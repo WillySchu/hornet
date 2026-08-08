@@ -19,7 +19,10 @@ class TokenType(Enum):
     EOF = auto()
 
     # Operators
+    PLUS = auto()
     MINUS = auto()
+    STAR = auto()
+    SLASH = auto()
     TILDE = auto()
     BANG = auto()
 
@@ -69,8 +72,10 @@ class Lexer():
             ('CLOSE_PAREN', r'\)'),              # Close paren
             ('COLON',       r':'),               # Colon
             #('ASSIGN',     r'='),               # Assignment operator
-            #('PLUS',       r'\+'),              # Add
-            ('MINUS',        r'\-'),             # Subtract
+            ('PLUS',        r'\+'),              # Add
+            ('MINUS',       r'\-'),              # Subtract
+            ('STAR',        r'\*'),              # Multiply
+            ('SLASH',       r'/'),               # Divide
             ('TILDE',       r'\~'),              # Tilde
             ('BANG',        r'\!'),              # Bang
             ('SKIP',        r'[ \t\r]+'),        # Spaces and tabs
@@ -108,8 +113,14 @@ class Lexer():
                 self.tokens.append(Token(TokenType.CLOSE_PAREN, value, self.line, column))
             elif kind == 'COLON':
                 self.tokens.append(Token(TokenType.COLON, value, self.line, column))
+            elif kind == 'PLUS':
+                self.tokens.append(Token(TokenType.PLUS, value, self.line, column))
             elif kind == 'MINUS':
                 self.tokens.append(Token(TokenType.MINUS, value, self.line, column))
+            elif kind == 'STAR':
+                self.tokens.append(Token(TokenType.STAR, value, self.line, column))
+            elif kind == 'SLASH':
+                self.tokens.append(Token(TokenType.SLASH, value, self.line, column))
             elif kind == 'TILDE':
                 self.tokens.append(Token(TokenType.TILDE, value, self.line, column))
             elif kind == 'BANG':

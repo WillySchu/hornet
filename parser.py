@@ -10,16 +10,35 @@ Grammar supported (matches what the current lexer can produce):
     type        := 'int'
     statement   := return_stmt
     return_stmt := 'return' expression NEWLINE?
-    expression   := unary_expr
+    expression   := binary_expr
+    binary_expr  := unary_expr (BIN_OP binary_expr)*   [precedence climbing]
     unary_expr   := ('-' | '~' | '!') unary_expr
                    | primary_expr
     primary_expr := NUMBER
+                   | '(' expression ')'
 
 unary_expr is recursive (rather than a single optional prefix) so that
 chained unary operators parse correctly -- e.g. `~-2`, `!!flag`, `--x`.
 Each recurses on itself, which makes the operators right-associative:
 `- - 2` parses as Unary(-, Unary(-, Constant(2))), i.e. "negate (negate
 2)", which is the reading you'd expect.
+
+binary_expr uses precedence climbing (see parse_binary and the
+_BINARY_OPS table below) so operator precedence and associativity are
+both driven by a small data table rather than by a cascade of
+precedence-level methods (parse_additive/parse_multiplicative/etc). That
+makes both properties -- including per-operator associativity, e.g. a
+future right-associative exponentiation operator -- a one-line change
+when a new operator shows up, instead of a restructuring.
+
+primary_expr also accepts a parenthesized sub-expression. This wasn't
+explicitly requested, but it's what lets precedence actually be
+*overridden* (e.g. `(1 + 2) * 3`), which is the main reason anyone
+reaches for explicit precedence handling in the first place -- without
+it there'd be no way to test, or use, most of what precedence climbing
+is for. It reuses the OPEN_PAREN/CLOSE_PAREN tokens already used for
+function declarations; there's no ambiguity since the two uses occur in
+disjoint grammar positions.
 
 NOTE ON INDENTATION
 --------------------
@@ -62,6 +81,21 @@ class UnaryOp(Enum):
         }[self]
 
 
+class BinaryOp(Enum):
+    ADD = auto()       # '+'
+    SUBTRACT = auto()  # '-'
+    MULTIPLY = auto()  # '*'
+    DIVIDE = auto()    # '/'
+
+    def symbol(self) -> str:
+        return {
+            BinaryOp.ADD: '+',
+            BinaryOp.SUBTRACT: '-',
+            BinaryOp.MULTIPLY: '*',
+            BinaryOp.DIVIDE: '/',
+        }[self]
+
+
 class Node:
     """Base class for all AST nodes."""
 
@@ -84,6 +118,21 @@ class Unary(Node):
 
     def pretty(self) -> str:
         return f"Unary(op: {self.op.symbol()}) -> {self.operand.pretty()}"
+
+
+@dataclass
+class Binary(Node):
+    op: BinaryOp
+    left: Node
+    right: Node
+
+    def pretty(self) -> str:
+        # Binary has two children, so the linear "A -> B" chain style
+        # used elsewhere (Return, Unary, Function) doesn't quite fit --
+        # this bracketed form keeps it a single readable line while still
+        # showing the tree shape, e.g. for `(1 + 2) * 3`:
+        #   Binary(op: *) -> [Binary(op: +) -> [Constant(value: 1), Constant(value: 2)], Constant(value: 3)]
+        return f"Binary(op: {self.op.symbol()}) -> [{self.left.pretty()}, {self.right.pretty()}]"
 
 
 @dataclass
@@ -129,6 +178,39 @@ _UNARY_OPS = {
     TokenType.MINUS: UnaryOp.NEGATE,
     TokenType.TILDE: UnaryOp.COMPLEMENT,
     TokenType.BANG: UnaryOp.NOT,
+}
+
+
+class Associativity(Enum):
+    LEFT = auto()
+    RIGHT = auto()
+
+
+@dataclass(frozen=True)
+class OperatorInfo:
+    op: BinaryOp
+    precedence: int
+    associativity: Associativity
+
+
+# TokenType -> parsing metadata for each binary (infix) operator: which
+# BinaryOp it produces, its precedence (higher binds tighter), and
+# whether it's left- or right-associative. parse_binary()'s
+# precedence-climbing loop reads entirely from this table, so adding a
+# new binary operator -- including a right-associative one -- is just
+# adding a row here, not restructuring the parser.
+#
+# For example, right-associative exponentiation (so `2 ** 3 ** 2` parses
+# as `2 ** (3 ** 2)`, not `(2 ** 3) ** 2`) would slot in above STAR/SLASH
+# at a higher precedence once the lexer grows a token for it:
+#
+#   TokenType.STAR_STAR: OperatorInfo(BinaryOp.POWER, precedence=3, associativity=Associativity.RIGHT),
+#
+_BINARY_OPS = {
+    TokenType.PLUS:  OperatorInfo(BinaryOp.ADD,      precedence=1, associativity=Associativity.LEFT),
+    TokenType.MINUS: OperatorInfo(BinaryOp.SUBTRACT, precedence=1, associativity=Associativity.LEFT),
+    TokenType.STAR:  OperatorInfo(BinaryOp.MULTIPLY, precedence=2, associativity=Associativity.LEFT),
+    TokenType.SLASH: OperatorInfo(BinaryOp.DIVIDE,   precedence=2, associativity=Associativity.LEFT),
 }
 
 
@@ -238,7 +320,43 @@ class Parser:
         return Return(value=value)
 
     def parse_expression(self) -> Node:
-        return self.parse_unary()
+        return self.parse_binary()
+
+    def parse_binary(self, min_prec: int = 0) -> Node:
+        """Precedence-climbing parse of a binary expression.
+
+        Starts with a single unary/primary operand, then repeatedly folds
+        in further `operand OP operand` pairs as long as the next
+        operator's precedence is high enough to bind at this level
+        (`>= min_prec`).
+
+        Associativity is entirely a matter of what minimum precedence
+        gets passed to the recursive call that parses the right-hand
+        side:
+          - LEFT-associative operators recurse with `precedence + 1`,
+            which stops that recursive call from also consuming another
+            operator at the *same* precedence -- so that next operator
+            instead gets picked up by *this* call's own loop, producing
+            left-leaning nesting: `1 - 2 - 3` -> `(1 - 2) - 3`.
+          - RIGHT-associative operators recurse with `precedence`
+            unchanged, which lets that recursive call keep consuming
+            further same-precedence operators itself, producing
+            right-leaning nesting: `2 ^ 3 ^ 2` -> `2 ^ (3 ^ 2)`.
+        """
+        left = self.parse_unary()
+        while True:
+            op_info = _BINARY_OPS.get(self.current().type)
+            if op_info is None or op_info.precedence < min_prec:
+                break
+            self.advance()  # consume the operator token
+            next_min_prec = (
+                op_info.precedence + 1
+                if op_info.associativity == Associativity.LEFT
+                else op_info.precedence
+            )
+            right = self.parse_binary(next_min_prec)
+            left = Binary(op=op_info.op, left=left, right=right)
+        return left
 
     def parse_unary(self) -> Node:
         if self.check(*_UNARY_OPS):
@@ -250,13 +368,14 @@ class Parser:
         return self.parse_primary()
 
     def parse_primary(self) -> Node:
-        # Only numeric constants are supported for now -- the lexer
-        # doesn't yet emit binary operators or parens-as-grouping, so
-        # there's nothing else a primary expression could be.
         if self.check(TokenType.NUMBER):
             tok = self.advance()
             value = float(tok.val) if '.' in tok.val else int(tok.val)
             return Constant(value=value)
+        if self.match(TokenType.OPEN_PAREN):
+            expr = self.parse_expression()
+            self.expect(TokenType.CLOSE_PAREN, "Expected ')' to close grouped expression")
+            return expr
         tok = self.current()
         raise ParseError(
             f"Expected an expression, got {tok.type} ('{tok.val}') "

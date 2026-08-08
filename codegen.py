@@ -25,6 +25,7 @@ Supported so far (matches what parser.py can currently produce):
     Unary    -> NEGATE ('-'), COMPLEMENT ('~'), and NOT ('!'), each
                 applied in place to whatever's already in the
                 destination register
+    Binary   -> ADD ('+'), SUBTRACT ('-'), MULTIPLY ('*'), DIVIDE ('/')
 
 Unlike Constant, a Unary expression can't be represented as a bare
 Operand (there's no such thing as "the immediate value of `-2`" as an
@@ -35,6 +36,33 @@ compute the expression's value directly into a destination (see
 operators fall out of this for free: `~-2` recurses inward first
 (computing -2 into %eax), then applies the outer operator to whatever's
 now sitting in that register (`notl %eax`).
+
+BINARY OPERATORS AND THE ONE-REGISTER PROBLEM
+------------------------------------------------
+Binary operators need *two* operand values alive at once (left and
+right), but `gen_expr_into` only has one destination register to work
+with -- there's no register allocator yet to hand out a second one. The
+fix used here is the classic minimal-effort answer: spill to the real
+CPU stack.
+
+To compute `left OP right` into `dst` (%eax):
+  1. Compute `left` into %eax (the usual gen_expr_into).
+  2. `pushq %rax` -- save that value on the stack.
+  3. Compute `right` into %eax -- safe to reuse, since `left` is on the
+     stack now.
+  4. `movl %eax, %ecx` -- move `right` out of the way into a scratch
+     register.
+  5. `popq %rax` -- restore `left` back into %eax.
+  6. Emit the actual operator instruction combining %ecx into %eax.
+
+Because this always pushes before recursing into the right-hand side and
+pops after, nested binary expressions of any depth resolve correctly:
+each push/pop pair is balanced within its own gen_binary_into call
+regardless of what further pushes and pops happen inside step 3, so the
+stack naturally behaves like an expression-evaluation stack. This is not
+efficient (a real register allocator would keep far more values in
+registers), but it's correct at arbitrary nesting depth, which is what
+matters before you have one.
 """
 
 import argparse
@@ -43,6 +71,8 @@ from typing import List
 
 from lexer import lex
 from parser import (
+    Binary,
+    BinaryOp,
     Constant,
     Function,
     Node,
@@ -170,6 +200,85 @@ class MovZX(Instruction):
 
 
 @dataclass
+class Add(Instruction):
+    """dst += src."""
+    src: Operand
+    dst: Operand
+    mnemonic = "addl"
+
+    def operands(self) -> List[str]:
+        return [self.src.emit(), self.dst.emit()]
+
+
+@dataclass
+class Sub(Instruction):
+    """dst -= src."""
+    src: Operand
+    dst: Operand
+    mnemonic = "subl"
+
+    def operands(self) -> List[str]:
+        return [self.src.emit(), self.dst.emit()]
+
+
+@dataclass
+class IMul(Instruction):
+    """dst *= src (signed, two-operand form)."""
+    src: Operand
+    dst: Operand
+    mnemonic = "imull"
+
+    def operands(self) -> List[str]:
+        return [self.src.emit(), self.dst.emit()]
+
+
+@dataclass
+class Cdq(Instruction):
+    """Sign-extends %eax across the %edx:%eax pair. Required immediately
+    before IDiv, which always divides that 64-bit pair (not just %eax)
+    by its operand -- without this, %edx could hold garbage and corrupt
+    the division."""
+    mnemonic = "cdq"
+
+
+@dataclass
+class IDiv(Instruction):
+    """Divides the 64-bit %edx:%eax pair by `operand` (signed). Quotient
+    ends up in %eax, remainder in %edx. `operand` must be a register or
+    memory location -- x86 doesn't support an immediate divisor for
+    idiv, which is why gen_binary_into always routes the right-hand side
+    through the %ecx scratch register rather than leaving it as an Imm."""
+    operand: Operand
+    mnemonic = "idivl"
+
+    def operands(self) -> List[str]:
+        return [self.operand.emit()]
+
+
+@dataclass
+class Push(Instruction):
+    """Pushes a register onto the stack. x86-64 doesn't support a 32-bit
+    push in long mode, so this always pushes the full 64-bit register
+    that the given 32-bit register is the low half of (e.g. passing the
+    Register for %eax actually emits `pushq %rax`)."""
+    operand: Register
+    mnemonic = "pushq"
+
+    def operands(self) -> List[str]:
+        return [as_qword_register(self.operand).emit()]
+
+
+@dataclass
+class Pop(Instruction):
+    """The pop counterpart to Push -- see its docstring."""
+    operand: Register
+    mnemonic = "popq"
+
+    def operands(self) -> List[str]:
+        return [as_qword_register(self.operand).emit()]
+
+
+@dataclass
 class Ret(Instruction):
     mnemonic = "ret"
 
@@ -199,6 +308,20 @@ def as_byte_register(reg: Operand) -> Register:
     if not isinstance(reg, Register) or reg.name not in _BYTE_REGISTER_ALIASES:
         raise CodegenError(f"No 8-bit alias known for register operand: {reg!r}")
     return Register(_BYTE_REGISTER_ALIASES[reg.name])
+
+
+# 32-bit register name -> its 64-bit alias (e.g. %eax -> %rax). Needed
+# because Push/Pop can't operate on a 32-bit operand size in long mode.
+_QWORD_REGISTER_ALIASES = {
+    'eax': 'rax',
+    'ecx': 'rcx',
+}
+
+
+def as_qword_register(reg: Operand) -> Register:
+    if not isinstance(reg, Register) or reg.name not in _QWORD_REGISTER_ALIASES:
+        raise CodegenError(f"No 64-bit alias known for register operand: {reg!r}")
+    return Register(_QWORD_REGISTER_ALIASES[reg.name])
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +379,44 @@ class CodeGenerator:
             instructions = self.gen_expr_into(expr.operand, dst)
             instructions.extend(self.gen_unary_op(expr.op, dst))
             return instructions
+        if isinstance(expr, Binary):
+            return self.gen_binary_into(expr, dst)
         raise CodegenError(f"No codegen rule for expression: {expr!r}")
+
+    def gen_binary_into(self, expr: Binary, dst: Operand) -> List[Instruction]:
+        """Computes `expr.left OP expr.right` into `dst` using the
+        stack-spill scheme described in the module docstring. Requires
+        `dst` to be a register (there's a real 32-bit register and its
+        64-bit alias pushed/popped along the way, which an Imm can't do).
+        """
+        if not isinstance(dst, Register):
+            raise CodegenError(f"Binary codegen requires a register destination, got: {dst!r}")
+
+        scratch = Register('ecx')  # holds the right-hand value while combining
+        instructions = self.gen_expr_into(expr.left, dst)   # dst = left
+        instructions.append(Push(dst))                      # save left on the stack
+        instructions.extend(self.gen_expr_into(expr.right, dst))  # dst = right (left is safe)
+        instructions.append(Mov(src=dst, dst=scratch))       # scratch = right
+        instructions.append(Pop(dst))                        # dst = left (restored)
+        instructions.extend(self.gen_binary_op(expr.op, src=scratch, dst=dst))
+        return instructions
+
+    def gen_binary_op(self, op: BinaryOp, src: Operand, dst: Operand) -> List[Instruction]:
+        if op == BinaryOp.ADD:
+            return [Add(src=src, dst=dst)]
+        if op == BinaryOp.SUBTRACT:
+            return [Sub(src=src, dst=dst)]
+        if op == BinaryOp.MULTIPLY:
+            return [IMul(src=src, dst=dst)]
+        if op == BinaryOp.DIVIDE:
+            # idivl divides %edx:%eax by its operand, so by the time this
+            # runs, the dividend (`dst`, i.e. left) must be in %eax and
+            # the divisor (`src`, i.e. right) must be in a register --
+            # both guaranteed by how gen_binary_into calls this.
+            if dst != Register('eax'):
+                raise CodegenError("Division currently requires its destination to be %eax")
+            return [Cdq(), IDiv(src)]
+        raise CodegenError(f"No codegen rule for binary operator: {op}")
 
     def gen_unary_op(self, op: UnaryOp, dst: Operand) -> List[Instruction]:
         if op == UnaryOp.NEGATE:
