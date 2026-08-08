@@ -22,6 +22,19 @@ Supported so far (matches what parser.py can currently produce):
     Function -> a name and a body of statements
     Return   -> evaluate an expression into %eax, then `ret`
     Constant -> an immediate value
+    Unary    -> NEGATE ('-'), COMPLEMENT ('~'), and NOT ('!'), each
+                applied in place to whatever's already in the
+                destination register
+
+Unlike Constant, a Unary expression can't be represented as a bare
+Operand (there's no such thing as "the immediate value of `-2`" as an
+assembly-level concept -- the negation has to actually happen on a
+register). So expression codegen works by emitting instructions that
+compute the expression's value directly into a destination (see
+`gen_expr_into`), rather than by returning an Operand. Nested unary
+operators fall out of this for free: `~-2` recurses inward first
+(computing -2 into %eax), then applies the outer operator to whatever's
+now sitting in that register (`notl %eax`).
 """
 
 import argparse
@@ -36,6 +49,8 @@ from parser import (
     Parser,
     Program,
     Return,
+    Unary,
+    UnaryOp,
 )
 
 
@@ -65,23 +80,98 @@ class Register(Operand):
 
 
 class Instruction:
+    """Base class for assembly instructions.
+
+    Subclasses set `mnemonic` and implement `operands()`; `emit()` is
+    generic and handles column alignment (via `mnemonic.ljust(8)`) so
+    every instruction lines up the same way regardless of how long its
+    mnemonic is -- compare `movl` (4 chars) and `movzbl` (6 chars) in the
+    examples below, both of which align their first operand to column 8.
+    """
+
+    mnemonic: str = ""
+
+    def operands(self) -> List[str]:
+        return []
+
     def emit(self) -> str:
-        raise NotImplementedError
+        ops = self.operands()
+        if not ops:
+            return self.mnemonic
+        return f"{self.mnemonic:<8}{', '.join(ops)}"
 
 
 @dataclass
 class Mov(Instruction):
     src: Operand
     dst: Operand
+    mnemonic = "movl"
 
-    def emit(self) -> str:
-        return f"movl    {self.src.emit()}, {self.dst.emit()}"
+    def operands(self) -> List[str]:
+        return [self.src.emit(), self.dst.emit()]
+
+
+@dataclass
+class Neg(Instruction):
+    """Two's-complement arithmetic negation, in place: dst = -dst."""
+    operand: Operand
+    mnemonic = "negl"
+
+    def operands(self) -> List[str]:
+        return [self.operand.emit()]
+
+
+@dataclass
+class Not(Instruction):
+    """Bitwise complement, in place: dst = ~dst."""
+    operand: Operand
+    mnemonic = "notl"
+
+    def operands(self) -> List[str]:
+        return [self.operand.emit()]
+
+
+@dataclass
+class Cmp(Instruction):
+    """Compares src and dst by computing dst - src and setting flags
+    (notably ZF) accordingly -- doesn't modify either operand."""
+    src: Operand
+    dst: Operand
+    mnemonic = "cmpl"
+
+    def operands(self) -> List[str]:
+        return [self.src.emit(), self.dst.emit()]
+
+
+@dataclass
+class SetE(Instruction):
+    """Sets an 8-bit operand to 1 if the last Cmp found its operands
+    equal (ZF set), else 0. Used to implement logical NOT: `!x` is
+    exactly "was x equal to 0?"."""
+    operand: Operand
+    mnemonic = "sete"
+
+    def operands(self) -> List[str]:
+        return [self.operand.emit()]
+
+
+@dataclass
+class MovZX(Instruction):
+    """Zero-extends an 8-bit src into a 32-bit dst. Needed after SetE,
+    since `sete` only ever writes the low byte (e.g. %al) and leaves the
+    rest of the containing 32-bit register (e.g. %eax) untouched -- so
+    without this, %eax could still hold garbage in its upper 24 bits."""
+    src: Operand
+    dst: Operand
+    mnemonic = "movzbl"
+
+    def operands(self) -> List[str]:
+        return [self.src.emit(), self.dst.emit()]
 
 
 @dataclass
 class Ret(Instruction):
-    def emit(self) -> str:
-        return "ret"
+    mnemonic = "ret"
 
 
 @dataclass
@@ -93,6 +183,22 @@ class AsmFunction:
 @dataclass
 class AsmProgram:
     functions: List[AsmFunction] = field(default_factory=list)
+
+
+# 32-bit register name -> its 8-bit low-byte alias (e.g. %eax -> %al).
+# `sete` (and friends) can only target an 8-bit operand, so codegen needs
+# to be able to get from "the register I'm working in" to "its byte
+# alias". Only registers actually in use are listed; extend this table
+# alongside whatever new registers the code generator starts using.
+_BYTE_REGISTER_ALIASES = {
+    'eax': 'al',
+}
+
+
+def as_byte_register(reg: Operand) -> Register:
+    if not isinstance(reg, Register) or reg.name not in _BYTE_REGISTER_ALIASES:
+        raise CodegenError(f"No 8-bit alias known for register operand: {reg!r}")
+    return Register(_BYTE_REGISTER_ALIASES[reg.name])
 
 
 # ---------------------------------------------------------------------------
@@ -123,16 +229,52 @@ class CodeGenerator:
         raise CodegenError(f"No codegen rule for statement: {stmt!r}")
 
     def gen_return(self, stmt: Return) -> List[Instruction]:
-        value = self.gen_expression(stmt.value)
-        return [
-            Mov(src=value, dst=Register('eax')),
-            Ret(),
-        ]
+        dst = Register('eax')
+        instructions = self.gen_expr_into(stmt.value, dst)
+        instructions.append(Ret())
+        return instructions
 
-    def gen_expression(self, expr: Node) -> Operand:
+    def gen_expr_into(self, expr: Node, dst: Operand) -> List[Instruction]:
+        """Emits the instructions needed to compute `expr` and leave its
+        result sitting in `dst`.
+
+        This (rather than "return an Operand") is the right shape for
+        expression codegen once operators are involved: a Constant can
+        be represented as a bare Imm operand, but "the result of negating
+        something" can't -- it has to actually be computed by an
+        instruction acting on a register. So every expression, constants
+        included, is generated the same way: as instructions that leave
+        their answer in `dst`.
+        """
         if isinstance(expr, Constant):
-            return Imm(expr.value)
+            return [Mov(src=Imm(expr.value), dst=dst)]
+        if isinstance(expr, Unary):
+            # Compute the operand into dst first, then apply this node's
+            # operator to whatever's now there. This is what makes chained
+            # operators (`~-2`) work: the inner Unary's instructions run
+            # first, then the outer operator's instructions run on top.
+            instructions = self.gen_expr_into(expr.operand, dst)
+            instructions.extend(self.gen_unary_op(expr.op, dst))
+            return instructions
         raise CodegenError(f"No codegen rule for expression: {expr!r}")
+
+    def gen_unary_op(self, op: UnaryOp, dst: Operand) -> List[Instruction]:
+        if op == UnaryOp.NEGATE:
+            return [Neg(dst)]
+        if op == UnaryOp.COMPLEMENT:
+            return [Not(dst)]
+        if op == UnaryOp.NOT:
+            # `!x` is "1 if x == 0, else 0". cmpl sets flags from
+            # (dst - 0); sete writes 1/0 into the low byte based on
+            # those flags; movzbl zero-extends that byte back out to
+            # fill the full 32-bit destination register.
+            byte_dst = as_byte_register(dst)
+            return [
+                Cmp(src=Imm(0), dst=dst),
+                SetE(byte_dst),
+                MovZX(src=byte_dst, dst=dst),
+            ]
+        raise CodegenError(f"No codegen rule for unary operator: {op}")
 
 
 # ---------------------------------------------------------------------------

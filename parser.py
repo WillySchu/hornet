@@ -10,7 +10,16 @@ Grammar supported (matches what the current lexer can produce):
     type        := 'int'
     statement   := return_stmt
     return_stmt := 'return' expression NEWLINE?
-    expression  := NUMBER
+    expression   := unary_expr
+    unary_expr   := ('-' | '~' | '!') unary_expr
+                   | primary_expr
+    primary_expr := NUMBER
+
+unary_expr is recursive (rather than a single optional prefix) so that
+chained unary operators parse correctly -- e.g. `~-2`, `!!flag`, `--x`.
+Each recurses on itself, which makes the operators right-associative:
+`- - 2` parses as Unary(-, Unary(-, Constant(2))), i.e. "negate (negate
+2)", which is the reading you'd expect.
 
 NOTE ON INDENTATION
 --------------------
@@ -30,6 +39,7 @@ below should be rewritten to consume those instead of scanning for 'def'.
 
 import argparse
 from dataclasses import dataclass, field
+from enum import auto, Enum
 from typing import List, Union
 
 from lexer import Token, TokenType, lex
@@ -38,6 +48,19 @@ from lexer import Token, TokenType, lex
 # ---------------------------------------------------------------------------
 # AST Nodes
 # ---------------------------------------------------------------------------
+
+class UnaryOp(Enum):
+    NEGATE = auto()      # '-'  arithmetic negation
+    COMPLEMENT = auto()  # '~'  bitwise complement
+    NOT = auto()         # '!'  logical not
+
+    def symbol(self) -> str:
+        return {
+            UnaryOp.NEGATE: '-',
+            UnaryOp.COMPLEMENT: '~',
+            UnaryOp.NOT: '!',
+        }[self]
+
 
 class Node:
     """Base class for all AST nodes."""
@@ -53,10 +76,14 @@ class Constant(Node):
     def pretty(self) -> str:
         return f"Constant(value: {self.value})"
 
+
 @dataclass
-class UnOp(Node):
-    op: Node
-    expression: Node
+class Unary(Node):
+    op: UnaryOp
+    operand: Node
+
+    def pretty(self) -> str:
+        return f"Unary(op: {self.op.symbol()}) -> {self.operand.pretty()}"
 
 
 @dataclass
@@ -95,6 +122,14 @@ class Program(Node):
 
 class ParseError(Exception):
     """Raised when the parser encounters unexpected or malformed input."""
+
+
+# Maps a prefix-operator token straight to the UnaryOp it represents.
+_UNARY_OPS = {
+    TokenType.MINUS: UnaryOp.NEGATE,
+    TokenType.TILDE: UnaryOp.COMPLEMENT,
+    TokenType.BANG: UnaryOp.NOT,
+}
 
 
 class Parser:
@@ -203,6 +238,21 @@ class Parser:
         return Return(value=value)
 
     def parse_expression(self) -> Node:
+        return self.parse_unary()
+
+    def parse_unary(self) -> Node:
+        if self.check(*_UNARY_OPS):
+            op_tok = self.advance()
+            # Recurse on parse_unary (not parse_primary) so operators
+            # chain: `~-2` is COMPLEMENT applied to (NEGATE applied to 2).
+            operand = self.parse_unary()
+            return Unary(op=_UNARY_OPS[op_tok.type], operand=operand)
+        return self.parse_primary()
+
+    def parse_primary(self) -> Node:
+        # Only numeric constants are supported for now -- the lexer
+        # doesn't yet emit binary operators or parens-as-grouping, so
+        # there's nothing else a primary expression could be.
         if self.check(TokenType.NUMBER):
             tok = self.advance()
             value = float(tok.val) if '.' in tok.val else int(tok.val)
