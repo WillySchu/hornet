@@ -25,7 +25,9 @@ Supported so far (matches what parser.py can currently produce):
     Unary    -> NEGATE ('-'), COMPLEMENT ('~'), and NOT ('!'), each
                 applied in place to whatever's already in the
                 destination register
-    Binary   -> ADD ('+'), SUBTRACT ('-'), MULTIPLY ('*'), DIVIDE ('/')
+    Binary   -> ADD ('+'), SUBTRACT ('-'), MULTIPLY ('*'), DIVIDE ('/'),
+                the six comparisons (== != < > <= >=), and the two
+                short-circuiting logical operators (and, or)
 
 Unlike Constant, a Unary expression can't be represented as a bare
 Operand (there's no such thing as "the immediate value of `-2`" as an
@@ -63,6 +65,53 @@ stack naturally behaves like an expression-evaluation stack. This is not
 efficient (a real register allocator would keep far more values in
 registers), but it's correct at arbitrary nesting depth, which is what
 matters before you have one.
+
+COMPARISONS
+-----------
+The six comparison operators (== != < > <= >=) reuse that exact scheme
+-- both sides always get evaluated -- but combine with cmpl + setCC +
+movzbl instead of an arithmetic instruction: cmpl sets flags from
+(left - right), setCC turns the relevant flag pattern into a 0/1 byte,
+movzbl zero-extends it to fill the register. This is the same trick
+logical NOT already used against a fixed comparand of 0 (see
+gen_unary_op); comparisons just generalize it to comparing against a
+computed `right` and to all six condition codes instead of only 'e'.
+
+AND / OR: SHORT-CIRCUITING
+---------------------------
+AND and OR are NOT routed through the stack-spill scheme above, because
+that scheme always evaluates both operands -- exactly what short-circuit
+evaluation must avoid. `a and b` must not evaluate `b` at all if `a` is
+already false, and `a or b` must not evaluate `b` at all if `a` is
+already true.
+
+Instead, gen_short_circuit emits real control flow: evaluate the left
+side, compare it to 0, and conditionally jump straight past the code
+that would evaluate the right side. AND and OR are mirror images of each
+other and share one implementation:
+
+    AND (jump early on left == 0, early result 0, fallthrough result 1):
+        <left>              ; -> %eax
+        cmpl $0, %eax
+        je   .Land_short_N  ; left was false -- skip right entirely
+        <right>             ; -> %eax
+        cmpl $0, %eax
+        je   .Land_short_N  ; right was false
+        movl $1, %eax
+        jmp  .Land_end_N
+    .Land_short_N:
+        movl $0, %eax
+    .Land_end_N:
+
+    OR is the same shape with the jump condition, early value, and
+    fallthrough value each flipped (jne / 1 / 0).
+
+Because the jump genuinely skips over the right-hand side's instructions
+at runtime -- they're present in the binary but never executed -- this
+is real short-circuiting, not just a coincidentally-correct value. That
+distinction is externally observable: `0 and (1 / 0)` returns 0 without
+crashing, while `1 and (1 / 0)` does crash (SIGFPE), because only in the
+second case does control flow ever reach the division.
 """
 
 import argparse
@@ -174,12 +223,21 @@ class Cmp(Instruction):
 
 
 @dataclass
-class SetE(Instruction):
-    """Sets an 8-bit operand to 1 if the last Cmp found its operands
-    equal (ZF set), else 0. Used to implement logical NOT: `!x` is
-    exactly "was x equal to 0?"."""
+class SetCC(Instruction):
+    """Sets an 8-bit operand to 1 if the given condition matches the
+    flags from the last Cmp, else 0. `cc` is the x86 condition-code
+    suffix -- 'e' (equal), 'ne' (not equal), 'l'/'g' (signed less/greater
+    than), 'le'/'ge' (signed less/greater-or-equal) -- and the mnemonic
+    is built from it (`sete`, `setne`, `setl`, ...). This is the single
+    instruction behind every comparison operator (== != < > <= >=) and
+    also behind logical NOT, which is just "was the operand equal to
+    0?" (cc='e')."""
+    cc: str
     operand: Operand
-    mnemonic = "sete"
+
+    @property
+    def mnemonic(self) -> str:
+        return f"set{self.cc}"
 
     def operands(self) -> List[str]:
         return [self.operand.emit()]
@@ -279,6 +337,47 @@ class Pop(Instruction):
 
 
 @dataclass
+class Label(Instruction):
+    """A jump target. Not really an "instruction" (it assembles to
+    nothing -- it just names the address of whatever comes next), but it
+    fits the same emit()-based rendering as everything else."""
+    name: str
+
+    def emit(self) -> str:
+        return f"{self.name}:"
+
+
+@dataclass
+class Jmp(Instruction):
+    """Unconditional jump to `target` (a Label's name)."""
+    target: str
+    mnemonic = "jmp"
+
+    def operands(self) -> List[str]:
+        return [self.target]
+
+
+@dataclass
+class Je(Instruction):
+    """Jump to `target` if the last Cmp found its operands equal (ZF set)."""
+    target: str
+    mnemonic = "je"
+
+    def operands(self) -> List[str]:
+        return [self.target]
+
+
+@dataclass
+class Jne(Instruction):
+    """Jump to `target` if the last Cmp found its operands unequal (ZF clear)."""
+    target: str
+    mnemonic = "jne"
+
+    def operands(self) -> List[str]:
+        return [self.target]
+
+
+@dataclass
 class Ret(Instruction):
     mnemonic = "ret"
 
@@ -324,6 +423,20 @@ def as_qword_register(reg: Operand) -> Register:
     return Register(_QWORD_REGISTER_ALIASES[reg.name])
 
 
+# BinaryOp -> the x86 condition-code suffix that implements it, given
+# that Cmp(src=right, dst=left) computes (left - right) and sets flags
+# accordingly. All six comparisons share one codegen path (see
+# gen_binary_op) that just plugs the relevant cc into SetCC.
+_COMPARISON_CONDITION_CODES = {
+    BinaryOp.EQUAL: 'e',
+    BinaryOp.NOT_EQUAL: 'ne',
+    BinaryOp.LESS_THAN: 'l',
+    BinaryOp.GREATER_THAN: 'g',
+    BinaryOp.LESS_THAN_OR_EQUAL: 'le',
+    BinaryOp.GREATER_THAN_OR_EQUAL: 'ge',
+}
+
+
 # ---------------------------------------------------------------------------
 # AST -> Assembly AST
 # ---------------------------------------------------------------------------
@@ -336,6 +449,18 @@ class CodegenError(Exception):
 class CodeGenerator:
     """Walks the source AST (Program/Function/Return/Constant/...) and
     produces an equivalent AsmProgram."""
+
+    def __init__(self):
+        self._label_count = 0
+
+    def new_label(self, prefix: str) -> str:
+        """Returns a fresh, uniquely-numbered local label like
+        `.Land_short_0`. Needed because AND/OR codegen emits real jump
+        targets, and a program can contain any number of them -- each
+        one needs a name the assembler won't collide with any other."""
+        label = f".L{prefix}_{self._label_count}"
+        self._label_count += 1
+        return label
 
     def generate(self, program: Program) -> AsmProgram:
         return AsmProgram(functions=[self.gen_function(fn) for fn in program.functions])
@@ -384,11 +509,33 @@ class CodeGenerator:
         raise CodegenError(f"No codegen rule for expression: {expr!r}")
 
     def gen_binary_into(self, expr: Binary, dst: Operand) -> List[Instruction]:
-        """Computes `expr.left OP expr.right` into `dst` using the
-        stack-spill scheme described in the module docstring. Requires
-        `dst` to be a register (there's a real 32-bit register and its
-        64-bit alias pushed/popped along the way, which an Imm can't do).
+        """Computes `expr.left OP expr.right` into `dst`.
+
+        AND/OR are handled entirely separately (see gen_short_circuit)
+        since they must not unconditionally evaluate both sides. Every
+        other binary operator -- arithmetic and comparisons alike -- goes
+        through the stack-spill scheme described in the module
+        docstring, which always evaluates both sides. Requires `dst` to
+        be a register (there's a real 32-bit register and its 64-bit
+        alias pushed/popped along the way, which an Imm can't do).
         """
+        if expr.op == BinaryOp.AND:
+            return self.gen_short_circuit(
+                expr, dst,
+                short_circuit_jump=Je,   # jump early when the left side is already false
+                short_circuit_value=0,   # ...and the overall result is false
+                fallthrough_value=1,     # both sides were truthy -> true
+                label_prefix="and",
+            )
+        if expr.op == BinaryOp.OR:
+            return self.gen_short_circuit(
+                expr, dst,
+                short_circuit_jump=Jne,  # jump early when the left side is already true
+                short_circuit_value=1,   # ...and the overall result is true
+                fallthrough_value=0,     # both sides were falsy -> false
+                label_prefix="or",
+            )
+
         if not isinstance(dst, Register):
             raise CodegenError(f"Binary codegen requires a register destination, got: {dst!r}")
 
@@ -399,6 +546,49 @@ class CodeGenerator:
         instructions.append(Mov(src=dst, dst=scratch))       # scratch = right
         instructions.append(Pop(dst))                        # dst = left (restored)
         instructions.extend(self.gen_binary_op(expr.op, src=scratch, dst=dst))
+        return instructions
+
+    def gen_short_circuit(
+        self, expr: Binary, dst: Operand, *,
+        short_circuit_jump: type,
+        short_circuit_value: int,
+        fallthrough_value: int,
+        label_prefix: str,
+    ) -> List[Instruction]:
+        """Shared codegen for AND and OR -- they're mirror images of each
+        other: each evaluates its left side, tests it against 0, and
+        jumps straight past the right side entirely (never emitting the
+        instructions that would compute it as *executed* code) if that
+        test already decides the answer. Only if it doesn't -- left was
+        truthy for AND, falsy for OR -- does the right side actually get
+        evaluated, and *that* result decides the answer instead.
+
+          AND: jump early (to `short_circuit_value=0`) when left == 0.
+          OR:  jump early (to `short_circuit_value=1`) when left != 0.
+
+        This is what makes `0 and (1 / 0)` return 0 instead of crashing:
+        the division is real code sitting in the binary, but control
+        flow jumps clean over it.
+        """
+        if not isinstance(dst, Register):
+            raise CodegenError(f"Binary codegen requires a register destination, got: {dst!r}")
+
+        short_label = self.new_label(f"{label_prefix}_short")
+        end_label = self.new_label(f"{label_prefix}_end")
+
+        instructions = self.gen_expr_into(expr.left, dst)
+        instructions.append(Cmp(src=Imm(0), dst=dst))
+        instructions.append(short_circuit_jump(short_label))
+
+        instructions.extend(self.gen_expr_into(expr.right, dst))
+        instructions.append(Cmp(src=Imm(0), dst=dst))
+        instructions.append(short_circuit_jump(short_label))
+
+        instructions.append(Mov(src=Imm(fallthrough_value), dst=dst))
+        instructions.append(Jmp(end_label))
+        instructions.append(Label(short_label))
+        instructions.append(Mov(src=Imm(short_circuit_value), dst=dst))
+        instructions.append(Label(end_label))
         return instructions
 
     def gen_binary_op(self, op: BinaryOp, src: Operand, dst: Operand) -> List[Instruction]:
@@ -416,6 +606,19 @@ class CodeGenerator:
             if dst != Register('eax'):
                 raise CodegenError("Division currently requires its destination to be %eax")
             return [Cdq(), IDiv(src)]
+        if op in _COMPARISON_CONDITION_CODES:
+            # Cmp(src=right, dst=left) computes (left - right) and sets
+            # flags from that; SetCC turns the relevant flag combination
+            # into a 0/1 byte; MovZX zero-extends that byte back out to
+            # fill the full destination register (same pattern used for
+            # NOT -- see gen_unary_op -- just against a computed `right`
+            # instead of the literal 0).
+            byte_dst = as_byte_register(dst)
+            return [
+                Cmp(src=src, dst=dst),
+                SetCC(cc=_COMPARISON_CONDITION_CODES[op], operand=byte_dst),
+                MovZX(src=byte_dst, dst=dst),
+            ]
         raise CodegenError(f"No codegen rule for binary operator: {op}")
 
     def gen_unary_op(self, op: UnaryOp, dst: Operand) -> List[Instruction]:
@@ -424,14 +627,13 @@ class CodeGenerator:
         if op == UnaryOp.COMPLEMENT:
             return [Not(dst)]
         if op == UnaryOp.NOT:
-            # `!x` is "1 if x == 0, else 0". cmpl sets flags from
-            # (dst - 0); sete writes 1/0 into the low byte based on
-            # those flags; movzbl zero-extends that byte back out to
-            # fill the full 32-bit destination register.
+            # `!x` is "1 if x == 0, else 0" -- the same cmp/setCC/movzx
+            # pattern used for comparisons, just always against 0 and
+            # always with cc='e'.
             byte_dst = as_byte_register(dst)
             return [
                 Cmp(src=Imm(0), dst=dst),
-                SetE(byte_dst),
+                SetCC(cc='e', operand=byte_dst),
                 MovZX(src=byte_dst, dst=dst),
             ]
         raise CodegenError(f"No codegen rule for unary operator: {op}")

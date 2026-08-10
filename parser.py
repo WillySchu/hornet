@@ -31,6 +31,15 @@ makes both properties -- including per-operator associativity, e.g. a
 future right-associative exponentiation operator -- a one-line change
 when a new operator shows up, instead of a restructuring.
 
+Operators currently supported by binary_expr, tightest to loosest
+binding: * / , then + - , then < > <= >= , then == != , then 'and' ,
+then 'or'. All are left-associative -- including 'and'/'or', which
+matters beyond just parenthesization: parsing `a and b and c`
+left-associatively as `(a and b) and c` is what makes chained
+short-circuiting fall out naturally in codegen (see codegen.py), since
+evaluating the outer node left-to-right evaluates `a and b` first and
+only reaches `c` if that was true.
+
 primary_expr also accepts a parenthesized sub-expression. This wasn't
 explicitly requested, but it's what lets precedence actually be
 *overridden* (e.g. `(1 + 2) * 3`), which is the main reason anyone
@@ -87,12 +96,31 @@ class BinaryOp(Enum):
     MULTIPLY = auto()  # '*'
     DIVIDE = auto()    # '/'
 
+    LESS_THAN = auto()              # '<'
+    GREATER_THAN = auto()           # '>'
+    LESS_THAN_OR_EQUAL = auto()     # '<='
+    GREATER_THAN_OR_EQUAL = auto()  # '>='
+
+    EQUAL = auto()      # '=='
+    NOT_EQUAL = auto()  # '!='
+
+    AND = auto()  # 'and'
+    OR = auto()   # 'or'
+
     def symbol(self) -> str:
         return {
             BinaryOp.ADD: '+',
             BinaryOp.SUBTRACT: '-',
             BinaryOp.MULTIPLY: '*',
             BinaryOp.DIVIDE: '/',
+            BinaryOp.LESS_THAN: '<',
+            BinaryOp.GREATER_THAN: '>',
+            BinaryOp.LESS_THAN_OR_EQUAL: '<=',
+            BinaryOp.GREATER_THAN_OR_EQUAL: '>=',
+            BinaryOp.EQUAL: '==',
+            BinaryOp.NOT_EQUAL: '!=',
+            BinaryOp.AND: 'and',
+            BinaryOp.OR: 'or',
         }[self]
 
 
@@ -200,17 +228,38 @@ class OperatorInfo:
 # new binary operator -- including a right-associative one -- is just
 # adding a row here, not restructuring the parser.
 #
+# Precedence levels, tightest to loosest (as specified):
+#   6: *  /
+#   5: +  -
+#   4: <  >  <=  >=
+#   3: ==  !=
+#   2: and
+#   1: or
+#
 # For example, right-associative exponentiation (so `2 ** 3 ** 2` parses
 # as `2 ** (3 ** 2)`, not `(2 ** 3) ** 2`) would slot in above STAR/SLASH
 # at a higher precedence once the lexer grows a token for it:
 #
-#   TokenType.STAR_STAR: OperatorInfo(BinaryOp.POWER, precedence=3, associativity=Associativity.RIGHT),
+#   TokenType.STAR_STAR: OperatorInfo(BinaryOp.POWER, precedence=7, associativity=Associativity.RIGHT),
 #
 _BINARY_OPS = {
-    TokenType.PLUS:  OperatorInfo(BinaryOp.ADD,      precedence=1, associativity=Associativity.LEFT),
-    TokenType.MINUS: OperatorInfo(BinaryOp.SUBTRACT, precedence=1, associativity=Associativity.LEFT),
-    TokenType.STAR:  OperatorInfo(BinaryOp.MULTIPLY, precedence=2, associativity=Associativity.LEFT),
-    TokenType.SLASH: OperatorInfo(BinaryOp.DIVIDE,   precedence=2, associativity=Associativity.LEFT),
+    TokenType.STAR:  OperatorInfo(BinaryOp.MULTIPLY, precedence=6, associativity=Associativity.LEFT),
+    TokenType.SLASH: OperatorInfo(BinaryOp.DIVIDE,   precedence=6, associativity=Associativity.LEFT),
+
+    TokenType.PLUS:  OperatorInfo(BinaryOp.ADD,      precedence=5, associativity=Associativity.LEFT),
+    TokenType.MINUS: OperatorInfo(BinaryOp.SUBTRACT, precedence=5, associativity=Associativity.LEFT),
+
+    TokenType.LESS_THAN:             OperatorInfo(BinaryOp.LESS_THAN,             precedence=4, associativity=Associativity.LEFT),
+    TokenType.GREATER_THAN:          OperatorInfo(BinaryOp.GREATER_THAN,          precedence=4, associativity=Associativity.LEFT),
+    TokenType.LESS_THAN_OR_EQUAL:    OperatorInfo(BinaryOp.LESS_THAN_OR_EQUAL,    precedence=4, associativity=Associativity.LEFT),
+    TokenType.GREATER_THAN_OR_EQUAL: OperatorInfo(BinaryOp.GREATER_THAN_OR_EQUAL, precedence=4, associativity=Associativity.LEFT),
+
+    TokenType.EQUAL:     OperatorInfo(BinaryOp.EQUAL,     precedence=3, associativity=Associativity.LEFT),
+    TokenType.NOT_EQUAL: OperatorInfo(BinaryOp.NOT_EQUAL, precedence=3, associativity=Associativity.LEFT),
+
+    TokenType.AND: OperatorInfo(BinaryOp.AND, precedence=2, associativity=Associativity.LEFT),
+
+    TokenType.OR: OperatorInfo(BinaryOp.OR, precedence=1, associativity=Associativity.LEFT),
 }
 
 

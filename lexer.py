@@ -25,6 +25,14 @@ class TokenType(Enum):
     SLASH = auto()
     TILDE = auto()
     BANG = auto()
+    AND = auto()
+    OR = auto()
+    EQUAL = auto()
+    NOT_EQUAL = auto()
+    LESS_THAN = auto()
+    GREATER_THAN = auto()
+    LESS_THAN_OR_EQUAL = auto()
+    GREATER_THAN_OR_EQUAL = auto()
 
     # Keywords
     DEF = auto()
@@ -61,25 +69,38 @@ class Lexer():
             'def': TokenType.DEF,
             'int': TokenType.INT,
             'return': TokenType.RETURN,
+            'and': TokenType.AND,
+            'or': TokenType.OR,
         }
 
         # Compile master regex pattern
         self.rules = [
+            # Multi character.
             ('NUMBER',      r'\d+(\.\d+)?'),     # Integer or decimal
             ('IDENTIFIER',  r'[a-zA-Z_]\w*'),    # Variable names/keywords
-            ('NEWLINE',     r'\n'),              # Line breaks
-            ('OPEN_PAREN',  r'\('),              # Open paren
-            ('CLOSE_PAREN', r'\)'),              # Close paren
-            ('COLON',       r':'),               # Colon
-            #('ASSIGN',     r'='),               # Assignment operator
-            ('PLUS',        r'\+'),              # Add
-            ('MINUS',       r'\-'),              # Subtract
-            ('STAR',        r'\*'),              # Multiply
-            ('SLASH',       r'/'),               # Divide
-            ('TILDE',       r'\~'),              # Tilde
-            ('BANG',        r'\!'),              # Bang
-            ('SKIP',        r'[ \t\r]+'),        # Spaces and tabs
-            ('MISMATCH',    r'.'),               # Any other character (error)
+
+            # Double character
+            ('EQUAL',                 r'=='),    # Equal
+            ('NOT_EQUAL',             r'!='),    # Not equal
+            ('GREATER_THAN_OR_EQUAL', r'>='),    # Greater than or equal
+            ('LESS_THAN_OR_EQUAL',    r'<='),
+            
+            # Single character
+            ('NEWLINE',      r'\n'),              # Line breaks
+            ('OPEN_PAREN',   r'\('),              # Open paren
+            ('CLOSE_PAREN',  r'\)'),              # Close paren
+            ('GREATER_THAN', r'>'),              
+            ('LESS_THAN',    r'<'),
+            ('COLON',        r':'),               # Colon
+            #('ASSIGN',      r'='),               # Assignment operator
+            ('PLUS',         r'\+'),              # Add
+            ('MINUS',        r'\-'),              # Subtract
+            ('STAR',         r'\*'),              # Multiply
+            ('SLASH',        r'/'),               # Divide
+            ('TILDE',        r'\~'),              # Tilde
+            ('BANG',         r'\!'),              # Bang
+            ('SKIP',         r'[ \t\r]+'),        # Spaces and tabs
+            ('MISMATCH',     r'.'),               # Any other character (error)
         ]
 
         # Combine rules into a single regex string
@@ -99,10 +120,6 @@ class Lexer():
                 self.tokens.append(Token(token_type, value, self.line, column))
             #elif kind == 'ASSIGN':
             #    self.tokens.append(Token(TokenType.ASSIGN, value, self.line, column))
-            #elif kind == 'PLUS':
-            #    self.tokens.append(Token(TokenType.PLUS, value, self.line, column))
-            #elif kind == 'MINUS':
-            #    self.tokens.append(Token(TokenType.MINUS, value, self.line, column))
             elif kind == 'NEWLINE':
                 self.tokens.append(Token(TokenType.NEWLINE, value, self.line, column))
                 self.line += 1
@@ -125,6 +142,18 @@ class Lexer():
                 self.tokens.append(Token(TokenType.TILDE, value, self.line, column))
             elif kind == 'BANG':
                 self.tokens.append(Token(TokenType.BANG, value, self.line, column))
+            elif kind == 'EQUAL':
+                self.tokens.append(Token(TokenType.EQUAL, value, self.line, column))
+            elif kind == 'NOT_EQUAL':
+                self.tokens.append(Token(TokenType.NOT_EQUAL, value, self.line, column))
+            elif kind == 'GREATER_THAN':
+                self.tokens.append(Token(TokenType.GREATER_THAN, value, self.line, column))
+            elif kind == 'LESS_THAN':
+                self.tokens.append(Token(TokenType.LESS_THAN, value, self.line, column))
+            elif kind == 'GREATER_THAN_OR_EQUAL':
+                self.tokens.append(Token(TokenType.GREATER_THAN_OR_EQUAL, value, self.line, column))
+            elif kind == 'LESS_THAN_OR_EQUAL':
+                self.tokens.append(Token(TokenType.LESS_THAN_OR_EQUAL, value, self.line, column))
             elif kind == 'SKIP':
                 continue
             elif kind == 'MISMATCH':

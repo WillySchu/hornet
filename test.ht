@@ -1,2 +1,2 @@
 def int main():
-    return 2 + 40
+    return 0 and (1 / 0)
