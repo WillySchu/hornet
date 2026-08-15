@@ -1,2 +1,4 @@
 def int main():
-    return 0 and (1 / 0)
+    int b
+    int a = 2 * (b * 2)
+    return a - 1

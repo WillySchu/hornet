@@ -7,5 +7,7 @@ RUN rm -rf /var/lib/apt/lists/*
 WORKDIR /
 
 COPY test.s test.s
+COPY entrypoint.sh entrypoint.sh
+RUN chmod +x ./entrypoint.sh
 
-CMD /bin/bash
+ENTRYPOINT ./entrypoint.sh
