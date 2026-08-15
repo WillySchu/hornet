@@ -41,13 +41,18 @@ class TokenType(Enum):
     BOOL = auto()
     TRUE = auto()
     FALSE = auto()
+    IF = auto()
+    ELSE = auto()
+    ELIF = auto()
 
     # Special
     NEWLINE = auto()
+    INDENT = auto()
+    DEDENT = auto()
     MISMATCH = auto()
     EOF = auto()
 
-    
+
 class Token():
     def __init__(self, t: TokenType, val: str, line: int, col: int):
         self.type = t
@@ -68,11 +73,23 @@ class Token():
 
 
 class Lexer():
+    """Tokenizes Hornet source, including synthesizing INDENT/DEDENT
+    tokens for block structure (see tokenize()'s docstring).
+    """
+
     def __init__(self, source: str):
         self.source = source
         self.tokens = []
         self.line = 1
         self.line_start = 0
+
+        # Indentation tracking -- see tokenize() for how these are used.
+        # indent_stack always starts at [0] (top-level code is
+        # unindented); at_line_start tracks whether the next real token
+        # we see will be the first one on its logical line, which is
+        # the only time indentation actually gets measured.
+        self.indent_stack = [0]
+        self.at_line_start = True
 
         # Define keywords mapping
         self.keywords = {
@@ -85,6 +102,9 @@ class Lexer():
             'bool': TokenType.BOOL,
             'true': TokenType.TRUE,
             'false': TokenType.FALSE,
+            'if': TokenType.IF,
+            'else': TokenType.ELSE,
+            'elif': TokenType.ELIF,
         }
 
         # Compile master regex pattern
@@ -98,12 +118,12 @@ class Lexer():
             ('NOT_EQUAL',             r'!='),    # Not equal
             ('GREATER_THAN_OR_EQUAL', r'>='),    # Greater than or equal
             ('LESS_THAN_OR_EQUAL',    r'<='),
-            
+
             # Single character
             ('NEWLINE',      r'\n'),              # Line breaks
             ('OPEN_PAREN',   r'\('),              # Open paren
             ('CLOSE_PAREN',  r'\)'),              # Close paren
-            ('GREATER_THAN', r'>'),              
+            ('GREATER_THAN', r'>'),
             ('LESS_THAN',    r'<'),
             ('COLON',        r':'),               # Colon
             ('ASSIGN',       r'='),                # Assignment operator
@@ -121,10 +141,46 @@ class Lexer():
         self.regex = re.compile('|'.join(f'(?P<{name}>{pattern})' for name, pattern in self.rules))
 
     def tokenize(self):
+        """Tokenizes the source, including block structure.
+
+        Previously this language had no INDENT/DEDENT tokens at all --
+        the SKIP rule below just swallowed all whitespace, including
+        leading indentation, uniformly. That was fine as long as every
+        block was flat (a function body with no nested if/while), since
+        the parser could get away with "a block ends at the next 'def'
+        or EOF". It cannot work for nested blocks: once an `if` can
+        appear inside a function body, "the next def or EOF" no longer
+        tells you where the if's own body ends versus where an `elif`/
+        `else` begins, or where control returns to the enclosing block.
+
+        The fix is the classic Python-style approach: track an
+        indentation stack, and synthesize INDENT/DEDENT tokens whenever
+        a new logical line's leading whitespace goes deeper or
+        shallower than what's currently open. The parser then treats a
+        block as `INDENT statement+ DEDENT` -- a signal that
+        generalizes to any nesting depth, unlike scanning for `def`.
+
+        The key trick for finding where a logical line's real content
+        starts: rather than specifically inspecting the SKIP match at
+        the front of each line, this waits for the first match that
+        ISN'T itself SKIP or NEWLINE while `at_line_start` is true, and
+        computes that token's column directly. That sidesteps having to
+        special-case blank lines (lines that are only whitespace, or
+        entirely empty) -- a blank line never produces such a match, so
+        `at_line_start` just stays true across it, and the next genuinely
+        content-bearing line is what actually gets measured. Comparing
+        tabs and spaces isn't handled specially; each whitespace
+        character just counts as one column of indentation, which is a
+        simplification worth knowing about if you ever mix the two.
+        """
         for match in self.regex.finditer(self.source):
             kind = match.lastgroup
             value = match.group(kind)
             column = match.start() - self.line_start + 1
+
+            if self.at_line_start and kind not in ('NEWLINE', 'SKIP'):
+                self._handle_indentation(column - 1)
+                self.at_line_start = False
 
             if kind == 'NUMBER':
                 self.tokens.append(Token(TokenType.NUMBER, value, self.line, column))
@@ -138,6 +194,7 @@ class Lexer():
                 self.tokens.append(Token(TokenType.NEWLINE, value, self.line, column))
                 self.line += 1
                 self.line_start = match.end()
+                self.at_line_start = True
             elif kind == 'OPEN_PAREN':
                 self.tokens.append(Token(TokenType.OPEN_PAREN, value, self.line, column))
             elif kind == 'CLOSE_PAREN':
@@ -176,9 +233,41 @@ class Lexer():
             else:
                 raise RuntimeError('This should be impossible.')
 
+        # If the source didn't end with a newline, synthesize one before
+        # closing out indentation -- keeps the final logical line's
+        # shape consistent with every other line, whose NEWLINE arrives
+        # before any DEDENTs that follow it.
+        if self.tokens and self.tokens[-1].type != TokenType.NEWLINE:
+            col = len(self.source) - self.line_start + 1
+            self.tokens.append(Token(TokenType.NEWLINE, '', self.line, col))
+
+        # Unwind any indentation still open at EOF (e.g. a file that
+        # ends inside an if-block, with no trailing dedent to close it).
+        while len(self.indent_stack) > 1:
+            self.indent_stack.pop()
+            self.tokens.append(Token(TokenType.DEDENT, '', self.line, 1))
+
         # Append End-Of-File token
         self.tokens.append(Token(TokenType.EOF, "", self.line, len(self.source) - self.line_start + 1))
         return self.tokens
+
+    def _handle_indentation(self, width: int) -> None:
+        """Compares `width` (the new logical line's indentation, in
+        characters) against the current indentation stack, emitting
+        INDENT/DEDENT tokens to reconcile the difference."""
+        top = self.indent_stack[-1]
+        if width > top:
+            self.indent_stack.append(width)
+            self.tokens.append(Token(TokenType.INDENT, '', self.line, 1))
+        elif width < top:
+            while width < self.indent_stack[-1]:
+                self.indent_stack.pop()
+                self.tokens.append(Token(TokenType.DEDENT, '', self.line, 1))
+            if width != self.indent_stack[-1]:
+                raise SyntaxError(
+                    f"Unindent does not match any outer indentation "
+                    f"level at line {self.line}"
+                )
 
 
 def main():

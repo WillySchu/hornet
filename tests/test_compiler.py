@@ -29,9 +29,24 @@ Organization:
     TestPrecedenceAndLogicalOperators   ( 8 tests)
     TestShortCircuitEvaluation          ( 4 tests)
     TestVariablesAndStatements          (12 tests)
-    TestSemanticErrors                  (21 tests)
+    TestIfStatements                    (18 tests)
+    TestSemanticErrors                  (28 tests)
                                         ----------
-                                         82 tests total
+                                        107 tests total
+
+A NOTE ON BLOCK SCOPING AND WHY CODEGEN'S ALLOCATOR CHANGED SHAPE
+-----------------------------------------------------------------
+`if`/`elif`/`else` introduced real nested scopes (see semantic.py's
+SCOPING section), which broke an assumption codegen's local-variable
+allocator used to rely on: that a variable name always maps to exactly
+one stack slot per function. Once sibling branches can each declare a
+variable with the same name (`if x: int a = 1` / `else: int a = 2`,
+now legitimately two different variables), stack slots have to be
+keyed by which specific declaration a name resolves to at a given
+point in the program, not by the name alone -- see codegen.py's LOCAL
+VARIABLES section for the actual mechanism. TestIfStatements' two
+same-name-in-both-branches tests exist specifically to prove that
+allocator change is correct, not just that if/else branch correctly.
 
 A NOTE ON THE TYPE SYSTEM AND WHY SEVERAL TESTS CHANGED SHAPE
 -----------------------------------------------------------------
@@ -453,6 +468,193 @@ class TestVariablesAndStatements:
 
 
 # ---------------------------------------------------------------------------
+# if / elif / else: branching, elif chains, nesting, and block scoping.
+#
+# The scoping tests here matter more than they might look -- they're not
+# just "does the value come out right", they're proof that codegen's
+# stack-slot allocator correctly gives two *different* variables their
+# own storage even when they share a name across sibling branches (see
+# codegen.py's LOCAL VARIABLES section). Before that allocator was
+# rewritten, a program declaring `a` in both an if and its else would
+# have been rejected as a duplicate declaration at the codegen layer,
+# even though semantic.py correctly allows it.
+# ---------------------------------------------------------------------------
+
+class TestIfStatements:
+    pytestmark = GCC_SKIP
+
+    def test_if_true_branch_taken(self):
+        assert_exit_code(
+            "    int a = 1\n"
+            "    if a == 1:\n"
+            "        return true\n"
+            "    else:\n"
+            "        return false",
+            1,
+            return_type="bool",
+        )
+
+    def test_if_false_branch_taken(self):
+        assert_exit_code(
+            "    int a = 2\n"
+            "    if a == 1:\n"
+            "        return true\n"
+            "    else:\n"
+            "        return false",
+            0,
+            return_type="bool",
+        )
+
+    def test_if_no_else_condition_false_falls_through(self):
+        assert_exit_code(
+            "    int a = 0\n"
+            "    if a == 1:\n"
+            "        a = 99\n"
+            "    return a",
+            0,
+        )
+
+    def test_if_no_else_condition_true_body_runs(self):
+        assert_exit_code(
+            "    int a = 1\n"
+            "    if a == 1:\n"
+            "        a = 99\n"
+            "    return a",
+            99,
+        )
+
+    @pytest.mark.parametrize("a,expected", [
+        (1, 10),   # first branch matches
+        (5, 20),   # second branch matches
+        (9, 30),   # third branch matches
+        (100, 40),  # falls through to else
+    ])
+    def test_elif_chain(self, a, expected):
+        assert_exit_code(
+            f"    int a = {a}\n"
+            "    if a == 1:\n"
+            "        return 10\n"
+            "    elif a == 5:\n"
+            "        return 20\n"
+            "    elif a == 9:\n"
+            "        return 30\n"
+            "    else:\n"
+            "        return 40",
+            expected,
+        )
+
+    def test_nested_if_in_if_inner_false(self):
+        assert_exit_code(
+            "    if true:\n"
+            "        if false:\n"
+            "            return 1\n"
+            "        return 2\n"
+            "    return 3",
+            2,
+        )
+
+    def test_nested_if_in_if_outer_false(self):
+        assert_exit_code(
+            "    if false:\n"
+            "        if true:\n"
+            "            return 1\n"
+            "        return 2\n"
+            "    return 3",
+            3,
+        )
+
+    def test_same_name_in_both_branches_then(self):
+        """The key scoping case: `a` in the then-branch and `a` in the
+        else-branch are independent variables that happen to share a
+        name -- semantic.py allows this (separate scopes), and codegen
+        must give them genuinely separate stack slots for this to come
+        out right."""
+        assert_exit_code(
+            "    if true:\n"
+            "        int a = 1\n"
+            "        return a\n"
+            "    else:\n"
+            "        int a = 2\n"
+            "        return a",
+            1,
+        )
+
+    def test_same_name_in_both_branches_else(self):
+        assert_exit_code(
+            "    if false:\n"
+            "        int a = 1\n"
+            "        return a\n"
+            "    else:\n"
+            "        int a = 2\n"
+            "        return a",
+            2,
+        )
+
+    def test_shadowing_outer_variable_returns_inner_value(self):
+        assert_exit_code(
+            "    int a = 100\n"
+            "    if true:\n"
+            "        int a = 5\n"
+            "        return a\n"
+            "    return a",
+            5,
+        )
+
+    def test_outer_variable_unaffected_after_shadowing_block_ends(self):
+        assert_exit_code(
+            "    int a = 100\n"
+            "    if true:\n"
+            "        int a = 5\n"
+            "    return a",
+            100,
+        )
+
+    def test_assignment_to_outer_variable_from_inside_if(self):
+        assert_exit_code(
+            "    int a = 1\n"
+            "    if true:\n"
+            "        a = 2\n"
+            "    return a",
+            2,
+        )
+
+    def test_early_return_from_then_branch(self):
+        assert_exit_code(
+            "    if true:\n"
+            "        return 1\n"
+            "    return 2",
+            1,
+        )
+
+    def test_if_condition_using_and_and_comparisons(self):
+        assert_exit_code(
+            "    int a = 5\n"
+            "    int b = 3\n"
+            "    if a > b and b > 0:\n"
+            "        return 1\n"
+            "    return 0",
+            1,
+        )
+
+    def test_two_separate_if_blocks_each_declare_their_own_variable(self):
+        """Two *non-overlapping* if-blocks (not sibling branches of the
+        same if) each declaring a variable called `y` -- distinct from
+        the sibling-branch case above, but exercising the same
+        node-identity-keyed allocation."""
+        assert_exit_code(
+            "    int x = 1\n"
+            "    if true:\n"
+            "        int y = 2\n"
+            "        x = x + y\n"
+            "    if true:\n"
+            "        int y = 10\n"
+            "        x = x + y\n"
+            "    return x",
+            13,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Semantic analysis: scope/declaration checking and the strict int/bool
 # type system. These never reach codegen -- each one asserts that
 # analyze() itself raises SemanticError -- so they don't need gcc and
@@ -631,4 +833,96 @@ class TestSemanticErrors:
         assert_semantic_error(
             "    return 2.5",
             match="not a whole number",
+        )
+
+    # -- if/elif/else: condition typing and block scoping ----------------
+
+    def test_if_condition_must_be_bool(self):
+        """No int-as-truthy shortcut -- same rule as everywhere else in
+        this type system."""
+        assert_semantic_error(
+            "    if 1:\n"
+            "        return 1\n"
+            "    return 0",
+            match="'if' condition must be bool",
+        )
+
+    def test_elif_condition_must_be_bool(self):
+        """The condition check applies to every elif in a chain, not
+        just the first `if` -- since an elif is just a nested If (see
+        parser.py's If docstring), this falls out of analyze_if being
+        called recursively rather than needing separate elif logic."""
+        assert_semantic_error(
+            "    if false:\n"
+            "        return 1\n"
+            "    elif 1:\n"
+            "        return 2\n"
+            "    return 0",
+            match="'if' condition must be bool",
+        )
+
+    def test_variable_declared_in_if_does_not_leak_outside(self):
+        """A variable declared inside an if-block goes out of scope
+        once the block ends -- referencing it afterward is exactly as
+        invalid as referencing any other undeclared name."""
+        assert_semantic_error(
+            "    if true:\n"
+            "        int a = 1\n"
+            "    return a",
+            match="undeclared variable",
+        )
+
+    def test_variable_declared_in_then_not_visible_in_else(self):
+        """then and else get independent scopes -- a name from one
+        branch isn't visible in the other, since they're mutually
+        exclusive at runtime."""
+        assert_semantic_error(
+            "    if true:\n"
+            "        int a = 1\n"
+            "    else:\n"
+            "        return a",
+            match="undeclared variable",
+        )
+
+    def test_same_name_in_sibling_branches_is_allowed(self):
+        """The positive control for the two tests above: declaring `a`
+        independently in both an if and its else must NOT raise, since
+        they're separate scopes -- this is exactly the scenario that
+        motivated rewriting codegen's allocator (see codegen.py's LOCAL
+        VARIABLES section)."""
+        ast = _parse(
+            "def int main():\n"
+            "    if true:\n"
+            "        int a = 1\n"
+            "        return a\n"
+            "    else:\n"
+            "        int a = 2\n"
+            "        return a\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_shadowing_outer_variable_in_if_is_allowed(self):
+        """A block-local declaration is allowed to shadow a
+        same-named variable from an enclosing scope."""
+        ast = _parse(
+            "def int main():\n"
+            "    int a = 1\n"
+            "    if true:\n"
+            "        int a = 2\n"
+            "        return a\n"
+            "    return a\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_double_declaration_within_same_if_branch_is_rejected(self):
+        """Shadowing an *enclosing* scope is fine, but the ordinary
+        double-declaration rule still applies *within* a single
+        branch's own scope."""
+        assert_semantic_error(
+            "    if true:\n"
+            "        int a = 1\n"
+            "        int a = 2\n"
+            "        return a\n"
+            "    return 0",
+            match="already declared",
         )

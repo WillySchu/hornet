@@ -6,15 +6,20 @@ into an Abstract Syntax Tree (AST).
 Grammar supported (matches what the current lexer can produce):
 
     program     := function* EOF
-    function    := 'def' type IDENTIFIER '(' ')' ':' NEWLINE statement+
+    function    := 'def' type IDENTIFIER '(' ')' ':' NEWLINE block
     type        := 'int' | 'bool'
+    block       := INDENT statement+ DEDENT
     statement   := decl_stmt
                  | assign_stmt
                  | return_stmt
+                 | if_stmt
                  | expr_stmt
     decl_stmt   := type IDENTIFIER ('=' expression)? NEWLINE
     assign_stmt := IDENTIFIER '=' expression NEWLINE
     return_stmt := 'return' expression NEWLINE?
+    if_stmt     := 'if' expression ':' NEWLINE block
+                    ('elif' expression ':' NEWLINE block)*
+                    ('else' ':' NEWLINE block)?
     expr_stmt   := expression NEWLINE
     expression   := binary_expr
     binary_expr  := unary_expr (BIN_OP binary_expr)*   [precedence climbing]
@@ -90,20 +95,24 @@ semantic error -- even though codegen's own pre-scan (which only cares
 about sizing the stack frame, not validity) still wouldn't catch it on
 its own if it somehow ran without semantic analysis first.
 
-NOTE ON INDENTATION
---------------------
-The attached lexer's SKIP rule consumes all spaces/tabs -- including
-leading indentation -- so no INDENT/DEDENT tokens ever reach the parser.
-That means this parser currently has no reliable signal for "where a
-block ends" other than "the next 'def' or end of file". That's enough to
-correctly parse flat, single-block functions (like the example below),
-but it will NOT correctly handle nested blocks (if/while/etc.) once those
-are added to the language, since two nested blocks at different
-indentation levels are indistinguishable from one flat block once
-whitespace is stripped. When you're ready to add nested blocks, the
-lexer will need to track indentation depth per line and emit INDENT/
-DEDENT tokens (the classic Python-style approach), and parse_block()
-below should be rewritten to consume those instead of scanning for 'def'.
+NOTE ON INDENTATION (RESOLVED)
+--------------------------------
+Earlier versions of this parser had no reliable signal for "where a
+block ends" beyond "the next 'def' or end of file", because the lexer's
+SKIP rule swallowed all whitespace uniformly, including leading
+indentation. That was fine as long as every block was flat, but it
+could never work for nested blocks (if/while/etc.), since two blocks at
+different indentation levels are indistinguishable from one flat block
+once whitespace is stripped -- this is exactly the limitation that
+blocked `if` statements from being addable at all until now.
+
+The lexer now tracks an indentation stack and synthesizes INDENT/DEDENT
+tokens (the classic Python-style approach; see lexer.py's tokenize()).
+parse_block() consumes exactly `INDENT statement+ DEDENT`, and -- unlike
+the old "scan for def" hack -- this generalizes to any nesting depth for
+free: a function's top-level body and an if/elif/else's body both go
+through the same parse_block(), so an if nested inside an if nested
+inside a function just falls out of ordinary recursion.
 """
 
 import argparse
@@ -266,6 +275,33 @@ class ExprStmt(Node):
 
     def pretty(self) -> str:
         return f"ExprStmt -> {self.expr.pretty()}"
+
+
+@dataclass
+class If(Node):
+    """`if cond: <then_body> [elif cond: ...]* [else: <else_body>]?`.
+
+    An `elif` isn't its own AST concept -- parse_if desugars it into a
+    single-element else_body containing one more If node, i.e. `elif c:
+    b` is represented exactly like `else: if c: b`. That means
+    else_body is always just `Optional[List[Node]]`, the same shape as
+    then_body, whether it came from a real `else` block or a chain of
+    elifs -- semantic.py and codegen.py both consume it uniformly and
+    never need to know which case they're looking at, and an elif chain
+    of any length falls out of ordinary nesting rather than needing
+    dedicated handling anywhere else in the pipeline.
+    """
+    condition: Node
+    then_body: List[Node]
+    else_body: Optional[List[Node]] = None
+
+    def pretty(self) -> str:
+        then_str = '; '.join(stmt.pretty() for stmt in self.then_body)
+        head = f"If({self.condition.pretty()}) -> [{then_str}]"
+        if self.else_body is None:
+            return head
+        else_str = '; '.join(stmt.pretty() for stmt in self.else_body)
+        return f"{head} else -> [{else_str}]"
 
 
 @dataclass
@@ -446,22 +482,29 @@ class Parser:
         )
 
     def parse_block(self) -> List[Node]:
-        """Parse statements until the next 'def' (a new function) or EOF.
+        """Parses an indented block: INDENT statement+ DEDENT.
 
-        See the module docstring for why this -- rather than proper
-        INDENT/DEDENT tracking -- is how block boundaries are detected.
+        This is the one routine every block in the language goes
+        through -- a function's top-level body and an if/elif/else's
+        body alike -- which is exactly what makes nesting work for
+        free: parse_if calls this same method for its own then/else
+        bodies, so an if inside an if inside a function just falls out
+        of ordinary recursion, with no separate "nested block" concept
+        anywhere. skip_newlines() before the INDENT handles any blank
+        lines between the block-opening NEWLINE (from `:`) and the
+        block's first real line; skip_newlines() inside the loop does
+        the same between statements.
         """
-        statements = []
         self.skip_newlines()
-        while not self.at_end() and not self.check(TokenType.DEF):
+        self.expect(TokenType.INDENT, "Expected an indented block")
+        self.skip_newlines()
+        statements = []
+        while not self.check(TokenType.DEDENT) and not self.at_end():
             statements.append(self.parse_statement())
             self.skip_newlines()
+        self.expect(TokenType.DEDENT, "Expected the end of an indented block")
         if not statements:
-            tok = self.current()
-            raise ParseError(
-                f"Expected at least one statement in function body "
-                f"at line {tok.line}, column {tok.col}"
-            )
+            raise ParseError("Expected at least one statement in this block")
         return statements
 
     def parse_statement(self) -> Node:
@@ -469,9 +512,44 @@ class Parser:
             return self.parse_var_decl()
         if self.check(TokenType.RETURN):
             return self.parse_return()
+        if self.check(TokenType.IF):
+            return self.parse_if()
         if self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.ASSIGN:
             return self.parse_assign()
         return self.parse_expr_stmt()
+
+    def parse_if(self) -> If:
+        self.expect(TokenType.IF, "Expected 'if'")
+        return self._parse_if_body()
+
+    def parse_elif_as_if(self) -> If:
+        # See If's docstring: an elif is parsed as an ordinary If, just
+        # nested one level inside the enclosing if's else_body.
+        self.expect(TokenType.ELIF, "Expected 'elif'")
+        return self._parse_if_body()
+
+    def _parse_if_body(self) -> If:
+        """Shared by parse_if and parse_elif_as_if -- both are just
+        `KEYWORD expression ':' NEWLINE block`, differing only in which
+        keyword the caller already consumed. Handles an arbitrarily
+        long elif chain by recursing into parse_elif_as_if, and an
+        optional trailing else.
+        """
+        condition = self.parse_expression()
+        self.expect(TokenType.COLON, "Expected ':' to start the if body")
+        self.expect(TokenType.NEWLINE, "Expected a newline after ':'")
+        then_body = self.parse_block()
+
+        else_body = None
+        self.skip_newlines()
+        if self.check(TokenType.ELIF):
+            else_body = [self.parse_elif_as_if()]
+        elif self.match(TokenType.ELSE):
+            self.expect(TokenType.COLON, "Expected ':' to start the else body")
+            self.expect(TokenType.NEWLINE, "Expected a newline after ':'")
+            else_body = self.parse_block()
+
+        return If(condition=condition, then_body=then_body, else_body=else_body)
 
     def parse_var_decl(self) -> VarDecl:
         var_type = self.parse_type()

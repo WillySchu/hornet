@@ -36,7 +36,7 @@ def test_token_eq():
 
 def test_lex_return_2():
     res = lexer.lex('tests/return_2.ht')
-    #assert res[8].col == 0
+    #assert res[11].col == 0
     expected = [
         lexer.Token(lexer.TokenType.DEF, 'def', 1, 1),
         lexer.Token(lexer.TokenType.INT, 'int', 1, 5),
@@ -45,9 +45,11 @@ def test_lex_return_2():
         lexer.Token(lexer.TokenType.CLOSE_PAREN, ')', 1, 14),
         lexer.Token(lexer.TokenType.COLON, ':', 1, 15),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 16),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
         lexer.Token(lexer.TokenType.RETURN, 'return', 2, 5),
         lexer.Token(lexer.TokenType.NUMBER, '2', 2, 12),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 13),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
         lexer.Token(lexer.TokenType.EOF, '', 3, 1),
     ]
     assert expected == res
@@ -64,10 +66,12 @@ def test_lex_negation():
         lexer.Token(lexer.TokenType.CLOSE_PAREN, ')', 1, 14),
         lexer.Token(lexer.TokenType.COLON, ':', 1, 15),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 16),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
         lexer.Token(lexer.TokenType.RETURN, 'return', 2, 5),
         lexer.Token(lexer.TokenType.MINUS, '-', 2, 12),
         lexer.Token(lexer.TokenType.NUMBER, '2', 2, 13),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 14),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
         lexer.Token(lexer.TokenType.EOF, '', 3, 1),
     ]
     assert expected == res
@@ -83,10 +87,12 @@ def test_lex_bitwise_complement():
         lexer.Token(lexer.TokenType.CLOSE_PAREN, ')', 1, 14),
         lexer.Token(lexer.TokenType.COLON, ':', 1, 15),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 16),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
         lexer.Token(lexer.TokenType.RETURN, 'return', 2, 5),
         lexer.Token(lexer.TokenType.TILDE, '~', 2, 12),
         lexer.Token(lexer.TokenType.NUMBER, '2', 2, 13),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 14),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
         lexer.Token(lexer.TokenType.EOF, '', 3, 1),
     ]
     assert expected == res
@@ -102,10 +108,12 @@ def test_lex_logical_negation():
         lexer.Token(lexer.TokenType.CLOSE_PAREN, ')', 1, 14),
         lexer.Token(lexer.TokenType.COLON, ':', 1, 15),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 16),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
         lexer.Token(lexer.TokenType.RETURN, 'return', 2, 5),
         lexer.Token(lexer.TokenType.BANG, '!', 2, 12),
         lexer.Token(lexer.TokenType.NUMBER, '2', 2, 13),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 14),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
         lexer.Token(lexer.TokenType.EOF, '', 3, 1),
     ]
     assert expected == res
@@ -122,11 +130,13 @@ def test_lex_addition():
         lexer.Token(lexer.TokenType.CLOSE_PAREN, ')', 1, 14),
         lexer.Token(lexer.TokenType.COLON, ':', 1, 15),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 16),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
         lexer.Token(lexer.TokenType.RETURN, 'return', 2, 5),
         lexer.Token(lexer.TokenType.NUMBER, '2', 2, 12),
         lexer.Token(lexer.TokenType.PLUS, '+', 2, 14),
         lexer.Token(lexer.TokenType.NUMBER, '3', 2, 16),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 17),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
         lexer.Token(lexer.TokenType.EOF, '', 3, 1),
     ]
     assert expected == res
@@ -142,11 +152,13 @@ def test_lex_subtraction():
         lexer.Token(lexer.TokenType.CLOSE_PAREN, ')', 1, 14),
         lexer.Token(lexer.TokenType.COLON, ':', 1, 15),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 16),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
         lexer.Token(lexer.TokenType.RETURN, 'return', 2, 5),
         lexer.Token(lexer.TokenType.NUMBER, '2', 2, 12),
         lexer.Token(lexer.TokenType.MINUS, '-', 2, 14),
         lexer.Token(lexer.TokenType.NUMBER, '3', 2, 16),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 17),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
         lexer.Token(lexer.TokenType.EOF, '', 3, 1),
     ]
     assert expected == res
@@ -162,11 +174,13 @@ def test_lex_multiplication():
         lexer.Token(lexer.TokenType.CLOSE_PAREN, ')', 1, 14),
         lexer.Token(lexer.TokenType.COLON, ':', 1, 15),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 16),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
         lexer.Token(lexer.TokenType.RETURN, 'return', 2, 5),
         lexer.Token(lexer.TokenType.NUMBER, '2', 2, 12),
         lexer.Token(lexer.TokenType.STAR, '*', 2, 14),
         lexer.Token(lexer.TokenType.NUMBER, '3', 2, 16),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 17),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
         lexer.Token(lexer.TokenType.EOF, '', 3, 1),
     ]
     assert expected == res
@@ -182,11 +196,13 @@ def test_lex_division():
         lexer.Token(lexer.TokenType.CLOSE_PAREN, ')', 1, 14),
         lexer.Token(lexer.TokenType.COLON, ':', 1, 15),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 16),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
         lexer.Token(lexer.TokenType.RETURN, 'return', 2, 5),
         lexer.Token(lexer.TokenType.NUMBER, '2', 2, 12),
         lexer.Token(lexer.TokenType.SLASH, '/', 2, 14),
         lexer.Token(lexer.TokenType.NUMBER, '3', 2, 16),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 17),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
         lexer.Token(lexer.TokenType.EOF, '', 3, 1),
     ]
     assert expected == res
@@ -202,11 +218,13 @@ def test_lex_equal():
         lexer.Token(lexer.TokenType.CLOSE_PAREN, ')', 1, 14),
         lexer.Token(lexer.TokenType.COLON, ':', 1, 15),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 16),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
         lexer.Token(lexer.TokenType.RETURN, 'return', 2, 5),
         lexer.Token(lexer.TokenType.NUMBER, '2', 2, 12),
         lexer.Token(lexer.TokenType.EQUAL, '==', 2, 14),
         lexer.Token(lexer.TokenType.NUMBER, '3', 2, 17),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 18),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
         lexer.Token(lexer.TokenType.EOF, '', 3, 1),
     ]
     assert expected == res
@@ -222,11 +240,13 @@ def test_lex_not_equal():
         lexer.Token(lexer.TokenType.CLOSE_PAREN, ')', 1, 14),
         lexer.Token(lexer.TokenType.COLON, ':', 1, 15),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 16),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
         lexer.Token(lexer.TokenType.RETURN, 'return', 2, 5),
         lexer.Token(lexer.TokenType.NUMBER, '2', 2, 12),
         lexer.Token(lexer.TokenType.NOT_EQUAL, '!=', 2, 14),
         lexer.Token(lexer.TokenType.NUMBER, '3', 2, 17),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 18),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
         lexer.Token(lexer.TokenType.EOF, '', 3, 1),
     ]
     assert expected == res
@@ -242,11 +262,13 @@ def test_lex_less_than():
         lexer.Token(lexer.TokenType.CLOSE_PAREN, ')', 1, 14),
         lexer.Token(lexer.TokenType.COLON, ':', 1, 15),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 16),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
         lexer.Token(lexer.TokenType.RETURN, 'return', 2, 5),
         lexer.Token(lexer.TokenType.NUMBER, '2', 2, 12),
         lexer.Token(lexer.TokenType.LESS_THAN, '<', 2, 14),
         lexer.Token(lexer.TokenType.NUMBER, '3', 2, 16),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 17),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
         lexer.Token(lexer.TokenType.EOF, '', 3, 1),
     ]
     assert expected == res
@@ -262,11 +284,13 @@ def test_lex_greater_than():
         lexer.Token(lexer.TokenType.CLOSE_PAREN, ')', 1, 14),
         lexer.Token(lexer.TokenType.COLON, ':', 1, 15),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 16),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
         lexer.Token(lexer.TokenType.RETURN, 'return', 2, 5),
         lexer.Token(lexer.TokenType.NUMBER, '2', 2, 12),
         lexer.Token(lexer.TokenType.GREATER_THAN, '>', 2, 14),
         lexer.Token(lexer.TokenType.NUMBER, '3', 2, 16),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 17),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
         lexer.Token(lexer.TokenType.EOF, '', 3, 1),
     ]
     assert expected == res
@@ -282,11 +306,13 @@ def test_lex_less_than_or_equal():
         lexer.Token(lexer.TokenType.CLOSE_PAREN, ')', 1, 14),
         lexer.Token(lexer.TokenType.COLON, ':', 1, 15),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 16),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
         lexer.Token(lexer.TokenType.RETURN, 'return', 2, 5),
         lexer.Token(lexer.TokenType.NUMBER, '2', 2, 12),
         lexer.Token(lexer.TokenType.LESS_THAN_OR_EQUAL, '<=', 2, 14),
         lexer.Token(lexer.TokenType.NUMBER, '3', 2, 17),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 18),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
         lexer.Token(lexer.TokenType.EOF, '', 3, 1),
     ]
     assert expected == res
@@ -302,11 +328,13 @@ def test_lex_greater_than_or_equal():
         lexer.Token(lexer.TokenType.CLOSE_PAREN, ')', 1, 14),
         lexer.Token(lexer.TokenType.COLON, ':', 1, 15),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 16),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
         lexer.Token(lexer.TokenType.RETURN, 'return', 2, 5),
         lexer.Token(lexer.TokenType.NUMBER, '2', 2, 12),
         lexer.Token(lexer.TokenType.GREATER_THAN_OR_EQUAL, '>=', 2, 14),
         lexer.Token(lexer.TokenType.NUMBER, '3', 2, 17),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 18),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
         lexer.Token(lexer.TokenType.EOF, '', 3, 1),
     ]
     assert expected == res
@@ -323,10 +351,12 @@ def test_lex_not():
         lexer.Token(lexer.TokenType.CLOSE_PAREN, ')', 1, 14),
         lexer.Token(lexer.TokenType.COLON, ':', 1, 15),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 16),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
         lexer.Token(lexer.TokenType.RETURN, 'return', 2, 5),
         lexer.Token(lexer.TokenType.NOT, 'not', 2, 12),
         lexer.Token(lexer.TokenType.NUMBER, '2', 2, 16),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 17),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
         lexer.Token(lexer.TokenType.EOF, '', 3, 1),
     ]
     assert expected == res
@@ -342,11 +372,13 @@ def test_lex_and():
         lexer.Token(lexer.TokenType.CLOSE_PAREN, ')', 1, 14),
         lexer.Token(lexer.TokenType.COLON, ':', 1, 15),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 16),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
         lexer.Token(lexer.TokenType.RETURN, 'return', 2, 5),
         lexer.Token(lexer.TokenType.NUMBER, '0', 2, 12),
         lexer.Token(lexer.TokenType.AND, 'and', 2, 14),
         lexer.Token(lexer.TokenType.NUMBER, '1', 2, 18),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 19),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
         lexer.Token(lexer.TokenType.EOF, '', 3, 1),
     ]
     assert expected == res
@@ -362,11 +394,13 @@ def test_lex_or():
         lexer.Token(lexer.TokenType.CLOSE_PAREN, ')', 1, 14),
         lexer.Token(lexer.TokenType.COLON, ':', 1, 15),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 16),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
         lexer.Token(lexer.TokenType.RETURN, 'return', 2, 5),
         lexer.Token(lexer.TokenType.NUMBER, '0', 2, 12),
         lexer.Token(lexer.TokenType.OR, 'or', 2, 14),
         lexer.Token(lexer.TokenType.NUMBER, '1', 2, 17),
         lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 18),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
         lexer.Token(lexer.TokenType.EOF, '', 3, 1),
     ]
     assert expected == res

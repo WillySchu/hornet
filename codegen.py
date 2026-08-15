@@ -33,6 +33,8 @@ Supported so far (matches what parser.py can currently produce):
     Assign   -> `a = <expr>`
     ExprStmt -> a bare expression statement, evaluated and discarded
     BoolLiteral -> `true`/`false`, immediate 1/0
+    If       -> `if`/`elif`/`else`, real conditional jumps (elif is
+                nested If, not a separate case -- see parser.py)
 
 A note on typing: as of semantic.py, this file is no longer the only
 line of defense against a malformed program -- undeclared/re-declared
@@ -138,10 +140,11 @@ LOCAL VARIABLES
 Every local variable lives in a fixed stack slot at a constant offset
 from %rbp -- the classic frame-pointer-relative layout, e.g. the first
 variable declared in a function at -4(%rbp), the second at -8(%rbp), and
-so on (each int is 4 bytes). gen_function pre-scans a function's whole
-body for VarDecls *before* generating any instructions, so every slot's
-offset is already assigned, and the total frame size is already known,
-by the time the prologue is emitted:
+so on (each int/bool is 4 bytes). _collect_locals recursively pre-scans
+a function's whole body -- including into every If's then_body and
+else_body -- for VarDecls *before* generating any instructions, so every
+slot's offset is already assigned, and the total frame size is already
+known, by the time the prologue is emitted:
 
     pushq %rbp
     movq  %rsp, %rbp
@@ -154,6 +157,37 @@ functions (`return 2` now sets up and tears down an empty frame), but it
 keeps codegen uniform now and means there's no special case to unwind
 later once this needs to support more than one frame per program (e.g.
 actual function calls).
+
+TWO NAMES, TWO NUMBERS: WHY OFFSETS ARE KEYED BY NODE, NOT NAME
+-------------------------------------------------------------------
+Now that if/else exist, semantic.py allows two variables in sibling
+branches to share a name -- `if x: int a = 1` / `else: int a = 2` are
+independent scopes, so that's legitimately two different variables that
+happen to be spelled the same way. A single `Dict[str, int]` allocator
+can't represent that (the second VarDecl would look like a duplicate of
+the first). So _collect_locals keys offsets by `id(vardecl_node)`
+instead of by name -- every VarDecl anywhere in the function, no matter
+how deeply nested or how many others share its name, gets its own
+permanent slot. This is simple and always correct, but not
+space-optimal: two variables that can never both be alive at once (like
+the `a` in an if and the `a` in its else) still each get dedicated stack
+space for the whole function call, rather than sharing a slot. Trading a
+few bytes of stack for a much simpler allocator felt like the right
+call at this stage.
+
+Fixed, permanent offsets alone aren't enough to make `Variable`/`Assign`
+nodes resolve to the *right* slot, though -- codegen still needs to know
+which of possibly-several same-named VarDecls a given reference means at
+the point it's generated, which is exactly a scoping question. So
+`self.scopes: List[Dict[str, int]]` mirrors semantic.py's own scope
+stack (pushed/popped around an If's then/else bodies in gen_if, name ->
+offset instead of name -> Type), and _local_offset walks it
+innermost-to-outermost exactly like semantic.py's _lookup does. This
+does mean scope resolution is implemented twice in this codebase, once
+per pass -- a real duplication, and a reasonable one to revisit (e.g. by
+having semantic.py annotate each Variable/Assign node with its resolved
+VarDecl directly) if it ever drifts out of sync with semantic.py's own
+rules.
 
 Reading or writing a variable never touches gen_expr_into's core
 contract -- every expression still always computes into a register
@@ -168,22 +202,17 @@ byte-register aliasing comparisons and NOT depend on, none of which are
 built to target anything but a register. Routing every store through
 %eax first avoids all of that at the cost of one extra mov per store.
 
-Two related simplifications worth knowing about, both consequences of
-there being no semantic-analysis pass yet: declaring the same variable
-twice in one function, and referencing a variable that was never
-declared, are both only caught here in codegen (see _declare_local and
-_local_offset) -- not in the parser. And because the whole function body
-is pre-scanned for VarDecls up front rather than incrementally as
-statements are generated, declare-before-use in textual order isn't
-enforced either; a variable assigned above its own declaration would
-"work" instead of being rejected. Both are fine for now and worth
-revisiting once real error-checking matters more than getting variables
-working at all.
+As of semantic.py, double declarations, undeclared references, and
+every type error are caught well before this file ever runs -- the
+`_local_offset` lookup failing here would now only happen if codegen
+were invoked directly on an AST that skipped semantic analysis (see this
+module's top for the compile_to_asm/generate_asm split), so treat it as
+a defensive check rather than the primary error-reporting path.
 """
 
 import argparse
 from dataclasses import dataclass, field
-from typing import List
+from typing import Dict, List
 
 from lexer import lex
 from parser import (
@@ -194,6 +223,7 @@ from parser import (
     Constant,
     ExprStmt,
     Function,
+    If,
     Node,
     Parser,
     Program,
@@ -571,13 +601,16 @@ class CodeGenerator:
 
     def __init__(self):
         self._label_count = 0
-        self.locals = {}  # name -> Memory offset; reset per function, see gen_function
+        self._var_offsets: Dict[int, int] = {}  # id(VarDecl node) -> its permanent Memory offset
+        self._next_offset = 0
+        self.scopes: List[Dict[str, int]] = []  # name -> offset, generation-time; see LOCAL VARIABLES
 
     def new_label(self, prefix: str) -> str:
         """Returns a fresh, uniquely-numbered local label like
-        `.Land_short_0`. Needed because AND/OR codegen emits real jump
-        targets, and a program can contain any number of them -- each
-        one needs a name the assembler won't collide with any other."""
+        `.Land_short_0`. Needed because AND/OR/if codegen all emit real
+        jump targets, and a program can contain any number of them --
+        each one needs a name the assembler won't collide with any
+        other."""
         label = f".L{prefix}_{self._label_count}"
         self._label_count += 1
         return label
@@ -586,13 +619,13 @@ class CodeGenerator:
         return AsmProgram(functions=[self.gen_function(fn) for fn in program.functions])
 
     def gen_function(self, fn: Function) -> AsmFunction:
-        # Fresh locals table per function -- variables don't persist
-        # across functions, and offsets are relative to *this* function's
-        # own %rbp.
-        self.locals = {}
-        for stmt in fn.body:
-            if isinstance(stmt, VarDecl):
-                self._declare_local(stmt.name)
+        # Fresh allocator state per function -- variables don't persist
+        # across functions, and offsets are relative to *this*
+        # function's own %rbp.
+        self._var_offsets = {}
+        self._next_offset = 0
+        self._collect_locals(fn.body)
+        self.scopes = [{}]
 
         instructions: List[Instruction] = [
             Push(Register('rbp')),
@@ -607,18 +640,20 @@ class CodeGenerator:
 
         return AsmFunction(name=fn.name, instructions=instructions)
 
-    def _declare_local(self, name: str) -> None:
-        if name in self.locals:
-            raise CodegenError(f"Variable '{name}' is already declared in this function")
-        # Every local is a 4-byte int; slots grow downward from %rbp, so
-        # the first declared variable ends up closest to it (-4(%rbp)).
-        offset = -4 * (len(self.locals) + 1)
-        self.locals[name] = offset
-
-    def _local_offset(self, name: str) -> int:
-        if name not in self.locals:
-            raise CodegenError(f"Reference to undeclared variable '{name}'")
-        return self.locals[name]
+    def _collect_locals(self, statements: List[Node]) -> None:
+        """Recursively walks `statements`, including into every If's
+        then_body/else_body, and gives each VarDecl found its own
+        permanent stack slot, keyed by the AST node's identity rather
+        than its name -- see the module docstring's LOCAL VARIABLES
+        section for why that distinction now matters."""
+        for stmt in statements:
+            if isinstance(stmt, VarDecl):
+                self._next_offset -= 4
+                self._var_offsets[id(stmt)] = self._next_offset
+            elif isinstance(stmt, If):
+                self._collect_locals(stmt.then_body)
+                if stmt.else_body is not None:
+                    self._collect_locals(stmt.else_body)
 
     def _frame_size(self) -> int:
         # Total bytes used by locals, rounded up to a 16-byte boundary.
@@ -626,8 +661,29 @@ class CodeGenerator:
         # SysV ABI's 16-byte-alignment-before-call rule doesn't bind),
         # but keeping frames aligned now avoids having to retrofit it
         # once function calls exist.
-        raw = 4 * len(self.locals)
-        return ((raw + 15) // 16) * 16 if raw else 0
+        raw = -self._next_offset
+        return ((raw + 15) // 16) * 16 if raw > 0 else 0
+
+    def _push_scope(self) -> None:
+        self.scopes.append({})
+
+    def _pop_scope(self) -> None:
+        self.scopes.pop()
+
+    def _bind_local(self, stmt: VarDecl) -> int:
+        """Registers `stmt`'s name in the current (innermost)
+        generation-time scope, pointing at the permanent offset
+        _collect_locals already assigned this exact VarDecl node, and
+        returns that offset."""
+        offset = self._var_offsets[id(stmt)]
+        self.scopes[-1][stmt.name] = offset
+        return offset
+
+    def _local_offset(self, name: str) -> int:
+        for scope in reversed(self.scopes):
+            if name in scope:
+                return scope[name]
+        raise CodegenError(f"Reference to undeclared variable '{name}'")
 
     def gen_statement(self, stmt: Node) -> List[Instruction]:
         if isinstance(stmt, VarDecl):
@@ -636,25 +692,30 @@ class CodeGenerator:
             return self.gen_assign(stmt)
         if isinstance(stmt, Return):
             return self.gen_return(stmt)
+        if isinstance(stmt, If):
+            return self.gen_if(stmt)
         if isinstance(stmt, ExprStmt):
             return self.gen_expr_stmt(stmt)
         raise CodegenError(f"No codegen rule for statement: {stmt!r}")
 
     def gen_var_decl(self, stmt: VarDecl) -> List[Instruction]:
-        # `_declare_local` already ran for every VarDecl in gen_function
-        # (that's what sizes the frame), so the slot already exists here
-        # -- this only needs to emit the store, and only if there's an
-        # initializer. `int a` with no initializer leaves the slot's
-        # contents genuinely uninitialized, matching C: reading it before
-        # assigning is undefined behavior, not implicitly zero.
+        # _collect_locals already reserved this VarDecl's slot (that's
+        # what sizes the frame); _bind_local just needs to make its name
+        # resolvable in the current scope, and return where to store the
+        # initializer, if there is one. `int a` with no initializer
+        # leaves the slot's contents genuinely uninitialized, matching
+        # C: reading it before assigning is undefined behavior, not
+        # implicitly zero.
+        offset = self._bind_local(stmt)
         if stmt.init is None:
             return []
-        return self._gen_store(stmt.name, stmt.init)
+        return self._gen_store(offset, stmt.init)
 
     def gen_assign(self, stmt: Assign) -> List[Instruction]:
-        return self._gen_store(stmt.name, stmt.value)
+        offset = self._local_offset(stmt.name)
+        return self._gen_store(offset, stmt.value)
 
-    def _gen_store(self, name: str, value_expr: Node) -> List[Instruction]:
+    def _gen_store(self, offset: int, value_expr: Node) -> List[Instruction]:
         """Shared by VarDecl-with-initializer and Assign: both are just
         "compute this expression, then write the result into that
         variable's slot" -- evaluate into %eax using the ordinary
@@ -663,7 +724,6 @@ class CodeGenerator:
         way none of gen_expr_into/gen_binary_into/gen_unary_op need to
         know memory operands exist at all -- they just always work with
         %eax, same as before variables existed."""
-        offset = self._local_offset(name)
         instructions = self.gen_expr_into(value_expr, Register('eax'))
         instructions.append(Mov(src=Register('eax'), dst=Memory('rbp', offset)))
         return instructions
@@ -673,6 +733,51 @@ class CodeGenerator:
         instructions = self.gen_expr_into(stmt.value, dst)
         instructions.append(Leave())
         instructions.append(Ret())
+        return instructions
+
+    def gen_if(self, stmt: If) -> List[Instruction]:
+        """Computes the condition into %eax and compares it to 0, exactly
+        like the short-circuit AND/OR codegen already does -- then jumps
+        past the `then` body when it's false:
+
+            <condition>          ; -> %eax
+            cmpl $0, %eax
+            je   .Lif_else_N     ; false -> skip straight to else (or end)
+            <then_body>
+            jmp  .Lif_end_N      ; true -> skip over else after then runs
+        .Lif_else_N:
+            <else_body>          ; only emitted if else_body is present
+        .Lif_end_N:
+
+        then_body and else_body each get their own pushed/popped scope
+        (see _push_scope), matching semantic.py's independent-branch
+        scoping -- and since an elif is just a nested If sitting inside
+        else_body (see parser.py's If docstring), gen_statement's
+        ordinary recursion handles a whole elif/else chain of any
+        length with no extra logic here at all.
+        """
+        dst = Register('eax')
+        else_label = self.new_label("if_else")
+        end_label = self.new_label("if_end")
+
+        instructions = self.gen_expr_into(stmt.condition, dst)
+        instructions.append(Cmp(src=Imm(0), dst=dst))
+        instructions.append(Je(else_label))
+
+        self._push_scope()
+        for s in stmt.then_body:
+            instructions.extend(self.gen_statement(s))
+        self._pop_scope()
+        instructions.append(Jmp(end_label))
+
+        instructions.append(Label(else_label))
+        if stmt.else_body is not None:
+            self._push_scope()
+            for s in stmt.else_body:
+                instructions.extend(self.gen_statement(s))
+            self._pop_scope()
+        instructions.append(Label(end_label))
+
         return instructions
 
     def gen_expr_stmt(self, stmt: ExprStmt) -> List[Instruction]:

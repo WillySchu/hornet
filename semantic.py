@@ -43,6 +43,8 @@ The operator typing rules, precisely:
     -- that's exactly the kind of mismatch strong typing exists to
     catch.
   - Logical (! and or): all operands must be `bool`; result is `bool`.
+  - An `if`/`elif` condition must be `bool` -- same rule as everywhere
+    else: no int-as-truthy shortcut, write `x != 0` or similar.
   - A VarDecl's initializer, an Assign's value, and a Return's value
     must all match the relevant declared type (the variable's declared
     type, or the function's declared return type) exactly.
@@ -58,25 +60,41 @@ literal like `2.5` would have produced literally invalid assembly,
 
 SCOPING
 --------
-There are no nested blocks yet (no if/while), so scoping is currently
-about as simple as it gets: one flat scope per function, reset at the
-start of each one, with no visibility into any other function's
-variables. analyze_function walks that function's statements in
-*program order*, adding each variable to the scope only once its own
-VarDecl has actually been processed. Two things fall out of that
-choice, both deliberate:
-  - Declare-before-use in textual order is enforced for free: a name
-    used above its own declaration is, from the analyzer's point of
-    view, simply not in scope yet, indistinguishable from any other
-    undeclared reference.
-  - A self-referential initializer (`int a = a`) fails the same way,
-    for the same reason: the initializer is checked *before* `a` is
-    added to scope, not after.
+Blocks now nest (if/elif/else), so scope tracking is a real stack:
+self.scopes is a List[Dict[str, Type]], one dict per currently-open
+block, with the function's own top-level body as the bottom entry.
+Two rules fall out of using a stack rather than one flat dict per
+function:
+  - A variable declared inside an `if` (or `else`) is only visible for
+    the rest of that block -- analyze_if pushes a fresh scope before
+    walking each branch's statements and pops it again afterward, so
+    the name simply isn't there anymore once the block ends.
+  - Shadowing is allowed: a block can declare a variable with the same
+    name as one in an enclosing scope. Declaration only checks the
+    *current* (innermost) scope for a collision (see _declare), while
+    a reference or assignment resolves by walking outward from
+    innermost to outermost until it finds a match (see _lookup) -- the
+    same lookup order used for the classic "nearest enclosing
+    declaration wins" semantics most block-scoped languages use.
+  - The `then` and `else` branches of one `if` get *independent*
+    scopes (each is its own push/pop), since they're mutually
+    exclusive at runtime -- a name declared in `then` has no business
+    being visible in `else`, and vice versa.
+
+Aside from that, analyze_function/analyze_if still walk statements in
+*program order*, adding each variable to its scope only once its own
+VarDecl has actually been processed, so declare-before-use in textual
+order and rejection of self-referential initializers (`int a = a`)
+both still fall out for free, exactly as before -- they just now apply
+per-scope rather than per-function.
+
 This is notably different from codegen.py's own local-variable
-handling, which pre-scans a whole function body for VarDecls up front
-purely to size the stack frame before emitting any instructions --
-that pass is about layout, not validity, and by the time it runs this
-one has already guaranteed the program is well-formed.
+handling, which pre-scans a whole function body (recursively, into
+every if/else branch) for VarDecls up front purely to size the stack
+frame before emitting any instructions -- that pass is about layout,
+not validity, and by the time it runs this one has already guaranteed
+the program is well-formed. codegen.py also ends up needing its own
+scope-stack, for a different reason: see its LOCAL VARIABLES section.
 
 ERROR REPORTING
 -----------------
@@ -94,7 +112,7 @@ fairly contained follow-up if these messages need to get more precise.
 
 import argparse
 from enum import auto, Enum
-from typing import Dict
+from typing import Dict, List
 
 from lexer import lex
 from parser import (
@@ -105,6 +123,7 @@ from parser import (
     Constant,
     ExprStmt,
     Function,
+    If,
     Node,
     Parser,
     Program,
@@ -179,17 +198,43 @@ class SemanticAnalyzer:
     you want to be safe against reuse across unrelated programs."""
 
     def __init__(self):
-        self.scope: Dict[str, Type] = {}
+        self.scopes: List[Dict[str, Type]] = []
 
     def analyze(self, program: Program) -> None:
         for fn in program.functions:
             self.analyze_function(fn)
 
     def analyze_function(self, fn: Function) -> None:
-        self.scope = {}  # fresh scope per function; see module docstring
+        self.scopes = [{}]  # fresh, single-level scope stack per function
         return_type = type_from_name(fn.return_type)
         for stmt in fn.body:
             self.analyze_statement(stmt, return_type)
+
+    # -- scope stack ------------------------------------------------------
+
+    def _push_scope(self) -> None:
+        self.scopes.append({})
+
+    def _pop_scope(self) -> None:
+        self.scopes.pop()
+
+    def _declare(self, name: str, type_: Type) -> None:
+        """Adds `name` to the *current* (innermost) scope. Only checks
+        that scope for a collision -- a name already declared in an
+        enclosing scope is fine to shadow, it's only a re-declaration
+        error if it collides with something in this same block."""
+        if name in self.scopes[-1]:
+            raise SemanticError(f"Variable '{name}' is already declared in this scope")
+        self.scopes[-1][name] = type_
+
+    def _lookup(self, name: str) -> Type:
+        """Resolves `name` by walking outward from the innermost scope
+        to the outermost, returning the type from the first (nearest
+        enclosing) match."""
+        for scope in reversed(self.scopes):
+            if name in scope:
+                return scope[name]
+        raise SemanticError(f"Reference to undeclared variable '{name}'")
 
     # -- statements ---------------------------------------------------
 
@@ -200,14 +245,14 @@ class SemanticAnalyzer:
             self.analyze_assign(stmt)
         elif isinstance(stmt, Return):
             self.analyze_return(stmt, return_type)
+        elif isinstance(stmt, If):
+            self.analyze_if(stmt, return_type)
         elif isinstance(stmt, ExprStmt):
             self.check_expr(stmt.expr)  # evaluated for validity; result unused
         else:
             raise SemanticError(f"No semantic rule for statement: {stmt!r}")
 
     def analyze_var_decl(self, stmt: VarDecl) -> None:
-        if stmt.name in self.scope:
-            raise SemanticError(f"Variable '{stmt.name}' is already declared in this function")
         declared_type = type_from_name(stmt.var_type)
         if stmt.init is not None:
             # Checked before `stmt.name` is added to scope below, so a
@@ -219,12 +264,10 @@ class SemanticAnalyzer:
                     f"Cannot initialize '{stmt.name}' (declared {declared_type}) "
                     f"with a value of type {init_type}"
                 )
-        self.scope[stmt.name] = declared_type
+        self._declare(stmt.name, declared_type)
 
     def analyze_assign(self, stmt: Assign) -> None:
-        if stmt.name not in self.scope:
-            raise SemanticError(f"Assignment to undeclared variable '{stmt.name}'")
-        declared_type = self.scope[stmt.name]
+        declared_type = self._lookup(stmt.name)  # may resolve to an enclosing scope
         value_type = self.check_expr(stmt.value)
         if value_type != declared_type:
             raise SemanticError(
@@ -239,6 +282,32 @@ class SemanticAnalyzer:
                 f"Function is declared to return {return_type}, but this "
                 f"'return' statement returns {value_type}"
             )
+
+    def analyze_if(self, stmt: If, return_type: Type) -> None:
+        condition_type = self.check_expr(stmt.condition)
+        if condition_type != Type.BOOL:
+            raise SemanticError(
+                f"'if' condition must be bool, got {condition_type} "
+                f"(no implicit int-to-bool conversion -- try `x != 0` "
+                f"instead of `x`)"
+            )
+
+        self._push_scope()
+        for s in stmt.then_body:
+            self.analyze_statement(s, return_type)
+        self._pop_scope()
+
+        # then/else get independent scopes -- see module docstring --
+        # so a name declared in one is never visible in the other. When
+        # else_body came from an elif, it's a single nested If (see
+        # parser.py's If docstring); analyze_if just recurses into it
+        # like any other statement, so the elif gets its own condition
+        # check and its own then/else scopes automatically.
+        if stmt.else_body is not None:
+            self._push_scope()
+            for s in stmt.else_body:
+                self.analyze_statement(s, return_type)
+            self._pop_scope()
 
     # -- expressions ----------------------------------------------------
     # Every check_* method both validates its node and returns its Type,
@@ -267,9 +336,7 @@ class SemanticAnalyzer:
         return Type.INT
 
     def check_variable(self, expr: Variable) -> Type:
-        if expr.name not in self.scope:
-            raise SemanticError(f"Reference to undeclared variable '{expr.name}'")
-        return self.scope[expr.name]
+        return self._lookup(expr.name)
 
     def check_unary(self, expr: Unary) -> Type:
         operand_type = self.check_expr(expr.operand)

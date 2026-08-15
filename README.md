@@ -29,4 +29,4 @@ Compound Assignment Ops:
 
 Updates:
 - Change "!" to "not"
-
+- All code paths must return / default return values.
