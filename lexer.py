@@ -51,6 +51,11 @@ class Token():
         self.line = line
         self.col = col
 
+    def __eq__(self, other) -> bool:
+        if not isinstance(other, Token):
+            return False
+        return other.__dict__ == self.__dict__
+
     def __str__(self) -> str:
         return f'Token(type={self.type}, val={self.val})'
 
