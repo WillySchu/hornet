@@ -1,0 +1,356 @@
+"""Semantic analysis
+
+Walks a parsed Program (see parser.py) and rejects it before codegen
+ever runs if it's not well-formed: an undeclared variable is
+referenced, a variable is declared twice, or any expression's type
+doesn't match what the surrounding context requires.
+
+This is a genuinely new *phase* in the pipeline, not an extension of an
+existing one:
+
+    lex (lexer.py) -> parse (parser.py) -> analyze (semantic.py) -> codegen (codegen.py)
+
+Before this pass existed, undeclared/double-declared variables were
+only caught incidentally, deep inside codegen, when a variable's stack
+offset was looked up. That worked, but it meant a name-resolution
+problem only ever surfaced as a side effect of code generation, with no
+place for a *type* system to hook in at all. Putting a real pass here
+instead means codegen can go back to only ever being asked to generate
+code for programs already known to be valid -- it doesn't need to
+(and after this, mostly doesn't) defend against malformed input itself.
+
+THE TYPE SYSTEM
+-----------------
+Two types exist: `int` and `bool`. This is a genuinely *strong* static
+type system in the traditional PL sense: there is no implicit
+conversion between them in either direction. A bool is not a 0-or-1
+int that happens to print differently -- it's a distinct type, and
+using one where the other is expected is a type error, full stop. In
+particular (and this is the part most likely to surprise someone
+coming from C): `!`, `and`, and `or` all require real `bool` operands.
+`!0` is a type error, not "not true". Write `!(x == 0)` or `!false`
+instead.
+
+The operator typing rules, precisely:
+  - Arithmetic (+ - * /) and the two purely-numeric unary operators
+    (- ~): both/the operand(s) must be `int`; result is `int`.
+  - Ordering comparisons (< > <= >=): both operands must be `int`;
+    result is `bool`. (There's no inherent ordering on bool, so these
+    don't accept bool operands.)
+  - Equality (== !=): both operands must be the *same* type (either
+    both int or both bool); result is `bool`. Comparing an int to a
+    bool is a type error even though both are "just numbers" underneath
+    -- that's exactly the kind of mismatch strong typing exists to
+    catch.
+  - Logical (! and or): all operands must be `bool`; result is `bool`.
+  - A VarDecl's initializer, an Assign's value, and a Return's value
+    must all match the relevant declared type (the variable's declared
+    type, or the function's declared return type) exactly.
+
+Number literals are always `int`. There's no float type in this
+language yet, even though the lexer's NUMBER rule matches decimals (a
+holdover from before there was any type checking to catch this) --
+check_constant rejects a non-whole-number literal as a type error
+rather than silently truncating or miscompiling it (codegen has no
+instruction for a fractional immediate; before this pass existed, a
+literal like `2.5` would have produced literally invalid assembly,
+`movl $2.5, %eax`, with no clear error pointing at why).
+
+SCOPING
+--------
+There are no nested blocks yet (no if/while), so scoping is currently
+about as simple as it gets: one flat scope per function, reset at the
+start of each one, with no visibility into any other function's
+variables. analyze_function walks that function's statements in
+*program order*, adding each variable to the scope only once its own
+VarDecl has actually been processed. Two things fall out of that
+choice, both deliberate:
+  - Declare-before-use in textual order is enforced for free: a name
+    used above its own declaration is, from the analyzer's point of
+    view, simply not in scope yet, indistinguishable from any other
+    undeclared reference.
+  - A self-referential initializer (`int a = a`) fails the same way,
+    for the same reason: the initializer is checked *before* `a` is
+    added to scope, not after.
+This is notably different from codegen.py's own local-variable
+handling, which pre-scans a whole function body for VarDecls up front
+purely to size the stack frame before emitting any instructions --
+that pass is about layout, not validity, and by the time it runs this
+one has already guaranteed the program is well-formed.
+
+ERROR REPORTING
+-----------------
+This raises SemanticError on the *first* problem found and stops,
+matching how ParseError and CodegenError already behave elsewhere in
+this pipeline, rather than collecting every error in the program and
+reporting them all at once. Neither AST nodes nor this pass currently
+track source positions (that information exists only transiently, on
+Tokens, during parsing), so error messages name the offending variable,
+operator, or type mismatch as specifically as possible without being
+able to point at a line/column -- the same limitation CodegenError
+already had. Adding position tracking to AST nodes would be a good,
+fairly contained follow-up if these messages need to get more precise.
+"""
+
+import argparse
+from enum import auto, Enum
+from typing import Dict
+
+from lexer import lex
+from parser import (
+    Assign,
+    Binary,
+    BinaryOp,
+    BoolLiteral,
+    Constant,
+    ExprStmt,
+    Function,
+    Node,
+    Parser,
+    Program,
+    Return,
+    Unary,
+    UnaryOp,
+    VarDecl,
+    Variable,
+)
+
+
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
+
+class Type(Enum):
+    INT = auto()
+    BOOL = auto()
+
+    def __str__(self) -> str:
+        return self.name.lower()
+
+
+_TYPE_NAMES = {
+    'int': Type.INT,
+    'bool': Type.BOOL,
+}
+
+
+def type_from_name(name: str) -> Type:
+    """Converts a type keyword's text (as stored in VarDecl.var_type /
+    Function.return_type, straight from the token) into a Type. Only
+    ever fails for a program that isn't syntactically valid in the
+    first place -- parse_type() already restricts these strings to
+    'int'/'bool' -- so this is a defensive check, not a user-facing
+    validation path."""
+    try:
+        return _TYPE_NAMES[name]
+    except KeyError:
+        raise SemanticError(f"Unknown type '{name}'")
+
+
+# ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
+
+class SemanticError(Exception):
+    """Raised on the first semantic problem found: an undeclared or
+    re-declared variable, or a type mismatch anywhere in the program."""
+
+
+# ---------------------------------------------------------------------------
+# Analyzer
+# ---------------------------------------------------------------------------
+
+# BinaryOp -> which typing rule applies. See the module docstring for
+# what each category actually requires; this table is only "which
+# bucket does this operator fall into", kept separate from check_binary
+# so adding an operator later is "add it to the right set" rather than
+# another branch of if/elif.
+_ARITHMETIC_OPS = {BinaryOp.ADD, BinaryOp.SUBTRACT, BinaryOp.MULTIPLY, BinaryOp.DIVIDE}
+_ORDERING_OPS = {BinaryOp.LESS_THAN, BinaryOp.GREATER_THAN,
+                  BinaryOp.LESS_THAN_OR_EQUAL, BinaryOp.GREATER_THAN_OR_EQUAL}
+_EQUALITY_OPS = {BinaryOp.EQUAL, BinaryOp.NOT_EQUAL}
+_LOGICAL_OPS = {BinaryOp.AND, BinaryOp.OR}
+
+
+class SemanticAnalyzer:
+    """Type-checks and scope-checks a Program. Call analyze() once per
+    Program; analyze_function() resets internal scope state, so a fresh
+    SemanticAnalyzer isn't required per function, only per full run if
+    you want to be safe against reuse across unrelated programs."""
+
+    def __init__(self):
+        self.scope: Dict[str, Type] = {}
+
+    def analyze(self, program: Program) -> None:
+        for fn in program.functions:
+            self.analyze_function(fn)
+
+    def analyze_function(self, fn: Function) -> None:
+        self.scope = {}  # fresh scope per function; see module docstring
+        return_type = type_from_name(fn.return_type)
+        for stmt in fn.body:
+            self.analyze_statement(stmt, return_type)
+
+    # -- statements ---------------------------------------------------
+
+    def analyze_statement(self, stmt: Node, return_type: Type) -> None:
+        if isinstance(stmt, VarDecl):
+            self.analyze_var_decl(stmt)
+        elif isinstance(stmt, Assign):
+            self.analyze_assign(stmt)
+        elif isinstance(stmt, Return):
+            self.analyze_return(stmt, return_type)
+        elif isinstance(stmt, ExprStmt):
+            self.check_expr(stmt.expr)  # evaluated for validity; result unused
+        else:
+            raise SemanticError(f"No semantic rule for statement: {stmt!r}")
+
+    def analyze_var_decl(self, stmt: VarDecl) -> None:
+        if stmt.name in self.scope:
+            raise SemanticError(f"Variable '{stmt.name}' is already declared in this function")
+        declared_type = type_from_name(stmt.var_type)
+        if stmt.init is not None:
+            # Checked before `stmt.name` is added to scope below, so a
+            # self-referential initializer (`int a = a`) correctly fails
+            # as "undeclared variable" rather than reading itself.
+            init_type = self.check_expr(stmt.init)
+            if init_type != declared_type:
+                raise SemanticError(
+                    f"Cannot initialize '{stmt.name}' (declared {declared_type}) "
+                    f"with a value of type {init_type}"
+                )
+        self.scope[stmt.name] = declared_type
+
+    def analyze_assign(self, stmt: Assign) -> None:
+        if stmt.name not in self.scope:
+            raise SemanticError(f"Assignment to undeclared variable '{stmt.name}'")
+        declared_type = self.scope[stmt.name]
+        value_type = self.check_expr(stmt.value)
+        if value_type != declared_type:
+            raise SemanticError(
+                f"Cannot assign a value of type {value_type} to '{stmt.name}' "
+                f"(declared {declared_type})"
+            )
+
+    def analyze_return(self, stmt: Return, return_type: Type) -> None:
+        value_type = self.check_expr(stmt.value)
+        if value_type != return_type:
+            raise SemanticError(
+                f"Function is declared to return {return_type}, but this "
+                f"'return' statement returns {value_type}"
+            )
+
+    # -- expressions ----------------------------------------------------
+    # Every check_* method both validates its node and returns its Type,
+    # so callers (including other check_* methods, for operands) get
+    # both in one call rather than needing a separate inference pass.
+
+    def check_expr(self, expr: Node) -> Type:
+        if isinstance(expr, Constant):
+            return self.check_constant(expr)
+        if isinstance(expr, BoolLiteral):
+            return Type.BOOL
+        if isinstance(expr, Variable):
+            return self.check_variable(expr)
+        if isinstance(expr, Unary):
+            return self.check_unary(expr)
+        if isinstance(expr, Binary):
+            return self.check_binary(expr)
+        raise SemanticError(f"No semantic rule for expression: {expr!r}")
+
+    def check_constant(self, expr: Constant) -> Type:
+        if isinstance(expr.value, float) and not expr.value.is_integer():
+            raise SemanticError(
+                f"'{expr.value}' is not a whole number -- this language has "
+                f"no floating-point type; only int and bool exist"
+            )
+        return Type.INT
+
+    def check_variable(self, expr: Variable) -> Type:
+        if expr.name not in self.scope:
+            raise SemanticError(f"Reference to undeclared variable '{expr.name}'")
+        return self.scope[expr.name]
+
+    def check_unary(self, expr: Unary) -> Type:
+        operand_type = self.check_expr(expr.operand)
+        if expr.op in (UnaryOp.NEGATE, UnaryOp.COMPLEMENT):
+            if operand_type != Type.INT:
+                raise SemanticError(
+                    f"'{expr.op.symbol()}' requires an int operand, got {operand_type}"
+                )
+            return Type.INT
+        if expr.op == UnaryOp.NOT:
+            if operand_type != Type.BOOL:
+                raise SemanticError(
+                    f"'!' requires a bool operand, got {operand_type} "
+                    f"(no implicit int-to-bool conversion -- try `!(x == 0)` "
+                    f"instead of `!x`)"
+                )
+            return Type.BOOL
+        raise SemanticError(f"No semantic rule for unary operator: {expr.op}")
+
+    def check_binary(self, expr: Binary) -> Type:
+        left_type = self.check_expr(expr.left)
+        right_type = self.check_expr(expr.right)
+        op = expr.op
+
+        if op in _ARITHMETIC_OPS:
+            self._require_type(left_type, Type.INT, op)
+            self._require_type(right_type, Type.INT, op)
+            return Type.INT
+
+        if op in _ORDERING_OPS:
+            self._require_type(left_type, Type.INT, op)
+            self._require_type(right_type, Type.INT, op)
+            return Type.BOOL
+
+        if op in _EQUALITY_OPS:
+            if left_type != right_type:
+                raise SemanticError(
+                    f"Cannot compare {left_type} to {right_type} with "
+                    f"'{op.symbol()}' -- both sides must be the same type"
+                )
+            return Type.BOOL
+
+        if op in _LOGICAL_OPS:
+            self._require_type(left_type, Type.BOOL, op)
+            self._require_type(right_type, Type.BOOL, op)
+            return Type.BOOL
+
+        raise SemanticError(f"No semantic rule for binary operator: {op}")
+
+    def _require_type(self, actual: Type, expected: Type, op) -> None:
+        if actual != expected:
+            raise SemanticError(
+                f"'{op.symbol()}' requires {expected} operands, got {actual}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Convenience entry points
+# ---------------------------------------------------------------------------
+
+def analyze(program: Program) -> None:
+    SemanticAnalyzer().analyze(program)
+
+
+def analyze_source(filename: str) -> Program:
+    """Runs lex -> parse -> analyze on a file and returns the (now
+    known-valid) Program, for callers that want the checked AST rather
+    than just a pass/fail."""
+    tokens = lex(filename)
+    program = Parser(tokens).parse_program()
+    analyze(program)
+    return program
+
+
+def main():
+    arg_parser = argparse.ArgumentParser(description='Semantic analyzer')
+    arg_parser.add_argument('file', type=str, help='File to check.')
+    args = arg_parser.parse_args()
+    analyze_source(args.file)
+    print("OK: no semantic errors found")
+
+
+if __name__ == '__main__':
+    main()

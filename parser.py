@@ -7,7 +7,7 @@ Grammar supported (matches what the current lexer can produce):
 
     program     := function* EOF
     function    := 'def' type IDENTIFIER '(' ')' ':' NEWLINE statement+
-    type        := 'int'
+    type        := 'int' | 'bool'
     statement   := decl_stmt
                  | assign_stmt
                  | return_stmt
@@ -21,6 +21,7 @@ Grammar supported (matches what the current lexer can produce):
     unary_expr   := ('-' | '~' | '!') unary_expr
                    | primary_expr
     primary_expr := NUMBER
+                   | 'true' | 'false'
                    | IDENTIFIER
                    | '(' expression ')'
 
@@ -70,16 +71,24 @@ reference `a`" (`a + 1`, or `a` alone) -- so parse_statement peeks one
 token ahead and only commits to assign_stmt if that next token is
 ASSIGN, falling through to expr_stmt otherwise.
 
-Declaring a variable twice in the same function, or referencing one that
-was never declared, is caught by codegen.py rather than here -- there's
-no semantic-analysis pass yet, so those checks happen when a name is
-looked up against the function's local-variable table during code
-generation instead of during parsing. Relatedly, the parser doesn't
-enforce declare-before-use in textual order (codegen currently pre-scans
-a whole function body for VarDecls before generating any of it, so a
-variable assigned above its declaration would technically "work" instead
-of being rejected) -- a real limitation, called out again in codegen.py
-where it's implemented.
+Declaring a variable twice in the same function, referencing one that
+was never declared, and every type error (mismatched assignment,
+wrong-typed operands, a `return` that doesn't match the function's
+declared type, ...) are all caught by a dedicated semantic-analysis pass
+(see semantic.py) that runs after parsing and before codegen -- not by
+the parser itself, and not deferred to codegen anymore either. The
+parser's job stays purely syntactic: it doesn't know or care whether
+`int` or `bool` is the "right" type for `var_type` -- it just requires
+one of the two type keywords and hands the resulting string on.
+
+One thing that changes as a side effect: semantic.py walks a function's
+statements in program order, building up its scope as it goes (see its
+module docstring), rather than pre-scanning the whole body up front the
+way codegen.py's stack-layout pass does. So declare-before-use in
+textual order is now actually enforced -- `a = 1` above `int a` is a
+semantic error -- even though codegen's own pre-scan (which only cares
+about sizing the stack frame, not validity) still wouldn't catch it on
+its own if it somehow ran without semantic analysis first.
 
 NOTE ON INDENTATION
 --------------------
@@ -169,6 +178,19 @@ class Constant(Node):
 
     def pretty(self) -> str:
         return f"Constant(value: {self.value})"
+
+
+@dataclass
+class BoolLiteral(Node):
+    """`true` or `false`. Kept as its own node rather than folded into
+    Constant -- Python's bool is a subclass of int, and overloading
+    Constant.value to sometimes hold one would make "is this actually an
+    int or a bool" ambiguous exactly where semantic.py most needs it to
+    be unambiguous."""
+    value: bool
+
+    def pretty(self) -> str:
+        return f"BoolLiteral(value: {'true' if self.value else 'false'})"
 
 
 @dataclass
@@ -412,9 +434,16 @@ class Parser:
         return Function(name=name_tok.val, return_type=return_type, body=body)
 
     def parse_type(self) -> str:
-        # Only 'int' is a recognized type for now.
-        tok = self.expect(TokenType.INT, "Expected a type (e.g. 'int')")
-        return tok.val
+        # 'int' or 'bool' -- semantic.py is what actually knows what to
+        # do with the resulting string; the parser just needs to accept
+        # either type keyword here.
+        if self.check(TokenType.INT, TokenType.BOOL):
+            return self.advance().val
+        tok = self.current()
+        raise ParseError(
+            f"Expected a type ('int' or 'bool'), got {tok.type} ('{tok.val}') "
+            f"at line {tok.line}, column {tok.col}"
+        )
 
     def parse_block(self) -> List[Node]:
         """Parse statements until the next 'def' (a new function) or EOF.
@@ -436,7 +465,7 @@ class Parser:
         return statements
 
     def parse_statement(self) -> Node:
-        if self.check(TokenType.INT):
+        if self.check(TokenType.INT, TokenType.BOOL):
             return self.parse_var_decl()
         if self.check(TokenType.RETURN):
             return self.parse_return()
@@ -519,6 +548,9 @@ class Parser:
             tok = self.advance()
             value = float(tok.val) if '.' in tok.val else int(tok.val)
             return Constant(value=value)
+        if self.check(TokenType.TRUE, TokenType.FALSE):
+            tok = self.advance()
+            return BoolLiteral(value=(tok.type == TokenType.TRUE))
         if self.check(TokenType.IDENTIFIER):
             tok = self.advance()
             return Variable(name=tok.val)

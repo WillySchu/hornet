@@ -32,6 +32,22 @@ Supported so far (matches what parser.py can currently produce):
     VarDecl  -> `int a` or `int a = <expr>`
     Assign   -> `a = <expr>`
     ExprStmt -> a bare expression statement, evaluated and discarded
+    BoolLiteral -> `true`/`false`, immediate 1/0
+
+A note on typing: as of semantic.py, this file is no longer the only
+line of defense against a malformed program -- undeclared/re-declared
+variables and every type error are now caught earlier, by a dedicated
+semantic-analysis pass that runs between parsing and codegen. This file
+still doesn't know anything about int vs bool (both are just 4-byte
+values to it; see BoolLiteral's codegen), and still doesn't need to,
+since semantic.py already guaranteed the program type-checks before this
+ever runs. `generate_asm` deliberately stays a pure "AST -> assembly
+text" function with no semantic checking baked in, so it composes
+cleanly with pipelines that already validated the AST some other way;
+`compile_to_asm` is the file-based convenience wrapper that actually
+chains lex -> parse -> analyze -> codegen together, and is what the CLI
+below uses. A caller going through `generate_asm` directly is expected
+to have called semantic.analyze() itself first.
 
 Unlike Constant, a Unary expression can't be represented as a bare
 Operand (there's no such thing as "the immediate value of `-2`" as an
@@ -174,6 +190,7 @@ from parser import (
     Assign,
     Binary,
     BinaryOp,
+    BoolLiteral,
     Constant,
     ExprStmt,
     Function,
@@ -186,6 +203,7 @@ from parser import (
     VarDecl,
     Variable,
 )
+from semantic import analyze
 
 
 # ---------------------------------------------------------------------------
@@ -678,6 +696,12 @@ class CodeGenerator:
         """
         if isinstance(expr, Constant):
             return [Mov(src=Imm(expr.value), dst=dst)]
+        if isinstance(expr, BoolLiteral):
+            # bool has the same 4-byte runtime representation as int
+            # (0/1 in a register or stack slot) -- semantic.py is what
+            # keeps the two from being mixed up; codegen just needs an
+            # immediate.
+            return [Mov(src=Imm(1 if expr.value else 0), dst=dst)]
         if isinstance(expr, Variable):
             offset = self._local_offset(expr.name)
             return [Mov(src=Memory('rbp', offset), dst=dst)]
@@ -877,6 +901,7 @@ def generate_asm(program: Program, platform: str = 'macos') -> str:
 def compile_to_asm(filename: str, platform: str = 'macos') -> str:
     tokens = lex(filename)
     ast = Parser(tokens).parse_program()
+    analyze(ast)  # raises SemanticError before any code is generated
     return generate_asm(ast, platform=platform)
 
 

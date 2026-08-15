@@ -38,6 +38,9 @@ class TokenType(Enum):
     INT = auto()
     RETURN = auto()
     NOT = auto()
+    BOOL = auto()
+    TRUE = auto()
+    FALSE = auto()
 
     # Special
     NEWLINE = auto()
@@ -79,6 +82,9 @@ class Lexer():
             'and': TokenType.AND,
             'or': TokenType.OR,
             'not': TokenType.NOT,
+            'bool': TokenType.BOOL,
+            'true': TokenType.TRUE,
+            'false': TokenType.FALSE,
         }
 
         # Compile master regex pattern
