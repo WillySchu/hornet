@@ -8,13 +8,20 @@ Grammar supported (matches what the current lexer can produce):
     program     := function* EOF
     function    := 'def' type IDENTIFIER '(' ')' ':' NEWLINE statement+
     type        := 'int'
-    statement   := return_stmt
+    statement   := decl_stmt
+                 | assign_stmt
+                 | return_stmt
+                 | expr_stmt
+    decl_stmt   := type IDENTIFIER ('=' expression)? NEWLINE
+    assign_stmt := IDENTIFIER '=' expression NEWLINE
     return_stmt := 'return' expression NEWLINE?
+    expr_stmt   := expression NEWLINE
     expression   := binary_expr
     binary_expr  := unary_expr (BIN_OP binary_expr)*   [precedence climbing]
     unary_expr   := ('-' | '~' | '!') unary_expr
                    | primary_expr
     primary_expr := NUMBER
+                   | IDENTIFIER
                    | '(' expression ')'
 
 unary_expr is recursive (rather than a single optional prefix) so that
@@ -49,6 +56,31 @@ is for. It reuses the OPEN_PAREN/CLOSE_PAREN tokens already used for
 function declarations; there's no ambiguity since the two uses occur in
 disjoint grammar positions.
 
+STATEMENT DISPATCH
+-------------------
+decl_stmt, assign_stmt, and expr_stmt all start with a token that could,
+on its own, also start something else -- INT also starts a function's
+return type, IDENTIFIER also starts any expression that happens to begin
+with a variable, and so on. parse_statement resolves this with one
+token of lookahead (peek(1)) rather than backtracking: INT always means
+a declaration (a type can't appear anywhere else a statement could
+start), but IDENTIFIER is ambiguous between "the start of an assignment"
+(`a = ...`) and "the start of some other expression that just happens to
+reference `a`" (`a + 1`, or `a` alone) -- so parse_statement peeks one
+token ahead and only commits to assign_stmt if that next token is
+ASSIGN, falling through to expr_stmt otherwise.
+
+Declaring a variable twice in the same function, or referencing one that
+was never declared, is caught by codegen.py rather than here -- there's
+no semantic-analysis pass yet, so those checks happen when a name is
+looked up against the function's local-variable table during code
+generation instead of during parsing. Relatedly, the parser doesn't
+enforce declare-before-use in textual order (codegen currently pre-scans
+a whole function body for VarDecls before generating any of it, so a
+variable assigned above its declaration would technically "work" instead
+of being rejected) -- a real limitation, called out again in codegen.py
+where it's implemented.
+
 NOTE ON INDENTATION
 --------------------
 The attached lexer's SKIP rule consumes all spaces/tabs -- including
@@ -68,7 +100,7 @@ below should be rewritten to consume those instead of scanning for 'def'.
 import argparse
 from dataclasses import dataclass, field
 from enum import auto, Enum
-from typing import List, Union
+from typing import List, Optional, Union
 
 from lexer import Token, TokenType, lex
 
@@ -140,6 +172,15 @@ class Constant(Node):
 
 
 @dataclass
+class Variable(Node):
+    """A reference to a local variable, e.g. the `a` in `a + 1`."""
+    name: str
+
+    def pretty(self) -> str:
+        return f"Variable(name: {self.name})"
+
+
+@dataclass
 class Unary(Node):
     op: UnaryOp
     operand: Node
@@ -172,13 +213,53 @@ class Return(Node):
 
 
 @dataclass
+class VarDecl(Node):
+    """`int a` (init=None) or `int a = 1` (init=the initializer expression)."""
+    name: str
+    var_type: str
+    init: Optional[Node] = None
+
+    def pretty(self) -> str:
+        head = f"VarDecl(name: {self.name}, type: {self.var_type})"
+        return head if self.init is None else f"{head} -> {self.init.pretty()}"
+
+
+@dataclass
+class Assign(Node):
+    """`a = <value>`, assigning to an already-declared variable."""
+    name: str
+    value: Node
+
+    def pretty(self) -> str:
+        return f"Assign(name: {self.name}) -> {self.value.pretty()}"
+
+
+@dataclass
+class ExprStmt(Node):
+    """A bare expression used as a full statement, e.g. `2 + 2` on its
+    own line -- evaluated for any side effects (there are none yet, but
+    this is also how a future function-call-as-statement would look) and
+    then discarded."""
+    expr: Node
+
+    def pretty(self) -> str:
+        return f"ExprStmt -> {self.expr.pretty()}"
+
+
+@dataclass
 class Function(Node):
     name: str
     return_type: str
     body: List[Node] = field(default_factory=list)
 
     def pretty(self) -> str:
-        body_str = ' -> '.join(stmt.pretty() for stmt in self.body)
+        # Statements are joined with "; " rather than the "->" used
+        # everywhere else, specifically so statement boundaries stay
+        # visually distinct from the "->" each statement already uses
+        # internally for its own children (e.g. VarDecl's initializer).
+        # With a single Return per function this was never ambiguous;
+        # with multiple statements it would be.
+        body_str = '; '.join(stmt.pretty() for stmt in self.body)
         return f"Function(name: {self.name}) -> {body_str}"
 
 
@@ -355,18 +436,35 @@ class Parser:
         return statements
 
     def parse_statement(self) -> Node:
+        if self.check(TokenType.INT):
+            return self.parse_var_decl()
         if self.check(TokenType.RETURN):
             return self.parse_return()
-        tok = self.current()
-        raise ParseError(
-            f"Unexpected token {tok.type} ('{tok.val}') at line {tok.line}, "
-            f"column {tok.col}"
-        )
+        if self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.ASSIGN:
+            return self.parse_assign()
+        return self.parse_expr_stmt()
+
+    def parse_var_decl(self) -> VarDecl:
+        var_type = self.parse_type()
+        name_tok = self.expect(TokenType.IDENTIFIER, "Expected a variable name")
+        init = None
+        if self.match(TokenType.ASSIGN):
+            init = self.parse_expression()
+        return VarDecl(name=name_tok.val, var_type=var_type, init=init)
+
+    def parse_assign(self) -> Assign:
+        name_tok = self.expect(TokenType.IDENTIFIER)
+        self.expect(TokenType.ASSIGN, "Expected '=' in assignment")
+        value = self.parse_expression()
+        return Assign(name=name_tok.val, value=value)
 
     def parse_return(self) -> Return:
         self.expect(TokenType.RETURN)
         value = self.parse_expression()
         return Return(value=value)
+
+    def parse_expr_stmt(self) -> ExprStmt:
+        return ExprStmt(expr=self.parse_expression())
 
     def parse_expression(self) -> Node:
         return self.parse_binary()
@@ -421,6 +519,9 @@ class Parser:
             tok = self.advance()
             value = float(tok.val) if '.' in tok.val else int(tok.val)
             return Constant(value=value)
+        if self.check(TokenType.IDENTIFIER):
+            tok = self.advance()
+            return Variable(name=tok.val)
         if self.match(TokenType.OPEN_PAREN):
             expr = self.parse_expression()
             self.expect(TokenType.CLOSE_PAREN, "Expected ')' to close grouped expression")

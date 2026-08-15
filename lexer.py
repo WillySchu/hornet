@@ -11,14 +11,13 @@ class TokenType(Enum):
     NUMBER = auto()
     IDENTIFIER = auto()
 
-    # TODO(will): What's a good categorie name here?
+    # Punctuation
     OPEN_PAREN = auto()
     CLOSE_PAREN = auto()
-    NEWLINE = auto()
     COLON = auto()
-    EOF = auto()
 
     # Operators
+    ASSIGN = auto()
     PLUS = auto()
     MINUS = auto()
     STAR = auto()
@@ -40,7 +39,9 @@ class TokenType(Enum):
     RETURN = auto()
 
     # Special
+    NEWLINE = auto()
     MISMATCH = auto()
+    EOF = auto()
 
     
 class Token():
@@ -92,7 +93,7 @@ class Lexer():
             ('GREATER_THAN', r'>'),              
             ('LESS_THAN',    r'<'),
             ('COLON',        r':'),               # Colon
-            #('ASSIGN',      r'='),               # Assignment operator
+            ('ASSIGN',       r'='),                # Assignment operator
             ('PLUS',         r'\+'),              # Add
             ('MINUS',        r'\-'),              # Subtract
             ('STAR',         r'\*'),              # Multiply
@@ -118,8 +119,8 @@ class Lexer():
                 # Check if the identifier is actually a reserved keyword
                 token_type = self.keywords.get(value, TokenType.IDENTIFIER)
                 self.tokens.append(Token(token_type, value, self.line, column))
-            #elif kind == 'ASSIGN':
-            #    self.tokens.append(Token(TokenType.ASSIGN, value, self.line, column))
+            elif kind == 'ASSIGN':
+                self.tokens.append(Token(TokenType.ASSIGN, value, self.line, column))
             elif kind == 'NEWLINE':
                 self.tokens.append(Token(TokenType.NEWLINE, value, self.line, column))
                 self.line += 1

@@ -28,6 +28,10 @@ Supported so far (matches what parser.py can currently produce):
     Binary   -> ADD ('+'), SUBTRACT ('-'), MULTIPLY ('*'), DIVIDE ('/'),
                 the six comparisons (== != < > <= >=), and the two
                 short-circuiting logical operators (and, or)
+    Variable -> a read of a local variable's stack slot
+    VarDecl  -> `int a` or `int a = <expr>`
+    Assign   -> `a = <expr>`
+    ExprStmt -> a bare expression statement, evaluated and discarded
 
 Unlike Constant, a Unary expression can't be represented as a bare
 Operand (there's no such thing as "the immediate value of `-2`" as an
@@ -112,6 +116,53 @@ is real short-circuiting, not just a coincidentally-correct value. That
 distinction is externally observable: `0 and (1 / 0)` returns 0 without
 crashing, while `1 and (1 / 0)` does crash (SIGFPE), because only in the
 second case does control flow ever reach the division.
+
+LOCAL VARIABLES
+----------------
+Every local variable lives in a fixed stack slot at a constant offset
+from %rbp -- the classic frame-pointer-relative layout, e.g. the first
+variable declared in a function at -4(%rbp), the second at -8(%rbp), and
+so on (each int is 4 bytes). gen_function pre-scans a function's whole
+body for VarDecls *before* generating any instructions, so every slot's
+offset is already assigned, and the total frame size is already known,
+by the time the prologue is emitted:
+
+    pushq %rbp
+    movq  %rsp, %rbp
+    subq  $N, %rsp      ; only if the function has any locals at all
+
+Every function gets this prologue -- and a matching `leave` right before
+every `ret` -- even ones with no locals at all, rather than only doing
+it conditionally. That costs a couple of extra instructions on trivial
+functions (`return 2` now sets up and tears down an empty frame), but it
+keeps codegen uniform now and means there's no special case to unwind
+later once this needs to support more than one frame per program (e.g.
+actual function calls).
+
+Reading or writing a variable never touches gen_expr_into's core
+contract -- every expression still always computes into a register
+(%eax). A variable read is just one more expr kind: `Mov(src=Memory(...),
+dst=dst)`. A variable *write* (VarDecl-with-initializer, or Assign) is
+handled one level up, in `_gen_store`: evaluate the expression into %eax
+exactly as always, then a single extra `movl %eax, offset(%rbp)` to
+actually store it. This is deliberately not "generate straight into the
+memory operand" -- that would mean threading Memory destinations through
+gen_binary_into's push/pop scheme, division's %eax requirement, and the
+byte-register aliasing comparisons and NOT depend on, none of which are
+built to target anything but a register. Routing every store through
+%eax first avoids all of that at the cost of one extra mov per store.
+
+Two related simplifications worth knowing about, both consequences of
+there being no semantic-analysis pass yet: declaring the same variable
+twice in one function, and referencing a variable that was never
+declared, are both only caught here in codegen (see _declare_local and
+_local_offset) -- not in the parser. And because the whole function body
+is pre-scanned for VarDecls up front rather than incrementally as
+statements are generated, declare-before-use in textual order isn't
+enforced either; a variable assigned above its own declaration would
+"work" instead of being rejected. Both are fine for now and worth
+revisiting once real error-checking matters more than getting variables
+working at all.
 """
 
 import argparse
@@ -120,9 +171,11 @@ from typing import List
 
 from lexer import lex
 from parser import (
+    Assign,
     Binary,
     BinaryOp,
     Constant,
+    ExprStmt,
     Function,
     Node,
     Parser,
@@ -130,6 +183,8 @@ from parser import (
     Return,
     Unary,
     UnaryOp,
+    VarDecl,
+    Variable,
 )
 
 
@@ -156,6 +211,18 @@ class Register(Operand):
 
     def emit(self) -> str:
         return f"%{self.name}"
+
+
+@dataclass
+class Memory(Operand):
+    """A stack-relative memory operand: `offset(%base)`, e.g. `-4(%rbp)`.
+    This is how every local variable is stored -- see the module
+    docstring's LOCAL VARIABLES section."""
+    base: str    # e.g. 'rbp'
+    offset: int  # bytes from `base`; locals live at negative offsets
+
+    def emit(self) -> str:
+        return f"{self.offset}(%{self.base})"
 
 
 class Instruction:
@@ -315,15 +382,16 @@ class IDiv(Instruction):
 
 @dataclass
 class Push(Instruction):
-    """Pushes a register onto the stack. x86-64 doesn't support a 32-bit
-    push in long mode, so this always pushes the full 64-bit register
-    that the given 32-bit register is the low half of (e.g. passing the
-    Register for %eax actually emits `pushq %rax`)."""
+    """Pushes a 64-bit register onto the stack. x86-64 doesn't support a
+    32-bit push in long mode, so the caller is responsible for passing
+    an already-64-bit register (e.g. Register('rax'), not
+    Register('eax')) -- see as_qword_register for converting a 32-bit
+    general-purpose register to its 64-bit alias when spilling one."""
     operand: Register
     mnemonic = "pushq"
 
     def operands(self) -> List[str]:
-        return [as_qword_register(self.operand).emit()]
+        return [self.operand.emit()]
 
 
 @dataclass
@@ -333,7 +401,40 @@ class Pop(Instruction):
     mnemonic = "popq"
 
     def operands(self) -> List[str]:
-        return [as_qword_register(self.operand).emit()]
+        return [self.operand.emit()]
+
+
+@dataclass
+class MovQ(Instruction):
+    """64-bit mov (`movq`). Distinct from Mov (`movl`, 32-bit) -- used
+    for frame-pointer setup (`movq %rsp, %rbp`), never for general int
+    computation, since every value in this language is a 32-bit int."""
+    src: Operand
+    dst: Operand
+    mnemonic = "movq"
+
+    def operands(self) -> List[str]:
+        return [self.src.emit(), self.dst.emit()]
+
+
+@dataclass
+class SubQ(Instruction):
+    """64-bit subtract (`subq`). Used exactly once per function, in the
+    prologue, to reserve stack space for locals: `subq $N, %rsp`."""
+    src: Operand
+    dst: Operand
+    mnemonic = "subq"
+
+    def operands(self) -> List[str]:
+        return [self.src.emit(), self.dst.emit()]
+
+
+@dataclass
+class Leave(Instruction):
+    """Tears down the current stack frame: equivalent to
+    `movq %rbp, %rsp; popq %rbp`. The standard epilogue counterpart to
+    the prologue's `pushq %rbp; movq %rsp, %rbp`."""
+    mnemonic = "leave"
 
 
 @dataclass
@@ -452,6 +553,7 @@ class CodeGenerator:
 
     def __init__(self):
         self._label_count = 0
+        self.locals = {}  # name -> Memory offset; reset per function, see gen_function
 
     def new_label(self, prefix: str) -> str:
         """Returns a fresh, uniquely-numbered local label like
@@ -466,21 +568,101 @@ class CodeGenerator:
         return AsmProgram(functions=[self.gen_function(fn) for fn in program.functions])
 
     def gen_function(self, fn: Function) -> AsmFunction:
-        instructions: List[Instruction] = []
+        # Fresh locals table per function -- variables don't persist
+        # across functions, and offsets are relative to *this* function's
+        # own %rbp.
+        self.locals = {}
+        for stmt in fn.body:
+            if isinstance(stmt, VarDecl):
+                self._declare_local(stmt.name)
+
+        instructions: List[Instruction] = [
+            Push(Register('rbp')),
+            MovQ(src=Register('rsp'), dst=Register('rbp')),
+        ]
+        frame_size = self._frame_size()
+        if frame_size:
+            instructions.append(SubQ(src=Imm(frame_size), dst=Register('rsp')))
+
         for stmt in fn.body:
             instructions.extend(self.gen_statement(stmt))
+
         return AsmFunction(name=fn.name, instructions=instructions)
 
+    def _declare_local(self, name: str) -> None:
+        if name in self.locals:
+            raise CodegenError(f"Variable '{name}' is already declared in this function")
+        # Every local is a 4-byte int; slots grow downward from %rbp, so
+        # the first declared variable ends up closest to it (-4(%rbp)).
+        offset = -4 * (len(self.locals) + 1)
+        self.locals[name] = offset
+
+    def _local_offset(self, name: str) -> int:
+        if name not in self.locals:
+            raise CodegenError(f"Reference to undeclared variable '{name}'")
+        return self.locals[name]
+
+    def _frame_size(self) -> int:
+        # Total bytes used by locals, rounded up to a 16-byte boundary.
+        # Not strictly required yet (nothing here makes a `call`, so the
+        # SysV ABI's 16-byte-alignment-before-call rule doesn't bind),
+        # but keeping frames aligned now avoids having to retrofit it
+        # once function calls exist.
+        raw = 4 * len(self.locals)
+        return ((raw + 15) // 16) * 16 if raw else 0
+
     def gen_statement(self, stmt: Node) -> List[Instruction]:
+        if isinstance(stmt, VarDecl):
+            return self.gen_var_decl(stmt)
+        if isinstance(stmt, Assign):
+            return self.gen_assign(stmt)
         if isinstance(stmt, Return):
             return self.gen_return(stmt)
+        if isinstance(stmt, ExprStmt):
+            return self.gen_expr_stmt(stmt)
         raise CodegenError(f"No codegen rule for statement: {stmt!r}")
+
+    def gen_var_decl(self, stmt: VarDecl) -> List[Instruction]:
+        # `_declare_local` already ran for every VarDecl in gen_function
+        # (that's what sizes the frame), so the slot already exists here
+        # -- this only needs to emit the store, and only if there's an
+        # initializer. `int a` with no initializer leaves the slot's
+        # contents genuinely uninitialized, matching C: reading it before
+        # assigning is undefined behavior, not implicitly zero.
+        if stmt.init is None:
+            return []
+        return self._gen_store(stmt.name, stmt.init)
+
+    def gen_assign(self, stmt: Assign) -> List[Instruction]:
+        return self._gen_store(stmt.name, stmt.value)
+
+    def _gen_store(self, name: str, value_expr: Node) -> List[Instruction]:
+        """Shared by VarDecl-with-initializer and Assign: both are just
+        "compute this expression, then write the result into that
+        variable's slot" -- evaluate into %eax using the ordinary
+        expression codegen (unchanged, still always targets a register),
+        then a single extra `movl %eax, offset(%rbp)` to store it. This
+        way none of gen_expr_into/gen_binary_into/gen_unary_op need to
+        know memory operands exist at all -- they just always work with
+        %eax, same as before variables existed."""
+        offset = self._local_offset(name)
+        instructions = self.gen_expr_into(value_expr, Register('eax'))
+        instructions.append(Mov(src=Register('eax'), dst=Memory('rbp', offset)))
+        return instructions
 
     def gen_return(self, stmt: Return) -> List[Instruction]:
         dst = Register('eax')
         instructions = self.gen_expr_into(stmt.value, dst)
+        instructions.append(Leave())
         instructions.append(Ret())
         return instructions
+
+    def gen_expr_stmt(self, stmt: ExprStmt) -> List[Instruction]:
+        # Evaluated the same way as any other expression, into %eax --
+        # just with nothing done with the result afterward. Still real
+        # instructions that really run; see the module docstring for how
+        # that's verified (a standalone `1 / 0` genuinely crashes).
+        return self.gen_expr_into(stmt.expr, Register('eax'))
 
     def gen_expr_into(self, expr: Node, dst: Operand) -> List[Instruction]:
         """Emits the instructions needed to compute `expr` and leave its
@@ -496,6 +678,9 @@ class CodeGenerator:
         """
         if isinstance(expr, Constant):
             return [Mov(src=Imm(expr.value), dst=dst)]
+        if isinstance(expr, Variable):
+            offset = self._local_offset(expr.name)
+            return [Mov(src=Memory('rbp', offset), dst=dst)]
         if isinstance(expr, Unary):
             # Compute the operand into dst first, then apply this node's
             # operator to whatever's now there. This is what makes chained
@@ -541,10 +726,10 @@ class CodeGenerator:
 
         scratch = Register('ecx')  # holds the right-hand value while combining
         instructions = self.gen_expr_into(expr.left, dst)   # dst = left
-        instructions.append(Push(dst))                      # save left on the stack
+        instructions.append(Push(as_qword_register(dst)))   # save left on the stack
         instructions.extend(self.gen_expr_into(expr.right, dst))  # dst = right (left is safe)
         instructions.append(Mov(src=dst, dst=scratch))       # scratch = right
-        instructions.append(Pop(dst))                        # dst = left (restored)
+        instructions.append(Pop(as_qword_register(dst)))     # dst = left (restored)
         instructions.extend(self.gen_binary_op(expr.op, src=scratch, dst=dst))
         return instructions
 
