@@ -6,6 +6,7 @@ gcc -o test test.o
 
 
 TODO:
+
 Binary Ops:
 - Modulo %
 - Bitwise AND &
@@ -13,5 +14,19 @@ Binary Ops:
 - Bitwise XOR ^
 - Bitwise shift left <<
 - Bitwise shift right >>
+
+Compound Assignment Ops:
+- +=
+- -=
+- /=
+- \*=
+- %=
+- <<=
+- >>=
+- &=
+- |=
+- ^=
+
+Updates:
 - Change "!" to "not"
 
