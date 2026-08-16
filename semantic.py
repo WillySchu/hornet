@@ -119,6 +119,27 @@ nothing to do with it. codegen.py mirrors this with its own stack of
 underlying reason: break/continue always target the *innermost*
 enclosing loop, never an outer one.
 
+FUNCTIONS
+----------
+self.functions (name -> (param types, return type)) is deliberately a
+single, program-wide, flat namespace -- completely separate from
+self.scopes (variable names). That's what lets a variable and a
+function share a name without colliding, and it's built in a dedicated
+first pass over *every* function in the Program, before any function's
+own body is checked (see analyze()). Doing it in two passes rather than
+building each function's signature just before checking that function
+is what makes call order not matter at all: a function can call one
+defined later in the file, and a function can call itself (or two
+functions can call each other) recursively, since by the time
+analyze_function ever looks anything up in self.functions, every
+signature -- including the current function's own -- is already there.
+
+Parameters are bound into the function's own scope right at the start
+of analyze_function, before any statement is walked, exactly like
+already-declared locals -- which, as a side effect, means a duplicate
+parameter name (`def int f(int a, int a):`) is caught by the ordinary
+_declare collision check, with no separate check needed for it.
+
 ERROR REPORTING
 -----------------
 This raises SemanticError on the *first* problem found and stops,
@@ -144,12 +165,14 @@ from parser import (
     BinaryOp,
     BoolLiteral,
     Break,
+    Call,
     Constant,
     Continue,
     ExprStmt,
     Function,
     If,
     Node,
+    Param,
     Parser,
     Program,
     Return,
@@ -232,14 +255,36 @@ class SemanticAnalyzer:
     def __init__(self):
         self.scopes: List[Dict[str, Type]] = []
         self.loop_depth = 0  # how many enclosing `while` loops we're currently inside
+        self.functions: Dict[str, tuple] = {}  # name -> (List[Type] param types, Type return type)
 
     def analyze(self, program: Program) -> None:
+        # First pass: collect every function's signature before checking
+        # any function's body. This is what makes call order not matter
+        # -- a function can call one defined later in the file, or call
+        # itself recursively -- since by the time analyze_function ever
+        # looks anything up in self.functions, every signature is
+        # already there. See the module docstring's FUNCTIONS section.
+        self.functions = {}
+        for fn in program.functions:
+            if fn.name in self.functions:
+                raise SemanticError(f"Function '{fn.name}' is already declared")
+            param_types = [type_from_name(p.type) for p in fn.params]
+            return_type = type_from_name(fn.return_type)
+            self.functions[fn.name] = (param_types, return_type)
+
+        # Second pass: now check each function's own body.
         for fn in program.functions:
             self.analyze_function(fn)
 
     def analyze_function(self, fn: Function) -> None:
         self.scopes = [{}]  # fresh, single-level scope stack per function
         self.loop_depth = 0
+        # Parameters act like already-declared locals from the body's
+        # point of view -- _declare here also gets duplicate-parameter-
+        # name checking for free (`def int f(int a, int a):` collides in
+        # this same scope exactly like `int a` twice in a row would).
+        for p in fn.params:
+            self._declare(p.name, type_from_name(p.type))
         return_type = type_from_name(fn.return_type)
         for stmt in fn.body:
             self.analyze_statement(stmt, return_type)
@@ -393,11 +438,32 @@ class SemanticAnalyzer:
             return Type.STR
         if isinstance(expr, Variable):
             return self.check_variable(expr)
+        if isinstance(expr, Call):
+            return self.check_call(expr)
         if isinstance(expr, Unary):
             return self.check_unary(expr)
         if isinstance(expr, Binary):
             return self.check_binary(expr)
         raise SemanticError(f"No semantic rule for expression: {expr!r}")
+
+    def check_call(self, expr: Call) -> Type:
+        if expr.name not in self.functions:
+            raise SemanticError(f"Call to undeclared function '{expr.name}'")
+        param_types, return_type = self.functions[expr.name]
+
+        if len(expr.args) != len(param_types):
+            raise SemanticError(
+                f"Function '{expr.name}' expects {len(param_types)} "
+                f"argument(s), got {len(expr.args)}"
+            )
+        for i, (arg, expected_type) in enumerate(zip(expr.args, param_types), start=1):
+            actual_type = self.check_expr(arg)
+            if actual_type != expected_type:
+                raise SemanticError(
+                    f"Argument {i} to '{expr.name}' should be "
+                    f"{expected_type}, got {actual_type}"
+                )
+        return return_type
 
     def check_constant(self, expr: Constant) -> Type:
         if isinstance(expr.value, float) and not expr.value.is_integer():

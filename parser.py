@@ -245,6 +245,22 @@ class Variable(Node):
 
 
 @dataclass
+class Call(Node):
+    """`name(arg1, arg2, ...)` -- a function call, used as an ordinary
+    expression. There's no separate "call statement" concept: `foo(1)`
+    alone on its own line already parses as an expr_stmt wrapping this
+    (see ExprStmt), exactly the same way any other expression can be a
+    bare statement -- a call just happens to be one whose value people
+    often want to discard."""
+    name: str
+    args: List[Node] = field(default_factory=list)
+
+    def pretty(self) -> str:
+        args_str = ', '.join(a.pretty() for a in self.args)
+        return f"Call(name: {self.name}) -> [{args_str}]"
+
+
+@dataclass
 class Unary(Node):
     op: UnaryOp
     operand: Node
@@ -371,9 +387,25 @@ class Continue(Node):
 
 
 @dataclass
+class Param(Node):
+    """A single `type name` entry in a function's parameter list, e.g.
+    the `int a` in `def int add(int a, int b):`. Not part of the
+    function's own statement/expression tree -- it's a declaration
+    record attached to Function, conceptually the same role VarDecl
+    plays for a local, just without an initializer (a parameter's
+    "initial value" is whatever the caller passed)."""
+    name: str
+    type: str
+
+    def pretty(self) -> str:
+        return f"Param(name: {self.name}, type: {self.type})"
+
+
+@dataclass
 class Function(Node):
     name: str
     return_type: str
+    params: List[Param] = field(default_factory=list)
     body: List[Node] = field(default_factory=list)
 
     def pretty(self) -> str:
@@ -383,8 +415,9 @@ class Function(Node):
         # internally for its own children (e.g. VarDecl's initializer).
         # With a single Return per function this was never ambiguous;
         # with multiple statements it would be.
+        params_str = ', '.join(p.pretty() for p in self.params)
         body_str = '; '.join(stmt.pretty() for stmt in self.body)
-        return f"Function(name: {self.name}) -> {body_str}"
+        return f"Function(name: {self.name}, params: [{params_str}]) -> {body_str}"
 
 
 @dataclass
@@ -570,14 +603,31 @@ class Parser:
         return_type = self.parse_type()
         name_tok = self.expect(TokenType.IDENTIFIER, "Expected a function name")
         self.expect(TokenType.OPEN_PAREN, "Expected '(' after function name")
-        # No parameter support yet -- the lexer has no comma token, so
-        # anything beyond an empty parameter list can't be produced.
+        params = self.parse_params()
         self.expect(TokenType.CLOSE_PAREN, "Expected ')' after parameter list")
         self.expect(TokenType.COLON, "Expected ':' to start the function body")
         self.expect(TokenType.NEWLINE, "Expected a newline after ':'")
 
         body = self.parse_block()
-        return Function(name=name_tok.val, return_type=return_type, body=body)
+        return Function(name=name_tok.val, return_type=return_type, params=params, body=body)
+
+    def parse_params(self) -> List[Param]:
+        """Parses a comma-separated parameter list -- zero or more
+        `type IDENTIFIER` entries -- stopping *without* consuming
+        CLOSE_PAREN, so the caller (parse_function) still owns matching
+        it. An empty list (`()`) is valid and just returns []."""
+        params = []
+        if self.check(TokenType.CLOSE_PAREN):
+            return params
+        params.append(self.parse_param())
+        while self.match(TokenType.COMMA):
+            params.append(self.parse_param())
+        return params
+
+    def parse_param(self) -> Param:
+        param_type = self.parse_type()
+        name_tok = self.expect(TokenType.IDENTIFIER, "Expected a parameter name")
+        return Param(name=name_tok.val, type=param_type)
 
     def parse_type(self) -> str:
         # 'int', 'bool', or 'str' -- semantic.py is what actually knows
@@ -765,6 +815,12 @@ class Parser:
             tok = self.advance()
             return StringLiteral(value=_unescape_string_literal(tok.val))
         if self.check(TokenType.IDENTIFIER):
+            # One token of lookahead disambiguates a call (`foo(...)`)
+            # from a bare variable reference (`foo`), the same way
+            # parse_statement already peeks ahead to tell an assignment
+            # apart from any other expression starting with a name.
+            if self.peek(1).type == TokenType.OPEN_PAREN:
+                return self.parse_call()
             tok = self.advance()
             return Variable(name=tok.val)
         if self.match(TokenType.OPEN_PAREN):
@@ -776,6 +832,17 @@ class Parser:
             f"Expected an expression, got {tok.type} ('{tok.val}') "
             f"at line {tok.line}, column {tok.col}"
         )
+
+    def parse_call(self) -> Call:
+        name_tok = self.expect(TokenType.IDENTIFIER)
+        self.expect(TokenType.OPEN_PAREN, "Expected '(' to start a call's argument list")
+        args = []
+        if not self.check(TokenType.CLOSE_PAREN):
+            args.append(self.parse_expression())
+            while self.match(TokenType.COMMA):
+                args.append(self.parse_expression())
+        self.expect(TokenType.CLOSE_PAREN, "Expected ')' to close a call's argument list")
+        return Call(name=name_tok.val, args=args)
 
 
 # ---------------------------------------------------------------------------

@@ -20,7 +20,7 @@ class TokenType(Enum):
     OPEN_PAREN = auto()
     CLOSE_PAREN = auto()
     COLON = auto()
-    #COMMA = auto()
+    COMMA = auto()
 
     # Operators
     ASSIGN = auto()
@@ -142,7 +142,7 @@ class Lexer():
             ('GREATER_THAN', r'>'),
             ('LESS_THAN',    r'<'),
             ('COLON',        r':'),               # Colon
-            #('COMMA',        r','),
+            ('COMMA',        r','),
             ('ASSIGN',       r'='),                # Assignment operator
             ('PLUS',         r'\+'),              # Add
             ('MINUS',        r'\-'),              # Subtract
@@ -229,6 +229,8 @@ class Lexer():
                 self.tokens.append(Token(TokenType.CLOSE_PAREN, value, self.line, column))
             elif kind == 'COLON':
                 self.tokens.append(Token(TokenType.COLON, value, self.line, column))
+            elif kind == 'COMMA':
+                self.tokens.append(Token(TokenType.COMMA, value, self.line, column))
             elif kind == 'PLUS':
                 self.tokens.append(Token(TokenType.PLUS, value, self.line, column))
             elif kind == 'MINUS':

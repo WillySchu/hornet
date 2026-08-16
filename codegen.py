@@ -249,6 +249,120 @@ that it's worth noting the difference: semantic.py only needs to know
 *whether* a break/continue is inside some loop, so a counter suffices;
 codegen needs to know *which* loop's labels to jump to, so it needs the
 actual label pair, not just a depth.
+
+STRINGS
+--------
+A `str` value is a plain pointer -- to a null-terminated buffer, either
+static (a literal, emitted into `.data`; see gen_string_literal_into and
+Emitter.emit) or malloc'd (a concatenation result; see
+gen_string_concat_into). Being a pointer, it's 8 bytes on x86-64, not
+the 4 bytes every value before it fit in -- which is why _collect_locals
+gives *every* local a uniform 8-byte slot now regardless of type,
+trading a few wasted bytes on int/bool locals for not needing a
+variable-width allocator at all.
+
+Concatenation and equality both need real work at runtime -- there's no
+way to fold `a + b` or `a == b` at compile time once `a`/`b` are
+variables -- so they call real C library functions (`strlen`/`malloc`/
+`strcpy`/`strcat` for concatenation, `strcmp` for equality) via the
+actual SysV calling convention. This is the first place in this
+compiler that calls anything external at all, and it surfaced a real
+bug worth understanding, not just the fix for it:
+
+Both operations need `left`'s value to survive while `right` gets
+computed. The first implementation stashed `left` in a fixed register
+(%rbx) for the duration -- which works fine as long as evaluating
+`right` never *also* needs %rbx. But `right` can itself be another
+string concatenation or comparison (`(a + b) + c`, or a function that
+does its own string work), and that nested evaluation reaches this
+exact same method again, which unconditionally overwrites %rbx as its
+own first step -- silently clobbering the outer call's `left` before
+it's ever used. This didn't show up in earlier testing because those
+tests only ever nested a string op on one side of another (`(a+b)+c`,
+where `c` is a plain variable); it takes something on the scale of `(a
++ b) == (c + d)` -- a nested op on *both* sides of another -- to
+actually hit it.
+
+The fix (see gen_string_concat_into/gen_string_compare_into) is to stop
+relying on %rbx surviving on its own, and instead push `left` onto the
+real stack before evaluating `right` -- the exact push-before-recursing
+scheme gen_binary_into already uses for ordinary int/bool operators,
+which has no such fixed-identity conflict no matter how deeply it
+nests, since every push has its own place on the stack regardless of
+what any nested call does to any register. `right` gets captured into
+%r12 immediately after its own evaluation completes, which *is* safe as
+a fixed register, since nothing recursive happens between that capture
+and this method's own further use of it -- only the fixed strlen/
+malloc/strcpy/strcat sequence, which can't reach back into
+gen_expr_into. %r13/%r14 are similarly write-once, straight from a
+direct call result, with nothing recursive after.
+
+This is a *different* concern from why every function's own prologue/
+epilogue also saves and restores %rbx/%r12/%r13/%r14 unconditionally
+(see gen_function and gen_return, and this section's FUNCTIONS
+neighbor) -- that fix protects a value held in one of these registers
+*across a call into another function*; this one protects a value held
+here *across evaluating a nested expression within the same function*,
+call or no call. Both are genuinely necessary; neither one covers what
+the other does.
+
+Never frees a concatenation's malloc'd buffer -- an accepted,
+explicitly-documented simplification for this first pass, not an
+oversight. A correct `free` story needs to reason about a string's
+lifetime (was this pointer heap-allocated at all, or pointing into
+static `.data`? has it since been overwritten?), which is a
+meaningfully bigger problem than concatenation itself.
+
+FUNCTIONS
+----------
+Parameters arrive in registers per the SysV ABI (%rdi, %rsi, %rdx,
+%rcx, %r8, %r9, in that order -- see _ARG_REGISTERS_64/_32) and get
+moved into their own stack slots immediately in the prologue, via
+_collect_params/_bind_param -- from that point on a parameter is
+indistinguishable from any other local to the rest of codegen. Only the
+first 6 arguments are supported, matching how far the ABI's
+register-passing goes before falling back to the stack; a 7th parameter
+or argument is a CodegenError, not a silent miscompile.
+
+A call's arguments are each fully evaluated (via the ordinary
+gen_expr_into, so a nested call or a string concatenation as an
+argument works correctly) and immediately pushed onto the stack, one at
+a time, *before* any of them get popped into the actual argument
+registers -- see gen_call_into. Only once every argument is safely
+stacked does popping begin, in reverse, into %rdi/%rsi/etc. This is the
+same "compute now, protect on the stack, place into position later"
+principle behind the STRINGS section's fix above, for the same reason:
+if argument 2 happened to be a string concatenation, and argument 1's
+value were sitting in some fixed register instead of on the stack while
+argument 2 gets computed, argument 2's own scratch usage could corrupt
+argument 1.
+
+Every function's prologue unconditionally pushes %rbx/%r12/%r13/%r14
+right after setting up %rbp, and every return pops them back before
+`leave` (see gen_function/gen_return) -- regardless of whether that
+particular function happens to do any string work itself. This is what
+makes it safe for function A, mid-string-operation with a value
+currently sitting in one of those registers, to call function B: B's
+own prologue saves whatever A left there, B is free to use those
+registers however it wants internally, and B's epilogue restores A's
+values before control returns -- the standard meaning of "callee-saved"
+applied uniformly, rather than reasoned about per call site. Note this
+protects a value *across a call*; it does not, on its own, protect a
+value across a *nested expression* evaluated in the same function
+without a call in between -- that's what the stack-based fix in the
+STRINGS section above is for. Both together are what make deeply nested
+string operations, with or without function calls mixed in, safe
+regardless of how deep the nesting goes.
+
+self.functions is never built here -- semantic.py already guaranteed
+every call resolves to a real function with matching argument types and
+count before this file ever runs (see this module's top for the
+compile_to_asm/generate_asm split). The one piece of function-signature
+information codegen *does* still need for itself is each function's
+return type, collected once in generate() into
+self.function_return_types -- needed by _infer_type so a Call
+expression's type (int/bool/str) is known when it's used as an operand,
+e.g. deciding whether `foo() + bar()` means arithmetic or concatenation.
 """
 
 import argparse
@@ -262,12 +376,14 @@ from parser import (
     BinaryOp,
     BoolLiteral,
     Break,
+    Call,
     Constant,
     Continue,
     ExprStmt,
     Function,
     If,
     Node,
+    Param,
     Parser,
     Program,
     Return,
@@ -530,16 +646,25 @@ class LeaQ(Instruction):
 
 
 @dataclass
-class Call(Instruction):
-    """Calls an external function by symbol name, e.g. `call strlen`.
+class CallInstr(Instruction):
+    """Calls a function (either a libc routine like `strlen`, or another
+    Hornet-compiled function) by symbol name, e.g. `call strlen` or
+    `call add`. Named CallInstr rather than plain Call specifically to
+    avoid colliding with parser.Call -- the source-level AST node for a
+    function-call *expression* -- which this file also imports; the two
+    are easy to conflate by name but are completely different things
+    (one is assembly, the other is source syntax), and Python will
+    silently let a module-level class definition shadow an import of
+    the same name with no error, which is exactly what happened here
+    during development before this rename.
 
     `target` is always the *unprefixed* C symbol name (`malloc`, not
     `_malloc`) -- Emitter is what knows whether the target platform
     needs a leading underscore (see its emit_function), the same way it
     already decides that for this program's own function labels. Emit()
-    here (unprefixed) is only ever used if a Call is inspected/rendered
-    outside of Emitter; the real rendering path always goes through
-    Emitter's own handling instead.
+    here (unprefixed) is only ever used if a CallInstr is inspected/
+    rendered outside of Emitter; the real rendering path always goes
+    through Emitter's own handling instead.
 
     Requires %rsp to be 16-byte aligned at the point this executes, per
     the SysV ABI -- see codegen.py's LIBRARY CALLS section for how that
@@ -695,6 +820,29 @@ _COMPARISON_CONDITION_CODES = {
 }
 
 
+# SysV ABI integer/pointer argument registers, in order, 64-bit and
+# 32-bit forms. Only the first 6 arguments of a call are supported --
+# beyond that the ABI moves to stack-passed arguments, which this
+# compiler doesn't implement (see gen_call_into and gen_function's
+# param-count checks). The 32-bit names don't follow one consistent
+# pattern: rdi/rsi/rdx/rcx are "legacy" registers with their own
+# historical e-prefixed names, while r8/r9 are x86-64-only and use a
+# d-suffix instead -- hence two explicit parallel lists rather than a
+# derived/computed mapping.
+_ARG_REGISTERS_64 = ['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
+_ARG_REGISTERS_32 = ['edi', 'esi', 'edx', 'ecx', 'r8d', 'r9d']
+
+# Registers gen_string_concat_into/gen_string_compare_into use as
+# scratch (see STRINGS). Now that functions can call each other,
+# *every* function's prologue/epilogue saves and restores these
+# unconditionally -- see gen_function and gen_return -- regardless of
+# whether that particular function happens to use them, because the
+# callee-saved contract has to hold for any call, not just ones this
+# compiler happens to know use string operations. See the module
+# docstring's FUNCTIONS section for why this became necessary.
+_CALLEE_SAVED_SCRATCH_REGISTERS = ['rbx', 'r12', 'r13', 'r14']
+
+
 # ---------------------------------------------------------------------------
 # AST -> Assembly AST
 # ---------------------------------------------------------------------------
@@ -715,6 +863,7 @@ class CodeGenerator:
         self.scopes: List[Dict[str, tuple]] = []  # name -> (offset, type_str), generation-time; see LOCAL VARIABLES
         self.loop_labels: List[tuple] = []  # stack of (start_label, end_label), innermost last; see LOOPS
         self.string_literals: List[tuple] = []  # (label, content) pairs; see STRINGS
+        self.function_return_types: Dict[str, str] = {}  # name -> return type string; see FUNCTIONS
 
     def new_label(self, prefix: str) -> str:
         """Returns a fresh, uniquely-numbered local label like
@@ -727,6 +876,16 @@ class CodeGenerator:
         return label
 
     def generate(self, program: Program) -> AsmProgram:
+        # A Call expression's type is its callee's declared return type
+        # -- _infer_type needs that to decide operand width and which
+        # overloaded operator (+, ==, !=) applies when a call result
+        # feeds into one, exactly the same reason Variable lookups need
+        # to know a variable's type. Collecting every function's return
+        # type by name, once, up front (rather than looking a Function
+        # node up by name every time) is the smallest amount of
+        # function-signature duplication that actually satisfies that
+        # need -- see the module docstring's FUNCTIONS section.
+        self.function_return_types = {fn.name: fn.return_type for fn in program.functions}
         functions = [self.gen_function(fn) for fn in program.functions]
         return AsmProgram(functions=functions, string_literals=self.string_literals)
 
@@ -736,21 +895,68 @@ class CodeGenerator:
         # function's own %rbp.
         self._var_offsets = {}
         self._next_offset = 0
+        self._collect_params(fn.params)
         self._collect_locals(fn.body)
         self.scopes = [{}]
+
+        if len(fn.params) > 6:
+            raise CodegenError(
+                f"Function '{fn.name}' has {len(fn.params)} parameters; "
+                f"this compiler only supports up to 6 (passed via "
+                f"registers per the SysV ABI -- stack-passed parameters "
+                f"aren't implemented)"
+            )
 
         instructions: List[Instruction] = [
             Push(Register('rbp')),
             MovQ(src=Register('rsp'), dst=Register('rbp')),
         ]
+        # Save every callee-saved scratch register unconditionally, not
+        # just in functions that happen to do string work themselves --
+        # see _CALLEE_SAVED_SCRATCH_REGISTERS and the module docstring's
+        # FUNCTIONS section for why this is now required rather than
+        # optional once functions can call each other.
+        for reg in _CALLEE_SAVED_SCRATCH_REGISTERS:
+            instructions.append(Push(Register(reg)))
+
         frame_size = self._frame_size()
         if frame_size:
             instructions.append(SubQ(src=Imm(frame_size), dst=Register('rsp')))
+
+        # Parameters arrive in registers per the SysV ABI; move each
+        # into its own stack slot immediately, exactly like storing any
+        # other local -- from here on, a parameter is indistinguishable
+        # from a VarDecl-with-initializer as far as the rest of codegen
+        # is concerned.
+        for i, p in enumerate(fn.params):
+            offset = self._bind_param(p)
+            if p.type == 'str':
+                instructions.append(MovQ(src=Register(_ARG_REGISTERS_64[i]), dst=Memory('rbp', offset)))
+            else:
+                instructions.append(Mov(src=Register(_ARG_REGISTERS_32[i]), dst=Memory('rbp', offset)))
 
         for stmt in fn.body:
             instructions.extend(self.gen_statement(stmt))
 
         return AsmFunction(name=fn.name, instructions=instructions)
+
+    def _collect_params(self, params: List[Param]) -> None:
+        """Gives each parameter its own permanent stack slot, exactly
+        like _collect_locals does for VarDecls (same node-identity
+        keying, same uniform 8-byte width) -- kept as a separate method
+        since Param and VarDecl are different AST node types, not
+        because parameters need fundamentally different treatment."""
+        for p in params:
+            self._next_offset -= 8
+            self._var_offsets[id(p)] = self._next_offset
+
+    def _bind_param(self, p: Param) -> int:
+        """The Param counterpart to _bind_local -- registers `p`'s name
+        and declared type in the current scope, pointing at the
+        permanent offset _collect_params already assigned it."""
+        offset = self._var_offsets[id(p)]
+        self.scopes[-1][p.name] = (offset, p.type)
+        return offset
 
     def _collect_locals(self, statements: List[Node]) -> None:
         """Recursively walks `statements`, including into every If's
@@ -776,11 +982,16 @@ class CodeGenerator:
                 self._collect_locals(stmt.body)
 
     def _frame_size(self) -> int:
-        # Total bytes used by locals, rounded up to a 16-byte boundary.
-        # Now genuinely required, not just good practice: gen_string_*
-        # emits real `call` instructions (to malloc/strlen/strcpy/
-        # strcat/strcmp), and the SysV ABI requires %rsp to be
-        # 16-byte-aligned at the point of every one of those.
+        # Total bytes used by locals and parameters, rounded up to a
+        # 16-byte boundary. Genuinely required, not just good practice:
+        # gen_string_* and gen_call_into both emit real `call`
+        # instructions (to malloc/strlen/strcpy/strcat/strcmp, or to
+        # another Hornet function), and the SysV ABI requires %rsp to be
+        # 16-byte-aligned at the point of every one of those. (The
+        # callee-saved register pushes in gen_function's prologue don't
+        # themselves need accounting for here -- there are always
+        # exactly 4 of them, an already-even number of 8-byte pushes, so
+        # they never change whether %rsp ends up aligned or not.)
         raw = -self._next_offset
         return ((raw + 15) // 16) * 16 if raw > 0 else 0
 
@@ -831,6 +1042,8 @@ class CodeGenerator:
             return 'str'
         if isinstance(expr, Variable):
             return self._local_type(expr.name)
+        if isinstance(expr, Call):
+            return self.function_return_types[expr.name]
         if isinstance(expr, Unary):
             return 'bool' if expr.op == UnaryOp.NOT else 'int'
         if isinstance(expr, Binary):
@@ -902,6 +1115,19 @@ class CodeGenerator:
     def gen_return(self, stmt: Return) -> List[Instruction]:
         dst = Register('eax')
         instructions = self.gen_expr_into(stmt.value, dst)
+        # Restore the callee-saved scratch registers *before* Leave --
+        # Leave resets %rsp straight to %rbp, which was captured before
+        # these were pushed in the prologue, so anything pushed after
+        # that point has to be popped explicitly first or it's just
+        # silently discarded (never actually restored into the
+        # registers) rather than popped. Popping happens in reverse of
+        # the prologue's push order, the usual stack discipline. None of
+        # this touches %eax/%rax, so the return value computed above is
+        # unaffected regardless of what these registers held during the
+        # body (e.g. if the return expression itself did string work
+        # that reused them as scratch in between).
+        for reg in reversed(_CALLEE_SAVED_SCRATCH_REGISTERS):
+            instructions.append(Pop(Register(reg)))
         instructions.append(Leave())
         instructions.append(Ret())
         return instructions
@@ -1051,6 +1277,8 @@ class CodeGenerator:
             if self._local_type(expr.name) == 'str':
                 return [MovQ(src=Memory('rbp', offset), dst=as_qword_register(dst))]
             return [Mov(src=Memory('rbp', offset), dst=dst)]
+        if isinstance(expr, Call):
+            return self.gen_call_into(expr, dst)
         if isinstance(expr, Unary):
             # Compute the operand into dst first, then apply this node's
             # operator to whatever's now there. This is what makes chained
@@ -1155,6 +1383,49 @@ class CodeGenerator:
         instructions.append(Label(end_label))
         return instructions
 
+    def gen_call_into(self, expr: Call, dst: Operand) -> List[Instruction]:
+        """`name(arg1, arg2, ...)`: evaluates every argument -- in
+        order, each via the ordinary gen_expr_into, so an argument that
+        is itself a nested call, a string concatenation, or any other
+        arbitrarily complex expression works correctly -- immediately
+        pushing each one's result onto the stack before moving on to the
+        next. Only *after* every argument has been safely computed and
+        stacked does this start popping them back off, in reverse, into
+        the actual SysV argument registers (see _ARG_REGISTERS_64).
+
+        This "compute and stack everything, then pop into place" order
+        is what avoids the same register-clobbering hazard that
+        motivated saving %rbx/%r12/%r13/%r14 across calls in the first
+        place (see the module docstring's FUNCTIONS section): if
+        argument 2 happens to be a string concatenation and argument 1's
+        value were sitting in a scratch register instead of safely on
+        the stack while argument 2 gets computed, argument 2's own use
+        of that same scratch register would corrupt argument 1.
+
+        The result already ends up exactly where gen_expr_into's
+        contract expects it (%rax/%eax, matching `dst`, which is always
+        Register('eax') throughout this file), so there's nothing left
+        to move once the call returns.
+        """
+        if len(expr.args) > 6:
+            raise CodegenError(
+                f"Call to '{expr.name}' has {len(expr.args)} arguments; "
+                f"this compiler only supports up to 6 (passed via "
+                f"registers per the SysV ABI -- stack-passed arguments "
+                f"aren't implemented)"
+            )
+        if dst != Register('eax'):
+            raise CodegenError(f"Call codegen requires dst == %eax, got: {dst!r}")
+
+        instructions: List[Instruction] = []
+        for arg in expr.args:
+            instructions.extend(self.gen_expr_into(arg, Register('eax')))
+            instructions.append(Push(Register('rax')))
+        for i in reversed(range(len(expr.args))):
+            instructions.append(Pop(Register(_ARG_REGISTERS_64[i])))
+        instructions.append(CallInstr(expr.name))
+        return instructions
+
     def gen_string_literal_into(self, expr: StringLiteral, dst: Operand) -> List[Instruction]:
         """Registers this literal's content for later emission as static
         `.data` (see AsmProgram.string_literals / Emitter.emit), and
@@ -1173,51 +1444,70 @@ class CodeGenerator:
         followed by right's -- `strlen(left) + strlen(right) + 1`
         bytes, then `strcpy` then `strcat`.
 
-        Uses %rbx/%r12/%r13/%r14 as scratch to hold left, right, and
-        intermediate values *across* several `call` instructions,
-        rather than the stack-spill scheme every other binary operator
-        uses (see the module docstring's STRINGS section for why: those
-        are callee-saved registers, so nothing this function calls can
-        clobber them, which avoids having to hand-track stack offsets
-        that shift with every additional push -- exactly the kind of
-        bookkeeping that gets error-prone once more than one value needs
-        to stay alive across more than one call). Nothing here saves or
-        restores their *prior* contents, since nothing else in this
-        codebase currently uses them; a real register allocator would
-        need to reconsider that.
+        `left` is protected across evaluating `right` by pushing it onto
+        the real CPU stack -- the exact same push-before-recursing
+        scheme gen_binary_into already uses for ordinary int/bool
+        operators -- rather than stashing it in a fixed register like
+        %rbx. That distinction matters here specifically because
+        `right` can itself be *another* string concatenation or
+        comparison (or a call to a function that does one): if `left`
+        were sitting in %rbx while `right` gets evaluated, and `right`'s
+        own evaluation also needs %rbx for its own left/right dance
+        (which it does, being this same method, or via a called
+        function that itself calls this method), it would silently
+        clobber `left` before this method ever gets to use it. The
+        stack has no such fixed-identity conflict, no matter how deeply
+        this nests.
 
-        Never frees the buffer -- see the module docstring's STRINGS
-        section for why that's an accepted, explicitly-documented
-        simplification for this first pass rather than an oversight.
+        %r12 (holding `right`), by contrast, *is* safe to set as a fixed
+        register immediately after `right`'s evaluation completes:
+        nothing between that point and this method's own use of %r12
+        recurses back into gen_expr_into, so there's no nested
+        evaluation left that could still clobber it -- only the fixed
+        strlen/malloc/strcpy/strcat sequence below runs, and libc is
+        itself SysV-ABI-compliant, so it's required to preserve %r12 as
+        a callee-saved register on its own. %r13/%r14 are similarly
+        only ever written once, from a direct call result, with nothing
+        recursive happening afterward.
+
+        This is a *distinct* concern from why every function's own
+        prologue/epilogue also saves/restores %rbx/%r12/%r13/%r14 (see
+        gen_function and gen_return) -- that fix protects a value held
+        in one of these registers *across a call into another
+        function*; this one protects a value held here *across
+        evaluating a nested expression within the same function*. Both
+        are needed; neither replaces the other.
         """
         if not isinstance(dst, Register):
             raise CodegenError(f"Binary codegen requires a register destination, got: {dst!r}")
         result = as_qword_register(dst)
 
         instructions = self.gen_expr_into(expr.left, dst)
-        instructions.append(MovQ(src=result, dst=Register('rbx')))       # rbx = left
-        instructions.extend(self.gen_expr_into(expr.right, dst))
+        instructions.append(Push(result))                                # save left on the stack
+        instructions.extend(self.gen_expr_into(expr.right, dst))         # left is safe regardless of what this does
         instructions.append(MovQ(src=result, dst=Register('r12')))       # r12 = right
+        instructions.append(Pop(result))                                 # restore left
+        instructions.append(MovQ(src=result, dst=Register('rbx')))       # rbx = left
 
         instructions.append(MovQ(src=Register('rbx'), dst=Register('rdi')))
-        instructions.append(Call('strlen'))
+        instructions.append(CallInstr('strlen'))
         instructions.append(MovQ(src=Register('rax'), dst=Register('r13')))  # r13 = len(left)
 
         instructions.append(MovQ(src=Register('r12'), dst=Register('rdi')))
-        instructions.append(Call('strlen'))                              # rax = len(right)
+        instructions.append(CallInstr('strlen'))                              # rax = len(right)
         instructions.append(AddQ(src=Register('r13'), dst=Register('rax')))
         instructions.append(AddQ(src=Imm(1), dst=Register('rax')))       # rax = len(left)+len(right)+1
         instructions.append(MovQ(src=Register('rax'), dst=Register('rdi')))
-        instructions.append(Call('malloc'))
+        instructions.append(CallInstr('malloc'))
         instructions.append(MovQ(src=Register('rax'), dst=Register('r14')))  # r14 = new buffer
 
         instructions.append(MovQ(src=Register('r14'), dst=Register('rdi')))
         instructions.append(MovQ(src=Register('rbx'), dst=Register('rsi')))
-        instructions.append(Call('strcpy'))
+        instructions.append(CallInstr('strcpy'))
 
         instructions.append(MovQ(src=Register('r14'), dst=Register('rdi')))
         instructions.append(MovQ(src=Register('r12'), dst=Register('rsi')))
-        instructions.append(Call('strcat'))
+        instructions.append(CallInstr('strcat'))
 
         instructions.append(MovQ(src=Register('r14'), dst=result))
         return instructions
@@ -1229,19 +1519,25 @@ class CodeGenerator:
         pattern every other comparison already uses -- reusing
         _COMPARISON_CONDITION_CODES[op] directly, since strcmp's result
         is a plain 32-bit int that "compared to 0" behaves exactly like
-        any other int comparison from here on."""
+        any other int comparison from here on.
+
+        `left` is protected across evaluating `right` via the stack, for
+        exactly the same reason gen_string_concat_into does -- see its
+        docstring."""
         if not isinstance(dst, Register):
             raise CodegenError(f"Binary codegen requires a register destination, got: {dst!r}")
         result = as_qword_register(dst)
 
         instructions = self.gen_expr_into(expr.left, dst)
-        instructions.append(MovQ(src=result, dst=Register('rbx')))
+        instructions.append(Push(result))
         instructions.extend(self.gen_expr_into(expr.right, dst))
         instructions.append(MovQ(src=result, dst=Register('r12')))
+        instructions.append(Pop(result))
+        instructions.append(MovQ(src=result, dst=Register('rbx')))
 
         instructions.append(MovQ(src=Register('rbx'), dst=Register('rdi')))
         instructions.append(MovQ(src=Register('r12'), dst=Register('rsi')))
-        instructions.append(Call('strcmp'))
+        instructions.append(CallInstr('strcmp'))
 
         byte_dst = as_byte_register(dst)
         instructions.append(Cmp(src=Imm(0), dst=dst))
@@ -1369,7 +1665,7 @@ class Emitter:
         sym = self.symbol(fn.name)
         lines = [f"    .globl {sym}", f"{sym}:"]
         for instr in fn.instructions:
-            if isinstance(instr, Call):
+            if isinstance(instr, CallInstr):
                 # Call.emit() renders its target unprefixed -- platform
                 # symbol naming is this Emitter's job alone, same as for
                 # this program's own function labels above, so this is

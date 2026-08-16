@@ -1,7 +1,11 @@
-def int main():
-    int i = 10
-    int x = 0
-    while i > 0:
-        i = i - 1
-        x = x + 2
-    return x
+def str main():
+    return hello() + ' ' + world('!')
+
+
+def str hello():
+    str hello = 'hello'
+    return hello
+
+
+def str world(str p):
+    return 'world' + p

@@ -32,9 +32,36 @@ Organization:
     TestIfStatements                    (18 tests)
     TestWhileLoops                      (10 tests)
     TestStrings                         (13 tests)
-    TestSemanticErrors                  (46 tests)
+    TestFunctions                       (12 tests)
+    TestSemanticErrors                  (53 tests)
                                         ----------
-                                        148 tests total
+                                        167 tests total
+
+A NOTE ON FUNCTION CALLS AND THE SECOND REGISTER-PRESERVATION FIX
+-----------------------------------------------------------------
+Function calls exposed a real bug in how `str` concatenation/comparison
+were implemented: they use %rbx/%r12/%r13/%r14 as scratch, on the
+reasoning (accurate at the time) that "nothing else uses them". That
+stopped being true the moment one Hornet function could call another --
+if function A is mid-concatenation (holding a value in %rbx) and calls
+function B, and B also does string work, B would silently clobber A's
+%rbx with no compiler warning and no crash, just a wrong answer. Every
+function's prologue/epilogue now unconditionally saves/restores these
+four registers (see codegen.py's FUNCTIONS section), regardless of
+whether that particular function happens to use them itself, which is
+what a callee-saved contract actually requires.
+
+TestFunctions' register-preservation and recursive-string-concatenation
+tests exist specifically to prove that fix, not just that calls work in
+general -- the former nests one string-using call inside another,
+the latter stress-tests the same fix under genuine recursion, where
+each level's saved registers live on a distinct stack frame rather than
+just one level of nesting. TestFunctions' mutual-recursion test proves
+the *other* half of what functions needed: semantic.py collects every
+function's signature in a first pass over the whole program before
+checking any function's body, so call order doesn't matter and forward
+references / recursion just work, rather than requiring functions to be
+defined before they're used.
 
 A NOTE ON str AND WHY THIS TOUCHED FAR MORE THAN THE TYPE CHECKER
 -----------------------------------------------------------------
@@ -131,7 +158,7 @@ from pathlib import Path
 
 import pytest
 
-from codegen import generate_asm
+from codegen import CodegenError, generate_asm
 from lexer import lex
 from parser import Parser
 from semantic import SemanticError, analyze
@@ -278,6 +305,26 @@ def assert_semantic_error(body: str, return_type: str = "int", match: str = None
     rejected by semantic analysis. Never reaches codegen or gcc, so
     these run regardless of GCC_AVAILABLE."""
     source = f"def {return_type} main():\n{body}\n"
+    ast = _parse(source)
+    with pytest.raises(SemanticError, match=match):
+        analyze(ast)
+
+
+def assert_program_exit_code(source: str, expected: int) -> None:
+    """Like assert_exit_code, but takes a complete, ready-to-run program
+    (possibly multiple functions) rather than wrapping a body in a
+    single `main` -- needed for function-call tests, which by their
+    nature involve more than one function definition."""
+    result = compile_and_run(source)
+    assert result.returncode == expected, (
+        f"program:\n{source}\nexpected exit {expected}, got {result.returncode}"
+    )
+
+
+def assert_program_semantic_error(source: str, match: str = None) -> None:
+    """The assert_semantic_error counterpart to assert_program_exit_code
+    -- takes a complete program rather than wrapping a single-function
+    body."""
     ast = _parse(source)
     with pytest.raises(SemanticError, match=match):
         analyze(ast)
@@ -1026,6 +1073,186 @@ class TestStrings:
 
 
 # ---------------------------------------------------------------------------
+# Function calls: parameters, arguments, recursion, and the two distinct
+# register-preservation fixes that make string operations safe across
+# both nested expressions and nested calls (see codegen.py's STRINGS and
+# FUNCTIONS docstring sections). The mutual-recursion and register-
+# preservation tests here are the ones that actually prove something
+# subtle is correct, not just that a call compiles and runs.
+# ---------------------------------------------------------------------------
+
+class TestFunctions:
+    pytestmark = GCC_SKIP
+
+    def test_no_arg_function_call(self):
+        assert_program_exit_code(
+            "def int five():\n"
+            "    return 5\n"
+            "\n"
+            "def int main():\n"
+            "    return five()\n",
+            5,
+        )
+
+    def test_two_arg_function_call(self):
+        assert_program_exit_code(
+            "def int add(int a, int b):\n"
+            "    return a + b\n"
+            "\n"
+            "def int main():\n"
+            "    return add(2, 3)\n",
+            5,
+        )
+
+    def test_nested_calls(self):
+        assert_program_exit_code(
+            "def int inc(int x):\n"
+            "    return x + 1\n"
+            "\n"
+            "def int main():\n"
+            "    return inc(inc(5))\n",
+            7,
+        )
+
+    def test_recursive_factorial(self):
+        assert_program_exit_code(
+            "def int fact(int n):\n"
+            "    if n == 0:\n"
+            "        return 1\n"
+            "    return n * fact(n - 1)\n"
+            "\n"
+            "def int main():\n"
+            "    return fact(5)\n",
+            120,
+        )
+
+    def test_recursive_fibonacci(self):
+        assert_program_exit_code(
+            "def int fib(int n):\n"
+            "    if n < 2:\n"
+            "        return n\n"
+            "    return fib(n - 1) + fib(n - 2)\n"
+            "\n"
+            "def int main():\n"
+            "    return fib(10)\n",
+            55,
+        )
+
+    def test_mutual_recursion_with_forward_reference(self):
+        """is_even is defined *before* is_odd but calls it -- proves
+        semantic.py's two-pass signature collection (and codegen's own
+        function_return_types pre-scan) make call order not matter."""
+        assert_program_exit_code(
+            "def bool is_even(int n):\n"
+            "    if n == 0:\n"
+            "        return true\n"
+            "    return is_odd(n - 1)\n"
+            "\n"
+            "def bool is_odd(int n):\n"
+            "    if n == 0:\n"
+            "        return false\n"
+            "    return is_even(n - 1)\n"
+            "\n"
+            "def int main():\n"
+            "    if is_even(10):\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_call_result_used_as_argument_to_another_call(self):
+        assert_program_exit_code(
+            "def int add(int a, int b):\n"
+            "    return a + b\n"
+            "\n"
+            "def int main():\n"
+            "    return add(add(1, 2), add(3, 4))\n",
+            10,
+        )
+
+    def test_str_parameter_and_str_return_type(self):
+        assert_program_exit_code(
+            "def str greet(str name):\n"
+            "    return 'hello, ' + name\n"
+            "\n"
+            "def bool main():\n"
+            "    str result = greet('world')\n"
+            "    return result == 'hello, world'\n",
+            1,
+        )
+
+    def test_function_call_as_bare_statement(self):
+        """A call's result can be discarded entirely, via the ordinary
+        expr_stmt grammar rule -- no separate "call statement" concept
+        needed (see parser.py's Call docstring)."""
+        assert_program_exit_code(
+            "def int side_effect():\n"
+            "    return 99\n"
+            "\n"
+            "def int main():\n"
+            "    side_effect()\n"
+            "    return 42\n",
+            42,
+        )
+
+    def test_register_preservation_across_nested_string_using_call(self):
+        """The critical test for codegen.py's FUNCTIONS section: `outer`
+        is mid-concatenation (holding a value that needs to survive)
+        when it calls `inner_concat`, which does its *own* string
+        concatenation internally. If the callee-saved-register fix in
+        every function's prologue/epilogue weren't there, this would
+        silently compute a wrong answer rather than fail loudly."""
+        assert_program_exit_code(
+            "def str inner_concat(str a, str b):\n"
+            "    return a + b\n"
+            "\n"
+            "def bool outer(str x, str y, str z):\n"
+            "    str first = x + y\n"
+            "    str second = inner_concat(y, z)\n"
+            "    return (first + second) == (x + y + y + z)\n"
+            "\n"
+            "def bool main():\n"
+            "    return outer('a', 'b', 'c')\n",
+            1,
+        )
+
+    def test_recursive_string_concatenation(self):
+        """A more aggressive version of the register-preservation test:
+        `repeat` calls *itself*, each level doing its own concatenation,
+        stress-testing that the callee-saved fix holds up under actual
+        recursion (each level's saved registers living on a genuinely
+        different stack frame), not just a single level of nesting."""
+        assert_program_exit_code(
+            "def str repeat(str s, int n):\n"
+            "    if n == 0:\n"
+            "        return ''\n"
+            "    return s + repeat(s, n - 1)\n"
+            "\n"
+            "def bool main():\n"
+            "    str result = repeat('x', 4)\n"
+            "    return result == 'xxxx'\n",
+            1,
+        )
+
+    def test_more_than_six_parameters_is_a_clean_codegen_error(self):
+        """Only up to 6 parameters/arguments are supported (register-
+        passed per the SysV ABI; stack-passed ones aren't implemented)
+        -- a 7th should fail loudly and clearly, not silently miscompile
+        or crash at runtime."""
+        source = (
+            "def int seven(int a, int b, int c, int d, int e, int f, int g):\n"
+            "    return a\n"
+            "\n"
+            "def int main():\n"
+            "    return seven(1, 2, 3, 4, 5, 6, 7)\n"
+        )
+        ast = _parse(source)
+        analyze(ast)  # semantically fine -- the limit is a codegen-level one
+        with pytest.raises(CodegenError, match="only supports up to 6"):
+            generate_asm(ast, platform=ASM_PLATFORM)
+
+
+# ---------------------------------------------------------------------------
 # Semantic analysis: scope/declaration checking and the strict int/bool
 # type system. These never reach codegen -- each one asserts that
 # analyze() itself raises SemanticError -- so they don't need gcc and
@@ -1483,5 +1710,84 @@ class TestSemanticErrors:
             "    str b = ' world'\n"
             "    str c = a + b\n"
             "    return c\n"
+        )
+        analyze(ast)  # should not raise
+
+    # -- functions -------------------------------------------------------
+
+    def test_call_to_undeclared_function(self):
+        assert_semantic_error(
+            "    return foo(1)",
+            match="undeclared function",
+        )
+
+    def test_duplicate_function_name(self):
+        assert_program_semantic_error(
+            "def int foo():\n"
+            "    return 1\n"
+            "\n"
+            "def int foo():\n"
+            "    return 2\n",
+            match="already declared",
+        )
+
+    def test_call_wrong_argument_count(self):
+        assert_program_semantic_error(
+            "def int add(int a, int b):\n"
+            "    return a + b\n"
+            "\n"
+            "def int main():\n"
+            "    return add(1)\n",
+            match="expects 2 argument",
+        )
+
+    def test_call_wrong_argument_type(self):
+        assert_program_semantic_error(
+            "def int add(int a, int b):\n"
+            "    return a + b\n"
+            "\n"
+            "def int main():\n"
+            "    return add(1, 'hello')\n",
+            match="should be int, got str",
+        )
+
+    def test_duplicate_parameter_name(self):
+        """A parameter is declared into the function's own scope exactly
+        like a local, so this is caught by the ordinary double-
+        declaration check, not a function-specific one."""
+        assert_program_semantic_error(
+            "def int add(int a, int a):\n"
+            "    return a\n",
+            match="already declared",
+        )
+
+    def test_recursive_call_is_allowed(self):
+        """The positive control: a function calling itself must NOT
+        raise, since self.functions already has this function's own
+        signature by the time its body is checked (see semantic.py's
+        FUNCTIONS section)."""
+        ast = _parse(
+            "def int fact(int n):\n"
+            "    if n == 0:\n"
+            "        return 1\n"
+            "    return n * fact(n - 1)\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_mutual_recursion_with_forward_reference_is_allowed(self):
+        """The positive control for forward references specifically:
+        is_even calls is_odd, which is defined *after* it in the file --
+        must not raise, since every signature is collected before any
+        body is checked."""
+        ast = _parse(
+            "def bool is_even(int n):\n"
+            "    if n == 0:\n"
+            "        return true\n"
+            "    return is_odd(n - 1)\n"
+            "\n"
+            "def bool is_odd(int n):\n"
+            "    if n == 0:\n"
+            "        return false\n"
+            "    return is_even(n - 1)\n"
         )
         analyze(ast)  # should not raise
