@@ -30,9 +30,27 @@ Organization:
     TestShortCircuitEvaluation          ( 4 tests)
     TestVariablesAndStatements          (12 tests)
     TestIfStatements                    (18 tests)
-    TestSemanticErrors                  (28 tests)
+    TestWhileLoops                      (10 tests)
+    TestSemanticErrors                  (36 tests)
                                         ----------
-                                        107 tests total
+                                        125 tests total
+
+A NOTE ON LOOPS AND WHY THE EXECUTION HELPER GAINED A TIMEOUT
+-----------------------------------------------------------------
+`while`/`break`/`continue` are the first feature in this language where
+a codegen bug can produce a compiled program that genuinely never
+terminates -- every previous feature, however buggy, still always ran
+to completion (or crashed) in bounded time. compile_and_run now passes
+`timeout=EXECUTION_TIMEOUT` to the actual process execution and fails
+with a clear "likely an infinite loop" message on expiry, rather than
+hanging the whole test run. TestWhileLoops' two nested-loop tests are
+the ones this matters most for: break/continue are resolved via
+codegen's loop_labels *stack* (see codegen.py's LOOPS section)
+specifically so they target the innermost enclosing loop once loops
+nest -- a bug there (e.g. accidentally using the outer loop's labels)
+would very plausibly manifest as an infinite loop rather than a wrong
+answer, which is exactly the failure mode the timeout exists to catch
+cleanly instead of silently hanging.
 
 A NOTE ON BLOCK SCOPING AND WHY CODEGEN'S ALLOCATOR CHANGED SHAPE
 -----------------------------------------------------------------
@@ -47,6 +65,9 @@ point in the program, not by the name alone -- see codegen.py's LOCAL
 VARIABLES section for the actual mechanism. TestIfStatements' two
 same-name-in-both-branches tests exist specifically to prove that
 allocator change is correct, not just that if/else branch correctly.
+`while` bodies reuse the same node-identity-keyed allocation, though
+for a simpler reason -- see codegen.py's LOCAL VARIABLES section for
+why a loop body's own variables don't need anything extra beyond that.
 
 A NOTE ON THE TYPE SYSTEM AND WHY SEVERAL TESTS CHANGED SHAPE
 -----------------------------------------------------------------
@@ -114,6 +135,13 @@ GCC_SKIP = pytest.mark.skipif(
 HOST_IS_MACOS = sys.platform == "darwin"
 ASM_PLATFORM = "macos" if HOST_IS_MACOS else "linux"
 
+# How long a compiled program gets to run before it's treated as hung.
+# Every test in this file finishes in well under a second normally; a
+# few seconds of headroom absorbs slow CI machines without making a
+# genuinely infinite loop (e.g. from a break/continue codegen bug) wait
+# long to fail.
+EXECUTION_TIMEOUT = 5
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -132,9 +160,9 @@ def _parse(source: str):
 
 def compile_and_run(source: str) -> subprocess.CompletedProcess:
     """Runs `source` through the real lex -> parse -> analyze -> codegen
-    pipeline, assembles and links the result with gcc (using
-    ASM_PLATFORM, the platform this test process is actually running on
-    -- see above), and runs the resulting binary.
+    pipeline, assembles and links it with gcc (using ASM_PLATFORM, the
+    platform this test process is actually running on -- see above),
+    and runs the resulting binary, subject to EXECUTION_TIMEOUT below.
 
     Returns the CompletedProcess so callers can inspect `.returncode`:
     0-255 for a normal exit, or -N if the process was killed by signal N
@@ -178,7 +206,18 @@ def compile_and_run(source: str) -> subprocess.CompletedProcess:
             )
 
         try:
-            return subprocess.run([str(bin_path)])
+            return subprocess.run([str(bin_path)], timeout=EXECUTION_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            # Now that while loops exist, a genuine codegen bug (e.g. a
+            # break/continue that jumps to the wrong label) could produce
+            # a real infinite loop -- without this, that would just hang
+            # the test suite forever instead of failing with a message
+            # that points at what's actually wrong.
+            pytest.fail(
+                f"Compiled program did not exit within {EXECUTION_TIMEOUT}s "
+                "-- likely an infinite loop.\n"
+                f"--- generated assembly ---\n{asm}"
+            )
         except OSError as e:
             if HOST_IS_MACOS:
                 pytest.fail(
@@ -187,6 +226,7 @@ def compile_and_run(source: str) -> subprocess.CompletedProcess:
                     "installed -- try `softwareupdate --install-rosetta`."
                 )
             raise
+
 
 
 def assert_exit_code(body: str, expected: int, return_type: str = "int") -> None:
@@ -665,6 +705,155 @@ class TestIfStatements:
 
 
 # ---------------------------------------------------------------------------
+# while / break / continue.
+#
+# The nested-loop tests here matter more than they might look, same as
+# the sibling-branch tests in TestIfStatements matter more than they
+# look -- they're not just "does break/continue work", they're proof
+# that codegen's loop_labels stack (see codegen.py's LOOPS section)
+# correctly resolves break/continue to the *innermost* enclosing loop
+# rather than some outer one, which a naive single-pair implementation
+# (rather than a stack) would get wrong the moment loops nest.
+# ---------------------------------------------------------------------------
+
+class TestWhileLoops:
+    pytestmark = GCC_SKIP
+
+    def test_counts_to_five(self):
+        assert_exit_code(
+            "    int i = 0\n"
+            "    while i < 5:\n"
+            "        i = i + 1\n"
+            "    return i",
+            5,
+        )
+
+    def test_condition_false_immediately_zero_iterations(self):
+        assert_exit_code(
+            "    int i = 10\n"
+            "    while i < 5:\n"
+            "        i = i + 1\n"
+            "    return i",
+            10,
+        )
+
+    def test_break_exits_immediately(self):
+        assert_exit_code(
+            "    int i = 0\n"
+            "    while true:\n"
+            "        i = i + 1\n"
+            "        if i == 3:\n"
+            "            break\n"
+            "    return i",
+            3,
+        )
+
+    def test_continue_skips_specific_iterations(self):
+        """Sums 1..5 but skips adding when i is 2 or 4, via continue --
+        1 + 3 + 5 = 9. Proves continue skips only the rest of *that*
+        iteration's body (the `sum = sum + i` line), not the increment
+        that already happened above it, and not the loop entirely."""
+        assert_exit_code(
+            "    int i = 0\n"
+            "    int sum = 0\n"
+            "    while i < 5:\n"
+            "        i = i + 1\n"
+            "        if i == 2 or i == 4:\n"
+            "            continue\n"
+            "        sum = sum + i\n"
+            "    return sum",
+            9,
+        )
+
+    def test_nested_loops_break_only_exits_innermost(self):
+        """Inner loop always breaks on its second check (j==1), so it
+        contributes exactly one `count = count + 1` per outer iteration
+        -- if break incorrectly exited *both* loops, count would only
+        ever reach 1, not 3."""
+        assert_exit_code(
+            "    int count = 0\n"
+            "    int i = 0\n"
+            "    while i < 3:\n"
+            "        int j = 0\n"
+            "        while j < 3:\n"
+            "            if j == 1:\n"
+            "                break\n"
+            "            count = count + 1\n"
+            "            j = j + 1\n"
+            "        i = i + 1\n"
+            "    return count",
+            3,
+        )
+
+    def test_nested_loops_continue_only_affects_innermost(self):
+        """Inner loop runs 3 times per outer iteration, skipping one via
+        continue, so 2 increments per outer iteration -- 3 outer
+        iterations x 2 = 6. If continue incorrectly targeted the outer
+        loop's condition instead, this would come out very differently
+        (and likely loop far more than 3 outer times)."""
+        assert_exit_code(
+            "    int total = 0\n"
+            "    int i = 0\n"
+            "    while i < 3:\n"
+            "        int j = 0\n"
+            "        while j < 3:\n"
+            "            j = j + 1\n"
+            "            if j == 2:\n"
+            "                continue\n"
+            "            total = total + 1\n"
+            "        i = i + 1\n"
+            "    return total",
+            6,
+        )
+
+    def test_variable_declared_inside_loop_body_reused_each_iteration(self):
+        assert_exit_code(
+            "    int total = 0\n"
+            "    int i = 0\n"
+            "    while i < 4:\n"
+            "        int doubled = i * 2\n"
+            "        total = total + doubled\n"
+            "        i = i + 1\n"
+            "    return total",
+            12,  # 0 + 2 + 4 + 6
+        )
+
+    def test_while_condition_using_and(self):
+        assert_exit_code(
+            "    int i = 0\n"
+            "    int j = 10\n"
+            "    while i < 5 and j > 0:\n"
+            "        i = i + 1\n"
+            "        j = j - 1\n"
+            "    return i",
+            5,
+        )
+
+    def test_early_return_from_inside_while(self):
+        assert_exit_code(
+            "    int i = 0\n"
+            "    while true:\n"
+            "        i = i + 1\n"
+            "        if i == 7:\n"
+            "            return i\n"
+            "    return 0",
+            7,
+        )
+
+    def test_if_followed_by_while_mixed_control_flow(self):
+        assert_exit_code(
+            "    int a = 5\n"
+            "    if a > 0:\n"
+            "        a = a + 1\n"
+            "    int i = 0\n"
+            "    while i < a:\n"
+            "        i = i + 1\n"
+            "    return i",
+            6,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Semantic analysis: scope/declaration checking and the strict int/bool
 # type system. These never reach codegen -- each one asserts that
 # analyze() itself raises SemanticError -- so they don't need gcc and
@@ -936,3 +1125,90 @@ class TestSemanticErrors:
             "    return 0",
             match="already declared",
         )
+
+    # -- while/break/continue ---------------------------------------------
+
+    def test_while_condition_must_be_bool(self):
+        assert_semantic_error(
+            "    while 1:\n"
+            "        return 1\n"
+            "    return 0",
+            match="'while' condition must be bool",
+        )
+
+    def test_break_outside_loop_is_rejected(self):
+        assert_semantic_error(
+            "    break\n"
+            "    return 0",
+            match="'break' outside of a loop",
+        )
+
+    def test_continue_outside_loop_is_rejected(self):
+        assert_semantic_error(
+            "    continue\n"
+            "    return 0",
+            match="'continue' outside of a loop",
+        )
+
+    def test_break_inside_if_inside_while_is_allowed(self):
+        """loop_depth (see semantic.py's LOOPS section) has to survive
+        being nested inside a non-loop block -- an `if` between the
+        `break` and its enclosing `while` shouldn't matter."""
+        ast = _parse(
+            "def int main():\n"
+            "    while true:\n"
+            "        if true:\n"
+            "            break\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_break_inside_if_not_inside_while_is_rejected(self):
+        """The negative control for the test above: an `if` on its own,
+        with no enclosing `while` at all, still correctly rejects a
+        `break` inside it."""
+        assert_semantic_error(
+            "    if true:\n"
+            "        break\n"
+            "    return 0",
+            match="'break' outside of a loop",
+        )
+
+    def test_break_after_loop_ends_is_rejected(self):
+        """Proves loop_depth is correctly *decremented* once a while's
+        body finishes being analyzed -- a break textually after the
+        loop, at the same level, must not be treated as still being
+        inside it."""
+        assert_semantic_error(
+            "    while true:\n"
+            "        return 1\n"
+            "    break\n"
+            "    return 0",
+            match="'break' outside of a loop",
+        )
+
+    def test_variable_declared_in_while_does_not_leak_outside(self):
+        assert_semantic_error(
+            "    while true:\n"
+            "        int a = 1\n"
+            "    return a",
+            match="undeclared variable",
+        )
+
+    def test_break_in_outer_loop_after_inner_loop_ends_is_allowed(self):
+        """The positive control matching the nested-loop codegen tests
+        in TestWhileLoops: a break in the *outer* loop, positioned
+        after an inner loop's body has already been fully analyzed and
+        its scope popped, must still correctly resolve as being inside
+        the outer loop (loop_depth is a counter, not reset to 0 by the
+        inner loop's own pop)."""
+        ast = _parse(
+            "def int main():\n"
+            "    while true:\n"
+            "        int j = 0\n"
+            "        while j < 3:\n"
+            "            j = j + 1\n"
+            "        break\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise

@@ -60,15 +60,20 @@ literal like `2.5` would have produced literally invalid assembly,
 
 SCOPING
 --------
-Blocks now nest (if/elif/else), so scope tracking is a real stack:
-self.scopes is a List[Dict[str, Type]], one dict per currently-open
-block, with the function's own top-level body as the bottom entry.
-Two rules fall out of using a stack rather than one flat dict per
-function:
-  - A variable declared inside an `if` (or `else`) is only visible for
-    the rest of that block -- analyze_if pushes a fresh scope before
-    walking each branch's statements and pops it again afterward, so
-    the name simply isn't there anymore once the block ends.
+Blocks now nest (if/elif/else, and while), so scope tracking is a real
+stack: self.scopes is a List[Dict[str, Type]], one dict per
+currently-open block, with the function's own top-level body as the
+bottom entry. Two rules fall out of using a stack rather than one flat
+dict per function:
+  - A variable declared inside an `if` (or `else`, or a `while` body)
+    is only visible for the rest of that block -- analyze_if/
+    analyze_while push a fresh scope before walking their statements
+    and pop it again afterward, so the name simply isn't there anymore
+    once the block ends. This applies uniformly whether the block runs
+    zero times, once, or (for a while body) many times -- the scope is
+    a *static* fact about the program text, pushed and popped exactly
+    once during analysis, regardless of how many times the block might
+    actually execute at runtime.
   - Shadowing is allowed: a block can declare a variable with the same
     name as one in an enclosing scope. Declaration only checks the
     *current* (innermost) scope for a collision (see _declare), while
@@ -81,20 +86,38 @@ function:
     exclusive at runtime -- a name declared in `then` has no business
     being visible in `else`, and vice versa.
 
-Aside from that, analyze_function/analyze_if still walk statements in
-*program order*, adding each variable to its scope only once its own
-VarDecl has actually been processed, so declare-before-use in textual
-order and rejection of self-referential initializers (`int a = a`)
-both still fall out for free, exactly as before -- they just now apply
-per-scope rather than per-function.
+Aside from that, analyze_function/analyze_if/analyze_while still walk
+statements in *program order*, adding each variable to its scope only
+once its own VarDecl has actually been processed, so declare-before-use
+in textual order and rejection of self-referential initializers
+(`int a = a`) both still fall out for free, exactly as before -- they
+just now apply per-scope rather than per-function.
 
 This is notably different from codegen.py's own local-variable
 handling, which pre-scans a whole function body (recursively, into
-every if/else branch) for VarDecls up front purely to size the stack
-frame before emitting any instructions -- that pass is about layout,
-not validity, and by the time it runs this one has already guaranteed
-the program is well-formed. codegen.py also ends up needing its own
-scope-stack, for a different reason: see its LOCAL VARIABLES section.
+every if/else branch and while body) for VarDecls up front purely to
+size the stack frame before emitting any instructions -- that pass is
+about layout, not validity, and by the time it runs this one has
+already guaranteed the program is well-formed. codegen.py also ends up
+needing its own scope-stack, for a different reason: see its LOCAL
+VARIABLES section.
+
+LOOPS: break/continue VALIDITY
+---------------------------------
+`break` and `continue` are each only meaningful inside a loop -- there's
+nothing to break out of, or skip the rest of an iteration of, at the
+top level of a function. This is tracked with a simple counter,
+self.loop_depth, incremented before analyzing a while's body and
+decremented after (analyze_while), rather than anything scope-related:
+it needs to survive being nested inside an `if` (a `break` inside an
+`if` that's inside a `while` is fine -- loop_depth doesn't care about
+intervening non-loop blocks) while still correctly resetting once a
+nested while's own body finishes being analyzed, so an outer loop's
+break/continue isn't accidentally validated by an inner loop that has
+nothing to do with it. codegen.py mirrors this with its own stack of
+(start_label, end_label) pairs -- see its LOOPS section -- for the same
+underlying reason: break/continue always target the *innermost*
+enclosing loop, never an outer one.
 
 ERROR REPORTING
 -----------------
@@ -120,7 +143,9 @@ from parser import (
     Binary,
     BinaryOp,
     BoolLiteral,
+    Break,
     Constant,
+    Continue,
     ExprStmt,
     Function,
     If,
@@ -132,6 +157,7 @@ from parser import (
     UnaryOp,
     VarDecl,
     Variable,
+    While,
 )
 
 
@@ -199,6 +225,7 @@ class SemanticAnalyzer:
 
     def __init__(self):
         self.scopes: List[Dict[str, Type]] = []
+        self.loop_depth = 0  # how many enclosing `while` loops we're currently inside
 
     def analyze(self, program: Program) -> None:
         for fn in program.functions:
@@ -206,6 +233,7 @@ class SemanticAnalyzer:
 
     def analyze_function(self, fn: Function) -> None:
         self.scopes = [{}]  # fresh, single-level scope stack per function
+        self.loop_depth = 0
         return_type = type_from_name(fn.return_type)
         for stmt in fn.body:
             self.analyze_statement(stmt, return_type)
@@ -247,6 +275,12 @@ class SemanticAnalyzer:
             self.analyze_return(stmt, return_type)
         elif isinstance(stmt, If):
             self.analyze_if(stmt, return_type)
+        elif isinstance(stmt, While):
+            self.analyze_while(stmt, return_type)
+        elif isinstance(stmt, Break):
+            self.analyze_break(stmt)
+        elif isinstance(stmt, Continue):
+            self.analyze_continue(stmt)
         elif isinstance(stmt, ExprStmt):
             self.check_expr(stmt.expr)  # evaluated for validity; result unused
         else:
@@ -308,6 +342,36 @@ class SemanticAnalyzer:
             for s in stmt.else_body:
                 self.analyze_statement(s, return_type)
             self._pop_scope()
+
+    def analyze_while(self, stmt: While, return_type: Type) -> None:
+        condition_type = self.check_expr(stmt.condition)
+        if condition_type != Type.BOOL:
+            raise SemanticError(
+                f"'while' condition must be bool, got {condition_type} "
+                f"(no implicit int-to-bool conversion -- try `x != 0` "
+                f"instead of `x`)"
+            )
+
+        # loop_depth (not the scope stack) is what break/continue check
+        # against -- see analyze_break/analyze_continue. It has to be a
+        # counter rather than a boolean so nested while loops work: the
+        # inner loop's own push/pop shouldn't make an outer loop's
+        # break/continue look invalid once the inner one's body is done
+        # being analyzed.
+        self.loop_depth += 1
+        self._push_scope()
+        for s in stmt.body:
+            self.analyze_statement(s, return_type)
+        self._pop_scope()
+        self.loop_depth -= 1
+
+    def analyze_break(self, stmt: Break) -> None:
+        if self.loop_depth == 0:
+            raise SemanticError("'break' outside of a loop")
+
+    def analyze_continue(self, stmt: Continue) -> None:
+        if self.loop_depth == 0:
+            raise SemanticError("'continue' outside of a loop")
 
     # -- expressions ----------------------------------------------------
     # Every check_* method both validates its node and returns its Type,

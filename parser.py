@@ -13,6 +13,9 @@ Grammar supported (matches what the current lexer can produce):
                  | assign_stmt
                  | return_stmt
                  | if_stmt
+                 | while_stmt
+                 | break_stmt
+                 | continue_stmt
                  | expr_stmt
     decl_stmt   := type IDENTIFIER ('=' expression)? NEWLINE
     assign_stmt := IDENTIFIER '=' expression NEWLINE
@@ -20,6 +23,9 @@ Grammar supported (matches what the current lexer can produce):
     if_stmt     := 'if' expression ':' NEWLINE block
                     ('elif' expression ':' NEWLINE block)*
                     ('else' ':' NEWLINE block)?
+    while_stmt   := 'while' expression ':' NEWLINE block
+    break_stmt   := 'break' NEWLINE?
+    continue_stmt := 'continue' NEWLINE?
     expr_stmt   := expression NEWLINE
     expression   := binary_expr
     binary_expr  := unary_expr (BIN_OP binary_expr)*   [precedence climbing]
@@ -317,6 +323,39 @@ class If(Node):
 
 
 @dataclass
+class While(Node):
+    """`while cond: <body>`. Loops as long as `cond` evaluates to true,
+    re-checking it before every iteration including the first (so a
+    false condition means the body never runs at all)."""
+    condition: Node
+    body: List[Node]
+
+    def pretty(self) -> str:
+        body_str = '; '.join(stmt.pretty() for stmt in self.body)
+        return f"While({self.condition.pretty()}) -> [{body_str}]"
+
+
+@dataclass
+class Break(Node):
+    """`break` -- exits the *innermost* enclosing loop immediately.
+    Only valid inside a while body; semantic.py rejects one that isn't
+    (see its loop_depth tracking)."""
+
+    def pretty(self) -> str:
+        return "Break"
+
+
+@dataclass
+class Continue(Node):
+    """`continue` -- skips the rest of the current iteration of the
+    *innermost* enclosing loop and jumps straight to re-checking its
+    condition. Same "only valid inside a while" rule as Break."""
+
+    def pretty(self) -> str:
+        return "Continue"
+
+
+@dataclass
 class Function(Node):
     name: str
     return_type: str
@@ -526,9 +565,31 @@ class Parser:
             return self.parse_return()
         if self.check(TokenType.IF):
             return self.parse_if()
+        if self.check(TokenType.WHILE):
+            return self.parse_while()
+        if self.check(TokenType.BREAK):
+            return self.parse_break()
+        if self.check(TokenType.CONTINUE):
+            return self.parse_continue()
         if self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.ASSIGN:
             return self.parse_assign()
         return self.parse_expr_stmt()
+
+    def parse_while(self) -> While:
+        self.expect(TokenType.WHILE, "Expected 'while'")
+        condition = self.parse_expression()
+        self.expect(TokenType.COLON, "Expected ':' to start the while body")
+        self.expect(TokenType.NEWLINE, "Expected a newline after ':'")
+        body = self.parse_block()
+        return While(condition=condition, body=body)
+
+    def parse_break(self) -> Break:
+        self.expect(TokenType.BREAK, "Expected 'break'")
+        return Break()
+
+    def parse_continue(self) -> Continue:
+        self.expect(TokenType.CONTINUE, "Expected 'continue'")
+        return Continue()
 
     def parse_if(self) -> If:
         self.expect(TokenType.IF, "Expected 'if'")

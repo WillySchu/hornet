@@ -30,3 +30,4 @@ Compound Assignment Ops:
 Updates:
 - All code paths must return / default return values.
 - Ternary.
+- For loops.

@@ -1,2 +1,7 @@
-def bool main():
-    return not true
+def int main():
+    int i = 10
+    int x = 0
+    while i > 0:
+        i = i - 1
+        x = x + 2
+    return x

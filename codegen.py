@@ -35,6 +35,11 @@ Supported so far (matches what parser.py can currently produce):
     BoolLiteral -> `true`/`false`, immediate 1/0
     If       -> `if`/`elif`/`else`, real conditional jumps (elif is
                 nested If, not a separate case -- see parser.py)
+    While    -> real loop control flow, condition re-checked before
+                every iteration including the first
+    Break    -> unconditional jump to the innermost loop's end
+    Continue -> unconditional jump back to the innermost loop's
+                condition check
 
 A note on typing: as of semantic.py, this file is no longer the only
 line of defense against a malformed program -- undeclared/re-declared
@@ -142,9 +147,9 @@ from %rbp -- the classic frame-pointer-relative layout, e.g. the first
 variable declared in a function at -4(%rbp), the second at -8(%rbp), and
 so on (each int/bool is 4 bytes). _collect_locals recursively pre-scans
 a function's whole body -- including into every If's then_body and
-else_body -- for VarDecls *before* generating any instructions, so every
-slot's offset is already assigned, and the total frame size is already
-known, by the time the prologue is emitted:
+else_body, and every While's body -- for VarDecls *before* generating
+any instructions, so every slot's offset is already assigned, and the
+total frame size is already known, by the time the prologue is emitted:
 
     pushq %rbp
     movq  %rsp, %rbp
@@ -175,13 +180,23 @@ space for the whole function call, rather than sharing a slot. Trading a
 few bytes of stack for a much simpler allocator felt like the right
 call at this stage.
 
+A while loop's body follows the exact same rule, for a related but
+distinct reason: a VarDecl inside a loop body is only ever encountered
+*once* by _collect_locals (the pre-scan walks the AST, a static tree,
+not a simulation of runtime iterations), so it only ever gets one slot
+-- and that's correct, because every iteration reuses that same slot by
+just overwriting it. There's no "which iteration's `a`" question the
+way there's a "which branch's `a`" question for if/else, so nothing
+extra is needed here beyond recursing into While bodies the same way
+_collect_locals already recurses into If branches.
+
 Fixed, permanent offsets alone aren't enough to make `Variable`/`Assign`
 nodes resolve to the *right* slot, though -- codegen still needs to know
 which of possibly-several same-named VarDecls a given reference means at
 the point it's generated, which is exactly a scoping question. So
 `self.scopes: List[Dict[str, int]]` mirrors semantic.py's own scope
-stack (pushed/popped around an If's then/else bodies in gen_if, name ->
-offset instead of name -> Type), and _local_offset walks it
+stack (pushed/popped around an If's then/else bodies and a While's body,
+name -> offset instead of name -> Type), and _local_offset walks it
 innermost-to-outermost exactly like semantic.py's _lookup does. This
 does mean scope resolution is implemented twice in this codebase, once
 per pass -- a real duplication, and a reasonable one to revisit (e.g. by
@@ -208,6 +223,32 @@ every type error are caught well before this file ever runs -- the
 were invoked directly on an AST that skipped semantic analysis (see this
 module's top for the compile_to_asm/generate_asm split), so treat it as
 a defensive check rather than the primary error-reporting path.
+
+LOOPS
+------
+A while loop reuses the same condition-into-%eax-then-compare-to-0
+pattern used everywhere else real control flow shows up (short-circuit
+AND/OR, if/else): evaluate the condition, jump past the body if it's
+false. What's new here is that the condition also needs to be
+*re-checked* after the body runs, which just means the body's closing
+instruction is an unconditional jump back up to a label placed right
+before the condition, rather than falling through to whatever comes
+next -- see gen_while's docstring for the exact shape.
+
+break/continue are both just an unconditional Jmp to one of that loop's
+two labels -- break to the end (falls out of the loop entirely),
+continue to the start (re-checks the condition, which is exactly what
+"skip the rest of this iteration" means here, since there's no
+per-iteration cleanup step distinct from the condition check). The only
+real question either one has to answer is *which* loop's labels, once
+loops can nest -- `self.loop_labels: List[Tuple[str, str]]` is a stack
+for exactly that reason, pushed with the current loop's (start, end)
+pair before its body is generated and popped once it's done, mirroring
+semantic.py's loop_depth counter (see its LOOPS section) closely enough
+that it's worth noting the difference: semantic.py only needs to know
+*whether* a break/continue is inside some loop, so a counter suffices;
+codegen needs to know *which* loop's labels to jump to, so it needs the
+actual label pair, not just a depth.
 """
 
 import argparse
@@ -220,7 +261,9 @@ from parser import (
     Binary,
     BinaryOp,
     BoolLiteral,
+    Break,
     Constant,
+    Continue,
     ExprStmt,
     Function,
     If,
@@ -232,6 +275,7 @@ from parser import (
     UnaryOp,
     VarDecl,
     Variable,
+    While,
 )
 from semantic import analyze
 
@@ -604,6 +648,7 @@ class CodeGenerator:
         self._var_offsets: Dict[int, int] = {}  # id(VarDecl node) -> its permanent Memory offset
         self._next_offset = 0
         self.scopes: List[Dict[str, int]] = []  # name -> offset, generation-time; see LOCAL VARIABLES
+        self.loop_labels: List[tuple] = []  # stack of (start_label, end_label), innermost last; see LOOPS
 
     def new_label(self, prefix: str) -> str:
         """Returns a fresh, uniquely-numbered local label like
@@ -642,10 +687,11 @@ class CodeGenerator:
 
     def _collect_locals(self, statements: List[Node]) -> None:
         """Recursively walks `statements`, including into every If's
-        then_body/else_body, and gives each VarDecl found its own
-        permanent stack slot, keyed by the AST node's identity rather
-        than its name -- see the module docstring's LOCAL VARIABLES
-        section for why that distinction now matters."""
+        then_body/else_body and every While's body, and gives each
+        VarDecl found its own permanent stack slot, keyed by the AST
+        node's identity rather than its name -- see the module
+        docstring's LOCAL VARIABLES section for why that distinction
+        now matters."""
         for stmt in statements:
             if isinstance(stmt, VarDecl):
                 self._next_offset -= 4
@@ -654,6 +700,8 @@ class CodeGenerator:
                 self._collect_locals(stmt.then_body)
                 if stmt.else_body is not None:
                     self._collect_locals(stmt.else_body)
+            elif isinstance(stmt, While):
+                self._collect_locals(stmt.body)
 
     def _frame_size(self) -> int:
         # Total bytes used by locals, rounded up to a 16-byte boundary.
@@ -694,6 +742,12 @@ class CodeGenerator:
             return self.gen_return(stmt)
         if isinstance(stmt, If):
             return self.gen_if(stmt)
+        if isinstance(stmt, While):
+            return self.gen_while(stmt)
+        if isinstance(stmt, Break):
+            return self.gen_break(stmt)
+        if isinstance(stmt, Continue):
+            return self.gen_continue(stmt)
         if isinstance(stmt, ExprStmt):
             return self.gen_expr_stmt(stmt)
         raise CodegenError(f"No codegen rule for statement: {stmt!r}")
@@ -779,6 +833,72 @@ class CodeGenerator:
         instructions.append(Label(end_label))
 
         return instructions
+
+    def gen_while(self, stmt: While) -> List[Instruction]:
+        """Computes the condition, re-checked before every iteration
+        (including the first), with the body sitting between two labels
+        that break/continue jump to:
+
+            .Lwhile_start_N:
+                <condition>          ; -> %eax
+                cmpl $0, %eax
+                je   .Lwhile_end_N   ; false -> exit the loop entirely
+                <body>
+                jmp  .Lwhile_start_N ; loop back to re-check the condition
+            .Lwhile_end_N:
+
+        Both labels get pushed onto self.loop_labels for the duration
+        of generating the body, so any Break/Continue statement inside
+        it -- including ones nested inside an If -- can find its way
+        back here via gen_break/gen_continue without this method needing
+        to know anything about where inside the body they are. Popped
+        again once the body's done, so a Break/Continue *after* this
+        while (or in a sibling loop) can't accidentally resolve to this
+        loop's labels -- see the module docstring's LOOPS section for
+        why that matters once loops nest.
+
+        The body gets its own pushed/popped scope, same as an If's
+        then/else bodies, even though it's the same physical stack slots
+        being reused on every iteration (see _collect_locals) -- this is
+        purely about name resolution during code generation, not
+        anything that happens at runtime.
+        """
+        dst = Register('eax')
+        start_label = self.new_label("while_start")
+        end_label = self.new_label("while_end")
+
+        instructions = [Label(start_label)]
+        instructions.extend(self.gen_expr_into(stmt.condition, dst))
+        instructions.append(Cmp(src=Imm(0), dst=dst))
+        instructions.append(Je(end_label))
+
+        self.loop_labels.append((start_label, end_label))
+        self._push_scope()
+        for s in stmt.body:
+            instructions.extend(self.gen_statement(s))
+        self._pop_scope()
+        self.loop_labels.pop()
+
+        instructions.append(Jmp(start_label))
+        instructions.append(Label(end_label))
+        return instructions
+
+    def gen_break(self, stmt: Break) -> List[Instruction]:
+        # semantic.py already guarantees this only appears inside a
+        # loop; the IndexError-avoiding check here is the same defensive
+        # posture as _local_offset's -- see the module docstring on
+        # generate_asm/compile_to_asm for why codegen still checks for
+        # itself rather than trusting semantic analysis unconditionally.
+        if not self.loop_labels:
+            raise CodegenError("'break' outside of a loop")
+        _, end_label = self.loop_labels[-1]
+        return [Jmp(end_label)]
+
+    def gen_continue(self, stmt: Continue) -> List[Instruction]:
+        if not self.loop_labels:
+            raise CodegenError("'continue' outside of a loop")
+        start_label, _ = self.loop_labels[-1]
+        return [Jmp(start_label)]
 
     def gen_expr_stmt(self, stmt: ExprStmt) -> List[Instruction]:
         # Evaluated the same way as any other expression, into %eax --
