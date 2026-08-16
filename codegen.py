@@ -864,6 +864,15 @@ class CodeGenerator:
         self.loop_labels: List[tuple] = []  # stack of (start_label, end_label), innermost last; see LOOPS
         self.string_literals: List[tuple] = []  # (label, content) pairs; see STRINGS
         self.function_return_types: Dict[str, str] = {}  # name -> return type string; see FUNCTIONS
+        # Lazily created, then cached and reused for the rest of this
+        # compilation -- see gen_print_call_into and the module
+        # docstring's BUILTINS section for why these specifically (and
+        # only these) get a small dedicated cache rather than following
+        # string_literals' usual "every occurrence gets its own label,
+        # no dedup" policy.
+        self._int_format_label = None
+        self._true_str_label = None
+        self._false_str_label = None
 
     def new_label(self, prefix: str) -> str:
         """Returns a fresh, uniquely-numbered local label like
@@ -1043,6 +1052,13 @@ class CodeGenerator:
         if isinstance(expr, Variable):
             return self._local_type(expr.name)
         if isinstance(expr, Call):
+            # 'print' isn't in function_return_types -- it was never a
+            # Function node in the Program to begin with, so it can't
+            # show up there (see the module docstring's BUILTINS
+            # section). Its type is always 'int', matching what
+            # semantic.py's check_print_call already settled on.
+            if expr.name == 'print':
+                return 'int'
             return self.function_return_types[expr.name]
         if isinstance(expr, Unary):
             return 'bool' if expr.op == UnaryOp.NOT else 'int'
@@ -1278,6 +1294,8 @@ class CodeGenerator:
                 return [MovQ(src=Memory('rbp', offset), dst=as_qword_register(dst))]
             return [Mov(src=Memory('rbp', offset), dst=dst)]
         if isinstance(expr, Call):
+            if expr.name == 'print':
+                return self.gen_print_call_into(expr, dst)
             return self.gen_call_into(expr, dst)
         if isinstance(expr, Unary):
             # Compute the operand into dst first, then apply this node's
@@ -1425,6 +1443,104 @@ class CodeGenerator:
             instructions.append(Pop(Register(_ARG_REGISTERS_64[i])))
         instructions.append(CallInstr(expr.name))
         return instructions
+
+    def gen_print_call_into(self, expr: Call, dst: Operand) -> List[Instruction]:
+        """`print(x)`: dispatches on x's *compile-time* type -- known
+        exactly, since Hornet is statically typed -- to one of three
+        completely different instruction sequences, each calling a
+        different libc function. See the module docstring's BUILTINS
+        section for why each type gets its own call rather than one
+        shared, format-driven path.
+
+          str:  puts(x)                    -- puts adds its own newline
+          int:  printf("%d\\n", x)         -- needs real formatting
+          bool: puts(x ? "true" : "false") -- a runtime branch (the
+                exact same cmp/je/jmp/label shape gen_if already uses)
+                picks which string literal's address to pass, then
+                falls through to the same puts call as the str case
+
+        Every path ends with `movl $0, %eax`, overriding whatever
+        puts/printf actually returned -- print's "return value" is a
+        clean, predictable 0 (see semantic.py's check_print_call),
+        never leaking the underlying libc call's own return convention
+        into the language.
+
+        No register-preservation concerns beyond the ones already
+        established: puts/printf are libc functions, and libc is
+        already a fully ABI-compliant citizen (that's the entire point
+        of the ABI), so calling them from inside a Hornet function's
+        body is exactly as safe as calling another Hornet function --
+        both rely on the callee-saved registers being honored by
+        whatever gets called, which is now true either way (see
+        gen_function's prologue).
+        """
+        if dst != Register('eax'):
+            raise CodegenError(f"Call codegen requires dst == %eax, got: {dst!r}")
+
+        arg = expr.args[0]
+        arg_type = self._infer_type(arg)
+
+        if arg_type == 'str':
+            instructions = self.gen_expr_into(arg, dst)
+            instructions.append(MovQ(src=as_qword_register(dst), dst=Register('rdi')))
+            instructions.append(CallInstr('puts'))
+            instructions.append(Mov(src=Imm(0), dst=dst))
+            return instructions
+
+        if arg_type == 'int':
+            fmt_label = self._get_int_format_label()
+            instructions = self.gen_expr_into(arg, dst)
+            instructions.append(Mov(src=dst, dst=Register('esi')))       # esi = value (2nd printf arg)
+            instructions.append(LeaQ(label=fmt_label, dst=Register('rdi')))  # rdi = &"%d\n" (1st arg)
+            # AL must be 0 before calling a variadic function per the
+            # SysV ABI (it tells the callee how many vector/xmm
+            # registers were used for float varargs -- always 0 here,
+            # since nothing in this language is ever passed as a float).
+            # A plain `movl $0, %eax` both clears AL and is a completely
+            # safe clobber of %eax at this point, since the value we
+            # care about was already copied into %esi just above.
+            instructions.append(Mov(src=Imm(0), dst=dst))
+            instructions.append(CallInstr('printf'))
+            instructions.append(Mov(src=Imm(0), dst=dst))
+            return instructions
+
+        if arg_type == 'bool':
+            true_label = self._get_true_str_label()
+            false_label = self._get_false_str_label()
+            false_branch_label = self.new_label("print_bool_false")
+            end_label = self.new_label("print_bool_end")
+
+            instructions = self.gen_expr_into(arg, dst)
+            instructions.append(Cmp(src=Imm(0), dst=dst))
+            instructions.append(Je(false_branch_label))
+            instructions.append(LeaQ(label=true_label, dst=Register('rdi')))
+            instructions.append(Jmp(end_label))
+            instructions.append(Label(false_branch_label))
+            instructions.append(LeaQ(label=false_label, dst=Register('rdi')))
+            instructions.append(Label(end_label))
+            instructions.append(CallInstr('puts'))
+            instructions.append(Mov(src=Imm(0), dst=dst))
+            return instructions
+
+        raise CodegenError(f"'print' has no codegen rule for type: {arg_type}")
+
+    def _get_int_format_label(self) -> str:
+        if self._int_format_label is None:
+            self._int_format_label = self.new_label("fmt_int")
+            self.string_literals.append((self._int_format_label, "%d\n"))
+        return self._int_format_label
+
+    def _get_true_str_label(self) -> str:
+        if self._true_str_label is None:
+            self._true_str_label = self.new_label("true_str")
+            self.string_literals.append((self._true_str_label, "true"))
+        return self._true_str_label
+
+    def _get_false_str_label(self) -> str:
+        if self._false_str_label is None:
+            self._false_str_label = self.new_label("false_str")
+            self.string_literals.append((self._false_str_label, "false"))
+        return self._false_str_label
 
     def gen_string_literal_into(self, expr: StringLiteral, dst: Operand) -> List[Instruction]:
         """Registers this literal's content for later emission as static

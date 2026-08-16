@@ -1,5 +1,6 @@
 def str main():
-    return hello() + ' ' + world('!')
+    print(hello() + ' ' + world('!'))
+    return ''
 
 
 def str hello():

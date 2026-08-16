@@ -33,9 +33,34 @@ Organization:
     TestWhileLoops                      (10 tests)
     TestStrings                         (13 tests)
     TestFunctions                       (12 tests)
-    TestSemanticErrors                  (53 tests)
+    TestPrint                           (12 tests)
+    TestSemanticErrors                  (58 tests)
                                         ----------
-                                        167 tests total
+                                        184 tests total
+
+A NOTE ON print AND WHY assert_stdout EXISTS
+-----------------------------------------------------------------
+`print` is the first genuinely observable I/O this language has -- every
+prior feature was only ever checkable through a program's exit code
+(the low byte of whatever `main` returns). print's entire purpose is a
+side effect (what it writes to stdout), so testing it via exit codes
+alone would be a real step down in rigor -- an exit-code check can't
+tell "printed the right text" apart from "printed nothing at all, but
+happened to exit 0 anyway". assert_stdout/assert_program_stdout check
+the compiled program's actual captured stdout content instead (see
+compile_and_run, which now passes capture_output=True for exactly this
+reason), and TestPrint uses them throughout rather than falling back to
+exit-code checks out of habit.
+
+Each of print's three argument types (int, bool, str) goes through a
+completely different instruction sequence in codegen.py's
+gen_print_call_into -- calling libc's printf, or puts, or a runtime
+branch into puts -- so TestPrint deliberately exercises all three
+individually rather than assuming "int works, so the others probably do
+too". print's return value (always a predictable int 0, never
+whatever puts/printf themselves returned) gets its own test via the
+ordinary exit-code path, since that's a case where the exit code is
+actually the relevant observable, not the printed text.
 
 A NOTE ON FUNCTION CALLS AND THE SECOND REGISTER-PRESERVATION FIX
 -----------------------------------------------------------------
@@ -256,7 +281,16 @@ def compile_and_run(source: str) -> subprocess.CompletedProcess:
             )
 
         try:
-            return subprocess.run([str(bin_path)], timeout=EXECUTION_TIMEOUT)
+            # capture_output=True so callers can also inspect .stdout --
+            # needed now that print exists and genuinely produces
+            # observable output beyond just an exit code (see
+            # assert_program_stdout below). Every prior helper here only
+            # ever looked at .returncode, so capturing stdout/stderr as
+            # well doesn't change anything about their behavior.
+            return subprocess.run(
+                [str(bin_path)], timeout=EXECUTION_TIMEOUT,
+                capture_output=True, text=True,
+            )
         except subprocess.TimeoutExpired:
             # Now that while loops exist, a genuine codegen bug (e.g. a
             # break/continue that jumps to the wrong label) could produce
@@ -328,6 +362,31 @@ def assert_program_semantic_error(source: str, match: str = None) -> None:
     ast = _parse(source)
     with pytest.raises(SemanticError, match=match):
         analyze(ast)
+
+
+def assert_stdout(body: str, expected_stdout: str, return_type: str = "int") -> None:
+    """Like assert_exit_code, but checks the program's actual printed
+    output instead of its exit code -- the only way to meaningfully
+    test `print`, whose entire observable effect (from a Hornet
+    program's point of view) is what it writes to stdout, not its exit
+    code. `body` still needs its own `return`, exactly like every other
+    body-based helper here -- this doesn't check the exit code, but
+    doesn't preclude a caller checking it too if they care."""
+    source = f"def {return_type} main():\n{body}\n"
+    result = compile_and_run(source)
+    assert result.stdout == expected_stdout, (
+        f"body:\n{body}\nexpected stdout {expected_stdout!r}, got {result.stdout!r}"
+    )
+
+
+def assert_program_stdout(source: str, expected_stdout: str) -> None:
+    """The assert_stdout counterpart to assert_program_exit_code -- takes
+    a complete, ready-to-run program rather than wrapping a body in a
+    single `main`."""
+    result = compile_and_run(source)
+    assert result.stdout == expected_stdout, (
+        f"program:\n{source}\nexpected stdout {expected_stdout!r}, got {result.stdout!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1253,6 +1312,136 @@ class TestFunctions:
 
 
 # ---------------------------------------------------------------------------
+# print: the first builtin. Every test here checks actual stdout content
+# via assert_stdout/assert_program_stdout, not just an exit code -- exit
+# codes can't tell "printed the right thing" from "printed nothing at
+# all", which is exactly the distinction that matters for a function
+# whose entire purpose is its side effect.
+# ---------------------------------------------------------------------------
+
+class TestPrint:
+    pytestmark = GCC_SKIP
+
+    def test_print_int(self):
+        assert_stdout(
+            "    print(5)\n"
+            "    return 0",
+            "5\n",
+        )
+
+    def test_print_negative_int(self):
+        assert_stdout(
+            "    print(-42)\n"
+            "    return 0",
+            "-42\n",
+        )
+
+    def test_print_str(self):
+        assert_stdout(
+            "    print('hello')\n"
+            "    return 0",
+            "hello\n",
+        )
+
+    def test_print_bool_true(self):
+        assert_stdout(
+            "    print(true)\n"
+            "    return 0",
+            "true\n",
+        )
+
+    def test_print_bool_false(self):
+        assert_stdout(
+            "    print(false)\n"
+            "    return 0",
+            "false\n",
+        )
+
+    def test_print_expression_results_not_just_literals(self):
+        """print's argument can be any expression, not just a bare
+        literal -- proves the argument is genuinely evaluated first,
+        not special-cased to only accept literal syntax."""
+        assert_stdout(
+            "    int a = 3\n"
+            "    int b = 4\n"
+            "    print(a + b)\n"
+            "    print(a > b)\n"
+            "    print('re' + 'sult')\n"
+            "    return 0",
+            "7\nfalse\nresult\n",
+        )
+
+    def test_print_multiple_calls_in_sequence(self):
+        assert_stdout(
+            "    print(1)\n"
+            "    print(2)\n"
+            "    print(3)\n"
+            "    return 0",
+            "1\n2\n3\n",
+        )
+
+    def test_print_inside_a_loop(self):
+        assert_stdout(
+            "    int i = 0\n"
+            "    while i < 3:\n"
+            "        print(i)\n"
+            "        i = i + 1\n"
+            "    return 0",
+            "0\n1\n2\n",
+        )
+
+    def test_print_inside_if_branches(self):
+        assert_stdout(
+            "    bool flag = true\n"
+            "    if flag:\n"
+            "        print('yes')\n"
+            "    else:\n"
+            "        print('no')\n"
+            "    return 0",
+            "yes\n",
+        )
+
+    def test_print_return_value_usable_as_int(self):
+        """print "returns" a clean, predictable int 0 (see
+        semantic.py's check_print_call and codegen.py's
+        gen_print_call_into) -- never leaking whatever puts/printf
+        themselves actually returned."""
+        assert_exit_code(
+            "    int x = print(5) + 41\n"
+            "    return x",
+            41,
+        )
+
+    def test_print_inside_a_user_defined_function(self):
+        assert_program_stdout(
+            "def int announce(int x):\n"
+            "    print(x)\n"
+            "    return x * 2\n"
+            "\n"
+            "def int main():\n"
+            "    int result = announce(21)\n"
+            "    print(result)\n"
+            "    return 0\n",
+            "21\n42\n",
+        )
+
+    def test_print_repeated_int_calls_reuse_cached_format_string(self):
+        """Not observable from stdout content alone, but this exercises
+        the lazy-cached %d format-string label (see codegen.py's
+        _get_int_format_label) across multiple print(int) calls in the
+        same program -- if the caching logic were broken (e.g. reusing
+        a stale label across functions), this would show up as garbled
+        or missing output rather than a clean failure."""
+        assert_stdout(
+            "    print(1)\n"
+            "    print(22)\n"
+            "    print(333)\n"
+            "    return 0",
+            "1\n22\n333\n",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Semantic analysis: scope/declaration checking and the strict int/bool
 # type system. These never reach codegen -- each one asserts that
 # analyze() itself raises SemanticError -- so they don't need gcc and
@@ -1791,3 +1980,46 @@ class TestSemanticErrors:
             "    return is_even(n - 1)\n"
         )
         analyze(ast)  # should not raise
+
+    # -- print (the first builtin) ----------------------------------------
+
+    def test_print_wrong_argument_count_zero(self):
+        assert_semantic_error(
+            "    print()\n"
+            "    return 0",
+            match="expects exactly 1 argument",
+        )
+
+    def test_print_wrong_argument_count_multiple(self):
+        assert_semantic_error(
+            "    print(1, 2)\n"
+            "    return 0",
+            match="expects exactly 1 argument",
+        )
+
+    def test_print_argument_must_still_be_well_typed(self):
+        """print accepts any *valid* type, but its argument still has to
+        actually type-check on its own -- an undeclared variable inside
+        it is still an error, same as anywhere else."""
+        assert_semantic_error(
+            "    print(undeclared_variable)\n"
+            "    return 0",
+            match="undeclared variable",
+        )
+
+    def test_redefining_print_is_rejected(self):
+        assert_program_semantic_error(
+            "def int print(int x):\n"
+            "    return x\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="builtin",
+        )
+
+    def test_print_accepts_int_bool_and_str_without_raising(self):
+        """The positive control: all three types must be individually
+        acceptable to print, with no error for any of them."""
+        for arg in ("5", "true", "'hello'"):
+            ast = _parse(f"def int main():\n    print({arg})\n    return 0\n")
+            analyze(ast)  # should not raise

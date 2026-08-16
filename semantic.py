@@ -140,6 +140,30 @@ already-declared locals -- which, as a side effect, means a duplicate
 parameter name (`def int f(int a, int a):`) is caught by the ordinary
 _declare collision check, with no separate check needed for it.
 
+BUILTINS
+---------
+`print` is the first (only, so far) builtin -- a callable that isn't an
+ordinary user-defined function and doesn't go through self.functions at
+all. check_call special-cases it before ever consulting self.functions,
+and analyze()'s signature-collection pass rejects any user function
+whose name collides with a builtin (_BUILTIN_FUNCTION_NAMES), so there's
+no ambiguity about which one wins -- a program simply can't define its
+own `print`.
+
+check_print_call accepts exactly one argument of *any* type (int, bool,
+and str are all printable, and there's no reason to force a caller to
+pick a differently-named builtin per type the way an ordinary function's
+fixed parameter types would require), and always "returns" int. That
+return type is a bit of a formality -- Hornet has no void type, and
+`print(x)` is almost always used as a bare expression statement whose
+value is thrown away -- but giving it *some* real type is what lets it
+flow through the exact same ExprStmt path every other call already
+uses, with nothing print-specific needed anywhere else in this pass.
+codegen.py is where print's actual behavior (which underlying libc call
+per argument type, and that it always evaluates to a clean 0 rather
+than leaking through whatever puts/printf themselves return) lives --
+see its BUILTINS section.
+
 ERROR REPORTING
 -----------------
 This raises SemanticError on the *first* problem found and stops,
@@ -218,6 +242,14 @@ def type_from_name(name: str) -> Type:
         raise SemanticError(f"Unknown type '{name}'")
 
 
+# Names that are builtins rather than ordinary user-definable functions
+# -- see check_call and the module docstring's BUILTINS section. Kept as
+# a set (not hardcoded string comparisons scattered around) so a second
+# builtin later is "add a name here plus its own check_*/gen_* pair",
+# not a search-and-replace.
+_BUILTIN_FUNCTION_NAMES = {'print'}
+
+
 # ---------------------------------------------------------------------------
 # Errors
 # ---------------------------------------------------------------------------
@@ -266,6 +298,11 @@ class SemanticAnalyzer:
         # already there. See the module docstring's FUNCTIONS section.
         self.functions = {}
         for fn in program.functions:
+            if fn.name in _BUILTIN_FUNCTION_NAMES:
+                raise SemanticError(
+                    f"'{fn.name}' is a builtin and can't be redefined as "
+                    f"a function"
+                )
             if fn.name in self.functions:
                 raise SemanticError(f"Function '{fn.name}' is already declared")
             param_types = [type_from_name(p.type) for p in fn.params]
@@ -447,6 +484,8 @@ class SemanticAnalyzer:
         raise SemanticError(f"No semantic rule for expression: {expr!r}")
 
     def check_call(self, expr: Call) -> Type:
+        if expr.name == 'print':
+            return self.check_print_call(expr)
         if expr.name not in self.functions:
             raise SemanticError(f"Call to undeclared function '{expr.name}'")
         param_types, return_type = self.functions[expr.name]
@@ -464,6 +503,23 @@ class SemanticAnalyzer:
                     f"{expected_type}, got {actual_type}"
                 )
         return return_type
+
+    def check_print_call(self, expr: Call) -> Type:
+        """`print` takes exactly one argument, of *any* type -- unlike
+        an ordinary function it isn't tied to one fixed parameter type,
+        since int/bool/str are all printable and there's no reason to
+        force a caller to pick a differently-named builtin per type.
+        Always "returns" int (see the module docstring's BUILTINS
+        section for why 0, specifically) -- Hornet has no void type, and
+        this keeps `print(x)` usable as an ordinary expression statement
+        via the same ExprStmt path every other call already goes
+        through, with nothing print-specific needed there."""
+        if len(expr.args) != 1:
+            raise SemanticError(
+                f"'print' expects exactly 1 argument, got {len(expr.args)}"
+            )
+        self.check_expr(expr.args[0])  # any type is fine; just validate it
+        return Type.INT
 
     def check_constant(self, expr: Constant) -> Type:
         if isinstance(expr.value, float) and not expr.value.is_integer():
