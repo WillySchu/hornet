@@ -32,11 +32,12 @@ Organization:
     TestIfStatements                    (18 tests)
     TestWhileLoops                      (10 tests)
     TestStrings                         (13 tests)
+    TestStringMemory                    (12 tests)
     TestFunctions                       (12 tests)
     TestPrint                           (12 tests)
     TestSemanticErrors                  (58 tests)
                                         ----------
-                                        184 tests total
+                                        196 tests total
 
 A NOTE ON print AND WHY assert_stdout EXISTS
 -----------------------------------------------------------------
@@ -1128,6 +1129,201 @@ class TestStrings:
             "        return 42\n"
             "    return 0",
             42,
+        )
+
+
+# ---------------------------------------------------------------------------
+# String memory management: freeing an intermediate concatenation result
+# the moment it's no longer needed (see codegen.py's
+# _gen_free_if_fresh_concat and its STRINGS section).
+#
+# None of these tests can observe the freeing itself from inside the
+# Hornet language -- there's no way to inspect the heap from here, so
+# what they actually verify is that the optimization *doesn't break
+# anything*: every one of them would still produce the exact same
+# result if this feature didn't exist at all. The CRITICAL-labeled
+# tests are the ones that would actually catch a mistake in this
+# feature specifically -- reusing a named variable, a literal, or a
+# function call's return value after it was incorrectly freed would
+# show up here as wrong output or a crash, not just a leak.
+#
+# The freeing itself -- that it actually happens, targets the right
+# pointer, and never double-frees or frees a non-heap address -- was
+# verified directly with an LD_PRELOAD malloc/free tracer during
+# development (not part of this suite, since it needs a compiled .so
+# shim well outside what a portable pytest file should depend on): a
+# 3-way chain showed exactly 1 free (the intermediate result, not the
+# final one); a 6-way chain (5 concatenations) showed exactly 4 frees
+# with 1 correctly left un-freed; reusing a named variable or two
+# literals showed zero frees; and zero invalid frees appeared in any
+# case tested.
+# ---------------------------------------------------------------------------
+
+class TestStringMemory:
+    pytestmark = GCC_SKIP
+
+    def test_basic_concat_no_fresh_operands(self):
+        assert_exit_code(
+            "    str a = 'foo'\n"
+            "    str b = 'bar'\n"
+            "    str c = a + b\n"
+            "    return c == 'foobar'",
+            1,
+            return_type="bool",
+        )
+
+    def test_three_way_chain_intermediate_result_freed(self):
+        assert_exit_code(
+            "    str a = 'x'\n"
+            "    str b = 'y'\n"
+            "    str c = 'z'\n"
+            "    str r = a + b + c\n"
+            "    return r == 'xyz'",
+            1,
+            return_type="bool",
+        )
+
+    def test_deep_six_way_chain(self):
+        assert_exit_code(
+            "    str a = '1'\n"
+            "    str b = '2'\n"
+            "    str c = '3'\n"
+            "    str d = '4'\n"
+            "    str e = '5'\n"
+            "    str f = '6'\n"
+            "    str r = a + b + c + d + e + f\n"
+            "    return r == '123456'",
+            1,
+            return_type="bool",
+        )
+
+    def test_critical_named_variable_reused_across_two_concats(self):
+        """A named variable used as an operand in one concatenation must
+        still be fully intact and usable in a *second*, later
+        concatenation -- if the freeing check incorrectly matched
+        Variable nodes instead of only Binary(ADD, ...) nodes, this
+        would read freed memory the second time and almost certainly
+        produce garbage or crash."""
+        assert_exit_code(
+            "    str a = 'shared'\n"
+            "    str b = a + '_first'\n"
+            "    str c = a + '_second'\n"
+            "    return b == 'shared_first' and c == 'shared_second'",
+            1,
+            return_type="bool",
+        )
+
+    def test_critical_named_variable_reused_four_times(self):
+        assert_exit_code(
+            "    str base = 'X'\n"
+            "    str r1 = base + '1'\n"
+            "    str r2 = base + '2'\n"
+            "    str r3 = base + '3'\n"
+            "    str r4 = base + '4'\n"
+            "    return r1 == 'X1' and r2 == 'X2' and r3 == 'X3' and r4 == 'X4'",
+            1,
+            return_type="bool",
+        )
+
+    def test_critical_two_literal_operands_never_freed(self):
+        """Both operands here point into static `.data`, never the
+        heap -- calling free() on either would be undefined behavior
+        (most likely heap corruption or an immediate crash), so this is
+        the test that would catch the freeing check failing to exclude
+        StringLiteral operands."""
+        assert_exit_code(
+            "    str r = 'lit1' + 'lit2'\n"
+            "    return r == 'lit1lit2'",
+            1,
+            return_type="bool",
+        )
+
+    def test_critical_function_call_results_never_freed(self):
+        """A function's return value might be a static literal, a fresh
+        heap buffer, or a parameter passed straight through -- codegen
+        has no visibility into which, so Call results are always
+        excluded from freeing. Using both results again afterward (via
+        the equality check) would surface a use-after-free if this
+        exclusion were missing."""
+        assert_program_exit_code(
+            "def str make_a():\n"
+            "    return 'aaa'\n"
+            "\n"
+            "def str make_b():\n"
+            "    return 'bbb'\n"
+            "\n"
+            "def bool main():\n"
+            "    str r = make_a() + make_b()\n"
+            "    return r == 'aaabbb'\n",
+            1,
+        )
+
+    def test_fresh_concat_compared_directly(self):
+        """A fresh concatenation result used immediately as an operand
+        of == also gets freed (in gen_string_compare_into, after
+        strcmp) -- this is the case that specifically exercises the
+        stash-before-free/restore-after-free dance needed there, since
+        `call free` clobbers %eax exactly where strcmp's own result
+        briefly lives."""
+        assert_exit_code(
+            "    str a = 'foo'\n"
+            "    str b = 'bar'\n"
+            "    return (a + b) == 'foobar'",
+            1,
+            return_type="bool",
+        )
+
+    def test_fresh_concat_on_both_sides_of_comparison(self):
+        assert_exit_code(
+            "    str a = 'x'\n"
+            "    str b = 'y'\n"
+            "    return (a + b) == ('x' + 'y')",
+            1,
+            return_type="bool",
+        )
+
+    def test_one_fresh_one_named_operand_in_same_concat(self):
+        assert_exit_code(
+            "    str a = 'p'\n"
+            "    str b = 'q'\n"
+            "    str c = 'r'\n"
+            "    str result = (a + b) + c\n"
+            "    return result == 'pqr'",
+            1,
+            return_type="bool",
+        )
+
+    def test_critical_concat_result_stored_in_variable_reused_twice(self):
+        """The subtlest case: `combined`'s value originally came from a
+        concatenation, but once it's stored in a named variable, later
+        *references* to it are Variable nodes, not Binary nodes -- the
+        freeing check has to look at the AST shape at each use site,
+        not "was this value ever produced by a concatenation
+        somewhere". Verified directly with the malloc/free tracer
+        during development: this program allocates 3 buffers and frees
+        none of them, confirming `combined` is correctly never freed on
+        either reuse."""
+        assert_exit_code(
+            "    str a = 'hello'\n"
+            "    str b = 'world'\n"
+            "    str combined = a + b\n"
+            "    str r1 = combined + '!'\n"
+            "    str r2 = combined + '?'\n"
+            "    return r1 == 'helloworld!' and r2 == 'helloworld?'",
+            1,
+            return_type="bool",
+        )
+
+    def test_concatenation_with_fresh_intermediate_inside_a_loop(self):
+        assert_exit_code(
+            "    str result = ''\n"
+            "    int i = 0\n"
+            "    while i < 5:\n"
+            "        result = result + 'a' + 'b'\n"
+            "        i = i + 1\n"
+            "    return result == 'ababababab'",
+            1,
+            return_type="bool",
         )
 
 

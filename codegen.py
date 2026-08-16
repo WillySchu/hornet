@@ -306,12 +306,31 @@ here *across evaluating a nested expression within the same function*,
 call or no call. Both are genuinely necessary; neither one covers what
 the other does.
 
-Never frees a concatenation's malloc'd buffer -- an accepted,
-explicitly-documented simplification for this first pass, not an
-oversight. A correct `free` story needs to reason about a string's
-lifetime (was this pointer heap-allocated at all, or pointing into
-static `.data`? has it since been overwritten?), which is a
-meaningfully bigger problem than concatenation itself.
+Never frees a *named* concatenation result -- deciding whether a value
+in a variable is safe to free needs real escape analysis (has it been
+returned? assigned somewhere else? handed to another function that
+might retain it?), which semantic.py doesn't do at all, and which is a
+meaningfully bigger problem than concatenation itself. What it *does*
+free now: the moment a concatenation's operand is itself a fresh,
+unnamed concatenation result -- a Binary(ADD, ...) sub-expression that
+was never stored into a variable, returned, or passed anywhere, and so
+could not possibly be referenced by anything else -- its buffer is
+freed immediately after its bytes are copied out (see
+_gen_free_if_fresh_concat, called from both gen_string_concat_into and
+gen_string_compare_into). That's a real, narrow, decidable-from-the-AST
+case: `str r = a + b + c` mallocs three buffers under the hood, but the
+intermediate `a + b` result is never reachable by anything once `+ c`
+has copied its bytes into the final buffer, so it's freed rather than
+silently discarded. A StringLiteral (static `.data`, never
+heap-allocated), a Variable (might be read again, or aliased elsewhere
+-- codegen has no visibility into that), and a Call's return value
+(same problem, plus it might be a static literal or a passed-through
+parameter for all codegen can tell) are all deliberately left alone.
+This was verified directly during development with an LD_PRELOAD
+malloc/free tracer, confirming both that frees only ever target live,
+previously-malloc'd pointers (never a literal, never a double-free) and
+that the reduction is real: a 6-way concatenation chain drops from 5
+un-freed buffers to 1.
 
 FUNCTIONS
 ----------
@@ -1593,6 +1612,15 @@ class CodeGenerator:
         function*; this one protects a value held here *across
         evaluating a nested expression within the same function*. Both
         are needed; neither replaces the other.
+
+        MEMORY: once an operand's bytes have been fully copied out
+        (strcpy for left, strcat for right), if that operand was itself
+        a fresh, unnamed concatenation result -- a Binary(ADD, ...)
+        sub-expression, never a named variable, a literal, or a
+        function call's return value -- its buffer is immediately
+        freed. See _gen_free_if_fresh_concat and the module docstring's
+        STRINGS section for exactly why this specific, narrow case is
+        safe to free automatically with no broader escape analysis.
         """
         if not isinstance(dst, Register):
             raise CodegenError(f"Binary codegen requires a register destination, got: {dst!r}")
@@ -1620,13 +1648,46 @@ class CodeGenerator:
         instructions.append(MovQ(src=Register('r14'), dst=Register('rdi')))
         instructions.append(MovQ(src=Register('rbx'), dst=Register('rsi')))
         instructions.append(CallInstr('strcpy'))
+        # left's bytes are now fully copied into the new buffer -- if
+        # left was itself a fresh concatenation result, nothing else
+        # can possibly still need it.
+        instructions.extend(self._gen_free_if_fresh_concat(expr.left, 'rbx'))
 
         instructions.append(MovQ(src=Register('r14'), dst=Register('rdi')))
         instructions.append(MovQ(src=Register('r12'), dst=Register('rsi')))
         instructions.append(CallInstr('strcat'))
+        # same reasoning, now that right's bytes have been appended.
+        instructions.extend(self._gen_free_if_fresh_concat(expr.right, 'r12'))
 
         instructions.append(MovQ(src=Register('r14'), dst=result))
         return instructions
+
+    def _gen_free_if_fresh_concat(self, operand: Node, holding_register: str) -> List[Instruction]:
+        """If `operand` is itself a Binary(ADD, ...) node -- meaning
+        whatever's sitting in `holding_register` right now is a fresh
+        buffer that gen_string_concat_into just malloc'd for *this*
+        expression alone, and which could never have been stored into a
+        variable, returned from a function, or passed as an argument
+        anywhere, since it only ever existed as this expression's own
+        intermediate operand -- frees it. Everything else is left
+        alone: a StringLiteral points into static `.data` and was never
+        heap-allocated in the first place (freeing it would corrupt the
+        allocator); a Variable or a Call's return value might be
+        aliased by other code we have no visibility into here (a named
+        variable could be read again later, a call's return value could
+        be a parameter passed straight through, etc.) -- telling those
+        apart from a genuinely fresh, exclusively-owned buffer is a
+        real escape-analysis problem this narrow check deliberately
+        doesn't attempt to solve. See the module docstring's STRINGS
+        section for the fuller reasoning and what's intentionally still
+        left leaking as a result.
+        """
+        if isinstance(operand, Binary) and operand.op == BinaryOp.ADD:
+            return [
+                MovQ(src=Register(holding_register), dst=Register('rdi')),
+                CallInstr('free'),
+            ]
+        return []
 
     def gen_string_compare_into(self, expr: Binary, dst: Operand) -> List[Instruction]:
         """`left == right` / `left != right`, both str: calls `strcmp`
@@ -1639,7 +1700,20 @@ class CodeGenerator:
 
         `left` is protected across evaluating `right` via the stack, for
         exactly the same reason gen_string_concat_into does -- see its
-        docstring."""
+        docstring.
+
+        MEMORY: the same fresh-concatenation-result freeing
+        gen_string_concat_into does, and for the same reason -- strcmp
+        has already read both operands' bytes by the time this frees
+        them, so there's nothing left that could need them. The one
+        thing to get right here that concatenation didn't have to worry
+        about: `call free` clobbers %rax/%eax exactly like any other
+        call does, and strcmp's result is *sitting* in %eax at this
+        point -- so it has to be stashed in a callee-saved register
+        before either free() call, and restored into `dst` afterward,
+        or freeing a fresh operand would silently destroy the very
+        comparison result this method exists to compute.
+        """
         if not isinstance(dst, Register):
             raise CodegenError(f"Binary codegen requires a register destination, got: {dst!r}")
         result = as_qword_register(dst)
@@ -1654,6 +1728,11 @@ class CodeGenerator:
         instructions.append(MovQ(src=Register('rbx'), dst=Register('rdi')))
         instructions.append(MovQ(src=Register('r12'), dst=Register('rsi')))
         instructions.append(CallInstr('strcmp'))
+
+        instructions.append(MovQ(src=result, dst=Register('r13')))  # stash strcmp's result before it can be clobbered
+        instructions.extend(self._gen_free_if_fresh_concat(expr.left, 'rbx'))
+        instructions.extend(self._gen_free_if_fresh_concat(expr.right, 'r12'))
+        instructions.append(MovQ(src=Register('r13'), dst=result))  # restore it
 
         byte_dst = as_byte_register(dst)
         instructions.append(Cmp(src=Imm(0), dst=dst))

@@ -32,3 +32,4 @@ Updates:
 - Ternary.
 - For loops.
 - Free memory `malloc`ed by string concatenation.
+- Build Dockerfile to run memory test.

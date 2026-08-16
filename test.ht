@@ -1,4 +1,6 @@
 def str main():
+    int print = 5
+    print(print)
     print(hello() + ' ' + world('!'))
     return ''
 
