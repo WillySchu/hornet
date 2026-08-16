@@ -153,6 +153,7 @@ from parser import (
     Parser,
     Program,
     Return,
+    StringLiteral,
     Unary,
     UnaryOp,
     VarDecl,
@@ -168,6 +169,7 @@ from parser import (
 class Type(Enum):
     INT = auto()
     BOOL = auto()
+    STR = auto()
 
     def __str__(self) -> str:
         return self.name.lower()
@@ -176,6 +178,7 @@ class Type(Enum):
 _TYPE_NAMES = {
     'int': Type.INT,
     'bool': Type.BOOL,
+    'str': Type.STR,
 }
 
 
@@ -209,8 +212,11 @@ class SemanticError(Exception):
 # what each category actually requires; this table is only "which
 # bucket does this operator fall into", kept separate from check_binary
 # so adding an operator later is "add it to the right set" rather than
-# another branch of if/elif.
-_ARITHMETIC_OPS = {BinaryOp.ADD, BinaryOp.SUBTRACT, BinaryOp.MULTIPLY, BinaryOp.DIVIDE}
+# another branch of if/elif. ADD is deliberately NOT in this set -- it's
+# overloaded (int+int is arithmetic, str+str is concatenation), so
+# check_binary handles it as its own case rather than lumping it in with
+# operators that only ever mean one thing.
+_INT_ONLY_ARITHMETIC_OPS = {BinaryOp.SUBTRACT, BinaryOp.MULTIPLY, BinaryOp.DIVIDE}
 _ORDERING_OPS = {BinaryOp.LESS_THAN, BinaryOp.GREATER_THAN,
                   BinaryOp.LESS_THAN_OR_EQUAL, BinaryOp.GREATER_THAN_OR_EQUAL}
 _EQUALITY_OPS = {BinaryOp.EQUAL, BinaryOp.NOT_EQUAL}
@@ -383,6 +389,8 @@ class SemanticAnalyzer:
             return self.check_constant(expr)
         if isinstance(expr, BoolLiteral):
             return Type.BOOL
+        if isinstance(expr, StringLiteral):
+            return Type.STR
         if isinstance(expr, Variable):
             return self.check_variable(expr)
         if isinstance(expr, Unary):
@@ -425,7 +433,22 @@ class SemanticAnalyzer:
         right_type = self.check_expr(expr.right)
         op = expr.op
 
-        if op in _ARITHMETIC_OPS:
+        if op == BinaryOp.ADD:
+            # Overloaded: int+int is arithmetic addition, str+str is
+            # concatenation. Anything else -- mixing the two, or trying
+            # to add a bool -- is a type error. This has to be checked
+            # explicitly here rather than via _require_type, since
+            # there's no single "the" expected type to require.
+            if left_type == Type.INT and right_type == Type.INT:
+                return Type.INT
+            if left_type == Type.STR and right_type == Type.STR:
+                return Type.STR
+            raise SemanticError(
+                f"'+' requires two int operands or two str operands, "
+                f"got {left_type} and {right_type}"
+            )
+
+        if op in _INT_ONLY_ARITHMETIC_OPS:
             self._require_type(left_type, Type.INT, op)
             self._require_type(right_type, Type.INT, op)
             return Type.INT

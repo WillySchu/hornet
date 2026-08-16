@@ -221,6 +221,21 @@ class BoolLiteral(Node):
 
 
 @dataclass
+class StringLiteral(Node):
+    """`'...'`. `value` holds the string's *actual* content -- quotes
+    already stripped and escape sequences already resolved (`\\'` -> `'`,
+    `\\n` -> a real newline, etc.) by parse_primary, not the raw source
+    text. That mirrors how Constant already works for numbers (the
+    parser turns `tok.val` -- the raw '2' or '2.5' text -- into a real
+    Python int/float once, rather than every downstream pass re-parsing
+    the source string itself)."""
+    value: str
+
+    def pretty(self) -> str:
+        return f"StringLiteral(value: {self.value!r})"
+
+
+@dataclass
 class Variable(Node):
     """A reference to a local variable, e.g. the `a` in `a + 1`."""
     name: str
@@ -391,6 +406,50 @@ class ParseError(Exception):
     """Raised when the parser encounters unexpected or malformed input."""
 
 
+# Escape sequences recognized inside a STRING literal's raw text. Keyed
+# by the character *after* the backslash.
+_ESCAPE_SEQUENCES = {
+    'n': '\n',
+    't': '\t',
+    'r': '\r',
+    '0': '\0',
+    "'": "'",
+    '"': '"',
+    '\\': '\\',
+}
+
+
+def _unescape_string_literal(raw: str) -> str:
+    """Converts a STRING token's raw text (still including its
+    surrounding quotes, e.g. the 7 characters `'it\\'s'`) into the
+    string's actual content: quotes stripped, and each backslash escape
+    resolved via _ESCAPE_SEQUENCES.
+
+    This mirrors how Constant's value is only ever computed once, here
+    in the parser, rather than every later pass re-parsing `tok.val`
+    itself -- codegen.py just needs the real bytes to embed as a
+    string constant, not the original source syntax for them.
+
+    An escape not in the table (`\\x` for some `x` the lexer's own
+    STRING regex still happily matched, since it accepts a backslash
+    followed by *any* single character) is treated leniently: the
+    backslash is dropped and `x` is kept as-is, rather than raising.
+    """
+    inner = raw[1:-1]  # strip the surrounding single quotes
+    chars = []
+    i = 0
+    while i < len(inner):
+        ch = inner[i]
+        if ch == '\\' and i + 1 < len(inner):
+            nxt = inner[i + 1]
+            chars.append(_ESCAPE_SEQUENCES.get(nxt, nxt))
+            i += 2
+        else:
+            chars.append(ch)
+            i += 1
+    return ''.join(chars)
+
+
 # Maps a prefix-operator token straight to the UnaryOp it represents.
 _UNARY_OPS = {
     TokenType.MINUS: UnaryOp.NEGATE,
@@ -521,15 +580,15 @@ class Parser:
         return Function(name=name_tok.val, return_type=return_type, body=body)
 
     def parse_type(self) -> str:
-        # 'int' or 'bool' -- semantic.py is what actually knows what to
-        # do with the resulting string; the parser just needs to accept
-        # either type keyword here.
-        if self.check(TokenType.INT, TokenType.BOOL):
+        # 'int', 'bool', or 'str' -- semantic.py is what actually knows
+        # what to do with the resulting string; the parser just needs to
+        # accept one of the three type keywords here.
+        if self.check(TokenType.INT, TokenType.BOOL, TokenType.STR):
             return self.advance().val
         tok = self.current()
         raise ParseError(
-            f"Expected a type ('int' or 'bool'), got {tok.type} ('{tok.val}') "
-            f"at line {tok.line}, column {tok.col}"
+            f"Expected a type ('int', 'bool', or 'str'), got {tok.type} "
+            f"('{tok.val}') at line {tok.line}, column {tok.col}"
         )
 
     def parse_block(self) -> List[Node]:
@@ -559,7 +618,7 @@ class Parser:
         return statements
 
     def parse_statement(self) -> Node:
-        if self.check(TokenType.INT, TokenType.BOOL):
+        if self.check(TokenType.INT, TokenType.BOOL, TokenType.STR):
             return self.parse_var_decl()
         if self.check(TokenType.RETURN):
             return self.parse_return()
@@ -702,6 +761,9 @@ class Parser:
         if self.check(TokenType.TRUE, TokenType.FALSE):
             tok = self.advance()
             return BoolLiteral(value=(tok.type == TokenType.TRUE))
+        if self.check(TokenType.STRING):
+            tok = self.advance()
+            return StringLiteral(value=_unescape_string_literal(tok.val))
         if self.check(TokenType.IDENTIFIER):
             tok = self.advance()
             return Variable(name=tok.val)

@@ -271,6 +271,7 @@ from parser import (
     Parser,
     Program,
     Return,
+    StringLiteral,
     Unary,
     UnaryOp,
     VarDecl,
@@ -428,6 +429,20 @@ class Add(Instruction):
 
 
 @dataclass
+class AddQ(Instruction):
+    """64-bit dst += src (`addq`). Used only for the length arithmetic
+    in gen_string_concat_into (`len(left) + len(right) + 1`) -- string
+    lengths come back from `strlen` as a full 64-bit size_t, so this
+    needs to be the 64-bit add, not Add's 32-bit `addl`."""
+    src: Operand
+    dst: Operand
+    mnemonic = "addq"
+
+    def operands(self) -> List[str]:
+        return [self.src.emit(), self.dst.emit()]
+
+
+@dataclass
 class Sub(Instruction):
     """dst -= src."""
     src: Operand
@@ -497,10 +512,53 @@ class Pop(Instruction):
 
 
 @dataclass
+class LeaQ(Instruction):
+    """Loads the *address* of `label` into `dst`, RIP-relative (the
+    `(%rip)` addressing mode). This is the standard, PIE-friendly way to
+    get a static data address on x86-64 -- an absolute `movq
+    $label, %reg` would work on some setups but isn't safe to rely on
+    once position-independent executables are in the picture (the
+    default for `gcc`-produced binaries on both Linux and macOS), so
+    this is what every string literal's address gets loaded with (see
+    gen_string_literal_into)."""
+    label: str
+    dst: Register
+    mnemonic = "leaq"
+
+    def operands(self) -> List[str]:
+        return [f"{self.label}(%rip)", self.dst.emit()]
+
+
+@dataclass
+class Call(Instruction):
+    """Calls an external function by symbol name, e.g. `call strlen`.
+
+    `target` is always the *unprefixed* C symbol name (`malloc`, not
+    `_malloc`) -- Emitter is what knows whether the target platform
+    needs a leading underscore (see its emit_function), the same way it
+    already decides that for this program's own function labels. Emit()
+    here (unprefixed) is only ever used if a Call is inspected/rendered
+    outside of Emitter; the real rendering path always goes through
+    Emitter's own handling instead.
+
+    Requires %rsp to be 16-byte aligned at the point this executes, per
+    the SysV ABI -- see codegen.py's LIBRARY CALLS section for how that
+    invariant is maintained without explicit runtime alignment checks.
+    """
+    target: str
+    mnemonic = "call"
+
+    def operands(self) -> List[str]:
+        return [self.target]
+
+
+@dataclass
 class MovQ(Instruction):
-    """64-bit mov (`movq`). Distinct from Mov (`movl`, 32-bit) -- used
-    for frame-pointer setup (`movq %rsp, %rbp`), never for general int
-    computation, since every value in this language is a 32-bit int."""
+    """64-bit mov (`movq`). Used for frame-pointer setup (`movq %rsp,
+    %rbp`) and for anything genuinely 64-bit -- which, as of `str`, now
+    includes string pointers (see codegen.py's LOCAL VARIABLES and
+    STRINGS sections). int/bool still exclusively use the 32-bit Mov
+    (`movl`)."""
     src: Operand
     dst: Operand
     mnemonic = "movq"
@@ -584,6 +642,13 @@ class AsmFunction:
 @dataclass
 class AsmProgram:
     functions: List[AsmFunction] = field(default_factory=list)
+    # (label, content) pairs for every string literal anywhere in the
+    # program, collected across all functions during generation (see
+    # CodeGenerator.gen_string_literal_into). These aren't tied to any
+    # one function's frame -- they're static, immutable data -- so they
+    # live at the AsmProgram level and get emitted once, in a shared
+    # `.data` block, by Emitter (see its emit()).
+    string_literals: List[tuple] = field(default_factory=list)
 
 
 # 32-bit register name -> its 8-bit low-byte alias (e.g. %eax -> %al).
@@ -647,8 +712,9 @@ class CodeGenerator:
         self._label_count = 0
         self._var_offsets: Dict[int, int] = {}  # id(VarDecl node) -> its permanent Memory offset
         self._next_offset = 0
-        self.scopes: List[Dict[str, int]] = []  # name -> offset, generation-time; see LOCAL VARIABLES
+        self.scopes: List[Dict[str, tuple]] = []  # name -> (offset, type_str), generation-time; see LOCAL VARIABLES
         self.loop_labels: List[tuple] = []  # stack of (start_label, end_label), innermost last; see LOOPS
+        self.string_literals: List[tuple] = []  # (label, content) pairs; see STRINGS
 
     def new_label(self, prefix: str) -> str:
         """Returns a fresh, uniquely-numbered local label like
@@ -661,7 +727,8 @@ class CodeGenerator:
         return label
 
     def generate(self, program: Program) -> AsmProgram:
-        return AsmProgram(functions=[self.gen_function(fn) for fn in program.functions])
+        functions = [self.gen_function(fn) for fn in program.functions]
+        return AsmProgram(functions=functions, string_literals=self.string_literals)
 
     def gen_function(self, fn: Function) -> AsmFunction:
         # Fresh allocator state per function -- variables don't persist
@@ -691,10 +758,15 @@ class CodeGenerator:
         VarDecl found its own permanent stack slot, keyed by the AST
         node's identity rather than its name -- see the module
         docstring's LOCAL VARIABLES section for why that distinction
-        now matters."""
+        now matters.
+
+        Every slot is 8 bytes, even for a 4-byte int/bool, now that str
+        (an 8-byte pointer) exists -- see the module docstring's
+        STRINGS section for why a uniform width was chosen over
+        variable-width packing."""
         for stmt in statements:
             if isinstance(stmt, VarDecl):
-                self._next_offset -= 4
+                self._next_offset -= 8
                 self._var_offsets[id(stmt)] = self._next_offset
             elif isinstance(stmt, If):
                 self._collect_locals(stmt.then_body)
@@ -705,10 +777,10 @@ class CodeGenerator:
 
     def _frame_size(self) -> int:
         # Total bytes used by locals, rounded up to a 16-byte boundary.
-        # Not strictly required yet (nothing here makes a `call`, so the
-        # SysV ABI's 16-byte-alignment-before-call rule doesn't bind),
-        # but keeping frames aligned now avoids having to retrofit it
-        # once function calls exist.
+        # Now genuinely required, not just good practice: gen_string_*
+        # emits real `call` instructions (to malloc/strlen/strcpy/
+        # strcat/strcmp), and the SysV ABI requires %rsp to be
+        # 16-byte-aligned at the point of every one of those.
         raw = -self._next_offset
         return ((raw + 15) // 16) * 16 if raw > 0 else 0
 
@@ -719,19 +791,58 @@ class CodeGenerator:
         self.scopes.pop()
 
     def _bind_local(self, stmt: VarDecl) -> int:
-        """Registers `stmt`'s name in the current (innermost)
+        """Registers `stmt`'s name -- and its declared type, needed by
+        _local_type/_infer_type -- in the current (innermost)
         generation-time scope, pointing at the permanent offset
         _collect_locals already assigned this exact VarDecl node, and
         returns that offset."""
         offset = self._var_offsets[id(stmt)]
-        self.scopes[-1][stmt.name] = offset
+        self.scopes[-1][stmt.name] = (offset, stmt.var_type)
         return offset
 
     def _local_offset(self, name: str) -> int:
         for scope in reversed(self.scopes):
             if name in scope:
-                return scope[name]
+                return scope[name][0]
         raise CodegenError(f"Reference to undeclared variable '{name}'")
+
+    def _local_type(self, name: str) -> str:
+        for scope in reversed(self.scopes):
+            if name in scope:
+                return scope[name][1]
+        raise CodegenError(f"Reference to undeclared variable '{name}'")
+
+    def _infer_type(self, expr: Node) -> str:
+        """A lightweight, duplicate-of-semantic.py type inference --
+        trusts the program has already passed semantic analysis (so
+        e.g. a Binary's operands are guaranteed type-consistent), and
+        only needs to answer "is this str, so a pointer, or not" for
+        deciding operand width and which of a handful of overloaded
+        operators (`+`, `==`, `!=`) actually apply. See the module
+        docstring's STRINGS section, and its LOCAL VARIABLES section
+        for the broader precedent of codegen re-deriving something
+        semantic.py already computed rather than sharing state with it.
+        """
+        if isinstance(expr, Constant):
+            return 'int'
+        if isinstance(expr, BoolLiteral):
+            return 'bool'
+        if isinstance(expr, StringLiteral):
+            return 'str'
+        if isinstance(expr, Variable):
+            return self._local_type(expr.name)
+        if isinstance(expr, Unary):
+            return 'bool' if expr.op == UnaryOp.NOT else 'int'
+        if isinstance(expr, Binary):
+            if expr.op == BinaryOp.ADD:
+                # str+str -> str, int+int -> int; semantic.py already
+                # ruled out any other combination, so the left operand's
+                # type alone determines which this is.
+                return self._infer_type(expr.left)
+            if expr.op in (BinaryOp.SUBTRACT, BinaryOp.MULTIPLY, BinaryOp.DIVIDE):
+                return 'int'
+            return 'bool'  # every comparison, and/or
+        raise CodegenError(f"Cannot infer a type for expression: {expr!r}")
 
     def gen_statement(self, stmt: Node) -> List[Instruction]:
         if isinstance(stmt, VarDecl):
@@ -773,13 +884,19 @@ class CodeGenerator:
         """Shared by VarDecl-with-initializer and Assign: both are just
         "compute this expression, then write the result into that
         variable's slot" -- evaluate into %eax using the ordinary
-        expression codegen (unchanged, still always targets a register),
-        then a single extra `movl %eax, offset(%rbp)` to store it. This
-        way none of gen_expr_into/gen_binary_into/gen_unary_op need to
-        know memory operands exist at all -- they just always work with
-        %eax, same as before variables existed."""
+        expression codegen (still always targets a register), then a
+        single extra store to actually place it in memory. Which store
+        instruction depends on the value's type: a str is an 8-byte
+        pointer sitting in %rax and needs `movq`, while int/bool are
+        still the original 4-byte `movl %eax, ...` -- everything about
+        gen_expr_into/gen_binary_into/gen_unary_op's own internals stays
+        exactly as it always has, oblivious to str entirely; only this
+        one call site needs to ask "which width am I storing"."""
         instructions = self.gen_expr_into(value_expr, Register('eax'))
-        instructions.append(Mov(src=Register('eax'), dst=Memory('rbp', offset)))
+        if self._infer_type(value_expr) == 'str':
+            instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
+        else:
+            instructions.append(Mov(src=Register('eax'), dst=Memory('rbp', offset)))
         return instructions
 
     def gen_return(self, stmt: Return) -> List[Instruction]:
@@ -927,8 +1044,12 @@ class CodeGenerator:
             # keeps the two from being mixed up; codegen just needs an
             # immediate.
             return [Mov(src=Imm(1 if expr.value else 0), dst=dst)]
+        if isinstance(expr, StringLiteral):
+            return self.gen_string_literal_into(expr, dst)
         if isinstance(expr, Variable):
             offset = self._local_offset(expr.name)
+            if self._local_type(expr.name) == 'str':
+                return [MovQ(src=Memory('rbp', offset), dst=as_qword_register(dst))]
             return [Mov(src=Memory('rbp', offset), dst=dst)]
         if isinstance(expr, Unary):
             # Compute the operand into dst first, then apply this node's
@@ -939,6 +1060,15 @@ class CodeGenerator:
             instructions.extend(self.gen_unary_op(expr.op, dst))
             return instructions
         if isinstance(expr, Binary):
+            # ADD and the two equality operators are overloaded for str
+            # (concatenation and strcmp-backed comparison respectively;
+            # see the module docstring's STRINGS section) -- everything
+            # else, and ADD/==/!= between two ints or bools, goes
+            # through the original gen_binary_into completely unchanged.
+            if expr.op == BinaryOp.ADD and self._infer_type(expr.left) == 'str':
+                return self.gen_string_concat_into(expr, dst)
+            if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL) and self._infer_type(expr.left) == 'str':
+                return self.gen_string_compare_into(expr, dst)
             return self.gen_binary_into(expr, dst)
         raise CodegenError(f"No codegen rule for expression: {expr!r}")
 
@@ -1025,6 +1155,100 @@ class CodeGenerator:
         instructions.append(Label(end_label))
         return instructions
 
+    def gen_string_literal_into(self, expr: StringLiteral, dst: Operand) -> List[Instruction]:
+        """Registers this literal's content for later emission as static
+        `.data` (see AsmProgram.string_literals / Emitter.emit), and
+        loads its address into `dst`. Every occurrence gets its own
+        fresh label, even if two literals happen to have identical
+        content -- no deduplication, which is a bit wasteful but keeps
+        this a one-line append rather than needing a content->label
+        cache."""
+        label = self.new_label("str")
+        self.string_literals.append((label, expr.value))
+        return [LeaQ(label=label, dst=as_qword_register(dst))]
+
+    def gen_string_concat_into(self, expr: Binary, dst: Operand) -> List[Instruction]:
+        """`left + right`, both str: builds a brand-new, malloc'd,
+        null-terminated buffer holding left's bytes immediately
+        followed by right's -- `strlen(left) + strlen(right) + 1`
+        bytes, then `strcpy` then `strcat`.
+
+        Uses %rbx/%r12/%r13/%r14 as scratch to hold left, right, and
+        intermediate values *across* several `call` instructions,
+        rather than the stack-spill scheme every other binary operator
+        uses (see the module docstring's STRINGS section for why: those
+        are callee-saved registers, so nothing this function calls can
+        clobber them, which avoids having to hand-track stack offsets
+        that shift with every additional push -- exactly the kind of
+        bookkeeping that gets error-prone once more than one value needs
+        to stay alive across more than one call). Nothing here saves or
+        restores their *prior* contents, since nothing else in this
+        codebase currently uses them; a real register allocator would
+        need to reconsider that.
+
+        Never frees the buffer -- see the module docstring's STRINGS
+        section for why that's an accepted, explicitly-documented
+        simplification for this first pass rather than an oversight.
+        """
+        if not isinstance(dst, Register):
+            raise CodegenError(f"Binary codegen requires a register destination, got: {dst!r}")
+        result = as_qword_register(dst)
+
+        instructions = self.gen_expr_into(expr.left, dst)
+        instructions.append(MovQ(src=result, dst=Register('rbx')))       # rbx = left
+        instructions.extend(self.gen_expr_into(expr.right, dst))
+        instructions.append(MovQ(src=result, dst=Register('r12')))       # r12 = right
+
+        instructions.append(MovQ(src=Register('rbx'), dst=Register('rdi')))
+        instructions.append(Call('strlen'))
+        instructions.append(MovQ(src=Register('rax'), dst=Register('r13')))  # r13 = len(left)
+
+        instructions.append(MovQ(src=Register('r12'), dst=Register('rdi')))
+        instructions.append(Call('strlen'))                              # rax = len(right)
+        instructions.append(AddQ(src=Register('r13'), dst=Register('rax')))
+        instructions.append(AddQ(src=Imm(1), dst=Register('rax')))       # rax = len(left)+len(right)+1
+        instructions.append(MovQ(src=Register('rax'), dst=Register('rdi')))
+        instructions.append(Call('malloc'))
+        instructions.append(MovQ(src=Register('rax'), dst=Register('r14')))  # r14 = new buffer
+
+        instructions.append(MovQ(src=Register('r14'), dst=Register('rdi')))
+        instructions.append(MovQ(src=Register('rbx'), dst=Register('rsi')))
+        instructions.append(Call('strcpy'))
+
+        instructions.append(MovQ(src=Register('r14'), dst=Register('rdi')))
+        instructions.append(MovQ(src=Register('r12'), dst=Register('rsi')))
+        instructions.append(Call('strcat'))
+
+        instructions.append(MovQ(src=Register('r14'), dst=result))
+        return instructions
+
+    def gen_string_compare_into(self, expr: Binary, dst: Operand) -> List[Instruction]:
+        """`left == right` / `left != right`, both str: calls `strcmp`
+        (0 means equal) and converts that into this language's usual
+        0/1 bool representation via the exact same cmp/setCC/movzx
+        pattern every other comparison already uses -- reusing
+        _COMPARISON_CONDITION_CODES[op] directly, since strcmp's result
+        is a plain 32-bit int that "compared to 0" behaves exactly like
+        any other int comparison from here on."""
+        if not isinstance(dst, Register):
+            raise CodegenError(f"Binary codegen requires a register destination, got: {dst!r}")
+        result = as_qword_register(dst)
+
+        instructions = self.gen_expr_into(expr.left, dst)
+        instructions.append(MovQ(src=result, dst=Register('rbx')))
+        instructions.extend(self.gen_expr_into(expr.right, dst))
+        instructions.append(MovQ(src=result, dst=Register('r12')))
+
+        instructions.append(MovQ(src=Register('rbx'), dst=Register('rdi')))
+        instructions.append(MovQ(src=Register('r12'), dst=Register('rsi')))
+        instructions.append(Call('strcmp'))
+
+        byte_dst = as_byte_register(dst)
+        instructions.append(Cmp(src=Imm(0), dst=dst))
+        instructions.append(SetCC(cc=_COMPARISON_CONDITION_CODES[expr.op], operand=byte_dst))
+        instructions.append(MovZX(src=byte_dst, dst=dst))
+        return instructions
+
     def gen_binary_op(self, op: BinaryOp, src: Operand, dst: Operand) -> List[Instruction]:
         if op == BinaryOp.ADD:
             return [Add(src=src, dst=dst)]
@@ -1077,13 +1301,34 @@ class CodeGenerator:
 # Assembly AST -> text
 # ---------------------------------------------------------------------------
 
+def _escape_for_asciz(s: str) -> str:
+    """Escapes `s` (an already-unescaped Hornet string value -- see
+    parser.py's _unescape_string_literal) for embedding in a GAS
+    `.asciz "..."` directive. Backslash has to be escaped *first*, or
+    the escapes added for the other characters would themselves get
+    re-escaped; double-quote needs escaping since that's the
+    directive's own delimiter; the rest are the common control
+    characters getting their standard short escape so the emitted
+    assembly stays readable text rather than raw control bytes."""
+    s = s.replace('\\', '\\\\')
+    s = s.replace('"', '\\"')
+    s = s.replace('\n', '\\n')
+    s = s.replace('\t', '\\t')
+    s = s.replace('\r', '\\r')
+    return s
+
+
 class Emitter:
     """Renders an AsmProgram as textual x64 AT&T-syntax assembly.
 
-    `platform` controls the two portability wrinkles that matter at this
+    `platform` controls the portability wrinkles that matter at this
     stage of the compiler:
       - macOS (Mach-O) requires a leading underscore on external symbols
-        (e.g. `_main`); Linux (ELF) does not.
+        (e.g. `_main`, and now also library calls like `_malloc`); Linux
+        (ELF) does not. This applies uniformly to this program's own
+        function labels (emit_function) and to Call instruction targets
+        (also emit_function, since that's where every instruction gets
+        rendered) -- both go through the same symbol() method.
       - Linux toolchains generally expect a `.note.GNU-stack` section so
         the linker doesn't warn about an executable stack; macOS doesn't
         use this.
@@ -1102,6 +1347,20 @@ class Emitter:
         for fn in program.functions:
             lines.extend(self.emit_function(fn))
             lines.append("")  # blank line between functions
+        if program.string_literals:
+            # Plain `.data` rather than a stricter read-only section
+            # (like ELF's `.rodata` or Mach-O's `__TEXT,__cstring`) on
+            # purpose -- `.data` is the one directive that assembles
+            # correctly, unchanged, on both this Linux sandbox and
+            # macOS's assembler, and nothing in this language ever
+            # writes back into a string literal's bytes anyway, so the
+            # extra write-protection those stricter sections would give
+            # isn't actually buying anything here.
+            lines.append(".data")
+            for label, content in program.string_literals:
+                lines.append(f"{label}:")
+                lines.append(f'    .asciz "{_escape_for_asciz(content)}"')
+            lines.append("")
         if self.platform == 'linux':
             lines.append('.section .note.GNU-stack,"",@progbits')
         return "\n".join(lines).rstrip() + "\n"
@@ -1110,7 +1369,15 @@ class Emitter:
         sym = self.symbol(fn.name)
         lines = [f"    .globl {sym}", f"{sym}:"]
         for instr in fn.instructions:
-            lines.append(f"    {instr.emit()}")
+            if isinstance(instr, Call):
+                # Call.emit() renders its target unprefixed -- platform
+                # symbol naming is this Emitter's job alone, same as for
+                # this program's own function labels above, so this is
+                # the one instruction type emit_function special-cases
+                # rather than just calling instr.emit() uniformly.
+                lines.append(f"    call    {self.symbol(instr.target)}")
+            else:
+                lines.append(f"    {instr.emit()}")
         return lines
 
 

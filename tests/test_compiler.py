@@ -31,9 +31,32 @@ Organization:
     TestVariablesAndStatements          (12 tests)
     TestIfStatements                    (18 tests)
     TestWhileLoops                      (10 tests)
-    TestSemanticErrors                  (36 tests)
+    TestStrings                         (13 tests)
+    TestSemanticErrors                  (46 tests)
                                         ----------
-                                        125 tests total
+                                        148 tests total
+
+A NOTE ON str AND WHY THIS TOUCHED FAR MORE THAN THE TYPE CHECKER
+-----------------------------------------------------------------
+Every type added before `str` (bool) fit in the same 4 bytes as `int`,
+so codegen never had to think about width -- everything was always
+%eax, always `movl`. A string is an 8-byte pointer, and concatenation
+needs to call real C library functions (malloc/strlen/strcpy/strcat)
+via the actual SysV calling convention, which is the first time this
+compiler has ever called anything external at all. See codegen.py's
+STRINGS and LOCAL VARIABLES sections for the mechanism; the short
+version is every local now gets a uniform 8-byte stack slot regardless
+of type (simpler than variable-width packing, at the cost of a few
+wasted bytes on int/bool locals), and codegen re-derives just enough
+type information on its own (_infer_type) to know when a value is a
+pointer rather than duplicating semantic.py's full type checker.
+
+TestStrings' chained-concatenation and reused-result tests exist
+specifically to prove the malloc/strlen/strcpy/strcat sequence can run
+more than once within one expression, and that a concatenation's result
+survives being used as an operand in a *later* concatenation, without
+the scratch registers (%rbx/%r12/%r13/%r14) from one call clobbering
+values a still-in-progress outer expression depends on.
 
 A NOTE ON LOOPS AND WHY THE EXECUTION HELPER GAINED A TIMEOUT
 -----------------------------------------------------------------
@@ -854,6 +877,155 @@ class TestWhileLoops:
 
 
 # ---------------------------------------------------------------------------
+# str: literals, equality/inequality, and concatenation.
+#
+# Every test here that touches equality or concatenation is a real,
+# end-to-end proof of the runtime mechanism, not just a type-checking
+# formality: concatenation genuinely calls malloc/strlen/strcpy/strcat
+# via the SysV ABI (see codegen.py's STRINGS section), and equality
+# genuinely calls strcmp -- there's no shortcut where the compiler
+# "knows" two literals are equal at compile time and folds the
+# comparison away. The chained-concatenation and reused-result tests in
+# particular are what prove multiple concatenations in sequence don't
+# corrupt each other's scratch registers.
+# ---------------------------------------------------------------------------
+
+class TestStrings:
+    pytestmark = GCC_SKIP
+
+    def test_equal_string_literals_compare_equal(self):
+        assert_exit_code(
+            "    str a = 'hello'\n"
+            "    str b = 'hello'\n"
+            "    return a == b",
+            1,
+            return_type="bool",
+        )
+
+    def test_different_string_literals_compare_unequal(self):
+        assert_exit_code(
+            "    str a = 'hello'\n"
+            "    str b = 'world'\n"
+            "    return a == b",
+            0,
+            return_type="bool",
+        )
+
+    def test_not_equal_on_different_strings(self):
+        assert_exit_code(
+            "    str a = 'hello'\n"
+            "    str b = 'world'\n"
+            "    return a != b",
+            1,
+            return_type="bool",
+        )
+
+    def test_basic_concatenation(self):
+        assert_exit_code(
+            "    str a = 'foo'\n"
+            "    str b = 'bar'\n"
+            "    return (a + b) == 'foobar'",
+            1,
+            return_type="bool",
+        )
+
+    def test_concatenation_of_two_literals_directly(self):
+        assert_exit_code(
+            "    return ('foo' + 'bar') == 'foobar'",
+            1,
+            return_type="bool",
+        )
+
+    def test_chained_concatenation_of_three_strings(self):
+        """Proves the malloc/strlen/strcpy/strcat sequence in
+        gen_string_concat_into can run more than once in a row within
+        one expression without the second call clobbering scratch state
+        the first call's result still depends on."""
+        assert_exit_code(
+            "    str a = 'a'\n"
+            "    str b = 'b'\n"
+            "    str c = 'c'\n"
+            "    return (a + b + c) == 'abc'",
+            1,
+            return_type="bool",
+        )
+
+    def test_concatenation_result_reused_in_later_concatenation(self):
+        assert_exit_code(
+            "    str a = 'hello'\n"
+            "    str greeting = a + ', world'\n"
+            "    str full = greeting + '!'\n"
+            "    return full == 'hello, world!'",
+            1,
+            return_type="bool",
+        )
+
+    def test_escape_sequence_matches_manual_construction(self):
+        assert_exit_code(
+            "    str a = 'line1\\nline2'\n"
+            "    str b = 'line1' + '\\n' + 'line2'\n"
+            "    return a == b",
+            1,
+            return_type="bool",
+        )
+
+    def test_escaped_quote_in_string_literal(self):
+        assert_exit_code(
+            "    str a = 'it\\'s here'\n"
+            "    return a == 'it\\'s here'",
+            1,
+            return_type="bool",
+        )
+
+    def test_string_equality_as_if_condition(self):
+        assert_exit_code(
+            "    str a = 'hello'\n"
+            "    if a == 'hello':\n"
+            "        return 1\n"
+            "    return 0",
+            1,
+        )
+
+    def test_string_equality_driving_a_while_loop(self):
+        assert_exit_code(
+            "    str target = 'stop'\n"
+            "    str current = 'go'\n"
+            "    int count = 0\n"
+            "    while current != target:\n"
+            "        count = count + 1\n"
+            "        if count == 3:\n"
+            "            current = 'stop'\n"
+            "        else:\n"
+            "            current = current + 'x'\n"
+            "    return count",
+            3,
+        )
+
+    def test_reassigning_a_str_variable(self):
+        assert_exit_code(
+            "    str a = 'first'\n"
+            "    a = 'second'\n"
+            "    return a == 'second'",
+            1,
+            return_type="bool",
+        )
+
+    def test_str_int_bool_locals_coexisting(self):
+        """Exercises the uniform 8-byte stack-slot allocation (see
+        codegen.py's LOCAL VARIABLES section) with all three types
+        present in the same frame at once."""
+        assert_exit_code(
+            "    int x = 5\n"
+            "    str s = 'test'\n"
+            "    bool b = true\n"
+            "    if s == 'test' and b and x == 5:\n"
+            "        return 42\n"
+            "    return 0",
+            42,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Semantic analysis: scope/declaration checking and the strict int/bool
 # type system. These never reach codegen -- each one asserts that
 # analyze() itself raises SemanticError -- so they don't need gcc and
@@ -968,9 +1140,22 @@ class TestSemanticErrors:
         )
 
     def test_arithmetic_requires_int_operands(self):
+        """- * / are int-only, unaffected by ADD's overload -- '+' gets
+        its own dedicated test below, since mixing bool into it hits a
+        different, ADD-specific error message."""
+        assert_semantic_error(
+            "    return true - false",
+            match="requires int operands",
+        )
+
+    def test_add_requires_two_int_or_two_str_operands(self):
+        """'+' is overloaded (int+int is arithmetic, str+str is
+        concatenation -- see semantic.py's check_binary), so it doesn't
+        go through the generic _require_type path the other arithmetic
+        operators use, and gets its own distinct error message."""
         assert_semantic_error(
             "    return true + false",
-            match="requires int operands",
+            match="requires two int operands or two str operands",
         )
 
     def test_ordering_comparison_requires_int_operands(self):
@@ -1210,5 +1395,93 @@ class TestSemanticErrors:
             "            j = j + 1\n"
             "        break\n"
             "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    # -- str -----------------------------------------------------------
+
+    def test_add_rejects_mixed_int_and_str(self):
+        assert_semantic_error(
+            "    str a = 'hello'\n"
+            "    int b = 5\n"
+            "    return a + b",
+            return_type="str",
+            match="requires two int operands or two str operands",
+        )
+
+    def test_subtract_rejects_str_operands(self):
+        """Only '+' is overloaded for str -- every other arithmetic
+        operator stays strictly int-only."""
+        assert_semantic_error(
+            "    str a = 'hello'\n"
+            "    str b = 'world'\n"
+            "    return a - b",
+            return_type="str",
+            match="requires int operands",
+        )
+
+    def test_ordering_comparison_rejects_str_operands(self):
+        """No inherent ordering on str in this language, same as bool
+        -- only == and != are defined for it."""
+        assert_semantic_error(
+            "    str a = 'hello'\n"
+            "    str b = 'world'\n"
+            "    return a < b",
+            return_type="bool",
+            match="requires int operands",
+        )
+
+    def test_equality_rejects_str_compared_to_int(self):
+        assert_semantic_error(
+            "    str a = 'hello'\n"
+            "    return a == 5",
+            return_type="bool",
+            match="Cannot compare",
+        )
+
+    def test_str_equality_same_type_is_valid(self):
+        """The positive control: comparing two str values with == must
+        NOT raise -- this is what makes string equality actually usable
+        at all."""
+        ast = _parse(
+            "def bool main():\n"
+            "    str a = 'hello'\n"
+            "    str b = 'hello'\n"
+            "    return a == b\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_initializer_type_mismatch_int_into_str(self):
+        assert_semantic_error(
+            "    str a = 5\n"
+            "    return 0",
+            match="Cannot initialize",
+        )
+
+    def test_assignment_type_mismatch_str_into_int(self):
+        assert_semantic_error(
+            "    int a = 5\n"
+            "    a = 'hello'\n"
+            "    return a",
+            match="Cannot assign",
+        )
+
+    def test_return_type_mismatch_str_where_int_expected(self):
+        assert_semantic_error(
+            "    return 'hello'",
+            return_type="int",
+            match="declared to return",
+        )
+
+    def test_concatenation_type_checks_as_valid_str(self):
+        """The positive control for concatenation: `+` on two str
+        operands must produce a value assignable to a str variable,
+        with no error anywhere along the way."""
+        ast = _parse(
+            "def str main():\n"
+            "    str a = 'hello'\n"
+            "    str b = ' world'\n"
+            "    str c = a + b\n"
+            "    return c\n"
         )
         analyze(ast)  # should not raise

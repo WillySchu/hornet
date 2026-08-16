@@ -10,11 +10,17 @@ class TokenType(Enum):
     # Literals
     NUMBER = auto()
     IDENTIFIER = auto()
+    STRING = auto()  # a string *literal*, e.g. 'hello' -- distinct from
+                      # STR below (the 'str' *type keyword*). Reusing one
+                      # token type for both would make it impossible for
+                      # the parser to tell "the word str" apart from "an
+                      # actual string value" by type alone.
 
     # Punctuation
     OPEN_PAREN = auto()
     CLOSE_PAREN = auto()
     COLON = auto()
+    #COMMA = auto()
 
     # Operators
     ASSIGN = auto()
@@ -33,6 +39,7 @@ class TokenType(Enum):
     # Keywords
     DEF = auto()
     INT = auto()
+    STR = auto()
     RETURN = auto()
     AND = auto()
     OR = auto()
@@ -98,6 +105,7 @@ class Lexer():
         self.keywords = {
             'def': TokenType.DEF,
             'int': TokenType.INT,
+            'str': TokenType.STR,
             'return': TokenType.RETURN,
             'and': TokenType.AND,
             'or': TokenType.OR,
@@ -119,6 +127,7 @@ class Lexer():
             # Multi character.
             ('NUMBER',      r'\d+(\.\d+)?'),     # Integer or decimal
             ('IDENTIFIER',  r'[a-zA-Z_]\w*'),    # Variable names/keywords
+            ('STRING',      r"'([^'\\]|\\.)*'"), # String literals
 
             # Double character
             ('EQUAL',                 r'=='),    # Equal
@@ -133,6 +142,7 @@ class Lexer():
             ('GREATER_THAN', r'>'),
             ('LESS_THAN',    r'<'),
             ('COLON',        r':'),               # Colon
+            #('COMMA',        r','),
             ('ASSIGN',       r'='),                # Assignment operator
             ('PLUS',         r'\+'),              # Add
             ('MINUS',        r'\-'),              # Subtract
@@ -178,6 +188,16 @@ class Lexer():
         tabs and spaces isn't handled specially; each whitespace
         character just counts as one column of indentation, which is a
         simplification worth knowing about if you ever mix the two.
+
+        NOTE: a STRING literal that spans a genuine embedded newline
+        (an actual newline character typed between the quotes, not the
+        two-character `\\n` escape) is matched as a single token here,
+        since the STRING rule is tried -- and consumes as far as it
+        matches -- before NEWLINE gets a chance to. That means such a
+        newline never increments self.line, so line numbers reported in
+        errors after a multi-line string literal can drift. This is a
+        known, narrow edge case, not something worth the extra
+        bookkeeping to fix right now.
         """
         for match in self.regex.finditer(self.source):
             kind = match.lastgroup
@@ -194,6 +214,8 @@ class Lexer():
                 # Check if the identifier is actually a reserved keyword
                 token_type = self.keywords.get(value, TokenType.IDENTIFIER)
                 self.tokens.append(Token(token_type, value, self.line, column))
+            elif kind == 'STRING':
+                self.tokens.append(Token(TokenType.STRING, value, self.line, column))
             elif kind == 'ASSIGN':
                 self.tokens.append(Token(TokenType.ASSIGN, value, self.line, column))
             elif kind == 'NEWLINE':
