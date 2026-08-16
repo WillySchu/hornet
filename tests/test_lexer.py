@@ -97,27 +97,6 @@ def test_lex_bitwise_complement():
     ]
     assert expected == res
 
-
-def test_lex_logical_negation():
-    res = lexer.lex('tests/logical_negation.ht')
-    expected = [
-        lexer.Token(lexer.TokenType.DEF, 'def', 1, 1),
-        lexer.Token(lexer.TokenType.INT, 'int', 1, 5),
-        lexer.Token(lexer.TokenType.IDENTIFIER, 'main', 1, 9),
-        lexer.Token(lexer.TokenType.OPEN_PAREN, '(', 1, 13),
-        lexer.Token(lexer.TokenType.CLOSE_PAREN, ')', 1, 14),
-        lexer.Token(lexer.TokenType.COLON, ':', 1, 15),
-        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 16),
-        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
-        lexer.Token(lexer.TokenType.RETURN, 'return', 2, 5),
-        lexer.Token(lexer.TokenType.BANG, '!', 2, 12),
-        lexer.Token(lexer.TokenType.NUMBER, '2', 2, 13),
-        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 14),
-        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
-        lexer.Token(lexer.TokenType.EOF, '', 3, 1),
-    ]
-    assert expected == res
-
 # Binary Ops.
 
 def test_lex_addition():

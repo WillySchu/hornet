@@ -23,7 +23,6 @@ class TokenType(Enum):
     STAR = auto()
     SLASH = auto()
     TILDE = auto()
-    BANG = auto()
     AND = auto()
     OR = auto()
     EQUAL = auto()
@@ -44,6 +43,10 @@ class TokenType(Enum):
     IF = auto()
     ELSE = auto()
     ELIF = auto()
+    # FOR = auto()
+    WHILE = auto()
+    BREAK = auto()
+    CONTINUE = auto()
 
     # Special
     NEWLINE = auto()
@@ -105,6 +108,10 @@ class Lexer():
             'if': TokenType.IF,
             'else': TokenType.ELSE,
             'elif': TokenType.ELIF,
+            # 'for': TokenType.FOR,
+            'while': TokenType.WHILE,
+            'break': TokenType.BREAK,
+            'continue': TokenType.CONTINUE,
         }
 
         # Compile master regex pattern
@@ -132,7 +139,6 @@ class Lexer():
             ('STAR',         r'\*'),              # Multiply
             ('SLASH',        r'/'),               # Divide
             ('TILDE',        r'\~'),              # Tilde
-            ('BANG',         r'\!'),              # Bang
             ('SKIP',         r'[ \t\r]+'),        # Spaces and tabs
             ('MISMATCH',     r'.'),               # Any other character (error)
         ]
@@ -211,8 +217,6 @@ class Lexer():
                 self.tokens.append(Token(TokenType.SLASH, value, self.line, column))
             elif kind == 'TILDE':
                 self.tokens.append(Token(TokenType.TILDE, value, self.line, column))
-            elif kind == 'BANG':
-                self.tokens.append(Token(TokenType.BANG, value, self.line, column))
             elif kind == 'EQUAL':
                 self.tokens.append(Token(TokenType.EQUAL, value, self.line, column))
             elif kind == 'NOT_EQUAL':

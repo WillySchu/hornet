@@ -27,9 +27,9 @@ conversion between them in either direction. A bool is not a 0-or-1
 int that happens to print differently -- it's a distinct type, and
 using one where the other is expected is a type error, full stop. In
 particular (and this is the part most likely to surprise someone
-coming from C): `!`, `and`, and `or` all require real `bool` operands.
-`!0` is a type error, not "not true". Write `!(x == 0)` or `!false`
-instead.
+coming from C): `not`, `and`, and `or` all require real `bool`
+operands. `not 0` is a type error, not "not true". Write
+`not (x == 0)` or `not false` instead.
 
 The operator typing rules, precisely:
   - Arithmetic (+ - * /) and the two purely-numeric unary operators
@@ -42,7 +42,7 @@ The operator typing rules, precisely:
     bool is a type error even though both are "just numbers" underneath
     -- that's exactly the kind of mismatch strong typing exists to
     catch.
-  - Logical (! and or): all operands must be `bool`; result is `bool`.
+  - Logical (not/and/or): all operands must be `bool`; result is `bool`.
   - An `if`/`elif` condition must be `bool` -- same rule as everywhere
     else: no int-as-truthy shortcut, write `x != 0` or similar.
   - A VarDecl's initializer, an Assign's value, and a Return's value
@@ -349,9 +349,9 @@ class SemanticAnalyzer:
         if expr.op == UnaryOp.NOT:
             if operand_type != Type.BOOL:
                 raise SemanticError(
-                    f"'!' requires a bool operand, got {operand_type} "
-                    f"(no implicit int-to-bool conversion -- try `!(x == 0)` "
-                    f"instead of `!x`)"
+                    f"'not' requires a bool operand, got {operand_type} "
+                    f"(no implicit int-to-bool conversion -- try "
+                    f"`not (x == 0)` instead of `not x`)"
                 )
             return Type.BOOL
         raise SemanticError(f"No semantic rule for unary operator: {expr.op}")

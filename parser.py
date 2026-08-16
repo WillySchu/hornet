@@ -23,7 +23,7 @@ Grammar supported (matches what the current lexer can produce):
     expr_stmt   := expression NEWLINE
     expression   := binary_expr
     binary_expr  := unary_expr (BIN_OP binary_expr)*   [precedence climbing]
-    unary_expr   := ('-' | '~' | '!') unary_expr
+    unary_expr   := ('-' | '~' | 'not') unary_expr
                    | primary_expr
     primary_expr := NUMBER
                    | 'true' | 'false'
@@ -31,10 +31,10 @@ Grammar supported (matches what the current lexer can produce):
                    | '(' expression ')'
 
 unary_expr is recursive (rather than a single optional prefix) so that
-chained unary operators parse correctly -- e.g. `~-2`, `!!flag`, `--x`.
-Each recurses on itself, which makes the operators right-associative:
-`- - 2` parses as Unary(-, Unary(-, Constant(2))), i.e. "negate (negate
-2)", which is the reading you'd expect.
+chained unary operators parse correctly -- e.g. `~-2`, `not not flag`,
+`--x`. Each recurses on itself, which makes the operators
+right-associative: `- - 2` parses as Unary(-, Unary(-, Constant(2))),
+i.e. "negate (negate 2)", which is the reading you'd expect.
 
 binary_expr uses precedence climbing (see parse_binary and the
 _BINARY_OPS table below) so operator precedence and associativity are
@@ -113,6 +113,18 @@ the old "scan for def" hack -- this generalizes to any nesting depth for
 free: a function's top-level body and an if/elif/else's body both go
 through the same parse_block(), so an if nested inside an if nested
 inside a function just falls out of ordinary recursion.
+
+NOTE ON '!' -> 'not' (RESOLVED)
+----------------------------------
+Logical NOT used to be spelled `!` (the BANG token). The lexer has since
+dropped BANG entirely -- there's no single-character `!` token anymore,
+only the two-character `!=` (NOT_EQUAL, a completely separate token that
+was never affected by this) -- and logical NOT is now spelled with the
+`not` keyword instead (the NOT token, matched via the ordinary
+IDENTIFIER-then-keyword-lookup path, same as `and`/`or`/`return`/etc.).
+_UNARY_OPS below maps TokenType.NOT (not BANG) to UnaryOp.NOT; nothing
+else about how NOT parses changed -- it's still an ordinary prefix
+unary operator, chainable the same way `~`/`-` are (`not not flag`).
 """
 
 import argparse
@@ -128,15 +140,15 @@ from lexer import Token, TokenType, lex
 # ---------------------------------------------------------------------------
 
 class UnaryOp(Enum):
-    NEGATE = auto()      # '-'  arithmetic negation
-    COMPLEMENT = auto()  # '~'  bitwise complement
-    NOT = auto()         # '!'  logical not
+    NEGATE = auto()      # '-'    arithmetic negation
+    COMPLEMENT = auto()  # '~'    bitwise complement
+    NOT = auto()         # 'not'  logical not
 
     def symbol(self) -> str:
         return {
             UnaryOp.NEGATE: '-',
             UnaryOp.COMPLEMENT: '~',
-            UnaryOp.NOT: '!',
+            UnaryOp.NOT: 'not',
         }[self]
 
 
@@ -344,7 +356,7 @@ class ParseError(Exception):
 _UNARY_OPS = {
     TokenType.MINUS: UnaryOp.NEGATE,
     TokenType.TILDE: UnaryOp.COMPLEMENT,
-    TokenType.BANG: UnaryOp.NOT,
+    TokenType.NOT: UnaryOp.NOT,
 }
 
 

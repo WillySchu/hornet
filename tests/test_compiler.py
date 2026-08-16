@@ -54,10 +54,11 @@ This language now has a strong static type system (see semantic.py):
 `int` and `bool` are distinct types with *no* implicit conversion
 between them in either direction. That's a real behavior change, not
 just an addition, and it broke several tests that predate it:
-  - `!0`, `!5`, `!-0` used to work (NOT applied to a raw int). Under
-    strict typing, `!` requires a genuine `bool` operand -- `!0` is now
-    a type error, not "not true". These are now written with real bool
-    values (`!true`, `!(x == y)`, etc.) instead.
+  - `not 0`, `not 5`, `not -0` used to work (NOT applied to a raw int,
+    back when NOT was spelled `!` -- see the note below). Under strict
+    typing, `not` requires a genuine `bool` operand -- `not 0` is now a
+    type error, not "not true". These are now written with real bool
+    values (`not true`, `not (x == y)`, etc.) instead.
   - Every test that did `return <comparison-or-logical-expr>` from a
     `def int main()` now needs `def bool main()` instead, since
     comparisons and `and`/`or` produce `bool`, and a strict return type
@@ -67,6 +68,15 @@ just an addition, and it broke several tests that predate it:
     were rewritten with `true`/`false` and a comparison
     (`(1 / 0) == 1`) standing in for "an int expression that crashes if
     evaluated, but produces a bool so `and`/`or` will accept it".
+
+A NOTE ON '!' -> 'not' (RESOLVED)
+-----------------------------------
+Logical NOT used to be spelled `!` (the BANG token). The lexer has
+since dropped BANG entirely -- a bare `!` is now a genuine lexer error,
+not just unused -- and NOT is spelled with the `not` keyword instead
+(see parser.py's own note on this). `!=` (NOT_EQUAL) was never part of
+this rename and is completely unaffected; it's a separate two-character
+token that never depended on BANG existing.
 """
 import shutil
 import signal
@@ -211,7 +221,7 @@ def assert_semantic_error(body: str, return_type: str = "int", match: str = None
 
 
 # ---------------------------------------------------------------------------
-# Unary operators: -, ~, !  (including chaining, e.g. ~-2)
+# Unary operators: -, ~, not  (including chaining, e.g. ~-2)
 # ---------------------------------------------------------------------------
 
 class TestUnaryOperators:
@@ -227,9 +237,9 @@ class TestUnaryOperators:
         assert_exit_code(f"    return {expr}", expected, return_type="int")
 
     @pytest.mark.parametrize("expr,expected", [
-        ("!true", 0),
-        ("!false", 1),
-        ("!!true", 1),   # chained NOT, still requires (and produces) bool at each step
+        ("not true", 0),
+        ("not false", 1),
+        ("not not true", 1),   # chained NOT, still requires (and produces) bool at each step
     ])
     def test_bool_not(self, expr, expected):
         assert_exit_code(f"    return {expr}", expected, return_type="bool")
@@ -751,7 +761,7 @@ class TestSemanticErrors:
 
     def test_not_requires_bool_not_int(self):
         assert_semantic_error(
-            "    return !0",
+            "    return not 0",
             return_type="bool",
             match="requires a bool operand",
         )

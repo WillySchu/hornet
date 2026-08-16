@@ -22,7 +22,7 @@ Supported so far (matches what parser.py can currently produce):
     Function -> a name and a body of statements
     Return   -> evaluate an expression into %eax, then `ret`
     Constant -> an immediate value
-    Unary    -> NEGATE ('-'), COMPLEMENT ('~'), and NOT ('!'), each
+    Unary    -> NEGATE ('-'), COMPLEMENT ('~'), and NOT ('not'), each
                 applied in place to whatever's already in the
                 destination register
     Binary   -> ADD ('+'), SUBTRACT ('-'), MULTIPLY ('*'), DIVIDE ('/'),
@@ -941,7 +941,7 @@ class CodeGenerator:
         if op == UnaryOp.COMPLEMENT:
             return [Not(dst)]
         if op == UnaryOp.NOT:
-            # `!x` is "1 if x == 0, else 0" -- the same cmp/setCC/movzx
+            # `not x` is "1 if x == 0, else 0" -- the same cmp/setCC/movzx
             # pattern used for comparisons, just always against 0 and
             # always with cc='e'.
             byte_dst = as_byte_register(dst)

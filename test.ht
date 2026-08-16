@@ -1,5 +1,2 @@
-def int main():
-    bool b = false
-    int a = 2
-    if b:
-        return a
+def bool main():
+    return not true
