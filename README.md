@@ -8,12 +8,8 @@ gcc -o test test.o
 TODO:
 
 Binary Ops:
-- Modulo %
-- Bitwise AND &
-- Bitwise OR |
-- Bitwise XOR ^
-- Bitwise shift left <<
-- Bitwise shift right >>
+- Consider replacing ^ with ~
+- Exponentiation (either ** or ^)
 
 Compound Assignment Ops:
 - +=

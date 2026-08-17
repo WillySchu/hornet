@@ -51,13 +51,16 @@ future right-associative exponentiation operator -- a one-line change
 when a new operator shows up, instead of a restructuring.
 
 Operators currently supported by binary_expr, tightest to loosest
-binding: * / , then + - , then < > <= >= , then == != , then 'and' ,
-then 'or'. All are left-associative -- including 'and'/'or', which
-matters beyond just parenthesization: parsing `a and b and c`
-left-associatively as `(a and b) and c` is what makes chained
-short-circuiting fall out naturally in codegen (see codegen.py), since
-evaluating the outer node left-to-right evaluates `a and b` first and
-only reaches `c` if that was true.
+binding: `* / %` , then `+ -` , then `<< >>` , then `< > <= >=` , then
+`== !=` , then `&` , then `^` , then `|` , then `and` , then `or`. This
+is the classic C precedence ladder (see the comment above _BINARY_OPS
+for why it's worth keeping even though it reproduces one of C's better-
+known surprises around bitwise operators and equality). All are
+left-associative -- including 'and'/'or', which matters beyond just
+parenthesization: parsing `a and b and c` left-associatively as `(a and
+b) and c` is what makes chained short-circuiting fall out naturally in
+codegen (see codegen.py), since evaluating the outer node left-to-right
+evaluates `a and b` first and only reaches `c` if that was true.
 
 primary_expr also accepts a parenthesized sub-expression. This wasn't
 explicitly requested, but it's what lets precedence actually be
@@ -163,6 +166,10 @@ class BinaryOp(Enum):
     SUBTRACT = auto()  # '-'
     MULTIPLY = auto()  # '*'
     DIVIDE = auto()    # '/'
+    MODULO = auto()    # '%'
+
+    SHIFT_LEFT = auto()   # '<<'
+    SHIFT_RIGHT = auto()  # '>>'
 
     LESS_THAN = auto()              # '<'
     GREATER_THAN = auto()           # '>'
@@ -171,6 +178,10 @@ class BinaryOp(Enum):
 
     EQUAL = auto()      # '=='
     NOT_EQUAL = auto()  # '!='
+
+    BITWISE_AND = auto()  # '&'
+    BITWISE_XOR = auto()  # '^'
+    BITWISE_OR = auto()   # '|'
 
     AND = auto()  # 'and'
     OR = auto()   # 'or'
@@ -181,12 +192,18 @@ class BinaryOp(Enum):
             BinaryOp.SUBTRACT: '-',
             BinaryOp.MULTIPLY: '*',
             BinaryOp.DIVIDE: '/',
+            BinaryOp.MODULO: '%',
+            BinaryOp.SHIFT_LEFT: '<<',
+            BinaryOp.SHIFT_RIGHT: '>>',
             BinaryOp.LESS_THAN: '<',
             BinaryOp.GREATER_THAN: '>',
             BinaryOp.LESS_THAN_OR_EQUAL: '<=',
             BinaryOp.GREATER_THAN_OR_EQUAL: '>=',
             BinaryOp.EQUAL: '==',
             BinaryOp.NOT_EQUAL: '!=',
+            BinaryOp.BITWISE_AND: '&',
+            BinaryOp.BITWISE_XOR: '^',
+            BinaryOp.BITWISE_OR: '|',
             BinaryOp.AND: 'and',
             BinaryOp.OR: 'or',
         }[self]
@@ -510,34 +527,61 @@ class OperatorInfo:
 # new binary operator -- including a right-associative one -- is just
 # adding a row here, not restructuring the parser.
 #
-# Precedence levels, tightest to loosest (as specified):
-#   6: *  /
-#   5: +  -
-#   4: <  >  <=  >=
-#   3: ==  !=
-#   2: and
-#   1: or
+# Precedence levels, tightest to loosest -- this is the classic C
+# ladder (https://en.cppreference.com/w/c/language/operator_precedence),
+# adopted deliberately rather than invented fresh, since it's what
+# anyone coming from a C-family language already expects:
+#   10: *  /  %
+#    9: +  -
+#    8: <<  >>
+#    7: <  >  <=  >=
+#    6: ==  !=
+#    5: &
+#    4: ^
+#    3: |
+#    2: and
+#    1: or
+#
+# Putting the bitwise operators *below* equality (rather than, say,
+# right next to the other int-only arithmetic operators) reproduces a
+# well-known C surprise: `a & b == c` parses as `a & (b == c)`, not
+# `(a & b) == c`, because == binds tighter than &. In C that's a classic
+# footgun -- it silently compiles into something you probably didn't
+# mean. Here it isn't: `b == c` is bool, `&` requires int, so
+# semantic.py rejects it outright as a type error rather than silently
+# accepting the "wrong" grouping. Strong typing turns a subtle
+# precedence trap into a compile error -- see TestSemanticErrors'
+# test_bitwise_and_equality_precedence_is_a_type_error for exactly this
+# case.
 #
 # For example, right-associative exponentiation (so `2 ** 3 ** 2` parses
 # as `2 ** (3 ** 2)`, not `(2 ** 3) ** 2`) would slot in above STAR/SLASH
 # at a higher precedence once the lexer grows a token for it:
 #
-#   TokenType.STAR_STAR: OperatorInfo(BinaryOp.POWER, precedence=7, associativity=Associativity.RIGHT),
+#   TokenType.STAR_STAR: OperatorInfo(BinaryOp.POWER, precedence=11, associativity=Associativity.RIGHT),
 #
 _BINARY_OPS = {
-    TokenType.STAR:  OperatorInfo(BinaryOp.MULTIPLY, precedence=6, associativity=Associativity.LEFT),
-    TokenType.SLASH: OperatorInfo(BinaryOp.DIVIDE,   precedence=6, associativity=Associativity.LEFT),
+    TokenType.STAR:    OperatorInfo(BinaryOp.MULTIPLY, precedence=10, associativity=Associativity.LEFT),
+    TokenType.SLASH:   OperatorInfo(BinaryOp.DIVIDE,   precedence=10, associativity=Associativity.LEFT),
+    TokenType.PERCENT: OperatorInfo(BinaryOp.MODULO,   precedence=10, associativity=Associativity.LEFT),
 
-    TokenType.PLUS:  OperatorInfo(BinaryOp.ADD,      precedence=5, associativity=Associativity.LEFT),
-    TokenType.MINUS: OperatorInfo(BinaryOp.SUBTRACT, precedence=5, associativity=Associativity.LEFT),
+    TokenType.PLUS:  OperatorInfo(BinaryOp.ADD,      precedence=9, associativity=Associativity.LEFT),
+    TokenType.MINUS: OperatorInfo(BinaryOp.SUBTRACT, precedence=9, associativity=Associativity.LEFT),
 
-    TokenType.LESS_THAN:             OperatorInfo(BinaryOp.LESS_THAN,             precedence=4, associativity=Associativity.LEFT),
-    TokenType.GREATER_THAN:          OperatorInfo(BinaryOp.GREATER_THAN,          precedence=4, associativity=Associativity.LEFT),
-    TokenType.LESS_THAN_OR_EQUAL:    OperatorInfo(BinaryOp.LESS_THAN_OR_EQUAL,    precedence=4, associativity=Associativity.LEFT),
-    TokenType.GREATER_THAN_OR_EQUAL: OperatorInfo(BinaryOp.GREATER_THAN_OR_EQUAL, precedence=4, associativity=Associativity.LEFT),
+    TokenType.SHIFT_LEFT:  OperatorInfo(BinaryOp.SHIFT_LEFT,  precedence=8, associativity=Associativity.LEFT),
+    TokenType.SHIFT_RIGHT: OperatorInfo(BinaryOp.SHIFT_RIGHT, precedence=8, associativity=Associativity.LEFT),
 
-    TokenType.EQUAL:     OperatorInfo(BinaryOp.EQUAL,     precedence=3, associativity=Associativity.LEFT),
-    TokenType.NOT_EQUAL: OperatorInfo(BinaryOp.NOT_EQUAL, precedence=3, associativity=Associativity.LEFT),
+    TokenType.LESS_THAN:             OperatorInfo(BinaryOp.LESS_THAN,             precedence=7, associativity=Associativity.LEFT),
+    TokenType.GREATER_THAN:          OperatorInfo(BinaryOp.GREATER_THAN,          precedence=7, associativity=Associativity.LEFT),
+    TokenType.LESS_THAN_OR_EQUAL:    OperatorInfo(BinaryOp.LESS_THAN_OR_EQUAL,    precedence=7, associativity=Associativity.LEFT),
+    TokenType.GREATER_THAN_OR_EQUAL: OperatorInfo(BinaryOp.GREATER_THAN_OR_EQUAL, precedence=7, associativity=Associativity.LEFT),
+
+    TokenType.EQUAL:     OperatorInfo(BinaryOp.EQUAL,     precedence=6, associativity=Associativity.LEFT),
+    TokenType.NOT_EQUAL: OperatorInfo(BinaryOp.NOT_EQUAL, precedence=6, associativity=Associativity.LEFT),
+
+    TokenType.AMPERSAND: OperatorInfo(BinaryOp.BITWISE_AND, precedence=5, associativity=Associativity.LEFT),
+    TokenType.CARET:     OperatorInfo(BinaryOp.BITWISE_XOR, precedence=4, associativity=Associativity.LEFT),
+    TokenType.PIPE:      OperatorInfo(BinaryOp.BITWISE_OR,  precedence=3, associativity=Associativity.LEFT),
 
     TokenType.AND: OperatorInfo(BinaryOp.AND, precedence=2, associativity=Associativity.LEFT),
 

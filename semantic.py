@@ -271,7 +271,17 @@ class SemanticError(Exception):
 # overloaded (int+int is arithmetic, str+str is concatenation), so
 # check_binary handles it as its own case rather than lumping it in with
 # operators that only ever mean one thing.
-_INT_ONLY_ARITHMETIC_OPS = {BinaryOp.SUBTRACT, BinaryOp.MULTIPLY, BinaryOp.DIVIDE}
+#
+# Named _INT_ONLY_BINARY_OPS rather than "_ARITHMETIC" now that it
+# covers modulo, the bitwise operators, and the shifts too -- all of
+# which share the exact same rule (both operands int, result int) as
+# the original arithmetic operators, even though "arithmetic" isn't
+# really the right word for, say, bitwise XOR.
+_INT_ONLY_BINARY_OPS = {
+    BinaryOp.SUBTRACT, BinaryOp.MULTIPLY, BinaryOp.DIVIDE, BinaryOp.MODULO,
+    BinaryOp.BITWISE_AND, BinaryOp.BITWISE_OR, BinaryOp.BITWISE_XOR,
+    BinaryOp.SHIFT_LEFT, BinaryOp.SHIFT_RIGHT,
+}
 _ORDERING_OPS = {BinaryOp.LESS_THAN, BinaryOp.GREATER_THAN,
                   BinaryOp.LESS_THAN_OR_EQUAL, BinaryOp.GREATER_THAN_OR_EQUAL}
 _EQUALITY_OPS = {BinaryOp.EQUAL, BinaryOp.NOT_EQUAL}
@@ -570,7 +580,7 @@ class SemanticAnalyzer:
                 f"got {left_type} and {right_type}"
             )
 
-        if op in _INT_ONLY_ARITHMETIC_OPS:
+        if op in _INT_ONLY_BINARY_OPS:
             self._require_type(left_type, Type.INT, op)
             self._require_type(right_type, Type.INT, op)
             return Type.INT

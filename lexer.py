@@ -28,7 +28,13 @@ class TokenType(Enum):
     MINUS = auto()
     STAR = auto()
     SLASH = auto()
+    PERCENT = auto()
     TILDE = auto()
+    AMPERSAND = auto()
+    PIPE = auto()
+    CARET = auto()
+    SHIFT_LEFT = auto()
+    SHIFT_RIGHT = auto()
     EQUAL = auto()
     NOT_EQUAL = auto()
     LESS_THAN = auto()
@@ -134,6 +140,10 @@ class Lexer():
             ('NOT_EQUAL',             r'!='),    # Not equal
             ('GREATER_THAN_OR_EQUAL', r'>='),    # Greater than or equal
             ('LESS_THAN_OR_EQUAL',    r'<='),
+            ('SHIFT_LEFT',            r'<<'),    # Bitwise shift left -- must come before
+            ('SHIFT_RIGHT',           r'>>'),    # LESS_THAN/GREATER_THAN below, or those
+                                                  # single-char rules would consume one '<'/'>'
+                                                  # at a time and never let this match.
 
             # Single character
             ('NEWLINE',      r'\n'),              # Line breaks
@@ -148,7 +158,11 @@ class Lexer():
             ('MINUS',        r'\-'),              # Subtract
             ('STAR',         r'\*'),              # Multiply
             ('SLASH',        r'/'),               # Divide
+            ('PERCENT',      r'%'),               # Modulo
             ('TILDE',        r'\~'),              # Tilde
+            ('AMPERSAND',    r'&'),               # Bitwise AND
+            ('PIPE',         r'\|'),              # Bitwise OR
+            ('CARET',        r'\^'),              # Bitwise XOR
             ('SKIP',         r'[ \t\r]+'),        # Spaces and tabs
             ('MISMATCH',     r'.'),               # Any other character (error)
         ]
@@ -239,8 +253,20 @@ class Lexer():
                 self.tokens.append(Token(TokenType.STAR, value, self.line, column))
             elif kind == 'SLASH':
                 self.tokens.append(Token(TokenType.SLASH, value, self.line, column))
+            elif kind == 'PERCENT':
+                self.tokens.append(Token(TokenType.PERCENT, value, self.line, column))
             elif kind == 'TILDE':
                 self.tokens.append(Token(TokenType.TILDE, value, self.line, column))
+            elif kind == 'AMPERSAND':
+                self.tokens.append(Token(TokenType.AMPERSAND, value, self.line, column))
+            elif kind == 'PIPE':
+                self.tokens.append(Token(TokenType.PIPE, value, self.line, column))
+            elif kind == 'CARET':
+                self.tokens.append(Token(TokenType.CARET, value, self.line, column))
+            elif kind == 'SHIFT_LEFT':
+                self.tokens.append(Token(TokenType.SHIFT_LEFT, value, self.line, column))
+            elif kind == 'SHIFT_RIGHT':
+                self.tokens.append(Token(TokenType.SHIFT_RIGHT, value, self.line, column))
             elif kind == 'EQUAL':
                 self.tokens.append(Token(TokenType.EQUAL, value, self.line, column))
             elif kind == 'NOT_EQUAL':

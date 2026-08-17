@@ -26,7 +26,8 @@ Supported so far (matches what parser.py can currently produce):
                 applied in place to whatever's already in the
                 destination register
     Binary   -> ADD ('+'), SUBTRACT ('-'), MULTIPLY ('*'), DIVIDE ('/'),
-                the six comparisons (== != < > <= >=), and the two
+                MODULO ('%'), the bitwise operators (& | ^ << >>), the
+                six comparisons (== != < > <= >=), and the two
                 short-circuiting logical operators (and, or)
     Variable -> a read of a local variable's stack slot
     VarDecl  -> `int a` or `int a = <expr>`
@@ -614,12 +615,81 @@ class IDiv(Instruction):
     ends up in %eax, remainder in %edx. `operand` must be a register or
     memory location -- x86 doesn't support an immediate divisor for
     idiv, which is why gen_binary_into always routes the right-hand side
-    through the %ecx scratch register rather than leaving it as an Imm."""
+    through the %ecx scratch register rather than leaving it as an Imm.
+
+    This is also what MODULO reuses -- see gen_binary_op's MODULO case
+    -- since idiv computes the quotient *and* remainder in one
+    instruction; modulo is exactly this same Cdq+IDiv sequence, just
+    reading %edx afterward instead of %eax."""
     operand: Operand
     mnemonic = "idivl"
 
     def operands(self) -> List[str]:
         return [self.operand.emit()]
+
+
+@dataclass
+class And(Instruction):
+    """dst &= src (bitwise AND)."""
+    src: Operand
+    dst: Operand
+    mnemonic = "andl"
+
+    def operands(self) -> List[str]:
+        return [self.src.emit(), self.dst.emit()]
+
+
+@dataclass
+class Or(Instruction):
+    """dst |= src (bitwise OR)."""
+    src: Operand
+    dst: Operand
+    mnemonic = "orl"
+
+    def operands(self) -> List[str]:
+        return [self.src.emit(), self.dst.emit()]
+
+
+@dataclass
+class Xor(Instruction):
+    """dst ^= src (bitwise XOR)."""
+    src: Operand
+    dst: Operand
+    mnemonic = "xorl"
+
+    def operands(self) -> List[str]:
+        return [self.src.emit(), self.dst.emit()]
+
+
+@dataclass
+class ShiftLeft(Instruction):
+    """dst <<= %cl. x86 only allows an immediate or specifically %cl as
+    a shift instruction's count operand -- never an arbitrary register
+    -- so, unlike And/Or/Xor above, this doesn't take a general `src`
+    field at all; %cl is hardcoded, since architecturally nothing else
+    could ever go there. This lines up for free with how every other
+    binary operator already works: gen_binary_into always evaluates the
+    right-hand operand into %ecx before calling gen_binary_op, so the
+    shift count is already sitting in the one register x86 requires by
+    the time this instruction is emitted."""
+    dst: Operand
+    mnemonic = "shll"
+
+    def operands(self) -> List[str]:
+        return ['%cl', self.dst.emit()]
+
+
+@dataclass
+class ShiftRightArithmetic(Instruction):
+    """dst >>= %cl, sign-extending (arithmetic) shift -- matches this
+    language's `int` being signed, so `-8 >> 1 == -4`, not some large
+    positive value from a zero-filling logical shift. See ShiftLeft's
+    docstring for why %cl is hardcoded rather than a general `src`."""
+    dst: Operand
+    mnemonic = "sarl"
+
+    def operands(self) -> List[str]:
+        return ['%cl', self.dst.emit()]
 
 
 @dataclass
@@ -1087,7 +1157,9 @@ class CodeGenerator:
                 # ruled out any other combination, so the left operand's
                 # type alone determines which this is.
                 return self._infer_type(expr.left)
-            if expr.op in (BinaryOp.SUBTRACT, BinaryOp.MULTIPLY, BinaryOp.DIVIDE):
+            if expr.op in (BinaryOp.SUBTRACT, BinaryOp.MULTIPLY, BinaryOp.DIVIDE,
+                           BinaryOp.MODULO, BinaryOp.BITWISE_AND, BinaryOp.BITWISE_OR,
+                           BinaryOp.BITWISE_XOR, BinaryOp.SHIFT_LEFT, BinaryOp.SHIFT_RIGHT):
                 return 'int'
             return 'bool'  # every comparison, and/or
         raise CodegenError(f"Cannot infer a type for expression: {expr!r}")
@@ -1755,6 +1827,29 @@ class CodeGenerator:
             if dst != Register('eax'):
                 raise CodegenError("Division currently requires its destination to be %eax")
             return [Cdq(), IDiv(src)]
+        if op == BinaryOp.MODULO:
+            # Exactly the same Cdq+IDiv sequence as DIVIDE -- idivl
+            # always computes both the quotient (%eax) and the remainder
+            # (%edx) in one instruction -- just followed by moving the
+            # remainder into dst instead of leaving the quotient there.
+            if dst != Register('eax'):
+                raise CodegenError("Modulo currently requires its destination to be %eax")
+            return [Cdq(), IDiv(src), Mov(src=Register('edx'), dst=Register('eax'))]
+        if op == BinaryOp.BITWISE_AND:
+            return [And(src=src, dst=dst)]
+        if op == BinaryOp.BITWISE_OR:
+            return [Or(src=src, dst=dst)]
+        if op == BinaryOp.BITWISE_XOR:
+            return [Xor(src=src, dst=dst)]
+        if op == BinaryOp.SHIFT_LEFT:
+            # `src` (== %ecx, per gen_binary_into) is never referenced
+            # here -- ShiftLeft hardcodes %cl as its count operand,
+            # since that's the only register x86 allows there, and %ecx
+            # is already where the right-hand operand ends up by the
+            # time gen_binary_op is called for any binary operator.
+            return [ShiftLeft(dst=dst)]
+        if op == BinaryOp.SHIFT_RIGHT:
+            return [ShiftRightArithmetic(dst=dst)]
         if op in _COMPARISON_CONDITION_CODES:
             # Cmp(src=right, dst=left) computes (left - right) and sets
             # flags from that; SetCC turns the relevant flag combination

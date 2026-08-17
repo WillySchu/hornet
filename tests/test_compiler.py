@@ -25,6 +25,7 @@ Run with:
 Organization:
     TestUnaryOperators                 ( 7 tests)
     TestBinaryArithmetic                (18 tests)
+    TestBitwiseAndModuloOperators       (18 tests)
     TestComparisons                     (12 tests)
     TestPrecedenceAndLogicalOperators   ( 8 tests)
     TestShortCircuitEvaluation          ( 4 tests)
@@ -35,9 +36,34 @@ Organization:
     TestStringMemory                    (12 tests)
     TestFunctions                       (12 tests)
     TestPrint                           (12 tests)
-    TestSemanticErrors                  (58 tests)
+    TestSemanticErrors                  (66 tests)
                                         ----------
-                                        196 tests total
+                                        222 tests total
+
+A NOTE ON THE BITWISE OPERATORS' PRECEDENCE
+-----------------------------------------------------------------
+% & | ^ << >> follow the classic C precedence ladder (see parser.py's
+_BINARY_OPS comment), adopted deliberately rather than invented fresh.
+That choice reproduces a well-known C surprise on purpose: `a & b == c`
+parses as `a & (b == c)`, not `(a & b) == c`, since == binds tighter
+than &. In C that silently compiles into something almost nobody
+intends. Here it can't -- `b == c` is bool, & requires int, so it's a
+compile-time type error instead of a silent footgun.
+test_bitwise_and_equality_precedence_is_a_type_error in
+TestSemanticErrors is the test that actually proves this, paired with
+test_bitwise_and_equality_with_explicit_parens_is_valid as the positive
+control showing the fix (adding the parens) works.
+
+Also worth knowing: modulo shares codegen with division (idivl computes
+both the quotient and the remainder in one instruction), so it inherits
+the exact same division-by-zero SIGFPE crash -- see
+test_modulo_by_zero_crashes_with_sigfpe. And
+test_modulo_result_used_as_operand_of_plus exists specifically because
+adding these operators surfaced a real bug in codegen.py's _infer_type:
+it needed these six new operators added to its int-producing branch, or
+an expression like `5 % 2 + 3` would have misidentified `5 % 2` as
+bool-typed and routed the outer `+` to string concatenation codegen
+instead of ordinary integer addition.
 
 A NOTE ON print AND WHY assert_stdout EXISTS
 -----------------------------------------------------------------
@@ -444,6 +470,91 @@ class TestBinaryArithmetic:
     ])
     def test_binary_arithmetic(self, expr, expected):
         assert_exit_code(f"    return {expr}", expected, return_type="int")
+
+
+# ---------------------------------------------------------------------------
+# Modulo and the bitwise operators (% & | ^ << >>) -- the last of the
+# operators from the README's original TODO list. Precedence follows
+# the classic C ladder (see parser.py's _BINARY_OPS comment): % sits
+# with * /; << >> sit between +- and the relational operators; & ^ |
+# sit between == != and and/or, in that tightness order (& tightest,
+# | loosest).
+#
+# That specific placement reproduces a well-known C surprise on
+# purpose: `a & b == c` parses as `a & (b == c)`, not `(a & b) == c`,
+# since == binds tighter than &. TestSemanticErrors has the positive
+# proof that this language turns that into a real type error rather
+# than silently accepting the "wrong" grouping the way C does.
+# ---------------------------------------------------------------------------
+
+class TestBitwiseAndModuloOperators:
+    pytestmark = GCC_SKIP
+
+    @pytest.mark.parametrize("expr,expected", [
+        ("7 % 3", 1),
+        ("17 % 5", 2),
+        ("-7 % 3", 255),          # C-style truncating modulo: -7 % 3 == -1 -> 255
+        ("12 & 10", 8),
+        ("12 | 10", 14),
+        ("12 ^ 10", 6),
+        ("1 << 4", 16),
+        ("256 >> 4", 16),
+        ("-8 >> 1", 252),         # arithmetic (sign-preserving) shift: -8 >> 1 == -4 -> 252
+        ("10 - 6 % 4", 8),        # % binds as tight as * / -- tighter than -
+        ("1 + 1 << 2", 8),        # << is looser than + -- (1+1)<<2, not 1+(1<<2)
+        ("5 & 3 | 8", 9),         # & binds tighter than |
+        ("1 | 2 ^ 3 & 3", 1),     # & tightest of these three, then ^, then |
+    ])
+    def test_bitwise_and_modulo(self, expr, expected):
+        assert_exit_code(f"    return {expr}", expected, return_type="int")
+
+    def test_modulo_with_variables(self):
+        assert_exit_code(
+            "    int a = 17\n"
+            "    int b = 5\n"
+            "    return a % b",
+            2,
+        )
+
+    def test_modulo_by_zero_crashes_with_sigfpe(self):
+        """Modulo reuses idivl (see codegen.py's gen_binary_op MODULO
+        case -- it's the exact same Cdq+IDiv sequence as division, just
+        reading %edx instead of %eax afterward), so it inherits the
+        same division-by-zero hardware trap DIVIDE already has."""
+        assert_crashes_with_sigfpe("    int a = 5\n    int b = 0\n    return a % b")
+
+    def test_modulo_result_used_as_operand_of_plus(self):
+        """Specifically exercises _infer_type's handling of these new
+        operators (see codegen.py) -- if MODULO weren't included in its
+        int-producing branch, this expression's `5 % 2` would be
+        misidentified as bool-typed, and the outer `+` would be wrongly
+        routed to string concatenation codegen instead of ordinary
+        integer addition."""
+        assert_exit_code(
+            "    int x = 5 % 2 + 3\n"
+            "    return x",
+            4,
+        )
+
+    def test_modulo_in_a_loop_condition(self):
+        assert_exit_code(
+            "    int x = 0\n"
+            "    int i = 0\n"
+            "    while i < 10:\n"
+            "        if i % 2 == 0:\n"
+            "            x = x + 1\n"
+            "        i = i + 1\n"
+            "    return x",
+            5,
+        )
+
+    def test_bitwise_and_combined_with_logical_and(self):
+        assert_exit_code(
+            "    int flags = 6\n"
+            "    return (flags & 2) == 2 and (flags & 1) == 0",
+            1,
+            return_type="bool",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2219,3 +2330,61 @@ class TestSemanticErrors:
         for arg in ("5", "true", "'hello'"):
             ast = _parse(f"def int main():\n    print({arg})\n    return 0\n")
             analyze(ast)  # should not raise
+
+    # -- modulo and the bitwise operators (% & | ^ << >>) -----------------
+
+    def test_modulo_requires_int_operands(self):
+        assert_semantic_error(
+            "    return true % 2",
+            match="requires int operands",
+        )
+
+    def test_bitwise_and_requires_int_operands(self):
+        assert_semantic_error(
+            "    return true & false",
+            match="requires int operands",
+        )
+
+    def test_bitwise_or_requires_int_operands(self):
+        assert_semantic_error(
+            "    return 'x' | 1",
+            match="requires int operands",
+        )
+
+    def test_bitwise_xor_requires_int_operands(self):
+        assert_semantic_error(
+            "    return true ^ true",
+            match="requires int operands",
+        )
+
+    def test_shift_left_requires_int_operands(self):
+        assert_semantic_error(
+            "    return 'x' << 1",
+            match="requires int operands",
+        )
+
+    def test_shift_right_requires_int_operands(self):
+        assert_semantic_error(
+            "    return true >> 1",
+            match="requires int operands",
+        )
+
+    def test_bitwise_and_equality_precedence_is_a_type_error(self):
+        """The C footgun, made real: `1 & 2 == 2` parses as
+        `1 & (2 == 2)` (== binds tighter than &, per parser.py's
+        _BINARY_OPS), so the right-hand side of & is bool, not int.
+        In C this silently compiles into something almost nobody
+        intends; here, strong typing turns it into a compile error
+        instead."""
+        assert_semantic_error(
+            "    return 1 & 2 == 2",
+            match="requires int operands",
+        )
+
+    def test_bitwise_and_equality_with_explicit_parens_is_valid(self):
+        """The positive control for the test above: adding the
+        parentheses C programmers usually need to remember here
+        (`(1 & 2) == 2`) makes the grouping explicit and the program
+        valid."""
+        ast = _parse("def bool main():\n    return (1 & 2) == 2\n")
+        analyze(ast)  # should not raise
