@@ -212,6 +212,53 @@ to. That's a distinct kind of duplication (of scope/offset resolution,
 not of type inference) that this annotation mechanism doesn't attempt
 to address.
 
+ALL PATHS RETURN
+------------------
+analyze_function's last step, after every statement in a function's
+body is already known to be individually well-typed, is
+always_returns(fn.body): does every execution path through this
+function's body reach a `return` before falling off the end? This
+applies to every function regardless of declared return type, since
+this language has no void -- and it's not just a correctness nicety.
+Once functions could call each other (see codegen.py's FUNCTIONS
+section), a function whose generated code falls through to whatever
+comes after it with no `ret` ever executed doesn't just return garbage
+to its caller -- it corrupts the *calling* function's own stack, since
+there's a real return address sitting on the stack from the `call` that
+invoked it, with nothing left to pop it and jump there.
+
+This is deliberately modeled as a simple, conservative "terminating
+statement" check (the same shape Go's specification uses for this exact
+problem) rather than a fully general flow analysis: always_returns scans
+a list of statements front-to-back for the first one that, *on its
+own*, guarantees a return, and stops there (anything after it doesn't
+matter to this question -- dead/unreachable code is a separate concern
+this doesn't address). A statement guarantees a return if it's a Return
+itself; an If with a non-None else_body where both branches themselves
+guarantee a return (which, since elif desugars into a nested If in
+else_body, handles an elif chain of any length for free); or a `while
+true` loop with no reachable break anywhere in its body.
+
+That last case is the one genuinely subtle piece here. In general a
+while loop can't guarantee anything -- its condition might be false
+immediately, so its body might run zero times -- except when the
+condition is the literal constant `true` (checked structurally, as
+`isinstance(condition, BoolLiteral) and condition.value is True`; this
+does not try to prove some other expression is always true, e.g. `1 ==
+1` -- only the literal keyword counts). Even then, a `while true` loop
+only guarantees a return if there's no way to escape it other than
+returning: if it also contains a `break`, that break could fire and
+fall through to whatever comes after the loop, so the loop stops
+counting as guaranteeing anything on its own, and something has to
+catch that path explicitly (typically a return placed right after the
+loop). contains_reachable_break finds a break anywhere in a loop's own
+body, including nested arbitrarily deep inside if/elif/else -- but
+deliberately does NOT recurse into a *nested* while loop's own body, on
+the same reasoning break already has for its own validity (see
+analyze_break/loop_depth) and at the codegen level (see codegen.py's
+loop_labels stack): a break inside an inner loop belongs to that inner
+loop, not whatever loop encloses it.
+
 ERROR REPORTING
 -----------------
 This raises SemanticError on the *first* problem found and stops,
@@ -288,6 +335,75 @@ def type_from_name(name: str) -> Type:
         return _TYPE_NAMES[name]
     except KeyError:
         raise SemanticError(f"Unknown type '{name}'")
+
+
+def always_returns(statements: List[Node]) -> bool:
+    """Does every execution path through this list of statements reach
+    a `return` before falling off the end? Used to enforce that every
+    function returns on every code path -- see the module docstring's
+    ALL PATHS RETURN section for the full reasoning and what this
+    deliberately does and doesn't try to prove.
+
+    Scans front-to-back for the first statement that, on its own,
+    guarantees a return; if one is found, everything after it is
+    irrelevant to *this* question (dead code is a separate concern this
+    function doesn't address). Reaching the end without finding one
+    means False -- there's some path through this block that falls
+    through without returning.
+    """
+    for stmt in statements:
+        if isinstance(stmt, Return):
+            return True
+        if isinstance(stmt, If):
+            # Only counts if there's an else at all, and *both* sides
+            # are themselves guaranteed to return -- an if with no else
+            # can always just not run its body, so it can never by
+            # itself guarantee anything about what happens next.
+            if stmt.else_body is not None and always_returns(stmt.then_body) and always_returns(stmt.else_body):
+                return True
+        if isinstance(stmt, While):
+            # A `while <cond>: ...` loop's body might run zero times
+            # (whenever cond isn't literally the constant `true`), so in
+            # general a while loop can never by itself guarantee a
+            # return -- *unless* it's a genuine `while true` with no way
+            # to break out of it, in which case it never falls through
+            # to whatever comes after it at all (it either returns from
+            # inside, or loops forever) -- either way, nothing after it
+            # is reachable, which vacuously satisfies "never falls off
+            # the end without returning". See contains_reachable_break
+            # for why a break anywhere inside changes this.
+            is_infinite = isinstance(stmt.condition, BoolLiteral) and stmt.condition.value is True
+            if is_infinite and not contains_reachable_break(stmt.body):
+                return True
+        # VarDecl, Assign, Break, Continue, ExprStmt: none of these can
+        # themselves guarantee a return, and none of them stop the scan
+        # -- move on to the next statement.
+    return False
+
+
+def contains_reachable_break(statements: List[Node]) -> bool:
+    """Does this list of statements contain a `break` that refers to
+    *this* loop -- i.e., one not already claimed by a nested loop?
+    Recurses into if/elif/else bodies (a break inside an if that's
+    directly in this loop's body still belongs to this loop), but
+    deliberately does NOT recurse into a nested While's own body -- a
+    break there refers to that inner loop, not this one, exactly the
+    same scoping break already has at the semantic-error-checking level
+    (see analyze_break/loop_depth) and at the codegen level (see
+    codegen.py's loop_labels stack). Only used by always_returns, to
+    decide whether a `while true` loop is genuinely inescapable-except-
+    by-return or not.
+    """
+    for stmt in statements:
+        if isinstance(stmt, Break):
+            return True
+        if isinstance(stmt, If):
+            if contains_reachable_break(stmt.then_body):
+                return True
+            if stmt.else_body is not None and contains_reachable_break(stmt.else_body):
+                return True
+        # While: deliberately not recursed into -- see docstring above.
+    return False
 
 
 # Names that are builtins rather than ordinary user-definable functions
@@ -383,6 +499,20 @@ class SemanticAnalyzer:
         return_type = type_from_name(fn.return_type)
         for stmt in fn.body:
             self.analyze_statement(stmt, return_type)
+        # Checked last, after every statement is individually known to
+        # be well-typed -- see the module docstring's ALL PATHS RETURN
+        # section. Every function needs this regardless of return type,
+        # since this language has no void: falling off the end of a
+        # function's generated code was always wrong, but it became a
+        # real safety issue once functions could call each other (see
+        # codegen.py's FUNCTIONS section) -- control falling through
+        # with no `ret` executed corrupts the calling function's own
+        # stack, not just the callee's exit code.
+        if not always_returns(fn.body):
+            raise SemanticError(
+                f"Function '{fn.name}' (declared to return {return_type}) "
+                f"does not return a value on all code paths"
+            )
 
     # -- scope stack ------------------------------------------------------
 

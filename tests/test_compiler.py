@@ -38,9 +38,34 @@ Organization:
     TestFunctions                       (12 tests)
     TestTypeAnnotation                  ( 4 tests)
     TestPrint                           (12 tests)
+    TestAllPathsReturn                  (18 tests)
     TestSemanticErrors                  (66 tests)
                                         ----------
-                                        242 tests total
+                                        260 tests total
+
+A NOTE ON TestAllPathsReturn
+-----------------------------------------------------------------
+semantic.py now rejects any function where some execution path could
+fall off the end of its body without hitting a `return` -- see
+always_returns/contains_reachable_break there. This isn't just a
+correctness nicety: once functions could call each other (see
+codegen.py's FUNCTIONS section), a function falling through with no
+`ret` executed corrupts the *calling* function's own stack, not just
+the callee's exit code, since there's a real return address on the
+stack with nothing left to pop and jump to it.
+
+The genuinely subtle case, and the one the CRITICAL-labeled tests in
+TestAllPathsReturn specifically target, is `while true` with a `break`
+somewhere inside it. A bare `while true: ...; return x` is fine on its
+own -- the loop never falls through, it either returns from inside or
+runs forever -- but the instant a `break` exists anywhere in that
+loop's body, even buried inside a nested if/elif chain, the loop can
+fall through to whatever comes after it, so it stops counting as
+guaranteeing a return on its own. Getting this exactly right (finding a
+break nested arbitrarily deep in if/elif/else, while correctly *not*
+letting a break that belongs to a nested loop count toward the outer
+one) is most of what makes this check nontrivial rather than a simple
+"does every function end in a return statement" pattern match.
 
 A NOTE ON TestTypeAnnotation
 -----------------------------------------------------------------
@@ -2007,6 +2032,253 @@ class TestPrint:
             "    print(333)\n"
             "    return 0",
             "1\n22\n333\n",
+        )
+
+
+# ---------------------------------------------------------------------------
+# All-paths-return checking (semantic.py's always_returns /
+# contains_reachable_break). Every function needs this regardless of
+# return type, since this language has no void -- but it became a real
+# safety issue, not just a correctness nicety, once functions could call
+# each other: control falling off the end of a function's generated
+# code with no `ret` executed corrupts the *calling* function's own
+# stack, not just the callee's exit code.
+#
+# The genuinely subtle case here is `while true` with a `break` inside
+# it -- a bare `while true: ...; return x` is fine on its own (the loop
+# never falls through: it either returns from inside or runs forever),
+# but the moment a `break` exists anywhere in that loop's body (even
+# buried inside a nested if/elif chain), the loop CAN fall through to
+# whatever comes after it, so it stops counting as guaranteeing a
+# return and something has to catch that path explicitly. The
+# CRITICAL-labeled tests are the ones that would actually catch a
+# mistake in this specific piece of the algorithm, not just prove the
+# ordinary if/else and trailing-return cases work.
+# ---------------------------------------------------------------------------
+
+class TestAllPathsReturn:
+
+    # -- accepted (analyze() must NOT raise) -------------------------------
+
+    def test_simple_trailing_return(self):
+        ast = _parse("def int f():\n    return 1\n")
+        analyze(ast)  # should not raise
+
+    def test_if_else_both_branches_return(self):
+        ast = _parse(
+            "def int f(int x):\n"
+            "    if x > 0:\n"
+            "        return 1\n"
+            "    else:\n"
+            "        return 2\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_if_without_else_followed_by_trailing_return(self):
+        """An if with no else can never guarantee a return by itself --
+        it's the return statement *after* it that makes this valid."""
+        ast = _parse(
+            "def int f(int x):\n"
+            "    if x > 0:\n"
+            "        return 1\n"
+            "    return 2\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_if_elif_else_chain_all_branches_return(self):
+        """elif desugars into a nested If in else_body (see parser.py),
+        so this also proves always_returns recurses correctly through
+        an elif chain of arbitrary length, not just a single if/else."""
+        ast = _parse(
+            "def int f(int x):\n"
+            "    if x > 0:\n"
+            "        return 1\n"
+            "    elif x < 0:\n"
+            "        return 2\n"
+            "    else:\n"
+            "        return 3\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_if_elif_without_final_else_followed_by_trailing_return(self):
+        """The elif chain itself isn't exhaustive (no final else), but
+        the trailing return after it catches every path that falls
+        through the chain without returning."""
+        ast = _parse(
+            "def int f(int x):\n"
+            "    if x > 0:\n"
+            "        return 1\n"
+            "    elif x < 0:\n"
+            "        return 2\n"
+            "    return 99\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_while_true_with_no_break_needs_no_trailing_return(self):
+        """A genuine `while true` with nothing that can break out of it
+        never falls through to whatever comes after it -- it either
+        loops forever or returns from inside -- so this is valid even
+        though nothing follows the loop and the loop body itself has no
+        return in it. See codegen.py's own gaps around genuinely
+        infinite loops for the flip side of this: this is a legitimate,
+        if unusual, thing to write."""
+        ast = _parse(
+            "def int f():\n"
+            "    while true:\n"
+            "        int x = 1\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_critical_while_true_with_break_and_trailing_return(self):
+        """The positive control for the critical case: once a `while
+        true` loop has a `break`, the loop alone can no longer
+        guarantee a return -- but an explicit return placed after the
+        loop correctly catches the break-exit path."""
+        ast = _parse(
+            "def int f(bool x):\n"
+            "    while true:\n"
+            "        if x:\n"
+            "            break\n"
+            "        int y = 1\n"
+            "    return 99\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_critical_nested_while_true_inner_break_does_not_satisfy_outer(self):
+        """A break inside a nested while loop belongs to that inner
+        loop, not the outer one (the exact same scoping break already
+        has for its own semantic validity -- see analyze_break/
+        loop_depth -- and at the codegen level -- see codegen.py's
+        loop_labels stack). So the outer while here is correctly still
+        recognized as unbreakable-except-by-return, purely because of
+        its own trailing `return 1`, with the inner loop's break having
+        no bearing on that."""
+        ast = _parse(
+            "def int f():\n"
+            "    while true:\n"
+            "        while true:\n"
+            "            break\n"
+            "        return 1\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_finite_while_loop_followed_by_trailing_return(self):
+        """The most common real shape: an ordinary, condition-bounded
+        loop (not `while true`) can never itself guarantee a return --
+        its condition might be false immediately -- so it's the return
+        after the loop that makes this valid, exactly like an if
+        without an else."""
+        ast = _parse(
+            "def int f():\n"
+            "    int i = 0\n"
+            "    while i < 10:\n"
+            "        i = i + 1\n"
+            "    return i\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_str_returning_function_with_trailing_return(self):
+        """The check applies uniformly regardless of the function's
+        declared return type -- this isn't an int/bool-specific rule."""
+        ast = _parse(
+            "def str f():\n"
+            "    str s = 'hello'\n"
+            "    return s\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_critical_break_inside_elif_chain_inside_while_true_with_trailing_return(self):
+        """A break buried three levels deep inside an elif chain,
+        itself inside a while-true loop, must still be found by
+        contains_reachable_break (which has to recurse through If's
+        then_body/else_body, including the nested-If shape an elif
+        chain desugars into) -- and the trailing return after the loop
+        must still correctly catch the resulting break-exit path."""
+        ast = _parse(
+            "def int f(int x):\n"
+            "    while true:\n"
+            "        if x == 1:\n"
+            "            int y = 1\n"
+            "        elif x == 2:\n"
+            "            break\n"
+            "        else:\n"
+            "            int z = 1\n"
+            "        return 1\n"
+            "    return 99\n"
+        )
+        analyze(ast)  # should not raise
+
+    # -- rejected (analyze() must raise SemanticError) ---------------------
+
+    def test_no_return_at_all(self):
+        assert_semantic_error(
+            "    int x = 1",
+            match="does not return a value on all code paths",
+        )
+
+    def test_print_only_function_with_no_return(self):
+        """print's own presence has no bearing on this check -- it's
+        just an ordinary expression statement as far as always_returns
+        is concerned."""
+        assert_semantic_error(
+            "    print(5)",
+            match="does not return a value on all code paths",
+        )
+
+    def test_if_without_else_and_nothing_after_it(self):
+        assert_semantic_error(
+            "    bool x = true\n"
+            "    if x:\n"
+            "        return 1",
+            match="does not return a value on all code paths",
+        )
+
+    def test_if_elif_without_final_else_and_nothing_after_it(self):
+        assert_semantic_error(
+            "    int x = 0\n"
+            "    if x == 1:\n"
+            "        return 1\n"
+            "    elif x == 2:\n"
+            "        return 2",
+            match="does not return a value on all code paths",
+        )
+
+    def test_critical_while_true_with_break_and_no_trailing_return(self):
+        """The critical negative case: exactly the shape of program
+        that motivated this whole feature -- a `while true` loop that
+        looks like it always returns at a glance (it has a return
+        inside it), but can actually fall through to the end of the
+        function whenever `x` is true and the break fires."""
+        assert_semantic_error(
+            "    bool x = true\n"
+            "    while true:\n"
+            "        if x:\n"
+            "            break\n"
+            "        return 1",
+            match="does not return a value on all code paths",
+        )
+
+    def test_finite_while_loop_with_nothing_after_it(self):
+        """A condition-bounded while loop's body might never execute
+        (the condition could be false from the start), so even a
+        return unconditionally reached *inside* the loop body doesn't
+        help if there's nothing after the loop to catch the
+        zero-iterations case."""
+        assert_semantic_error(
+            "    bool x = true\n"
+            "    int i = 0\n"
+            "    while i < 10:\n"
+            "        if x:\n"
+            "            return 1\n"
+            "        i = i + 1",
+            match="does not return a value on all code paths",
+        )
+
+    def test_str_returning_function_with_no_return(self):
+        assert_semantic_error(
+            "    str s = 'hello'",
+            match="does not return a value on all code paths",
+            return_type="str",
         )
 
 

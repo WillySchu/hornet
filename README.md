@@ -12,7 +12,7 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- All code paths must return / default return values.
 - Ternary.
 - For loops.
 - Free memory `malloc`ed by string concatenation.
+- Void type (none, nil?).
