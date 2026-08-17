@@ -36,10 +36,29 @@ Organization:
     TestStrings                         (13 tests)
     TestStringMemory                    (12 tests)
     TestFunctions                       (12 tests)
+    TestTypeAnnotation                  ( 4 tests)
     TestPrint                           (12 tests)
     TestSemanticErrors                  (66 tests)
                                         ----------
-                                        238 tests total
+                                        242 tests total
+
+A NOTE ON TestTypeAnnotation
+-----------------------------------------------------------------
+semantic.py's check_expr now annotates every expression node with its
+resolved type (expr.resolved_type), and codegen.py's _type_of reads
+that directly instead of re-deriving a type independently the way its
+old _infer_type method used to. That old method wasn't just a
+theoretical duplication risk -- it silently caused two real bugs, once
+each when `print` and the six int-only operators (% & | ^ << >>) were
+added, since each addition needed a matching update to semantic.py's
+real type-checking logic *and* a separate, easy-to-forget update to
+_infer_type's own parallel copy of that logic. TestTypeAnnotation
+exists specifically to regression-test those two exact bug shapes
+directly (a Call result and a modulo result each used straight as an
+operand of `+`, with no intermediate variable), plus the new
+CodegenError _type_of raises if codegen somehow runs before semantic
+analysis. See semantic.py's TYPES section and codegen.py's own comments
+on _type_of for the full reasoning.
 
 A NOTE ON COMPOUND ASSIGNMENT BEING PURE DESUGARING
 -----------------------------------------------------------------
@@ -1763,6 +1782,101 @@ class TestFunctions:
         ast = _parse(source)
         analyze(ast)  # semantically fine -- the limit is a codegen-level one
         with pytest.raises(CodegenError, match="only supports up to 6"):
+            generate_asm(ast, platform=ASM_PLATFORM)
+
+
+# ---------------------------------------------------------------------------
+# Type annotation: semantic.py's check_expr annotates every expression
+# node with its resolved type (expr.resolved_type), which codegen.py's
+# _type_of reads directly instead of re-deriving a type independently.
+#
+# This replaced a previous codegen.py-internal method, _infer_type, that
+# duplicated -- in miniature, via its own per-operator/per-node-type
+# branches -- the same "what type does this produce" logic semantic.py's
+# check_binary/check_call already fully implement. That duplication
+# wasn't hypothetical risk: it silently caused two real bugs. Adding
+# `print` needed a Call case added to _infer_type separately from
+# semantic.py's own check_call; adding the six int-only operators (%  &
+# | ^ << >>) needed them added to _infer_type's int-producing branch
+# separately from semantic.py's _INT_ONLY_BINARY_OPS. Neither omission
+# caused an immediate, loud failure -- both were only caught by manual
+# testing during those turns, which is exactly the failure mode worth
+# structurally preventing rather than just fixing twice.
+#
+# These tests specifically target the annotation mechanism and the two
+# bug patterns above -- most of the ordinary coverage that this
+# mechanism also has to get right already exists throughout the rest of
+# this file (every test that computes a nontrivial expression exercises
+# it, whether or not that test was written with this in mind).
+# ---------------------------------------------------------------------------
+
+class TestTypeAnnotation:
+    pytestmark = GCC_SKIP
+
+    def test_call_result_directly_as_operand_of_plus(self):
+        """The exact shape of the first bug this refactor prevents:
+        codegen needs to know a Call expression's type to decide
+        whether the outer `+` means concatenation or arithmetic, with
+        the call's result never stored in an intermediate variable
+        first -- every existing function-call test always assigns a
+        call's result to a variable before using it further, so this
+        specific shape wasn't previously covered anywhere."""
+        assert_program_exit_code(
+            "def int five():\n"
+            "    return 5\n"
+            "\n"
+            "def int main():\n"
+            "    int x = five() + 3\n"
+            "    return x\n",
+            8,
+        )
+
+    def test_modulo_result_directly_as_operand_of_plus(self):
+        """The exact shape of the second bug this refactor prevents.
+        Already covered by test_modulo_result_used_as_operand_of_plus
+        in TestBitwiseAndModuloOperators (added at the time that bug
+        was found); repeated here as a direct regression test scoped
+        to the annotation mechanism itself, so this file's own
+        organization doesn't obscure that the two bugs share one root
+        cause and one fix."""
+        assert_exit_code(
+            "    int x = 5 % 2 + 3\n"
+            "    return x",
+            4,
+        )
+
+    def test_deeply_nested_mixed_expression_annotates_and_executes_correctly(self):
+        """A kitchen-sink expression touching every expression node
+        type and several operator categories at once -- a call, int
+        arithmetic, modulo, a comparison, a bitwise AND, equality,
+        unary not, and logical and -- nested three levels deep. Proof
+        the annotation mechanism correctly threads a resolved type
+        through arbitrary nesting, not just each category checked in
+        isolation. Also, not incidentally, another instance of the
+        bitwise/equality-precedence type error from
+        TestSemanticErrors' test_bitwise_and_equality_precedence_is_a_
+        type_error -- `(5 & 2) == 2` needs its explicit parens for
+        exactly the same reason `(1 & 2) == 2` does there."""
+        assert_program_exit_code(
+            "def int add(int a, int b):\n"
+            "    return a + b\n"
+            "\n"
+            "def bool main():\n"
+            "    int n = add(1, 2) + (3 % 2)\n"
+            "    bool b = (n > 0) and not ((5 & 2) == 2)\n"
+            "    return b\n",
+            1,
+        )
+
+    def test_codegen_without_semantic_analysis_raises_clear_error(self):
+        """_type_of's defensive check: codegen invoked on an AST that
+        skipped semantic.analyze() (so no node has a resolved_type)
+        must fail with a clear, actionable CodegenError -- matching
+        _local_offset's own established posture -- rather than a bare
+        AttributeError or, worse, silently wrong codegen."""
+        ast = _parse("def int main():\n    return 1 + 2\n")
+        # Deliberately not calling analyze(ast) here.
+        with pytest.raises(CodegenError, match="has no resolved type"):
             generate_asm(ast, platform=ASM_PLATFORM)
 
 

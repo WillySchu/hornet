@@ -377,12 +377,11 @@ regardless of how deep the nesting goes.
 self.functions is never built here -- semantic.py already guaranteed
 every call resolves to a real function with matching argument types and
 count before this file ever runs (see this module's top for the
-compile_to_asm/generate_asm split). The one piece of function-signature
-information codegen *does* still need for itself is each function's
-return type, collected once in generate() into
-self.function_return_types -- needed by _infer_type so a Call
-expression's type (int/bool/str) is known when it's used as an operand,
-e.g. deciding whether `foo() + bar()` means arithmetic or concatenation.
+compile_to_asm/generate_asm split). This file doesn't need its own copy
+of function signatures at all, including return types -- a Call
+expression's type (int/bool/str) needed for e.g. deciding whether
+`foo() + bar()` means arithmetic or concatenation is read directly via
+_type_of from what semantic.py already resolved, not re-looked-up here.
 """
 
 import argparse
@@ -952,7 +951,6 @@ class CodeGenerator:
         self.scopes: List[Dict[str, tuple]] = []  # name -> (offset, type_str), generation-time; see LOCAL VARIABLES
         self.loop_labels: List[tuple] = []  # stack of (start_label, end_label), innermost last; see LOOPS
         self.string_literals: List[tuple] = []  # (label, content) pairs; see STRINGS
-        self.function_return_types: Dict[str, str] = {}  # name -> return type string; see FUNCTIONS
         # Lazily created, then cached and reused for the rest of this
         # compilation -- see gen_print_call_into and the module
         # docstring's BUILTINS section for why these specifically (and
@@ -974,16 +972,6 @@ class CodeGenerator:
         return label
 
     def generate(self, program: Program) -> AsmProgram:
-        # A Call expression's type is its callee's declared return type
-        # -- _infer_type needs that to decide operand width and which
-        # overloaded operator (+, ==, !=) applies when a call result
-        # feeds into one, exactly the same reason Variable lookups need
-        # to know a variable's type. Collecting every function's return
-        # type by name, once, up front (rather than looking a Function
-        # node up by name every time) is the smallest amount of
-        # function-signature duplication that actually satisfies that
-        # need -- see the module docstring's FUNCTIONS section.
-        self.function_return_types = {fn.name: fn.return_type for fn in program.functions}
         functions = [self.gen_function(fn) for fn in program.functions]
         return AsmProgram(functions=functions, string_literals=self.string_literals)
 
@@ -1101,10 +1089,9 @@ class CodeGenerator:
 
     def _bind_local(self, stmt: VarDecl) -> int:
         """Registers `stmt`'s name -- and its declared type, needed by
-        _local_type/_infer_type -- in the current (innermost)
-        generation-time scope, pointing at the permanent offset
-        _collect_locals already assigned this exact VarDecl node, and
-        returns that offset."""
+        _local_type -- in the current (innermost) generation-time
+        scope, pointing at the permanent offset _collect_locals already
+        assigned this exact VarDecl node, and returns that offset."""
         offset = self._var_offsets[id(stmt)]
         self.scopes[-1][stmt.name] = (offset, stmt.var_type)
         return offset
@@ -1116,53 +1103,56 @@ class CodeGenerator:
         raise CodegenError(f"Reference to undeclared variable '{name}'")
 
     def _local_type(self, name: str) -> str:
+        """Used specifically where a Variable's *offset* is also being
+        looked up right alongside it (see gen_expr_into's Variable case)
+        -- both come from the same (offset, type) tuple in the same
+        scope-stack entry, which codegen has to maintain regardless of
+        _type_of's existence, since resolved_type has no way to encode
+        *which* stack slot a name refers to. This is deliberately not
+        replaced by _type_of below, even though it would give the same
+        answer for a Variable node -- see _type_of's own docstring for
+        why the two coexist rather than one replacing the other."""
         for scope in reversed(self.scopes):
             if name in scope:
                 return scope[name][1]
         raise CodegenError(f"Reference to undeclared variable '{name}'")
 
-    def _infer_type(self, expr: Node) -> str:
-        """A lightweight, duplicate-of-semantic.py type inference --
-        trusts the program has already passed semantic analysis (so
-        e.g. a Binary's operands are guaranteed type-consistent), and
-        only needs to answer "is this str, so a pointer, or not" for
-        deciding operand width and which of a handful of overloaded
-        operators (`+`, `==`, `!=`) actually apply. See the module
-        docstring's STRINGS section, and its LOCAL VARIABLES section
-        for the broader precedent of codegen re-deriving something
-        semantic.py already computed rather than sharing state with it.
+    def _type_of(self, expr: Node) -> str:
+        """Reads the type semantic.py already resolved and annotated
+        onto this exact node (expr.resolved_type -- see semantic.py's
+        check_expr) rather than re-deriving it independently.
+
+        This replaces what used to be a separate _infer_type method
+        here that re-implemented, in miniature, the same "which type
+        does this operator/call produce" logic semantic.py's
+        check_binary/check_call already fully implement -- a second,
+        parallel copy of that logic that could (and twice actually did)
+        silently drift out of sync with the real one: adding `print`
+        needed a Call case added here too, and adding the six new
+        int-only operators (%, &, |, ^, <<, >>) needed them added to
+        this method's own int-producing branch, separately from adding
+        them to semantic.py's _INT_ONLY_BINARY_OPS. Neither addition
+        was structurally required by anything -- both were just easy to
+        forget, and both were only caught by manual testing rather than
+        anything that would have failed loudly on its own. Reading the
+        annotation instead removes the second copy entirely: there's no
+        per-operator or per-node-type branch here left to forget
+        updating, since whatever semantic.py already decided is just
+        read directly, whatever it happens to be.
+
+        Still raises a clear, defensive CodegenError (matching
+        _local_offset's own posture) rather than a bare AttributeError
+        if resolved_type is somehow None -- the one legitimate way that
+        happens is codegen being invoked on an AST that skipped
+        semantic analysis entirely (see compile_to_asm, which always
+        runs analyze() first for exactly this reason).
         """
-        if isinstance(expr, Constant):
-            return 'int'
-        if isinstance(expr, BoolLiteral):
-            return 'bool'
-        if isinstance(expr, StringLiteral):
-            return 'str'
-        if isinstance(expr, Variable):
-            return self._local_type(expr.name)
-        if isinstance(expr, Call):
-            # 'print' isn't in function_return_types -- it was never a
-            # Function node in the Program to begin with, so it can't
-            # show up there (see the module docstring's BUILTINS
-            # section). Its type is always 'int', matching what
-            # semantic.py's check_print_call already settled on.
-            if expr.name == 'print':
-                return 'int'
-            return self.function_return_types[expr.name]
-        if isinstance(expr, Unary):
-            return 'bool' if expr.op == UnaryOp.NOT else 'int'
-        if isinstance(expr, Binary):
-            if expr.op == BinaryOp.ADD:
-                # str+str -> str, int+int -> int; semantic.py already
-                # ruled out any other combination, so the left operand's
-                # type alone determines which this is.
-                return self._infer_type(expr.left)
-            if expr.op in (BinaryOp.SUBTRACT, BinaryOp.MULTIPLY, BinaryOp.DIVIDE,
-                           BinaryOp.MODULO, BinaryOp.BITWISE_AND, BinaryOp.BITWISE_OR,
-                           BinaryOp.BITWISE_XOR, BinaryOp.SHIFT_LEFT, BinaryOp.SHIFT_RIGHT):
-                return 'int'
-            return 'bool'  # every comparison, and/or
-        raise CodegenError(f"Cannot infer a type for expression: {expr!r}")
+        if expr.resolved_type is None:
+            raise CodegenError(
+                f"{expr!r} has no resolved type -- semantic.analyze() "
+                f"must run before codegen (see compile_to_asm)"
+            )
+        return expr.resolved_type
 
     def gen_statement(self, stmt: Node) -> List[Instruction]:
         if isinstance(stmt, VarDecl):
@@ -1213,7 +1203,7 @@ class CodeGenerator:
         exactly as it always has, oblivious to str entirely; only this
         one call site needs to ask "which width am I storing"."""
         instructions = self.gen_expr_into(value_expr, Register('eax'))
-        if self._infer_type(value_expr) == 'str':
+        if self._type_of(value_expr) == 'str':
             instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
         else:
             instructions.append(Mov(src=Register('eax'), dst=Memory('rbp', offset)))
@@ -1402,9 +1392,9 @@ class CodeGenerator:
             # see the module docstring's STRINGS section) -- everything
             # else, and ADD/==/!= between two ints or bools, goes
             # through the original gen_binary_into completely unchanged.
-            if expr.op == BinaryOp.ADD and self._infer_type(expr.left) == 'str':
+            if expr.op == BinaryOp.ADD and self._type_of(expr.left) == 'str':
                 return self.gen_string_concat_into(expr, dst)
-            if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL) and self._infer_type(expr.left) == 'str':
+            if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL) and self._type_of(expr.left) == 'str':
                 return self.gen_string_compare_into(expr, dst)
             return self.gen_binary_into(expr, dst)
         raise CodegenError(f"No codegen rule for expression: {expr!r}")
@@ -1569,7 +1559,7 @@ class CodeGenerator:
             raise CodegenError(f"Call codegen requires dst == %eax, got: {dst!r}")
 
         arg = expr.args[0]
-        arg_type = self._infer_type(arg)
+        arg_type = self._type_of(arg)
 
         if arg_type == 'str':
             instructions = self.gen_expr_into(arg, dst)

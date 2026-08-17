@@ -247,6 +247,10 @@ class Node:
 @dataclass
 class Constant(Node):
     value: Union[int, float]
+    # Set by semantic.py's check_expr after type-checking, not at parse
+    # time -- see this field's fuller explanation on StringLiteral
+    # below, which was the first node to need it documented in detail.
+    resolved_type: Optional[str] = None
 
     def pretty(self) -> str:
         return f"Constant(value: {self.value})"
@@ -260,6 +264,7 @@ class BoolLiteral(Node):
     int or a bool" ambiguous exactly where semantic.py most needs it to
     be unambiguous."""
     value: bool
+    resolved_type: Optional[str] = None
 
     def pretty(self) -> str:
         return f"BoolLiteral(value: {'true' if self.value else 'false'})"
@@ -275,6 +280,16 @@ class StringLiteral(Node):
     Python int/float once, rather than every downstream pass re-parsing
     the source string itself)."""
     value: str
+    # `resolved_type` ('int'/'bool'/'str', matching codegen.py's own
+    # plain-string type representation) is None right after parsing --
+    # this field only gets a real value once semantic.py's check_expr
+    # has actually type-checked the node (see its module docstring's
+    # TYPES section). It's plain str rather than semantic.Type
+    # specifically so parser.py never has to import semantic.py, which
+    # already imports *from* parser.py -- a Type import here would be
+    # circular. codegen.py reads this directly (see its _type_of)
+    # instead of re-deriving an expression's type itself.
+    resolved_type: Optional[str] = None
 
     def pretty(self) -> str:
         return f"StringLiteral(value: {self.value!r})"
@@ -284,6 +299,7 @@ class StringLiteral(Node):
 class Variable(Node):
     """A reference to a local variable, e.g. the `a` in `a + 1`."""
     name: str
+    resolved_type: Optional[str] = None
 
     def pretty(self) -> str:
         return f"Variable(name: {self.name})"
@@ -299,6 +315,7 @@ class Call(Node):
     often want to discard."""
     name: str
     args: List[Node] = field(default_factory=list)
+    resolved_type: Optional[str] = None
 
     def pretty(self) -> str:
         args_str = ', '.join(a.pretty() for a in self.args)
@@ -309,6 +326,7 @@ class Call(Node):
 class Unary(Node):
     op: UnaryOp
     operand: Node
+    resolved_type: Optional[str] = None
 
     def pretty(self) -> str:
         return f"Unary(op: {self.op.symbol()}) -> {self.operand.pretty()}"
@@ -319,6 +337,7 @@ class Binary(Node):
     op: BinaryOp
     left: Node
     right: Node
+    resolved_type: Optional[str] = None
 
     def pretty(self) -> str:
         # Binary has two children, so the linear "A -> B" chain style

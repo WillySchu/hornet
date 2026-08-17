@@ -164,6 +164,54 @@ per argument type, and that it always evaluates to a clean 0 rather
 than leaking through whatever puts/printf themselves return) lives --
 see its BUILTINS section.
 
+TYPES: ANNOTATING THE AST FOR codegen.py
+-------------------------------------------
+check_expr does one thing beyond type-checking: after computing an
+expression's Type, it stores that result on the node itself
+(expr.resolved_type = str(result)) before returning. Every check_*
+method below stays a pure type-computation function with no knowledge
+of this -- the annotation happens in exactly one place, check_expr's
+own dispatch, and every recursive call for an operand, argument, or
+condition anywhere in this file already goes through check_expr rather
+than some check_* method directly (see analyze_var_decl, check_binary,
+check_unary, check_call, and every other caller). That means every
+expression node anywhere in a program, no matter how deeply nested,
+ends up annotated automatically, with no separate wiring needed and no
+per-node-type case to remember adding as this pass grows.
+
+resolved_type is a plain string ('int' / 'bool' / 'str'), matching
+str(Type.X), rather than a Type enum value directly -- parser.py
+defines these dataclass fields and must not import semantic.py, which
+already imports *from* parser.py; a Type-typed field would be
+circular. This also happens to match codegen.py's own established
+plain-string type representation exactly, so no translation is needed
+on the read side either.
+
+codegen.py reads this directly (see its _type_of) instead of
+re-deriving an expression's type with its own independent logic, which
+is what it used to do, via a method called _infer_type. That older
+approach was a real liability, not just an aesthetic one: adding
+`print` needed a Call case added to _infer_type separately from this
+file's own check_call, and adding the six int-only operators (%  &  |
+^  <<  >>) needed them added to _infer_type's own int-producing branch
+separately from this file's own _INT_ONLY_BINARY_OPS. Both omissions
+were easy to make and were only caught by manual testing, not by
+anything that would have failed loudly on its own. Annotating the AST
+here and having codegen.py read the annotation removes that second,
+independently-maintained copy of the logic entirely -- whatever this
+file already decided is just read directly downstream, whatever it
+happens to be, with nothing left elsewhere to fall out of sync.
+
+codegen.py's own scope-stack (offset AND type per local variable, kept
+for resolving which of possibly-several same-named declarations a
+Variable reference means -- see its LOCAL VARIABLES section) is a
+deliberate, separate exception to this: it still exists after this
+change, unrelated to resolved_type, since an expression's type alone
+can never tell codegen *which stack slot* a variable reference resolves
+to. That's a distinct kind of duplication (of scope/offset resolution,
+not of type inference) that this annotation mechanism doesn't attempt
+to address.
+
 ERROR REPORTING
 -----------------
 This raises SemanticError on the *first* problem found and stops,
@@ -477,21 +525,36 @@ class SemanticAnalyzer:
     # both in one call rather than needing a separate inference pass.
 
     def check_expr(self, expr: Node) -> Type:
+        """Type-checks `expr` and, as a side effect, annotates it with
+        the result (expr.resolved_type = str(result)) before returning.
+        This is the ONE place that annotation happens -- every check_*
+        method below stays a pure type-computation function with no
+        knowledge of the annotation step, and every recursive call for
+        an operand or argument already goes through check_expr (see
+        check_binary/check_unary/check_call), so every expression node
+        anywhere in the tree gets annotated automatically, no matter
+        how deeply nested, with no risk of a new node type being added
+        later and someone forgetting to wire up the annotation for it.
+        See the module docstring's TYPES section for why this replaced
+        codegen.py's old, independently-duplicated _infer_type."""
         if isinstance(expr, Constant):
-            return self.check_constant(expr)
-        if isinstance(expr, BoolLiteral):
-            return Type.BOOL
-        if isinstance(expr, StringLiteral):
-            return Type.STR
-        if isinstance(expr, Variable):
-            return self.check_variable(expr)
-        if isinstance(expr, Call):
-            return self.check_call(expr)
-        if isinstance(expr, Unary):
-            return self.check_unary(expr)
-        if isinstance(expr, Binary):
-            return self.check_binary(expr)
-        raise SemanticError(f"No semantic rule for expression: {expr!r}")
+            result = self.check_constant(expr)
+        elif isinstance(expr, BoolLiteral):
+            result = Type.BOOL
+        elif isinstance(expr, StringLiteral):
+            result = Type.STR
+        elif isinstance(expr, Variable):
+            result = self.check_variable(expr)
+        elif isinstance(expr, Call):
+            result = self.check_call(expr)
+        elif isinstance(expr, Unary):
+            result = self.check_unary(expr)
+        elif isinstance(expr, Binary):
+            result = self.check_binary(expr)
+        else:
+            raise SemanticError(f"No semantic rule for expression: {expr!r}")
+        expr.resolved_type = str(result)
+        return result
 
     def check_call(self, expr: Call) -> Type:
         if expr.name == 'print':
