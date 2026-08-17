@@ -1,0 +1,3 @@
+def bool main():
+    bool b = true
+    return b
