@@ -1,0 +1,15 @@
+def int main():
+    int i = 0
+    while i < 20:
+        i = i + 1
+        print(fib(i))
+    return 0
+
+
+def int fib(int n):
+    if n == 0:
+        return 0
+    if n == 1:
+        return 1
+
+    return fib(n-2) + fib(n-1)
