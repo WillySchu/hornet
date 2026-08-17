@@ -1,0 +1,12 @@
+def int main():
+    int i = 0
+    bool a
+    bool b
+
+    while i < 10:
+        i += 1
+        if a:
+            continue
+        if b:
+            break
+    return 0

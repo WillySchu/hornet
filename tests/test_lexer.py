@@ -57,12 +57,58 @@ def test_lex_return_2():
 
 # Test Punctuation.
 
-def test_brackets():
-    ...
+def test_lex_brackets():
+    res = lexer.lex('tests/brackets.ht')
+    expected = [
+        lexer.Token(lexer.TokenType.DEF, 'def', 1, 1),
+        lexer.Token(lexer.TokenType.INT, 'int', 1, 5),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'main', 1, 9),
+        lexer.Token(lexer.TokenType.OPEN_PAREN, '(', 1, 13),
+        lexer.Token(lexer.TokenType.CLOSE_PAREN, ')', 1, 14),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 15),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 16),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.OPEN_BRACKET, '[', 2, 5),
+        lexer.Token(lexer.TokenType.NUMBER, '2', 2, 6),
+        lexer.Token(lexer.TokenType.CLOSE_BRACKET, ']', 2, 7),
+        lexer.Token(lexer.TokenType.INT, 'int', 2, 8),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'arr', 2, 12),
+        lexer.Token(lexer.TokenType.ASSIGN, '=', 2, 16),
+        lexer.Token(lexer.TokenType.OPEN_BRACKET, '[', 2, 18),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 2, 19),
+        lexer.Token(lexer.TokenType.COMMA, ',', 2, 20),
+        lexer.Token(lexer.TokenType.NUMBER, '2', 2, 22),
+        lexer.Token(lexer.TokenType.CLOSE_BRACKET, ']', 2, 23),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 24),
+        lexer.Token(lexer.TokenType.RETURN, 'return', 3, 5),
+        lexer.Token(lexer.TokenType.NUMBER, '0', 3, 12),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 3, 13),
+        lexer.Token(lexer.TokenType.DEDENT, '', 4, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 4, 1),
+    ]
+    assert expected == res
 
 
-def test_comma():
-    ...
+def test_lex_comma():
+    res = lexer.lex('tests/comma.ht')
+    expected = [
+        lexer.Token(lexer.TokenType.DEF, 'def', 1, 1),
+        lexer.Token(lexer.TokenType.INT, 'int', 1, 5),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'main', 1, 9),
+        lexer.Token(lexer.TokenType.OPEN_PAREN, '(', 1, 13),
+        lexer.Token(lexer.TokenType.INT, 'int', 1, 14),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 1, 18),
+        lexer.Token(lexer.TokenType.CLOSE_PAREN, ')', 1, 19),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 20),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 21),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.RETURN, 'return', 2, 5),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 2, 12),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 13),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 3, 1),
+    ]
+    assert expected == res
 
 
 # Unary Ops.
@@ -866,8 +912,129 @@ def test_lex_false():
 
 
 def test_if_elif_else():
-    ...
+    res = lexer.lex('tests/if_elif_else.ht')
+    expected = [
+        lexer.Token(lexer.TokenType.DEF, 'def', 1, 1),
+        lexer.Token(lexer.TokenType.INT, 'int', 1, 5),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'main', 1, 9),
+        lexer.Token(lexer.TokenType.OPEN_PAREN, '(', 1, 13),
+        lexer.Token(lexer.TokenType.CLOSE_PAREN, ')', 1, 14),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 15),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 16),
+
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.BOOL, 'bool', 2, 5),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 2, 10),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 11),
+
+        lexer.Token(lexer.TokenType.BOOL, 'bool', 3, 5),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'b', 3, 10),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 3, 11),
+
+        lexer.Token(lexer.TokenType.IF, 'if', 4, 5),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 4, 8),
+        lexer.Token(lexer.TokenType.COLON, ':', 4, 9),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 4, 10),
+
+        lexer.Token(lexer.TokenType.INDENT, '', 5, 1),
+        lexer.Token(lexer.TokenType.RETURN, 'return', 5, 9),
+        lexer.Token(lexer.TokenType.NUMBER, '0', 5, 16),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 5, 17),
+
+        lexer.Token(lexer.TokenType.DEDENT, '', 6, 1),
+        lexer.Token(lexer.TokenType.ELIF, 'elif', 6, 5),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'b', 6, 10),
+        lexer.Token(lexer.TokenType.COLON, ':', 6, 11),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 6, 12),
+
+        lexer.Token(lexer.TokenType.INDENT, '', 7, 1),
+        lexer.Token(lexer.TokenType.RETURN, 'return', 7, 9),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 7, 16),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 7, 17),
+
+        lexer.Token(lexer.TokenType.DEDENT, '', 8, 1),
+        lexer.Token(lexer.TokenType.ELSE, 'else', 8, 5),
+        lexer.Token(lexer.TokenType.COLON, ':', 8, 9),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 8, 10),
+
+        lexer.Token(lexer.TokenType.INDENT, '', 9, 1),
+        lexer.Token(lexer.TokenType.RETURN, 'return', 9, 9),
+        lexer.Token(lexer.TokenType.NUMBER, '2', 9, 16),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 9, 17),
+        lexer.Token(lexer.TokenType.DEDENT, '', 10, 1),
+        lexer.Token(lexer.TokenType.DEDENT, '', 10, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 10, 1),
+    ]
+    assert expected == res
 
 
 def test_while_break_continue():
-    ...
+    res = lexer.lex('tests/while_break_continue.ht')
+    expected = [
+        lexer.Token(lexer.TokenType.DEF, 'def', 1, 1),
+        lexer.Token(lexer.TokenType.INT, 'int', 1, 5),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'main', 1, 9),
+        lexer.Token(lexer.TokenType.OPEN_PAREN, '(', 1, 13),
+        lexer.Token(lexer.TokenType.CLOSE_PAREN, ')', 1, 14),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 15),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 16),
+
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.INT, 'int', 2, 5),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'i', 2, 9),
+        lexer.Token(lexer.TokenType.ASSIGN, '=', 2, 11),
+        lexer.Token(lexer.TokenType.NUMBER, '0', 2, 13),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 14),
+
+        lexer.Token(lexer.TokenType.BOOL, 'bool', 3, 5),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 3, 10),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 3, 11),
+
+        lexer.Token(lexer.TokenType.BOOL, 'bool', 4, 5),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'b', 4, 10),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 4, 11),
+
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 5, 1),
+
+        lexer.Token(lexer.TokenType.WHILE, 'while', 6, 5),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'i', 6, 11),
+        lexer.Token(lexer.TokenType.LESS_THAN, '<', 6, 13),
+        lexer.Token(lexer.TokenType.NUMBER, '10', 6, 15),
+        lexer.Token(lexer.TokenType.COLON, ':', 6, 17),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 6, 18),
+
+        lexer.Token(lexer.TokenType.INDENT, '', 7, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'i', 7, 9),
+        lexer.Token(lexer.TokenType.PLUS_ASSIGN, '+=', 7, 11),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 7, 14),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 7, 15),
+
+        lexer.Token(lexer.TokenType.IF, 'if', 8, 9),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 8, 12),
+        lexer.Token(lexer.TokenType.COLON, ':', 8, 13),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 8, 14),
+
+        lexer.Token(lexer.TokenType.INDENT, '', 9, 1),
+        lexer.Token(lexer.TokenType.CONTINUE, 'continue', 9, 13),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 9, 21),
+
+        lexer.Token(lexer.TokenType.DEDENT, '', 10, 1),
+        lexer.Token(lexer.TokenType.IF, 'if', 10, 9),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'b', 10, 12),
+        lexer.Token(lexer.TokenType.COLON, ':', 10, 13),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 10, 14),
+
+        lexer.Token(lexer.TokenType.INDENT, '', 11, 1),
+        lexer.Token(lexer.TokenType.BREAK, 'break', 11, 13),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 11, 18),
+
+        lexer.Token(lexer.TokenType.DEDENT, '', 12, 1),
+        lexer.Token(lexer.TokenType.DEDENT, '', 12, 1),
+        lexer.Token(lexer.TokenType.RETURN, 'return', 12, 5),
+        lexer.Token(lexer.TokenType.NUMBER, '0', 12, 12),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 12, 13),
+
+        lexer.Token(lexer.TokenType.DEDENT, '', 13, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 13, 1),
+    ]
+    assert expected == res

@@ -1,0 +1,9 @@
+def int main():
+    bool a
+    bool b
+    if a:
+        return 0
+    elif b:
+        return 1
+    else:
+        return 2
