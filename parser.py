@@ -167,7 +167,7 @@ unary operator, chainable the same way `~`/`-` are (`not not flag`).
 import argparse
 from dataclasses import dataclass, field
 from enum import auto, Enum
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Union
 
 from lexer import Token, TokenType, lex
 
@@ -250,7 +250,7 @@ class Constant(Node):
     # Set by semantic.py's check_expr after type-checking, not at parse
     # time -- see this field's fuller explanation on StringLiteral
     # below, which was the first node to need it documented in detail.
-    resolved_type: Optional[str] = None
+    resolved_type: Optional[Any] = None
 
     def pretty(self) -> str:
         return f"Constant(value: {self.value})"
@@ -264,7 +264,7 @@ class BoolLiteral(Node):
     int or a bool" ambiguous exactly where semantic.py most needs it to
     be unambiguous."""
     value: bool
-    resolved_type: Optional[str] = None
+    resolved_type: Optional[Any] = None
 
     def pretty(self) -> str:
         return f"BoolLiteral(value: {'true' if self.value else 'false'})"
@@ -280,16 +280,22 @@ class StringLiteral(Node):
     Python int/float once, rather than every downstream pass re-parsing
     the source string itself)."""
     value: str
-    # `resolved_type` ('int'/'bool'/'str', matching codegen.py's own
-    # plain-string type representation) is None right after parsing --
-    # this field only gets a real value once semantic.py's check_expr
-    # has actually type-checked the node (see its module docstring's
-    # TYPES section). It's plain str rather than semantic.Type
-    # specifically so parser.py never has to import semantic.py, which
-    # already imports *from* parser.py -- a Type import here would be
-    # circular. codegen.py reads this directly (see its _type_of)
-    # instead of re-deriving an expression's type itself.
-    resolved_type: Optional[str] = None
+    # `resolved_type` is None right after parsing -- it only gets a real
+    # value once semantic.py's check_expr has actually type-checked the
+    # node (see its module docstring's TYPES section). It's typed as
+    # Optional[Any] -- not Optional[semantic.Type] -- specifically so
+    # parser.py never has to import semantic.py, which already imports
+    # *from* parser.py; a Type import here would be circular. What's
+    # ACTUALLY stored, once semantic.py sets it, is a full semantic.Type
+    # instance (not a string -- that changed when array types were
+    # added, since a type now needs to carry an element type and size,
+    # not just a name). codegen.py reads this directly (see its
+    # _type_of) instead of re-deriving an expression's type itself, and
+    # is free to inspect the Type object's own fields (.kind,
+    # .element_type, .size) since it already imports Type from
+    # semantic.py -- only parser.py has the import-direction
+    # restriction that Any works around.
+    resolved_type: Optional[Any] = None
 
     def pretty(self) -> str:
         return f"StringLiteral(value: {self.value!r})"
@@ -299,10 +305,50 @@ class StringLiteral(Node):
 class Variable(Node):
     """A reference to a local variable, e.g. the `a` in `a + 1`."""
     name: str
-    resolved_type: Optional[str] = None
+    resolved_type: Optional[Any] = None
 
     def pretty(self) -> str:
         return f"Variable(name: {self.name})"
+
+
+@dataclass
+class ArrayLiteral(Node):
+    """`[e1, e2, ...]` in EXPRESSION position -- an array literal, e.g.
+    the value side of `[3]int arr = [1, 2, 3]`. An element can itself
+    be another ArrayLiteral for a multi-dimensional literal (e.g.
+    `[[1,2,3],[4,5,6]]` for a [2][3]int value) -- there's no special
+    casing for this in the parser at all; parse_expression naturally
+    recurses into a nested `[...]` the same way it would parse any
+    other nested expression, since ArrayLiteral is just one more
+    primary-expression shape. Elements don't have to be constants --
+    any expression is valid per element (see codegen.py's ARRAYS
+    section for how each one gets evaluated and stored)."""
+    elements: List[Node] = field(default_factory=list)
+    resolved_type: Optional[Any] = None
+
+    def pretty(self) -> str:
+        elems_str = ', '.join(e.pretty() for e in self.elements)
+        return f"ArrayLiteral -> [{elems_str}]"
+
+
+@dataclass
+class Index(Node):
+    """`array[index]` -- reads a single element (or, for a
+    multi-dimensional array not yet fully indexed, a sub-array) out of
+    `array`. Multi-dimensional indexing `matrix[i][j]` is represented
+    as NESTED Index nodes -- Index(array=Index(array=Variable('matrix'),
+    index=i), index=j) -- one per bracket pair, matching how the TYPE
+    itself is structured (an array of arrays): reading the outer Index
+    first yields a whole row (itself array-typed), and the outer
+    bracket pair indexes into THAT. See parse_postfix for how this gets
+    built left-to-right off of however many `[...]` pairs follow a
+    primary expression."""
+    array: Node
+    index: Node
+    resolved_type: Optional[Any] = None
+
+    def pretty(self) -> str:
+        return f"Index -> [{self.array.pretty()}, {self.index.pretty()}]"
 
 
 @dataclass
@@ -315,7 +361,7 @@ class Call(Node):
     often want to discard."""
     name: str
     args: List[Node] = field(default_factory=list)
-    resolved_type: Optional[str] = None
+    resolved_type: Optional[Any] = None
 
     def pretty(self) -> str:
         args_str = ', '.join(a.pretty() for a in self.args)
@@ -326,7 +372,7 @@ class Call(Node):
 class Unary(Node):
     op: UnaryOp
     operand: Node
-    resolved_type: Optional[str] = None
+    resolved_type: Optional[Any] = None
 
     def pretty(self) -> str:
         return f"Unary(op: {self.op.symbol()}) -> {self.operand.pretty()}"
@@ -337,7 +383,7 @@ class Binary(Node):
     op: BinaryOp
     left: Node
     right: Node
-    resolved_type: Optional[str] = None
+    resolved_type: Optional[Any] = None
 
     def pretty(self) -> str:
         # Binary has two children, so the linear "A -> B" chain style
@@ -357,14 +403,49 @@ class Return(Node):
 
 
 @dataclass
+class ArrayTypeExpr(Node):
+    """`[size]element_type` in TYPE position -- e.g. the `[3]int` in
+    `[3]int arr = ...`, or the `[2][3]int` in `[2][3]int matrix = ...`
+    (parsed as ArrayTypeExpr(size=2, element_type=ArrayTypeExpr(size=3,
+    element_type='int'))) -- an array of 2 arrays of 3 ints, matching
+    row-major layout: the OUTERMOST dimension is listed first, closest
+    to the brackets. Wherever a plain type keyword string
+    ('int'/'bool'/'str') was previously the ONLY valid value for
+    VarDecl.var_type / Param.type / Function.return_type, those fields
+    now accept EITHER that same plain string OR one of these, recursed
+    arbitrarily deep for arbitrarily-nested array types -- hence
+    `element_type` being typed Union[str, 'ArrayTypeExpr'] rather than
+    just str.
+
+    `size` is required to be a positive integer LITERAL (see
+    Parser.parse_type) -- not an arbitrary constant expression like
+    `[2+3]int` -- kept deliberately simple for this first pass, and
+    validated at parse time (unlike most validation in this file, which
+    is left to semantic.py) since an array's size isn't really an
+    ordinary expression the way a VarDecl's initializer is; it's closer
+    to syntax, the same way a type keyword itself is validated directly
+    by the parser rather than deferred.
+    """
+    size: int
+    element_type: Union[str, 'ArrayTypeExpr']
+
+    def pretty(self) -> str:
+        et = self.element_type if isinstance(self.element_type, str) else self.element_type.pretty()
+        return f"[{self.size}]{et}"
+
+
+@dataclass
 class VarDecl(Node):
-    """`int a` (init=None) or `int a = 1` (init=the initializer expression)."""
+    """`int a` (init=None) or `int a = 1` (init=the initializer expression).
+    `var_type` is either a plain type keyword string ('int'/'bool'/'str')
+    or an ArrayTypeExpr (see its own docstring) for an array-typed decl."""
     name: str
-    var_type: str
+    var_type: Union[str, ArrayTypeExpr]
     init: Optional[Node] = None
 
     def pretty(self) -> str:
-        head = f"VarDecl(name: {self.name}, type: {self.var_type})"
+        vt = self.var_type if isinstance(self.var_type, str) else self.var_type.pretty()
+        head = f"VarDecl(name: {self.name}, type: {vt})"
         return head if self.init is None else f"{head} -> {self.init.pretty()}"
 
 
@@ -376,6 +457,33 @@ class Assign(Node):
 
     def pretty(self) -> str:
         return f"Assign(name: {self.name}) -> {self.value.pretty()}"
+
+
+@dataclass
+class IndexAssign(Node):
+    """`array[index] = value` -- writes a single array element.
+    `array` is the expression being indexed: a bare Variable for
+    `arr[i] = v`, or itself an Index node for the OUTER dimensions of a
+    multi-dimensional assignment like `matrix[i][j] = v`, which parses
+    as IndexAssign(array=Index(array=Variable('matrix'), index=i),
+    index=j, value=v) -- "index INTO matrix to get a row, then
+    index-ASSIGN into that row at the given column". This mirrors
+    exactly how Index itself nests for multi-dimensional READS (see
+    Index's own docstring) -- one node per bracket pair, either way.
+
+    Compound index-assignment (`arr[i] += 1`) is NOT supported yet --
+    see parse_statement's own handling -- since it would need the index
+    expression evaluated exactly once and reused for both the read and
+    the write, which the simple desugaring used for `x += y` on a bare
+    variable (see the module docstring's COMPOUND ASSIGNMENT section)
+    doesn't guarantee if the index expression isn't side-effect-free.
+    """
+    array: Node
+    index: Node
+    value: Node
+
+    def pretty(self) -> str:
+        return f"IndexAssign(index: {self.index.pretty()}) -> [{self.array.pretty()}, {self.value.pretty()}]"
 
 
 @dataclass
@@ -457,18 +565,21 @@ class Param(Node):
     function's own statement/expression tree -- it's a declaration
     record attached to Function, conceptually the same role VarDecl
     plays for a local, just without an initializer (a parameter's
-    "initial value" is whatever the caller passed)."""
+    "initial value" is whatever the caller passed). `type` is either a
+    plain type keyword string or an ArrayTypeExpr, exactly like
+    VarDecl.var_type (see ArrayTypeExpr's own docstring)."""
     name: str
-    type: str
+    type: Union[str, ArrayTypeExpr]
 
     def pretty(self) -> str:
-        return f"Param(name: {self.name}, type: {self.type})"
+        t = self.type if isinstance(self.type, str) else self.type.pretty()
+        return f"Param(name: {self.name}, type: {t})"
 
 
 @dataclass
 class Function(Node):
     name: str
-    return_type: str
+    return_type: Union[str, ArrayTypeExpr]
     params: List[Param] = field(default_factory=list)
     body: List[Node] = field(default_factory=list)
 
@@ -748,16 +859,42 @@ class Parser:
         name_tok = self.expect(TokenType.IDENTIFIER, "Expected a parameter name")
         return Param(name=name_tok.val, type=param_type)
 
-    def parse_type(self) -> str:
+    def parse_type(self) -> Union[str, ArrayTypeExpr]:
         # 'int', 'bool', or 'str' -- semantic.py is what actually knows
         # what to do with the resulting string; the parser just needs to
-        # accept one of the three type keywords here.
+        # accept one of the three type keywords here. OR: '[' NUMBER ']'
+        # followed by another type (recursively -- this is what lets
+        # `[2][3]int` parse at all, each bracket pair peeling off one
+        # more ArrayTypeExpr wrapping whatever parse_type() returns for
+        # the rest). The size has to be a literal, positive, whole
+        # NUMBER token -- checked and rejected right here, unlike most
+        # validation in this file (which is semantic.py's job): an
+        # array's size isn't really an expression the way a VarDecl
+        # initializer is, it's closer to syntax, the same way a type
+        # keyword itself is validated directly rather than deferred.
+        if self.check(TokenType.OPEN_BRACKET):
+            self.advance()
+            size_tok = self.expect(TokenType.NUMBER, "Expected an array size (a positive integer literal)")
+            if '.' in size_tok.val:
+                raise ParseError(
+                    f"Array size must be a whole number, got '{size_tok.val}' "
+                    f"at line {size_tok.line}, column {size_tok.col}"
+                )
+            size = int(size_tok.val)
+            if size <= 0:
+                raise ParseError(
+                    f"Array size must be positive, got {size} "
+                    f"at line {size_tok.line}, column {size_tok.col}"
+                )
+            self.expect(TokenType.CLOSE_BRACKET, "Expected ']' after array size")
+            element_type = self.parse_type()
+            return ArrayTypeExpr(size=size, element_type=element_type)
         if self.check(TokenType.INT, TokenType.BOOL, TokenType.STR):
             return self.advance().val
         tok = self.current()
         raise ParseError(
-            f"Expected a type ('int', 'bool', or 'str'), got {tok.type} "
-            f"('{tok.val}') at line {tok.line}, column {tok.col}"
+            f"Expected a type ('int', 'bool', 'str', or '[size]type'), got "
+            f"{tok.type} ('{tok.val}') at line {tok.line}, column {tok.col}"
         )
 
     def parse_block(self) -> List[Node]:
@@ -787,7 +924,7 @@ class Parser:
         return statements
 
     def parse_statement(self) -> Node:
-        if self.check(TokenType.INT, TokenType.BOOL, TokenType.STR):
+        if self.check(TokenType.INT, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET):
             return self.parse_var_decl()
         if self.check(TokenType.RETURN):
             return self.parse_return()
@@ -801,7 +938,7 @@ class Parser:
             return self.parse_continue()
         if self.check(TokenType.IDENTIFIER) and self.peek(1).type in _ASSIGNMENT_TOKENS:
             return self.parse_assign()
-        return self.parse_expr_stmt()
+        return self.parse_expr_stmt_or_index_assign()
 
     def parse_while(self) -> While:
         self.expect(TokenType.WHILE, "Expected 'while'")
@@ -892,8 +1029,42 @@ class Parser:
         value = self.parse_expression()
         return Return(value=value)
 
-    def parse_expr_stmt(self) -> ExprStmt:
-        return ExprStmt(expr=self.parse_expression())
+    def parse_expr_stmt_or_index_assign(self) -> Node:
+        """Handles two statement shapes that -- unlike plain `a = ...`
+        -- can't be told apart by a single token of lookahead: a bare
+        expression statement (`arr[i] + 1`, or just `foo()`), and an
+        index-assignment (`arr[i] = value`, or `matrix[i][j] = value`
+        for deeper nesting). The number of `[...]` pairs on the left
+        varies, so instead of trying to look ahead through however many
+        of them there might be, this just parses the leading expression
+        through the ordinary machinery first (which already builds
+        nested Index nodes for however many brackets follow -- see
+        parse_postfix), then decides based on what comes next.
+
+        Only plain `=` is handled here -- `arr[i] += 1` and the other
+        compound forms are deliberately rejected with a clear error
+        rather than silently mis-parsed (see IndexAssign's own
+        docstring for why compound index-assignment isn't supported
+        yet at all, not just here)."""
+        expr = self.parse_expression()
+        if self.check(TokenType.ASSIGN):
+            if not isinstance(expr, Index):
+                tok = self.current()
+                raise ParseError(
+                    f"Left-hand side of '=' is not assignable "
+                    f"at line {tok.line}, column {tok.col}"
+                )
+            self.advance()
+            value = self.parse_expression()
+            return IndexAssign(array=expr.array, index=expr.index, value=value)
+        if isinstance(expr, Index) and self.current().type in _COMPOUND_ASSIGN_OPS:
+            tok = self.current()
+            raise ParseError(
+                f"Compound assignment to an array element ('{tok.val}') "
+                f"is not supported yet -- write it as a plain '=' instead "
+                f"at line {tok.line}, column {tok.col}"
+            )
+        return ExprStmt(expr=expr)
 
     def parse_expression(self) -> Node:
         return self.parse_binary()
@@ -941,7 +1112,31 @@ class Parser:
             # chain: `~-2` is COMPLEMENT applied to (NEGATE applied to 2).
             operand = self.parse_unary()
             return Unary(op=_UNARY_OPS[op_tok.type], operand=operand)
-        return self.parse_primary()
+        return self.parse_postfix()
+
+    def parse_postfix(self) -> Node:
+        """Wraps a primary expression with zero or more `[index]`
+        suffixes -- e.g. `matrix[i][j]` is parsed here as `parse_primary`
+        producing the `matrix` Variable, then this loop wrapping it in
+        two nested Index nodes, one per bracket pair (see Index's own
+        docstring for why that nesting -- rather than a single Index
+        carrying a list of indices -- is the right shape).
+
+        Sits between parse_unary and parse_primary specifically so
+        indexing binds TIGHTER than a prefix unary operator: `-arr[0]`
+        has to mean `-(arr[0])`, not `(-arr)[0]` (which wouldn't even
+        type-check, since unary '-' requires an int operand, not an
+        array) -- and it does, here, since parse_unary's own base case
+        (no unary operator present) calls straight into this method
+        rather than parse_primary directly.
+        """
+        expr = self.parse_primary()
+        while self.check(TokenType.OPEN_BRACKET):
+            self.advance()
+            index_expr = self.parse_expression()
+            self.expect(TokenType.CLOSE_BRACKET, "Expected ']' after array index")
+            expr = Index(array=expr, index=index_expr)
+        return expr
 
     def parse_primary(self) -> Node:
         if self.check(TokenType.NUMBER):
@@ -954,6 +1149,8 @@ class Parser:
         if self.check(TokenType.STRING):
             tok = self.advance()
             return StringLiteral(value=_unescape_string_literal(tok.val))
+        if self.check(TokenType.OPEN_BRACKET):
+            return self.parse_array_literal()
         if self.check(TokenType.IDENTIFIER):
             # One token of lookahead disambiguates a call (`foo(...)`)
             # from a bare variable reference (`foo`), the same way
@@ -972,6 +1169,21 @@ class Parser:
             f"Expected an expression, got {tok.type} ('{tok.val}') "
             f"at line {tok.line}, column {tok.col}"
         )
+
+    def parse_array_literal(self) -> ArrayLiteral:
+        """`[e1, e2, ...]` -- see ArrayLiteral's own docstring for why
+        no special handling is needed here for a multi-dimensional
+        literal like `[[1,2,3],[4,5,6]]`: each element is just parsed
+        via the ordinary parse_expression, which naturally recurses
+        back into this same method for a nested `[...]`."""
+        self.expect(TokenType.OPEN_BRACKET)
+        elements = []
+        if not self.check(TokenType.CLOSE_BRACKET):
+            elements.append(self.parse_expression())
+            while self.match(TokenType.COMMA):
+                elements.append(self.parse_expression())
+        self.expect(TokenType.CLOSE_BRACKET, "Expected ']' to close array literal")
+        return ArrayLiteral(elements=elements)
 
     def parse_call(self) -> Call:
         name_tok = self.expect(TokenType.IDENTIFIER)

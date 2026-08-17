@@ -39,9 +39,43 @@ Organization:
     TestTypeAnnotation                  ( 4 tests)
     TestPrint                           (12 tests)
     TestAllPathsReturn                  (18 tests)
-    TestSemanticErrors                  (66 tests)
+    TestArrays                          (14 tests)
+    TestBoundsChecking                  ( 4 tests)
+    TestSemanticErrors                  (76 tests)
                                         ----------
-                                        260 tests total
+                                        288 tests total
+
+A NOTE ON ARRAYS
+-----------------------------------------------------------------
+Fixed-size, stack-allocated, value-typed (see codegen.py's ARRAYS
+section for the full design). TestArrays' value-semantics tests are
+the ones that actually prove the headline design decision holds at the
+machine-code level, not just conceptually: `b = a; b[0] = 99` must
+leave `a[0]` completely untouched, for both 1D and 2D arrays, and for
+a sub-array extracted via `[3]int row = matrix[i]` too.
+
+TestBoundsChecking exists because every array access is runtime-
+checked -- one unsigned comparison catches both an over-large index
+and a negative one at once. test_panic_message_survives_piped_output
+is a genuine regression test, not a hypothetical one: during
+development, the "array index out of bounds" message was reliably
+printed to an interactive terminal but silently LOST whenever output
+was piped or redirected (the common case for a program run non-
+interactively), because abort() bypasses the normal exit() path that
+would otherwise flush libc's buffered stdio. Caught only by explicitly
+capturing and checking stdout, not by eyeballing an interactive run --
+worth remembering as a reason to prefer capture_output-based
+assertions over manual spot-checks for anything involving abort()/
+exit() specifically.
+
+Array function parameters and return values are a deliberate, explicit
+gap -- not silently missing. test_array_parameter_not_supported_yet
+and test_array_return_not_supported_yet in TestArrays confirm both
+fail with a clear CodegenError rather than a confusing crash or,
+worse, silently wrong codegen -- both need a real calling-convention
+extension (copy-on-entry for parameters, a hidden output pointer for
+returns) that's genuinely separable follow-up work, not a small
+addition.
 
 A NOTE ON TestAllPathsReturn
 -----------------------------------------------------------------
@@ -427,6 +461,18 @@ def assert_crashes_with_sigfpe(body: str, return_type: str = "int") -> None:
     result = compile_and_run(source)
     assert result.returncode == -signal.SIGFPE, (
         f"body:\n{body}\nexpected SIGFPE crash, got exit {result.returncode}"
+    )
+
+
+def assert_crashes_with_sigabrt(body: str, return_type: str = "int") -> None:
+    """Same as assert_crashes_with_sigfpe, but for SIGABRT -- what an
+    out-of-bounds array access deliberately triggers (see codegen.py's
+    _gen_bounds_check_panic_block), rather than a hardware-trapped
+    SIGFPE."""
+    source = f"def {return_type} main():\n{body}\n"
+    result = compile_and_run(source)
+    assert result.returncode == -signal.SIGABRT, (
+        f"body:\n{body}\nexpected SIGABRT crash, got exit {result.returncode}"
     )
 
 
@@ -2283,6 +2329,247 @@ class TestAllPathsReturn:
 
 
 # ---------------------------------------------------------------------------
+# Arrays: fixed-size, stack-allocated, value-typed (see codegen.py's
+# ARRAYS section for the full design). Scope note, repeated from there:
+# this covers LOCAL arrays completely -- declaration (literal- or
+# copy-initialized), reading/writing an element at any nesting depth,
+# and whole-array copy via plain assignment -- but array function
+# PARAMETERS and RETURN VALUES are a deliberately separate, not-yet-
+# built piece of work (a real calling-convention extension), covered
+# here only by the tests proving that gap fails with a clear,
+# actionable error rather than silently miscompiling.
+#
+# test_value_semantics_1d/2d and test_sub_array_extraction_is_independent
+# are the tests that actually prove the headline design decision --
+# arrays are values, not references -- holds at the machine-code level:
+# mutating a copy must never affect the original. The bounds-checking
+# tests are the other centerpiece: TestBoundsChecking proves the single
+# unsigned comparison genuinely catches both an over-large index and a
+# negative one, correctly leaves a valid boundary index alone, and --
+# found only by testing, not assumed -- that the panic message actually
+# reaches the user rather than being silently lost in an unflushed
+# stdio buffer when abort() bypasses the normal exit() path.
+# ---------------------------------------------------------------------------
+
+class TestArrays:
+    pytestmark = GCC_SKIP
+
+    def test_basic_1d_array_read(self):
+        assert_exit_code(
+            "    [3]int arr = [10, 20, 30]\n"
+            "    return arr[0] + arr[1] + arr[2]",
+            60,
+        )
+
+    def test_index_write(self):
+        assert_exit_code(
+            "    [3]int arr = [1, 2, 3]\n"
+            "    arr[1] = 99\n"
+            "    return arr[1]",
+            99,
+        )
+
+    def test_value_semantics_1d(self):
+        """The headline design property: assigning one array to
+        another copies its elements -- it does not alias them.
+        Mutating the copy must leave the original untouched."""
+        assert_exit_code(
+            "    [3]int a = [1, 2, 3]\n"
+            "    [3]int b = [0, 0, 0]\n"
+            "    b = a\n"
+            "    b[0] = 99\n"
+            "    return a[0] == 1 and b[0] == 99",
+            1,
+            return_type="bool",
+        )
+
+    def test_2d_array_read(self):
+        assert_exit_code(
+            "    [2][3]int matrix = [[1, 2, 3], [4, 5, 6]]\n"
+            "    return matrix[0][1] + matrix[1][2]",
+            8,
+        )
+
+    def test_2d_array_index_write(self):
+        assert_exit_code(
+            "    [2][3]int matrix = [[1, 2, 3], [4, 5, 6]]\n"
+            "    matrix[1][0] = 99\n"
+            "    return matrix[1][0]",
+            99,
+        )
+
+    def test_value_semantics_2d(self):
+        assert_exit_code(
+            "    [2][2]int a = [[1, 2], [3, 4]]\n"
+            "    [2][2]int b = [[0, 0], [0, 0]]\n"
+            "    b = a\n"
+            "    b[0][0] = 99\n"
+            "    return a[0][0] == 1 and b[0][0] == 99",
+            1,
+            return_type="bool",
+        )
+
+    def test_sub_array_extraction_is_independent(self):
+        """`[3]int row = matrix[1]` extracts a whole row -- and per the
+        same value semantics, `row` is its own independent copy, not an
+        alias into `matrix`'s own storage."""
+        assert_exit_code(
+            "    [2][3]int matrix = [[1, 2, 3], [4, 5, 6]]\n"
+            "    [3]int row = matrix[1]\n"
+            "    row[0] = 99\n"
+            "    return matrix[1][0] == 4 and row[0] == 99",
+            1,
+            return_type="bool",
+        )
+
+    def test_array_of_str_elements(self):
+        assert_exit_code(
+            "    [3]str names = ['alice', 'bob', 'carol']\n"
+            "    return names[0] == 'alice' and names[2] == 'carol'",
+            1,
+            return_type="bool",
+        )
+
+    def test_array_element_in_larger_expression(self):
+        assert_exit_code(
+            "    [4]int arr = [10, 20, 30, 40]\n"
+            "    int i = 2\n"
+            "    return arr[i] * 2 + arr[0]",
+            70,
+        )
+
+    def test_array_element_as_function_argument(self):
+        assert_program_exit_code(
+            "def int double(int x):\n"
+            "    return x * 2\n"
+            "\n"
+            "def int main():\n"
+            "    [3]int arr = [5, 10, 15]\n"
+            "    return double(arr[1])\n",
+            20,
+        )
+
+    def test_array_iteration_via_while_loop(self):
+        assert_exit_code(
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    int sum = 0\n"
+            "    int i = 0\n"
+            "    while i < 5:\n"
+            "        sum = sum + arr[i]\n"
+            "        i = i + 1\n"
+            "    return sum",
+            15,
+        )
+
+    def test_index_assignment_with_computed_index(self):
+        assert_exit_code(
+            "    [5]int arr = [0, 0, 0, 0, 0]\n"
+            "    int i = 1\n"
+            "    arr[i + 1] = 42\n"
+            "    return arr[2]",
+            42,
+        )
+
+    def test_array_parameter_not_supported_yet(self):
+        """A real, deliberate gap -- not silent mishandling. Array
+        parameters need a calling-convention extension (copy-on-entry
+        from a caller-passed pointer) that hasn't been built; this
+        confirms attempting one fails loudly and clearly rather than
+        generating code that reads a pointer as if it were 4 raw
+        bytes of int."""
+        source = (
+            "def int sum_array([3]int arr):\n"
+            "    return arr[0] + arr[1] + arr[2]\n"
+            "\n"
+            "def int main():\n"
+            "    [3]int a = [1, 2, 3]\n"
+            "    return sum_array(a)\n"
+        )
+        ast = _parse(source)
+        analyze(ast)  # semantically fine -- the gap is codegen-level only
+        with pytest.raises(CodegenError, match="array parameters are not supported yet"):
+            generate_asm(ast, platform=ASM_PLATFORM)
+
+    def test_array_return_not_supported_yet(self):
+        """The return-side counterpart to the parameter gap above --
+        needs a hidden-output-pointer calling-convention extension that
+        also hasn't been built yet."""
+        source = (
+            "def [3]int make():\n"
+            "    [3]int r = [1, 2, 3]\n"
+            "    return r\n"
+            "\n"
+            "def int main():\n"
+            "    [3]int x = make()\n"
+            "    return x[0]\n"
+        )
+        ast = _parse(source)
+        analyze(ast)  # semantically fine -- the gap is codegen-level only
+        with pytest.raises(CodegenError, match="Returning an array is not supported yet"):
+            generate_asm(ast, platform=ASM_PLATFORM)
+
+
+class TestBoundsChecking:
+    """Every array access is runtime-checked (see codegen.py's
+    gen_index_address_into): a single unsigned comparison against the
+    array's size catches an over-large index and a negative one alike,
+    since a negative int reinterpreted unsigned becomes a huge positive
+    number. test_panic_message_survives_piped_output specifically
+    guards against a real bug found during development, not a
+    hypothetical one: abort() terminates via a raw signal, bypassing
+    the normal exit() path that would otherwise flush libc's buffered
+    stdio -- without an explicit fflush(NULL) before the abort() call,
+    the panic message was reliably printed to an interactive terminal
+    but silently lost whenever output was piped or redirected, which is
+    the common case for a program run non-interactively.
+    """
+    pytestmark = GCC_SKIP
+
+    def test_index_too_large_aborts(self):
+        assert_crashes_with_sigabrt(
+            "    [3]int arr = [1, 2, 3]\n"
+            "    int i = 5\n"
+            "    return arr[i]"
+        )
+
+    def test_negative_index_aborts(self):
+        assert_crashes_with_sigabrt(
+            "    [3]int arr = [1, 2, 3]\n"
+            "    int i = 0 - 1\n"
+            "    return arr[i]"
+        )
+
+    def test_valid_boundary_index_does_not_abort(self):
+        """The positive control: the LAST valid index (size - 1) must
+        not trip the bounds check -- proof the comparison's boundary
+        condition (unsigned >=, not >) is exactly right, not
+        off-by-one in either direction."""
+        assert_exit_code(
+            "    [3]int arr = [10, 20, 30]\n"
+            "    int i = 2\n"
+            "    return arr[i]",
+            30,
+        )
+
+    def test_panic_message_survives_piped_output(self):
+        """Regression test for a real bug found during development:
+        the "array index out of bounds" message must actually reach
+        stdout, not be silently discarded in an unflushed buffer when
+        abort() bypasses the normal exit() path. Captures output
+        directly (compile_and_run's capture_output=True) rather than
+        relying on an interactive terminal's line-buffering to mask
+        the bug the way a casual manual test would."""
+        result = compile_and_run(
+            "def int main():\n"
+            "    [3]int arr = [1, 2, 3]\n"
+            "    int i = 5\n"
+            "    return arr[i]\n"
+        )
+        assert result.returncode == -signal.SIGABRT
+        assert "array index out of bounds" in result.stdout
+
+
+# ---------------------------------------------------------------------------
 # Semantic analysis: scope/declaration checking and the strict int/bool
 # type system. These never reach codegen -- each one asserts that
 # analyze() itself raises SemanticError -- so they don't need gcc and
@@ -2921,4 +3208,104 @@ class TestSemanticErrors:
         (`(1 & 2) == 2`) makes the grouping explicit and the program
         valid."""
         ast = _parse("def bool main():\n    return (1 & 2) == 2\n")
+        analyze(ast)  # should not raise
+
+    # -- arrays ------------------------------------------------------------
+
+    def test_array_literal_size_mismatch(self):
+        assert_semantic_error(
+            "    [3]int arr = [1, 2]\n"
+            "    return arr[0]",
+            match="Cannot initialize",
+        )
+
+    def test_ragged_2d_array_literal_is_rejected(self):
+        """A ragged literal like `[[1,2,3],[4,5]]` is rejected with no
+        special-cased "ragged" logic at all -- once Type is
+        structurally comparable, the two rows are just genuinely
+        different types ([3]int vs [2]int), caught by the exact same
+        check that rejects [3]int vs [3]bool."""
+        assert_semantic_error(
+            "    [2][3]int matrix = [[1, 2, 3], [4, 5]]\n"
+            "    return matrix[0][0]",
+            match="Array literal elements must all be the same type",
+        )
+
+    def test_heterogeneous_array_literal_is_rejected(self):
+        assert_semantic_error(
+            "    [3]int arr = [1, true, 3]\n"
+            "    return arr[0]",
+            match="Array literal elements must all be the same type",
+        )
+
+    def test_non_int_array_index_is_rejected(self):
+        assert_semantic_error(
+            "    [3]int arr = [1, 2, 3]\n"
+            "    return arr[true]",
+            match="Array index must be int",
+        )
+
+    def test_indexing_a_non_array_value_is_rejected(self):
+        assert_semantic_error(
+            "    int x = 5\n"
+            "    return x[0]",
+            match="only arrays support indexing",
+        )
+
+    def test_indexing_past_available_dimensions_is_rejected(self):
+        assert_semantic_error(
+            "    [2][3]int matrix = [[1, 2, 3], [4, 5, 6]]\n"
+            "    return matrix[0][0][0]",
+            match="only arrays support indexing",
+        )
+
+    def test_wrong_element_type_in_index_assignment_is_rejected(self):
+        assert_semantic_error(
+            "    [3]int arr = [1, 2, 3]\n"
+            "    arr[0] = true\n"
+            "    return arr[0]",
+            match="Cannot assign a value of type bool to an array element of type int",
+        )
+
+    def test_print_with_array_argument_is_rejected(self):
+        assert_semantic_error(
+            "    [3]int arr = [1, 2, 3]\n"
+            "    print(arr)\n"
+            "    return 0",
+            match="'print' does not support array arguments",
+        )
+
+    def test_array_equality_comparison_is_rejected(self):
+        """Not yet implemented, not a real type error -- explicitly
+        excluded (see check_binary's equality handling) since
+        codegen.py has no element-wise array-comparison logic, unlike
+        str's real strcmp-backed one. Rejected even when both arrays
+        are the exact same type, to avoid type-checking fine and then
+        hitting an unhandled case in codegen."""
+        assert_semantic_error(
+            "    [3]int a = [1, 2, 3]\n"
+            "    [3]int b = [1, 2, 3]\n"
+            "    return a == b",
+            match="does not support array operands",
+            return_type="bool",
+        )
+
+    def test_array_as_function_param_and_return_type_checks_correctly(self):
+        """The positive control: semantic.py fully accepts arrays as
+        parameter and return types -- type_from_name and Type's
+        structural equality handle this with no special-casing needed
+        anywhere in this file. The gap is codegen-only (see
+        TestArrays' test_array_parameter_not_supported_yet and
+        test_array_return_not_supported_yet in the codegen-level
+        suite) -- semantic analysis alone has no reason to reject
+        this program."""
+        ast = _parse(
+            "def [3]int make_array(int a, int b, int c):\n"
+            "    [3]int result = [a, b, c]\n"
+            "    return result\n"
+            "\n"
+            "def int main():\n"
+            "    [3]int r = make_array(1, 2, 3)\n"
+            "    return r[0]\n"
+        )
         analyze(ast)  # should not raise

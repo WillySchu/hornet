@@ -274,11 +274,14 @@ fairly contained follow-up if these messages need to get more precise.
 """
 
 import argparse
+from dataclasses import dataclass
 from enum import auto, Enum
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from lexer import lex
 from parser import (
+    ArrayLiteral,
+    ArrayTypeExpr,
     Assign,
     Binary,
     BinaryOp,
@@ -290,6 +293,8 @@ from parser import (
     ExprStmt,
     Function,
     If,
+    Index,
+    IndexAssign,
     Node,
     Param,
     Parser,
@@ -308,13 +313,55 @@ from parser import (
 # Types
 # ---------------------------------------------------------------------------
 
-class Type(Enum):
+class TypeKind(Enum):
     INT = auto()
     BOOL = auto()
     STR = auto()
+    ARRAY = auto()
+
+
+@dataclass(frozen=True)
+class Type:
+    """A type in this language: one of the three scalars (kind alone,
+    element_type/size both None), or an array (kind=ARRAY, element_type
+    the Type one level down, size that dimension's fixed length).
+
+    Frozen specifically to get structural equality and hashing for
+    free from the dataclass machinery, rather than writing __eq__ by
+    hand -- which is what makes `Type(ARRAY, Type.INT, 3) ==
+    Type(ARRAY, Type.INT, 3)` (two SEPARATE Type objects describing the
+    same array shape) correctly True, and, just as importantly,
+    `Type(ARRAY, Type.INT, 3) != Type(ARRAY, Type.INT, 4)` correctly
+    True too -- [3]int and [4]int are different types, exactly like
+    [3]int and [3]bool are, with no special-casing needed anywhere
+    that already just does `left_type != right_type` (see
+    check_binary's equality handling, analyze_var_decl,
+    analyze_assign, check_call's argument checking -- none of them
+    needed to change at all to correctly handle arrays, once Type
+    itself became structurally comparable). This recurses correctly to
+    arbitrary nesting depth for free too, since element_type is itself
+    just another Type.
+    """
+    kind: TypeKind
+    element_type: Optional['Type'] = None  # only set when kind == ARRAY
+    size: Optional[int] = None             # only set when kind == ARRAY
 
     def __str__(self) -> str:
-        return self.name.lower()
+        if self.kind == TypeKind.ARRAY:
+            return f"[{self.size}]{self.element_type}"
+        return self.kind.name.lower()
+
+
+# Singleton instances for the three scalar kinds -- assigned as class
+# attributes after the class body (not instance fields set via
+# __init__), so every existing `Type.INT`/`Type.BOOL`/`Type.STR`
+# reference throughout this file keeps working completely unchanged.
+# `frozen=True` only prevents mutating an INSTANCE's own fields after
+# construction; it has nothing to say about adding attributes to the
+# Type CLASS object itself, which is all this is doing.
+Type.INT = Type(TypeKind.INT)
+Type.BOOL = Type(TypeKind.BOOL)
+Type.STR = Type(TypeKind.STR)
 
 
 _TYPE_NAMES = {
@@ -324,17 +371,30 @@ _TYPE_NAMES = {
 }
 
 
-def type_from_name(name: str) -> Type:
-    """Converts a type keyword's text (as stored in VarDecl.var_type /
-    Function.return_type, straight from the token) into a Type. Only
-    ever fails for a program that isn't syntactically valid in the
-    first place -- parse_type() already restricts these strings to
-    'int'/'bool' -- so this is a defensive check, not a user-facing
+def type_from_name(type_expr) -> Type:
+    """Converts a parsed type expression (VarDecl.var_type /
+    Function.return_type / Param.type, straight from parser.py) into a
+    Type. `type_expr` is either a plain str ('int'/'bool'/'str') for a
+    scalar type, or an ArrayTypeExpr (see its own docstring in
+    parser.py) for an array type -- handled here by recursing on
+    ArrayTypeExpr.element_type, which is itself either a plain str or
+    another ArrayTypeExpr, naturally bottoming out at a scalar and
+    handling arbitrarily-nested array types (`[2][3]int`) with no
+    depth limit or special-casing for "how many dimensions".
+
+    Only ever fails for a program that isn't syntactically valid in
+    the first place -- parse_type() already restricts a scalar
+    type_expr to 'int'/'bool'/'str', and already validates an
+    ArrayTypeExpr's size is a positive whole number at parse time --
+    so the KeyError case here is a defensive check, not a user-facing
     validation path."""
+    if isinstance(type_expr, ArrayTypeExpr):
+        element = type_from_name(type_expr.element_type)
+        return Type(TypeKind.ARRAY, element_type=element, size=type_expr.size)
     try:
-        return _TYPE_NAMES[name]
+        return _TYPE_NAMES[type_expr]
     except KeyError:
-        raise SemanticError(f"Unknown type '{name}'")
+        raise SemanticError(f"Unknown type '{type_expr}'")
 
 
 def always_returns(statements: List[Node]) -> bool:
@@ -547,6 +607,8 @@ class SemanticAnalyzer:
             self.analyze_var_decl(stmt)
         elif isinstance(stmt, Assign):
             self.analyze_assign(stmt)
+        elif isinstance(stmt, IndexAssign):
+            self.analyze_index_assign(stmt)
         elif isinstance(stmt, Return):
             self.analyze_return(stmt, return_type)
         elif isinstance(stmt, If):
@@ -584,6 +646,40 @@ class SemanticAnalyzer:
                 f"Cannot assign a value of type {value_type} to '{stmt.name}' "
                 f"(declared {declared_type})"
             )
+
+    def analyze_index_assign(self, stmt: IndexAssign) -> None:
+        element_type = self._check_array_and_index(stmt.array, stmt.index)
+        value_type = self.check_expr(stmt.value)
+        if value_type != element_type:
+            raise SemanticError(
+                f"Cannot assign a value of type {value_type} to an array "
+                f"element of type {element_type}"
+            )
+
+    def _check_array_and_index(self, array_expr: Node, index_expr: Node) -> Type:
+        """Shared by check_index (reading `array[index]`) and
+        analyze_index_assign (writing `array[index] = value`):
+        validates that `array_expr` is actually array-typed and
+        `index_expr` is int-typed, returning the array's element type
+        -- what a successful `[index]` operation on it would read or
+        write. Recurses correctly for multi-dimensional access for
+        free: for `matrix[i][j]`, the outer call's `array_expr` is
+        itself an Index node (`matrix[i]`), so checking IT via
+        check_expr recursively runs this same method again, returning
+        the row's element type (e.g. int, if matrix's rows are
+        [3]int) -- which is exactly the type this outer call then
+        needs `array_expr` to have.
+        """
+        array_type = self.check_expr(array_expr)
+        if array_type.kind != TypeKind.ARRAY:
+            raise SemanticError(
+                f"Cannot index into a value of type {array_type} -- "
+                f"only arrays support indexing"
+            )
+        index_type = self.check_expr(index_expr)
+        if index_type != Type.INT:
+            raise SemanticError(f"Array index must be int, got {index_type}")
+        return array_type.element_type
 
     def analyze_return(self, stmt: Return, return_type: Type) -> None:
         value_type = self.check_expr(stmt.value)
@@ -656,7 +752,7 @@ class SemanticAnalyzer:
 
     def check_expr(self, expr: Node) -> Type:
         """Type-checks `expr` and, as a side effect, annotates it with
-        the result (expr.resolved_type = str(result)) before returning.
+        the result (expr.resolved_type = result) before returning.
         This is the ONE place that annotation happens -- every check_*
         method below stays a pure type-computation function with no
         knowledge of the annotation step, and every recursive call for
@@ -666,7 +762,16 @@ class SemanticAnalyzer:
         how deeply nested, with no risk of a new node type being added
         later and someone forgetting to wire up the annotation for it.
         See the module docstring's TYPES section for why this replaced
-        codegen.py's old, independently-duplicated _infer_type."""
+        codegen.py's old, independently-duplicated _infer_type.
+
+        Stores the actual Type object here, not str(result) -- that
+        changed when array types were added, since a bare name string
+        ('int'/'bool'/'str') can no longer represent everything a type
+        might be (an array also needs its element type and size).
+        codegen.py imports Type from this module directly and compares
+        against it (Type.STR, Type.INT, ...) rather than string
+        literals, and can freely inspect .kind/.element_type/.size on
+        whatever it reads back."""
         if isinstance(expr, Constant):
             result = self.check_constant(expr)
         elif isinstance(expr, BoolLiteral):
@@ -675,6 +780,10 @@ class SemanticAnalyzer:
             result = Type.STR
         elif isinstance(expr, Variable):
             result = self.check_variable(expr)
+        elif isinstance(expr, ArrayLiteral):
+            result = self.check_array_literal(expr)
+        elif isinstance(expr, Index):
+            result = self.check_index(expr)
         elif isinstance(expr, Call):
             result = self.check_call(expr)
         elif isinstance(expr, Unary):
@@ -683,8 +792,37 @@ class SemanticAnalyzer:
             result = self.check_binary(expr)
         else:
             raise SemanticError(f"No semantic rule for expression: {expr!r}")
-        expr.resolved_type = str(result)
+        expr.resolved_type = result
         return result
+
+    def check_array_literal(self, expr: ArrayLiteral) -> Type:
+        """`[e1, e2, ...]`. Every element must be the same type -- this
+        language doesn't support heterogeneous arrays -- checked by
+        type-checking each element (via check_expr, so a nested
+        ArrayLiteral for a multi-dimensional literal is handled by
+        plain recursion, no special-casing needed) and comparing every
+        element's type to the first one's.
+
+        A "ragged" literal like `[[1,2,3],[4,5]]` is rejected by this
+        same check, with no extra logic needed: the two rows' types
+        are [3]int and [2]int, which -- now that Type is structurally
+        comparable -- are simply different types, exactly like [3]int
+        and [3]bool would be.
+        """
+        if len(expr.elements) == 0:
+            raise SemanticError("Array literals must have at least one element")
+        element_types = [self.check_expr(e) for e in expr.elements]
+        first = element_types[0]
+        for i, t in enumerate(element_types[1:], start=2):
+            if t != first:
+                raise SemanticError(
+                    f"Array literal elements must all be the same type -- "
+                    f"element 1 is {first}, element {i} is {t}"
+                )
+        return Type(TypeKind.ARRAY, element_type=first, size=len(expr.elements))
+
+    def check_index(self, expr: Index) -> Type:
+        return self._check_array_and_index(expr.array, expr.index)
 
     def check_call(self, expr: Call) -> Type:
         if expr.name == 'print':
@@ -708,20 +846,27 @@ class SemanticAnalyzer:
         return return_type
 
     def check_print_call(self, expr: Call) -> Type:
-        """`print` takes exactly one argument, of *any* type -- unlike
-        an ordinary function it isn't tied to one fixed parameter type,
-        since int/bool/str are all printable and there's no reason to
-        force a caller to pick a differently-named builtin per type.
-        Always "returns" int (see the module docstring's BUILTINS
-        section for why 0, specifically) -- Hornet has no void type, and
-        this keeps `print(x)` usable as an ordinary expression statement
-        via the same ExprStmt path every other call already goes
-        through, with nothing print-specific needed there."""
+        """`print` takes exactly one argument, of *any* scalar type --
+        unlike an ordinary function it isn't tied to one fixed
+        parameter type, since int/bool/str are all printable and
+        there's no reason to force a caller to pick a differently-named
+        builtin per type. Arrays are explicitly excluded: there's no
+        defined formatting for one (nothing in codegen.py knows how to
+        print one), so this rejects them here with a clear error rather
+        than letting an array argument through to type-check fine and
+        then hit an unhandled case in codegen. Always "returns" int
+        (see the module docstring's BUILTINS section for why 0,
+        specifically) -- Hornet has no void type, and this keeps
+        `print(x)` usable as an ordinary expression statement via the
+        same ExprStmt path every other call already goes through, with
+        nothing print-specific needed there."""
         if len(expr.args) != 1:
             raise SemanticError(
                 f"'print' expects exactly 1 argument, got {len(expr.args)}"
             )
-        self.check_expr(expr.args[0])  # any type is fine; just validate it
+        arg_type = self.check_expr(expr.args[0])
+        if arg_type.kind == TypeKind.ARRAY:
+            raise SemanticError(f"'print' does not support array arguments (got {arg_type})")
         return Type.INT
 
     def check_constant(self, expr: Constant) -> Type:
@@ -784,6 +929,16 @@ class SemanticAnalyzer:
             return Type.BOOL
 
         if op in _EQUALITY_OPS:
+            # Array operands are rejected outright, even when both
+            # sides are the exact same array type -- codegen.py has no
+            # element-wise array-comparison logic (unlike str, which
+            # gets a real strcmp-backed comparison), so without this
+            # check a same-shaped-array comparison would type-check
+            # fine here and then hit an unhandled case in codegen.
+            # Whole-array equality is a real, well-defined feature to
+            # consider adding later; it's just not implemented yet.
+            if left_type.kind == TypeKind.ARRAY or right_type.kind == TypeKind.ARRAY:
+                raise SemanticError(f"'{op.symbol()}' does not support array operands")
             if left_type != right_type:
                 raise SemanticError(
                     f"Cannot compare {left_type} to {right_type} with "

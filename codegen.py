@@ -382,6 +382,100 @@ of function signatures at all, including return types -- a Call
 expression's type (int/bool/str) needed for e.g. deciding whether
 `foo() + bar()` means arithmetic or concatenation is read directly via
 _type_of from what semantic.py already resolved, not re-looked-up here.
+
+ARRAYS
+-------
+Fixed-size and stack-allocated: an array's size is a compile-time
+constant (see parser.py's ArrayTypeExpr), so the whole thing -- for a
+[2][3]int, all 24 bytes of it -- lives directly in the local's own
+stack slot, contiguous, row-major (the outermost dimension's elements
+each occupy a whole inner-array's worth of space, one after another),
+exactly the same layout C uses for a fixed-size multi-dimensional
+array. This is why _collect_locals/_collect_params stopped using a
+uniform 8-byte slot for every local once arrays existed (see LOCAL
+VARIABLES above) -- type_byte_width computes a type's real, possibly-
+large-and-array-shaped footprint, and every local gets exactly that
+much space now, not a fixed amount.
+
+VALUE SEMANTICS, AND WHY THAT'S WHAT MAKES A COPY A COPY
+-------------------------------------------------------------
+Arrays are values, not references: `b = a` (or `[3]int b = a` as an
+initializer) copies every element of `a` into `b`'s own, completely
+independent storage -- mutating `b` afterward never affects `a`. This
+falls out of gen_array_value_into's Variable case doing a flat,
+element-by-element copy (gen_array_copy) between the two variables'
+OWN fixed stack offsets, rather than ever copying a pointer the way a
+str assignment does. That's also what keeps arrays out of the
+aliasing/lifetime problems str's heap-backed, pointer-copied values
+have (see STRINGS above) -- an array's storage is exactly as long-lived
+as the local variable holding it, no more and no less, so there's
+nothing to leak and nothing to free.
+
+ADDRESS COMPUTATION AND BOUNDS CHECKING
+-------------------------------------------
+gen_index_address_into computes the address of `array[index]` --
+element_stride (the size, in bytes, of ONE element -- for a
+multi-dimensional array's outer index, that's a whole inner array's
+width, e.g. 12 bytes for a [3]int row, not a power of two x86's native
+scaled-addressing mode (`offset(base,index,scale)`, which only accepts
+scale factors of 1/2/4/8) could always handle) is multiplied by the
+index explicitly via imull, rather than relying on that native mode at
+all. This is deliberately the SAME approach regardless of whether the
+stride happens to be a "nice" value like 4 or 8 or an "awkward" one
+like 12 -- one uniform code path, not two, consistent with this
+compiler's general preference for a single simple mechanism over a
+faster one that only sometimes applies.
+
+Every access is bounds-checked at runtime: one unsigned comparison
+(`cmpl $size, %index; jae fail_label`) catches both index >= size and
+index < 0 at once, since a negative int, reinterpreted unsigned,
+becomes a huge positive number. This isn't just a correctness nicety --
+an array's storage sits in the same stack frame as the saved return
+address and the callee-saved registers every function call already
+depends on (see FUNCTIONS above), so an unchecked out-of-bounds WRITE
+could silently corrupt exactly the state that keeps `call`/`ret`
+working correctly, not just produce a wrong value. On failure, the
+program prints a message and calls abort() (SIGABRT -- a genuine
+program bug, not a normal termination, the same character division by
+zero's hardware-trapped SIGFPE already has) -- with an explicit
+fflush(NULL) between the two, found necessary by testing rather than
+assumed: abort() bypasses the normal exit() path that would otherwise
+flush libc's buffered stdio, so without the explicit flush the message
+was reliably printed to an interactive terminal but silently lost
+whenever output was piped or redirected, which is the common case for
+a program run non-interactively. The fail-label itself is a single,
+per-function jump target shared by every bounds check in that function
+(see _get_bounds_check_fail_label), reset fresh per function
+(gen_function) -- not duplicated at every individual check site, and
+not shared ACROSS functions, since it's a local jump target.
+
+SCOPE: WHAT THIS DOESN'T COVER YET
+--------------------------------------
+Array function PARAMETERS and RETURN VALUES are explicitly not
+supported -- gen_function's parameter loop and gen_return both raise a
+clear CodegenError rather than silently mishandling one, since neither
+is a small addition: a parameter needs the caller to pass a pointer to
+its own copy of the argument and the callee to copy from that pointer
+into its own local slot on entry; a return value needs the standard
+"hidden output pointer" convention (the caller passes a pointer to
+where the result should be written, shifting every real argument's
+register one position later, and the callee writes directly through
+it instead of ever using %eax/%rax). Both are real, well-understood,
+separable pieces of work -- deliberately scoped out of this pass
+rather than rushed, not a gap discovered after the fact.
+
+Similarly, an ArrayLiteral or a Call returning an array used DIRECTLY
+as a function-call argument (`foo([1,2,3])` or `foo(bar())`) isn't
+supported either -- since array parameters aren't supported at all
+yet (see above), `foo` itself already fails to compile the moment it's
+defined, regardless of what any particular call site passes. Once
+array parameters land, the natural next question is exactly this one
+-- an argument expression with no address of its own yet (a literal,
+or a nested call) needing to be materialized into a temporary first --
+worth solving properly at that point rather than half-built now.
+Whole-array equality (`==`/`!=`) is rejected at the semantic level for
+a related reason -- a real, well-defined feature to consider later,
+just not implemented yet (see semantic.py's check_binary).
 """
 
 import argparse
@@ -390,6 +484,7 @@ from typing import Dict, List
 
 from lexer import lex
 from parser import (
+    ArrayLiteral,
     Assign,
     Binary,
     BinaryOp,
@@ -401,6 +496,8 @@ from parser import (
     ExprStmt,
     Function,
     If,
+    Index,
+    IndexAssign,
     Node,
     Param,
     Parser,
@@ -413,7 +510,7 @@ from parser import (
     Variable,
     While,
 )
-from semantic import analyze
+from semantic import analyze, type_from_name, Type, TypeKind
 
 
 # ---------------------------------------------------------------------------
@@ -443,10 +540,15 @@ class Register(Operand):
 
 @dataclass
 class Memory(Operand):
-    """A stack-relative memory operand: `offset(%base)`, e.g. `-4(%rbp)`.
-    This is how every local variable is stored -- see the module
-    docstring's LOCAL VARIABLES section."""
-    base: str    # e.g. 'rbp'
+    """A memory operand: `offset(%base)`, e.g. `-4(%rbp)`. This is how
+    every local variable is stored -- see the module docstring's LOCAL
+    VARIABLES section -- with `base` almost always 'rbp'. It's also
+    reused, with a DIFFERENT base, for reading/writing through a
+    computed address held in some other register (e.g. Memory('rbx',
+    0) for the address an array index computed) -- see the ARRAYS
+    section for why array copying/addressing needed this generality
+    that scalar locals never did."""
+    base: str    # e.g. 'rbp', or another register holding a computed address
     offset: int  # bytes from `base`; locals live at negative offsets
 
     def emit(self) -> str:
@@ -734,6 +836,23 @@ class LeaQ(Instruction):
 
 
 @dataclass
+class LeaQFrame(Instruction):
+    """Loads the *address* of a %rbp-relative stack location into
+    `dst` -- `leaq offset(%rbp), dst`. Distinct from LeaQ (which is
+    RIP-relative, for static data like string literals): this is
+    relative to the CURRENT function's own frame, and is how an
+    array-typed local's address is obtained -- see the ARRAYS section
+    for why arrays need their own address computed at all, unlike a
+    scalar local, which is always read/written directly by offset."""
+    offset: int
+    dst: Register
+    mnemonic = "leaq"
+
+    def operands(self) -> List[str]:
+        return [f"{self.offset}(%rbp)", self.dst.emit()]
+
+
+@dataclass
 class CallInstr(Instruction):
     """Calls a function (either a libc routine like `strlen`, or another
     Hornet-compiled function) by symbol name, e.g. `call strlen` or
@@ -842,6 +961,23 @@ class Jne(Instruction):
 
 
 @dataclass
+class Jae(Instruction):
+    """Jump to `target` if the last Cmp found dst >= src, using an
+    UNSIGNED interpretation of the compared values -- unlike Je/Jne,
+    which only look at the zero flag (equal or not, meaningless
+    whether signed or unsigned). This is what makes array bounds
+    checking a single comparison: `cmpl $size, %index; jae fail_label`
+    correctly catches BOTH index >= size and index < 0 at once, since
+    a negative int, reinterpreted unsigned, becomes a huge positive
+    number -- see gen_index_address_into."""
+    target: str
+    mnemonic = "jae"
+
+    def operands(self) -> List[str]:
+        return [self.target]
+
+
+@dataclass
 class Ret(Instruction):
     mnemonic = "ret"
 
@@ -931,6 +1067,37 @@ _ARG_REGISTERS_32 = ['edi', 'esi', 'edx', 'ecx', 'r8d', 'r9d']
 _CALLEE_SAVED_SCRATCH_REGISTERS = ['rbx', 'r12', 'r13', 'r14']
 
 
+def type_byte_width(t: Type) -> int:
+    """Total bytes needed to store a value of type `t`: 4 for int/bool,
+    8 for str (a pointer), and recursively `size *
+    type_byte_width(element_type)` for an array -- its full, flattened
+    stack footprint, matching how it's laid out contiguously in
+    row-major order regardless of how many dimensions it has (see the
+    ARRAYS section). This is the one place that recursion lives; every
+    caller that needs an array's total size (stack allocation, whole-
+    array copies) or the shift-per-index (address computation) goes
+    through this or leaf_type below rather than re-deriving either."""
+    if t.kind == TypeKind.ARRAY:
+        return t.size * type_byte_width(t.element_type)
+    if t.kind == TypeKind.STR:
+        return 8
+    return 4  # INT, BOOL
+
+
+def leaf_type(t: Type) -> Type:
+    """Recursively unwraps array types to find the innermost, non-array
+    element type -- e.g. for [2][3]int, the leaf type is int. Used
+    wherever codegen needs to know the actual SCALAR type stored at
+    the bottom of a (possibly multi-dimensional) array, e.g. to decide
+    whether a flat element-by-element copy should move 4 or 8 bytes at
+    a time -- a multi-dimensional array is just one contiguous block
+    of leaf values for copying purposes, with no per-dimension logic
+    needed once this is known."""
+    while t.kind == TypeKind.ARRAY:
+        t = t.element_type
+    return t
+
+
 # ---------------------------------------------------------------------------
 # AST -> Assembly AST
 # ---------------------------------------------------------------------------
@@ -948,7 +1115,7 @@ class CodeGenerator:
         self._label_count = 0
         self._var_offsets: Dict[int, int] = {}  # id(VarDecl node) -> its permanent Memory offset
         self._next_offset = 0
-        self.scopes: List[Dict[str, tuple]] = []  # name -> (offset, type_str), generation-time; see LOCAL VARIABLES
+        self.scopes: List[Dict[str, tuple]] = []  # name -> (offset, Type), generation-time; see LOCAL VARIABLES
         self.loop_labels: List[tuple] = []  # stack of (start_label, end_label), innermost last; see LOOPS
         self.string_literals: List[tuple] = []  # (label, content) pairs; see STRINGS
         # Lazily created, then cached and reused for the rest of this
@@ -960,6 +1127,13 @@ class CodeGenerator:
         self._int_format_label = None
         self._true_str_label = None
         self._false_str_label = None
+        # Lazily created, but with different lifetimes from each other
+        # -- see _get_bounds_check_fail_label/_get_bounds_check_message_
+        # label's own docstrings. The fail label is reset per function
+        # (gen_function); the message label, like the print-related
+        # ones above, is cached for the whole compilation.
+        self._bounds_check_fail_label = None
+        self._bounds_check_message_label = None
 
     def new_label(self, prefix: str) -> str:
         """Returns a fresh, uniquely-numbered local label like
@@ -1013,35 +1187,60 @@ class CodeGenerator:
         # into its own stack slot immediately, exactly like storing any
         # other local -- from here on, a parameter is indistinguishable
         # from a VarDecl-with-initializer as far as the rest of codegen
-        # is concerned.
+        # is concerned. Array-typed parameters are explicitly rejected
+        # rather than silently mishandled -- see gen_return's own
+        # array-return check for why this is the same deliberately
+        # scoped-out piece of work (a calling-convention extension),
+        # not a small gap.
         for i, p in enumerate(fn.params):
             offset = self._bind_param(p)
-            if p.type == 'str':
+            p_type = type_from_name(p.type)
+            if p_type.kind == TypeKind.ARRAY:
+                raise CodegenError(
+                    f"Parameter '{p.name}' of function '{fn.name}' is "
+                    f"array-typed ({p_type}) -- array parameters are not "
+                    f"supported yet -- see the module docstring's ARRAYS "
+                    f"section"
+                )
+            if p_type == Type.STR:
                 instructions.append(MovQ(src=Register(_ARG_REGISTERS_64[i]), dst=Memory('rbp', offset)))
             else:
                 instructions.append(Mov(src=Register(_ARG_REGISTERS_32[i]), dst=Memory('rbp', offset)))
 
+        self._bounds_check_fail_label = None  # fresh, per-function jump target; see its own docstring
         for stmt in fn.body:
             instructions.extend(self.gen_statement(stmt))
+        instructions.extend(self._gen_bounds_check_panic_block())
 
         return AsmFunction(name=fn.name, instructions=instructions)
 
     def _collect_params(self, params: List[Param]) -> None:
         """Gives each parameter its own permanent stack slot, exactly
         like _collect_locals does for VarDecls (same node-identity
-        keying, same uniform 8-byte width) -- kept as a separate method
-        since Param and VarDecl are different AST node types, not
-        because parameters need fundamentally different treatment."""
+        keying) -- kept as a separate method since Param and VarDecl
+        are different AST node types, not because parameters need
+        fundamentally different treatment. Each slot's width is now
+        the parameter's own actual type width (see type_byte_width) --
+        4 bytes for int/bool, 8 for str, and an array's own full,
+        flattened footprint for an array parameter -- rather than the
+        uniform 8 bytes every local used before array types existed;
+        see the module docstring's ARRAYS section for why a variable-
+        width allocator became unavoidable once a single local could
+        need far more than 8 bytes."""
         for p in params:
-            self._next_offset -= 8
+            width = type_byte_width(type_from_name(p.type))
+            self._next_offset -= width
             self._var_offsets[id(p)] = self._next_offset
 
     def _bind_param(self, p: Param) -> int:
         """The Param counterpart to _bind_local -- registers `p`'s name
-        and declared type in the current scope, pointing at the
-        permanent offset _collect_params already assigned it."""
+        and declared type (as a real semantic.Type, via type_from_name,
+        not the raw parser-level string/ArrayTypeExpr -- see
+        _local_type's own docstring for why) in the current scope,
+        pointing at the permanent offset _collect_params already
+        assigned it."""
         offset = self._var_offsets[id(p)]
-        self.scopes[-1][p.name] = (offset, p.type)
+        self.scopes[-1][p.name] = (offset, type_from_name(p.type))
         return offset
 
     def _collect_locals(self, statements: List[Node]) -> None:
@@ -1052,13 +1251,23 @@ class CodeGenerator:
         docstring's LOCAL VARIABLES section for why that distinction
         now matters.
 
-        Every slot is 8 bytes, even for a 4-byte int/bool, now that str
-        (an 8-byte pointer) exists -- see the module docstring's
-        STRINGS section for why a uniform width was chosen over
-        variable-width packing."""
+        Each slot's width is the variable's own actual type width (see
+        type_byte_width) -- 4 bytes for int/bool, 8 for str, and an
+        array's own full, flattened footprint (e.g. 24 bytes for
+        [2][3]int) for an array-typed local. Uniform 8-byte slots were
+        a deliberate simplification back when str was the only thing
+        wider than 4 bytes; a fixed-size array can be arbitrarily
+        larger than 8 bytes, so that simplification stops making sense
+        once arrays exist -- see the module docstring's ARRAYS section.
+        No alignment padding is added between slots: x86-64 doesn't
+        require aligned access the way some architectures do, and
+        %rsp's OWN 16-byte alignment requirement is still satisfied
+        purely by _frame_size rounding the TOTAL frame size up at the
+        end, regardless of how the space within it is subdivided."""
         for stmt in statements:
             if isinstance(stmt, VarDecl):
-                self._next_offset -= 8
+                width = type_byte_width(type_from_name(stmt.var_type))
+                self._next_offset -= width
                 self._var_offsets[id(stmt)] = self._next_offset
             elif isinstance(stmt, If):
                 self._collect_locals(stmt.then_body)
@@ -1093,7 +1302,7 @@ class CodeGenerator:
         scope, pointing at the permanent offset _collect_locals already
         assigned this exact VarDecl node, and returns that offset."""
         offset = self._var_offsets[id(stmt)]
-        self.scopes[-1][stmt.name] = (offset, stmt.var_type)
+        self.scopes[-1][stmt.name] = (offset, type_from_name(stmt.var_type))
         return offset
 
     def _local_offset(self, name: str) -> int:
@@ -1102,22 +1311,29 @@ class CodeGenerator:
                 return scope[name][0]
         raise CodegenError(f"Reference to undeclared variable '{name}'")
 
-    def _local_type(self, name: str) -> str:
+    def _local_type(self, name: str) -> Type:
         """Used specifically where a Variable's *offset* is also being
-        looked up right alongside it (see gen_expr_into's Variable case)
-        -- both come from the same (offset, type) tuple in the same
-        scope-stack entry, which codegen has to maintain regardless of
-        _type_of's existence, since resolved_type has no way to encode
-        *which* stack slot a name refers to. This is deliberately not
-        replaced by _type_of below, even though it would give the same
-        answer for a Variable node -- see _type_of's own docstring for
-        why the two coexist rather than one replacing the other."""
+        looked up right alongside it (see gen_expr_into's Variable case,
+        and gen_array_address_into) -- both come from the same
+        (offset, Type) tuple in the same scope-stack entry, which
+        codegen has to maintain regardless of _type_of's existence,
+        since resolved_type has no way to encode *which* stack slot a
+        name refers to. This is deliberately not replaced by _type_of
+        below, even though it would give the same answer for a
+        Variable node -- see _type_of's own docstring for why the two
+        coexist rather than one replacing the other.
+
+        Returns a real semantic.Type (via type_from_name, called once
+        up front in _bind_local/_bind_param, not re-derived here) --
+        not the raw parser-level string/ArrayTypeExpr -- so callers can
+        uniformly inspect .kind/.element_type/.size exactly like they
+        already can on whatever _type_of returns."""
         for scope in reversed(self.scopes):
             if name in scope:
                 return scope[name][1]
         raise CodegenError(f"Reference to undeclared variable '{name}'")
 
-    def _type_of(self, expr: Node) -> str:
+    def _type_of(self, expr: Node) -> Type:
         """Reads the type semantic.py already resolved and annotated
         onto this exact node (expr.resolved_type -- see semantic.py's
         check_expr) rather than re-deriving it independently.
@@ -1146,6 +1362,12 @@ class CodeGenerator:
         happens is codegen being invoked on an AST that skipped
         semantic analysis entirely (see compile_to_asm, which always
         runs analyze() first for exactly this reason).
+
+        Returns a full semantic.Type object (not a string -- that
+        changed when array types were added, since a bare name can't
+        represent an element type and size). Callers can compare
+        against Type.INT/Type.BOOL/Type.STR directly, or inspect
+        .kind/.element_type/.size for an array.
         """
         if expr.resolved_type is None:
             raise CodegenError(
@@ -1154,11 +1376,249 @@ class CodeGenerator:
             )
         return expr.resolved_type
 
+    # -- arrays -----------------------------------------------------------
+    # See the module docstring's ARRAYS section for the full design.
+    # Scope note: this covers LOCAL arrays completely -- declaration
+    # (literal or copy-initialized), reading/writing an element at any
+    # nesting depth, and whole-array copy via plain assignment. Array
+    # function PARAMETERS and RETURN VALUES are a deliberately separate,
+    # not-yet-built piece of work (a real calling-convention extension,
+    # not a small addition) -- see gen_array_value_into's Call case and
+    # gen_function's existing parameter loop, both of which raise a
+    # clear CodegenError rather than silently mishandling one.
+
+    def gen_array_address_into(self, expr: Node, dst: Register) -> List[Instruction]:
+        """Computes the ADDRESS of an array-typed expression -- a
+        Variable referring to an array-typed local, or an Index node
+        that itself resolves to a sub-array (the outer dimensions of a
+        multi-dimensional access) -- into the 64-bit register `dst`.
+        `dst` must already be a 64-bit register (e.g. Register('rax'),
+        not Register('eax')) -- addresses are always 64-bit values,
+        regardless of how wide the array's own elements are."""
+        if isinstance(expr, Variable):
+            offset = self._local_offset(expr.name)
+            return [LeaQFrame(offset=offset, dst=dst)]
+        if isinstance(expr, Index):
+            return self.gen_index_address_into(expr, dst)
+        raise CodegenError(f"Cannot compute an array address for: {expr!r}")
+
+    def gen_index_address_into(self, expr: Index, dst: Register) -> List[Instruction]:
+        """Computes the address of `expr.array[expr.index]` into `dst`
+        (a 64-bit register) -- the shared foundation for reading an
+        element (gen_expr_into's Index case), writing one
+        (gen_index_assign), and reading a whole SUB-array for
+        multi-dimensional access (this method's own recursive base
+        case, via gen_array_address_into above, when `expr.array` is
+        itself an Index).
+
+        Includes a runtime bounds check: an out-of-range index prints a
+        message and calls abort() (see _gen_bounds_check_panic_block)
+        rather than silently reading or writing adjacent stack memory
+        -- which, given arrays live in the same frame as the saved
+        return address and the callee-saved registers every function
+        call already depends on, could otherwise corrupt exactly the
+        state that keeps `call`/`ret` working correctly, not just
+        return a wrong value.
+
+        `expr.array`'s own address is computed first and protected on
+        the real CPU stack (not a fixed register) while the index
+        expression -- which could be arbitrarily complex, including
+        another indexing operation or a function call -- is evaluated,
+        the same push-before-recursing pattern used everywhere else in
+        this file a value needs to survive evaluating something else.
+        This works out correctly no matter what register `dst` itself
+        is (including if it happens to coincide with the %rax/%rcx
+        this method uses internally): the base address is safely on
+        the stack while %rax/%rcx are used for the index/offset
+        arithmetic, and the final address is only ever written into
+        `dst` as the very last step.
+        """
+        array_type = self._type_of(expr.array)
+        element_stride = type_byte_width(array_type.element_type)
+        size = array_type.size
+
+        instructions = self.gen_array_address_into(expr.array, dst)
+        instructions.append(Push(dst))
+        instructions.extend(self.gen_expr_into(expr.index, Register('eax')))
+        # Unsigned comparison: catches index >= size AND index < 0 in
+        # one check, since a negative int, reinterpreted unsigned,
+        # becomes a huge positive number.
+        instructions.append(Cmp(src=Imm(size), dst=Register('eax')))
+        instructions.append(Jae(self._get_bounds_check_fail_label()))
+        # A plain 32-bit imul is safe here: the bounds check above
+        # already guarantees the index is small and non-negative, and
+        # a 32-bit write zero-extends into the full 64-bit rax.
+        instructions.append(IMul(src=Imm(element_stride), dst=Register('eax')))
+        instructions.append(Pop(Register('rcx')))  # restore expr.array's base address
+        instructions.append(AddQ(src=Register('rax'), dst=Register('rcx')))
+        instructions.append(MovQ(src=Register('rcx'), dst=dst))
+        return instructions
+
+    def gen_array_copy(self, dst_mem: Memory, src_mem: Memory, array_type: Type) -> List[Instruction]:
+        """Copies array_type's worth of data from src_mem to dst_mem --
+        both arbitrary Memory operands (e.g. Memory('rbp', -24) for a
+        fixed local's own slot, or Memory('rbx', 0) for a computed
+        address held in %rbx) -- via a flat sequence of movl/movq
+        instructions, one per leaf-typed element. A multi-dimensional
+        array is just one contiguous block of leaf values in row-major
+        order for copying purposes, so no per-dimension logic is
+        needed here at all, just the total byte width and the leaf
+        element's own width (see type_byte_width/leaf_type)."""
+        width = type_byte_width(leaf_type(array_type))
+        total = type_byte_width(array_type)
+        instructions = []
+        off = 0
+        while off < total:
+            src = Memory(src_mem.base, src_mem.offset + off)
+            dst = Memory(dst_mem.base, dst_mem.offset + off)
+            if width == 8:
+                instructions.append(MovQ(src=src, dst=Register('rax')))
+                instructions.append(MovQ(src=Register('rax'), dst=dst))
+            else:
+                instructions.append(Mov(src=src, dst=Register('eax')))
+                instructions.append(Mov(src=Register('eax'), dst=dst))
+            off += width
+        return instructions
+
+    def gen_array_literal_into(self, dst_offset: int, expr: ArrayLiteral, array_type: Type) -> List[Instruction]:
+        """Stores an array literal's elements directly into consecutive
+        stack slots starting at dst_offset. Each element is evaluated
+        via the ordinary gen_expr_into (so an element can be any
+        expression, not just a constant), except when the element type
+        is ITSELF an array -- a multi-dimensional literal's "elements"
+        are themselves ArrayLiterals, handled by recursing through
+        gen_array_value_into (which dispatches straight back here)."""
+        element_type = array_type.element_type
+        element_width = type_byte_width(element_type)
+        instructions = []
+        for i, elem_expr in enumerate(expr.elements):
+            elem_offset = dst_offset + i * element_width
+            if element_type.kind == TypeKind.ARRAY:
+                instructions.extend(self.gen_array_value_into(elem_expr, elem_offset, element_type))
+            elif element_type == Type.STR:
+                instructions.extend(self.gen_expr_into(elem_expr, Register('eax')))
+                instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', elem_offset)))
+            else:
+                instructions.extend(self.gen_expr_into(elem_expr, Register('eax')))
+                instructions.append(Mov(src=Register('eax'), dst=Memory('rbp', elem_offset)))
+        return instructions
+
+    def gen_array_value_into(self, expr: Node, dst_offset: int, array_type: Type) -> List[Instruction]:
+        """Stores an array-typed expression's VALUE into the stack slot
+        starting at dst_offset (%rbp-relative), matching array_type's
+        shape. This is the array counterpart to _gen_store's scalar
+        path -- an array can't fit into a single register the way an
+        int/bool/str value can, so it needs its own dedicated "store"
+        logic entirely, dispatched on what kind of expression is
+        producing the value:
+          - ArrayLiteral: each element stored directly (see
+            gen_array_literal_into).
+          - Variable: a flat, offset-to-offset copy (see
+            gen_array_copy) -- no address computation needed at all,
+            since a variable's own slot offset is already known at
+            compile time. This is what makes `arr2 = arr1` a real,
+            independent copy rather than a pointer alias -- see the
+            module docstring's ARRAYS section on value semantics.
+          - Index (a sub-array, e.g. `[3]int row = matrix[i]`): its
+            address has to be computed first (gen_array_address_into),
+            since it depends on a runtime index, then copied from that
+            computed address.
+          - Call (a function returning an array): not supported yet --
+            see this method's own module-docstring-referenced scope
+            note above.
+        """
+        if isinstance(expr, ArrayLiteral):
+            return self.gen_array_literal_into(dst_offset, expr, array_type)
+        if isinstance(expr, Variable):
+            src_offset = self._local_offset(expr.name)
+            return self.gen_array_copy(Memory('rbp', dst_offset), Memory('rbp', src_offset), array_type)
+        if isinstance(expr, Index):
+            instructions = self.gen_array_address_into(expr, Register('rbx'))
+            instructions.extend(self.gen_array_copy(Memory('rbp', dst_offset), Memory('rbx', 0), array_type))
+            return instructions
+        if isinstance(expr, Call):
+            raise CodegenError(
+                f"Calling '{expr.name}', which returns an array, is not "
+                f"supported yet -- array-returning functions need a "
+                f"calling-convention extension (a hidden output pointer) "
+                f"that hasn't been implemented"
+            )
+        raise CodegenError(f"No codegen rule for an array-typed value: {expr!r}")
+
+    def _get_bounds_check_fail_label(self) -> str:
+        """Lazily creates a single, per-function label that every
+        bounds check within this function jumps to on failure --
+        reused across however many indexing operations this function
+        has, rather than duplicating the panic sequence (see
+        _gen_bounds_check_panic_block) at every individual check site.
+        Reset to None at the start of every function (see
+        gen_function) -- unlike the message label below, this one is a
+        purely LOCAL jump target, meaningless outside the function
+        it's generated for."""
+        if self._bounds_check_fail_label is None:
+            self._bounds_check_fail_label = self.new_label("bounds_check_fail")
+        return self._bounds_check_fail_label
+
+    def _get_bounds_check_message_label(self) -> str:
+        """Lazily creates and caches (for the rest of the WHOLE
+        compilation, unlike the per-function label above -- this is
+        just a static string, safely shared by every function that
+        needs it, matching the same lazy-cache pattern print's own
+        format-string/true/false labels already use) the "array index
+        out of bounds" message string."""
+        if self._bounds_check_message_label is None:
+            self._bounds_check_message_label = self.new_label("bounds_msg")
+            self.string_literals.append((self._bounds_check_message_label, "array index out of bounds"))
+        return self._bounds_check_message_label
+
+    def _gen_bounds_check_panic_block(self) -> List[Instruction]:
+        """Appended once at the end of a function's own instructions
+        (see gen_function) if -- and only if -- that function's own
+        bounds checks ever actually used _get_bounds_check_fail_label.
+        Prints a clear message, then calls abort() (SIGABRT) rather
+        than a plain exit() -- an out-of-bounds access is a genuine
+        program bug, not a normal termination condition, the same
+        "abnormal termination" character division by zero's hardware-
+        trapped SIGFPE already has, just deliberately raised by this
+        compiler's own generated code instead of by the CPU. Never
+        reached via ordinary fall-through from the function's own body
+        -- every return already leaves via `leave; ret` before control
+        could reach this point, and abort() itself never returns -- so
+        appending it at the very end of the function is always safe.
+
+        Explicitly calls fflush(NULL) between puts() and abort() --
+        found necessary by testing, not assumed: abort() terminates
+        the process via a raw signal, bypassing the normal exit() path
+        that would otherwise flush libc's buffered stdio streams. Without
+        this, the message is reliably printed when stdout happens to be
+        line-buffered (an interactive terminal) but silently LOST
+        whenever stdout is redirected or piped -- exactly the case for
+        any program run non-interactively, which is most of them. A
+        NULL argument tells fflush to flush every open output stream,
+        so this doesn't need to reference libc's `stdout` symbol
+        directly (a global variable, not a function -- meaningfully
+        more awkward to reference correctly from hand-written assembly
+        than another ordinary `call`).
+        """
+        if self._bounds_check_fail_label is None:
+            return []
+        msg_label = self._get_bounds_check_message_label()
+        return [
+            Label(self._bounds_check_fail_label),
+            LeaQ(label=msg_label, dst=Register('rdi')),
+            CallInstr('puts'),
+            Mov(src=Imm(0), dst=Register('edi')),
+            CallInstr('fflush'),
+            CallInstr('abort'),
+        ]
+
     def gen_statement(self, stmt: Node) -> List[Instruction]:
         if isinstance(stmt, VarDecl):
             return self.gen_var_decl(stmt)
         if isinstance(stmt, Assign):
             return self.gen_assign(stmt)
+        if isinstance(stmt, IndexAssign):
+            return self.gen_index_assign(stmt)
         if isinstance(stmt, Return):
             return self.gen_return(stmt)
         if isinstance(stmt, If):
@@ -1190,26 +1650,73 @@ class CodeGenerator:
         offset = self._local_offset(stmt.name)
         return self._gen_store(offset, stmt.value)
 
+    def gen_index_assign(self, stmt: IndexAssign) -> List[Instruction]:
+        """`array[index] = value` -- computes the target element's
+        address (via gen_index_address_into, which includes the
+        runtime bounds check), protects it on the stack while the
+        value expression is evaluated (the same push-before-recursing
+        pattern used throughout this file), then writes through it.
+        The element's own type decides the store width exactly like
+        _gen_store does for an ordinary variable -- str needs `movq`,
+        everything else `movl`. An array-typed element (writing a
+        whole sub-array via `matrix[i] = other_row`) isn't reachable
+        here at all: IndexAssign's own grammar only ever produces a
+        single leaf-level element write; a whole-row assignment would
+        need `matrix[i]` to appear as an ordinary Assign target, which
+        parser.py doesn't produce (see IndexAssign's own docstring).
+        """
+        element_type = self._type_of(stmt.value)
+        addr_reg = Register('rax')
+        instructions = self.gen_index_address_into(Index(array=stmt.array, index=stmt.index), addr_reg)
+        instructions.append(Push(addr_reg))
+        if element_type == Type.STR:
+            instructions.extend(self.gen_expr_into(stmt.value, Register('eax')))
+            instructions.append(MovQ(src=Register('rax'), dst=Register('r8')))  # value survives the pop below
+            instructions.append(Pop(addr_reg))
+            instructions.append(MovQ(src=Register('r8'), dst=Memory('rax', 0)))
+        else:
+            instructions.extend(self.gen_expr_into(stmt.value, Register('eax')))
+            instructions.append(Mov(src=Register('eax'), dst=Register('r8d')))
+            instructions.append(Pop(addr_reg))
+            instructions.append(Mov(src=Register('r8d'), dst=Memory('rax', 0)))
+        return instructions
+
     def _gen_store(self, offset: int, value_expr: Node) -> List[Instruction]:
         """Shared by VarDecl-with-initializer and Assign: both are just
         "compute this expression, then write the result into that
-        variable's slot" -- evaluate into %eax using the ordinary
-        expression codegen (still always targets a register), then a
-        single extra store to actually place it in memory. Which store
-        instruction depends on the value's type: a str is an 8-byte
-        pointer sitting in %rax and needs `movq`, while int/bool are
-        still the original 4-byte `movl %eax, ...` -- everything about
-        gen_expr_into/gen_binary_into/gen_unary_op's own internals stays
-        exactly as it always has, oblivious to str entirely; only this
-        one call site needs to ask "which width am I storing"."""
+        variable's slot". Which store instruction depends on the
+        value's type: an array can't fit into a single register at
+        all, so it's dispatched to gen_array_value_into entirely
+        separately (see its own docstring); a str is an 8-byte pointer
+        sitting in %rax and needs `movq`; int/bool are still the
+        original 4-byte `movl %eax, ...` -- everything about
+        gen_expr_into/gen_binary_into/gen_unary_op's own internals
+        stays exactly as it always has, oblivious to str (or arrays)
+        entirely; only this one call site needs to ask "which width,
+        or which entirely different mechanism, am I storing"."""
+        value_type = self._type_of(value_expr)
+        if value_type.kind == TypeKind.ARRAY:
+            return self.gen_array_value_into(value_expr, offset, value_type)
         instructions = self.gen_expr_into(value_expr, Register('eax'))
-        if self._type_of(value_expr) == 'str':
+        if value_type == Type.STR:
             instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
         else:
             instructions.append(Mov(src=Register('eax'), dst=Memory('rbp', offset)))
         return instructions
 
     def gen_return(self, stmt: Return) -> List[Instruction]:
+        # Array-typed returns need a genuine calling-convention
+        # extension (a hidden output pointer the caller passes and the
+        # callee writes directly through) that hasn't been implemented
+        # yet -- gen_expr_into below would silently try to fit an
+        # array's value into a single register otherwise, which can
+        # never be correct. See the module docstring's ARRAYS section.
+        if self._type_of(stmt.value).kind == TypeKind.ARRAY:
+            raise CodegenError(
+                "Returning an array is not supported yet -- array "
+                "return values need a calling-convention extension (a "
+                "hidden output pointer) that hasn't been implemented"
+            )
         dst = Register('eax')
         instructions = self.gen_expr_into(stmt.value, dst)
         # Restore the callee-saved scratch registers *before* Leave --
@@ -1369,11 +1876,55 @@ class CodeGenerator:
             return [Mov(src=Imm(1 if expr.value else 0), dst=dst)]
         if isinstance(expr, StringLiteral):
             return self.gen_string_literal_into(expr, dst)
+        if isinstance(expr, ArrayLiteral):
+            # Never reachable in correct codegen -- an array literal's
+            # value can't fit in a single register, so every producer
+            # of one (VarDecl init, Assign, a nested literal element)
+            # routes through gen_array_value_into/gen_array_literal_into
+            # instead of ever calling gen_expr_into on it directly. A
+            # clear error here catches a codegen bug immediately rather
+            # than silently truncating an array down to whatever
+            # happens to fit in %eax.
+            raise CodegenError(
+                "Cannot compute an array literal via gen_expr_into -- "
+                "arrays don't fit in a single register; use "
+                "gen_array_value_into instead"
+            )
         if isinstance(expr, Variable):
             offset = self._local_offset(expr.name)
-            if self._local_type(expr.name) == 'str':
+            var_type = self._local_type(expr.name)
+            if var_type.kind == TypeKind.ARRAY:
+                raise CodegenError(
+                    f"Cannot read array-typed variable '{expr.name}' via "
+                    f"gen_expr_into -- arrays don't fit in a single "
+                    f"register; use gen_array_value_into or "
+                    f"gen_array_address_into instead"
+                )
+            if var_type == Type.STR:
                 return [MovQ(src=Memory('rbp', offset), dst=as_qword_register(dst))]
             return [Mov(src=Memory('rbp', offset), dst=dst)]
+        if isinstance(expr, Index):
+            element_type = self._type_of(expr)
+            if element_type.kind == TypeKind.ARRAY:
+                # Reading a sub-array (e.g. `matrix[i]` alone, not yet
+                # fully indexed down to a scalar) has the same "doesn't
+                # fit in a register" problem as an array literal --
+                # `[3]int row = matrix[i]` is handled via
+                # gen_array_value_into instead, which calls
+                # gen_array_address_into directly rather than ever
+                # reaching this method for the sub-array's VALUE.
+                raise CodegenError(
+                    "Cannot read a sub-array via gen_expr_into -- arrays "
+                    "don't fit in a single register; use "
+                    "gen_array_value_into or gen_array_address_into instead"
+                )
+            addr_reg = as_qword_register(dst)
+            instructions = self.gen_index_address_into(expr, addr_reg)
+            if element_type == Type.STR:
+                instructions.append(MovQ(src=Memory(addr_reg.name, 0), dst=addr_reg))
+            else:
+                instructions.append(Mov(src=Memory(addr_reg.name, 0), dst=dst))
+            return instructions
         if isinstance(expr, Call):
             if expr.name == 'print':
                 return self.gen_print_call_into(expr, dst)
@@ -1392,9 +1943,9 @@ class CodeGenerator:
             # see the module docstring's STRINGS section) -- everything
             # else, and ADD/==/!= between two ints or bools, goes
             # through the original gen_binary_into completely unchanged.
-            if expr.op == BinaryOp.ADD and self._type_of(expr.left) == 'str':
+            if expr.op == BinaryOp.ADD and self._type_of(expr.left) == Type.STR:
                 return self.gen_string_concat_into(expr, dst)
-            if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL) and self._type_of(expr.left) == 'str':
+            if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL) and self._type_of(expr.left) == Type.STR:
                 return self.gen_string_compare_into(expr, dst)
             return self.gen_binary_into(expr, dst)
         raise CodegenError(f"No codegen rule for expression: {expr!r}")
@@ -1561,14 +2112,14 @@ class CodeGenerator:
         arg = expr.args[0]
         arg_type = self._type_of(arg)
 
-        if arg_type == 'str':
+        if arg_type == Type.STR:
             instructions = self.gen_expr_into(arg, dst)
             instructions.append(MovQ(src=as_qword_register(dst), dst=Register('rdi')))
             instructions.append(CallInstr('puts'))
             instructions.append(Mov(src=Imm(0), dst=dst))
             return instructions
 
-        if arg_type == 'int':
+        if arg_type == Type.INT:
             fmt_label = self._get_int_format_label()
             instructions = self.gen_expr_into(arg, dst)
             instructions.append(Mov(src=dst, dst=Register('esi')))       # esi = value (2nd printf arg)
@@ -1585,7 +2136,7 @@ class CodeGenerator:
             instructions.append(Mov(src=Imm(0), dst=dst))
             return instructions
 
-        if arg_type == 'bool':
+        if arg_type == Type.BOOL:
             true_label = self._get_true_str_label()
             false_label = self._get_false_str_label()
             false_branch_label = self.new_label("print_bool_false")

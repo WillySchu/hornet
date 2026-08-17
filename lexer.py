@@ -180,8 +180,8 @@ class Lexer():
             ('NEWLINE',       r'\n'),              # Line breaks
             ('OPEN_PAREN',    r'\('),              # Open paren
             ('CLOSE_PAREN',   r'\)'),              # Close paren
-            ('OPEN_BRACKET',  r'\['),              # Open square bracket
-            ('CLOSE_BRACKET', r'\]'),              # Close square bracket
+            ('OPEN_BRACKET',  r'\['),              # Array type/literal/index open
+            ('CLOSE_BRACKET', r'\]'),              # Array type/literal/index close
             ('GREATER_THAN',  r'>'),
             ('LESS_THAN',     r'<'),
             ('COLON',         r':'),               # Colon
