@@ -1,4 +1,5 @@
 #!/bin/bash
-as -o test.o test.s
-gcc -o test test.o
-./test; echo $?
+
+as -o "$FILE".o "$FILE".s
+gcc -o "$FILE" "$FILE".o
+./"$FILE"; echo $?

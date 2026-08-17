@@ -1,0 +1,12 @@
+def int main():
+    int i = 0
+    while i < 20:
+        i = i + 1
+        if i % 3 == 0:
+            if i % 5 == 0:
+                print('fizzbuzz')
+                continue
+            print('fizz')
+        if i % 5 == 0:
+            print('buzz')
+    return 0
