@@ -2,6 +2,9 @@ def str main():
     int print = 5
     print(print)
     print(hello() + ' ' + world('!'))
+    [3]int ints = [1, 2, 3]
+    print(ints[0])
+    print(ints[3])
     return ''
 
 
