@@ -30,6 +30,7 @@ Organization:
     TestPrecedenceAndLogicalOperators   ( 8 tests)
     TestShortCircuitEvaluation          ( 4 tests)
     TestVariablesAndStatements          (12 tests)
+    TestCompoundAssignment              (16 tests)
     TestIfStatements                    (18 tests)
     TestWhileLoops                      (10 tests)
     TestStrings                         (13 tests)
@@ -38,7 +39,31 @@ Organization:
     TestPrint                           (12 tests)
     TestSemanticErrors                  (66 tests)
                                         ----------
-                                        222 tests total
+                                        238 tests total
+
+A NOTE ON COMPOUND ASSIGNMENT BEING PURE DESUGARING
+-----------------------------------------------------------------
++= -= *= /= %= &= |= ^= <<= >>= are parsed directly into the same AST a
+hand-written `a = a + b` would already produce (see parser.py's
+parse_assign and its COMPOUND ASSIGNMENT docstring section) -- not a
+dedicated CompoundAssign node. That means semantic.py and codegen.py
+needed zero changes for any of these ten operators; most of
+TestCompoundAssignment is really confirming the desugaring round-trips
+correctly through already-tested machinery, not exercising new code
+paths. test_string_concat_via_plus_equals is the one genuinely new
+runtime path (reaching string concatenation through `+=` rather than an
+explicit `s = s + ...`), and the type-mismatch/undeclared-variable
+tests confirm the desugared form still gets full checking rather than
+some kind of bypass.
+
+test_compound_assignment_in_a_loop's docstring is worth reading even
+though the test itself only uses int: it connects to
+TestStringMemory's existing leak tests -- `result += 'x'` in a loop is
+now a much more natural, easy-to-write-by-accident way to reach the
+same "named variable buffers are never automatically freed" limitation
+that was already true and already documented before this feature
+existed. Compound assignment doesn't introduce a new leak; it just
+makes the existing one easier to hit.
 
 A NOTE ON THE BITWISE OPERATORS' PRECEDENCE
 -----------------------------------------------------------------
@@ -755,6 +780,129 @@ class TestVariablesAndStatements:
             "    1 + 1\n"
             "    return 42",
             42,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Compound assignment (+= -= *= /= %= &= |= ^= <<= >>=).
+#
+# These are parsed as pure syntactic sugar -- parser.py's parse_assign
+# desugars `a += b` directly into the same AST a hand-written `a = a +
+# b` would produce (Assign wrapping a Binary), so semantic.py and
+# codegen.py needed zero changes to support any of these ten operators.
+# That means most of these tests are really testing the desugaring
+# itself and confirming nothing was lost by reusing existing machinery,
+# not exercising new codegen. test_string_concat_via_plus_equals is the
+# one genuinely new runtime path (compound assignment reaching the
+# string-concatenation/malloc machinery through the new syntax), and
+# test_compound_assignment_type_mismatch_is_rejected +
+# test_compound_assignment_to_undeclared_variable_is_rejected confirm
+# the desugared form still gets full type- and scope-checking, not a
+# bypass around it.
+# ---------------------------------------------------------------------------
+
+class TestCompoundAssignment:
+    pytestmark = GCC_SKIP
+
+    @pytest.mark.parametrize("body,expected", [
+        ("    int x = 5\n    x += 3\n    return x", 8),
+        ("    int x = 5\n    x -= 3\n    return x", 2),
+        ("    int x = 5\n    x *= 3\n    return x", 15),
+        ("    int x = 20\n    x /= 4\n    return x", 5),
+        ("    int x = 17\n    x %= 5\n    return x", 2),
+        ("    int x = 12\n    x &= 10\n    return x", 8),
+        ("    int x = 12\n    x |= 10\n    return x", 14),
+        ("    int x = 12\n    x ^= 10\n    return x", 6),
+        ("    int x = 1\n    x <<= 4\n    return x", 16),
+        ("    int x = 256\n    x >>= 4\n    return x", 16),
+    ])
+    def test_each_compound_operator(self, body, expected):
+        assert_exit_code(body, expected)
+
+    def test_chained_compound_assignments(self):
+        """Every operator applied in sequence to the same variable --
+        proof the desugared reads/writes compose correctly across
+        multiple statements, not just in isolation."""
+        assert_exit_code(
+            "    int x = 5\n"
+            "    x += 3\n"   # 8
+            "    x -= 1\n"   # 7
+            "    x *= 2\n"   # 14
+            "    x /= 2\n"   # 7
+            "    x %= 5\n"   # 2
+            "    x &= 3\n"   # 2
+            "    x |= 4\n"   # 6
+            "    x ^= 1\n"   # 7
+            "    x <<= 2\n"  # 28
+            "    x >>= 1\n"  # 14
+            "    return x",
+            14,
+        )
+
+    def test_string_concat_via_plus_equals(self):
+        """The one genuinely new runtime path here: compound assignment
+        reaching string concatenation's malloc/strlen/strcpy/strcat
+        codegen through the new `+=` syntax rather than an explicit
+        `s = s + ...`."""
+        assert_exit_code(
+            "    str s = 'hello'\n"
+            "    s += ' world'\n"
+            "    return s == 'hello world'",
+            1,
+            return_type="bool",
+        )
+
+    def test_compound_assignment_in_a_loop(self):
+        """The natural, idiomatic use case for compound assignment --
+        an accumulator. Also the case worth knowing accumulates
+        garbage: each `total += i` here still only ever costs a few
+        bytes of stack, but the equivalent `result += 'x'` pattern for
+        str would leak one buffer per iteration, for the exact same
+        underlying reason `test_concatenation_with_fresh_intermediate_
+        inside_a_loop` in TestStringMemory already does -- `result` is
+        a named variable, not a fresh Binary(ADD, ...) result, so the
+        memory-freeing optimization correctly (if unfortunately) leaves
+        it alone every time. Compound assignment doesn't introduce a
+        new leak here; it just makes the existing one much easier to
+        write by accident.
+        """
+        assert_exit_code(
+            "    int total = 0\n"
+            "    int i = 1\n"
+            "    while i <= 5:\n"
+            "        total += i\n"
+            "        i += 1\n"
+            "    return total",
+            15,
+        )
+
+    def test_compound_assignment_type_mismatch_is_rejected(self):
+        """Confirms the desugared form still gets full type-checking --
+        `b += 1` desugars to `b = b + 1`, and `+` on bool and int is
+        exactly as invalid as it would be written out longhand."""
+        assert_semantic_error(
+            "    bool b = true\n"
+            "    b += 1\n"
+            "    return 0",
+            match="requires two int operands or two str operands",
+        )
+
+    def test_compound_assignment_to_undeclared_variable_is_rejected(self):
+        assert_semantic_error(
+            "    undeclared_var += 1\n"
+            "    return 0",
+            match="undeclared variable",
+        )
+
+    def test_modulo_assign_by_zero_still_crashes_with_sigfpe(self):
+        """%= reuses ordinary modulo codegen via desugaring, so it
+        inherits the same division-by-zero hardware trap DIVIDE and
+        MODULO already have."""
+        assert_crashes_with_sigfpe(
+            "    int a = 5\n"
+            "    int zero = 0\n"
+            "    a %= zero\n"
+            "    return a"
         )
 
 

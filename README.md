@@ -11,18 +11,6 @@ Binary Ops:
 - Consider replacing ^ with ~
 - Exponentiation (either ** or ^)
 
-Compound Assignment Ops:
-- +=
-- -=
-- /=
-- \*=
-- %=
-- <<=
-- >>=
-- &=
-- |=
-- ^=
-
 Updates:
 - All code paths must return / default return values.
 - Ternary.

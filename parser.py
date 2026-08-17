@@ -18,7 +18,9 @@ Grammar supported (matches what the current lexer can produce):
                  | continue_stmt
                  | expr_stmt
     decl_stmt   := type IDENTIFIER ('=' expression)? NEWLINE
-    assign_stmt := IDENTIFIER '=' expression NEWLINE
+    assign_stmt := IDENTIFIER assign_op expression NEWLINE
+    assign_op   := '=' | '+=' | '-=' | '*=' | '/=' | '%='
+                 | '&=' | '|=' | '^=' | '<<=' | '>>='
     return_stmt := 'return' expression NEWLINE?
     if_stmt     := 'if' expression ':' NEWLINE block
                     ('elif' expression ':' NEWLINE block)*
@@ -103,6 +105,32 @@ textual order is now actually enforced -- `a = 1` above `int a` is a
 semantic error -- even though codegen's own pre-scan (which only cares
 about sizing the stack frame, not validity) still wouldn't catch it on
 its own if it somehow ran without semantic analysis first.
+
+COMPOUND ASSIGNMENT
+---------------------
+`+= -= *= /= %= &= |= ^= <<= >>=` are all handled entirely inside
+parse_assign, by desugaring: `a += b` is parsed directly into
+Assign(name='a', value=Binary(op=ADD, left=Variable(name='a'),
+right=b)) -- the exact same tree a hand-written `a = a + b` would
+produce, not a dedicated CompoundAssign node carrying the original
+syntax through separately.
+
+This is deliberate, not just convenient. It only works this cleanly
+because every assignment target in this language is a bare variable
+name -- there's no array-index or struct-field l-value where "evaluate
+the target once" would actually matter, and reading a bare variable has
+no side effect to worry about duplicating. Given that, the desugared
+tree isn't an approximation of what `+=` means, it just *is* what `+=`
+means, exactly as precisely as if the person had written the long form
+themselves. The payoff: semantic.py and codegen.py need zero changes to
+support any of these ten operators. check_binary already knows every
+type rule each underlying operator has (including str's `+` overload
+for concatenation), and codegen.py's gen_binary_into/
+gen_string_concat_into already handle every one of these AST shapes
+correctly -- including the concatenation memory-freeing optimization,
+which correctly does *not* fire here, since the left operand is a
+Variable node (a named, possibly-still-referenced value), never a
+fresh Binary(ADD, ...) result.
 
 NOTE ON INDENTATION (RESOLVED)
 --------------------------------
@@ -589,6 +617,34 @@ _BINARY_OPS = {
 }
 
 
+# TokenType -> the BinaryOp a compound-assignment operator desugars
+# into. See parse_assign: `x += y` is parsed directly into the exact
+# same AST shape as `x = x + y` (Assign wrapping a Binary), rather than
+# introducing a dedicated CompoundAssign node -- see the module
+# docstring's COMPOUND ASSIGNMENT section for why that's not a
+# shortcut so much as the actually-correct representation here, given
+# this language's assignment targets are always a bare name.
+_COMPOUND_ASSIGN_OPS = {
+    TokenType.PLUS_ASSIGN:      BinaryOp.ADD,
+    TokenType.MINUS_ASSIGN:     BinaryOp.SUBTRACT,
+    TokenType.STAR_ASSIGN:      BinaryOp.MULTIPLY,
+    TokenType.SLASH_ASSIGN:     BinaryOp.DIVIDE,
+    TokenType.PERCENT_ASSIGN:   BinaryOp.MODULO,
+    TokenType.AMPERSAND_ASSIGN: BinaryOp.BITWISE_AND,
+    TokenType.PIPE_ASSIGN:      BinaryOp.BITWISE_OR,
+    TokenType.CARET_ASSIGN:     BinaryOp.BITWISE_XOR,
+    TokenType.SHIFT_LEFT_ASSIGN:  BinaryOp.SHIFT_LEFT,
+    TokenType.SHIFT_RIGHT_ASSIGN: BinaryOp.SHIFT_RIGHT,
+}
+
+# Every token that can start the operator position of an assignment
+# statement: plain '=' plus every compound form. parse_statement uses
+# this set for its one-token lookahead (IDENTIFIER followed by one of
+# these means "this is an assignment statement", exactly the same way
+# it already used to check for TokenType.ASSIGN alone).
+_ASSIGNMENT_TOKENS = {TokenType.ASSIGN, *_COMPOUND_ASSIGN_OPS.keys()}
+
+
 class Parser:
     def __init__(self, tokens: List[Token]):
         self.tokens = tokens
@@ -724,7 +780,7 @@ class Parser:
             return self.parse_break()
         if self.check(TokenType.CONTINUE):
             return self.parse_continue()
-        if self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.ASSIGN:
+        if self.check(TokenType.IDENTIFIER) and self.peek(1).type in _ASSIGNMENT_TOKENS:
             return self.parse_assign()
         return self.parse_expr_stmt()
 
@@ -786,10 +842,31 @@ class Parser:
         return VarDecl(name=name_tok.val, var_type=var_type, init=init)
 
     def parse_assign(self) -> Assign:
+        """`a = <expr>` or a compound form (`a += <expr>`, etc).
+
+        A compound form is desugared right here into the exact same
+        Assign(name, Binary(op, Variable(name), value)) shape a
+        hand-written `a = a + <expr>` would already produce -- not into
+        some dedicated CompoundAssign node. That's deliberate: reading
+        `a` to combine with the new value has no side effect in this
+        language (a bare variable reference never does), so there's
+        nothing lost by representing "read a, combine, write back" as
+        literally that, and everything downstream -- every type rule in
+        check_binary (including str's `+` overload), and every codegen
+        path (including the string-concatenation memory-freeing
+        optimization) -- already handles this AST shape correctly with
+        no changes needed anywhere else.
+        """
         name_tok = self.expect(TokenType.IDENTIFIER)
-        self.expect(TokenType.ASSIGN, "Expected '=' in assignment")
+        op_tok = self.advance()  # one of _ASSIGNMENT_TOKENS -- already confirmed by parse_statement's lookahead
         value = self.parse_expression()
-        return Assign(name=name_tok.val, value=value)
+
+        if op_tok.type == TokenType.ASSIGN:
+            return Assign(name=name_tok.val, value=value)
+
+        binary_op = _COMPOUND_ASSIGN_OPS[op_tok.type]
+        desugared_value = Binary(op=binary_op, left=Variable(name=name_tok.val), right=value)
+        return Assign(name=name_tok.val, value=desugared_value)
 
     def parse_return(self) -> Return:
         self.expect(TokenType.RETURN)

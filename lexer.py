@@ -42,6 +42,18 @@ class TokenType(Enum):
     LESS_THAN_OR_EQUAL = auto()
     GREATER_THAN_OR_EQUAL = auto()
 
+    # Compound assignment
+    PLUS_ASSIGN = auto()
+    MINUS_ASSIGN = auto()
+    STAR_ASSIGN = auto()
+    SLASH_ASSIGN = auto()
+    PERCENT_ASSIGN = auto()
+    AMPERSAND_ASSIGN = auto()
+    PIPE_ASSIGN = auto()
+    CARET_ASSIGN = auto()
+    SHIFT_LEFT_ASSIGN = auto()
+    SHIFT_RIGHT_ASSIGN = auto()
+
     # Keywords
     DEF = auto()
     INT = auto()
@@ -135,6 +147,15 @@ class Lexer():
             ('IDENTIFIER',  r'[a-zA-Z_]\w*'),    # Variable names/keywords
             ('STRING',      r"'([^'\\]|\\.)*'"), # String literals
 
+            # Triple character -- must come before the double- and
+            # single-character '<'/'>' rules below (SHIFT_LEFT,
+            # SHIFT_RIGHT, LESS_THAN, GREATER_THAN, LESS_THAN_OR_EQUAL,
+            # GREATER_THAN_OR_EQUAL), or those would each greedily
+            # consume a prefix of '<<=' / '>>=' one or two characters at
+            # a time and never let the full three-character token match.
+            ('SHIFT_LEFT_ASSIGN',  r'<<='),
+            ('SHIFT_RIGHT_ASSIGN', r'>>='),
+
             # Double character
             ('EQUAL',                 r'=='),    # Equal
             ('NOT_EQUAL',             r'!='),    # Not equal
@@ -144,6 +165,14 @@ class Lexer():
             ('SHIFT_RIGHT',           r'>>'),    # LESS_THAN/GREATER_THAN below, or those
                                                   # single-char rules would consume one '<'/'>'
                                                   # at a time and never let this match.
+            ('PLUS_ASSIGN',      r'\+='),   # Compound assignment -- each of these must
+            ('MINUS_ASSIGN',     r'\-='),   # come before its corresponding single-character
+            ('STAR_ASSIGN',      r'\*='),   # operator rule below, for the same greedy-
+            ('SLASH_ASSIGN',     r'/='),    # single-char-match-first reason as SHIFT_LEFT/
+            ('PERCENT_ASSIGN',   r'%='),    # SHIFT_RIGHT above.
+            ('AMPERSAND_ASSIGN', r'&='),
+            ('PIPE_ASSIGN',      r'\|='),
+            ('CARET_ASSIGN',     r'\^='),
 
             # Single character
             ('NEWLINE',      r'\n'),              # Line breaks
@@ -279,6 +308,26 @@ class Lexer():
                 self.tokens.append(Token(TokenType.GREATER_THAN_OR_EQUAL, value, self.line, column))
             elif kind == 'LESS_THAN_OR_EQUAL':
                 self.tokens.append(Token(TokenType.LESS_THAN_OR_EQUAL, value, self.line, column))
+            elif kind == 'PLUS_ASSIGN':
+                self.tokens.append(Token(TokenType.PLUS_ASSIGN, value, self.line, column))
+            elif kind == 'MINUS_ASSIGN':
+                self.tokens.append(Token(TokenType.MINUS_ASSIGN, value, self.line, column))
+            elif kind == 'STAR_ASSIGN':
+                self.tokens.append(Token(TokenType.STAR_ASSIGN, value, self.line, column))
+            elif kind == 'SLASH_ASSIGN':
+                self.tokens.append(Token(TokenType.SLASH_ASSIGN, value, self.line, column))
+            elif kind == 'PERCENT_ASSIGN':
+                self.tokens.append(Token(TokenType.PERCENT_ASSIGN, value, self.line, column))
+            elif kind == 'AMPERSAND_ASSIGN':
+                self.tokens.append(Token(TokenType.AMPERSAND_ASSIGN, value, self.line, column))
+            elif kind == 'PIPE_ASSIGN':
+                self.tokens.append(Token(TokenType.PIPE_ASSIGN, value, self.line, column))
+            elif kind == 'CARET_ASSIGN':
+                self.tokens.append(Token(TokenType.CARET_ASSIGN, value, self.line, column))
+            elif kind == 'SHIFT_LEFT_ASSIGN':
+                self.tokens.append(Token(TokenType.SHIFT_LEFT_ASSIGN, value, self.line, column))
+            elif kind == 'SHIFT_RIGHT_ASSIGN':
+                self.tokens.append(Token(TokenType.SHIFT_RIGHT_ASSIGN, value, self.line, column))
             elif kind == 'SKIP':
                 continue
             elif kind == 'MISMATCH':
