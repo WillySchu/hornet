@@ -19,6 +19,8 @@ class TokenType(Enum):
     # Punctuation
     OPEN_PAREN = auto()
     CLOSE_PAREN = auto()
+    OPEN_BRACKET = auto()
+    CLOSE_BRACKET = auto()
     COLON = auto()
     COMMA = auto()
 
@@ -175,25 +177,27 @@ class Lexer():
             ('CARET_ASSIGN',     r'\^='),
 
             # Single character
-            ('NEWLINE',      r'\n'),              # Line breaks
-            ('OPEN_PAREN',   r'\('),              # Open paren
-            ('CLOSE_PAREN',  r'\)'),              # Close paren
-            ('GREATER_THAN', r'>'),
-            ('LESS_THAN',    r'<'),
-            ('COLON',        r':'),               # Colon
-            ('COMMA',        r','),
-            ('ASSIGN',       r'='),                # Assignment operator
-            ('PLUS',         r'\+'),              # Add
-            ('MINUS',        r'\-'),              # Subtract
-            ('STAR',         r'\*'),              # Multiply
-            ('SLASH',        r'/'),               # Divide
-            ('PERCENT',      r'%'),               # Modulo
-            ('TILDE',        r'\~'),              # Tilde
-            ('AMPERSAND',    r'&'),               # Bitwise AND
-            ('PIPE',         r'\|'),              # Bitwise OR
-            ('CARET',        r'\^'),              # Bitwise XOR
-            ('SKIP',         r'[ \t\r]+'),        # Spaces and tabs
-            ('MISMATCH',     r'.'),               # Any other character (error)
+            ('NEWLINE',       r'\n'),              # Line breaks
+            ('OPEN_PAREN',    r'\('),              # Open paren
+            ('CLOSE_PAREN',   r'\)'),              # Close paren
+            ('OPEN_BRACKET',  r'\['),              # Open square bracket
+            ('CLOSE_BRACKET', r'\]'),              # Close square bracket
+            ('GREATER_THAN',  r'>'),
+            ('LESS_THAN',     r'<'),
+            ('COLON',         r':'),               # Colon
+            ('COMMA',         r','),
+            ('ASSIGN',        r'='),                # Assignment operator
+            ('PLUS',          r'\+'),              # Add
+            ('MINUS',         r'\-'),              # Subtract
+            ('STAR',          r'\*'),              # Multiply
+            ('SLASH',         r'/'),               # Divide
+            ('PERCENT',       r'%'),               # Modulo
+            ('TILDE',         r'\~'),              # Tilde
+            ('AMPERSAND',     r'&'),               # Bitwise AND
+            ('PIPE',          r'\|'),              # Bitwise OR
+            ('CARET',         r'\^'),              # Bitwise XOR
+            ('SKIP',          r'[ \t\r]+'),        # Spaces and tabs
+            ('MISMATCH',      r'.'),               # Any other character (error)
         ]
 
         # Combine rules into a single regex string
@@ -270,6 +274,10 @@ class Lexer():
                 self.tokens.append(Token(TokenType.OPEN_PAREN, value, self.line, column))
             elif kind == 'CLOSE_PAREN':
                 self.tokens.append(Token(TokenType.CLOSE_PAREN, value, self.line, column))
+            elif kind == 'OPEN_BRACKET':
+                self.tokens.append(Token(TokenType.OPEN_BRACKET, value, self.line, column))
+            elif kind == 'CLOSE_BRACKET':
+                self.tokens.append(Token(TokenType.CLOSE_BRACKET, value, self.line, column))
             elif kind == 'COLON':
                 self.tokens.append(Token(TokenType.COLON, value, self.line, column))
             elif kind == 'COMMA':
@@ -334,7 +342,7 @@ class Lexer():
                 raise SyntaxError(
                     f"Unexpected character '{value}' at line {self.line}, column {column}")
             else:
-                raise RuntimeError('This should be impossible.')
+                raise RuntimeError(f'Unhandled character "{value}" at line {self.line}, column {column}')
 
         # If the source didn't end with a newline, synthesize one before
         # closing out indentation -- keeps the final logical line's

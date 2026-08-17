@@ -1,4 +1,4 @@
 def int main():
-    int a
+    ints [2]int = [1, 2]
     a = 2
-    return a
+    return ints

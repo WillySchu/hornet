@@ -1,9 +1,11 @@
-Hornet Lang?
+Hornet Lang
+-----------
 
-as -o test.o test.s
-gcc -o test test.o
-./test; echo $?
-
+```
+def int main():
+    print('Hello World!')
+    return 0
+```
 
 TODO:
 
@@ -16,3 +18,4 @@ Updates:
 - For loops.
 - Free memory `malloc`ed by string concatenation.
 - Void type (none, nil?).
+- Bounds Check Elimination.
