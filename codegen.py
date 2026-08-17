@@ -449,33 +449,99 @@ per-function jump target shared by every bounds check in that function
 (gen_function) -- not duplicated at every individual check site, and
 not shared ACROSS functions, since it's a local jump target.
 
-SCOPE: WHAT THIS DOESN'T COVER YET
---------------------------------------
-Array function PARAMETERS and RETURN VALUES are explicitly not
-supported -- gen_function's parameter loop and gen_return both raise a
-clear CodegenError rather than silently mishandling one, since neither
-is a small addition: a parameter needs the caller to pass a pointer to
-its own copy of the argument and the callee to copy from that pointer
-into its own local slot on entry; a return value needs the standard
-"hidden output pointer" convention (the caller passes a pointer to
-where the result should be written, shifting every real argument's
-register one position later, and the callee writes directly through
-it instead of ever using %eax/%rax). Both are real, well-understood,
-separable pieces of work -- deliberately scoped out of this pass
-rather than rushed, not a gap discovered after the fact.
+FUNCTION PARAMETERS AND RETURN VALUES
+-------------------------------------------
+Both are fully supported, via the standard calling-convention
+extensions this needs:
 
-Similarly, an ArrayLiteral or a Call returning an array used DIRECTLY
-as a function-call argument (`foo([1,2,3])` or `foo(bar())`) isn't
-supported either -- since array parameters aren't supported at all
-yet (see above), `foo` itself already fails to compile the moment it's
-defined, regardless of what any particular call site passes. Once
-array parameters land, the natural next question is exactly this one
--- an argument expression with no address of its own yet (a literal,
-or a nested call) needing to be materialized into a temporary first --
-worth solving properly at that point rather than half-built now.
-Whole-array equality (`==`/`!=`) is rejected at the semantic level for
-a related reason -- a real, well-defined feature to consider later,
-just not implemented yet (see semantic.py's check_binary).
+RETURN VALUES use a "hidden output pointer": when a function's return
+type is an array, the caller passes an extra, FIRST argument -- the
+address of where the result should be written -- shifting every real
+argument's register one position later (the first real argument goes
+in %rsi instead of %rdi, and so on; see gen_array_call_into and
+gen_function's own receiving side). Rather than dedicate a register to
+holding this pointer for the whole function (which would need its own
+save/restore discipline, and -- worse -- would break the callee-saved-
+register prologue's even-push-count 16-byte alignment invariant if
+added on top of the existing four scratch registers), it gets its own
+ordinary stack slot instead, filled by exactly the same "reserve a
+slot, then store the incoming register into it" mechanism every real
+parameter already uses (see gen_function). gen_return then loads it
+back out and hands it to gen_array_value_into as an ordinary Memory
+destination -- which is also what makes forwarding one array-returning
+call's result straight out of another free (`return inner()`, where
+inner also returns an array): the SAME address just gets passed one
+level deeper, with no intermediate copy ever materialized.
+
+PARAMETERS: the caller computes the address of its own argument (see
+gen_array_arg_address_into -- only a Variable or an Index yielding a
+sub-array is supported directly; an ArrayLiteral or a call returning
+an array used DIRECTLY as an argument has no address of its own to
+point at, and needs to be assigned to a named variable first) and
+passes that address as a pointer; the callee copies from it into its
+own, already-reserved local slot on entry (gen_function's parameter
+loop). After that copy, the parameter is indistinguishable from an
+ordinary local array variable for the rest of the function -- this is
+also what preserves value semantics across a call: the callee's copy
+is independent, so mutating a parameter inside the callee never
+affects the caller's own array, the same guarantee `arr2 = arr1`
+already gives within a single function.
+
+A function returning an array supports at most 5 real parameters, not
+6 -- the hidden pointer itself occupies the first argument register.
+
+A REAL BUG, FOUND THREE TIMES, ONE MECHANISM
+-----------------------------------------------
+Getting return values working surfaced the same mistake in three
+different call paths, each found by testing a different shape of
+return value rather than assuming one passing test meant the
+underlying mechanism was sound:
+
+  - gen_array_copy unconditionally used %rax as scratch for shuttling
+    each element's value -- fine as long as the destination was always
+    a fixed %rbp-relative local slot, but broken the moment the
+    destination itself became a computed address held in %rax (which
+    is exactly what returning an array-typed local variable looks
+    like): the very first element copied silently overwrote the
+    destination address before any subsequent element could be
+    written through it. Fixed by picking a scratch register
+    dynamically, guaranteed distinct from both the source's and
+    destination's own base register.
+  - gen_array_literal_into had the identical problem for a literal
+    returned directly (`return [1,2,3]`): evaluating each element's
+    value always goes through gen_expr_into, which always computes
+    into %eax/%rax, silently destroying a hidden pointer sitting
+    there before a single element was ever written. Fixed with a
+    push/pop protecting the destination's base register across each
+    element's value computation, whenever that base isn't 'rbp' --
+    which is never clobbered by anything in this file, and so never
+    needs protecting.
+  - One layer deeper: returning a sub-array (`return matrix[i]`)
+    computes the SOURCE address first -- bounds-checking and index
+    arithmetic that freely use %rax/%rcx internally -- before the
+    copy ever runs, clobbering the destination the same way. Fixed
+    with a small, reusable _gen_protecting_dst_across helper.
+
+All three were genuine segfaults, not wrong answers -- a write
+through a destination address that's just been silently overwritten
+with unrelated data lands wherever that data happens to point, which
+is usually nowhere valid. Worth remembering as a general lesson for
+this kind of register-shuffling code: a Memory operand whose base is
+a general-purpose register (not 'rbp') has to be treated as fragile
+across ANY subsequent code that might use that same register as
+scratch, not just across the one method that finally reads or writes
+through it.
+
+SCOPE: WHAT THIS STILL DOESN'T COVER
+------------------------------------------
+An ArrayLiteral or a Call returning an array used DIRECTLY as a
+function-call argument (`foo([1,2,3])` or `foo(bar())`) isn't
+supported -- gen_array_arg_address_into raises a clear error pointing
+at the workaround: assign it to a named variable first
+(`[3]int t = [1,2,3]; foo(t)`), which already works today. Whole-array
+equality (`==`/`!=`) is rejected at the semantic level for a related
+reason -- a real, well-defined feature to consider later, just not
+implemented yet (see semantic.py's check_binary).
 """
 
 import argparse
@@ -1134,6 +1200,16 @@ class CodeGenerator:
         # ones above, is cached for the whole compilation.
         self._bounds_check_fail_label = None
         self._bounds_check_message_label = None
+        # Set fresh at the start of every gen_function call -- see its
+        # own comments -- to either None (this function's own return
+        # type isn't an array) or the %rbp offset of the stack slot
+        # holding the hidden output pointer the caller passed in.
+        # Declared here too, defensively, so referencing it before any
+        # function has been generated fails with a clear AttributeError
+        # rather than silently reading a stale value from a previous
+        # instance of this class (there shouldn't be one, but this
+        # costs nothing to be explicit about).
+        self._hidden_return_ptr_offset = None
 
     def new_label(self, prefix: str) -> str:
         """Returns a fresh, uniquely-numbered local label like
@@ -1155,16 +1231,44 @@ class CodeGenerator:
         # function's own %rbp.
         self._var_offsets = {}
         self._next_offset = 0
+        return_type = type_from_name(fn.return_type)
+
+        # An array-typed return needs a hidden pointer -- the caller
+        # passes the address to write the result into, as an extra,
+        # FIRST argument (see gen_array_call_into), shifting every real
+        # parameter one register position later. Rather than dedicate
+        # a register to holding it for the whole function (which would
+        # need its own save/restore discipline, and -- worse -- would
+        # break the callee-saved-register prologue's even-push-count
+        # alignment invariant if added on top of the existing four),
+        # it just gets its own ordinary stack slot, handled by exactly
+        # the same "reserve a slot, then store the incoming register
+        # into it" mechanism every real parameter already uses. See
+        # the module docstring's ARRAYS section.
+        self._hidden_return_ptr_offset = None
+        arg_shift = 0
+        if return_type.kind == TypeKind.ARRAY:
+            self._next_offset -= 8
+            self._hidden_return_ptr_offset = self._next_offset
+            arg_shift = 1
+
         self._collect_params(fn.params)
         self._collect_locals(fn.body)
         self.scopes = [{}]
 
-        if len(fn.params) > 6:
+        max_params = 6 - arg_shift
+        if len(fn.params) > max_params:
+            reason = (
+                "the hidden output pointer itself uses the first argument "
+                "register, leaving 5"
+                if arg_shift else
+                "this compiler only supports up to 6 (passed via registers "
+                "per the SysV ABI -- stack-passed parameters aren't "
+                "implemented)"
+            )
             raise CodegenError(
                 f"Function '{fn.name}' has {len(fn.params)} parameters; "
-                f"this compiler only supports up to 6 (passed via "
-                f"registers per the SysV ABI -- stack-passed parameters "
-                f"aren't implemented)"
+                f"{reason}"
             )
 
         instructions: List[Instruction] = [
@@ -1183,29 +1287,33 @@ class CodeGenerator:
         if frame_size:
             instructions.append(SubQ(src=Imm(frame_size), dst=Register('rsp')))
 
-        # Parameters arrive in registers per the SysV ABI; move each
-        # into its own stack slot immediately, exactly like storing any
-        # other local -- from here on, a parameter is indistinguishable
-        # from a VarDecl-with-initializer as far as the rest of codegen
-        # is concerned. Array-typed parameters are explicitly rejected
-        # rather than silently mishandled -- see gen_return's own
-        # array-return check for why this is the same deliberately
-        # scoped-out piece of work (a calling-convention extension),
-        # not a small gap.
+        if self._hidden_return_ptr_offset is not None:
+            instructions.append(MovQ(src=Register('rdi'), dst=Memory('rbp', self._hidden_return_ptr_offset)))
+
+        # Parameters arrive in registers per the SysV ABI (shifted one
+        # position later than usual if this function itself returns an
+        # array -- see arg_shift above); move each into its own stack
+        # slot immediately, exactly like storing any other local -- from
+        # here on, a scalar parameter is indistinguishable from a
+        # VarDecl-with-initializer as far as the rest of codegen is
+        # concerned. An array-typed parameter arrives as a POINTER (to
+        # a copy the caller already made just for this call -- see
+        # gen_array_arg_address_into) rather than a value, so it's
+        # copied element-by-element into its own local slot instead --
+        # after that copy, it's just as indistinguishable from an
+        # ordinary array local as a scalar parameter is from a scalar
+        # local.
         for i, p in enumerate(fn.params):
             offset = self._bind_param(p)
             p_type = type_from_name(p.type)
+            reg_index = i + arg_shift
             if p_type.kind == TypeKind.ARRAY:
-                raise CodegenError(
-                    f"Parameter '{p.name}' of function '{fn.name}' is "
-                    f"array-typed ({p_type}) -- array parameters are not "
-                    f"supported yet -- see the module docstring's ARRAYS "
-                    f"section"
-                )
-            if p_type == Type.STR:
-                instructions.append(MovQ(src=Register(_ARG_REGISTERS_64[i]), dst=Memory('rbp', offset)))
+                arg_reg_name = _ARG_REGISTERS_64[reg_index]
+                instructions.extend(self.gen_array_copy(Memory('rbp', offset), Memory(arg_reg_name, 0), p_type))
+            elif p_type == Type.STR:
+                instructions.append(MovQ(src=Register(_ARG_REGISTERS_64[reg_index]), dst=Memory('rbp', offset)))
             else:
-                instructions.append(Mov(src=Register(_ARG_REGISTERS_32[i]), dst=Memory('rbp', offset)))
+                instructions.append(Mov(src=Register(_ARG_REGISTERS_32[reg_index]), dst=Memory('rbp', offset)))
 
         self._bounds_check_fail_label = None  # fresh, per-function jump target; see its own docstring
         for stmt in fn.body:
@@ -1226,7 +1334,11 @@ class CodeGenerator:
         uniform 8 bytes every local used before array types existed;
         see the module docstring's ARRAYS section for why a variable-
         width allocator became unavoidable once a single local could
-        need far more than 8 bytes."""
+        need far more than 8 bytes. Called after gen_function has
+        already reserved the hidden-return-pointer slot, if this
+        function needs one -- _next_offset just keeps counting down
+        from wherever it already is, agnostic to what it was
+        decremented for so far."""
         for p in params:
             width = type_byte_width(type_from_name(p.type))
             self._next_offset -= width
@@ -1463,7 +1575,29 @@ class CodeGenerator:
         array is just one contiguous block of leaf values in row-major
         order for copying purposes, so no per-dimension logic is
         needed here at all, just the total byte width and the leaf
-        element's own width (see type_byte_width/leaf_type)."""
+        element's own width (see type_byte_width/leaf_type).
+
+        The scratch register shuttling each element's value between
+        src and dst is picked dynamically to differ from BOTH src_mem's
+        and dst_mem's own base register -- otherwise loading a value
+        into it would destroy the very address a later iteration still
+        needs to read from or write to. Found as a real bug during
+        development, not a hypothetical one: gen_return passes
+        Memory('rax', 0) as the destination when writing an array
+        directly through a received hidden return pointer, and
+        unconditionally using %eax/%rax as scratch (the very reasonable
+        choice everywhere else in this file, since gen_expr_into always
+        targets it) destroyed that address the moment the first
+        element's value was loaded, before it could even be written
+        anywhere. rcx and rdx are never used as a Memory base anywhere
+        else in this file, so picking whichever of rax/rcx/rdx isn't
+        already one of the two bases here stays correct even if that
+        ever changes."""
+        used_bases = {src_mem.base, dst_mem.base}
+        scratch_64, scratch_32 = next(
+            (r64, r32) for r64, r32 in [('rax', 'eax'), ('rcx', 'ecx'), ('rdx', 'edx')]
+            if r64 not in used_bases
+        )
         width = type_byte_width(leaf_type(array_type))
         total = type_byte_width(array_type)
         instructions = []
@@ -1472,77 +1606,234 @@ class CodeGenerator:
             src = Memory(src_mem.base, src_mem.offset + off)
             dst = Memory(dst_mem.base, dst_mem.offset + off)
             if width == 8:
-                instructions.append(MovQ(src=src, dst=Register('rax')))
-                instructions.append(MovQ(src=Register('rax'), dst=dst))
+                instructions.append(MovQ(src=src, dst=Register(scratch_64)))
+                instructions.append(MovQ(src=Register(scratch_64), dst=dst))
             else:
-                instructions.append(Mov(src=src, dst=Register('eax')))
-                instructions.append(Mov(src=Register('eax'), dst=dst))
+                instructions.append(Mov(src=src, dst=Register(scratch_32)))
+                instructions.append(Mov(src=Register(scratch_32), dst=dst))
             off += width
         return instructions
 
-    def gen_array_literal_into(self, dst_offset: int, expr: ArrayLiteral, array_type: Type) -> List[Instruction]:
-        """Stores an array literal's elements directly into consecutive
-        stack slots starting at dst_offset. Each element is evaluated
-        via the ordinary gen_expr_into (so an element can be any
-        expression, not just a constant), except when the element type
-        is ITSELF an array -- a multi-dimensional literal's "elements"
-        are themselves ArrayLiterals, handled by recursing through
-        gen_array_value_into (which dispatches straight back here)."""
-        element_type = array_type.element_type
-        element_width = type_byte_width(element_type)
-        instructions = []
-        for i, elem_expr in enumerate(expr.elements):
-            elem_offset = dst_offset + i * element_width
-            if element_type.kind == TypeKind.ARRAY:
-                instructions.extend(self.gen_array_value_into(elem_expr, elem_offset, element_type))
-            elif element_type == Type.STR:
-                instructions.extend(self.gen_expr_into(elem_expr, Register('eax')))
-                instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', elem_offset)))
+    def _gen_address_of_memory_into(self, mem: Memory, dst: Register) -> List[Instruction]:
+        """Computes the ADDRESS a Memory operand refers to, into `dst`
+        (a 64-bit register). Memory('rbp', offset) needs a real leaq --
+        the address is offset-from-frame-pointer, not stored anywhere
+        as a value in its own right; Memory(some_reg, 0) already IS an
+        address, sitting directly in some_reg (see gen_array_copy's own
+        docstring for how that shape arises elsewhere in this file), so
+        this just copies it. Used specifically for passing a Memory
+        destination on as a POINTER argument -- the hidden output
+        pointer for an array-returning call (gen_array_call_into) or an
+        array-typed argument's own address (gen_array_arg_address_into)
+        -- everywhere else, a Memory operand is read from or written to
+        directly rather than having its own address taken."""
+        if mem.base == 'rbp':
+            return [LeaQFrame(offset=mem.offset, dst=dst)]
+        return [MovQ(src=Register(mem.base), dst=dst)]
+
+    def gen_array_arg_address_into(self, expr: Node, dst: Register) -> List[Instruction]:
+        """Computes the address to pass for an array-typed function-call
+        argument, into the 64-bit register `dst`. Only a Variable or an
+        Index yielding a sub-array is supported -- both already have a
+        real, existing address (see gen_array_address_into) -- an
+        ArrayLiteral or a call returning an array used DIRECTLY as an
+        argument (e.g. `foo([1,2,3])` or `foo(bar())`) has no home of
+        its own to point at, and isn't supported: assign it to a named
+        variable first (`[3]int t = [1,2,3]; foo(t)`), which already
+        works today.
+
+        The callee copies from this address into its own local slot on
+        entry (see gen_function's parameter loop) -- so what's passed
+        here only needs to stay valid for the duration of that one
+        copy, not any longer, and the caller's own array is never
+        itself mutated through it: the callee's copy is independent,
+        preserving value semantics across the call the same way an
+        ordinary `arr2 = arr1` does within a single function (see the
+        module docstring's ARRAYS section)."""
+        if isinstance(expr, (Variable, Index)):
+            return self.gen_array_address_into(expr, dst)
+        raise CodegenError(
+            f"Array-typed call arguments must be a variable or an "
+            f"indexing expression, not {type(expr).__name__} -- assign "
+            f"it to a variable first"
+        )
+
+    def gen_array_call_into(self, dst_mem: Memory, expr: Call, array_type: Type) -> List[Instruction]:
+        """Calls a function that returns an array, writing its result
+        directly into dst_mem via the hidden-pointer convention: the
+        callee receives a pointer to where its result should go as an
+        extra, FIRST argument (in %rdi), with every genuine argument
+        shifted one register position later (see gen_function's own
+        handling on the receiving side). The callee writes its return
+        value directly through that pointer (see gen_return's array
+        case) -- there's nothing for the CALLER to copy afterward,
+        unlike an ordinary array-typed expression. This is also what
+        makes forwarding one array-returning call's result straight out
+        of another free (`return bar()`, where bar also returns an
+        array): the SAME destination address just gets passed one
+        level deeper, with no intermediate copy -- see gen_return's own
+        docstring.
+
+        dst_mem's own address is computed and pushed onto the stack
+        FIRST, before any argument is evaluated, so it survives
+        regardless of what an argument expression does internally (a
+        nested call, string concatenation, another indexing operation
+        -- anything that might otherwise clobber a register holding it)
+        -- the same push-before-evaluating-something-else discipline
+        used everywhere else in this file a value needs to survive past
+        a sub-expression. Each argument is then pushed in turn (an
+        array-typed one as an address via gen_array_arg_address_into,
+        anything else as a value via the ordinary gen_expr_into) and
+        popped back off in reverse, into registers shifted one position
+        past the hidden pointer -- exactly gen_call_into's own
+        push-then-pop-in-reverse pattern, just with that one-position
+        shift threaded through.
+        """
+        if len(expr.args) > 5:
+            raise CodegenError(
+                f"Call to '{expr.name}' has {len(expr.args)} arguments; "
+                f"a call to a function that returns an array supports "
+                f"at most 5 (the hidden output pointer itself uses the "
+                f"first argument register)"
+            )
+        instructions = self._gen_address_of_memory_into(dst_mem, Register('rax'))
+        instructions.append(Push(Register('rax')))
+        for arg in expr.args:
+            arg_type = self._type_of(arg)
+            if arg_type.kind == TypeKind.ARRAY:
+                instructions.extend(self.gen_array_arg_address_into(arg, Register('rax')))
             else:
-                instructions.extend(self.gen_expr_into(elem_expr, Register('eax')))
-                instructions.append(Mov(src=Register('eax'), dst=Memory('rbp', elem_offset)))
+                instructions.extend(self.gen_expr_into(arg, Register('eax')))
+            instructions.append(Push(Register('rax')))
+        for i in reversed(range(len(expr.args))):
+            instructions.append(Pop(Register(_ARG_REGISTERS_64[i + 1])))  # +1: shifted past the hidden pointer
+        instructions.append(Pop(Register('rdi')))
+        instructions.append(CallInstr(expr.name))
         return instructions
 
-    def gen_array_value_into(self, expr: Node, dst_offset: int, array_type: Type) -> List[Instruction]:
-        """Stores an array-typed expression's VALUE into the stack slot
-        starting at dst_offset (%rbp-relative), matching array_type's
-        shape. This is the array counterpart to _gen_store's scalar
-        path -- an array can't fit into a single register the way an
-        int/bool/str value can, so it needs its own dedicated "store"
-        logic entirely, dispatched on what kind of expression is
-        producing the value:
+    def gen_array_literal_into(self, dst_mem: Memory, expr: ArrayLiteral, array_type: Type) -> List[Instruction]:
+        """Stores an array literal's elements directly into consecutive
+        memory locations starting at dst_mem -- almost always a fixed
+        local slot (Memory('rbp', offset)), but see gen_array_value_into
+        for why this takes a general Memory operand rather than a bare
+        offset. Each element is evaluated via the ordinary
+        gen_expr_into (so an element can be any expression, not just a
+        constant), except when the element type is ITSELF an array -- a
+        multi-dimensional literal's "elements" are themselves
+        ArrayLiterals, handled by recursing through gen_array_value_into
+        (which dispatches straight back here).
+
+        dst_mem's own base register is protected on the stack across
+        each element's value computation whenever it isn't 'rbp' --
+        found necessary by a real bug during development, not assumed:
+        'rbp' (the frame pointer, used for every ordinary local slot)
+        is never clobbered by gen_expr_into, so no protection is needed
+        there, but a computed or received address held in a general-
+        purpose register (e.g. Memory('rax', 0), the hidden return
+        pointer for a literal returned directly -- `return [1,2,3]`)
+        is exactly the kind of register gen_expr_into's own value
+        computation, which always targets %eax/%rax, can and did
+        clobber -- silently overwriting the destination address before
+        a single element was ever actually written through it."""
+        element_type = array_type.element_type
+        element_width = type_byte_width(element_type)
+        protect_dst = dst_mem.base != 'rbp'
+        instructions = []
+        for i, elem_expr in enumerate(expr.elements):
+            elem_mem = Memory(dst_mem.base, dst_mem.offset + i * element_width)
+            if element_type.kind == TypeKind.ARRAY:
+                instructions.extend(self.gen_array_value_into(elem_expr, elem_mem, element_type))
+                continue
+            if protect_dst:
+                instructions.append(Push(Register(dst_mem.base)))
+            instructions.extend(self.gen_expr_into(elem_expr, Register('eax')))
+            if element_type == Type.STR:
+                if protect_dst:
+                    instructions.append(MovQ(src=Register('rax'), dst=Register('r8')))
+                    instructions.append(Pop(Register(dst_mem.base)))
+                    instructions.append(MovQ(src=Register('r8'), dst=elem_mem))
+                else:
+                    instructions.append(MovQ(src=Register('rax'), dst=elem_mem))
+            else:
+                if protect_dst:
+                    instructions.append(Mov(src=Register('eax'), dst=Register('r8d')))
+                    instructions.append(Pop(Register(dst_mem.base)))
+                    instructions.append(Mov(src=Register('r8d'), dst=elem_mem))
+                else:
+                    instructions.append(Mov(src=Register('eax'), dst=elem_mem))
+        return instructions
+
+    def _gen_protecting_dst_across(self, dst_mem: Memory, inner: List[Instruction]) -> List[Instruction]:
+        """Wraps `inner` with a push/pop protecting dst_mem's own base
+        register across it, but only when that base isn't 'rbp' -- the
+        frame pointer, never clobbered by anything in this file, so
+        wrapping would just be wasted instructions. Used wherever code
+        that might use dst_mem.base as scratch internally (bounds-
+        checking, evaluating an arbitrary expression, computing another
+        address entirely) has to run before dst_mem is finally read
+        from or written to -- e.g. gen_array_value_into's Index case
+        below, where gen_array_address_into's own bounds-checking and
+        index arithmetic freely uses %rax/%rcx, which would otherwise
+        silently destroy a hidden return pointer received in %rax
+        before it was ever used. Found necessary by a real bug during
+        development (a segfault on `return matrix[i]` from a function
+        returning an array), not assumed defensively."""
+        if dst_mem.base == 'rbp':
+            return inner
+        return [Push(Register(dst_mem.base))] + inner + [Pop(Register(dst_mem.base))]
+
+    def gen_array_value_into(self, expr: Node, dst_mem: Memory, array_type: Type) -> List[Instruction]:
+        """Stores an array-typed expression's VALUE into dst_mem,
+        matching array_type's shape. This is the array counterpart to
+        _gen_store's scalar path -- an array can't fit into a single
+        register the way an int/bool/str value can, so it needs its
+        own dedicated "store" logic entirely, dispatched on what kind
+        of expression is producing the value:
           - ArrayLiteral: each element stored directly (see
             gen_array_literal_into).
           - Variable: a flat, offset-to-offset copy (see
-            gen_array_copy) -- no address computation needed at all,
-            since a variable's own slot offset is already known at
-            compile time. This is what makes `arr2 = arr1` a real,
-            independent copy rather than a pointer alias -- see the
-            module docstring's ARRAYS section on value semantics.
+            gen_array_copy) -- no address computation needed for the
+            SOURCE side at all, since a variable's own slot offset is
+            already known at compile time. This is what makes
+            `arr2 = arr1` a real, independent copy rather than a
+            pointer alias -- see the module docstring's ARRAYS section
+            on value semantics.
           - Index (a sub-array, e.g. `[3]int row = matrix[i]`): its
-            address has to be computed first (gen_array_address_into),
-            since it depends on a runtime index, then copied from that
-            computed address.
-          - Call (a function returning an array): not supported yet --
-            see this method's own module-docstring-referenced scope
-            note above.
+            SOURCE address has to be computed first
+            (gen_array_address_into), since it depends on a runtime
+            index, then copied from that computed address. dst_mem is
+            protected (see _gen_protecting_dst_across) across that
+            computation, since it isn't just a simple move -- it
+            includes bounds-checking and index arithmetic that freely
+            uses %rax/%rcx internally.
+          - Call (a function returning an array): calls through the
+            hidden-output-pointer convention, writing directly into
+            dst_mem -- see gen_array_call_into.
+
+        dst_mem is a general Memory operand, not always a fixed local
+        slot: it's Memory('rbp', offset) for an ordinary local variable
+        or literal-initialized declaration, but Memory(some_reg, 0) when
+        the destination is itself a computed or received address --
+        e.g. gen_return uses this to write an array-typed return value
+        directly through the hidden pointer it received, without ever
+        materializing an intermediate local copy first. gen_array_copy
+        and gen_array_literal_into both already work with an arbitrary
+        Memory destination for exactly this reason -- nothing about the
+        recursive structure here needed to change to support returns,
+        only the type of the destination each caller happens to pass.
         """
         if isinstance(expr, ArrayLiteral):
-            return self.gen_array_literal_into(dst_offset, expr, array_type)
+            return self.gen_array_literal_into(dst_mem, expr, array_type)
         if isinstance(expr, Variable):
             src_offset = self._local_offset(expr.name)
-            return self.gen_array_copy(Memory('rbp', dst_offset), Memory('rbp', src_offset), array_type)
+            return self.gen_array_copy(dst_mem, Memory('rbp', src_offset), array_type)
         if isinstance(expr, Index):
-            instructions = self.gen_array_address_into(expr, Register('rbx'))
-            instructions.extend(self.gen_array_copy(Memory('rbp', dst_offset), Memory('rbx', 0), array_type))
-            return instructions
-        if isinstance(expr, Call):
-            raise CodegenError(
-                f"Calling '{expr.name}', which returns an array, is not "
-                f"supported yet -- array-returning functions need a "
-                f"calling-convention extension (a hidden output pointer) "
-                f"that hasn't been implemented"
+            addr_instructions = self._gen_protecting_dst_across(
+                dst_mem, self.gen_array_address_into(expr, Register('rbx'))
             )
+            return addr_instructions + self.gen_array_copy(dst_mem, Memory('rbx', 0), array_type)
+        if isinstance(expr, Call):
+            return self.gen_array_call_into(dst_mem, expr, array_type)
         raise CodegenError(f"No codegen rule for an array-typed value: {expr!r}")
 
     def _get_bounds_check_fail_label(self) -> str:
@@ -1696,7 +1987,7 @@ class CodeGenerator:
         or which entirely different mechanism, am I storing"."""
         value_type = self._type_of(value_expr)
         if value_type.kind == TypeKind.ARRAY:
-            return self.gen_array_value_into(value_expr, offset, value_type)
+            return self.gen_array_value_into(value_expr, Memory('rbp', offset), value_type)
         instructions = self.gen_expr_into(value_expr, Register('eax'))
         if value_type == Type.STR:
             instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
@@ -1705,20 +1996,28 @@ class CodeGenerator:
         return instructions
 
     def gen_return(self, stmt: Return) -> List[Instruction]:
-        # Array-typed returns need a genuine calling-convention
-        # extension (a hidden output pointer the caller passes and the
-        # callee writes directly through) that hasn't been implemented
-        # yet -- gen_expr_into below would silently try to fit an
-        # array's value into a single register otherwise, which can
-        # never be correct. See the module docstring's ARRAYS section.
-        if self._type_of(stmt.value).kind == TypeKind.ARRAY:
-            raise CodegenError(
-                "Returning an array is not supported yet -- array "
-                "return values need a calling-convention extension (a "
-                "hidden output pointer) that hasn't been implemented"
-            )
-        dst = Register('eax')
-        instructions = self.gen_expr_into(stmt.value, dst)
+        # An array-typed return writes directly through the hidden
+        # pointer this function received (see gen_function's own
+        # prologue handling and the module docstring's ARRAYS section)
+        # instead of ever putting anything in %eax/%rax -- nothing
+        # reads a return value that way for an array-returning call
+        # (see gen_array_value_into's Call case, which is the only way
+        # such a call's result is ever consumed). Loading the pointer
+        # back out of its slot and handing it to gen_array_value_into
+        # as an ordinary Memory destination is also what makes
+        # `return bar()` (forwarding another array-returning call's
+        # result straight out) free: gen_array_value_into's own Call
+        # case just passes that SAME address one level deeper via
+        # gen_array_call_into, with no intermediate copy ever
+        # materialized.
+        value_type = self._type_of(stmt.value)
+        if value_type.kind == TypeKind.ARRAY:
+            ptr_reg = Register('rax')
+            instructions = [MovQ(src=Memory('rbp', self._hidden_return_ptr_offset), dst=ptr_reg)]
+            instructions.extend(self.gen_array_value_into(stmt.value, Memory('rax', 0), value_type))
+        else:
+            dst = Register('eax')
+            instructions = self.gen_expr_into(stmt.value, dst)
         # Restore the callee-saved scratch registers *before* Leave --
         # Leave resets %rsp straight to %rbp, which was captured before
         # these were pushed in the prologue, so anything pushed after
@@ -1726,10 +2025,10 @@ class CodeGenerator:
         # silently discarded (never actually restored into the
         # registers) rather than popped. Popping happens in reverse of
         # the prologue's push order, the usual stack discipline. None of
-        # this touches %eax/%rax, so the return value computed above is
-        # unaffected regardless of what these registers held during the
-        # body (e.g. if the return expression itself did string work
-        # that reused them as scratch in between).
+        # this touches %eax/%rax, so a scalar return value computed
+        # above is unaffected regardless of what these registers held
+        # during the body (e.g. if the return expression itself did
+        # string work that reused them as scratch in between).
         for reg in reversed(_CALLEE_SAVED_SCRATCH_REGISTERS):
             instructions.append(Pop(Register(reg)))
         instructions.append(Leave())
@@ -1926,6 +2225,19 @@ class CodeGenerator:
                 instructions.append(Mov(src=Memory(addr_reg.name, 0), dst=dst))
             return instructions
         if isinstance(expr, Call):
+            if self._type_of(expr).kind == TypeKind.ARRAY:
+                # Never reachable in correct codegen -- see ArrayLiteral
+                # and the Index sub-array case just above for the same
+                # reasoning. An array-returning call's result is only
+                # ever consumed via gen_array_value_into's own Call case
+                # (which writes it, through the hidden-pointer
+                # convention, straight into a given destination), never
+                # by trying to land it in a single register here.
+                raise CodegenError(
+                    f"Cannot call '{expr.name}' (which returns an array) "
+                    f"via gen_expr_into -- arrays don't fit in a single "
+                    f"register; use gen_array_value_into instead"
+                )
             if expr.name == 'print':
                 return self.gen_print_call_into(expr, dst)
             return self.gen_call_into(expr, dst)
@@ -2069,7 +2381,19 @@ class CodeGenerator:
 
         instructions: List[Instruction] = []
         for arg in expr.args:
-            instructions.extend(self.gen_expr_into(arg, Register('eax')))
+            arg_type = self._type_of(arg)
+            if arg_type.kind == TypeKind.ARRAY:
+                # This callee doesn't itself return an array (that's
+                # gen_array_call_into's job), but it can still ACCEPT
+                # one as a parameter -- e.g. `def int sum_array([3]int
+                # arr): ...` -- passed the same way either way: the
+                # address of an existing variable or sub-array, per
+                # gen_array_arg_address_into's own restriction, since
+                # the callee copies from it into its own local slot on
+                # entry regardless of which kind of call brought it in.
+                instructions.extend(self.gen_array_arg_address_into(arg, Register('rax')))
+            else:
+                instructions.extend(self.gen_expr_into(arg, Register('eax')))
             instructions.append(Push(Register('rax')))
         for i in reversed(range(len(expr.args))):
             instructions.append(Pop(Register(_ARG_REGISTERS_64[i])))

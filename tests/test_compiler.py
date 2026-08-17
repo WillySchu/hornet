@@ -39,11 +39,11 @@ Organization:
     TestTypeAnnotation                  ( 4 tests)
     TestPrint                           (12 tests)
     TestAllPathsReturn                  (18 tests)
-    TestArrays                          (14 tests)
+    TestArrays                          (26 tests)
     TestBoundsChecking                  ( 4 tests)
     TestSemanticErrors                  (76 tests)
                                         ----------
-                                        288 tests total
+                                        300 tests total
 
 A NOTE ON ARRAYS
 -----------------------------------------------------------------
@@ -52,7 +52,10 @@ section for the full design). TestArrays' value-semantics tests are
 the ones that actually prove the headline design decision holds at the
 machine-code level, not just conceptually: `b = a; b[0] = 99` must
 leave `a[0]` completely untouched, for both 1D and 2D arrays, and for
-a sub-array extracted via `[3]int row = matrix[i]` too.
+a sub-array extracted via `[3]int row = matrix[i]` too -- and, once
+arrays could cross a function boundary, for a parameter mutated inside
+a callee and a value returned from separate calls to the same function
+as well.
 
 TestBoundsChecking exists because every array access is runtime-
 checked -- one unsigned comparison catches both an over-large index
@@ -68,14 +71,24 @@ worth remembering as a reason to prefer capture_output-based
 assertions over manual spot-checks for anything involving abort()/
 exit() specifically.
 
-Array function parameters and return values are a deliberate, explicit
-gap -- not silently missing. test_array_parameter_not_supported_yet
-and test_array_return_not_supported_yet in TestArrays confirm both
-fail with a clear CodegenError rather than a confusing crash or,
-worse, silently wrong codegen -- both need a real calling-convention
-extension (copy-on-entry for parameters, a hidden output pointer for
-returns) that's genuinely separable follow-up work, not a small
-addition.
+Array function parameters and return values are fully supported, via
+a hidden-output-pointer convention for returns and copy-on-entry for
+parameters (see codegen.py's ARRAYS section). Getting there surfaced
+the same register-clobbering mistake in three separate call paths --
+test_array_return_direct_literal and test_array_return_via_sub_array_
+index are both genuine regression tests for segfaults found during
+development, not hypothetical edge cases: a destination address held
+in a general-purpose register (the hidden pointer, sitting in %rax)
+was silently overwritten by code that assumed it was free to use that
+same register as scratch, in three different places, each only found
+by testing a different shape of return value rather than trusting one
+passing test to mean the whole mechanism was sound. What's still a
+deliberate, explicit gap -- not silently missing -- is an ArrayLiteral
+or a call returning an array used DIRECTLY as a function-call argument
+(`foo([1,2,3])`); test_array_literal_as_direct_call_argument_not_
+supported confirms this fails with a clear error pointing at the
+workaround (assign it to a variable first) rather than a confusing
+crash.
 
 A NOTE ON TestAllPathsReturn
 -----------------------------------------------------------------
@@ -2470,42 +2483,229 @@ class TestArrays:
             42,
         )
 
-    def test_array_parameter_not_supported_yet(self):
-        """A real, deliberate gap -- not silent mishandling. Array
-        parameters need a calling-convention extension (copy-on-entry
-        from a caller-passed pointer) that hasn't been built; this
-        confirms attempting one fails loudly and clearly rather than
-        generating code that reads a pointer as if it were 4 raw
-        bytes of int."""
-        source = (
+    def test_array_parameter_basic(self):
+        assert_program_exit_code(
             "def int sum_array([3]int arr):\n"
             "    return arr[0] + arr[1] + arr[2]\n"
             "\n"
             "def int main():\n"
             "    [3]int a = [1, 2, 3]\n"
-            "    return sum_array(a)\n"
+            "    return sum_array(a)\n",
+            6,
         )
-        ast = _parse(source)
-        analyze(ast)  # semantically fine -- the gap is codegen-level only
-        with pytest.raises(CodegenError, match="array parameters are not supported yet"):
-            generate_asm(ast, platform=ASM_PLATFORM)
 
-    def test_array_return_not_supported_yet(self):
-        """The return-side counterpart to the parameter gap above --
-        needs a hidden-output-pointer calling-convention extension that
-        also hasn't been built yet."""
-        source = (
+    def test_array_parameter_value_semantics(self):
+        """The parameter-passing counterpart to test_value_semantics_1d:
+        mutating an array PARAMETER inside the callee must never affect
+        the caller's own array -- the callee receives a pointer to a
+        copy the caller made just for this call (see
+        gen_array_arg_address_into), not a reference to the original."""
+        assert_program_exit_code(
+            "def int mutate([3]int arr):\n"
+            "    arr[0] = 999\n"
+            "    return arr[0]\n"
+            "\n"
+            "def bool main():\n"
+            "    [3]int a = [1, 2, 3]\n"
+            "    int result = mutate(a)\n"
+            "    return result == 999 and a[0] == 1\n",
+            1,
+        )
+
+    def test_array_return_basic(self):
+        assert_program_exit_code(
             "def [3]int make():\n"
-            "    [3]int r = [1, 2, 3]\n"
+            "    [3]int r = [10, 20, 30]\n"
             "    return r\n"
             "\n"
             "def int main():\n"
             "    [3]int x = make()\n"
-            "    return x[0]\n"
+            "    return x[0] + x[1] + x[2]\n",
+            60,
+        )
+
+    def test_array_return_direct_literal(self):
+        """Regression test for a real bug found during development:
+        `return [1,2,3]` writes each element straight through the
+        hidden return pointer without ever materializing an
+        intermediate local. When that pointer happens to be sitting in
+        %rax (the same register gen_expr_into always computes an
+        element's value into), evaluating the first element used to
+        silently destroy the pointer before anything was ever written
+        through it -- a segfault, not a wrong answer, since the write
+        landed at whatever address the corrupted "pointer" happened to
+        be. See gen_array_literal_into's own docstring for the fix."""
+        assert_program_exit_code(
+            "def [3]int make():\n"
+            "    return [10, 20, 30]\n"
+            "\n"
+            "def int main():\n"
+            "    [3]int x = make()\n"
+            "    return x[0] + x[1] + x[2]\n",
+            60,
+        )
+
+    def test_array_return_via_sub_array_index(self):
+        """Another real bug found during development, the same class as
+        the literal-return one above but one layer deeper: `return
+        matrix[i]` computes the sub-array's SOURCE address (bounds-
+        checking and index arithmetic that freely use %rax/%rcx
+        internally) before ever touching the destination -- which,
+        again, could be sitting in %rax. See gen_array_value_into's
+        _gen_protecting_dst_across for the fix."""
+        assert_program_exit_code(
+            "def [3]int get_row([2][3]int matrix, int i):\n"
+            "    return matrix[i]\n"
+            "\n"
+            "def int main():\n"
+            "    [2][3]int m = [[1, 2, 3], [4, 5, 6]]\n"
+            "    [3]int row = get_row(m, 1)\n"
+            "    return row[0] + row[1] + row[2]\n",
+            15,
+        )
+
+    def test_nested_array_returning_call_forwarding(self):
+        """`return inner()`, where inner ALSO returns an array, forwards
+        the same hidden pointer one level deeper with no intermediate
+        copy ever materialized -- see gen_array_call_into's own
+        docstring."""
+        assert_program_exit_code(
+            "def [3]int inner():\n"
+            "    return [7, 8, 9]\n"
+            "\n"
+            "def [3]int outer():\n"
+            "    return inner()\n"
+            "\n"
+            "def int main():\n"
+            "    [3]int x = outer()\n"
+            "    return x[0] + x[1] + x[2]\n",
+            24,
+        )
+
+    def test_2d_array_as_parameter_and_return_type(self):
+        assert_program_exit_code(
+            "def [2][2]int double_all([2][2]int m):\n"
+            "    [2][2]int result = [[0, 0], [0, 0]]\n"
+            "    int i = 0\n"
+            "    while i < 2:\n"
+            "        int j = 0\n"
+            "        while j < 2:\n"
+            "            result[i][j] = m[i][j] * 2\n"
+            "            j = j + 1\n"
+            "        i = i + 1\n"
+            "    return result\n"
+            "\n"
+            "def int main():\n"
+            "    [2][2]int a = [[1, 2], [3, 4]]\n"
+            "    [2][2]int b = double_all(a)\n"
+            "    return b[0][0] + b[0][1] + b[1][0] + b[1][1]\n",
+            20,
+        )
+
+    def test_multiple_array_parameters(self):
+        assert_program_exit_code(
+            "def int dot_product([3]int a, [3]int b):\n"
+            "    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]\n"
+            "\n"
+            "def int main():\n"
+            "    [3]int x = [1, 2, 3]\n"
+            "    [3]int y = [4, 5, 6]\n"
+            "    return dot_product(x, y)\n",
+            32,
+        )
+
+    def test_returned_array_independent_across_separate_calls(self):
+        """Value semantics across the return boundary: two separate
+        calls to the same array-returning function must produce two
+        completely independent results, even though the function
+        builds its result in the exact same local slot both times."""
+        assert_program_exit_code(
+            "def [3]int make_and_mutate():\n"
+            "    [3]int local = [1, 2, 3]\n"
+            "    local[0] = 100\n"
+            "    return local\n"
+            "\n"
+            "def bool main():\n"
+            "    [3]int a = make_and_mutate()\n"
+            "    [3]int b = make_and_mutate()\n"
+            "    a[1] = 999\n"
+            "    return a[0] == 100 and a[1] == 999 and b[0] == 100 and b[1] == 2\n",
+            1,
+        )
+
+    def test_array_argument_as_index_expression(self):
+        """An array-typed argument doesn't have to be a bare variable --
+        gen_array_arg_address_into also accepts an Index yielding a
+        sub-array, e.g. passing one row of a matrix straight through."""
+        assert_program_exit_code(
+            "def int sum3([3]int arr):\n"
+            "    return arr[0] + arr[1] + arr[2]\n"
+            "\n"
+            "def int main():\n"
+            "    [2][3]int matrix = [[1, 2, 3], [4, 5, 6]]\n"
+            "    return sum3(matrix[1])\n",
+            15,
+        )
+
+    def test_str_element_array_as_parameter_and_return_type(self):
+        assert_program_exit_code(
+            "def bool first_is([3]str names, str target):\n"
+            "    return names[0] == target\n"
+            "\n"
+            "def [3]str make_names():\n"
+            "    return ['x', 'y', 'z']\n"
+            "\n"
+            "def bool main():\n"
+            "    [3]str n = make_names()\n"
+            "    return first_is(n, 'x') and n[2] == 'z'\n",
+            1,
+        )
+
+    def test_five_real_params_on_array_returning_function(self):
+        """The boundary case: an array-returning function supports at
+        most 5 REAL parameters, one fewer than the usual 6, since the
+        hidden output pointer itself occupies the first argument
+        register."""
+        assert_program_exit_code(
+            "def [2]int make5(int a, int b, int c, int d, int e):\n"
+            "    return [a + b, c + d + e]\n"
+            "\n"
+            "def int main():\n"
+            "    [2]int r = make5(1, 2, 3, 4, 5)\n"
+            "    return r[0] + r[1]\n",
+            15,
+        )
+
+    def test_six_real_params_on_array_returning_function_is_rejected(self):
+        source = (
+            "def [2]int make6(int a, int b, int c, int d, int e, int f):\n"
+            "    return [a, b]\n"
+            "\n"
+            "def int main():\n"
+            "    [2]int r = make6(1, 2, 3, 4, 5, 6)\n"
+            "    return r[0]\n"
+        )
+        ast = _parse(source)
+        analyze(ast)  # semantically fine -- the limit is codegen-level only
+        with pytest.raises(CodegenError, match="leaving 5"):
+            generate_asm(ast, platform=ASM_PLATFORM)
+
+    def test_array_literal_as_direct_call_argument_not_supported(self):
+        """A real, deliberate gap, not silent mishandling: an
+        ArrayLiteral (or a call returning an array) has no address of
+        its own to pass as an argument -- see
+        gen_array_arg_address_into's own docstring for the workaround
+        (assign it to a named variable first, which already works)."""
+        source = (
+            "def int sum3([3]int arr):\n"
+            "    return arr[0] + arr[1] + arr[2]\n"
+            "\n"
+            "def int main():\n"
+            "    return sum3([1, 2, 3])\n"
         )
         ast = _parse(source)
         analyze(ast)  # semantically fine -- the gap is codegen-level only
-        with pytest.raises(CodegenError, match="Returning an array is not supported yet"):
+        with pytest.raises(CodegenError, match="assign it to a variable first"):
             generate_asm(ast, platform=ASM_PLATFORM)
 
 

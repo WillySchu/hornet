@@ -19,3 +19,4 @@ Updates:
 - Free memory `malloc`ed by string concatenation.
 - Void type (none, nil?).
 - Bounds Check Elimination.
+- Stack based params to get around parameter limit.
