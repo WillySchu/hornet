@@ -532,6 +532,77 @@ across ANY subsequent code that might use that same register as
 scratch, not just across the one method that finally reads or writes
 through it.
 
+SIZE-BASED STACK SAFETY
+---------------------------
+An array over _STACK_ARRAY_LIMIT_BYTES (16KB, hardcoded -- see
+is_heap_allocated) is heap-allocated instead of living inline in its
+own stack slot: the slot holds an 8-byte pointer to a malloc'd block
+rather than the array's data directly. This closes the one concrete
+danger fixed-size arrays already had before any of this existed --
+nothing stopped a single huge array from silently blowing the stack,
+exactly the way it wouldn't in C -- without touching value semantics
+at all: `arr2 = arr1` still copies elements rather than aliasing a
+pointer regardless of which allocator is backing either side (see
+gen_array_copy/gen_array_value_into, which already work with an
+arbitrary Memory source/destination and needed no new logic here,
+only a different way of getting the address in the first place).
+
+This is deliberately a PER-ARRAY check, not a per-frame budget: it
+catches the case that actually matters most (one array declared far
+too large for the stack) but not, say, five moderately-sized arrays in
+the same function each individually under the limit, or a moderate
+array under deep recursion. Both are known, accepted gaps -- closing
+them would mean summing every local's width per frame or per call
+chain, real additional complexity for a problem this simple check
+already solves for the common case.
+
+Every place that used to assume an array-typed variable's own slot
+holds its data directly needed to branch on is_heap_allocated instead:
+gen_array_address_into's Variable case (load the stored pointer vs.
+compute the slot's own address), gen_array_value_into's Variable
+(source) case (load the source's pointer before copying, if it's heap-
+backed), gen_var_decl (malloc a fresh block, once, at declaration time
+-- reused by every later assignment, never reallocated, since a fixed-
+size array's footprint never changes across its lifetime), gen_assign
+(load the existing pointer and write through it, no malloc), and
+gen_function's own parameter loop (a heap-allocated parameter needs its
+own independent copy via malloc, exactly like the stack-allocated case
+already gets via gen_array_copy, to preserve value semantics across the
+call). Everything else -- gen_index_address_into, gen_index_assign, an
+Index read in gen_expr_into, gen_array_arg_address_into -- needed no
+direct changes at all, since each already delegates through one of the
+methods above rather than assuming a slot's shape itself.
+
+Array RETURN values need no changes whatsoever: an array-typed return
+already writes directly through the caller-provided hidden pointer
+(see gen_return), never allocating any storage of its own regardless
+of the array's size -- that path was already safe before this feature
+existed.
+
+A REAL HAZARD FOUND WHILE BUILDING THIS: PARAMETER STASHING
+-----------------------------------------------------------------
+A heap-allocated parameter's malloc call is a real function call, and
+like any call, it can clobber every caller-saved register -- including
+OTHER, not-yet-processed parameters' own incoming values still sitting
+in their argument registers. Naively processing parameters directly
+out of their registers, one at a time, breaks the moment any parameter
+needs malloc: an earlier one's malloc call can destroy a later one's
+still-unread value.
+
+The first fix attempted -- protecting each parameter's register with
+an ordinary push, popping it back immediately before that parameter is
+processed -- turned out to be wrong in a subtler way: popping one
+value at a time leaves a DIFFERENT number of not-yet-popped values on
+the stack ahead of each parameter's own malloc call, misaligning %rsp
+(a SysV ABI violation) for roughly half of them, depending on the
+parameter's position. The actual fix: every incoming argument register
+is stashed into its own dedicated, permanently-reserved temporary slot
+via a plain %rbp-relative store, in one pass, before any parameter is
+processed at all. Plain stores never touch %rsp, so there's no
+alignment question to get right -- the two-pass structure (stash
+everything, then process everything) exists specifically to sidestep
+this class of bug rather than to work around it case by case.
+
 SCOPE: WHAT THIS STILL DOESN'T COVER
 ------------------------------------------
 An ArrayLiteral or a Call returning an array used DIRECTLY as a
@@ -1164,6 +1235,46 @@ def leaf_type(t: Type) -> Type:
     return t
 
 
+# Fixed, hardcoded threshold for size-based stack safety (see the
+# module docstring's ARRAYS section). Any array-typed local or
+# parameter whose total flattened footprint (type_byte_width) exceeds
+# this many bytes is heap-allocated instead of living inline in its
+# own stack slot -- a deliberately simple, PER-ARRAY check, not a
+# per-frame budget: it catches the single-array case (one huge local
+# or parameter that would blow the stack on its own) but not, say,
+# five moderately-sized arrays in the same function each individually
+# under the limit, or a moderate array in a deeply recursive call
+# chain. Both are known, accepted gaps, not oversights -- closing them
+# would mean summing every local's width per frame (or per call
+# chain), which is real additional complexity for a problem this
+# simple, per-array check already solves for the common case that
+# actually matters: one array declared far too large for the stack.
+#
+# 16KB, not the more "principled" 4KB single-page size: generous
+# enough that ordinary matrix-shaped code (e.g. a [50][50]int, exactly
+# 10000 bytes) doesn't get quietly promoted to the heap by surprise,
+# while still leaving a wide safety margin against the default ~8MB
+# stack budget even under moderate recursion (8MB / 16KB = 512
+# same-sized frames before exhaustion).
+_STACK_ARRAY_LIMIT_BYTES = 16384
+
+
+def is_heap_allocated(t: Type) -> bool:
+    """Whether a value of type `t` is heap-allocated rather than stored
+    inline in its own stack slot -- true for an array type whose total
+    footprint (type_byte_width) exceeds _STACK_ARRAY_LIMIT_BYTES, false
+    for every scalar type and every array under the limit. This is the
+    one place that decision is made; every caller that needs to know
+    -- stack allocation width, how to compute a variable's address,
+    how to read or write its value -- goes through this rather than
+    re-deriving it, so the threshold only ever needs to change in one
+    place. Purely a function of the type itself, not of any per-
+    variable state, so it's never stored anywhere -- anywhere codegen
+    already has the Type (via _local_type or _type_of), it can just
+    call this directly."""
+    return t.kind == TypeKind.ARRAY and type_byte_width(t) > _STACK_ARRAY_LIMIT_BYTES
+
+
 # ---------------------------------------------------------------------------
 # AST -> Assembly AST
 # ---------------------------------------------------------------------------
@@ -1252,6 +1363,16 @@ class CodeGenerator:
             self._hidden_return_ptr_offset = self._next_offset
             arg_shift = 1
 
+        # One extra, purely internal 8-byte slot per parameter, used to
+        # stash its incoming register value immediately, before any
+        # parameter is actually processed -- see the loop below for
+        # why this has to happen up front rather than processing each
+        # parameter directly out of its own argument register in turn.
+        param_temp_offsets = []
+        for _ in fn.params:
+            self._next_offset -= 8
+            param_temp_offsets.append(self._next_offset)
+
         self._collect_params(fn.params)
         self._collect_locals(fn.body)
         self.scopes = [{}]
@@ -1292,28 +1413,69 @@ class CodeGenerator:
 
         # Parameters arrive in registers per the SysV ABI (shifted one
         # position later than usual if this function itself returns an
-        # array -- see arg_shift above); move each into its own stack
-        # slot immediately, exactly like storing any other local -- from
-        # here on, a scalar parameter is indistinguishable from a
-        # VarDecl-with-initializer as far as the rest of codegen is
-        # concerned. An array-typed parameter arrives as a POINTER (to
-        # a copy the caller already made just for this call -- see
-        # gen_array_arg_address_into) rather than a value, so it's
-        # copied element-by-element into its own local slot instead --
-        # after that copy, it's just as indistinguishable from an
-        # ordinary array local as a scalar parameter is from a scalar
-        # local.
+        # array -- see arg_shift above). Handled in two passes rather
+        # than reading each one directly out of its own argument
+        # register in turn:
+        #
+        # FIRST, every incoming register is stashed into its own
+        # temporary slot (param_temp_offsets, reserved above) via a
+        # plain %rbp-relative store -- these never touch %rsp, so
+        # there's no stack-alignment concern regardless of how many
+        # parameters there are or which ones turn out to need malloc.
+        #
+        # SECOND, each parameter is processed using its safely-stashed
+        # value rather than its original argument register. This
+        # two-pass structure exists specifically because a heap-
+        # allocated array parameter (see is_heap_allocated) needs its
+        # own malloc call to build an independent copy -- and malloc,
+        # like any real call, can clobber every caller-saved register,
+        # including OTHER, not-yet-processed parameters' own incoming
+        # values still sitting in their argument registers. Stashing
+        # everything first, before any malloc call can possibly run,
+        # avoids that regardless of which parameters (if any) end up
+        # needing one. (An earlier version of this tried protecting
+        # registers with ordinary push/pop instead -- which works for
+        # a single value, but breaks down here: popping one parameter's
+        # value at a time, immediately before processing it, leaves a
+        # DIFFERENT number of not-yet-popped values on the stack ahead
+        # of each parameter's own malloc call, which misaligns %rsp
+        # for roughly half of them. Plain %rbp-relative stores sidestep
+        # that failure mode entirely, since they never move %rsp.)
+        for i in range(len(fn.params)):
+            reg_index = i + arg_shift
+            instructions.append(MovQ(src=Register(_ARG_REGISTERS_64[reg_index]), dst=Memory('rbp', param_temp_offsets[i])))
+
         for i, p in enumerate(fn.params):
             offset = self._bind_param(p)
             p_type = type_from_name(p.type)
-            reg_index = i + arg_shift
+            temp_offset = param_temp_offsets[i]
             if p_type.kind == TypeKind.ARRAY:
-                arg_reg_name = _ARG_REGISTERS_64[reg_index]
-                instructions.extend(self.gen_array_copy(Memory('rbp', offset), Memory(arg_reg_name, 0), p_type))
+                if is_heap_allocated(p_type):
+                    # Needs its own, independent heap copy -- exactly
+                    # like the stack-allocated case below, just backed
+                    # by malloc'd memory instead of an inline slot --
+                    # to preserve value semantics across the call:
+                    # mutating this parameter must never affect the
+                    # caller's own array. %rbx holds the caller's
+                    # pointer across the malloc call itself: it's
+                    # callee-saved, so malloc (a well-behaved, ABI-
+                    # conforming function) is obligated to preserve it,
+                    # the same guarantee gen_string_concat_into's own
+                    # malloc/strlen/strcpy calls already rely on.
+                    instructions.append(MovQ(src=Memory('rbp', temp_offset), dst=Register('rbx')))
+                    instructions.extend(self._gen_malloc_array(p_type))
+                    instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
+                    instructions.append(MovQ(src=Register('rax'), dst=Register('r10')))
+                    instructions.extend(self.gen_array_copy(Memory('r10', 0), Memory('rbx', 0), p_type))
+                else:
+                    instructions.append(MovQ(src=Memory('rbp', temp_offset), dst=Register('rbx')))
+                    instructions.extend(self.gen_array_copy(Memory('rbp', offset), Memory('rbx', 0), p_type))
             elif p_type == Type.STR:
-                instructions.append(MovQ(src=Register(_ARG_REGISTERS_64[reg_index]), dst=Memory('rbp', offset)))
+                instructions.append(MovQ(src=Memory('rbp', temp_offset), dst=Register('rax')))
+                instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
             else:
-                instructions.append(Mov(src=Register(_ARG_REGISTERS_32[reg_index]), dst=Memory('rbp', offset)))
+                instructions.append(Mov(src=Memory('rbp', temp_offset), dst=Register('eax')))
+                instructions.append(Mov(src=Register('eax'), dst=Memory('rbp', offset)))
 
         self._bounds_check_fail_label = None  # fresh, per-function jump target; see its own docstring
         for stmt in fn.body:
@@ -1327,20 +1489,22 @@ class CodeGenerator:
         like _collect_locals does for VarDecls (same node-identity
         keying) -- kept as a separate method since Param and VarDecl
         are different AST node types, not because parameters need
-        fundamentally different treatment. Each slot's width is now
-        the parameter's own actual type width (see type_byte_width) --
-        4 bytes for int/bool, 8 for str, and an array's own full,
-        flattened footprint for an array parameter -- rather than the
-        uniform 8 bytes every local used before array types existed;
-        see the module docstring's ARRAYS section for why a variable-
-        width allocator became unavoidable once a single local could
-        need far more than 8 bytes. Called after gen_function has
-        already reserved the hidden-return-pointer slot, if this
-        function needs one -- _next_offset just keeps counting down
-        from wherever it already is, agnostic to what it was
-        decremented for so far."""
+        fundamentally different treatment. Each slot's width is the
+        parameter's own actual type width (see type_byte_width) -- 4
+        bytes for int/bool, 8 for str, and an array's own full,
+        flattened footprint for a stack-allocated array parameter --
+        except for an array parameter over _STACK_ARRAY_LIMIT_BYTES
+        (see is_heap_allocated), which only needs 8 bytes here: its
+        slot holds a pointer to a heap block gen_function's own
+        parameter loop allocates, not the array's data directly. See
+        the module docstring's ARRAYS section. Called after
+        gen_function has already reserved the hidden-return-pointer
+        slot, if this function needs one -- _next_offset just keeps
+        counting down from wherever it already is, agnostic to what it
+        was decremented for so far."""
         for p in params:
-            width = type_byte_width(type_from_name(p.type))
+            p_type = type_from_name(p.type)
+            width = 8 if is_heap_allocated(p_type) else type_byte_width(p_type)
             self._next_offset -= width
             self._var_offsets[id(p)] = self._next_offset
 
@@ -1366,11 +1530,17 @@ class CodeGenerator:
         Each slot's width is the variable's own actual type width (see
         type_byte_width) -- 4 bytes for int/bool, 8 for str, and an
         array's own full, flattened footprint (e.g. 24 bytes for
-        [2][3]int) for an array-typed local. Uniform 8-byte slots were
-        a deliberate simplification back when str was the only thing
-        wider than 4 bytes; a fixed-size array can be arbitrarily
-        larger than 8 bytes, so that simplification stops making sense
-        once arrays exist -- see the module docstring's ARRAYS section.
+        [2][3]int) for a stack-allocated array local. Uniform 8-byte
+        slots were a deliberate simplification back when str was the
+        only thing wider than 4 bytes; a fixed-size array can be
+        arbitrarily larger than 8 bytes, so that simplification stops
+        making sense once arrays exist -- see the module docstring's
+        ARRAYS section. An array whose own footprint exceeds
+        _STACK_ARRAY_LIMIT_BYTES only needs 8 bytes here regardless of
+        its real size (see is_heap_allocated): its slot holds a
+        pointer to a heap block, allocated by gen_var_decl, not the
+        array's data directly -- this is the one and only place that
+        decision actually changes how much stack space gets reserved.
         No alignment padding is added between slots: x86-64 doesn't
         require aligned access the way some architectures do, and
         %rsp's OWN 16-byte alignment requirement is still satisfied
@@ -1378,7 +1548,8 @@ class CodeGenerator:
         end, regardless of how the space within it is subdivided."""
         for stmt in statements:
             if isinstance(stmt, VarDecl):
-                width = type_byte_width(type_from_name(stmt.var_type))
+                var_type = type_from_name(stmt.var_type)
+                width = 8 if is_heap_allocated(var_type) else type_byte_width(var_type)
                 self._next_offset -= width
                 self._var_offsets[id(stmt)] = self._next_offset
             elif isinstance(stmt, If):
@@ -1506,9 +1677,26 @@ class CodeGenerator:
         multi-dimensional access) -- into the 64-bit register `dst`.
         `dst` must already be a 64-bit register (e.g. Register('rax'),
         not Register('eax')) -- addresses are always 64-bit values,
-        regardless of how wide the array's own elements are."""
+        regardless of how wide the array's own elements are.
+
+        A heap-allocated Variable (see is_heap_allocated) needs a
+        genuinely different instruction here, not just a different
+        offset: its own slot holds a POINTER to the array's actual
+        data, not the data itself, so getting the array's address
+        means LOADING that pointer (movq) rather than computing the
+        slot's own address (leaq) the way a stack-allocated array's
+        does. Every other array-address computation in this file --
+        gen_index_address_into's own recursive base case, and
+        everything that calls through it (gen_index_assign, an Index
+        read in gen_expr_into, gen_array_arg_address_into) -- goes
+        through this one method for a bare Variable, so this is the
+        only place that distinction needs to be made at all.
+        """
         if isinstance(expr, Variable):
             offset = self._local_offset(expr.name)
+            array_type = self._local_type(expr.name)
+            if is_heap_allocated(array_type):
+                return [MovQ(src=Memory('rbp', offset), dst=dst)]
             return [LeaQFrame(offset=offset, dst=dst)]
         if isinstance(expr, Index):
             return self.gen_index_address_into(expr, dst)
@@ -1791,13 +1979,21 @@ class CodeGenerator:
         of expression is producing the value:
           - ArrayLiteral: each element stored directly (see
             gen_array_literal_into).
-          - Variable: a flat, offset-to-offset copy (see
-            gen_array_copy) -- no address computation needed for the
-            SOURCE side at all, since a variable's own slot offset is
-            already known at compile time. This is what makes
+          - Variable: a copy from wherever the source's data actually
+            lives (see gen_array_copy) into dst_mem. For a stack-
+            allocated source, that's a flat offset-to-offset copy --
+            no address computation needed at all, since the variable's
+            own slot offset is already known at compile time. For a
+            heap-allocated source (see is_heap_allocated), the slot
+            holds a POINTER rather than the data itself, so that
+            pointer is loaded first (protecting dst_mem's own base
+            register across the load, via _gen_protecting_dst_across,
+            in case they happen to coincide), and the copy reads
+            through it instead. Either way, this is what makes
             `arr2 = arr1` a real, independent copy rather than a
             pointer alias -- see the module docstring's ARRAYS section
-            on value semantics.
+            on value semantics: heap-backed storage doesn't change
+            that guarantee, only where the bytes being copied live.
           - Index (a sub-array, e.g. `[3]int row = matrix[i]`): its
             SOURCE address has to be computed first
             (gen_array_address_into), since it depends on a runtime
@@ -1826,6 +2022,12 @@ class CodeGenerator:
             return self.gen_array_literal_into(dst_mem, expr, array_type)
         if isinstance(expr, Variable):
             src_offset = self._local_offset(expr.name)
+            src_type = self._local_type(expr.name)
+            if is_heap_allocated(src_type):
+                load_ptr = self._gen_protecting_dst_across(
+                    dst_mem, [MovQ(src=Memory('rbp', src_offset), dst=Register('rbx'))]
+                )
+                return load_ptr + self.gen_array_copy(dst_mem, Memory('rbx', 0), array_type)
             return self.gen_array_copy(dst_mem, Memory('rbp', src_offset), array_type)
         if isinstance(expr, Index):
             addr_instructions = self._gen_protecting_dst_across(
@@ -1924,6 +2126,21 @@ class CodeGenerator:
             return self.gen_expr_stmt(stmt)
         raise CodegenError(f"No codegen rule for statement: {stmt!r}")
 
+    def _gen_malloc_array(self, array_type: Type) -> List[Instruction]:
+        """Calls malloc for array_type's own total footprint
+        (type_byte_width), a compile-time-known constant, leaving the
+        returned pointer in %rax (the ordinary SysV return-value
+        register, not chosen specially here). Used wherever a heap-
+        allocated array (see is_heap_allocated) needs its own, fresh
+        backing allocation: a VarDecl declaring one (gen_var_decl) or a
+        parameter receiving one (gen_function's own parameter loop,
+        which needs its own independent copy of the caller's data to
+        preserve value semantics across the call -- exactly like a
+        stack-allocated parameter already gets via gen_array_copy, just
+        backed by malloc'd memory instead of an inline slot)."""
+        size = type_byte_width(array_type)
+        return [Mov(src=Imm(size), dst=Register('edi')), CallInstr('malloc')]
+
     def gen_var_decl(self, stmt: VarDecl) -> List[Instruction]:
         # _collect_locals already reserved this VarDecl's slot (that's
         # what sizes the frame); _bind_local just needs to make its name
@@ -1931,14 +2148,45 @@ class CodeGenerator:
         # initializer, if there is one. `int a` with no initializer
         # leaves the slot's contents genuinely uninitialized, matching
         # C: reading it before assigning is undefined behavior, not
-        # implicitly zero.
+        # implicitly zero -- and the same holds for a heap-allocated
+        # array's own malloc'd memory below: allocated, but left
+        # unwritten, if there's no initializer to write through it.
         offset = self._bind_local(stmt)
+        var_type = self._local_type(stmt.name)
+        if is_heap_allocated(var_type):
+            # A fresh backing allocation, made exactly once here at
+            # declaration time -- see gen_assign's own array case for
+            # why a later assignment reuses this same allocation
+            # rather than mallocing again. %rax still holds the
+            # pointer right after storing it into the slot (that store
+            # only READS %rax, it doesn't touch it), so it's safe to
+            # use directly as the destination for the initializer, if
+            # there is one -- the same "destination is a register-held
+            # address" shape gen_return already established for the
+            # hidden output pointer, and gen_array_value_into/
+            # gen_array_literal_into already handle generically.
+            instructions = self._gen_malloc_array(var_type)
+            instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
+            if stmt.init is not None:
+                instructions.extend(self.gen_array_value_into(stmt.init, Memory('rax', 0), var_type))
+            return instructions
         if stmt.init is None:
             return []
         return self._gen_store(offset, stmt.init)
 
     def gen_assign(self, stmt: Assign) -> List[Instruction]:
         offset = self._local_offset(stmt.name)
+        value_type = self._type_of(stmt.value)
+        if value_type.kind == TypeKind.ARRAY and is_heap_allocated(value_type):
+            # Reuses the EXISTING allocation from this variable's own
+            # declaration -- a fixed-size array's footprint never
+            # changes across its lifetime, so there's nothing to
+            # reallocate here, only to load the existing pointer and
+            # write the new value through it, exactly like gen_return
+            # does for the hidden pointer it receives.
+            instructions = [MovQ(src=Memory('rbp', offset), dst=Register('rax'))]
+            instructions.extend(self.gen_array_value_into(stmt.value, Memory('rax', 0), value_type))
+            return instructions
         return self._gen_store(offset, stmt.value)
 
     def gen_index_assign(self, stmt: IndexAssign) -> List[Instruction]:

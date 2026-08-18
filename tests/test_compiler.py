@@ -41,9 +41,10 @@ Organization:
     TestAllPathsReturn                  (18 tests)
     TestArrays                          (26 tests)
     TestBoundsChecking                  ( 4 tests)
+    TestHeapAllocatedArrays             (12 tests)
     TestSemanticErrors                  (76 tests)
                                         ----------
-                                        300 tests total
+                                        312 tests total
 
 A NOTE ON ARRAYS
 -----------------------------------------------------------------
@@ -89,6 +90,38 @@ or a call returning an array used DIRECTLY as a function-call argument
 supported confirms this fails with a clear error pointing at the
 workaround (assign it to a variable first) rather than a confusing
 crash.
+
+A NOTE ON TestHeapAllocatedArrays
+-----------------------------------------------------------------
+An array over 16KB (codegen.py's _STACK_ARRAY_LIMIT_BYTES, hardcoded --
+see is_heap_allocated) is heap-allocated instead of living inline on
+the stack, closing off the one concrete danger fixed-size arrays
+already had before any of this existed: nothing stopped a single huge
+array from silently blowing the stack. test_exactly_at_threshold_
+stays_on_stack and test_just_over_threshold_is_heap_allocated both
+inspect the generated assembly directly for the presence or complete
+absence of a malloc call, rather than only checking an exit code --
+proof the boundary itself is exactly right, not just that some array
+somewhere behaves plausibly.
+
+Heap-promoting an array turned out to touch nearly every piece of
+array codegen as a genuinely separate code path, not a transparent
+allocator swap -- test_heap_allocated_local_with_literal_initializer
+specifically exercises gen_var_decl's malloc-then-store-initializer
+path, which is fully distinct code from its malloc-then-copy path for
+a Variable/Index/Call initializer, and
+test_multiple_heap_allocated_parameters stress-tests gen_function's
+two-pass parameter handling: every incoming argument register gets
+stashed into its own slot before any parameter is processed, since a
+heap-allocated parameter's malloc call -- like any real call -- can
+clobber other, not-yet-processed parameters' own incoming values. An
+earlier, simpler attempt at protecting those registers (an ordinary
+push, popped immediately before each parameter was processed) turned
+out to misalign %rsp for roughly half of them; see codegen.py's own
+ARRAYS section for why. test_heap_allocated_array_as_return_type is
+the positive control proving array returns needed no changes at all --
+they already write through a caller-provided pointer regardless of
+size.
 
 A NOTE ON TestAllPathsReturn
 -----------------------------------------------------------------
@@ -2767,6 +2800,244 @@ class TestBoundsChecking:
         )
         assert result.returncode == -signal.SIGABRT
         assert "array index out of bounds" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Size-based stack safety: an array over _STACK_ARRAY_LIMIT_BYTES (16KB,
+# hardcoded -- see codegen.py's is_heap_allocated) is heap-allocated
+# instead of living inline in its own stack slot, closing off the one
+# concrete danger fixed-size arrays already had before any of this
+# existed: nothing stopped a single huge array from silently blowing
+# the stack, the exact same way it wouldn't in C. This is deliberately
+# a PER-ARRAY check, not a per-frame budget -- see is_heap_allocated's
+# own docstring for the accepted gaps that leaves (several moderate
+# arrays in one function, or a moderate array under deep recursion,
+# can still exhaust the stack even though no single array ever trips
+# this check).
+#
+# test_exactly_at_threshold_stays_on_stack and
+# test_just_over_threshold_is_heap_allocated both inspect the generated
+# assembly directly (via generate_asm) rather than only checking exit
+# codes -- proof the boundary itself is exactly right (>, not >=),
+# not just that some array somewhere behaves plausibly.
+#
+# The other tests exist because heap-promoting an array is a real,
+# separate code path through nearly every piece of array codegen, not
+# a transparent swap of one allocator for another: gen_var_decl's
+# malloc-then-store-initializer path is fully distinct from its
+# malloc-then-copy path (an ArrayLiteral initializer vs. a Variable/
+# Index/Call one), gen_assign has to reuse the existing allocation
+# rather than mallocing again, and gen_function's parameter loop needs
+# its own independent copy of a heap-allocated argument to preserve
+# value semantics across a call, exactly like the stack-allocated case
+# already had. Every one of these is exercised directly below, not
+# just assumed to follow from the allocation-site change alone.
+# ---------------------------------------------------------------------------
+
+class TestHeapAllocatedArrays:
+    pytestmark = GCC_SKIP
+
+    def test_exactly_at_threshold_stays_on_stack(self):
+        """The boundary case: exactly _STACK_ARRAY_LIMIT_BYTES (16384)
+        must NOT be heap-allocated -- checked by inspecting the
+        generated assembly for the complete absence of a malloc call,
+        not just by trusting a plausible-looking exit code."""
+        n = 4096  # 4096 * 4 = 16384, exactly the threshold
+        source = (
+            f"def int main():\n"
+            f"    [{n}]int arr\n"
+            f"    arr[0] = 1\n"
+            f"    return arr[0]\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        assert "malloc" not in asm
+
+    def test_just_over_threshold_is_heap_allocated(self):
+        """The other side of the same boundary: even one byte over the
+        threshold must be heap-allocated -- checked by confirming a
+        malloc call is present, sized to the array's own exact
+        footprint, not merely "big enough"."""
+        n = 4097  # 4097 * 4 = 16388, one int over the threshold
+        source = (
+            f"def int main():\n"
+            f"    [{n}]int arr\n"
+            f"    arr[0] = 1\n"
+            f"    return arr[0]\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        assert "malloc" in asm
+        assert "$16388" in asm
+
+    def test_heap_allocated_local_basic_read_write(self):
+        assert_exit_code(
+            "    [10000]int big\n"
+            "    big[0] = 42\n"
+            "    big[9999] = 99\n"
+            "    return big[0] + big[9999]",
+            141,
+        )
+
+    def test_heap_allocated_local_with_literal_initializer(self):
+        """gen_var_decl's malloc-then-store-initializer path is
+        genuinely distinct code from its malloc-then-copy path (see
+        this class's own module-level comment) -- exercised directly
+        with a literal large enough to force heap promotion, not
+        inferred from the Variable-initializer case below."""
+        n = 4200  # 4200 * 4 = 16800 bytes, over the threshold
+        elems = ', '.join(str(i % 10) for i in range(n))
+        assert_program_exit_code(
+            f"def int main():\n"
+            f"    [{n}]int arr = [{elems}]\n"
+            f"    return arr[0] + arr[1] + arr[9] + arr[{n - 1}]\n",
+            19,  # 0 + 1 + 9 + (4199 % 10 == 9)
+        )
+
+    def test_heap_allocated_value_semantics(self):
+        """The headline property, for heap-backed storage specifically:
+        assigning one heap-allocated array to another still copies
+        elements rather than aliasing the pointer -- reusing the
+        destination's existing allocation (see gen_assign's own array
+        case) rather than mallocing again, but still a real,
+        independent copy."""
+        assert_exit_code(
+            "    [10000]int a\n"
+            "    [10000]int b\n"
+            "    a[0] = 1\n"
+            "    b[0] = 0\n"
+            "    b = a\n"
+            "    b[0] = 999\n"
+            "    return a[0] == 1 and b[0] == 999",
+            1,
+            return_type="bool",
+        )
+
+    def test_heap_allocated_2d_array_value_semantics(self):
+        assert_exit_code(
+            "    [100][100]int grid\n"
+            "    grid[0][0] = 1\n"
+            "    grid[99][99] = 2\n"
+            "    [100][100]int copy = grid\n"
+            "    copy[0][0] = 999\n"
+            "    return grid[0][0] == 1 and copy[0][0] == 999 and copy[99][99] == 2",
+            1,
+            return_type="bool",
+        )
+
+    def test_heap_allocated_array_as_function_parameter(self):
+        assert_program_exit_code(
+            "def int sum_first_and_last([10000]int arr):\n"
+            "    return arr[0] + arr[9999]\n"
+            "\n"
+            "def int main():\n"
+            "    [10000]int big\n"
+            "    big[0] = 5\n"
+            "    big[9999] = 7\n"
+            "    return sum_first_and_last(big)\n",
+            12,
+        )
+
+    def test_heap_allocated_parameter_value_semantics(self):
+        """The parameter-passing counterpart to
+        test_heap_allocated_value_semantics: a heap-allocated array
+        parameter still gets its own independent copy on entry (see
+        gen_function's own parameter loop) -- mutating it inside the
+        callee must never affect the caller's original."""
+        assert_program_exit_code(
+            "def int mutate([10000]int arr):\n"
+            "    arr[0] = 999\n"
+            "    return arr[0]\n"
+            "\n"
+            "def bool main():\n"
+            "    [10000]int big\n"
+            "    big[0] = 1\n"
+            "    int result = mutate(big)\n"
+            "    return result == 999 and big[0] == 1\n",
+            1,
+        )
+
+    def test_heap_allocated_array_as_return_type(self):
+        """Array returns need no heap-allocation logic of their own at
+        all -- see is_heap_allocated's own scope note -- since an
+        array-typed return already writes directly through the
+        caller-provided hidden pointer (see gen_return), regardless of
+        the array's size. This just confirms that still holds once the
+        array involved happens to be heap-allocated."""
+        assert_program_exit_code(
+            "def [10000]int make():\n"
+            "    [10000]int r\n"
+            "    r[0] = 42\n"
+            "    r[9999] = 84\n"
+            "    return r\n"
+            "\n"
+            "def int main():\n"
+            "    [10000]int x = make()\n"
+            "    return x[0] + x[9999]\n",
+            126,
+        )
+
+    def test_heap_allocated_parameter_and_return_combined(self):
+        assert_program_exit_code(
+            "def [10000]int double_first([10000]int arr):\n"
+            "    [10000]int result\n"
+            "    result[0] = arr[0] * 2\n"
+            "    return result\n"
+            "\n"
+            "def int main():\n"
+            "    [10000]int a\n"
+            "    a[0] = 21\n"
+            "    [10000]int b = double_first(a)\n"
+            "    return b[0]\n",
+            42,
+        )
+
+    def test_multiple_heap_allocated_parameters(self):
+        """Stress-tests gen_function's two-pass parameter handling:
+        every incoming argument register is stashed into its own
+        temporary slot before any parameter is processed, specifically
+        because a heap-allocated parameter's malloc call can clobber
+        ANY caller-saved register, including other, not-yet-processed
+        parameters' own incoming values. Three heap-allocated
+        parameters in one function is exactly the scenario that would
+        expose a mistake in that stashing."""
+        assert_program_exit_code(
+            "def int sum_firsts([10000]int a, [10000]int b, [10000]int c):\n"
+            "    return a[0] + b[0] + c[0]\n"
+            "\n"
+            "def int main():\n"
+            "    [10000]int x\n"
+            "    [10000]int y\n"
+            "    [10000]int z\n"
+            "    x[0] = 1\n"
+            "    y[0] = 2\n"
+            "    z[0] = 3\n"
+            "    return sum_firsts(x, y, z)\n",
+            6,
+        )
+
+    def test_mixed_parameter_types_with_heap_allocated_array(self):
+        """A heap-allocated array parameter alongside ordinary scalar,
+        str, and small (stack-allocated) array parameters in the same
+        call -- confirms the two-pass parameter stashing handles a mix
+        of types correctly, not just a function whose parameters are
+        uniformly heap-allocated."""
+        assert_program_exit_code(
+            "def int mix(int a, str s, [3]int small, [10000]int big):\n"
+            "    int slen_check = 0\n"
+            "    if s == 'hi':\n"
+            "        slen_check = 1\n"
+            "    return a + slen_check + small[0] + big[0]\n"
+            "\n"
+            "def int main():\n"
+            "    [10000]int huge\n"
+            "    huge[0] = 100\n"
+            "    [3]int small = [2, 0, 0]\n"
+            "    return mix(1, 'hi', small, huge)\n",
+            104,
+        )
 
 
 # ---------------------------------------------------------------------------

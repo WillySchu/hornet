@@ -20,3 +20,5 @@ Updates:
 - Void type (none, nil?).
 - Bounds Check Elimination.
 - Stack based params to get around parameter limit.
+- Pass array literals to function calls.
+- Explore per frame vs per array heap promotion.
