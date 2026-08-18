@@ -14,7 +14,7 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- Void type (none, nil?).
+- None type (none).
 - `assert`
 - `len` function.
 - Index into unnamed slices.

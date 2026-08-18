@@ -416,14 +416,14 @@ def test_parse_function_only_eof():
         p.parse_function()
 
 
-def test_parse_function_no_type():
+def test_parse_function_no_name():
     tokens = [
         lexer.Token(lexer.TokenType.DEF, 'def', 1, 1),
         lexer.Token(lexer.TokenType.EOF, '', 1, 1),
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape("Expected a type ('int', 'bool', 'str', '[size]type', or '[]type'), got TokenType.EOF ('') at line 1, column 1")):
+    with pytest.raises(parser.ParseError, match=re.escape("Expected a function name at line 1, column 1")):
         p.parse_function()
 
 

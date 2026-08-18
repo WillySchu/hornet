@@ -383,6 +383,56 @@ expression's type (int/bool/str) needed for e.g. deciding whether
 `foo() + bar()` means arithmetic or concatenation is read directly via
 _type_of from what semantic.py already resolved, not re-looked-up here.
 
+FUNCTIONS WITH NO DECLARED RETURN TYPE
+-------------------------------------------
+fn.return_type is None (see Function's own docstring in parser.py) for
+`def NAME(params):` -- a function with no declared return type at all.
+Mapped to Type.VOID, the same internal-only sentinel semantic.py's own
+analyze_function already uses, right at the top of gen_function --
+kept as one shared representation across both files rather than a
+second, independent "no return type" encoding invented here.
+
+Two things follow from this, one at each end of the function:
+
+Return values: gen_return's stmt.value can be None (a bare `return`,
+valid exactly when semantic.py already confirmed this function has no
+declared return type -- see analyze_return) -- nothing needs computing
+at all in that case, just the ordinary epilogue (see _gen_epilogue).
+
+Falling off the end: every OTHER function relies on semantic.py's
+always_returns already having guaranteed an explicit `return` on every
+path (see the module docstring's ALL PATHS RETURN section in
+semantic.py), which is what lets gen_function get away with never
+emitting its own trailing epilogue -- some gen_return-emitted one is
+always guaranteed to execute first, making a trailing one permanently
+unreachable dead code. A function with no declared return type
+deliberately skips that guarantee, since falling off the end IS how
+such a function is expected to exit when it doesn't return early -- so
+gen_function appends a trailing epilogue unconditionally in this one
+case, or execution would fall straight through into whatever comes
+next in the generated assembly instead (the bounds-check panic block,
+or the next function's own prologue) -- a real, silent crash, not a
+hypothetical one. Appended even when this particular body happens to
+already return explicitly on every path (e.g. via an if/else where
+both branches return): there's no cheap way to know that without
+effectively re-running always_returns here too, and an extra,
+unreachable epilogue costs nothing but a few bytes.
+
+_gen_epilogue itself (restore every callee-saved scratch register,
+then leave/ret) is shared, unchanged code between gen_return's bare-
+return case and gen_function's trailing one -- both are exactly the
+same "there's no value to compute, just exit the function cleanly"
+situation, just reached from a different place.
+
+No changes were needed anywhere calls themselves are generated
+(gen_call_into, gen_expr_into's Call dispatch): calling a void function
+works exactly like calling any other one, and %eax simply ends up
+holding whatever it held before the call (never written to, since
+there's no return value to compute) -- harmless, since semantic.py
+already guarantees the only context a void call's result can ever
+appear in is a bare ExprStmt, which discards whatever's in %eax
+unconditionally regardless of what put it there.
+
 ARRAYS
 -------
 Fixed-size and stack-allocated: an array's size is a compile-time
@@ -1574,7 +1624,12 @@ class CodeGenerator:
         # function's own %rbp.
         self._var_offsets = {}
         self._next_offset = 0
-        return_type = type_from_name(fn.return_type)
+        # No declared return type (fn.return_type is None -- see
+        # Function's own docstring in parser.py) means Type.VOID, the
+        # same internal-only sentinel semantic.py's own analyze_function
+        # already uses -- kept consistent here rather than reinventing
+        # a second "no return type" representation in this file.
+        return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type)
 
         # An array-typed return needs a hidden pointer -- the caller
         # passes the address to write the result into, as an extra,
@@ -1728,6 +1783,30 @@ class CodeGenerator:
         self._bounds_check_fail_labels = {}  # fresh, per-function jump targets; see their own docstring
         for stmt in fn.body:
             instructions.extend(self.gen_statement(stmt))
+        if return_type == Type.VOID:
+            # A function with no declared return type never has to
+            # guarantee every path returns explicitly (see
+            # analyze_function's own always_returns skip for this case)
+            # -- its body can legitimately fall off the end, relying on
+            # THIS trailing epilogue rather than a gen_return-emitted
+            # one on every path. Every OTHER function never needed
+            # this: always_returns already guarantees some gen_return-
+            # emitted epilogue executes on every path, making a
+            # trailing one here permanently unreachable dead code -- so
+            # it's only ever added for the one case that genuinely
+            # needs it. Without this, a void function that fell off the
+            # end would fall straight through into whatever comes next
+            # in the generated assembly instead -- the bounds-check
+            # panic block below, or the next function's own prologue --
+            # a real, silent crash, not a hypothetical one.
+            #
+            # Appended unconditionally, even when this particular body
+            # happens to already return explicitly on every path (e.g.
+            # via an if/else where both branches return): there's no
+            # cheap way to know that without effectively re-running
+            # always_returns, and an extra, unreachable epilogue costs
+            # nothing but a few bytes.
+            instructions.extend(self._gen_epilogue())
         instructions.extend(self._gen_bounds_check_panic_block())
 
         return AsmFunction(name=fn.name, instructions=instructions)
@@ -2746,7 +2825,34 @@ class CodeGenerator:
             instructions.append(Mov(src=Register('eax'), dst=Memory('rbp', offset)))
         return instructions
 
+    def _gen_epilogue(self) -> List[Instruction]:
+        """The ordinary function epilogue: restore every callee-saved
+        scratch register (in reverse of the prologue's own push
+        order), then leave/ret. Shared by gen_return's own bare-return
+        case (no value to compute at all -- see Return's own docstring
+        in parser.py) and gen_function's own trailing fall-through case
+        (see its own comment): both are "there's no value to compute,
+        just exit the function cleanly" situations. Leave resets %rsp
+        straight to %rbp, which was captured before the callee-saved
+        registers were pushed in the prologue, so anything pushed after
+        that point has to be popped explicitly first or it's just
+        silently discarded (never actually restored into the
+        registers) rather than popped."""
+        instructions = []
+        for reg in reversed(_CALLEE_SAVED_SCRATCH_REGISTERS):
+            instructions.append(Pop(Register(reg)))
+        instructions.append(Leave())
+        instructions.append(Ret())
+        return instructions
+
     def gen_return(self, stmt: Return) -> List[Instruction]:
+        # A bare `return` (no value at all -- valid exactly when this
+        # function has no declared return type, see Return's own
+        # docstring in parser.py and analyze_return's own check) needs
+        # nothing computed at all, just the ordinary epilogue.
+        if stmt.value is None:
+            return self._gen_epilogue()
+
         # An array-typed return writes directly through the hidden
         # pointer this function received (see gen_function's own
         # prologue handling and the module docstring's ARRAYS section)
@@ -2782,21 +2888,12 @@ class CodeGenerator:
         else:
             dst = Register('eax')
             instructions = self.gen_expr_into(stmt.value, dst)
-        # Restore the callee-saved scratch registers *before* Leave --
-        # Leave resets %rsp straight to %rbp, which was captured before
-        # these were pushed in the prologue, so anything pushed after
-        # that point has to be popped explicitly first or it's just
-        # silently discarded (never actually restored into the
-        # registers) rather than popped. Popping happens in reverse of
-        # the prologue's push order, the usual stack discipline. None of
-        # this touches %eax/%rax, so a scalar return value computed
-        # above is unaffected regardless of what these registers held
-        # during the body (e.g. if the return expression itself did
-        # string work that reused them as scratch in between).
-        for reg in reversed(_CALLEE_SAVED_SCRATCH_REGISTERS):
-            instructions.append(Pop(Register(reg)))
-        instructions.append(Leave())
-        instructions.append(Ret())
+        # None of the epilogue touches %eax/%rax, so a scalar return
+        # value computed above is unaffected regardless of what these
+        # registers held during the body (e.g. if the return expression
+        # itself did string work that reused them as scratch in
+        # between).
+        instructions.extend(self._gen_epilogue())
         return instructions
 
     def gen_if(self, stmt: If) -> List[Instruction]:
@@ -3205,10 +3302,14 @@ class CodeGenerator:
                 Call has no address of its own to print through --
                 assign it to a named variable first.
 
-        Every path ends with `movl $0, %eax`, overriding whatever the
-        underlying libc call(s) actually returned -- print's "return
-        value" is a clean, predictable 0 (see semantic.py's
-        check_print_call), never leaking any of it into the language.
+        Every path still ends with `movl $0, %eax`, a harmless leftover
+        from before print had anywhere real to return to (it used to be
+        Type.INT, "returning" a clean, predictable 0 -- see semantic.py's
+        check_print_call). print is Type.VOID now, so nothing reads
+        %eax after this call anymore, the same as any other void call's
+        leftover register value -- but leaving this in costs nothing
+        and avoids restructuring dst handling here just because the
+        value it computes is no longer semantically meaningful.
 
         No register-preservation concerns beyond the ones already
         established: puts/printf are libc functions, and libc is

@@ -143,6 +143,48 @@ already-declared locals -- which, as a side effect, means a duplicate
 parameter name (`def int f(int a, int a):`) is caught by the ordinary
 _declare collision check, with no separate check needed for it.
 
+FUNCTIONS WITH NO DECLARED RETURN TYPE
+-------------------------------------------
+`def NAME(params):` -- the type before the name omitted entirely, not
+a `void`/`none` keyword -- means this function has no declared return
+type at all (Function.return_type is None, see its own docstring in
+parser.py). This is deliberately NOT a new user-facing type: there is
+no keyword for it, no way to declare a variable/parameter/array or
+slice element of it, and no plan to add one. Internally, though, it's
+given a real singleton, Type.VOID (see Type's own docstring), rather
+than reusing Python's own None for "this expression's type is void" --
+resolved_type's OWN None already means "not yet type-checked"
+everywhere it's used (see check_expr and codegen.py's own _type_of),
+and conflating the two would make a legitimately void expression
+indistinguishable from one semantic analysis simply hadn't reached
+yet.
+
+Two syntactic consequences follow directly, both documented on their
+own AST nodes in parser.py: such a function's body may fall off the
+end with no explicit `return` anywhere (Return.value can be None, a
+bare `return`, valid exactly when the enclosing function's return_type
+is Type.VOID -- see analyze_return), and always_returns is skipped
+entirely for it (see the ALL PATHS RETURN section above) -- there's
+nothing to guarantee returns, since falling off the end IS how such a
+function is expected to exit when it doesn't return early.
+
+Everywhere else Type.VOID might try to flow as a real value -- a
+VarDecl initializer, an Assign, a function-call argument, an array/
+slice base -- is already rejected for free by the exact same type-
+mismatch check that site already had: none of those ever compares
+against a type a user could actually write as "void", so Type.VOID
+simply never matches. check_print_call and check_binary's equality
+handling are the two exceptions that needed an explicit check apiece:
+print's argument-type check previously accepted anything unconditionally
+(added when arrays/slices became printable, before this feature
+existed), and `Type.VOID == Type.VOID` is trivially true by structural
+equality alone, the same way any type equals itself -- comparing two
+"nothing"s to each other would otherwise silently type-check fine.
+
+print itself is Type.VOID now -- its own docstring used to say
+outright that it returned a hardcoded, meaningless int 0 specifically
+*because* there was no real void type to give it; see check_print_call.
+
 BUILTINS
 ---------
 `print` is the first (only, so far) builtin -- a callable that isn't an
@@ -153,28 +195,24 @@ whose name collides with a builtin (_BUILTIN_FUNCTION_NAMES), so there's
 no ambiguity about which one wins -- a program simply can't define its
 own `print`.
 
-check_print_call accepts exactly one argument of *any* type (int, bool,
-and str are all printable, and there's no reason to force a caller to
-pick a differently-named builtin per type the way an ordinary function's
-fixed parameter types would require), and always "returns" int. That
-return type is a bit of a formality -- Hornet has no void type, and
-`print(x)` is almost always used as a bare expression statement whose
-value is thrown away -- but giving it *some* real type is what lets it
-flow through the exact same ExprStmt path every other call already
-uses, with nothing print-specific needed anywhere else in this pass.
-codegen.py is where print's actual behavior (which underlying libc call
-per argument type, and that it always evaluates to a clean 0 rather
-than leaking through whatever puts/printf themselves return) lives --
-see its BUILTINS section.
+check_print_call accepts exactly one argument of any REAL type (int,
+bool, str, array, and slice are all printable, and there's no reason to
+force a caller to pick a differently-named builtin per type the way an
+ordinary function's fixed parameter types would require) and is itself
+Type.VOID -- print's first real user, now that a real (if internal-only)
+void type exists at all; see the FUNCTIONS WITH NO DECLARED RETURN TYPE
+section below. codegen.py is where print's actual behavior (which
+underlying libc call per argument type) lives -- see its own PRINTING
+ARRAYS AND SLICES section for the array/slice case specifically.
 
 TYPES: ANNOTATING THE AST FOR codegen.py
 -------------------------------------------
 check_expr does one thing beyond type-checking: after computing an
 expression's Type, it stores that result on the node itself
-(expr.resolved_type = str(result)) before returning. Every check_*
-method below stays a pure type-computation function with no knowledge
-of this -- the annotation happens in exactly one place, check_expr's
-own dispatch, and every recursive call for an operand, argument, or
+(expr.resolved_type = result) before returning. Every check_* method
+below stays a pure type-computation function with no knowledge of
+this -- the annotation happens in exactly one place, check_expr's own
+dispatch, and every recursive call for an operand, argument, or
 condition anywhere in this file already goes through check_expr rather
 than some check_* method directly (see analyze_var_decl, check_binary,
 check_unary, check_call, and every other caller). That means every
@@ -182,13 +220,14 @@ expression node anywhere in a program, no matter how deeply nested,
 ends up annotated automatically, with no separate wiring needed and no
 per-node-type case to remember adding as this pass grows.
 
-resolved_type is a plain string ('int' / 'bool' / 'str'), matching
-str(Type.X), rather than a Type enum value directly -- parser.py
-defines these dataclass fields and must not import semantic.py, which
-already imports *from* parser.py; a Type-typed field would be
-circular. This also happens to match codegen.py's own established
-plain-string type representation exactly, so no translation is needed
-on the read side either.
+resolved_type holds the actual Type object directly (Type.INT, an
+ARRAY-kind Type with its own element_type/size, Type.VOID, ...), not a
+name string -- a bare name like 'int'/'bool'/'str' stopped being able to
+represent everything a type might be once arrays existed (an array also
+needs its element type and size, which no string alone can carry).
+codegen.py imports Type from this module directly and compares against
+it (Type.STR, Type.INT, Type.VOID, ...) rather than string literals, and
+can freely inspect .kind/.element_type/.size on whatever comes back.
 
 codegen.py reads this directly (see its _type_of) instead of
 re-deriving an expression's type with its own independent logic, which
@@ -221,14 +260,21 @@ analyze_function's last step, after every statement in a function's
 body is already known to be individually well-typed, is
 always_returns(fn.body): does every execution path through this
 function's body reach a `return` before falling off the end? This
-applies to every function regardless of declared return type, since
-this language has no void -- and it's not just a correctness nicety.
-Once functions could call each other (see codegen.py's FUNCTIONS
-section), a function whose generated code falls through to whatever
-comes after it with no `ret` ever executed doesn't just return garbage
-to its caller -- it corrupts the *calling* function's own stack, since
-there's a real return address sitting on the stack from the `call` that
-invoked it, with nothing left to pop it and jump there.
+applies to every function with a REAL declared return type -- and it's
+not just a correctness nicety. Once functions could call each other
+(see codegen.py's FUNCTIONS section), a function whose generated code
+falls through to whatever comes after it with no `ret` ever executed
+doesn't just return garbage to its caller -- it corrupts the *calling*
+function's own stack, since there's a real return address sitting on
+the stack from the `call` that invoked it, with nothing left to pop it
+and jump there.
+
+A function with NO declared return type (return_type is Type.VOID) is
+the one deliberate exception, skipped entirely rather than run and
+ignored -- see the FUNCTIONS WITH NO DECLARED RETURN TYPE section below
+for why falling off such a function's end is exactly how it's expected
+to exit, and how codegen.py still guarantees a real `ret` executes
+either way.
 
 This is deliberately modeled as a simple, conservative "terminating
 statement" check (the same shape Go's specification uses for this exact
@@ -324,6 +370,7 @@ class TypeKind(Enum):
     STR = auto()
     ARRAY = auto()
     SLICE = auto()
+    VOID = auto()  # see Type.VOID's own docstring below -- purely internal
 
 
 @dataclass(frozen=True)
@@ -380,6 +427,21 @@ class Type:
 Type.INT = Type(TypeKind.INT)
 Type.BOOL = Type(TypeKind.BOOL)
 Type.STR = Type(TypeKind.STR)
+# A fourth singleton, kept deliberately OUT of _TYPE_NAMES below (and
+# there's no lexer keyword for it either) -- Type.VOID can never be
+# reached by parsing a type expression from source, only ever
+# produced internally, as the "return type" of a function with no
+# declared one (see analyze_function/analyze/check_call). This is
+# purely a bookkeeping value, not a user-facing type: there's no way
+# to declare a void-typed variable, parameter, or array/slice element,
+# and there's no plan to add one -- see the module docstring's
+# FUNCTIONS WITH NO DECLARED RETURN TYPE section for why a real
+# (if internal-only) Type was still worth it here rather than reusing
+# Python's own None for this: None already means "not yet type-
+# checked" everywhere resolved_type is used, and conflating the two
+# would make a legitimately void expression indistinguishable from
+# one semantic analysis simply hadn't reached yet.
+Type.VOID = Type(TypeKind.VOID)
 
 
 _TYPE_NAMES = {
@@ -563,7 +625,7 @@ class SemanticAnalyzer:
             if fn.name in self.functions:
                 raise SemanticError(f"Function '{fn.name}' is already declared")
             param_types = [type_from_name(p.type) for p in fn.params]
-            return_type = type_from_name(fn.return_type)
+            return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type)
             self.functions[fn.name] = (param_types, return_type)
 
         # Second pass: now check each function's own body.
@@ -579,19 +641,26 @@ class SemanticAnalyzer:
         # this same scope exactly like `int a` twice in a row would).
         for p in fn.params:
             self._declare(p.name, type_from_name(p.type))
-        return_type = type_from_name(fn.return_type)
+        return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type)
         for stmt in fn.body:
             self.analyze_statement(stmt, return_type)
         # Checked last, after every statement is individually known to
         # be well-typed -- see the module docstring's ALL PATHS RETURN
-        # section. Every function needs this regardless of return type,
-        # since this language has no void: falling off the end of a
-        # function's generated code was always wrong, but it became a
-        # real safety issue once functions could call each other (see
-        # codegen.py's FUNCTIONS section) -- control falling through
-        # with no `ret` executed corrupts the calling function's own
-        # stack, not just the callee's exit code.
-        if not always_returns(fn.body):
+        # section. Every OTHER function needs this regardless of its
+        # return type, since falling off the end of a function's
+        # generated code was always wrong, and became a real safety
+        # issue once functions could call each other (see codegen.py's
+        # FUNCTIONS section) -- control falling through with no `ret`
+        # executed corrupts the calling function's own stack, not just
+        # the callee's exit code. A function with NO declared return
+        # type is the one deliberate exception: falling off the end is
+        # exactly how such a function is expected to exit when it
+        # doesn't return early (see the module docstring's FUNCTIONS
+        # WITH NO DECLARED RETURN TYPE section) -- codegen.py's own
+        # gen_function still guarantees a real `ret` executes either
+        # way, just via an unconditional trailing epilogue instead of
+        # relying on every path having its own explicit one.
+        if return_type != Type.VOID and not always_returns(fn.body):
             raise SemanticError(
                 f"Function '{fn.name}' (declared to return {return_type}) "
                 f"does not return a value on all code paths"
@@ -746,7 +815,29 @@ class SemanticAnalyzer:
         return Type(TypeKind.SLICE, element_type=base_type.element_type)
 
     def analyze_return(self, stmt: Return, return_type: Type) -> None:
+        """`return <expr>` or a bare `return` (stmt.value is None, see
+        Return's own docstring in parser.py). A bare return is valid
+        exactly when the enclosing function has no declared return
+        type (return_type is Type.VOID) -- the reverse direction
+        (returning a VALUE from such a function) is checked after
+        type-checking that value, not before, so a genuine error
+        inside the value expression itself is still reported rather
+        than masked by the "this function can't return a value at
+        all" rejection."""
+        if stmt.value is None:
+            if return_type != Type.VOID:
+                raise SemanticError(
+                    f"Function is declared to return {return_type}, but "
+                    f"this bare 'return' returns nothing"
+                )
+            return
         value_type = self.check_expr(stmt.value)
+        if return_type == Type.VOID:
+            raise SemanticError(
+                f"Function has no declared return type and cannot "
+                f"return a value (got {value_type}) -- use a bare "
+                f"'return' instead"
+            )
         if value_type != return_type:
             raise SemanticError(
                 f"Function is declared to return {return_type}, but this "
@@ -912,29 +1003,44 @@ class SemanticAnalyzer:
         return return_type
 
     def check_print_call(self, expr: Call) -> Type:
-        """`print` takes exactly one argument, of ANY type -- unlike an
-        ordinary function it isn't tied to one fixed parameter type,
-        since every type Hornet has is printable and there's no reason
-        to force a caller to pick a differently-named builtin per type.
-        An array or slice argument is formatted as `TYPE[elem, elem,
-        ...]` -- e.g. `[3]int[1, 2, 3]` or `[]int[1, 2, 3]` -- the
-        type prefix appearing exactly once, at the outermost level,
-        with no repetition for nested rows (see codegen.py's own
+        """`print` takes exactly one argument, of any REAL type --
+        unlike an ordinary function it isn't tied to one fixed
+        parameter type, since every type Hornet has is printable and
+        there's no reason to force a caller to pick a differently-
+        named builtin per type. "Real" excludes Type.VOID specifically
+        -- the result of calling a function with no declared return
+        type -- since there's nothing to format for a value that
+        doesn't exist; see check_call for how that's already the
+        result you'd get calling one of those. An array or slice
+        argument is formatted as `TYPE[elem, elem, ...]` -- e.g.
+        `[3]int[1, 2, 3]` or `[]int[1, 2, 3]` -- the type prefix
+        appearing exactly once, at the outermost level, with no
+        repetition for nested rows (see codegen.py's own
         _gen_print_collection); a str element is quoted inside a
         collection (`'alice'`) even though a bare str argument prints
         unquoted -- matching how most languages format a string
         differently in a collection than when printed on its own.
-        Always "returns" int (see the module docstring's BUILTINS
-        section for why 0, specifically) -- Hornet has no void type,
-        and this keeps `print(x)` usable as an ordinary expression
-        statement via the same ExprStmt path every other call already
-        goes through, with nothing print-specific needed there."""
+
+        print itself is Type.VOID -- Hornet's first, and so far only,
+        builtin with no meaningful value to return. Nothing has to
+        change in codegen.py for this: gen_print_call_into still
+        leaves *something* in %eax at the end of every path (a
+        harmless leftover from before print had anywhere real to
+        return to), but nothing ever reads it anymore, the same way
+        nothing reads any OTHER void call's leftover register value
+        -- see the module docstring's FUNCTIONS WITH NO DECLARED
+        RETURN TYPE section."""
         if len(expr.args) != 1:
             raise SemanticError(
                 f"'print' expects exactly 1 argument, got {len(expr.args)}"
             )
-        self.check_expr(expr.args[0])  # any type is fine; just validate it
-        return Type.INT
+        arg_type = self.check_expr(expr.args[0])
+        if arg_type == Type.VOID:
+            raise SemanticError(
+                "'print' cannot be called with the result of a function "
+                "that has no declared return type -- there's no value there to print"
+            )
+        return Type.VOID
 
     def check_constant(self, expr: Constant) -> Type:
         if isinstance(expr.value, float) and not expr.value.is_integer():
@@ -1008,8 +1114,23 @@ class SemanticAnalyzer:
             # the way Go's own `==` restriction on slices hints at?) --
             # both are real, well-defined features to consider later,
             # just not implemented yet.
-            if left_type.kind in (TypeKind.ARRAY, TypeKind.SLICE) or right_type.kind in (TypeKind.ARRAY, TypeKind.SLICE):
-                raise SemanticError(f"'{op.symbol()}' does not support array or slice operands")
+            #
+            # VOID is rejected for a completely different reason: it's
+            # not a missing FEATURE, it's structurally nonsensical --
+            # `foo() == bar()`, where neither foo nor bar has a
+            # declared return type, would otherwise type-check fine
+            # here (Type.VOID == Type.VOID is trivially true, same as
+            # any other type compared to itself), comparing two
+            # "nothing"s to each other. Every OTHER place a void call's
+            # result might flow (VarDecl, Assign, a binary operand,
+            # function argument, array/slice base) is already rejected
+            # for free, just by never matching the real, user-declared
+            # type each of those checks compares against -- this is the
+            # one place two void operands could accidentally match each
+            # other instead of a real type, so it needs its own,
+            # explicit check.
+            if left_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.VOID) or right_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.VOID):
+                raise SemanticError(f"'{op.symbol()}' does not support array, slice, or void operands")
             if left_type != right_type:
                 raise SemanticError(
                     f"Cannot compare {left_type} to {right_type} with "

@@ -36,6 +36,7 @@ Organization:
     TestStrings                         (13 tests)
     TestStringMemory                    (12 tests)
     TestFunctions                       (12 tests)
+    TestFunctionsWithNoDeclaredReturnType (12 tests)
     TestTypeAnnotation                  ( 4 tests)
     TestPrint                           (12 tests)
     TestAllPathsReturn                  (18 tests)
@@ -47,7 +48,7 @@ Organization:
     TestPrintArraysAndSlices            (11 tests)
     TestSemanticErrors                  (75 tests)
                                         ----------
-                                        338 tests total
+                                        350 tests total
 
 A NOTE ON ARRAYS
 -----------------------------------------------------------------
@@ -201,6 +202,54 @@ argument_not_supported and its Slice-expression counterpart are the
 same deliberate restriction gen_array_arg_address_into already
 imposes on array-typed call arguments, applied here for the same
 reason: neither has an address of its own to print through.
+
+A NOTE ON TestFunctionsWithNoDeclaredReturnType
+-----------------------------------------------------------------
+`def NAME(params):` -- the type before the name omitted entirely,
+not a `void`/`none` keyword (there is no such keyword) -- means this
+function has no declared return type. Such a function may fall off
+the end of its body with no explicit return at all, or exit early via
+a bare `return`.
+
+test_falls_off_the_end_with_no_explicit_return_at_all is the test
+that actually proves the core mechanism holds, not just that the
+syntax parses: every OTHER function relies on always_returns
+guaranteeing an explicit return on some path, which is what lets
+gen_function skip ever emitting its own trailing epilogue (some
+gen_return-emitted one is always guaranteed to run first). A function
+with no declared return type deliberately skips that guarantee, so
+gen_function has to append a trailing epilogue unconditionally --
+without it, this exact test would fall through into whatever comes
+next in the generated assembly instead of returning to its caller, a
+real, silent crash, not a hypothetical one.
+test_while_loop_inside_a_void_function is the same proof for a
+different shape of fall-through: reachable after a loop completes,
+not just after a straight-line sequence of statements.
+test_mixed_early_return_and_fall_through_paths stresses that the
+trailing epilogue and gen_return's own, ordinary per-path epilogues
+are both genuinely reachable in the same function, not just one or
+the other.
+
+test_comparing_two_void_call_results_is_rejected exists because
+`Type.VOID == Type.VOID` is trivially true by structural equality
+alone, the same way any type equals itself -- every OTHER "void used
+as a value" case (a VarDecl initializer, an Assign, a binary operand,
+a function argument) is already rejected for free, just by never
+matching the real, user-declared type each of those checks compares
+against; equality between two void results specifically needed its
+own explicit rejection in check_binary, since two "nothing"s would
+otherwise match each other instead. test_non_void_function_still_
+requires_explicit_returns_on_every_path is the regression check
+proving the always_returns skip in analyze_function is specific to
+Type.VOID, not a blanket relaxation for every function.
+
+test_print_result_not_usable_as_a_value in TestPrint is the other
+half of this feature worth knowing about here: print's own docstring
+always said it returned a hardcoded, meaningless 0 specifically
+because there was no real void type to give it -- print became
+Type.VOID's first real user the moment one existed, and that test
+confirms the old workaround is gone, not still lingering alongside
+the new mechanism.
 
 A NOTE ON TestAllPathsReturn
 -----------------------------------------------------------------
@@ -1982,6 +2031,216 @@ class TestFunctions:
 
 
 # ---------------------------------------------------------------------------
+# Functions with no declared return type: `def NAME(params):`, the type
+# before the name omitted entirely (Function.return_type=None) rather
+# than a `void`/`none` keyword -- there is no such keyword. Such a
+# function may fall off the end of its body without an explicit return
+# at all, or exit early via a bare `return` (Return.value=None) -- see
+# their own docstrings in parser.py. Internally, semantic.py gives this
+# a real (if purely internal, never user-writable) Type.VOID rather than
+# reusing Python's own None for it, specifically to keep it distinct
+# from resolved_type's OWN None, which already means "not yet type-
+# checked" everywhere else -- conflating the two would make a
+# legitimately void expression indistinguishable from one semantic
+# analysis simply hadn't reached yet.
+#
+# test_falls_off_the_end_with_no_explicit_return_at_all is the test
+# that actually proves the core mechanism holds, not just that the
+# feature parses: every OTHER function relies on always_returns
+# guaranteeing an explicit return on some path, which is what lets
+# gen_function skip ever emitting its own trailing epilogue (some
+# gen_return-emitted one is always guaranteed to run first). A function
+# with no declared return type deliberately skips that guarantee, so
+# gen_function has to append a trailing epilogue unconditionally --
+# without it, this exact test would fall through into whatever comes
+# next in the generated assembly (the bounds-check panic block, or the
+# next function's own prologue) instead of returning to its caller, a
+# real, silent crash, not a hypothetical one.
+#
+# print itself is Type.VOID now -- it was always documented as
+# returning a hardcoded, meaningless 0 specifically as a workaround for
+# there being no real void type at all; test_print_result_not_usable_
+# as_a_value in TestPrint is the test confirming that workaround is
+# gone.
+# ---------------------------------------------------------------------------
+
+class TestFunctionsWithNoDeclaredReturnType:
+    pytestmark = GCC_SKIP
+
+    def test_falls_off_the_end_with_no_explicit_return_at_all(self):
+        assert_program_stdout(
+            "def log(str msg):\n"
+            "    print(msg)\n"
+            "\n"
+            "def int main():\n"
+            "    log('hello')\n"
+            "    return 0\n",
+            "hello\n",
+        )
+
+    def test_bare_return_exits_early(self):
+        assert_program_stdout(
+            "def log(int x):\n"
+            "    if x < 0:\n"
+            "        return\n"
+            "    print(x)\n"
+            "\n"
+            "def int main():\n"
+            "    log(-5)\n"
+            "    log(42)\n"
+            "    return 0\n",
+            "42\n",
+        )
+
+    def test_no_parameters_and_no_return_type(self):
+        assert_program_stdout(
+            "def greet():\n"
+            "    print('hi')\n"
+            "\n"
+            "def int main():\n"
+            "    greet()\n"
+            "    return 0\n",
+            "hi\n",
+        )
+
+    def test_mixed_early_return_and_fall_through_paths(self):
+        """Several if-guarded early returns followed by a final fall-
+        through case, all in the same function -- stresses that the
+        trailing epilogue gen_function appends is genuinely reachable
+        (the fall-through case) alongside gen_return's own, ordinary
+        per-path epilogues (the early-return cases), not just one or
+        the other."""
+        assert_program_stdout(
+            "def classify(int x):\n"
+            "    if x < 0:\n"
+            "        print('negative')\n"
+            "        return\n"
+            "    if x == 0:\n"
+            "        print('zero')\n"
+            "        return\n"
+            "    print('positive')\n"
+            "\n"
+            "def int main():\n"
+            "    classify(-1)\n"
+            "    classify(0)\n"
+            "    classify(5)\n"
+            "    return 0\n",
+            "negative\nzero\npositive\n",
+        )
+
+    def test_void_function_calling_another_void_function(self):
+        assert_program_stdout(
+            "def inner():\n"
+            "    print('inner')\n"
+            "\n"
+            "def outer():\n"
+            "    print('outer')\n"
+            "    inner()\n"
+            "\n"
+            "def int main():\n"
+            "    outer()\n"
+            "    return 0\n",
+            "outer\ninner\n",
+        )
+
+    def test_recursive_void_function(self):
+        assert_program_stdout(
+            "def countdown(int n):\n"
+            "    if n <= 0:\n"
+            "        return\n"
+            "    print(n)\n"
+            "    countdown(n - 1)\n"
+            "\n"
+            "def int main():\n"
+            "    countdown(3)\n"
+            "    return 0\n",
+            "3\n2\n1\n",
+        )
+
+    def test_while_loop_inside_a_void_function(self):
+        """A different shape of "falls off the end" than the plain,
+        straight-line case above: the trailing epilogue has to be
+        reachable AFTER a loop completes, not just after a sequence of
+        ordinary statements."""
+        assert_program_stdout(
+            "def count_up(int n):\n"
+            "    int i = 0\n"
+            "    while i < n:\n"
+            "        print(i)\n"
+            "        i = i + 1\n"
+            "\n"
+            "def int main():\n"
+            "    count_up(3)\n"
+            "    return 0\n",
+            "0\n1\n2\n",
+        )
+
+    def test_returning_a_value_from_a_void_function_is_rejected(self):
+        assert_program_semantic_error(
+            "def log(int x):\n"
+            "    return x\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="cannot return a value",
+        )
+
+    def test_bare_return_inside_a_non_void_function_is_rejected(self):
+        assert_semantic_error(
+            "    return",
+            match="bare 'return' returns nothing",
+        )
+
+    def test_using_a_void_call_result_as_a_value_is_rejected(self):
+        source = (
+            "def log(int x):\n"
+            "    print(x)\n"
+            "\n"
+            "def int main():\n"
+            "    int y = log(5)\n"
+            "    return y\n"
+        )
+        ast = _parse(source)
+        with pytest.raises(SemanticError, match="Cannot initialize"):
+            analyze(ast)
+
+    def test_non_void_function_still_requires_explicit_returns_on_every_path(self):
+        """The regression check: a function with a REAL declared
+        return type still goes through always_returns exactly as
+        before -- the skip in analyze_function is specific to
+        Type.VOID, not a blanket relaxation."""
+        source = (
+            "def int classify(int x):\n"
+            "    if x < 0:\n"
+            "        return -1\n"
+            "    print(x)\n"
+            "\n"
+            "def int main():\n"
+            "    return classify(5)\n"
+        )
+        ast = _parse(source)
+        with pytest.raises(SemanticError, match="does not return a value on all code paths"):
+            analyze(ast)
+
+    def test_comparing_two_void_call_results_is_rejected(self):
+        """`Type.VOID == Type.VOID` is trivially true by structural
+        equality alone -- the same way any type equals itself -- so
+        this needs its own explicit rejection in check_binary rather
+        than falling out for free the way every OTHER "void used as a
+        value" case already does (see check_binary's own comment)."""
+        source = (
+            "def log(int x):\n"
+            "    print(x)\n"
+            "\n"
+            "def bool main():\n"
+            "    return log(1) == log(2)\n"
+        )
+        ast = _parse(source)
+        with pytest.raises(SemanticError, match="does not support array, slice, or void operands"):
+            analyze(ast)
+
+
+# ---------------------------------------------------------------------------
 # Type annotation: semantic.py's check_expr annotates every expression
 # node with its resolved type (expr.resolved_type), which codegen.py's
 # _type_of reads directly instead of re-deriving a type independently.
@@ -2166,15 +2425,21 @@ class TestPrint:
             "yes\n",
         )
 
-    def test_print_return_value_usable_as_int(self):
-        """print "returns" a clean, predictable int 0 (see
-        semantic.py's check_print_call and codegen.py's
-        gen_print_call_into) -- never leaking whatever puts/printf
-        themselves actually returned."""
-        assert_exit_code(
+    def test_print_result_not_usable_as_a_value(self):
+        """print is Type.VOID (see semantic.py's check_print_call) --
+        this used to be a positive test for print "returning" a usable
+        int 0, back when there was no real void type to give it and
+        that was the documented workaround. Now that a function with no
+        declared return type exists, print became its first real user,
+        and using its result as a value is a genuine semantic error,
+        the same as calling any other void function that way -- caught
+        here by the same type-mismatch check '+' already had for any
+        other non-int/non-str operand, with no void-specific code
+        needed at this particular call site."""
+        assert_semantic_error(
             "    int x = print(5) + 41\n"
             "    return x",
-            41,
+            match="requires two int operands or two str operands, got void",
         )
 
     def test_print_inside_a_user_defined_function(self):
@@ -4224,7 +4489,7 @@ class TestSemanticErrors:
             "    [3]int a = [1, 2, 3]\n"
             "    [3]int b = [1, 2, 3]\n"
             "    return a == b",
-            match="does not support array or slice operands",
+            match="does not support array, slice, or void operands",
             return_type="bool",
         )
 

@@ -457,10 +457,18 @@ class Binary(Node):
 
 @dataclass
 class Return(Node):
-    value: Node
+    """`return <expr>`, or a bare `return` with no expression at all
+    (value=None) -- valid inside a function with no declared return
+    type (see Function's own docstring), the same way C/Go/Python all
+    let a void-like function exit early with a bare `return`. Not
+    represented as, say, a sentinel Node wrapping "nothing": `None`
+    here mirrors exactly how Function.return_type itself represents
+    "no declared type" -- both ends of the same absence, checked the
+    same way (`is None`) wherever either is consumed."""
+    value: Optional[Node] = None
 
     def pretty(self) -> str:
-        return f"Return -> {self.value.pretty()}"
+        return "Return" if self.value is None else f"Return -> {self.value.pretty()}"
 
 
 @dataclass
@@ -670,8 +678,21 @@ class Param(Node):
 
 @dataclass
 class Function(Node):
+    """`def type NAME(params):` (return_type set), or `def NAME(params):`
+    with the type omitted entirely (return_type=None) -- a function
+    with no declared return type. Not a `none`/void keyword-typed
+    declaration -- there is no such keyword -- just the absence of a
+    type before the name, disambiguated from the ordinary case by a
+    single token of lookahead in parse_function (a type keyword or '['
+    starts a type; an IDENTIFIER, which is what a function name always
+    starts with instead, never does). Such a function may fall off the
+    end of its body without an explicit `return` at all, or exit early
+    via a bare `return` (see Return's own docstring) -- semantic.py
+    deliberately does not require every path to return explicitly the
+    way every other function's declared type does (see its own
+    always_returns skip for this case)."""
     name: str
-    return_type: Union[str, ArrayTypeExpr, SliceTypeExpr]
+    return_type: Optional[Union[str, ArrayTypeExpr, SliceTypeExpr]]
     params: List[Param] = field(default_factory=list)
     body: List[Node] = field(default_factory=list)
 
@@ -684,7 +705,10 @@ class Function(Node):
         # with multiple statements it would be.
         params_str = ', '.join(p.pretty() for p in self.params)
         body_str = '; '.join(stmt.pretty() for stmt in self.body)
-        return f"Function(name: {self.name}, params: [{params_str}]) -> {body_str}"
+        rt = "(none)" if self.return_type is None else (
+            self.return_type if isinstance(self.return_type, str) else self.return_type.pretty()
+        )
+        return f"Function(name: {self.name}, return_type: {rt}, params: [{params_str}]) -> {body_str}"
 
 
 @dataclass
@@ -926,7 +950,17 @@ class Parser:
 
     def parse_function(self) -> Function:
         self.expect(TokenType.DEF, "Expected 'def' to start a function definition")
-        return_type = self.parse_type()
+        # A type keyword or '[' starts a return type; anything else --
+        # in practice always IDENTIFIER, since that's what a function
+        # name always starts with -- means the return type was omitted
+        # entirely: this function has no declared return type at all
+        # (see Function's own docstring). One token of lookahead is
+        # enough to tell these apart unambiguously: a function name can
+        # never itself BE a type keyword, since those are reserved.
+        if self.check(TokenType.INT, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET):
+            return_type = self.parse_type()
+        else:
+            return_type = None
         name_tok = self.expect(TokenType.IDENTIFIER, "Expected a function name")
         self.expect(TokenType.OPEN_PAREN, "Expected '(' after function name")
         params = self.parse_params()
@@ -1136,7 +1170,17 @@ class Parser:
         return Assign(name=name_tok.val, value=desugared_value)
 
     def parse_return(self) -> Return:
+        """`return <expr>` or a bare `return` (see Return's own
+        docstring). A NEWLINE immediately after 'return' unambiguously
+        signals the bare form: every statement in this grammar is
+        NEWLINE-terminated (including the last one in a file with no
+        trailing newline of its own -- the lexer synthesizes one, see
+        its own tokenize() docstring), and no expression can itself
+        start with NEWLINE, so this single check never needs to
+        backtrack or look further ahead."""
         self.expect(TokenType.RETURN)
+        if self.check(TokenType.NEWLINE):
+            return Return(value=None)
         value = self.parse_expression()
         return Return(value=value)
 
