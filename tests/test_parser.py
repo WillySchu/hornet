@@ -936,4 +936,669 @@ def test_parse_block_many_statements():
     ] == p.parse_block()
 
 
-# Next: test_parse_statement
+def test_parse_statement_empty():
+    tokens = [
+        lexer.Token(lexer.TokenType.EOF, '', 1, 11),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got TokenType.EOF (\'\') at line 1, column 11')):
+        p.parse_statement()
+
+
+def test_parse_statement_int_no_name():
+    tokens = [
+        lexer.Token(lexer.TokenType.INT, '', 1, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 2),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected a variable name at line 1, column 2')):
+        p.parse_statement()
+
+
+def test_parse_statement_int():
+    tokens = [
+        lexer.Token(lexer.TokenType.INT, '', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 1, 2),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 3),
+    ]
+    p = parser.Parser(tokens)
+
+    assert parser.VarDecl(name='a', var_type='') == p.parse_statement()
+
+
+def test_parse_statement_str_no_name():
+    tokens = [
+        lexer.Token(lexer.TokenType.STR, '', 1, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 2),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected a variable name at line 1, column 2')):
+        p.parse_statement()
+
+
+def test_parse_statement_str():
+    tokens = [
+        lexer.Token(lexer.TokenType.STR, '', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 1, 2),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 3),
+    ]
+    p = parser.Parser(tokens)
+
+    assert parser.VarDecl(name='a', var_type='') == p.parse_statement()
+
+
+def test_parse_statement_bool_no_name():
+    tokens = [
+        lexer.Token(lexer.TokenType.BOOL, '', 1, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 2),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected a variable name at line 1, column 2')):
+        p.parse_statement()
+
+
+def test_parse_statement_bool():
+    tokens = [
+        lexer.Token(lexer.TokenType.BOOL, '', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 1, 2),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 3),
+    ]
+    p = parser.Parser(tokens)
+
+    assert parser.VarDecl(name='a', var_type='') == p.parse_statement()
+
+
+def test_parse_statement_array_no_size():
+    tokens = [
+        lexer.Token(lexer.TokenType.OPEN_BRACKET, '[', 1, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 2),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an array size (a positive integer literal), or \']\' for a slice type at line 1, column 2')):
+        p.parse_statement()
+
+
+def test_parse_statement_array_no_close_bracket():
+    tokens = [
+        lexer.Token(lexer.TokenType.OPEN_BRACKET, '[', 1, 1),
+        lexer.Token(lexer.TokenType.NUMBER, '3', 1, 2),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 3),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected \']\' after array size at line 1, column 3')):
+        p.parse_statement()
+
+
+def test_parse_statement_array_no_type():
+    tokens = [
+        lexer.Token(lexer.TokenType.OPEN_BRACKET, '[', 1, 1),
+        lexer.Token(lexer.TokenType.NUMBER, '3', 1, 2),
+        lexer.Token(lexer.TokenType.CLOSE_BRACKET, ']', 1, 3),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 4),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape("Expected a type ('int', 'bool', 'str', '[size]type', or '[]type'), got TokenType.EOF ('') at line 1, column 4")):
+        p.parse_statement()
+
+
+def test_parse_statement_array_no_name():
+    tokens = [
+        lexer.Token(lexer.TokenType.OPEN_BRACKET, '[', 1, 1),
+        lexer.Token(lexer.TokenType.NUMBER, '3', 1, 2),
+        lexer.Token(lexer.TokenType.CLOSE_BRACKET, ']', 1, 3),
+        lexer.Token(lexer.TokenType.INT, 'int', 1, 4),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 7),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected a variable name at line 1, column 7')):
+        p.parse_statement()
+
+
+def test_parse_statement_array():
+    tokens = [
+        lexer.Token(lexer.TokenType.OPEN_BRACKET, '[', 1, 1),
+        lexer.Token(lexer.TokenType.NUMBER, '3', 1, 2),
+        lexer.Token(lexer.TokenType.CLOSE_BRACKET, ']', 1, 3),
+        lexer.Token(lexer.TokenType.INT, 'int', 1, 4),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'arr', 1, 7),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 10),
+    ]
+    p = parser.Parser(tokens)
+
+    assert parser.VarDecl(name='arr', var_type=parser.ArrayTypeExpr(size=3, element_type='int')) == p.parse_statement()
+
+
+def test_parse_statement_return_no_value():
+    tokens = [
+        lexer.Token(lexer.TokenType.RETURN, 'return', 1, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 7),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got TokenType.EOF (\'\') at line 1, column 7')):
+        p.parse_statement()
+
+
+def test_parse_statement_return():
+    tokens = [
+        lexer.Token(lexer.TokenType.RETURN, 'return', 1, 1),
+        lexer.Token(lexer.TokenType.NUMBER, '5', 1, 8),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 9),
+    ]
+    p = parser.Parser(tokens)
+
+    assert parser.Return(value=parser.Constant(value=5)) == p.parse_statement()
+
+
+def test_parse_statement_if_no_expression():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 3),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got TokenType.EOF (\'\') at line 1, column 3')):
+        p.parse_statement()
+
+
+def test_parse_statement_if_no_colon():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 3),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 7),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected \':\' to start the if body at line 1, column 7')):
+        p.parse_statement()
+
+
+def test_parse_statement_if_no_newline():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 3),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 7),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 8),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected a newline after \':\' at line 1, column 8')):
+        p.parse_statement()
+
+
+def test_parse_statement_if_no_indent():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 3),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 7),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 8),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 9),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an indented block at line 1, column 9')):
+        p.parse_statement()
+
+
+def test_parse_statement_if_no_dedent():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 3),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 7),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 8),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 5),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected the end of an indented block at line 2, column 5')):
+        p.parse_statement()
+
+
+def test_parse_statement_if_no_body():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 3),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 7),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 8),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.DEDENT, '', 2, 5),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 6),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected at least one statement in this block')):
+        p.parse_statement()
+
+
+def test_parse_statement_if():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 3),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 7),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 8),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 2, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 2, 6),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 7),
+    ]
+    p = parser.Parser(tokens)
+
+    expected = parser.If(condition=parser.BoolLiteral(value=True), then_body=[parser.ExprStmt(expr=parser.Constant(value=1))])
+
+    assert expected == p.parse_statement()
+
+
+def test_parse_statement_while_no_condition():
+    tokens = [
+        lexer.Token(lexer.TokenType.WHILE, 'while', 1, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 6),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got TokenType.EOF (\'\') at line 1, column 6')):
+        p.parse_statement()
+
+
+def test_parse_statement_while_no_colon():
+    tokens = [
+        lexer.Token(lexer.TokenType.WHILE, 'while', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 6),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 10),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected \':\' to start the while body at line 1, column 10')):
+        p.parse_statement()
+
+
+def test_parse_statement_while_no_newline():
+    tokens = [
+        lexer.Token(lexer.TokenType.WHILE, 'while', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 6),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 10),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 11),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected a newline after \':\' at line 1, column 11')):
+        p.parse_statement()
+
+
+def test_parse_statement_while_no_indent():
+    tokens = [
+        lexer.Token(lexer.TokenType.WHILE, 'while', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 6),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 10),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 11),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 1),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an indented block at line 2, column 1')):
+        p.parse_statement()
+
+
+def test_parse_statement_while_no_dedent():
+    tokens = [
+        lexer.Token(lexer.TokenType.WHILE, 'while', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 6),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 10),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 11),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 5),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected the end of an indented block at line 2, column 5')):
+        p.parse_statement()
+
+
+def test_parse_statement_while_no_body():
+    tokens = [
+        lexer.Token(lexer.TokenType.WHILE, 'while', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 6),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 10),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 11),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.DEDENT, '', 2, 5),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 6),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected at least one statement in this block')):
+        p.parse_statement()
+
+
+def test_parse_statement_while():
+    tokens = [
+        lexer.Token(lexer.TokenType.WHILE, 'while', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 6),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 10),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 11),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.NUMBER, '5', 2, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 2, 6),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 7),
+    ]
+    p = parser.Parser(tokens)
+
+    expected = parser.While(condition=parser.BoolLiteral(value=True), body=[parser.ExprStmt(expr=parser.Constant(value=5))])
+
+    assert expected == p.parse_statement()
+
+
+def test_parse_statement_break():
+    tokens = [
+        lexer.Token(lexer.TokenType.BREAK, 'break', 1, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 6),
+    ]
+    p = parser.Parser(tokens)
+
+    expected = parser.Break()
+
+    assert expected == p.parse_statement()
+
+
+def test_parse_statement_break():
+    tokens = [
+        lexer.Token(lexer.TokenType.CONTINUE, 'continue', 1, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 9),
+    ]
+    p = parser.Parser(tokens)
+
+    expected = parser.Continue()
+
+    assert expected == p.parse_statement()
+
+
+def test_parse_statement_assign_no_value():
+    tokens = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 1, 1),
+        lexer.Token(lexer.TokenType.ASSIGN, '=', 1, 2),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 3),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got TokenType.EOF (\'\') at line 1, column 3')):
+        p.parse_statement()
+
+
+def test_parse_statement_assign():
+    tokens = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 1, 1),
+        lexer.Token(lexer.TokenType.ASSIGN, '=', 1, 2),
+        lexer.Token(lexer.TokenType.NUMBER, '3', 1, 3),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 4),
+    ]
+    p = parser.Parser(tokens)
+
+    expected = parser.Assign(name='a', value=parser.Constant(value=3))
+
+    assert expected == p.parse_statement()
+
+
+# TODO(will): Test parse_expr_stmt_or_index_assign() path.
+
+
+def test_parse_while_empty():
+    tokens = [
+        lexer.Token(lexer.TokenType.EOF, '', 1, 1),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected \'while\' at line 1, column 1')):
+        p.parse_while()
+
+
+def test_parse_while_no_condition():
+    tokens = [
+        lexer.Token(lexer.TokenType.WHILE, 'while', 1, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 6),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got TokenType.EOF (\'\') at line 1, column 6')):
+        p.parse_while()
+
+
+def test_parse_while_no_colon():
+    tokens = [
+        lexer.Token(lexer.TokenType.WHILE, 'while', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 6),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 10),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected \':\' to start the while body at line 1, column 10')):
+        p.parse_while()
+
+
+def test_parse_while_no_newline():
+    tokens = [
+        lexer.Token(lexer.TokenType.WHILE, 'while', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 6),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 10),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 11),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected a newline after \':\' at line 1, column 11')):
+        p.parse_while()
+
+
+def test_parse_while_no_indent():
+    tokens = [
+        lexer.Token(lexer.TokenType.WHILE, 'while', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 6),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 10),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 11),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 1),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an indented block at line 2, column 1')):
+        p.parse_while()
+
+
+def test_parse_while_no_dedent():
+    tokens = [
+        lexer.Token(lexer.TokenType.WHILE, 'while', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 6),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 10),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 11),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 5),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected the end of an indented block at line 2, column 5')):
+        p.parse_while()
+
+
+def test_parse_while_no_body():
+    tokens = [
+        lexer.Token(lexer.TokenType.WHILE, 'while', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 6),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 10),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 11),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.DEDENT, '', 2, 5),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 6),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected at least one statement in this block')):
+        p.parse_while()
+
+
+def test_parse_while():
+    tokens = [
+        lexer.Token(lexer.TokenType.WHILE, 'while', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 6),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 10),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 11),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.BREAK, 'break', 2, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 2, 6),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 7),
+    ]
+    p = parser.Parser(tokens)
+
+    expected = parser.While(condition=parser.BoolLiteral(value=True), body=[parser.Break()])
+
+    assert expected == p.parse_while()
+
+
+def test_parse_break_emtpy():
+    tokens = [
+        lexer.Token(lexer.TokenType.EOF, '', 1, 1),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected \'break\' at line 1, column 1')):
+        p.parse_break()
+
+
+def test_parse_break():
+    tokens = [
+        lexer.Token(lexer.TokenType.BREAK, 'break', 1, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 6),
+    ]
+    p = parser.Parser(tokens)
+
+    expected = parser.Break()
+
+    assert expected == p.parse_break()
+
+
+def test_parse_continue_emtpy():
+    tokens = [
+        lexer.Token(lexer.TokenType.EOF, '', 1, 1),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected \'continue\' at line 1, column 1')):
+        p.parse_continue()
+
+
+def test_parse_break():
+    tokens = [
+        lexer.Token(lexer.TokenType.CONTINUE, 'continue', 1, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 9),
+    ]
+    p = parser.Parser(tokens)
+
+    expected = parser.Continue()
+
+    assert expected == p.parse_continue()
+
+
+def test_parse_if_empty():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 3),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got TokenType.EOF (\'\') at line 1, column 3')):
+        p.parse_if()
+
+
+def test_parse_if_no_colon():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 4),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 8),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected \':\' to start the if body at line 1, column 8')):
+        p.parse_if()
+
+
+def test_parse_if_no_newline():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 4),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 9),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected a newline after \':\' at line 1, column 9')):
+        p.parse_if()
+
+
+def test_parse_if_no_indent():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 4),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 1),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an indented block at line 2, column 1')):
+        p.parse_if()
+
+
+def test_parse_if_no_dedent():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 4),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 5),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected the end of an indented block at line 2, column 5')):
+        p.parse_if()
+
+
+def test_parse_if_no_body():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 4),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.DEDENT, '', 2, 5),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 6),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected at least one statement in this block')):
+        p.parse_if()
+
+
+def test_parse_if():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 4),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.STRING, '\'hi\'', 2, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 2, 7),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 8),
+    ]
+    p = parser.Parser(tokens)
+
+    expected = parser.If(condition=parser.BoolLiteral(value=True), then_body=[parser.ExprStmt(expr=parser.StringLiteral(value='hi'))])
+
+    assert expected == p.parse_if()
+
+
+# TODO(will): Test parse_if() through elif and else.
