@@ -14,10 +14,18 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
+- `print()` for slices and arrays.
+- Void type (none, nil?).
+- `len` function.
+- Index into unnamed slices.
+- Slices in arrays.
+- `in` keyword.
+- Pass and return slices.
+- Slice literals.
+- Array literals?
 - Ternary.
 - For loops.
 - Free memory `malloc`ed by string concatenation.
-- Void type (none, nil?).
 - Bounds Check Elimination.
 - Stack based params to get around parameter limit.
 - Pass array literals to function calls.
@@ -29,6 +37,3 @@ Updates:
 - GC...
 - `is` keyword.
 - Pointers?
-- `in` keyword.
-- Index into unnamed slices.
-- Slices in arrays.

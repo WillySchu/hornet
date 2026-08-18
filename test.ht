@@ -4,7 +4,8 @@ def str main():
     print(hello() + ' ' + world('!'))
     [3]int ints = [1, 2, 3]
     print(ints[0])
-    print(ints[3])
+    [3]int ints2
+    ints2 = [4, 5, 6]
     return ''
 
 

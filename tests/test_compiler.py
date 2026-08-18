@@ -42,9 +42,11 @@ Organization:
     TestArrays                          (26 tests)
     TestBoundsChecking                  ( 4 tests)
     TestHeapAllocatedArrays             (12 tests)
+    TestSlices                          (10 tests)
+    TestSliceBoundsChecking             ( 6 tests)
     TestSemanticErrors                  (76 tests)
                                         ----------
-                                        312 tests total
+                                        328 tests total
 
 A NOTE ON ARRAYS
 -----------------------------------------------------------------
@@ -122,6 +124,49 @@ ARRAYS section for why. test_heap_allocated_array_as_return_type is
 the positive control proving array returns needed no changes at all --
 they already write through a caller-provided pointer regardless of
 size.
+
+A NOTE ON TestSlices AND TestSliceBoundsChecking
+-----------------------------------------------------------------
+A slice is a Go-style VIEW into an existing array or slice's own
+backing storage -- a fixed {pointer, length} descriptor (16 bytes),
+not a copy the way plain array assignment already is (see codegen.py's
+SLICES section for the full design). test_slice_write_mutates_
+underlying_array and test_overlapping_slices_alias_each_others_writes
+are the two tests that actually prove that holds at the machine-code
+level, not just conceptually -- writing through a slice has to be
+visible through the array it came from, and through any OTHER slice
+that overlaps it, or slices would just be a more awkward way to copy
+an array.
+
+test_slicing_a_slice is the hardest case exercised directly: the base
+being sliced is itself a slice, so its own length is a runtime value
+read out of its descriptor rather than a compile-time constant the
+way an array base's is -- this is what actually exercises
+gen_indexable_base_into's two different code paths, not just the
+array one.
+
+TestSliceBoundsChecking exists because slice bounds needed a genuinely
+different comparison from ordinary indexing's, not just a reused
+check with a different message: `low == length` and `high == length`
+are both VALID slice bounds (`arr[5:5]` is a valid, empty-slice-
+producing expression), unlike an ordinary index, where being equal to
+the array's own size is already invalid. test_low_equals_high_equals_
+length_is_valid is the positive control proving that boundary is
+exactly right (a strict `ja`, not `jae`) -- getting this wrong in
+either direction would either reject valid empty slices or silently
+accept a genuinely out-of-range one.
+
+test_slice_parameter_not_supported_yet and
+test_slice_return_not_supported_yet aren't gaps found by accident --
+each was caught by deliberately compiling exactly that case and
+checking the generated assembly, before any test asserted anything
+about it: neither was rejected at first, and a slice's own 16-byte
+descriptor was silently truncated down to whatever fit in one 32-bit
+register instead. Both a function parameter and a return value are
+meant to cross a function boundary via two registers directly (the
+two-register decision for slice parameters/returns), not through the
+stack-slot or hidden-pointer mechanisms arrays use -- that convention
+is real, separable follow-up work, not implemented yet.
 
 A NOTE ON TestAllPathsReturn
 -----------------------------------------------------------------
@@ -3038,6 +3083,248 @@ class TestHeapAllocatedArrays:
             "    return mix(1, 'hi', small, huge)\n",
             104,
         )
+
+
+# ---------------------------------------------------------------------------
+# Slices: Go-style views into an existing array or slice's own backing
+# storage -- a fixed {pointer, length} descriptor (16 bytes), NOT a
+# copy the way plain array assignment already is. This first pass is
+# deliberately view-only: no append, no growth, no capacity -- just
+# `base[low:high]`, both bounds optionally omitted, backed by whatever
+# array or slice `base` already is.
+#
+# test_slice_write_mutates_underlying_array and
+# test_overlapping_slices_alias_each_others_writes are the two tests
+# that actually prove the entire point of this feature holds at the
+# machine-code level, not just conceptually: a slice is a genuine
+# alias, so writing through one must be visible through the array it
+# came from, and through any OTHER slice that overlaps it -- if either
+# of these failed, slices would just be a more awkward way to copy an
+# array, not a real view.
+#
+# Any array that's ever sliced is unconditionally heap-allocated (see
+# codegen.py's is_heap_allocated and its own ARRAYS section) --
+# reusing the size-based promotion machinery with a second trigger --
+# specifically so a slice can never outlive the stack frame its
+# backing array would otherwise have lived in. That promotion isn't
+# exercised directly in this class; it's implicit in every test here
+# that slices anything, since the alternative (a dangling view into a
+# torn-down stack frame) is exactly the memory-safety hole this
+# feature was scoped to close from day one.
+# ---------------------------------------------------------------------------
+
+class TestSlices:
+    pytestmark = GCC_SKIP
+
+    def test_basic_slice_declare_and_index_read(self):
+        assert_exit_code(
+            "    [5]int arr = [10, 20, 30, 40, 50]\n"
+            "    []int s = arr[1:4]\n"
+            "    return s[0] + s[1] + s[2]",
+            90,
+        )
+
+    def test_omitted_bounds(self):
+        """All three omitted-bound forms together: `arr[:]` (both),
+        `arr[2:]` (high only), `arr[:3]` (low only)."""
+        assert_exit_code(
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int a = arr[:]\n"
+            "    []int b = arr[2:]\n"
+            "    []int c = arr[:3]\n"
+            "    return a[4] + b[0] + c[2]",
+            11,
+        )
+
+    def test_slicing_a_slice(self):
+        """The trickiest case for gen_indexable_base_into/gen_slice_
+        into: the BASE being sliced is itself a slice, so its own
+        length is a runtime value read out of its descriptor, not a
+        compile-time constant the way an array base's is."""
+        assert_exit_code(
+            "    [6]int arr = [1, 2, 3, 4, 5, 6]\n"
+            "    []int s = arr[1:5]\n"
+            "    []int s2 = s[1:3]\n"
+            "    return s2[0] + s2[1]",
+            7,
+        )
+
+    def test_indexing_slice_with_variable_index(self):
+        assert_exit_code(
+            "    [5]int arr = [10, 20, 30, 40, 50]\n"
+            "    []int s = arr[1:4]\n"
+            "    int i = 1\n"
+            "    return s[i]",
+            30,
+        )
+
+    def test_slicing_outer_dimension_of_2d_array(self):
+        """`matrix[0:2]` yields a slice of ROWS ([][3]int), not a
+        slice of ints -- confirmed by indexing two levels deep into
+        the result."""
+        assert_exit_code(
+            "    [3][3]int matrix = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]\n"
+            "    [][3]int rows = matrix[0:2]\n"
+            "    return rows[0][0] + rows[1][2]",
+            7,
+        )
+
+    def test_whole_slice_assignment(self):
+        """`s2 = s1` copies s1's own {ptr, len} DESCRIPTOR into s2's
+        slot -- after which s2 aliases whatever s1 aliased, not
+        whatever s2 originally pointed at."""
+        assert_exit_code(
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s1 = arr[0:3]\n"
+            "    []int s2 = arr[2:5]\n"
+            "    s2 = s1\n"
+            "    return s2[0] + s2[1] + s2[2]",
+            6,
+        )
+
+    def test_slice_write_mutates_underlying_array(self):
+        """The headline property: a slice is a genuine ALIAS into its
+        base's own storage, not a copy -- writing through a slice
+        index must be visible through the array it came from too."""
+        assert_exit_code(
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s = arr[1:4]\n"
+            "    s[0] = 999\n"
+            "    return arr[1] == 999 and s[0] == 999",
+            1,
+            return_type="bool",
+        )
+
+    def test_overlapping_slices_alias_each_others_writes(self):
+        assert_exit_code(
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s1 = arr[0:3]\n"
+            "    []int s2 = arr[1:4]\n"
+            "    s1[1] = 777\n"
+            "    return s2[0] == 777",
+            1,
+            return_type="bool",
+        )
+
+    def test_slice_parameter_not_supported_yet(self):
+        """A real, deliberate gap -- not silent mishandling. A slice
+        is meant to cross a function boundary via two registers
+        directly (the two-register decision for slice parameters/
+        returns), not through a stack slot the way an ordinary
+        parameter's copy-on-entry works -- that mechanism hasn't been
+        built yet. Found during development by proactively testing
+        this exact case, not by waiting for it to be reported: without
+        this check, the parameter loop silently treated a slice's own
+        16-byte descriptor as if it were a plain 4-byte int, truncating
+        it rather than raising any error at all."""
+        source = (
+            "def int first([]int s):\n"
+            "    return s[0]\n"
+            "\n"
+            "def int main():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s = arr[1:4]\n"
+            "    return first(s)\n"
+        )
+        ast = _parse(source)
+        analyze(ast)  # semantically fine -- the gap is codegen-level only
+        with pytest.raises(CodegenError, match="slice parameters are not supported yet"):
+            generate_asm(ast, platform=ASM_PLATFORM)
+
+    def test_slice_return_not_supported_yet(self):
+        """The return-side counterpart to the parameter gap above --
+        also found by proactively testing, not by waiting for a
+        report: falling through to the ordinary scalar return path
+        would otherwise raise too (gen_expr_into's own Variable-case
+        rejection), but with a less specific message, so this is
+        checked explicitly in gen_return itself instead."""
+        source = (
+            "def []int make():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    return arr[1:4]\n"
+            "\n"
+            "def int main():\n"
+            "    []int s = make()\n"
+            "    return s[0]\n"
+        )
+        ast = _parse(source)
+        analyze(ast)  # semantically fine -- the gap is codegen-level only
+        with pytest.raises(CodegenError, match="Returning a slice .* is not supported yet"):
+            generate_asm(ast, platform=ASM_PLATFORM)
+
+
+class TestSliceBoundsChecking:
+    """Slice bounds get their own message ("slice bounds out of
+    range", distinct from ordinary indexing's "array index out of
+    bounds") and their own comparison: `ja` (strictly "above"), not
+    `jae` -- unlike an ordinary index, where being equal to the
+    array's own size is already invalid, a slice's low/high are both
+    allowed to equal the base's length (`arr[5:5]` is a valid, empty-
+    slice-producing expression). test_low_equals_high_equals_length_
+    is_valid is the positive control proving that boundary is exactly
+    right, not off by one in either direction.
+    """
+    pytestmark = GCC_SKIP
+
+    def test_index_into_slice_out_of_bounds_aborts(self):
+        assert_crashes_with_sigabrt(
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s = arr[1:4]\n"
+            "    int i = 10\n"
+            "    return s[i]"
+        )
+
+    def test_low_greater_than_high_aborts(self):
+        assert_crashes_with_sigabrt(
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    int lo = 3\n"
+            "    int hi = 1\n"
+            "    []int s = arr[lo:hi]\n"
+            "    return s[0]"
+        )
+
+    def test_high_greater_than_length_aborts(self):
+        assert_crashes_with_sigabrt(
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    int hi = 10\n"
+            "    []int s = arr[0:hi]\n"
+            "    return s[0]"
+        )
+
+    def test_negative_low_aborts(self):
+        assert_crashes_with_sigabrt(
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    int lo = 0 - 1\n"
+            "    []int s = arr[lo:3]\n"
+            "    return s[0]"
+        )
+
+    def test_low_equals_high_equals_length_is_valid(self):
+        """The positive control: `arr[5:5]` on a 5-element array must
+        NOT abort -- it's a valid expression producing an empty
+        slice -- proof the `ja` (not `jae`) choice is exactly right."""
+        assert_exit_code(
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s = arr[5:5]\n"
+            "    return 42",
+            42,
+        )
+
+    def test_slice_bounds_panic_message(self):
+        """Regression-style check that the slice-specific message is
+        actually the one printed, not the ordinary indexing one --
+        confirming the bounds-check panic infrastructure's
+        generalization to multiple, distinct messages (see
+        codegen.py's _get_bounds_check_fail_label) works correctly."""
+        result = compile_and_run(
+            "def int main():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    int hi = 10\n"
+            "    []int s = arr[0:hi]\n"
+            "    return s[0]\n"
+        )
+        assert result.returncode == -signal.SIGABRT
+        assert "slice bounds out of range" in result.stdout
 
 
 # ---------------------------------------------------------------------------

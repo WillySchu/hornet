@@ -613,11 +613,133 @@ at the workaround: assign it to a named variable first
 equality (`==`/`!=`) is rejected at the semantic level for a related
 reason -- a real, well-defined feature to consider later, just not
 implemented yet (see semantic.py's check_binary).
+
+SLICES
+-------
+A view-only, Go-style slice: a fixed 16-byte {pointer, length}
+descriptor (type_byte_width returns 16 for TypeKind.SLICE regardless
+of element type -- two slices of different element types are still
+both 16 bytes, unlike two arrays), NOT a copy of whatever it's a slice
+of. `base[low:high]` -- both bounds optional, independently -- reads
+either an existing array's or an existing slice's own backing storage
+directly; no append, no growth, no capacity. This is what makes a
+slice write visible through the array (or other slice) it came from:
+unlike `arr2 = arr1`, which copies elements, a slice's whole point is
+to alias, not copy.
+
+SAFETY: WHY EVERY SLICED ARRAY IS HEAP-ALLOCATED
+-------------------------------------------------------
+Slicing something that lives on the stack creates a real dangling-
+pointer risk the moment the function that declared it returns -- a
+problem plain arrays never had, since every array-typed value is
+always either copied (assignment, parameter passing) or written
+through a caller-provided pointer before the frame that held it tears
+down (return values). A slice is different in kind: it's designed to
+outlive the exact call that created it, aliasing storage that has to
+still be there afterward.
+
+Rather than build a real escape-analysis pass to decide case by case
+which sliced arrays actually need to survive, ANY array that's ever
+sliced is unconditionally heap-allocated (see is_heap_allocated's
+second trigger condition, alongside the existing size threshold) --
+reusing the exact machinery size-based stack safety already built and
+tested, not a new mechanism. This is conservative (an array sliced
+only for strictly local use still gets promoted, even though nothing
+about that particular slice needed to survive the function), but it's
+memory-safe by construction and needed zero new allocation or
+addressing logic: gen_array_address_into and gen_indexable_base_into
+below already handle a heap- vs. stack-allocated array identically,
+so a sliced array simply flows through the same paths every heap-
+promoted array already does.
+
+ADDRESS AND LENGTH: gen_indexable_base_into
+-----------------------------------------------
+Indexing into a slice (`s[i]`) and slicing one (`s[low:high]`) both
+need exactly the same information about whatever's on the left of the
+`[...]`: an address to compute from, and a length to bounds-check
+against. gen_indexable_base_into returns both uniformly, regardless of
+which kind of base it's given -- an Imm (compile-time constant) for an
+array base, or a register loaded from the slice's own descriptor (a
+genuine runtime value) for a slice base -- so gen_index_address_into's
+own bounds-check comparison, and gen_slice_into's three-way one,
+each just work with whichever Operand comes back, uniformly, with no
+separate code path needed per base kind.
+
+The base must be a bare Variable when it's slice-typed -- not another
+Slice (or, in principle, an Index yielding a slice, though that's not
+otherwise reachable yet) node directly. A Slice expression's own
+result is a freshly computed descriptor with no pre-existing address
+to take; chaining `[...]` straight off one (`arr[1:5][0:2]`, or
+`matrix[0:2][1]` without first naming `matrix[0:2]`) isn't supported
+yet -- assign the intermediate result to a named variable first
+(`[][3]int rows = matrix[0:2]; rows[1]`), which already works, since
+THAT base is an ordinary Variable. A real, deliberate scope boundary,
+not an oversight: supporting it would need a temporary-materialization
+mechanism (somewhere to put a slice value that has no variable of its
+own yet) that doesn't exist, and neither of the two use cases this
+feature was actually scoped around -- slicing a named slice, slicing a
+named array's outer dimension -- needs it.
+
+BOUNDS CHECKING: A DIFFERENT BOUNDARY THAN INDEXING'S OWN
+-----------------------------------------------------------------
+Slice bounds needed a genuinely different comparison from ordinary
+indexing's, not just a reused check with a different message: an
+ordinary index equal to the array's own size is already invalid
+(`Jae`, jump if >=), but a slice's low and high are BOTH allowed to
+equal the base's own length (`arr[5:5]` on a 5-element array is a
+valid, empty-slice-producing expression) -- so this needed a new,
+strict comparison (Ja, jump if strictly >), not Jae reused wholesale.
+Both still catch a negative bound via the same unsigned-
+reinterpretation trick Jae already relies on.
+
+Slice-bounds failures get their own panic message ("slice bounds out
+of range", distinct from ordinary indexing's "array index out of
+bounds") -- which is what actually forced the bounds-check panic
+infrastructure to generalize from a single hardcoded message to a
+dict keyed by message text, each with its own per-function fail label
+and program-wide-cached message label, rather than everything sharing
+the one panic block indexing already had.
+
+gen_slice_into's OWN REGISTER DISCIPLINE
+--------------------------------------------
+Every intermediate value (the base's address, its length, high, low)
+is protected on the real CPU stack across evaluating whichever of
+low/high are actually present -- each could be an arbitrarily complex
+expression, including a function call -- rather than assumed to
+survive in whatever register initially held it. Pushed in a specific
+order (address, then length if it's a runtime value, then high, then
+low) and popped in exact reverse, so nothing ever needs to be read out
+of the middle of the stack, with one deliberate exception: defaulting
+`high` to the base's own RUNTIME length reads it via a plain peek at
+the top of the stack (`(%rsp)`, no pop) at the one point where doing so
+is safe -- nothing has been pushed since the length was, and peeking
+rather than popping keeps it protected for the bounds check that
+comes later, without needing a separate temporary slot just to hold a
+value that's already sitting exactly where it needs to be.
+
+SCOPE: WHAT THIS DOESN'T COVER YET
+--------------------------------------
+An array whose ELEMENTS are themselves slices (`[3][]int`) isn't
+supported -- gen_array_copy and gen_array_literal_into both raise a
+clear error rather than silently truncating a 16-byte descriptor down
+to a 4-or-8-byte scalar move, which is all their existing flat-copy
+logic knows how to do. A genuinely separable follow-up once plain
+slices are solid, not a gap discovered after the fact.
+
+Slice function PARAMETERS and RETURN VALUES are also not supported --
+gen_function's parameter loop and gen_return both raise a clear
+CodegenError, found by deliberately testing exactly these cases before
+anything else assumed they worked, not by accident. Both are meant to
+cross a function boundary via two registers directly (simpler than
+arrays' own hidden-pointer/copy-on-entry machinery, since a slice's
+descriptor is small and fixed-size rather than arbitrarily large) --
+real, well-understood, separable work, deliberately scoped out of this
+pass rather than rushed.
 """
 
 import argparse
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Tuple, Union
 
 from lexer import lex
 from parser import (
@@ -640,6 +762,7 @@ from parser import (
     Parser,
     Program,
     Return,
+    Slice,
     StringLiteral,
     Unary,
     UnaryOp,
@@ -1115,6 +1238,27 @@ class Jae(Instruction):
 
 
 @dataclass
+class Ja(Instruction):
+    """Jump to `target` if the last Cmp found dst > src (STRICTLY
+    greater), using an UNSIGNED interpretation -- the strict-
+    inequality counterpart to Jae, needed for slice bounds checking
+    specifically (see gen_slice_into): `low == length` and
+    `high == length` are both VALID slice bounds (`arr[5:5]` on a
+    5-element array is a valid, empty-slice-producing expression),
+    unlike ordinary indexing, where an index equal to the array's own
+    size is already out of bounds -- so the boundary condition itself
+    genuinely differs here, not just the label it jumps to. Still
+    catches a negative value via the same unsigned-reinterpretation
+    trick Jae relies on: a negative int, reinterpreted unsigned,
+    becomes huge, and so is "above" any non-negative length."""
+    target: str
+    mnemonic = "ja"
+
+    def operands(self) -> List[str]:
+        return [self.target]
+
+
+@dataclass
 class Ret(Instruction):
     mnemonic = "ret"
 
@@ -1206,16 +1350,22 @@ _CALLEE_SAVED_SCRATCH_REGISTERS = ['rbx', 'r12', 'r13', 'r14']
 
 def type_byte_width(t: Type) -> int:
     """Total bytes needed to store a value of type `t`: 4 for int/bool,
-    8 for str (a pointer), and recursively `size *
-    type_byte_width(element_type)` for an array -- its full, flattened
-    stack footprint, matching how it's laid out contiguously in
-    row-major order regardless of how many dimensions it has (see the
-    ARRAYS section). This is the one place that recursion lives; every
-    caller that needs an array's total size (stack allocation, whole-
-    array copies) or the shift-per-index (address computation) goes
-    through this or leaf_type below rather than re-deriving either."""
+    8 for str (a pointer), 16 for a slice (its own fixed-size
+    descriptor -- see the SLICES section -- regardless of what it's a
+    slice OF: two slices of different element types are still both 16
+    bytes, unlike two arrays of different element types or sizes),
+    and recursively `size * type_byte_width(element_type)` for an
+    array -- its full, flattened stack footprint, matching how it's
+    laid out contiguously in row-major order regardless of how many
+    dimensions it has (see the ARRAYS section). This is the one place
+    that recursion lives; every caller that needs an array's total
+    size (stack allocation, whole-array copies) or the shift-per-index
+    (address computation) goes through this or leaf_type below rather
+    than re-deriving either."""
     if t.kind == TypeKind.ARRAY:
         return t.size * type_byte_width(t.element_type)
+    if t.kind == TypeKind.SLICE:
+        return 16
     if t.kind == TypeKind.STR:
         return 8
     return 4  # INT, BOOL
@@ -1229,7 +1379,17 @@ def leaf_type(t: Type) -> Type:
     whether a flat element-by-element copy should move 4 or 8 bytes at
     a time -- a multi-dimensional array is just one contiguous block
     of leaf values for copying purposes, with no per-dimension logic
-    needed once this is known."""
+    needed once this is known.
+
+    Stops at a SLICE the same way it already stops at STR -- neither
+    is unwrapped further, since both are copied as one fixed-size
+    unit (a pointer, or a {pointer, length} pair) rather than
+    recursed into element by element. An array whose ELEMENTS are
+    themselves slices (`[3][]int`) is a real gap this leaves --
+    gen_array_copy's own flat-copy loop only knows how to move 4 or 8
+    bytes at a time, not a slice descriptor's 16 -- see its own
+    docstring for the explicit, deliberate rejection this leads to,
+    rather than a silent miscompile."""
     while t.kind == TypeKind.ARRAY:
         t = t.element_type
     return t
@@ -1306,11 +1466,14 @@ class CodeGenerator:
         self._false_str_label = None
         # Lazily created, but with different lifetimes from each other
         # -- see _get_bounds_check_fail_label/_get_bounds_check_message_
-        # label's own docstrings. The fail label is reset per function
-        # (gen_function); the message label, like the print-related
-        # ones above, is cached for the whole compilation.
-        self._bounds_check_fail_label = None
-        self._bounds_check_message_label = None
+        # label's own docstrings. The fail labels are reset per function
+        # (gen_function); the message labels, like the print-related
+        # ones above, are cached for the whole compilation. Both are
+        # dicts keyed by message text, since a function can trigger more
+        # than one distinct bounds-check message (e.g. plain indexing
+        # vs. a slice expression's own bounds).
+        self._bounds_check_fail_labels = {}
+        self._bounds_check_message_labels = {}
         # Set fresh at the start of every gen_function call -- see its
         # own comments -- to either None (this function's own return
         # type isn't an array) or the %rbp offset of the stack slot
@@ -1470,6 +1633,22 @@ class CodeGenerator:
                 else:
                     instructions.append(MovQ(src=Memory('rbp', temp_offset), dst=Register('rbx')))
                     instructions.extend(self.gen_array_copy(Memory('rbp', offset), Memory('rbx', 0), p_type))
+            elif p_type.kind == TypeKind.SLICE:
+                # Not supported yet -- see gen_return's own array-return
+                # check for why this is the same deliberately scoped-
+                # out piece of work (a calling-convention extension: a
+                # slice is meant to cross a function boundary via two
+                # registers directly, per the two-register decision for
+                # slice parameters/returns, not through a stack slot the
+                # way this parameter loop currently assumes). Silently
+                # falling through to the int/bool branch below would
+                # miscompile: a slice's own 16-byte descriptor would be
+                # truncated down to whatever fits in one 32-bit register.
+                raise CodegenError(
+                    f"Parameter '{p.name}' of function '{fn.name}' is "
+                    f"slice-typed ({p_type}) -- slice parameters are not "
+                    f"supported yet"
+                )
             elif p_type == Type.STR:
                 instructions.append(MovQ(src=Memory('rbp', temp_offset), dst=Register('rax')))
                 instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
@@ -1477,7 +1656,7 @@ class CodeGenerator:
                 instructions.append(Mov(src=Memory('rbp', temp_offset), dst=Register('eax')))
                 instructions.append(Mov(src=Register('eax'), dst=Memory('rbp', offset)))
 
-        self._bounds_check_fail_label = None  # fresh, per-function jump target; see its own docstring
+        self._bounds_check_fail_labels = {}  # fresh, per-function jump targets; see their own docstring
         for stmt in fn.body:
             instructions.extend(self.gen_statement(stmt))
         instructions.extend(self._gen_bounds_check_panic_block())
@@ -1670,6 +1849,49 @@ class CodeGenerator:
     # gen_function's existing parameter loop, both of which raise a
     # clear CodegenError rather than silently mishandling one.
 
+    def gen_indexable_base_into(self, expr: Node, addr_dst: Register, len_dst: Register) -> Tuple[List[Instruction], Union[Imm, Register]]:
+        """Computes the address of `expr`'s own data into `addr_dst`,
+        and returns (instructions, length_operand): length_operand is
+        an Imm (a compile-time constant) when `expr` is array-typed,
+        or `len_dst` itself (populated with a runtime value read out
+        of a slice's own descriptor) when `expr` is slice-typed.
+        Shared by gen_index_address_into (indexing, `base[i]`) and
+        gen_slice_into (slicing, `base[low:high]`) -- both need
+        exactly this same "address plus length, however each is
+        represented" information about whatever's on the left of a
+        `[...]` expression, and both already have to branch on which
+        kind of Operand comes back for their own bounds-check
+        comparison.
+
+        `expr` must be a Variable or an Index -- not another Slice
+        node directly. A Slice expression's own result is a freshly
+        computed descriptor with no pre-existing address to take;
+        chaining `[...]` straight off one (`arr[1:5][0:2]`, or
+        `matrix[0:2][1]` without first naming `matrix[0:2]`) isn't
+        supported yet -- assign the intermediate result to a named
+        variable first (`[][3]int rows = matrix[0:2]; rows[1]`), which
+        already works, since THAT base is an ordinary Variable.
+        """
+        base_type = self._type_of(expr)
+        if base_type.kind == TypeKind.ARRAY:
+            instructions = self.gen_array_address_into(expr, addr_dst)
+            return instructions, Imm(base_type.size)
+        if base_type.kind == TypeKind.SLICE:
+            if not isinstance(expr, Variable):
+                raise CodegenError(
+                    f"Cannot use a {type(expr).__name__} directly as "
+                    f"the base of an index or slice expression when "
+                    f"it's slice-typed -- assign it to a named "
+                    f"variable first"
+                )
+            offset = self._local_offset(expr.name)
+            instructions = [
+                MovQ(src=Memory('rbp', offset + 8), dst=len_dst),
+                MovQ(src=Memory('rbp', offset), dst=addr_dst),
+            ]
+            return instructions, len_dst
+        raise CodegenError(f"Cannot index or slice a value of type {base_type}")
+
     def gen_array_address_into(self, expr: Node, dst: Register) -> List[Instruction]:
         """Computes the ADDRESS of an array-typed expression -- a
         Variable referring to an array-typed local, or an Index node
@@ -1711,6 +1933,16 @@ class CodeGenerator:
         case, via gen_array_address_into above, when `expr.array` is
         itself an Index).
 
+        `expr.array` can now be array- OR slice-typed (indexing into a
+        slice, `s[i]`, uses this exact same method) -- see
+        gen_indexable_base_into for how the base's address and length
+        are computed either way. For an array base, the length is an
+        Imm known at compile time; for a slice base, it's a runtime
+        value read out of the slice's own descriptor, kept alive in
+        `len_reg` (picked dynamically, distinct from `dst`, the same
+        way gen_array_copy's own scratch register is) across
+        evaluating the index expression.
+
         Includes a runtime bounds check: an out-of-range index prints a
         message and calls abort() (see _gen_bounds_check_panic_block)
         rather than silently reading or writing adjacent stack memory
@@ -1720,31 +1952,45 @@ class CodeGenerator:
         state that keeps `call`/`ret` working correctly, not just
         return a wrong value.
 
-        `expr.array`'s own address is computed first and protected on
-        the real CPU stack (not a fixed register) while the index
-        expression -- which could be arbitrarily complex, including
-        another indexing operation or a function call -- is evaluated,
-        the same push-before-recursing pattern used everywhere else in
-        this file a value needs to survive evaluating something else.
-        This works out correctly no matter what register `dst` itself
-        is (including if it happens to coincide with the %rax/%rcx
-        this method uses internally): the base address is safely on
-        the stack while %rax/%rcx are used for the index/offset
-        arithmetic, and the final address is only ever written into
-        `dst` as the very last step.
+        `expr.array`'s own address (and, for a slice base, its length
+        too) is computed first and protected on the real CPU stack (not
+        a fixed register) while the index expression -- which could be
+        arbitrarily complex, including another indexing operation or a
+        function call -- is evaluated, the same push-before-recursing
+        pattern used everywhere else in this file a value needs to
+        survive evaluating something else. This works out correctly no
+        matter what register `dst` itself is (including if it happens
+        to coincide with the %rax/%rcx this method uses internally): every
+        value that needs to survive is protected on the stack, and the
+        final address is only ever written into `dst` as the very last
+        step.
         """
         array_type = self._type_of(expr.array)
         element_stride = type_byte_width(array_type.element_type)
-        size = array_type.size
 
-        instructions = self.gen_array_address_into(expr.array, dst)
+        # len_reg only matters for a slice base (a runtime length);
+        # picked dynamically, distinct from dst, since dst could in
+        # principle be any register a caller passes.
+        len_reg = Register('rdx' if dst.name != 'rdx' else 'r10')
+
+        instructions, length_operand = self.gen_indexable_base_into(expr.array, dst, len_reg)
         instructions.append(Push(dst))
+        is_runtime_length = isinstance(length_operand, Register)
+        if is_runtime_length:
+            instructions.append(Push(len_reg))
+
         instructions.extend(self.gen_expr_into(expr.index, Register('eax')))
-        # Unsigned comparison: catches index >= size AND index < 0 in
+
+        # Unsigned comparison: catches index >= length AND index < 0 in
         # one check, since a negative int, reinterpreted unsigned,
         # becomes a huge positive number.
-        instructions.append(Cmp(src=Imm(size), dst=Register('eax')))
-        instructions.append(Jae(self._get_bounds_check_fail_label()))
+        if is_runtime_length:
+            instructions.append(Pop(len_reg))
+            len_reg_32 = Register({'rdx': 'edx', 'r10': 'r10d'}[len_reg.name])
+            instructions.append(Cmp(src=len_reg_32, dst=Register('eax')))
+        else:
+            instructions.append(Cmp(src=length_operand, dst=Register('eax')))
+        instructions.append(Jae(self._get_bounds_check_fail_label("array index out of bounds")))
         # A plain 32-bit imul is safe here: the bounds check above
         # already guarantees the index is small and non-negative, and
         # a 32-bit write zero-extends into the full 64-bit rax.
@@ -1753,6 +1999,159 @@ class CodeGenerator:
         instructions.append(AddQ(src=Register('rax'), dst=Register('rcx')))
         instructions.append(MovQ(src=Register('rcx'), dst=dst))
         return instructions
+
+    def gen_slice_into(self, expr: Slice, dst_mem: Memory) -> List[Instruction]:
+        """Generates `expr.array[expr.low:expr.high]`'s resulting
+        {ptr, len} descriptor directly into dst_mem (ptr at
+        offset+0, len at offset+8) -- the slice counterpart to
+        gen_array_value_into, dispatched from gen_slice_value_into
+        wherever a slice-typed value needs to be produced.
+
+        The base's own address and length are computed first (see
+        gen_indexable_base_into -- an Imm for an array base, a
+        runtime value read out of the descriptor for a slice base),
+        then `low` and `high` are resolved -- each defaulting to 0 /
+        the base's own length respectively when omitted (see Slice's
+        own docstring in parser.py for why both stay None at parse
+        time rather than one being defaulted earlier) -- and finally
+        bounds-checked against each other and the base's length
+        before the resulting ptr/len are computed and written.
+
+        Every intermediate value (the base's address, its length,
+        high, low) is protected on the real CPU stack across
+        evaluating whichever of expr.low/expr.high are present --
+        each of which could be an arbitrarily complex expression,
+        including a function call -- rather than assumed to survive
+        in whatever register initially held it. Pushed in a specific
+        order (address, then length if runtime, then high, then low)
+        and popped in exact reverse, so nothing ever needs to be read
+        out of the middle of the stack -- except for one case:
+        defaulting `high` to the base's own RUNTIME length (a slice
+        base with no explicit high bound) reads it via a plain peek at
+        the top of the stack (`(%rsp)`, no pop), since at that exact
+        point nothing else has been pushed since the length was, and
+        reading it without popping keeps it protected for the bounds
+        check that comes later.
+
+        Bounds checks use `ja` (strictly "above", unsigned), not `jae`
+        -- unlike ordinary indexing (see gen_index_address_into),
+        where an index equal to the array's own size is already out
+        of bounds, `low` and `high` are both allowed to equal the
+        base's own length (`arr[5:5]` on a 5-element array is a valid,
+        empty-slice-producing expression) -- so the boundary itself
+        genuinely differs here, not just the label it jumps to.
+
+        Assumes dst_mem.base is 'rbp' -- an ordinary local slot, not a
+        computed address in some other register -- since nothing in
+        this turn's scope ever generates a slice value anywhere else
+        (slices cross function boundaries via two registers directly,
+        never through a hidden pointer the way arrays' returns are, so
+        there's no equivalent "write through a received address" case
+        yet). Checked explicitly rather than assumed silently, since a
+        wrong assumption here would corrupt whatever dst_mem.base
+        happens to hold, not just produce a wrong slice.
+        """
+        if dst_mem.base != 'rbp':
+            raise CodegenError(
+                "gen_slice_into currently only supports writing into "
+                "an ordinary local slot (dst_mem.base == 'rbp')"
+            )
+
+        base_type = self._type_of(expr.array)
+        element_stride = type_byte_width(base_type.element_type)
+
+        addr_reg = Register('rbx')
+        len_reg = Register('r11')
+        instructions, length_operand = self.gen_indexable_base_into(expr.array, addr_reg, len_reg)
+        is_runtime_length = isinstance(length_operand, Register)
+
+        instructions.append(Push(addr_reg))
+        if is_runtime_length:
+            instructions.append(Push(len_reg))
+
+        # Resolve `high` before `low`, so that defaulting it (when the
+        # base's length is a runtime value) can safely peek the top of
+        # the stack -- nothing else has been pushed since the length
+        # was, right above.
+        if expr.high is not None:
+            instructions.extend(self.gen_expr_into(expr.high, Register('eax')))
+        elif is_runtime_length:
+            instructions.append(Mov(src=Memory('rsp', 0), dst=Register('eax')))
+        else:
+            instructions.append(Mov(src=Imm(base_type.size), dst=Register('eax')))
+        instructions.append(Push(Register('rax')))
+
+        if expr.low is not None:
+            instructions.extend(self.gen_expr_into(expr.low, Register('eax')))
+        else:
+            instructions.append(Mov(src=Imm(0), dst=Register('eax')))
+        instructions.append(Push(Register('rax')))
+
+        low_reg = Register('r10')
+        high_reg = Register('r9')
+        low_32 = Register('r10d')
+        high_32 = Register('r9d')
+
+        instructions.append(Pop(low_reg))
+        instructions.append(Pop(high_reg))
+        if is_runtime_length:
+            instructions.append(Pop(len_reg))
+        instructions.append(Pop(addr_reg))
+
+        # Bounds check: 0 <= low <= high <= length.
+        fail_label = self._get_bounds_check_fail_label("slice bounds out of range")
+        length_op = Register('r11d') if is_runtime_length else length_operand
+        instructions.append(Cmp(src=length_op, dst=low_32))
+        instructions.append(Ja(fail_label))
+        instructions.append(Cmp(src=length_op, dst=high_32))
+        instructions.append(Ja(fail_label))
+        instructions.append(Cmp(src=high_32, dst=low_32))
+        instructions.append(Ja(fail_label))
+
+        # len = high - low, computed BEFORE low is scaled below --
+        # scaling would destroy the unscaled value this still needs.
+        instructions.append(Sub(src=low_32, dst=high_32))
+        # ptr = addr + low * element_stride. A plain 32-bit imul is
+        # safe here: the bounds check above already guarantees low is
+        # small and non-negative, and a 32-bit write zero-extends into
+        # the full 64-bit low_reg.
+        instructions.append(IMul(src=Imm(element_stride), dst=low_32))
+        instructions.append(AddQ(src=low_reg, dst=addr_reg))
+
+        instructions.append(MovQ(src=addr_reg, dst=Memory(dst_mem.base, dst_mem.offset)))
+        instructions.append(MovQ(src=high_reg, dst=Memory(dst_mem.base, dst_mem.offset + 8)))
+        return instructions
+
+    def gen_slice_value_into(self, expr: Node, dst_mem: Memory) -> List[Instruction]:
+        """Stores a slice-typed expression's VALUE (its {ptr, len}
+        descriptor) into dst_mem. Dispatched on what kind of
+        expression is producing the value:
+          - Slice (e.g. `arr[1:3]`): computed directly (see
+            gen_slice_into).
+          - Variable (e.g. `s2 = s1`): a flat 16-byte copy of an
+            existing slice's own descriptor. Deliberately NOT routed
+            through gen_array_copy, even though that method's own
+            flat-copy loop could technically move 16 bytes just as
+            well as any other width: gen_array_copy's own defensive
+            rejection of a slice LEAF type (see its docstring) is
+            specifically about an ARRAY whose ELEMENTS are slices, not
+            about copying a bare slice descriptor itself, which is
+            exactly what this case is -- and a slice's descriptor is
+            always exactly 16 bytes regardless of element type, so a
+            fixed two-field copy (no loop needed at all) is both
+            simpler and avoids that mismatch entirely.
+        """
+        if isinstance(expr, Slice):
+            return self.gen_slice_into(expr, dst_mem)
+        if isinstance(expr, Variable):
+            src_offset = self._local_offset(expr.name)
+            return [
+                MovQ(src=Memory('rbp', src_offset), dst=Register('rax')),
+                MovQ(src=Register('rax'), dst=Memory(dst_mem.base, dst_mem.offset)),
+                MovQ(src=Memory('rbp', src_offset + 8), dst=Register('rax')),
+                MovQ(src=Register('rax'), dst=Memory(dst_mem.base, dst_mem.offset + 8)),
+            ]
+        raise CodegenError(f"No codegen rule for a slice-typed value: {expr!r}")
 
     def gen_array_copy(self, dst_mem: Memory, src_mem: Memory, array_type: Type) -> List[Instruction]:
         """Copies array_type's worth of data from src_mem to dst_mem --
@@ -1764,6 +2163,15 @@ class CodeGenerator:
         order for copying purposes, so no per-dimension logic is
         needed here at all, just the total byte width and the leaf
         element's own width (see type_byte_width/leaf_type).
+
+        An array whose ELEMENTS are themselves slices (`[3][]int`) is
+        explicitly rejected rather than silently miscompiled: this
+        loop only knows how to move a leaf-typed value 4 or 8 bytes at
+        a time, and a slice descriptor is neither -- it's a 16-byte,
+        two-field {ptr, len} unit that would need its own copy logic,
+        not a flat scalar move. Not yet implemented; a genuinely
+        separable follow-up once plain slices are solid, not a gap
+        discovered after the fact.
 
         The scratch register shuttling each element's value between
         src and dst is picked dynamically to differ from BOTH src_mem's
@@ -1781,12 +2189,20 @@ class CodeGenerator:
         else in this file, so picking whichever of rax/rcx/rdx isn't
         already one of the two bases here stays correct even if that
         ever changes."""
+        leaf = leaf_type(array_type)
+        if leaf.kind == TypeKind.SLICE:
+            raise CodegenError(
+                f"An array whose elements are slices ({array_type}) is "
+                f"not supported yet -- copying one would need to move "
+                f"each element's full {{pointer, length}} descriptor, "
+                f"not a single scalar value"
+            )
         used_bases = {src_mem.base, dst_mem.base}
         scratch_64, scratch_32 = next(
             (r64, r32) for r64, r32 in [('rax', 'eax'), ('rcx', 'ecx'), ('rdx', 'edx')]
             if r64 not in used_bases
         )
-        width = type_byte_width(leaf_type(array_type))
+        width = type_byte_width(leaf)
         total = type_byte_width(array_type)
         instructions = []
         off = 0
@@ -1924,6 +2340,12 @@ class CodeGenerator:
         clobber -- silently overwriting the destination address before
         a single element was ever actually written through it."""
         element_type = array_type.element_type
+        if element_type.kind == TypeKind.SLICE:
+            raise CodegenError(
+                f"An array literal whose elements are slices ({array_type}) "
+                f"is not supported yet -- see gen_array_copy's own "
+                f"docstring for the same gap on the copy side"
+            )
         element_width = type_byte_width(element_type)
         protect_dst = dst_mem.base != 'rbp'
         instructions = []
@@ -2038,46 +2460,52 @@ class CodeGenerator:
             return self.gen_array_call_into(dst_mem, expr, array_type)
         raise CodegenError(f"No codegen rule for an array-typed value: {expr!r}")
 
-    def _get_bounds_check_fail_label(self) -> str:
-        """Lazily creates a single, per-function label that every
-        bounds check within this function jumps to on failure --
-        reused across however many indexing operations this function
-        has, rather than duplicating the panic sequence (see
+    def _get_bounds_check_fail_label(self, message: str) -> str:
+        """Lazily creates a per-function, per-message label that every
+        bounds check using this exact `message` jumps to on failure --
+        reused across however many checks in this function share the
+        same message, rather than duplicating the panic sequence (see
         _gen_bounds_check_panic_block) at every individual check site.
-        Reset to None at the start of every function (see
-        gen_function) -- unlike the message label below, this one is a
-        purely LOCAL jump target, meaningless outside the function
-        it's generated for."""
-        if self._bounds_check_fail_label is None:
-            self._bounds_check_fail_label = self.new_label("bounds_check_fail")
-        return self._bounds_check_fail_label
+        A single function can use more than one message (e.g. "array
+        index out of bounds" for ordinary indexing, "slice bounds out
+        of range" for a slice expression's own low/high check) --
+        each gets its own fail label, all reset together at the start
+        of every function (see gen_function) -- unlike the message
+        labels below, these are purely LOCAL jump targets, meaningless
+        outside the function they're generated for."""
+        if message not in self._bounds_check_fail_labels:
+            self._bounds_check_fail_labels[message] = self.new_label("bounds_check_fail")
+        return self._bounds_check_fail_labels[message]
 
-    def _get_bounds_check_message_label(self) -> str:
+    def _get_bounds_check_message_label(self, message: str) -> str:
         """Lazily creates and caches (for the rest of the WHOLE
-        compilation, unlike the per-function label above -- this is
-        just a static string, safely shared by every function that
+        compilation, unlike the per-function fail labels above -- each
+        is just a static string, safely shared by every function that
         needs it, matching the same lazy-cache pattern print's own
-        format-string/true/false labels already use) the "array index
-        out of bounds" message string."""
-        if self._bounds_check_message_label is None:
-            self._bounds_check_message_label = self.new_label("bounds_msg")
-            self.string_literals.append((self._bounds_check_message_label, "array index out of bounds"))
-        return self._bounds_check_message_label
+        format-string/true/false labels already use) a label for this
+        exact `message` string."""
+        if message not in self._bounds_check_message_labels:
+            label = self.new_label("bounds_msg")
+            self._bounds_check_message_labels[message] = label
+            self.string_literals.append((label, message))
+        return self._bounds_check_message_labels[message]
 
     def _gen_bounds_check_panic_block(self) -> List[Instruction]:
         """Appended once at the end of a function's own instructions
-        (see gen_function) if -- and only if -- that function's own
-        bounds checks ever actually used _get_bounds_check_fail_label.
-        Prints a clear message, then calls abort() (SIGABRT) rather
-        than a plain exit() -- an out-of-bounds access is a genuine
-        program bug, not a normal termination condition, the same
-        "abnormal termination" character division by zero's hardware-
-        trapped SIGFPE already has, just deliberately raised by this
-        compiler's own generated code instead of by the CPU. Never
-        reached via ordinary fall-through from the function's own body
-        -- every return already leaves via `leave; ret` before control
-        could reach this point, and abort() itself never returns -- so
-        appending it at the very end of the function is always safe.
+        (see gen_function) for every distinct message that function's
+        own bounds checks actually used (see
+        _get_bounds_check_fail_label) -- none at all if it never
+        triggered any. Each block prints its own clear message, then
+        calls abort() (SIGABRT) rather than a plain exit() -- an out-
+        of-bounds access is a genuine program bug, not a normal
+        termination condition, the same "abnormal termination"
+        character division by zero's hardware-trapped SIGFPE already
+        has, just deliberately raised by this compiler's own generated
+        code instead of by the CPU. Never reached via ordinary fall-
+        through from the function's own body -- every return already
+        leaves via `leave; ret` before control could reach this point,
+        and abort() itself never returns -- so appending these at the
+        very end of the function is always safe.
 
         Explicitly calls fflush(NULL) between puts() and abort() --
         found necessary by testing, not assumed: abort() terminates
@@ -2093,17 +2521,18 @@ class CodeGenerator:
         more awkward to reference correctly from hand-written assembly
         than another ordinary `call`).
         """
-        if self._bounds_check_fail_label is None:
-            return []
-        msg_label = self._get_bounds_check_message_label()
-        return [
-            Label(self._bounds_check_fail_label),
-            LeaQ(label=msg_label, dst=Register('rdi')),
-            CallInstr('puts'),
-            Mov(src=Imm(0), dst=Register('edi')),
-            CallInstr('fflush'),
-            CallInstr('abort'),
-        ]
+        instructions = []
+        for message, fail_label in self._bounds_check_fail_labels.items():
+            msg_label = self._get_bounds_check_message_label(message)
+            instructions.extend([
+                Label(fail_label),
+                LeaQ(label=msg_label, dst=Register('rdi')),
+                CallInstr('puts'),
+                Mov(src=Imm(0), dst=Register('edi')),
+                CallInstr('fflush'),
+                CallInstr('abort'),
+            ])
+        return instructions
 
     def gen_statement(self, stmt: Node) -> List[Instruction]:
         if isinstance(stmt, VarDecl):
@@ -2226,16 +2655,21 @@ class CodeGenerator:
         variable's slot". Which store instruction depends on the
         value's type: an array can't fit into a single register at
         all, so it's dispatched to gen_array_value_into entirely
-        separately (see its own docstring); a str is an 8-byte pointer
+        separately (see its own docstring); a slice is a fixed-size
+        16-byte descriptor, dispatched to gen_slice_value_into (see
+        its own docstring) the same way; a str is an 8-byte pointer
         sitting in %rax and needs `movq`; int/bool are still the
         original 4-byte `movl %eax, ...` -- everything about
         gen_expr_into/gen_binary_into/gen_unary_op's own internals
-        stays exactly as it always has, oblivious to str (or arrays)
-        entirely; only this one call site needs to ask "which width,
-        or which entirely different mechanism, am I storing"."""
+        stays exactly as it always has, oblivious to str (or arrays,
+        or slices) entirely; only this one call site needs to ask
+        "which width, or which entirely different mechanism, am I
+        storing"."""
         value_type = self._type_of(value_expr)
         if value_type.kind == TypeKind.ARRAY:
             return self.gen_array_value_into(value_expr, Memory('rbp', offset), value_type)
+        if value_type.kind == TypeKind.SLICE:
+            return self.gen_slice_value_into(value_expr, Memory('rbp', offset))
         instructions = self.gen_expr_into(value_expr, Register('eax'))
         if value_type == Type.STR:
             instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
@@ -2263,6 +2697,19 @@ class CodeGenerator:
             ptr_reg = Register('rax')
             instructions = [MovQ(src=Memory('rbp', self._hidden_return_ptr_offset), dst=ptr_reg)]
             instructions.extend(self.gen_array_value_into(stmt.value, Memory('rax', 0), value_type))
+        elif value_type.kind == TypeKind.SLICE:
+            # Not supported yet -- see the parameter-side rejection in
+            # gen_function's own parameter loop for why (a slice is
+            # meant to cross a function boundary via two registers
+            # directly, per the two-register decision for slice
+            # parameters/returns, not through a hidden pointer the way
+            # arrays' returns work). A clear error here, rather than
+            # falling through to gen_expr_into below (which would
+            # itself raise, but with a less specific message -- see
+            # its own Variable-case rejection).
+            raise CodegenError(
+                f"Returning a slice ({value_type}) is not supported yet"
+            )
         else:
             dst = Register('eax')
             instructions = self.gen_expr_into(stmt.value, dst)
@@ -2437,6 +2884,19 @@ class CodeGenerator:
                 "arrays don't fit in a single register; use "
                 "gen_array_value_into instead"
             )
+        if isinstance(expr, Slice):
+            # Never reachable in correct codegen -- a slice's value is
+            # a 16-byte {ptr, len} descriptor, which can't fit in a
+            # single register either. Every producer of one (VarDecl
+            # init, Assign) routes through gen_slice_value_into/
+            # gen_slice_into instead of ever calling gen_expr_into on
+            # it directly -- see ArrayLiteral's own case just above
+            # for the identical reasoning.
+            raise CodegenError(
+                "Cannot compute a slice expression via gen_expr_into -- "
+                "slices don't fit in a single register; use "
+                "gen_slice_value_into instead"
+            )
         if isinstance(expr, Variable):
             offset = self._local_offset(expr.name)
             var_type = self._local_type(expr.name)
@@ -2446,6 +2906,12 @@ class CodeGenerator:
                     f"gen_expr_into -- arrays don't fit in a single "
                     f"register; use gen_array_value_into or "
                     f"gen_array_address_into instead"
+                )
+            if var_type.kind == TypeKind.SLICE:
+                raise CodegenError(
+                    f"Cannot read slice-typed variable '{expr.name}' via "
+                    f"gen_expr_into -- slices don't fit in a single "
+                    f"register; use gen_slice_value_into instead"
                 )
             if var_type == Type.STR:
                 return [MovQ(src=Memory('rbp', offset), dst=as_qword_register(dst))]
