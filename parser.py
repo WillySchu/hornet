@@ -777,6 +777,10 @@ _ASSIGNMENT_TOKENS = {TokenType.ASSIGN, *_COMPOUND_ASSIGN_OPS.keys()}
 
 class Parser:
     def __init__(self, tokens: List[Token]):
+        if len(tokens) == 0:
+            raise ValueError('tokens must have non zero length')
+        if tokens[-1].type != TokenType.EOF:
+            raise ValueError('tokens must be terminated by an EOF')
         self.tokens = tokens
         self.pos = 0
 
