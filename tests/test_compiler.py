@@ -3713,21 +3713,21 @@ class TestSemanticErrors:
         assert_semantic_error(
             "    [3]int arr = [1, 2, 3]\n"
             "    return arr[true]",
-            match="Array index must be int",
+            match="Index must be int",
         )
 
     def test_indexing_a_non_array_value_is_rejected(self):
         assert_semantic_error(
             "    int x = 5\n"
             "    return x[0]",
-            match="only arrays support indexing",
+            match="only arrays and slices support indexing",
         )
 
     def test_indexing_past_available_dimensions_is_rejected(self):
         assert_semantic_error(
             "    [2][3]int matrix = [[1, 2, 3], [4, 5, 6]]\n"
             "    return matrix[0][0][0]",
-            match="only arrays support indexing",
+            match="only arrays and slices support indexing",
         )
 
     def test_wrong_element_type_in_index_assignment_is_rejected(self):
@@ -3743,7 +3743,7 @@ class TestSemanticErrors:
             "    [3]int arr = [1, 2, 3]\n"
             "    print(arr)\n"
             "    return 0",
-            match="'print' does not support array arguments",
+            match="'print' does not support array or slice arguments",
         )
 
     def test_array_equality_comparison_is_rejected(self):
@@ -3757,7 +3757,7 @@ class TestSemanticErrors:
             "    [3]int a = [1, 2, 3]\n"
             "    [3]int b = [1, 2, 3]\n"
             "    return a == b",
-            match="does not support array operands",
+            match="does not support array or slice operands",
             return_type="bool",
         )
 

@@ -423,7 +423,7 @@ def test_parse_function_no_type():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape("Expected a type ('int', 'bool', 'str', or '[size]type'), got TokenType.EOF ('') at line 1, column 1")):
+    with pytest.raises(parser.ParseError, match=re.escape("Expected a type ('int', 'bool', 'str', '[size]type', or '[]type'), got TokenType.EOF ('') at line 1, column 1")):
         p.parse_function()
 
 
@@ -453,7 +453,7 @@ def test_parse_function_no_close_paren():
     # The parser checks to see if there's a closing paren, if not it assumes there are parameters.
     #  Thus it calls parse_param() which in turn calls parse_type() leading to the following error message.
     #  TODO(will): Low priority, but this should probably be a more helpful message.
-    with pytest.raises(parser.ParseError, match=re.escape("Expected a type ('int', 'bool', 'str', or '[size]type'), got TokenType.EOF ('') at line 1, column 1")):
+    with pytest.raises(parser.ParseError, match=re.escape("Expected a type ('int', 'bool', 'str', '[size]type', or '[]type'), got TokenType.EOF ('') at line 1, column 1")):
         p.parse_function()
 
 
@@ -597,7 +597,9 @@ def test_parse_params_no_type():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape("Expected a type ('int', 'bool', 'str', or '[size]type'), got TokenType.IDENTIFIER ('a') at line 1, column 1")):
+    with pytest.raises(
+        parser.ParseError,
+        match=re.escape("Expected a type ('int', 'bool', 'str', '[size]type', or '[]type'), got TokenType.IDENTIFIER ('a') at line 1, column 1")):
         p.parse_params()
 
 
@@ -639,7 +641,9 @@ def test_parse_params_two_params_no_second():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape("Expected a type ('int', 'bool', 'str', or '[size]type'), got TokenType.CLOSE_PAREN (')') at line 1, column 7")):
+    with pytest.raises(
+        parser.ParseError,
+        match=re.escape("Expected a type ('int', 'bool', 'str', '[size]type', or '[]type'), got TokenType.CLOSE_PAREN (')') at line 1, column 7")):
         p.parse_params()
 
 
@@ -691,7 +695,7 @@ def test_parse_param_empty():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape("Expected a type ('int', 'bool', 'str', or '[size]type'), got TokenType.EOF ('') at line 1, column 1")):
+    with pytest.raises(parser.ParseError, match=re.escape("Expected a type ('int', 'bool', 'str', '[size]type', or '[]type'), got TokenType.EOF ('') at line 1, column 1")):
         p.parse_param()
 
 
@@ -723,7 +727,7 @@ def test_parse_type_empty():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape("Expected a type ('int', 'bool', 'str', or '[size]type'), got TokenType.EOF ('') at line 1, column 1")):
+    with pytest.raises(parser.ParseError, match=re.escape("Expected a type ('int', 'bool', 'str', '[size]type', or '[]type'), got TokenType.EOF ('') at line 1, column 1")):
         p.parse_type()
 
 
@@ -777,20 +781,7 @@ def test_parse_type_array_missing_size():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape('Expected an array size (a positive integer literal) at line 1, column 2')):
-        p.parse_type()
-
-
-def test_parse_type_array_missing_size2():
-    tokens = [
-        lexer.Token(lexer.TokenType.OPEN_BRACKET, '[', 1, 1),
-        lexer.Token(lexer.TokenType.CLOSE_BRACKET, ']', 1, 2),
-        lexer.Token(lexer.TokenType.INT, 'int', 1, 3),
-        lexer.Token(lexer.TokenType.EOF, '', 1, 6),
-    ]
-    p = parser.Parser(tokens)
-
-    with pytest.raises(parser.ParseError, match=re.escape('Expected an array size (a positive integer literal) at line 1, column 2')):
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an array size (a positive integer literal), or \']\' for a slice type at line 1, column 2')):
         p.parse_type()
 
 
@@ -815,7 +806,7 @@ def test_parse_type_array_missing_type():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape("Expected a type ('int', 'bool', 'str', or '[size]type'), got TokenType.EOF ('') at line 1, column 4")):
+    with pytest.raises(parser.ParseError, match=re.escape("Expected a type ('int', 'bool', 'str', '[size]type', or '[]type'), got TokenType.EOF ('') at line 1, column 4")):
         p.parse_type()
 
 

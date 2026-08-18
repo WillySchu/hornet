@@ -342,13 +342,74 @@ class Index(Node):
     first yields a whole row (itself array-typed), and the outer
     bracket pair indexes into THAT. See parse_postfix for how this gets
     built left-to-right off of however many `[...]` pairs follow a
-    primary expression."""
+    primary expression.
+
+    `array` can itself be Slice-typed, not just Array-typed -- indexing
+    into a slice (`s[i]`) uses this exact same node; nothing about
+    Index's own shape needs to know or care which kind of thing it's
+    indexing into (see semantic.py's indexable-and-index check, which
+    accepts either)."""
     array: Node
     index: Node
     resolved_type: Optional[Any] = None
 
     def pretty(self) -> str:
         return f"Index -> [{self.array.pretty()}, {self.index.pretty()}]"
+
+
+@dataclass
+class Slice(Node):
+    """`array[low:high]` -- a VIEW into `array` spanning [low, high):
+    low inclusive, high exclusive, matching Go's own convention (which
+    this whole feature is deliberately modeled on). Produces a Slice-
+    typed VALUE (conceptually a {pointer, length} descriptor -- see
+    codegen.py's eventual SLICES section for the concrete
+    representation), not a copy of the underlying elements: a slice is
+    a genuine alias into its base's own backing storage, unlike plain
+    array assignment (`arr2 = arr1`), which already copies. This is
+    exactly the aliasing surface that makes size-based stack safety's
+    heap-promotion policy load-bearing rather than optional once
+    slicing exists -- see codegen.py's ARRAYS section for the
+    existing mechanism this reuses (a second trigger for
+    is_heap_allocated: "is this array ever sliced", not just "is it
+    over the size threshold").
+
+    `array` can be EITHER Array-typed or Slice-typed -- slicing a
+    slice (`s2 = s[1:3]`) and slicing the outer dimension of a multi-
+    dimensional array (`matrix[0:2]`, yielding a slice of ROWS, type
+    `[][3]int`) are both valid, and both go through this same node;
+    see semantic.py's check_slice for the shared base-type check.
+
+    `low`/`high` are both OPTIONAL, independently -- `arr[:]` omits
+    both, `arr[2:]` omits high, `arr[:5]` omits low. Represented as
+    None here rather than synthesizing a default value at parse time:
+    low's default (0) could technically be filled in here, since it
+    never depends on anything the parser doesn't already know, but
+    high's default (the base's own length) can't be -- for a Slice
+    base specifically, that length is a runtime value read out of the
+    descriptor, not something the parser could ever compute. Rather
+    than defaulting one bound at parse time and deferring the other,
+    both stay None uniformly, resolved together wherever a Slice is
+    actually generated.
+
+    Deliberately NOT a valid assignment target -- `arr[1:3] = ...`
+    doesn't parse as anything at all (parse_expr_stmt_or_index_assign's
+    existing isinstance(expr, Index) check already excludes this
+    automatically, simply because Slice is a different class; no
+    changes were needed there to get this for free). This matches Go,
+    where slicing produces a value, not an addressable location: you
+    can assign to a single indexed element (`s[i] = x`) but never to a
+    sliced range.
+    """
+    array: Node
+    low: Optional[Node] = None
+    high: Optional[Node] = None
+    resolved_type: Optional[Any] = None
+
+    def pretty(self) -> str:
+        low_str = self.low.pretty() if self.low is not None else ''
+        high_str = self.high.pretty() if self.high is not None else ''
+        return f"Slice -> [{self.array.pretty()}, {low_str}:{high_str}]"
 
 
 @dataclass
@@ -412,10 +473,10 @@ class ArrayTypeExpr(Node):
     to the brackets. Wherever a plain type keyword string
     ('int'/'bool'/'str') was previously the ONLY valid value for
     VarDecl.var_type / Param.type / Function.return_type, those fields
-    now accept EITHER that same plain string OR one of these, recursed
-    arbitrarily deep for arbitrarily-nested array types -- hence
-    `element_type` being typed Union[str, 'ArrayTypeExpr'] rather than
-    just str.
+    now accept a plain string, one of these, OR a SliceTypeExpr (see
+    its own docstring), recursed arbitrarily deep -- hence
+    `element_type` being typed Union[str, 'ArrayTypeExpr',
+    'SliceTypeExpr'] rather than just str.
 
     `size` is required to be a positive integer LITERAL (see
     Parser.parse_type) -- not an arbitrary constant expression like
@@ -427,7 +488,7 @@ class ArrayTypeExpr(Node):
     by the parser rather than deferred.
     """
     size: int
-    element_type: Union[str, 'ArrayTypeExpr']
+    element_type: Union[str, 'ArrayTypeExpr', 'SliceTypeExpr']
 
     def pretty(self) -> str:
         et = self.element_type if isinstance(self.element_type, str) else self.element_type.pretty()
@@ -435,12 +496,43 @@ class ArrayTypeExpr(Node):
 
 
 @dataclass
+class SliceTypeExpr(Node):
+    """`[]element_type` in TYPE position -- e.g. the `[]int` in
+    `[]int s = arr[:]`. Sibling to ArrayTypeExpr, distinguished by the
+    single token of lookahead right after `[` (see Parser.parse_type):
+    a NUMBER means an array's size, an immediate `]` means a slice with
+    no size at all.
+
+    That's the essential difference from ArrayTypeExpr, not just a
+    detail of parsing it: a slice's length is a RUNTIME property of the
+    slice VALUE itself (part of what gets stored at a slice's own
+    `{pointer, length}` representation -- see codegen.py's eventual
+    SLICES section), not part of its TYPE the way an array's size is.
+    Two slices can have the exact same type ([]int) while holding
+    completely different lengths at runtime; two arrays with different
+    sizes ([3]int vs [4]int) are, and always were, different types
+    entirely (see semantic.Type's own structural equality).
+
+    `element_type` recurses exactly like ArrayTypeExpr's does -- a
+    slice of arrays (`[][3]int`) and a slice of slices (`[][]int`) are
+    both valid element types, parsed with no special-casing beyond
+    what parse_type's own recursive structure already provides.
+    """
+    element_type: Union[str, ArrayTypeExpr, 'SliceTypeExpr']
+
+    def pretty(self) -> str:
+        et = self.element_type if isinstance(self.element_type, str) else self.element_type.pretty()
+        return f"[]{et}"
+
+
+@dataclass
 class VarDecl(Node):
     """`int a` (init=None) or `int a = 1` (init=the initializer expression).
-    `var_type` is either a plain type keyword string ('int'/'bool'/'str')
-    or an ArrayTypeExpr (see its own docstring) for an array-typed decl."""
+    `var_type` is a plain type keyword string ('int'/'bool'/'str'), an
+    ArrayTypeExpr, or a SliceTypeExpr (see their own docstrings) for an
+    array- or slice-typed decl."""
     name: str
-    var_type: Union[str, ArrayTypeExpr]
+    var_type: Union[str, ArrayTypeExpr, SliceTypeExpr]
     init: Optional[Node] = None
 
     def pretty(self) -> str:
@@ -565,11 +657,11 @@ class Param(Node):
     function's own statement/expression tree -- it's a declaration
     record attached to Function, conceptually the same role VarDecl
     plays for a local, just without an initializer (a parameter's
-    "initial value" is whatever the caller passed). `type` is either a
-    plain type keyword string or an ArrayTypeExpr, exactly like
-    VarDecl.var_type (see ArrayTypeExpr's own docstring)."""
+    "initial value" is whatever the caller passed). `type` is a plain
+    type keyword string, an ArrayTypeExpr, or a SliceTypeExpr, exactly
+    like VarDecl.var_type (see their own docstrings)."""
     name: str
-    type: Union[str, ArrayTypeExpr]
+    type: Union[str, ArrayTypeExpr, SliceTypeExpr]
 
     def pretty(self) -> str:
         t = self.type if isinstance(self.type, str) else self.type.pretty()
@@ -579,7 +671,7 @@ class Param(Node):
 @dataclass
 class Function(Node):
     name: str
-    return_type: Union[str, ArrayTypeExpr]
+    return_type: Union[str, ArrayTypeExpr, SliceTypeExpr]
     params: List[Param] = field(default_factory=list)
     body: List[Node] = field(default_factory=list)
 
@@ -863,22 +955,36 @@ class Parser:
         name_tok = self.expect(TokenType.IDENTIFIER, "Expected a parameter name")
         return Param(name=name_tok.val, type=param_type)
 
-    def parse_type(self) -> Union[str, ArrayTypeExpr]:
+    def parse_type(self) -> Union[str, ArrayTypeExpr, SliceTypeExpr]:
         # 'int', 'bool', or 'str' -- semantic.py is what actually knows
         # what to do with the resulting string; the parser just needs to
         # accept one of the three type keywords here. OR: '[' NUMBER ']'
-        # followed by another type (recursively -- this is what lets
-        # `[2][3]int` parse at all, each bracket pair peeling off one
-        # more ArrayTypeExpr wrapping whatever parse_type() returns for
-        # the rest). The size has to be a literal, positive, whole
-        # NUMBER token -- checked and rejected right here, unlike most
-        # validation in this file (which is semantic.py's job): an
+        # followed by another type, recursively, for an array
+        # (ArrayTypeExpr -- this is what lets `[2][3]int` parse at all,
+        # each bracket pair peeling off one more ArrayTypeExpr wrapping
+        # whatever parse_type() returns for the rest). OR: '[' ']'
+        # followed by another type, recursively, for a slice
+        # (SliceTypeExpr) -- distinguished from the array case by a
+        # single token of lookahead right after '[': a NUMBER means an
+        # array's size, an immediate ']' means "no size at all, this is
+        # a slice" (see SliceTypeExpr's own docstring for why that's a
+        # meaningful distinction, not just a syntax difference). The
+        # array size, when present, has to be a literal, positive,
+        # whole NUMBER token -- checked and rejected right here, unlike
+        # most validation in this file (which is semantic.py's job): an
         # array's size isn't really an expression the way a VarDecl
         # initializer is, it's closer to syntax, the same way a type
         # keyword itself is validated directly rather than deferred.
         if self.check(TokenType.OPEN_BRACKET):
             self.advance()
-            size_tok = self.expect(TokenType.NUMBER, "Expected an array size (a positive integer literal)")
+            if self.check(TokenType.CLOSE_BRACKET):
+                self.advance()
+                element_type = self.parse_type()
+                return SliceTypeExpr(element_type=element_type)
+            size_tok = self.expect(
+                TokenType.NUMBER,
+                "Expected an array size (a positive integer literal), or ']' for a slice type",
+            )
             if '.' in size_tok.val:
                 raise ParseError(
                     f"Array size must be a whole number, got '{size_tok.val}' "
@@ -897,8 +1003,9 @@ class Parser:
             return self.advance().val
         tok = self.current()
         raise ParseError(
-            f"Expected a type ('int', 'bool', 'str', or '[size]type'), got "
-            f"{tok.type} ('{tok.val}') at line {tok.line}, column {tok.col}"
+            f"Expected a type ('int', 'bool', 'str', '[size]type', or "
+            f"'[]type'), got {tok.type} ('{tok.val}') at line {tok.line}, "
+            f"column {tok.col}"
         )
 
     def parse_block(self) -> List[Node]:
@@ -1119,28 +1226,62 @@ class Parser:
         return self.parse_postfix()
 
     def parse_postfix(self) -> Node:
-        """Wraps a primary expression with zero or more `[index]`
-        suffixes -- e.g. `matrix[i][j]` is parsed here as `parse_primary`
-        producing the `matrix` Variable, then this loop wrapping it in
-        two nested Index nodes, one per bracket pair (see Index's own
-        docstring for why that nesting -- rather than a single Index
-        carrying a list of indices -- is the right shape).
+        """Wraps a primary expression with zero or more `[...]`
+        suffixes -- each one either an index (`matrix[i][j]`, parsed
+        here as `parse_primary` producing the `matrix` Variable, then
+        this loop wrapping it in two nested Index nodes, one per
+        bracket pair -- see Index's own docstring for why that nesting,
+        rather than a single Index carrying a list of indices, is the
+        right shape) or a slice (`arr[low:high]`, see
+        _parse_index_or_slice for how the two are told apart within one
+        `[...]` pair). Either shape can chain with the other --
+        `s[1:3][0]` (index into a slice) and `matrix[0:2][1]` (index
+        into a slice of rows) both fall out of this same loop with no
+        special-casing, exactly like chained indexing already did.
 
         Sits between parse_unary and parse_primary specifically so
-        indexing binds TIGHTER than a prefix unary operator: `-arr[0]`
-        has to mean `-(arr[0])`, not `(-arr)[0]` (which wouldn't even
-        type-check, since unary '-' requires an int operand, not an
-        array) -- and it does, here, since parse_unary's own base case
-        (no unary operator present) calls straight into this method
-        rather than parse_primary directly.
+        indexing/slicing binds TIGHTER than a prefix unary operator:
+        `-arr[0]` has to mean `-(arr[0])`, not `(-arr)[0]` (which
+        wouldn't even type-check, since unary '-' requires an int
+        operand, not an array) -- and it does, here, since parse_unary's
+        own base case (no unary operator present) calls straight into
+        this method rather than parse_primary directly.
         """
         expr = self.parse_primary()
         while self.check(TokenType.OPEN_BRACKET):
             self.advance()
-            index_expr = self.parse_expression()
-            self.expect(TokenType.CLOSE_BRACKET, "Expected ']' after array index")
-            expr = Index(array=expr, index=index_expr)
+            expr = self.parse_index_or_slice(expr)
         return expr
+
+    def parse_index_or_slice(self, array_expr: Node) -> Node:
+        """Parses the CONTENT of one `[...]` pair, immediately following
+        an already-consumed OPEN_BRACKET, and returns either an Index
+        (`a[i]`) or a Slice (`a[low:high]`, with either bound optionally
+        omitted -- see Slice's own docstring) wrapping `array_expr`.
+
+        A leading ':' unambiguously signals a slice with an omitted low
+        bound (`a[:...]`) -- ':' can't start any expression in this
+        language, so seeing it immediately after '[' can only mean
+        this. Otherwise, an expression is parsed first; if a ':'
+        follows THAT, this is a slice too (with high optionally omitted
+        -- `a[low:]`), and if it doesn't, this was a plain index all
+        along, and the parsed expression was the index itself.
+        """
+        if self.check(TokenType.COLON):
+            self.advance()
+            high = None if self.check(TokenType.CLOSE_BRACKET) else self.parse_expression()
+            self.expect(TokenType.CLOSE_BRACKET, "Expected ']' to close a slice expression")
+            return Slice(array=array_expr, low=None, high=high)
+
+        first = self.parse_expression()
+
+        if self.match(TokenType.COLON):
+            high = None if self.check(TokenType.CLOSE_BRACKET) else self.parse_expression()
+            self.expect(TokenType.CLOSE_BRACKET, "Expected ']' to close a slice expression")
+            return Slice(array=array_expr, low=first, high=high)
+
+        self.expect(TokenType.CLOSE_BRACKET, "Expected ']' after array index")
+        return Index(array=array_expr, index=first)
 
     def parse_primary(self) -> Node:
         if self.check(TokenType.NUMBER):

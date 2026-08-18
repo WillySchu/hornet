@@ -21,14 +21,17 @@ code for programs already known to be valid -- it doesn't need to
 
 THE TYPE SYSTEM
 -----------------
-Two types exist: `int` and `bool`. This is a genuinely *strong* static
-type system in the traditional PL sense: there is no implicit
-conversion between them in either direction. A bool is not a 0-or-1
-int that happens to print differently -- it's a distinct type, and
-using one where the other is expected is a type error, full stop. In
-particular (and this is the part most likely to surprise someone
-coming from C): `not`, `and`, and `or` all require real `bool`
-operands. `not 0` is a type error, not "not true". Write
+`int` and `bool` were the first two types (see semantic.Type for the
+full, current set -- `str`, fixed-size arrays, and slices have all
+been added since, each with their own typing rules documented at
+their own check_* method rather than repeated here). This is a
+genuinely *strong* static type system in the traditional PL sense:
+there is no implicit conversion between them in either direction. A
+bool is not a 0-or-1 int that happens to print differently -- it's a
+distinct type, and using one where the other is expected is a type
+error, full stop. In particular (and this is the part most likely to
+surprise someone coming from C): `not`, `and`, and `or` all require
+real `bool` operands. `not 0` is a type error, not "not true". Write
 `not (x == 0)` or `not false` instead.
 
 The operator typing rules, precisely:
@@ -300,6 +303,8 @@ from parser import (
     Parser,
     Program,
     Return,
+    Slice,
+    SliceTypeExpr,
     StringLiteral,
     Unary,
     UnaryOp,
@@ -318,13 +323,21 @@ class TypeKind(Enum):
     BOOL = auto()
     STR = auto()
     ARRAY = auto()
+    SLICE = auto()
 
 
 @dataclass(frozen=True)
 class Type:
     """A type in this language: one of the three scalars (kind alone,
-    element_type/size both None), or an array (kind=ARRAY, element_type
-    the Type one level down, size that dimension's fixed length).
+    element_type/size both None), an array (kind=ARRAY, element_type
+    the Type one level down, size that dimension's fixed length), or a
+    slice (kind=SLICE, element_type the Type one level down, size
+    always None -- a slice's LENGTH is a runtime property of the slice
+    VALUE, not part of its type the way an array's size is; see
+    SliceTypeExpr's own docstring in parser.py). Two slices of the
+    same element type are the same Type regardless of how long either
+    one happens to be at runtime, unlike two arrays of different
+    sizes, which are different types even with the same element type.
 
     Frozen specifically to get structural equality and hashing for
     free from the dataclass machinery, rather than writing __eq__ by
@@ -340,15 +353,20 @@ class Type:
     needed to change at all to correctly handle arrays, once Type
     itself became structurally comparable). This recurses correctly to
     arbitrary nesting depth for free too, since element_type is itself
-    just another Type.
+    just another Type -- and the same structural-equality machinery is
+    what makes `Type(SLICE, Type.INT) == Type(SLICE, Type.INT)` true
+    regardless of which two separate Type objects produced it, with no
+    additional code needed for SLICE specifically.
     """
     kind: TypeKind
-    element_type: Optional['Type'] = None  # only set when kind == ARRAY
+    element_type: Optional['Type'] = None  # set when kind == ARRAY or SLICE
     size: Optional[int] = None             # only set when kind == ARRAY
 
     def __str__(self) -> str:
         if self.kind == TypeKind.ARRAY:
             return f"[{self.size}]{self.element_type}"
+        if self.kind == TypeKind.SLICE:
+            return f"[]{self.element_type}"
         return self.kind.name.lower()
 
 
@@ -374,13 +392,15 @@ _TYPE_NAMES = {
 def type_from_name(type_expr) -> Type:
     """Converts a parsed type expression (VarDecl.var_type /
     Function.return_type / Param.type, straight from parser.py) into a
-    Type. `type_expr` is either a plain str ('int'/'bool'/'str') for a
-    scalar type, or an ArrayTypeExpr (see its own docstring in
-    parser.py) for an array type -- handled here by recursing on
-    ArrayTypeExpr.element_type, which is itself either a plain str or
-    another ArrayTypeExpr, naturally bottoming out at a scalar and
-    handling arbitrarily-nested array types (`[2][3]int`) with no
-    depth limit or special-casing for "how many dimensions".
+    Type. `type_expr` is a plain str ('int'/'bool'/'str') for a scalar
+    type, an ArrayTypeExpr for an array type, or a SliceTypeExpr for a
+    slice type (see their own docstrings in parser.py) -- handled here
+    by recursing on element_type, which is itself a plain str,
+    another ArrayTypeExpr, or another SliceTypeExpr, naturally
+    bottoming out at a scalar and handling arbitrarily-nested types
+    (`[2][3]int`, `[][]int`, `[][3]int`, ...) with no depth limit or
+    special-casing for "how many dimensions" or "which mix of array
+    and slice".
 
     Only ever fails for a program that isn't syntactically valid in
     the first place -- parse_type() already restricts a scalar
@@ -391,6 +411,9 @@ def type_from_name(type_expr) -> Type:
     if isinstance(type_expr, ArrayTypeExpr):
         element = type_from_name(type_expr.element_type)
         return Type(TypeKind.ARRAY, element_type=element, size=type_expr.size)
+    if isinstance(type_expr, SliceTypeExpr):
+        element = type_from_name(type_expr.element_type)
+        return Type(TypeKind.SLICE, element_type=element)
     try:
         return _TYPE_NAMES[type_expr]
     except KeyError:
@@ -648,7 +671,7 @@ class SemanticAnalyzer:
             )
 
     def analyze_index_assign(self, stmt: IndexAssign) -> None:
-        element_type = self._check_array_and_index(stmt.array, stmt.index)
+        element_type = self._check_indexable_and_index(stmt.array, stmt.index)
         value_type = self.check_expr(stmt.value)
         if value_type != element_type:
             raise SemanticError(
@@ -656,30 +679,71 @@ class SemanticAnalyzer:
                 f"element of type {element_type}"
             )
 
-    def _check_array_and_index(self, array_expr: Node, index_expr: Node) -> Type:
-        """Shared by check_index (reading `array[index]`) and
-        analyze_index_assign (writing `array[index] = value`):
-        validates that `array_expr` is actually array-typed and
-        `index_expr` is int-typed, returning the array's element type
-        -- what a successful `[index]` operation on it would read or
-        write. Recurses correctly for multi-dimensional access for
-        free: for `matrix[i][j]`, the outer call's `array_expr` is
-        itself an Index node (`matrix[i]`), so checking IT via
-        check_expr recursively runs this same method again, returning
-        the row's element type (e.g. int, if matrix's rows are
-        [3]int) -- which is exactly the type this outer call then
-        needs `array_expr` to have.
+    def _check_indexable_and_index(self, base_expr: Node, index_expr: Node) -> Type:
+        """Shared by check_index (reading `base[index]`) and
+        analyze_index_assign (writing `base[index] = value`):
+        validates that `base_expr` is actually indexable -- array- or
+        slice-typed, see below -- and `index_expr` is int-typed,
+        returning the element type: what a successful `[index]`
+        operation on it would read or write. Recurses correctly for
+        multi-dimensional access for free: for `matrix[i][j]`, the
+        outer call's `base_expr` is itself an Index node
+        (`matrix[i]`), so checking IT via check_expr recursively runs
+        this same method again, returning the row's element type (e.g.
+        int, if matrix's rows are [3]int) -- which is exactly the type
+        this outer call then needs `base_expr` to have.
+
+        Named for what it actually accepts, not just for arrays
+        specifically: `s[i]`, where `s` is Slice-typed, uses this exact
+        same check (and was the reason for the rename from this
+        method's original _check_array_and_index) -- indexing into a
+        slice works identically to indexing into an array from
+        semantic.py's point of view, the only difference being where
+        codegen eventually finds the address to read from.
         """
-        array_type = self.check_expr(array_expr)
-        if array_type.kind != TypeKind.ARRAY:
+        base_type = self.check_expr(base_expr)
+        if base_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE):
             raise SemanticError(
-                f"Cannot index into a value of type {array_type} -- "
-                f"only arrays support indexing"
+                f"Cannot index into a value of type {base_type} -- "
+                f"only arrays and slices support indexing"
             )
         index_type = self.check_expr(index_expr)
         if index_type != Type.INT:
-            raise SemanticError(f"Array index must be int, got {index_type}")
-        return array_type.element_type
+            raise SemanticError(f"Index must be int, got {index_type}")
+        return base_type.element_type
+
+    def check_slice(self, expr: Slice) -> Type:
+        """`array[low:high]`. `array` must be indexable -- array- or
+        slice-typed, exactly the same acceptance _check_indexable_and_
+        index already uses for ordinary indexing, since slicing a
+        slice (`s2 = s[1:3]`) and slicing the outer dimension of a
+        multi-dimensional array (`matrix[0:2]`, yielding a slice of
+        ROWS, type [][3]int) are both valid. Either bound, if present,
+        must be int; an omitted bound (low=None or high=None, see
+        Slice's own docstring in parser.py) needs no check at all
+        here, since its default value is resolved later, at codegen
+        time, not something semantic.py fills in or validates.
+
+        The result is ALWAYS Type(SLICE, element_type=...) regardless
+        of what's being sliced -- a slice expression's own type never
+        depends on its bounds, only on the element type of whatever's
+        being sliced, matching how check_index's own result never
+        depends on WHICH index was used."""
+        base_type = self.check_expr(expr.array)
+        if base_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE):
+            raise SemanticError(
+                f"Cannot slice a value of type {base_type} -- only "
+                f"arrays and slices support slicing"
+            )
+        if expr.low is not None:
+            low_type = self.check_expr(expr.low)
+            if low_type != Type.INT:
+                raise SemanticError(f"Slice low bound must be int, got {low_type}")
+        if expr.high is not None:
+            high_type = self.check_expr(expr.high)
+            if high_type != Type.INT:
+                raise SemanticError(f"Slice high bound must be int, got {high_type}")
+        return Type(TypeKind.SLICE, element_type=base_type.element_type)
 
     def analyze_return(self, stmt: Return, return_type: Type) -> None:
         value_type = self.check_expr(stmt.value)
@@ -784,6 +848,8 @@ class SemanticAnalyzer:
             result = self.check_array_literal(expr)
         elif isinstance(expr, Index):
             result = self.check_index(expr)
+        elif isinstance(expr, Slice):
+            result = self.check_slice(expr)
         elif isinstance(expr, Call):
             result = self.check_call(expr)
         elif isinstance(expr, Unary):
@@ -822,7 +888,7 @@ class SemanticAnalyzer:
         return Type(TypeKind.ARRAY, element_type=first, size=len(expr.elements))
 
     def check_index(self, expr: Index) -> Type:
-        return self._check_array_and_index(expr.array, expr.index)
+        return self._check_indexable_and_index(expr.array, expr.index)
 
     def check_call(self, expr: Call) -> Type:
         if expr.name == 'print':
@@ -850,11 +916,11 @@ class SemanticAnalyzer:
         unlike an ordinary function it isn't tied to one fixed
         parameter type, since int/bool/str are all printable and
         there's no reason to force a caller to pick a differently-named
-        builtin per type. Arrays are explicitly excluded: there's no
-        defined formatting for one (nothing in codegen.py knows how to
-        print one), so this rejects them here with a clear error rather
-        than letting an array argument through to type-check fine and
-        then hit an unhandled case in codegen. Always "returns" int
+        builtin per type. Arrays and slices are explicitly excluded:
+        there's no defined formatting for either (nothing in codegen.py
+        knows how to print one), so this rejects them here with a
+        clear error rather than letting one through to type-check fine
+        and then hit an unhandled case in codegen. Always "returns" int
         (see the module docstring's BUILTINS section for why 0,
         specifically) -- Hornet has no void type, and this keeps
         `print(x)` usable as an ordinary expression statement via the
@@ -865,8 +931,8 @@ class SemanticAnalyzer:
                 f"'print' expects exactly 1 argument, got {len(expr.args)}"
             )
         arg_type = self.check_expr(expr.args[0])
-        if arg_type.kind == TypeKind.ARRAY:
-            raise SemanticError(f"'print' does not support array arguments (got {arg_type})")
+        if arg_type.kind in (TypeKind.ARRAY, TypeKind.SLICE):
+            raise SemanticError(f"'print' does not support array or slice arguments (got {arg_type})")
         return Type.INT
 
     def check_constant(self, expr: Constant) -> Type:
@@ -929,16 +995,20 @@ class SemanticAnalyzer:
             return Type.BOOL
 
         if op in _EQUALITY_OPS:
-            # Array operands are rejected outright, even when both
-            # sides are the exact same array type -- codegen.py has no
+            # Array and slice operands are rejected outright, even when
+            # both sides are the exact same type -- codegen.py has no
             # element-wise array-comparison logic (unlike str, which
             # gets a real strcmp-backed comparison), so without this
-            # check a same-shaped-array comparison would type-check
-            # fine here and then hit an unhandled case in codegen.
-            # Whole-array equality is a real, well-defined feature to
-            # consider adding later; it's just not implemented yet.
-            if left_type.kind == TypeKind.ARRAY or right_type.kind == TypeKind.ARRAY:
-                raise SemanticError(f"'{op.symbol()}' does not support array operands")
+            # check a same-shaped comparison would type-check fine
+            # here and then hit an unhandled case in codegen. Slice
+            # equality in particular isn't even well-defined yet
+            # without array equality existing first (would `s1 == s2`
+            # compare elements, or the underlying pointer/length pair
+            # the way Go's own `==` restriction on slices hints at?) --
+            # both are real, well-defined features to consider later,
+            # just not implemented yet.
+            if left_type.kind in (TypeKind.ARRAY, TypeKind.SLICE) or right_type.kind in (TypeKind.ARRAY, TypeKind.SLICE):
+                raise SemanticError(f"'{op.symbol()}' does not support array or slice operands")
             if left_type != right_type:
                 raise SemanticError(
                     f"Cannot compare {left_type} to {right_type} with "

@@ -22,3 +22,13 @@ Updates:
 - Stack based params to get around parameter limit.
 - Pass array literals to function calls.
 - Explore per frame vs per array heap promotion.
+- Append.
+- Array equality.
+- Slice equality?
+- Escape analysis for arrays and slices.
+- GC...
+- `is` keyword.
+- Pointers?
+- `in` keyword.
+- Index into unnamed slices.
+- Slices in arrays.
