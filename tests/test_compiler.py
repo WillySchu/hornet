@@ -44,9 +44,10 @@ Organization:
     TestHeapAllocatedArrays             (12 tests)
     TestSlices                          (10 tests)
     TestSliceBoundsChecking             ( 6 tests)
-    TestSemanticErrors                  (76 tests)
+    TestPrintArraysAndSlices            (11 tests)
+    TestSemanticErrors                  (75 tests)
                                         ----------
-                                        328 tests total
+                                        338 tests total
 
 A NOTE ON ARRAYS
 -----------------------------------------------------------------
@@ -167,6 +168,39 @@ meant to cross a function boundary via two registers directly (the
 two-register decision for slice parameters/returns), not through the
 stack-slot or hidden-pointer mechanisms arrays use -- that convention
 is real, separable follow-up work, not implemented yet.
+
+A NOTE ON TestPrintArraysAndSlices
+-----------------------------------------------------------------
+`print` on an array or slice formats as `TYPE[elem, elem, ...]` --
+e.g. `[3]int[1, 2, 3]` or `[]int[1, 2, 3]` -- built as a sequence of
+direct printf calls, one piece at a time, rather than materializing
+one big string via malloc first (see codegen.py's PRINTING ARRAYS AND
+SLICES section for why: doing that would need a new int-to-string
+conversion step this language has no other reason to have).
+
+test_nested_2d_array_prefix_appears_once_not_per_row is the test that
+actually proves the headline formatting decision holds, not just the
+one-dimensional case the original design examples showed: the type
+prefix appears exactly once, at the outermost level -- a [2][3]int
+prints as `[2][3]int[[1, 2, 3], [4, 5, 6]]`, with no "[3]int" repeated
+on each inner row. test_str_elements_are_quoted is the other
+deliberate asymmetry worth calling out: a str element inside a
+collection is quoted (`'alice'`) even though a bare str argument to
+print still prints unquoted -- two different, both intentional,
+conventions.
+
+Since an array's length is known at compile time but a slice's is
+only known at runtime, printing uses ONE uniform runtime loop for
+both rather than maintaining two separate code paths (unrolled vs.
+looped) -- test_printing_a_slice_of_a_slice exercises the harder,
+runtime-length path directly. test_empty_slice_prints_with_no_
+trailing_comma is the positive control for `arr[5:5]` (see
+TestSliceBoundsChecking's own boundary test) actually printing
+cleanly, not just type-checking. test_array_literal_as_direct_print_
+argument_not_supported and its Slice-expression counterpart are the
+same deliberate restriction gen_array_arg_address_into already
+imposes on array-typed call arguments, applied here for the same
+reason: neither has an address of its own to print through.
 
 A NOTE ON TestAllPathsReturn
 -----------------------------------------------------------------
@@ -3328,6 +3362,160 @@ class TestSliceBoundsChecking:
 
 
 # ---------------------------------------------------------------------------
+# Printing arrays and slices: `TYPE[elem, elem, ...]` -- e.g.
+# `[3]int[1, 2, 3]` or `[]int[1, 2, 3]` -- the type prefix (matching
+# semantic.Type.__str__ exactly, so no new formatting logic was needed
+# for it) appearing exactly once, at the outermost level, never
+# repeated for a nested row. A str element is quoted inside a
+# collection (`'alice'`) even though a bare str argument to print
+# still prints unquoted -- the two behave differently on purpose, not
+# by oversight.
+#
+# test_nested_2d_array_prefix_appears_once_not_per_row is the test
+# that actually proves the headline formatting decision holds, not
+# just the one-dimensional case both of the original examples showed:
+# a [2][3]int prints as `[2][3]int[[1, 2, 3], [4, 5, 6]]`, not with
+# "[3]int" repeated on each inner row.
+#
+# Built as a sequence of direct printf calls -- one piece at a time
+# (the type prefix, each bracket, each separator, each element) --
+# rather than materializing one big string via malloc and printing it
+# in one shot, which would have needed a new int-to-string conversion
+# step this language has no other reason to have (see codegen.py's
+# PRINTING ARRAYS AND SLICES section). Since an array's length is
+# known at compile time but a slice's is only known at runtime, this
+# uses ONE uniform runtime loop for both rather than unrolling arrays
+# separately -- test_printing_a_slice_of_a_slice exercises the harder,
+# runtime-length path directly, and
+# test_multiple_prints_each_get_exactly_one_newline confirms the loop
+# never leaks an extra or missing newline across separate print calls.
+# ---------------------------------------------------------------------------
+
+class TestPrintArraysAndSlices:
+    pytestmark = GCC_SKIP
+
+    def test_print_array_of_int(self):
+        assert_stdout(
+            "    [3]int arr = [1, 2, 3]\n"
+            "    print(arr)\n"
+            "    return 0",
+            "[3]int[1, 2, 3]\n",
+        )
+
+    def test_print_slice_of_int(self):
+        assert_stdout(
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s = arr[1:4]\n"
+            "    print(s)\n"
+            "    return 0",
+            "[]int[2, 3, 4]\n",
+        )
+
+    def test_nested_2d_array_prefix_appears_once_not_per_row(self):
+        """The test that actually proves the headline formatting
+        decision: the type prefix appears exactly once, at the
+        outermost level -- NOT repeated as "[3]int" on each inner row."""
+        assert_stdout(
+            "    [2][3]int matrix = [[1, 2, 3], [4, 5, 6]]\n"
+            "    print(matrix)\n"
+            "    return 0",
+            "[2][3]int[[1, 2, 3], [4, 5, 6]]\n",
+        )
+
+    def test_str_elements_are_quoted(self):
+        """A str element is quoted inside a collection even though a
+        bare str argument to print prints unquoted -- the two are
+        deliberately different conventions, not an inconsistency."""
+        assert_stdout(
+            "    [3]str names = ['alice', 'bob', 'carol']\n"
+            "    print(names)\n"
+            "    return 0",
+            "[3]str['alice', 'bob', 'carol']\n",
+        )
+
+    def test_bool_elements(self):
+        assert_stdout(
+            "    [3]bool flags = [true, false, true]\n"
+            "    print(flags)\n"
+            "    return 0",
+            "[3]bool[true, false, true]\n",
+        )
+
+    def test_empty_slice_prints_with_no_trailing_comma(self):
+        """`arr[5:5]` is a valid, empty-slice-producing expression
+        (see TestSliceBoundsChecking's own positive control) -- this
+        confirms printing one produces `[]` cleanly, not a trailing
+        comma or an error."""
+        assert_stdout(
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s = arr[5:5]\n"
+            "    print(s)\n"
+            "    return 0",
+            "[]int[]\n",
+        )
+
+    def test_slice_of_2d_array_outer_dimension(self):
+        assert_stdout(
+            "    [3][3]int matrix = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]\n"
+            "    [][3]int rows = matrix[0:2]\n"
+            "    print(rows)\n"
+            "    return 0",
+            "[][3]int[[1, 2, 3], [4, 5, 6]]\n",
+        )
+
+    def test_printing_a_slice_of_a_slice(self):
+        """Exercises the harder of gen_indexable_base_into's two code
+        paths directly: the base's own length is a RUNTIME value read
+        out of its descriptor, not a compile-time constant the way an
+        array base's is."""
+        assert_stdout(
+            "    [6]int arr = [1, 2, 3, 4, 5, 6]\n"
+            "    []int s = arr[1:5]\n"
+            "    []int s2 = s[1:3]\n"
+            "    print(s2)\n"
+            "    return 0",
+            "[]int[3, 4]\n",
+        )
+
+    def test_multiple_prints_each_get_exactly_one_newline(self):
+        assert_stdout(
+            "    [2]int a = [1, 2]\n"
+            "    [2]int b = [3, 4]\n"
+            "    print(a)\n"
+            "    print(b)\n"
+            "    return 0",
+            "[2]int[1, 2]\n[2]int[3, 4]\n",
+        )
+
+    def test_array_literal_as_direct_print_argument_not_supported(self):
+        """A real, deliberate gap, matching the same restriction
+        gen_array_arg_address_into already imposes on array-typed call
+        arguments: a bare ArrayLiteral has no address of its own to
+        print through. Assign it to a named variable first."""
+        source = (
+            "def int main():\n"
+            "    print([1, 2, 3])\n"
+            "    return 0\n"
+        )
+        ast = _parse(source)
+        analyze(ast)  # semantically fine -- the gap is codegen-level only
+        with pytest.raises(CodegenError, match="assign it to a variable first"):
+            generate_asm(ast, platform=ASM_PLATFORM)
+
+    def test_slice_expression_as_direct_print_argument_not_supported(self):
+        source = (
+            "def int main():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    print(arr[1:3])\n"
+            "    return 0\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        with pytest.raises(CodegenError, match="assign it to a variable first"):
+            generate_asm(ast, platform=ASM_PLATFORM)
+
+
+# ---------------------------------------------------------------------------
 # Semantic analysis: scope/declaration checking and the strict int/bool
 # type system. These never reach codegen -- each one asserts that
 # analyze() itself raises SemanticError -- so they don't need gcc and
@@ -4023,14 +4211,6 @@ class TestSemanticErrors:
             "    arr[0] = true\n"
             "    return arr[0]",
             match="Cannot assign a value of type bool to an array element of type int",
-        )
-
-    def test_print_with_array_argument_is_rejected(self):
-        assert_semantic_error(
-            "    [3]int arr = [1, 2, 3]\n"
-            "    print(arr)\n"
-            "    return 0",
-            match="'print' does not support array or slice arguments",
         )
 
     def test_array_equality_comparison_is_rejected(self):

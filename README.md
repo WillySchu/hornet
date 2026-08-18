@@ -14,8 +14,8 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- `print()` for slices and arrays.
 - Void type (none, nil?).
+- `assert`
 - `len` function.
 - Index into unnamed slices.
 - Slices in arrays.
@@ -34,6 +34,8 @@ Updates:
 - Array equality.
 - Slice equality?
 - Escape analysis for arrays and slices.
+- `type` Type.
+- Fix print for collections to build str buffer and call print once.
 - GC...
 - `is` keyword.
 - Pointers?

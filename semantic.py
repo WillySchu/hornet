@@ -912,27 +912,28 @@ class SemanticAnalyzer:
         return return_type
 
     def check_print_call(self, expr: Call) -> Type:
-        """`print` takes exactly one argument, of *any* scalar type --
-        unlike an ordinary function it isn't tied to one fixed
-        parameter type, since int/bool/str are all printable and
-        there's no reason to force a caller to pick a differently-named
-        builtin per type. Arrays and slices are explicitly excluded:
-        there's no defined formatting for either (nothing in codegen.py
-        knows how to print one), so this rejects them here with a
-        clear error rather than letting one through to type-check fine
-        and then hit an unhandled case in codegen. Always "returns" int
-        (see the module docstring's BUILTINS section for why 0,
-        specifically) -- Hornet has no void type, and this keeps
-        `print(x)` usable as an ordinary expression statement via the
-        same ExprStmt path every other call already goes through, with
-        nothing print-specific needed there."""
+        """`print` takes exactly one argument, of ANY type -- unlike an
+        ordinary function it isn't tied to one fixed parameter type,
+        since every type Hornet has is printable and there's no reason
+        to force a caller to pick a differently-named builtin per type.
+        An array or slice argument is formatted as `TYPE[elem, elem,
+        ...]` -- e.g. `[3]int[1, 2, 3]` or `[]int[1, 2, 3]` -- the
+        type prefix appearing exactly once, at the outermost level,
+        with no repetition for nested rows (see codegen.py's own
+        _gen_print_collection); a str element is quoted inside a
+        collection (`'alice'`) even though a bare str argument prints
+        unquoted -- matching how most languages format a string
+        differently in a collection than when printed on its own.
+        Always "returns" int (see the module docstring's BUILTINS
+        section for why 0, specifically) -- Hornet has no void type,
+        and this keeps `print(x)` usable as an ordinary expression
+        statement via the same ExprStmt path every other call already
+        goes through, with nothing print-specific needed there."""
         if len(expr.args) != 1:
             raise SemanticError(
                 f"'print' expects exactly 1 argument, got {len(expr.args)}"
             )
-        arg_type = self.check_expr(expr.args[0])
-        if arg_type.kind in (TypeKind.ARRAY, TypeKind.SLICE):
-            raise SemanticError(f"'print' does not support array or slice arguments (got {arg_type})")
+        self.check_expr(expr.args[0])  # any type is fine; just validate it
         return Type.INT
 
     def check_constant(self, expr: Constant) -> Type:

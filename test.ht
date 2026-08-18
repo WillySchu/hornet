@@ -6,6 +6,16 @@ def str main():
     print(ints[0])
     [3]int ints2
     ints2 = [4, 5, 6]
+    []int sl_ints = ints[:]
+    print(sl_ints)
+    ints[0] = 5
+    print(ints)
+    print(sl_ints)
+    sl_ints[1] = 6
+    print(ints)
+    print(sl_ints)
+    print(false)
+    print(ints)
     return ''
 
 

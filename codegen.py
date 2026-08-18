@@ -717,6 +717,67 @@ rather than popping keeps it protected for the bounds check that
 comes later, without needing a separate temporary slot just to hold a
 value that's already sitting exactly where it needs to be.
 
+PRINTING ARRAYS AND SLICES
+-------------------------------
+`print` on an array or slice formats as `TYPE[elem, elem, ...]` --
+e.g. `[3]int[1, 2, 3]` or `[]int[1, 2, 3]` -- the type prefix
+(str(arg_type), matching semantic.Type.__str__ exactly, so no new
+formatting logic was needed for it) appearing exactly once, at the
+outermost level, never repeated for a nested row (a [2][3]int prints
+as `[2][3]int[[1, 2, 3], [4, 5, 6]]`, not with "[3]int" repeated on
+each inner row). A str element is quoted inside a collection
+(`'alice'`) even though a bare str argument to print still prints
+unquoted -- two different, both intentional, conventions, matching
+how most languages format a string differently in a collection/repr
+context than when printed bare.
+
+Built as a sequence of direct printf calls -- one piece at a time
+(the type prefix, each bracket, each separator, each element) -- via
+_gen_print_static/_gen_print_quoted_str/_gen_print_int_value/
+_gen_print_bool_value, rather than materializing one big string via
+malloc and printing it in one shot. That alternative would need a new
+int-to-string conversion step this language has no other reason to
+have: every existing int print already goes straight to printf's own
+%d formatting, never through an intermediate string buffer -- adding
+one just for this would be real, separable work (buffer sizing, how
+it interacts with str's existing memory-leak policy) for a feature
+that doesn't otherwise need it. The trade-off is more instructions per
+print call on a collection than a scalar -- a reasonable one for a
+teaching compiler, not an accident.
+
+gen_print_collection: ONE LOOP, NOT UNROLLED-VS-LOOPED
+------------------------------------------------------------
+An array's length is known at compile time; a slice's is only known
+at runtime. Rather than unroll an array's printing at compile time
+(fewer instructions, but a second code path to maintain) and loop only
+for a slice, _gen_print_collection uses ONE uniform runtime loop for
+both, reusing gen_indexable_base_into's own "address plus length,
+either an Imm or a runtime register" abstraction directly -- the
+comparison that ends the loop just works with whichever Operand comes
+back, uniformly, exactly like gen_index_address_into's own bounds
+check already does.
+
+%rbx (the base address), %r12 (the length, when it's a runtime value),
+and %r13 (the loop counter) are all CALLEE-SAVED, not the caller-saved
+scratch (rax, rcx, rdx, ...) most of this file's transient
+computations already use -- because all three have to survive across
+every printf/puts call the loop body makes, at least one per element,
+and a well-behaved libc call is obligated to preserve a callee-saved
+register the same way another Hornet function already has to. A
+nested array element (this method's own recursive case, for a multi-
+dimensional array's rows) protects all three on the stack across the
+RECURSIVE call specifically, since that call reuses these same three
+physical registers for its own, independent address/length/counter --
+the same push-before-recursing discipline used everywhere else in this
+file a value needs to survive evaluating something else, just applied
+to a whole recursive call instead of a single sub-expression.
+
+print's own argument, when array- or slice-typed, is restricted to a
+Variable or Index -- the same restriction gen_array_arg_address_into
+already imposes on array-typed call arguments, for the same reason: a
+bare ArrayLiteral, Slice, or array/slice-returning Call has no address
+of its own to print through. Assign it to a named variable first.
+
 SCOPE: WHAT THIS DOESN'T COVER YET
 --------------------------------------
 An array whose ELEMENTS are themselves slices (`[3][]int`) isn't
@@ -1474,6 +1535,14 @@ class CodeGenerator:
         # vs. a slice expression's own bounds).
         self._bounds_check_fail_labels = {}
         self._bounds_check_message_labels = {}
+        # Lazily created and cached for the whole compilation, keyed by
+        # content -- a general-purpose version of the print-related
+        # caches above, for the punctuation/prefix pieces printing an
+        # array or slice needs (brackets, separators, a newline, each
+        # type's own "[N]int"/"[]int"-style prefix string, and the
+        # "'%s'" format used to quote a str element inside a
+        # collection). See _get_static_string_label.
+        self._static_string_labels = {}
         # Set fresh at the start of every gen_function call -- see its
         # own comments -- to either None (this function's own return
         # type isn't an array) or the %rbp offset of the stack slot
@@ -3116,11 +3185,7 @@ class CodeGenerator:
 
     def gen_print_call_into(self, expr: Call, dst: Operand) -> List[Instruction]:
         """`print(x)`: dispatches on x's *compile-time* type -- known
-        exactly, since Hornet is statically typed -- to one of three
-        completely different instruction sequences, each calling a
-        different libc function. See the module docstring's BUILTINS
-        section for why each type gets its own call rather than one
-        shared, format-driven path.
+        exactly, since Hornet is statically typed.
 
           str:  puts(x)                    -- puts adds its own newline
           int:  printf("%d\\n", x)         -- needs real formatting
@@ -3128,12 +3193,22 @@ class CodeGenerator:
                 exact same cmp/je/jmp/label shape gen_if already uses)
                 picks which string literal's address to pass, then
                 falls through to the same puts call as the str case
+          array/slice: `TYPE[elem, elem, ...]\\n` -- the type prefix
+                (str(arg_type), e.g. "[3]int" or "[]int") printed once,
+                then gen_indexable_base_into's own address+length,
+                handed to _gen_print_collection for the recursive,
+                piece-by-piece body -- see the module docstring's
+                PRINTING ARRAYS AND SLICES section for the full design.
+                Restricted to a Variable or Index argument, matching
+                gen_array_arg_address_into's own restriction elsewhere:
+                a bare ArrayLiteral, Slice, or array/slice-returning
+                Call has no address of its own to print through --
+                assign it to a named variable first.
 
-        Every path ends with `movl $0, %eax`, overriding whatever
-        puts/printf actually returned -- print's "return value" is a
-        clean, predictable 0 (see semantic.py's check_print_call),
-        never leaking the underlying libc call's own return convention
-        into the language.
+        Every path ends with `movl $0, %eax`, overriding whatever the
+        underlying libc call(s) actually returned -- print's "return
+        value" is a clean, predictable 0 (see semantic.py's
+        check_print_call), never leaking any of it into the language.
 
         No register-preservation concerns beyond the ones already
         established: puts/printf are libc functions, and libc is
@@ -3149,6 +3224,23 @@ class CodeGenerator:
 
         arg = expr.args[0]
         arg_type = self._type_of(arg)
+
+        if arg_type.kind in (TypeKind.ARRAY, TypeKind.SLICE):
+            if not isinstance(arg, (Variable, Index)):
+                raise CodegenError(
+                    f"print's argument must be a variable or an "
+                    f"indexing expression when it's array- or slice-"
+                    f"typed, not {type(arg).__name__} -- assign it to "
+                    f"a variable first"
+                )
+            instructions, length_operand = self.gen_indexable_base_into(
+                arg, Register('rbx'), Register('r12')
+            )
+            instructions.extend(self._gen_print_static(str(arg_type)))
+            instructions.extend(self._gen_print_collection(length_operand, arg_type))
+            instructions.extend(self._gen_print_static("\n"))
+            instructions.append(Mov(src=Imm(0), dst=dst))
+            return instructions
 
         if arg_type == Type.STR:
             instructions = self.gen_expr_into(arg, dst)
@@ -3211,6 +3303,224 @@ class CodeGenerator:
             self._false_str_label = self.new_label("false_str")
             self.string_literals.append((self._false_str_label, "false"))
         return self._false_str_label
+
+    # -- printing arrays and slices ----------------------------------------
+    # See the module docstring's PRINTING ARRAYS AND SLICES section for
+    # the full design. Format: `TYPE[elem, elem, ...]` -- e.g.
+    # `[3]int[1, 2, 3]` or `[]int[1, 2, 3]` -- the type prefix appearing
+    # exactly once, at the outermost level, never repeated for a nested
+    # row. Built as a sequence of direct printf calls, one piece at a
+    # time (the type prefix, each bracket, each separator, each
+    # element), rather than materializing one big string via malloc and
+    # printing it in one shot -- which would need a new int-to-string
+    # conversion step this language has no other reason to have; every
+    # existing int print already goes straight to printf's own %d
+    # formatting, never through an intermediate string buffer.
+
+    def _get_static_string_label(self, text: str) -> str:
+        """Lazily creates and caches (for the whole compilation, like
+        print's own %d-format/true/false labels above) a label for
+        this exact string, deduped by content -- e.g. every
+        "[3]int"-typed print call anywhere in the program shares one
+        cached label rather than emitting a fresh string literal per
+        call site, the same "small dedicated cache" policy those
+        labels already use, just generalized to arbitrary content
+        instead of three fixed strings."""
+        if text not in self._static_string_labels:
+            label = self.new_label("str_lit")
+            self._static_string_labels[text] = label
+            self.string_literals.append((label, text))
+        return self._static_string_labels[text]
+
+    def _gen_print_static(self, text: str) -> List[Instruction]:
+        """Prints a compile-time-known string with NO trailing newline
+        (unlike puts, which always appends one) -- used for every
+        punctuation/prefix piece of array/slice printing (the type
+        prefix, brackets, separators, and the single final newline
+        gen_print_call_into appends once at the very end), each of
+        which needs to NOT have its own newline so the whole
+        collection prints as one line.
+
+        Passes `text` directly as printf's own format string, rather
+        than going through a separate "%s" argument -- safe because
+        every string this is ever called with is either a hardcoded
+        punctuation piece or a type's own str() (see
+        semantic.Type.__str__), neither of which can ever contain a
+        literal '%' character."""
+        label = self._get_static_string_label(text)
+        return [
+            LeaQ(label=label, dst=Register('rdi')),
+            Mov(src=Imm(0), dst=Register('eax')),
+            CallInstr('printf'),
+        ]
+
+    def _gen_print_quoted_str(self, value_reg: Register) -> List[Instruction]:
+        """Prints a str VALUE (already in value_reg, a 64-bit pointer)
+        wrapped in single quotes, via printf("'%s'", value) -- used
+        for str elements WITHIN an array/slice being printed.
+        Distinct from print's own top-level str handling (unquoted,
+        via puts): quoting only applies inside a collection, matching
+        how most languages format a string differently in a
+        collection/repr context than when printed bare."""
+        fmt_label = self._get_static_string_label("'%s'")
+        return [
+            MovQ(src=value_reg, dst=Register('rsi')),
+            LeaQ(label=fmt_label, dst=Register('rdi')),
+            Mov(src=Imm(0), dst=Register('eax')),
+            CallInstr('printf'),
+        ]
+
+    def _gen_print_int_value(self, value_reg: Register) -> List[Instruction]:
+        """Prints an int VALUE (already in a 32-bit register) via
+        printf("%d", value), with NO trailing newline -- used for int
+        elements within an array/slice. Distinct from print's own
+        top-level int handling (_get_int_format_label's "%d\\n"),
+        which does include one."""
+        fmt_label = self._get_static_string_label("%d")
+        return [
+            Mov(src=value_reg, dst=Register('esi')),
+            LeaQ(label=fmt_label, dst=Register('rdi')),
+            Mov(src=Imm(0), dst=Register('eax')),
+            CallInstr('printf'),
+        ]
+
+    def _gen_print_bool_value(self, value_reg: Register) -> List[Instruction]:
+        """Prints a bool VALUE (already in a 32-bit register, 0 or 1)
+        as "true"/"false", with NO trailing newline -- reuses the same
+        cached true/false string labels print's own top-level bool
+        handling already caches (they were never stored WITH a
+        newline in the first place -- puts is what adds one there,
+        not the string itself), just calling printf directly on
+        whichever one applies instead of going through puts."""
+        true_label = self._get_true_str_label()
+        false_label = self._get_false_str_label()
+        false_branch = self.new_label("print_elem_bool_false")
+        end_label = self.new_label("print_elem_bool_end")
+        return [
+            Cmp(src=Imm(0), dst=value_reg),
+            Je(false_branch),
+            LeaQ(label=true_label, dst=Register('rdi')),
+            Jmp(end_label),
+            Label(false_branch),
+            LeaQ(label=false_label, dst=Register('rdi')),
+            Label(end_label),
+            Mov(src=Imm(0), dst=Register('eax')),
+            CallInstr('printf'),
+        ]
+
+    def _gen_print_collection(self, length_operand: Union[Imm, Register], collection_type: Type) -> List[Instruction]:
+        """Prints `[elem, elem, ...]` for a collection (array- or
+        slice-typed) whose base ADDRESS the caller has already placed
+        in %rbx, and whose LENGTH is `length_operand` -- an Imm for a
+        compile-time-known array length, or Register('r12')
+        (populated by the caller with a runtime value) for a slice's
+        own length. No leading type prefix, no trailing newline -- see
+        gen_print_call_into for those, which only ever happen once, at
+        the very outermost level.
+
+        Uses a genuine runtime loop, even when length_operand is a
+        compile-time Imm (an array base) -- rather than unrolling at
+        compile time, one uniform code path handles both an array's
+        and a slice's own length identically, the same "however it's
+        represented" uniformity gen_indexable_base_into's own other
+        callers already rely on.
+
+        %rbx (the address), %r12 (the length, when it's a runtime
+        value), and %r13 (the loop counter) all have to survive across
+        every printf/puts call this loop makes -- at least one per
+        element -- so all three are CALLEE-SAVED registers, which a
+        well-behaved libc call is obligated to preserve, rather than
+        the caller-saved scratch (rax, rcx, rdx, ...) most of this
+        file's transient computations already use. A nested array
+        element (this method's own recursive case, for a multi-
+        dimensional array's rows) needs all three protected on the
+        stack across the RECURSIVE call specifically, since that call
+        reuses these same three physical registers for its own,
+        independent address/length/counter -- exactly the same push-
+        before-recursing discipline used everywhere else in this file
+        a value needs to survive evaluating something else, just
+        applied to a whole recursive call instead of a single sub-
+        expression.
+        """
+        element_type = collection_type.element_type
+        element_stride = type_byte_width(element_type)
+        is_runtime_length = isinstance(length_operand, Register)
+
+        ADDR = Register('rbx')
+        LEN = Register('r12')
+        COUNTER = Register('r13')
+
+        instructions = self._gen_print_static("[")
+        instructions.append(Mov(src=Imm(0), dst=Register('r13d')))
+
+        loop_start = self.new_label("print_loop_start")
+        loop_end = self.new_label("print_loop_end")
+        skip_sep = self.new_label("print_skip_sep")
+
+        instructions.append(Label(loop_start))
+        length_op_32 = Register('r12d') if is_runtime_length else length_operand
+        instructions.append(Cmp(src=length_op_32, dst=Register('r13d')))
+        instructions.append(Jae(loop_end))
+
+        instructions.append(Cmp(src=Imm(0), dst=Register('r13d')))
+        instructions.append(Je(skip_sep))
+        instructions.extend(self._gen_print_static(", "))
+        instructions.append(Label(skip_sep))
+
+        # element address = ADDR + COUNTER * element_stride, into %rax.
+        # A plain 32-bit imul is safe: COUNTER is always small and
+        # non-negative (it's this loop's own counter), and a 32-bit
+        # write zero-extends into the full 64-bit rax.
+        instructions.append(Mov(src=Register('r13d'), dst=Register('eax')))
+        instructions.append(IMul(src=Imm(element_stride), dst=Register('eax')))
+        instructions.append(AddQ(src=ADDR, dst=Register('rax')))
+        # %rax now holds the element's own address.
+
+        if element_type.kind == TypeKind.ARRAY:
+            instructions.append(Push(ADDR))
+            if is_runtime_length:
+                instructions.append(Push(LEN))
+            instructions.append(Push(COUNTER))
+            instructions.append(MovQ(src=Register('rax'), dst=ADDR))
+            instructions.extend(self._gen_print_collection(Imm(element_type.size), element_type))
+            instructions.append(Pop(COUNTER))
+            if is_runtime_length:
+                instructions.append(Pop(LEN))
+            instructions.append(Pop(ADDR))
+        elif element_type.kind == TypeKind.SLICE:
+            # Not reachable via any currently-constructible program
+            # (an array or slice of slices can't be initialized --
+            # see gen_array_copy's own rejection), but handled
+            # correctly anyway rather than left to do something
+            # arbitrary: reads the nested slice's own descriptor
+            # (ptr at +0, len at +8) from the element address just
+            # computed, exactly like the top-level slice case does.
+            instructions.append(Push(ADDR))
+            if is_runtime_length:
+                instructions.append(Push(LEN))
+            instructions.append(Push(COUNTER))
+            instructions.append(MovQ(src=Memory('rax', 8), dst=LEN))
+            instructions.append(MovQ(src=Memory('rax', 0), dst=ADDR))
+            instructions.extend(self._gen_print_collection(LEN, element_type))
+            instructions.append(Pop(COUNTER))
+            if is_runtime_length:
+                instructions.append(Pop(LEN))
+            instructions.append(Pop(ADDR))
+        elif element_type == Type.STR:
+            instructions.append(MovQ(src=Memory('rax', 0), dst=Register('rax')))
+            instructions.extend(self._gen_print_quoted_str(Register('rax')))
+        elif element_type == Type.BOOL:
+            instructions.append(Mov(src=Memory('rax', 0), dst=Register('eax')))
+            instructions.extend(self._gen_print_bool_value(Register('eax')))
+        else:  # INT
+            instructions.append(Mov(src=Memory('rax', 0), dst=Register('esi')))
+            instructions.extend(self._gen_print_int_value(Register('esi')))
+
+        instructions.append(Add(src=Imm(1), dst=Register('r13d')))
+        instructions.append(Jmp(loop_start))
+        instructions.append(Label(loop_end))
+        instructions.extend(self._gen_print_static("]"))
+        return instructions
 
     def gen_string_literal_into(self, expr: StringLiteral, dst: Operand) -> List[Instruction]:
         """Registers this literal's content for later emission as static
