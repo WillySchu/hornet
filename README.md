@@ -18,7 +18,6 @@ Updates:
 - `len` function.
 - Slices in arrays.
 - `in` keyword.
-- Slice literals.
 - Pass function calls to print.
 - Compound index assign.
 - Ternary.

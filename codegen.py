@@ -1036,6 +1036,86 @@ side effect worth preserving" (a Variable) from "might have one" (a
 Call) -- or materializing either one just to immediately discard it --
 isn't implemented; this raises a clear error instead of guessing.
 
+SLICE LITERALS
+-------------------
+`[]int[1, 2, 3]` -- automatically creates a heap-allocated backing
+array (sized to the literal's own element count) AND the {ptr, len}
+descriptor pointing at it, in one expression. Also `[]int s = [1, 2,
+3]`: an untyped bracket list flowing directly into a slice-typed
+VarDecl/Assign is treated the same way, just with the element type
+inferred from the DECLARED slice type instead of restated in the
+literal (see semantic.py's own _check_value_flowing_into).
+
+Implemented as parser sugar, not a new AST node or a new top-level
+codegen entry point: `[]int[1, 2, 3]` parses directly into
+`Slice(array=ArrayLiteral(...), low=None, high=None)` -- an implicit
+"the whole thing" slice of a freshly-parsed array literal (see
+ArrayLiteral's own docstring in parser.py) -- which is what lets
+check_slice, gen_slice_into, and gen_indexable_base_into handle the
+general, TYPED form almost entirely via machinery that already existed
+for slicing a NAMED array. The one genuinely new piece needed is
+gen_indexable_base_into's own ArrayLiteral case (inside its existing
+ARRAY branch, not the SLICE one -- an ArrayLiteral's own type is
+ARRAY-kind; the slice-ness comes entirely from the outer Slice
+wrapping, not anything intrinsic to the literal node itself): where
+the ordinary Variable/Index cases compute the address of something
+that ALREADY exists, this one calls gen_array_literal_heap_alloc_into
+to create something new -- a fresh, heap-backed allocation, written
+with the literal's own elements, whose resulting pointer becomes the
+"address" gen_slice_into's own low/high-defaulting logic then slices
+in the ordinary way (trivially, the whole thing, since low/high are
+both None).
+
+The UNTYPED form (`[]int s = [1, 2, 3]`) can't be handled by parser
+sugar at all -- the parser has no way to know, at parse time, that a
+plain `[1, 2, 3]` is meant for a slice rather than an array, since
+that depends entirely on the SURROUNDING declared/target type. This is
+instead a small, explicit ArrayLiteral-as-slice-value short-circuit
+directly in gen_var_decl and gen_assign, reusing the exact same
+gen_array_literal_heap_alloc_into helper the general, typed form's
+gen_indexable_base_into case does -- both ultimately need identical
+work (malloc a backing array, write the literal's elements into it,
+record the resulting pointer and length), just reached from two
+different call sites for two different syntactic shapes.
+
+gen_array_literal_heap_alloc_into itself always allocates AT LEAST 1
+BYTE, even for a completely empty literal (`[]int[]`) -- deliberately
+not relying on libc's own malloc(0) behavior, which POSIX leaves
+implementation-defined (either a null return or a valid, unique
+pointer are both conforming). This is what makes `s == none` correctly
+FALSE for an intentionally empty slice literal: `[]int[]` is a real,
+live, zero-length slice with a genuine (if trivial) backing
+allocation, not a nil one -- the exact same nil-vs-empty distinction
+`arr[5:5]` already has (see gen_slice_none_comparison_into), extended
+here to a literal that was never sliced from anything at all. Every
+slice literal's own backing array is heap-allocated UNCONDITIONALLY
+here, regardless of size, unlike an ordinary array variable (which
+only heap-promotes past the existing 16KB stack-size threshold, see
+is_heap_allocated) -- not a size-based decision at all: a slice
+literal's backing array has to outlive the statement that creates it,
+the same "can safely cross frame boundaries" guarantee every OTHER
+sliced array already gets, unconditionally, for the same reason.
+
+A bare Slice-expression statement (`[]int[se(), 2, 3]` alone, with no
+assignment -- desugaring, per the above, into a bare Slice statement
+just like any other) needed its own new codegen too: gen_expr_stmt
+previously had no Slice case at all, so this fell through to the
+ordinary gen_expr_into dispatch and hit its ArrayLiteral/Slice
+defensive rejection (neither fits in a single register). Unlike the
+analogous ArrayLiteral case just above, this doesn't need its own
+narrower, side-effects-only path: gen_slice_into already computes
+fully correctly into any Memory destination, including a genuine
+runtime bounds check on low/high, so gen_expr_stmt's own new Slice
+case just reuses the same per-function scratch slot gen_indexable_
+base_into's own Slice-base case already needed (_unnamed_slice_temp_
+offset) and discards the result -- an out-of-range bound still aborts
+here, matching how any other bare expression statement's real
+instructions genuinely run. This same fix, found specifically by
+testing the slice-literal case, also closed a genuinely pre-existing,
+unrelated gap: a bare statement slicing an ordinary, already-existing
+array (`arr[:]` alone) was already broken before slice literals
+existed at all.
+
 SCOPE: WHAT THIS DOESN'T COVER YET
 --------------------------------------
 An array whose ELEMENTS are themselves slices (`[3][]int`) isn't
@@ -2271,6 +2351,55 @@ class CodeGenerator:
     # gen_function's existing parameter loop, both of which raise a
     # clear CodegenError rather than silently mishandling one.
 
+    def gen_array_literal_heap_alloc_into(self, expr: ArrayLiteral) -> List[Instruction]:
+        """Mallocs a NEW, heap-allocated array sized to fit expr's own
+        elements, writes them in (via the ordinary gen_array_literal_
+        into, whose own dst_mem-protection logic already handles a
+        non-'rbp' base correctly -- Memory('rax', 0) here is exactly
+        that case, and by the time gen_array_literal_into returns,
+        %rax is guaranteed to still hold the original malloc'd address,
+        the same guarantee every other caller of it already relies
+        on), and leaves the resulting pointer in %rax.
+
+        Shared by both ways a slice literal's backing array gets
+        created: the general, typed expression form (`[]int[1, 2, 3]`,
+        parsed as an implicit whole-array Slice -- see parser.py's own
+        _parse_bracketed_literal) via gen_indexable_base_into's own
+        ArrayLiteral case, and the untyped form used directly as a
+        slice-typed VarDecl/Assign value (`[]int s = [1, 2, 3]`) via
+        gen_var_decl/gen_assign's own ArrayLiteral-as-slice-value
+        short-circuit.
+
+        Always allocates at least 1 byte, even for an empty literal
+        (`[]int[]`) -- guaranteeing a genuine, non-null, unique pointer
+        regardless of libc's own malloc(0) behavior (implementation-
+        defined by POSIX; this doesn't rely on it), which is what makes
+        `s == none` correctly false for an intentionally empty slice
+        literal, matching the same nil-vs-empty distinction a real,
+        non-empty slice already has (see gen_slice_none_comparison_
+        into) -- `[]int[]` is a real, live, zero-length slice, not a
+        nil one, the same way `arr[5:5]` already is.
+
+        Every slice literal's own backing array is heap-allocated here
+        UNCONDITIONALLY, regardless of size -- unlike an ordinary array
+        variable, which only heap-promotes past the 16KB stack-size
+        threshold (see is_heap_allocated). This isn't a size-based
+        decision at all: a slice literal's backing array has to outlive
+        the statement that creates it (the whole POINT of a slice is to
+        be usable after the expression that produced it), so it needs
+        the SAME "can safely cross frame boundaries" guarantee every
+        OTHER sliced array already gets, unconditionally, for exactly
+        the same reason.
+        """
+        array_type = self._type_of(expr)
+        width = max(1, type_byte_width(array_type))
+        instructions = [
+            Mov(src=Imm(width), dst=Register('edi')),
+            CallInstr('malloc'),
+        ]
+        instructions.extend(self.gen_array_literal_into(Memory('rax', 0), expr, array_type))
+        return instructions
+
     def gen_indexable_base_into(self, expr: Node, addr_dst: Register, len_dst: Register) -> Tuple[List[Instruction], Union[Imm, Register]]:
         """Computes the address of `expr`'s own data into `addr_dst`,
         and returns (instructions, length_operand): length_operand is
@@ -2298,6 +2427,18 @@ class CodeGenerator:
         just moves those two registers into addr_dst/len_dst directly,
         no scratch slot needed at all).
 
+        An ARRAY-typed `expr` can ALSO be an ArrayLiteral directly --
+        not an existing Variable/Index at all, but a freshly-created
+        one -- for a slice LITERAL's own backing array (`[]int[1, 2,
+        3]`, parsed as an implicit whole-array Slice wrapping an
+        ArrayLiteral -- see parser.py's own _parse_bracketed_literal).
+        See gen_array_literal_heap_alloc_into's own docstring for why
+        this is a genuinely different kind of "address" than the
+        ordinary Variable/Index cases below: it mallocs a brand new
+        allocation and writes the literal's own elements into it,
+        rather than computing the address of something that already
+        exists.
+
         Reusing ONE shared scratch slot for every Slice materialization
         -- rather than a fresh one per nesting level -- is safe under
         arbitrarily deep chaining (`arr[:][0:2][0]`, and so on)
@@ -2316,16 +2457,20 @@ class CodeGenerator:
         An Index base (indexing into an array/slice OF slices) isn't
         included here -- that would require a constructible array of
         slices, which doesn't exist yet (see gen_array_copy's own
-        rejection) -- and neither is an ArrayLiteral or array-returning
-        Call as a slice base, since neither can ever BE slice-typed.
+        rejection) -- and neither is an array-returning Call as a
+        SLICE base, since it can never actually BE slice-typed.
 
-        `expr` being anything else (a bare ArrayLiteral or a Call
-        returning something other than an array/slice can't reach here
-        at all, being neither array- nor slice-typed) falls through to
-        the final CodegenError below.
+        `expr` being anything else (a Call returning something other
+        than an array/slice can't reach here at all, being neither
+        array- nor slice-typed) falls through to the final
+        CodegenError below.
         """
         base_type = self._type_of(expr)
         if base_type.kind == TypeKind.ARRAY:
+            if isinstance(expr, ArrayLiteral):
+                instructions = self.gen_array_literal_heap_alloc_into(expr)
+                instructions.append(MovQ(src=Register('rax'), dst=addr_dst))
+                return instructions, Imm(base_type.size)
             instructions = self.gen_array_address_into(expr, addr_dst)
             return instructions, Imm(base_type.size)
         if base_type.kind == TypeKind.SLICE:
@@ -3243,6 +3388,25 @@ class CodeGenerator:
             # expression itself since every OTHER kind of value's own
             # resolved type already matches what needs to be stored.
             return self.gen_none_into(Memory('rbp', offset), var_type)
+        if isinstance(stmt.init, ArrayLiteral) and var_type.kind == TypeKind.SLICE:
+            # `[]int s = [1, 2, 3]` -- an UNTYPED array literal used
+            # directly as a slice's own initializer, treated exactly
+            # like the general, explicitly-typed form (`[]int s =
+            # []int[1, 2, 3]`, a Slice wrapping an ArrayLiteral --
+            # see gen_indexable_base_into's own ArrayLiteral case):
+            # construct a new, heap-allocated backing array and
+            # produce a descriptor for the whole thing. Needed here,
+            # separately, specifically because stmt.init's own
+            # resolved type (Type(ARRAY, ...) -- see semantic.py's
+            # _check_value_flowing_into) never equals var_type
+            # (Type(SLICE, ...)), so _gen_store's ordinary dispatch,
+            # which trusts the value's own resolved type completely,
+            # would never route this to slice-producing codegen at all
+            # on its own.
+            instructions = self.gen_array_literal_heap_alloc_into(stmt.init)
+            instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
+            instructions.append(MovQ(src=Imm(len(stmt.init.elements)), dst=Memory('rbp', offset + 8)))
+            return instructions
         return self._gen_store(offset, stmt.init)
 
     def gen_assign(self, stmt: Assign) -> List[Instruction]:
@@ -3253,6 +3417,20 @@ class CodeGenerator:
             # type), not stmt.value's own resolved type (Type.NONE).
             var_type = self._local_type(stmt.name)
             return self.gen_none_into(Memory('rbp', offset), var_type)
+        var_type = self._local_type(stmt.name)
+        if isinstance(stmt.value, ArrayLiteral) and var_type.kind == TypeKind.SLICE:
+            # See gen_var_decl's own identical case just above for the
+            # full reasoning -- unlike an array's own Assign (just
+            # below), this always mallocs a FRESH allocation rather
+            # than reusing an existing one: an assigned-to slice
+            # variable might currently be pointing at a DIFFERENT
+            # array (or none at all) of a completely different size,
+            # so there's no existing allocation here that could
+            # possibly be safe to reuse in place.
+            instructions = self.gen_array_literal_heap_alloc_into(stmt.value)
+            instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
+            instructions.append(MovQ(src=Imm(len(stmt.value.elements)), dst=Memory('rbp', offset + 8)))
+            return instructions
         value_type = self._type_of(stmt.value)
         if value_type.kind == TypeKind.ARRAY and is_heap_allocated(value_type):
             # Reuses the EXISTING allocation from this variable's own
@@ -3571,6 +3749,26 @@ class CodeGenerator:
         # array in memory at all.
         if isinstance(stmt.expr, ArrayLiteral):
             return self.gen_array_literal_side_effects_only(stmt.expr)
+        # A Slice expression is the analogous exception for slices --
+        # a 16-byte descriptor doesn't fit in a single register either
+        # -- but unlike ArrayLiteral, this doesn't need its own
+        # narrower, side-effects-only path: gen_slice_into already
+        # computes fully correctly into any Memory destination,
+        # including a genuine runtime bounds check on low/high (an
+        # out-of-range bound still aborts here, matching how any other
+        # bare expression statement's real instructions genuinely run
+        # -- see this method's own opening comment), so this just
+        # reuses the same per-function scratch slot gen_indexable_
+        # base_into's own Slice-base case already uses (_unnamed_
+        # slice_temp_offset) and discards the result -- nothing ever
+        # reads it. Covers both a bare slice LITERAL statement
+        # (`[]int[se(), 2, 3]`, parsed as a Slice wrapping an
+        # ArrayLiteral -- see parser.py's own _parse_bracketed_
+        # literal) and an ordinary bare slice of an EXISTING array or
+        # slice (`arr[:]` alone, pointless but not an error) with the
+        # exact same code path.
+        if isinstance(stmt.expr, Slice):
+            return self.gen_slice_into(stmt.expr, Memory('rbp', self._unnamed_slice_temp_offset))
         return self.gen_expr_into(stmt.expr, Register('eax'))
 
     def gen_array_literal_side_effects_only(self, expr: ArrayLiteral) -> List[Instruction]:

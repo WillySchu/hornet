@@ -798,13 +798,55 @@ class SemanticAnalyzer:
             return True
         return value_type == Type.NONE and target_type.kind == TypeKind.SLICE
 
+    def _check_value_flowing_into(self, expr: Node, target_type: Type) -> Type:
+        """Type-checks `expr` as a value flowing into an already-typed
+        slot (target_type), returning its own type for the caller's
+        own _types_compatible check afterward -- almost always just
+        check_expr, with one exception: an UNTYPED array literal
+        (isinstance(expr, ArrayLiteral) and expr.type_expr is None)
+        flowing directly into a SLICE-typed target (`[]int s = [1, 2,
+        3]`) is checked against target_type's own element type
+        directly (via check_array_literal's own expected_element_type
+        parameter) rather than purely inferring a type from its
+        elements that would then need to separately match against
+        target_type -- this is what makes the untyped form behave
+        identically to the fully-typed `[]int s = []int[1, 2, 3]`,
+        just inferring the element count and checking element types
+        against the DECLARED element type instead of restating it.
+
+        Returns target_type ITSELF in that one case (not the array
+        type check_array_literal actually computed for the literal's
+        own elements), so the caller's own _types_compatible check
+        against target_type trivially succeeds, the same way it would
+        for any other already-slice-typed value -- `[]int s = arr`
+        (an ordinary, NAMED array, not a literal) is deliberately NOT
+        given this same treatment: only this one, specific expression
+        SHAPE is special-cased, not "any array-typed value is
+        compatible with a slice target," so an actual array still has
+        to be explicitly sliced (`arr[:]`) to become one.
+
+        Bypasses check_expr's own generic dispatch (and does its own
+        annotation, manually) for this one case, since check_expr has
+        no way to receive an expected type at all; every other kind of
+        value goes through check_expr completely unaffected. Shared by
+        analyze_var_decl and analyze_assign -- the two places a value
+        flows into an already-typed slot with a clear "this is the
+        expected type" side (unlike `==`/`!=`, which has no such
+        side -- see check_binary's own, separate none-vs-slice
+        handling for why that case can't reuse this)."""
+        if isinstance(expr, ArrayLiteral) and expr.type_expr is None and target_type.kind == TypeKind.SLICE:
+            array_type = self.check_array_literal(expr, expected_element_type=target_type.element_type)
+            expr.resolved_type = array_type
+            return target_type
+        return self.check_expr(expr)
+
     def analyze_var_decl(self, stmt: VarDecl) -> None:
         declared_type = type_from_name(stmt.var_type)
         if stmt.init is not None:
             # Checked before `stmt.name` is added to scope below, so a
             # self-referential initializer (`int a = a`) correctly fails
             # as "undeclared variable" rather than reading itself.
-            init_type = self.check_expr(stmt.init)
+            init_type = self._check_value_flowing_into(stmt.init, declared_type)
             if not self._types_compatible(init_type, declared_type):
                 raise SemanticError(
                     f"Cannot initialize '{stmt.name}' (declared {declared_type}) "
@@ -814,7 +856,7 @@ class SemanticAnalyzer:
 
     def analyze_assign(self, stmt: Assign) -> None:
         declared_type = self._lookup(stmt.name)  # may resolve to an enclosing scope
-        value_type = self.check_expr(stmt.value)
+        value_type = self._check_value_flowing_into(stmt.value, declared_type)
         if not self._types_compatible(value_type, declared_type):
             raise SemanticError(
                 f"Cannot assign a value of type {value_type} to '{stmt.name}' "
@@ -1036,14 +1078,15 @@ class SemanticAnalyzer:
         expr.resolved_type = result
         return result
 
-    def check_array_literal(self, expr: ArrayLiteral) -> Type:
+    def check_array_literal(self, expr: ArrayLiteral, expected_element_type: Optional[Type] = None) -> Type:
         """`[e1, e2, ...]`, or the fully-typed `[N]TYPE[e1, e2, ...]`
         (expr.type_expr is not None -- see ArrayLiteral's own
         docstring in parser.py). Either way, every element must be the
         same type -- this language doesn't support heterogeneous
         arrays.
 
-        UNTYPED form (type_expr is None): the array's own type is
+        UNTYPED form, no external context (type_expr is None,
+        expected_element_type is None): the array's own type is
         INFERRED entirely from its elements -- checked by type-
         checking each one (via check_expr, so a nested ArrayLiteral
         for a multi-dimensional literal is handled by plain recursion,
@@ -1052,23 +1095,45 @@ class SemanticAnalyzer:
         is rejected by this same check, with no extra logic needed:
         the two rows' types are [3]int and [2]int, which -- now that
         Type is structurally comparable -- are simply different types,
-        exactly like [3]int and [3]bool would be.
+        exactly like [3]int and [3]bool would be. Needs at least one
+        element -- with nothing else to go on, an empty literal here
+        gives no type information at all.
 
-        TYPED form: the declared type is resolved FIRST (via
-        type_from_name), and used as the standard every element (and
-        the literal's own size) is checked AGAINST, rather than
-        inferred from them -- the exact same _types_compatible check
-        used everywhere else a value flows into an already-typed slot
-        (a VarDecl initializer, an Assign, ...), so `none` would be
-        just as valid an element here as it is anywhere else a slice
-        is expected (not reachable in practice yet, since an array of
-        slices can't be constructed -- see codegen.py's gen_array_copy
-        -- but the type system doesn't need to know that to already
-        get it right).
+        TYPED form (expr.type_expr is not None): the declared type is
+        resolved FIRST (via type_from_name), and used as the standard
+        every element (and the literal's own size) is checked AGAINST,
+        rather than inferred from them -- the exact same
+        _types_compatible check used everywhere else a value flows
+        into an already-typed slot (a VarDecl initializer, an
+        Assign, ...), so `none` would be just as valid an element here
+        as it is anywhere else a slice is expected (not reachable in
+        practice yet, since an array of slices can't be constructed --
+        see codegen.py's gen_array_copy -- but the type system doesn't
+        need to know that to already get it right).
+
+        expected_element_type, when supplied (and type_expr is still
+        None): used for an UNTYPED literal flowing directly into an
+        already-slice-typed VarDecl/Assign value (`[]int s = [1, 2,
+        3]` -- see analyze_var_decl/analyze_assign's own callers,
+        which bypass check_expr's generic dispatch specifically to
+        pass this through, since check_expr has no way to receive
+        context at all). Checked the exact same way the explicitly-
+        typed form is, just against a type supplied by the CALLER
+        instead of restated in the literal itself.
+
+        Either typed path (an explicit type_expr, or a supplied
+        expected_element_type) allows -- and correctly handles -- zero
+        elements, unlike the fully-untyped path above: `[]int[]` (see
+        parser.py's own Slice-wrapping of a slice literal) or `[]int s
+        = []` both have a real, externally-known type to report even
+        with nothing to infer from, the same way parse_type() itself
+        already allows a slice type with no length embedded in it at
+        all -- only the ordinary, standalone array literal has size as
+        part of its declared type (enforced at parse time, `parse_
+        type`'s own ArrayTypeExpr validation), which is what makes
+        zero genuinely uninformative only in that one, fully-untyped
+        case.
         """
-        if len(expr.elements) == 0:
-            raise SemanticError("Array literals must have at least one element")
-
         if expr.type_expr is not None:
             declared_type = type_from_name(expr.type_expr)
             if len(expr.elements) != declared_type.size:
@@ -1087,6 +1152,19 @@ class SemanticAnalyzer:
                     )
             return declared_type
 
+        if expected_element_type is not None:
+            for i, element in enumerate(expr.elements, start=1):
+                element_type = self.check_expr(element)
+                if not self._types_compatible(element_type, expected_element_type):
+                    raise SemanticError(
+                        f"Array literal's elements must all be "
+                        f"{expected_element_type} (to match the declared "
+                        f"slice type), but element {i} is {element_type}"
+                    )
+            return Type(TypeKind.ARRAY, element_type=expected_element_type, size=len(expr.elements))
+
+        if len(expr.elements) == 0:
+            raise SemanticError("Array literals must have at least one element")
         element_types = [self.check_expr(e) for e in expr.elements]
         first = element_types[0]
         for i, t in enumerate(element_types[1:], start=2):

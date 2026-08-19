@@ -50,9 +50,10 @@ Organization:
     TestIndexingUnnamedSlices           (11 tests)
     TestPrintArraysAndSlices            (11 tests)
     TestNone                            (17 tests)
+    TestSliceLiterals                   (16 tests)
     TestSemanticErrors                  (75 tests)
                                         ----------
-                                        406 tests total
+                                        422 tests total
 
 A NOTE ON ARRAYS
 -----------------------------------------------------------------
@@ -4548,6 +4549,222 @@ class TestPrintArraysAndSlices:
 # own `arr[5:5]` positive control) -- gen_none_into only had to produce
 # that descriptor, not teach every existing slice operation a new case.
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Slice literals: `[]int[1, 2, 3]` -- automatically creates a heap-
+# allocated backing array (sized to the literal's own element count) AND
+# the {ptr, len} descriptor pointing at it, in one expression. Also
+# `[]int s = [1, 2, 3]` (similar to how the untyped ARRAY-literal form
+# already works): an untyped bracket list flowing directly into a
+# slice-typed VarDecl/Assign is treated the same way, just with the
+# element type inferred from the DECLARED slice type instead of
+# restated in the literal.
+#
+# Implemented as parser sugar, not a new AST node: `[]int[1, 2, 3]`
+# parses directly into `Slice(array=ArrayLiteral(...), low=None,
+# high=None)` -- an implicit "the whole thing" slice of a freshly-
+# parsed array literal (see parser.py's own _parse_bracketed_literal)
+# -- which is what lets check_slice, gen_slice_into, and gen_
+# indexable_base_into handle it almost entirely via machinery that
+# already existed for named arrays; the one genuinely new piece is
+# gen_indexable_base_into's own ArrayLiteral case (materializing a
+# FRESH heap allocation, rather than computing the address of
+# something that already exists) and its shared helper, gen_array_
+# literal_heap_alloc_into.
+#
+# test_named_array_is_not_auto_compatible_with_slice_target is the
+# critical regression check proving the untyped form's own special-
+# casing is genuinely narrow: `[]int s = arr` (an ordinary, EXISTING
+# array, not a literal) must still be rejected -- only the specific
+# shape "value is an untyped ArrayLiteral" gets this treatment, not
+# "any array-typed value is compatible with a slice target," or
+# explicit slicing (`arr[:]`) would stop being necessary anywhere.
+#
+# test_empty_slice_literal_is_not_nil is the test that actually proves
+# the subtlest part of this feature: `[]int[]` gets a real, non-null
+# (if trivial) allocation -- `s == none` is FALSE for it, matching the
+# same nil-vs-empty distinction `arr[5:5]` already has (see TestNone's
+# own note), NOT treated as equivalent to `none` just because it's
+# empty. gen_array_literal_heap_alloc_into allocates at least 1 byte
+# even for zero elements specifically so this doesn't depend on
+# libc's own, implementation-defined malloc(0) behavior.
+#
+# test_bare_slice_literal_statement_with_side_effecting_element and
+# test_bare_slice_of_existing_array_statement together are what
+# actually proves gen_expr_stmt's own Slice case is correct, not just
+# convenient: a bare Slice-expression statement is fully computed --
+# including a genuine runtime bounds check, which
+# test_bare_out_of_range_slice_statement_aborts confirms survives even
+# though the result is immediately discarded -- reusing the same
+# per-function scratch slot gen_indexable_base_into's own Slice-base
+# case already needed, rather than skipping the computation as a
+# shortcut. This same fix, found by testing the slice-literal case
+# specifically, also closed a genuinely pre-existing, unrelated gap:
+# a bare statement slicing an ordinary, already-existing array
+# (`arr[:]` alone) was ALREADY broken before slice literals existed at
+# all -- gen_expr_stmt never had any Slice case whatsoever.
+# ---------------------------------------------------------------------------
+
+class TestSliceLiterals:
+    pytestmark = GCC_SKIP
+
+    def test_typed_slice_literal_as_vardecl_initializer(self):
+        assert_exit_code(
+            "    []int slice = []int[1, 2, 3]\n"
+            "    return slice[0] + slice[1] + slice[2]",
+            6,
+        )
+
+    def test_typed_slice_literal_in_assign(self):
+        assert_exit_code(
+            "    []int slice = []int[1, 2, 3]\n"
+            "    slice = []int[4, 5, 6]\n"
+            "    return slice[0] + slice[1] + slice[2]",
+            15,
+        )
+
+    def test_empty_typed_slice_literal_in_assign(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    []int slice = []int[1, 2, 3]\n"
+            "    slice = []int[]\n"
+            "    print(slice)\n"
+            "    return 0\n",
+            "[]int[]\n",
+        )
+
+    def test_untyped_literal_as_slice_vardecl_initializer(self):
+        """`[]int slice = [1, 2, 3]` -- similar to how the untyped
+        ARRAY-literal form already works, but the resulting value is
+        a genuine slice (a fresh backing array plus a descriptor), not
+        an array."""
+        assert_exit_code(
+            "    []int slice = [1, 2, 3]\n"
+            "    return slice[0] + slice[1] + slice[2]",
+            6,
+        )
+
+    def test_untyped_literal_as_slice_assign_value(self):
+        assert_exit_code(
+            "    []int s = []int[1, 2, 3]\n"
+            "    s = [4, 5, 6]\n"
+            "    return s[0] + s[1] + s[2]",
+            15,
+        )
+
+    def test_named_array_is_not_auto_compatible_with_slice_target(self):
+        """The critical regression check: only the specific shape
+        "value is an untyped ArrayLiteral" gets the implicit-slice
+        treatment -- an ordinary, already-existing array must still
+        be explicitly sliced (`arr[:]`)."""
+        assert_semantic_error(
+            "    [3]int arr = [1, 2, 3]\n"
+            "    []int s = arr\n"
+            "    return 0",
+            match="Cannot initialize",
+        )
+
+    def test_empty_slice_literal_is_not_nil(self):
+        """The test that actually proves the subtlest part of this
+        feature: `[]int[]` gets a real, non-null allocation -- `s ==
+        none` is FALSE for it, matching the same nil-vs-empty
+        distinction `arr[5:5]` already has, not treated as `none`
+        just because it's empty."""
+        assert_exit_code(
+            "    []int s = []int[1, 2, 3]\n"
+            "    s = []int[]\n"
+            "    return s == none",
+            0,
+            return_type="bool",
+        )
+
+    def test_mutation_through_a_slice_literal_backed_slice(self):
+        assert_exit_code(
+            "    []int s = []int[1, 2, 3]\n"
+            "    s[0] = 99\n"
+            "    return s[0]",
+            99,
+        )
+
+    def test_slice_length_matches_literal_element_count(self):
+        assert_exit_code(
+            "    []int s = []int[7, 8, 9, 10]\n"
+            "    return s[3]",
+            10,
+        )
+
+    def test_multi_dimensional_slice_literal(self):
+        assert_exit_code(
+            "    [][2]int rows = [][2]int[[1, 2], [3, 4]]\n"
+            "    return rows[0][0] + rows[1][1]",
+            5,
+        )
+
+    def test_slice_literal_element_type_mismatch_is_rejected(self):
+        assert_semantic_error(
+            "    []bool s = []bool[1, 2, 3]\n"
+            "    return 0",
+            match="declares element type bool, but element 1 is int",
+        )
+
+    def test_untyped_literal_element_type_mismatch_against_slice_target_is_rejected(self):
+        assert_semantic_error(
+            "    []bool s = [1, 2, 3]\n"
+            "    return 0",
+            match="must all be bool",
+        )
+
+    def test_bare_slice_literal_statement_with_side_effecting_element(self):
+        assert_program_stdout(
+            "def int se():\n"
+            "    print(42)\n"
+            "    return 1\n"
+            "\n"
+            "def int main():\n"
+            "    []int[se(), 2, 3]\n"
+            "    return 0\n",
+            "42\n",
+        )
+
+    def test_bare_slice_of_existing_array_statement(self):
+        """A genuinely pre-existing, unrelated gap this same fix
+        closed: a bare statement slicing an ordinary, already-existing
+        array (`arr[:]` alone) was already broken before slice
+        literals existed at all -- gen_expr_stmt never had a Slice
+        case whatsoever."""
+        assert_exit_code(
+            "    [3]int arr = [1, 2, 3]\n"
+            "    arr[:]\n"
+            "    return 0",
+            0,
+        )
+
+    def test_bare_out_of_range_slice_statement_aborts(self):
+        """Proves the bare-statement Slice case is fully computed,
+        including its own runtime bounds check, not skipped as a
+        shortcut just because the result is discarded."""
+        assert_crashes_with_sigabrt(
+            "    [3]int arr = [1, 2, 3]\n"
+            "    arr[0:10]\n"
+            "    return 0"
+        )
+
+    def test_slice_literal_as_call_argument_still_restricted(self):
+        """The same pre-existing "must be a named variable" restriction
+        every other unnamed slice base has (indexing, print, re-
+        slicing, ordinary call arguments) applies identically here."""
+        source = (
+            "def int f([]int s):\n"
+            "    return s[0]\n"
+            "\n"
+            "def int main():\n"
+            "    return f([]int[1, 2, 3])\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        with pytest.raises(CodegenError, match="assign it to a variable first"):
+            generate_asm(ast, platform=ASM_PLATFORM)
+
 
 class TestNone:
     pytestmark = GCC_SKIP
