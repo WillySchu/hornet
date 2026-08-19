@@ -41,6 +41,7 @@ Organization:
     TestPrint                           (12 tests)
     TestAllPathsReturn                  (18 tests)
     TestArrays                          (26 tests)
+    TestTypedArrayLiterals              (13 tests)
     TestBoundsChecking                  ( 4 tests)
     TestHeapAllocatedArrays             (12 tests)
     TestSlices                          (10 tests)
@@ -51,7 +52,7 @@ Organization:
     TestNone                            (17 tests)
     TestSemanticErrors                  (75 tests)
                                         ----------
-                                        393 tests total
+                                        406 tests total
 
 A NOTE ON ARRAYS
 -----------------------------------------------------------------
@@ -97,6 +98,52 @@ or a call returning an array used DIRECTLY as a function-call argument
 supported confirms this fails with a clear error pointing at the
 workaround (assign it to a variable first) rather than a confusing
 crash.
+
+A NOTE ON TestTypedArrayLiterals
+-----------------------------------------------------------------
+The fully-typed array literal, `[3]int[1, 2, 3]` -- a genuine, self-
+describing primary expression, distinct from the plain `[1, 2, 3]`
+form even though that one already infers its own type just as validly
+from its elements alone (see check_array_literal in semantic.py): the
+untyped form stays restricted to a VarDecl's own initializer purely
+because codegen has nowhere else to write its value, not because of
+anything semantic.
+
+test_single_element_typed_literal and test_untyped_single_element_
+literal_still_works are the pair that actually prove the trickiest
+parsing ambiguity is resolved correctly: `[5]` (a single-element,
+untyped literal) and the OPENING of `[5]int[...]` share an identical
+first three tokens (OPEN_BRACKET NUMBER CLOSE_BRACKET) -- only a
+fourth token of lookahead (a type-starting token, or its absence)
+tells them apart, with no backtracking needed (see parse_primary's own
+_looks_like_typed_array_literal). A second, separate ambiguity showed
+up at the STATEMENT level specifically, not just the expression one:
+parse_statement used to route anything starting with OPEN_BRACKET
+unconditionally to parse_var_decl, since that was the only possibility
+before this feature existed -- `[3]int[1, 2, 3]` as a bare statement
+first failed with a confusing "expected a variable name" error before
+that dispatch was fixed to parse the type once and decide afterward
+based on what follows.
+
+test_bare_statement_with_side_effecting_element is the test that
+actually proves a bare literal statement genuinely evaluates its
+elements rather than silently dropping them: nothing ever reads the
+resulting array as a whole (there's no destination for a bare
+statement to write it into, and unlike a slice's fixed 16-byte
+descriptor, an array literal has no natural scratch-slot size to
+reserve one for), but each element still has to run for whatever side
+effect it might have, the same way any other bare expression statement
+already does. test_non_literal_array_element_in_bare_statement_not_
+supported is the explicit, deliberate boundary on that: an element
+that's itself some OTHER array-typed expression (a bare Variable, here)
+inside a bare-statement literal is rejected with a clear error rather
+than silently guessing whether it has a side effect worth preserving.
+
+test_typed_literal_as_call_argument_still_not_supported confirms the
+pre-existing "no direct array literal as a call argument" restriction
+(see TestArrays' own note on this) applies identically here -- it's
+about the expression being an ArrayLiteral at all, not about whether
+it happens to be typed.
 
 A NOTE ON TestHeapAllocatedArrays
 -----------------------------------------------------------------
@@ -3185,6 +3232,178 @@ class TestArrays:
         ast = _parse(source)
         analyze(ast)  # semantically fine -- the gap is codegen-level only
         with pytest.raises(CodegenError, match="assign it to a variable first"):
+            generate_asm(ast, platform=ASM_PLATFORM)
+
+
+# ---------------------------------------------------------------------------
+# The fully-typed array literal, `[3]int[1, 2, 3]` -- a genuine, self-
+# describing primary expression, unlike the plain `[1, 2, 3]` form (which
+# infers its own type from its elements just as validly, but is still
+# restricted to a VarDecl's own initializer, since codegen has nowhere
+# else to write its value -- see ArrayLiteral's own docstring in
+# parser.py). The typed form carries its own type, so it works as a
+# VarDecl initializer, redundantly restating a type the declaration
+# already gives, AND as a genuine standalone statement, AND (in principle)
+# anywhere else an expression is valid, subject to the same, pre-existing
+# restrictions untyped array values already have elsewhere (e.g. still
+# not usable as a direct call argument -- see
+# test_array_literal_as_direct_call_argument_not_supported just above,
+# which applies identically regardless of typed vs. untyped).
+#
+# test_single_element_typed_literal and test_untyped_single_element_
+# literal_still_works are the pair that actually prove the trickiest
+# parsing ambiguity is resolved correctly: `[5]` (a single-element,
+# untyped literal) and the OPENING of `[5]int[...]` share an identical
+# first three tokens (OPEN_BRACKET NUMBER CLOSE_BRACKET) -- only a
+# fourth token of lookahead (a type-starting token, or its absence)
+# tells them apart, with no backtracking needed.
+#
+# test_bare_statement_with_side_effecting_element is the test that
+# actually proves a bare literal statement genuinely evaluates its
+# elements rather than being silently dropped: nothing ever reads the
+# resulting array as a whole (there's no destination for a bare
+# statement to write it into), but each element still has to run for
+# whatever side effect it might have, the same way any other bare
+# expression statement already does.
+# ---------------------------------------------------------------------------
+
+class TestTypedArrayLiterals:
+    pytestmark = GCC_SKIP
+
+    def test_typed_literal_as_vardecl_initializer(self):
+        assert_exit_code(
+            "    [3]int arr = [3]int[1, 2, 3]\n"
+            "    return arr[0] + arr[1] + arr[2]",
+            6,
+        )
+
+    def test_typed_literal_matching_vardecl_type_is_redundant_but_valid(self):
+        """`[3]int arr = [3]int[1, 2, 3]` restates a type the
+        declaration already gives -- allowed, not an error."""
+        assert_stdout(
+            "    [3]int arr = [3]int[1, 2, 3]\n"
+            "    print(arr)\n"
+            "    return 0",
+            "[3]int[1, 2, 3]\n",
+        )
+
+    def test_bare_typed_literal_statement(self):
+        assert_exit_code(
+            "    [3]int[1, 2, 3]\n"
+            "    return 42",
+            42,
+        )
+
+    def test_bare_statement_with_side_effecting_element(self):
+        """Proves a bare literal statement genuinely evaluates its
+        elements -- nothing ever reads the resulting array as a whole,
+        but each element still runs for its own side effect, exactly
+        like any other bare expression statement already does."""
+        assert_program_stdout(
+            "def int se():\n"
+            "    print(99)\n"
+            "    return 1\n"
+            "\n"
+            "def int main():\n"
+            "    [2]int[se(), 2]\n"
+            "    return 0\n",
+            "99\n",
+        )
+
+    def test_single_element_typed_literal(self):
+        """One of the pair proving the trickiest parsing ambiguity is
+        resolved correctly -- see this class's own module-level note."""
+        assert_exit_code(
+            "    [1]int arr = [1]int[7]\n"
+            "    return arr[0]",
+            7,
+        )
+
+    def test_untyped_single_element_literal_still_works(self):
+        """The other half of the pair: `[5]` alone (untyped, single-
+        element) must NOT be misparsed as the start of a typed
+        literal's own size bracket, despite sharing an identical
+        first three tokens with one."""
+        assert_exit_code(
+            "    [1]int arr = [5]\n"
+            "    return arr[0]",
+            5,
+        )
+
+    def test_2d_typed_literal(self):
+        assert_exit_code(
+            "    [2][2]int arr = [2][2]int[[1, 2], [3, 4]]\n"
+            "    return arr[0][0] + arr[1][1]",
+            5,
+        )
+
+    def test_bare_2d_typed_literal_recurses_for_side_effects(self):
+        assert_program_stdout(
+            "def int se():\n"
+            "    print(7)\n"
+            "    return 1\n"
+            "\n"
+            "def int main():\n"
+            "    [2][2]int[[se(), 2], [3, 4]]\n"
+            "    return 0\n",
+            "7\n",
+        )
+
+    def test_size_mismatch_is_rejected(self):
+        assert_semantic_error(
+            "    [3]int arr = [3]int[1, 2]\n"
+            "    return 0",
+            match="declares type .*size 3.*but has 2 element",
+        )
+
+    def test_element_type_mismatch_is_rejected(self):
+        assert_semantic_error(
+            "    [3]int arr = [3]int[1, true, 3]\n"
+            "    return 0",
+            match="declares element type int, but element 2 is bool",
+        )
+
+    def test_literal_type_mismatched_with_vardecl_is_rejected(self):
+        assert_semantic_error(
+            "    [3]bool arr = [3]int[1, 2, 3]\n"
+            "    return 0",
+            match="Cannot initialize",
+        )
+
+    def test_typed_literal_as_call_argument_still_not_supported(self):
+        """Same pre-existing restriction untyped array values already
+        have (see test_array_literal_as_direct_call_argument_not_
+        supported in TestArrays) -- applies identically here, since
+        it's about the expression being an ArrayLiteral at all, not
+        about whether it happens to be typed."""
+        source = (
+            "def int sum3([3]int arr):\n"
+            "    return arr[0] + arr[1] + arr[2]\n"
+            "\n"
+            "def int main():\n"
+            "    return sum3([3]int[1, 2, 3])\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        with pytest.raises(CodegenError, match="assign it to a variable first"):
+            generate_asm(ast, platform=ASM_PLATFORM)
+
+    def test_non_literal_array_element_in_bare_statement_not_supported(self):
+        """A real, deliberate gap: an element that's itself a non-
+        literal array-typed expression (here, a bare Variable) inside
+        a BARE-statement literal has no side effect worth preserving,
+        but distinguishing that from an array-returning Call (which
+        might) isn't implemented -- rejected with a clear error rather
+        than silently guessing."""
+        source = (
+            "def int main():\n"
+            "    [3]int arr = [1, 2, 3]\n"
+            "    [1][3]int[arr]\n"
+            "    return 0\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        with pytest.raises(CodegenError, match="assign the literal to a variable first"):
             generate_asm(ast, platform=ASM_PLATFORM)
 
 

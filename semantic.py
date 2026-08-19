@@ -1037,21 +1037,56 @@ class SemanticAnalyzer:
         return result
 
     def check_array_literal(self, expr: ArrayLiteral) -> Type:
-        """`[e1, e2, ...]`. Every element must be the same type -- this
-        language doesn't support heterogeneous arrays -- checked by
-        type-checking each element (via check_expr, so a nested
-        ArrayLiteral for a multi-dimensional literal is handled by
-        plain recursion, no special-casing needed) and comparing every
-        element's type to the first one's.
+        """`[e1, e2, ...]`, or the fully-typed `[N]TYPE[e1, e2, ...]`
+        (expr.type_expr is not None -- see ArrayLiteral's own
+        docstring in parser.py). Either way, every element must be the
+        same type -- this language doesn't support heterogeneous
+        arrays.
 
-        A "ragged" literal like `[[1,2,3],[4,5]]` is rejected by this
-        same check, with no extra logic needed: the two rows' types
-        are [3]int and [2]int, which -- now that Type is structurally
-        comparable -- are simply different types, exactly like [3]int
-        and [3]bool would be.
+        UNTYPED form (type_expr is None): the array's own type is
+        INFERRED entirely from its elements -- checked by type-
+        checking each one (via check_expr, so a nested ArrayLiteral
+        for a multi-dimensional literal is handled by plain recursion,
+        no special-casing needed) and comparing every element's type
+        to the first one's. A "ragged" literal like `[[1,2,3],[4,5]]`
+        is rejected by this same check, with no extra logic needed:
+        the two rows' types are [3]int and [2]int, which -- now that
+        Type is structurally comparable -- are simply different types,
+        exactly like [3]int and [3]bool would be.
+
+        TYPED form: the declared type is resolved FIRST (via
+        type_from_name), and used as the standard every element (and
+        the literal's own size) is checked AGAINST, rather than
+        inferred from them -- the exact same _types_compatible check
+        used everywhere else a value flows into an already-typed slot
+        (a VarDecl initializer, an Assign, ...), so `none` would be
+        just as valid an element here as it is anywhere else a slice
+        is expected (not reachable in practice yet, since an array of
+        slices can't be constructed -- see codegen.py's gen_array_copy
+        -- but the type system doesn't need to know that to already
+        get it right).
         """
         if len(expr.elements) == 0:
             raise SemanticError("Array literals must have at least one element")
+
+        if expr.type_expr is not None:
+            declared_type = type_from_name(expr.type_expr)
+            if len(expr.elements) != declared_type.size:
+                raise SemanticError(
+                    f"Array literal declares type {declared_type} (size "
+                    f"{declared_type.size}), but has {len(expr.elements)} "
+                    f"element(s)"
+                )
+            for i, element in enumerate(expr.elements, start=1):
+                element_type = self.check_expr(element)
+                if not self._types_compatible(element_type, declared_type.element_type):
+                    raise SemanticError(
+                        f"Array literal declares element type "
+                        f"{declared_type.element_type}, but element {i} "
+                        f"is {element_type}"
+                    )
+            return declared_type
+
         element_types = [self.check_expr(e) for e in expr.elements]
         first = element_types[0]
         for i, t in enumerate(element_types[1:], start=2):

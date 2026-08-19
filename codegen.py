@@ -1002,6 +1002,40 @@ named Variable" restrictions (gen_slice_arg_into, gen_print_call_into),
 unrelated to and unaffected by this fix, which is specifically about
 gen_indexable_base_into's own base-of-`[...]` restriction.
 
+TYPED ARRAY LITERALS
+-------------------------
+`[3]int[1, 2, 3]` -- a fully-typed array literal, self-describing
+enough to work as a genuine, general expression rather than only ever
+appearing as a VarDecl's own initializer the way the plain `[1, 2, 3]`
+form still does (see ArrayLiteral's own docstring in parser.py for
+why that restriction was never really about semantics at all: even
+the untyped form already infers its own type entirely from its
+elements, with check_array_literal needing no externally-supplied
+"expected type" to do it -- it's purely that codegen never had
+anywhere else to WRITE the resulting value).
+
+This needed essentially NO changes here, which is itself worth stating
+plainly: gen_array_literal_into and gen_array_value_into already work
+purely off an externally-supplied array_type parameter, never reading
+ArrayLiteral.type_expr at all -- the typed and untyped forms produce
+byte-for-byte identical instructions once semantic.py has resolved
+either one down to a real Type. The one genuinely new piece needed was
+for a BARE literal statement specifically (`[3]int[1, 2, 3]` alone,
+with no assignment) -- see gen_expr_stmt's own dispatch and gen_array_
+literal_side_effects_only: since nothing ever reads such a statement's
+value, and an array literal has no natural upper bound the way a
+slice's fixed 16-byte descriptor does (so there's no single scratch
+slot size that would always be enough to reserve one for), this just
+evaluates each of the literal's own, directly-written elements for
+whatever side effects they might have, discarding every result,
+without ever materializing a real array in memory at all. An element
+that's itself some OTHER array-typed expression (a bare Variable, an
+indexed sub-array, an array-returning Call) inside a bare-statement
+literal is a deliberate, explicit gap: correctly distinguishing "no
+side effect worth preserving" (a Variable) from "might have one" (a
+Call) -- or materializing either one just to immediately discard it --
+isn't implemented; this raises a clear error instead of guessing.
+
 SCOPE: WHAT THIS DOESN'T COVER YET
 --------------------------------------
 An array whose ELEMENTS are themselves slices (`[3][]int`) isn't
@@ -3522,9 +3556,64 @@ class CodeGenerator:
     def gen_expr_stmt(self, stmt: ExprStmt) -> List[Instruction]:
         # Evaluated the same way as any other expression, into %eax --
         # just with nothing done with the result afterward. Still real
-        # instructions that really run; see the module docstring for how
-        # that's verified (a standalone `1 / 0` genuinely crashes).
+        # instructions that really run; see the module docstring for
+        # how that's verified (a standalone `1 / 0` genuinely crashes).
+        #
+        # An ArrayLiteral is the one exception: it can't be computed
+        # via gen_expr_into at all (an array doesn't fit in a single
+        # register), and unlike a VarDecl/Assign's own use of one, a
+        # bare literal statement has no destination to write the
+        # resulting array into -- but it doesn't need one, since
+        # nothing ever reads the array as a whole. See gen_array_
+        # literal_side_effects_only's own docstring for the resulting,
+        # narrower approach: evaluate each element for whatever side
+        # effects it might have, without ever materializing a real
+        # array in memory at all.
+        if isinstance(stmt.expr, ArrayLiteral):
+            return self.gen_array_literal_side_effects_only(stmt.expr)
         return self.gen_expr_into(stmt.expr, Register('eax'))
+
+    def gen_array_literal_side_effects_only(self, expr: ArrayLiteral) -> List[Instruction]:
+        """A bare array-literal statement (`[3]int[1, 2, 3]` alone,
+        with no assignment) never needs its VALUE materialized
+        anywhere at all -- nothing ever reads it as a coherent array
+        -- so rather than reserving a scratch slot sized to fit it
+        (which, unlike a slice's fixed 16-byte descriptor, an array
+        literal has no natural upper bound for), this just evaluates
+        each of the literal's own, directly-written elements for
+        whatever side effects it might have (e.g. a function call),
+        discarding every result -- exactly like any other bare
+        expression statement already does (see gen_expr_stmt).
+
+        Recurses for a nested ArrayLiteral element (a multi-dimensional
+        literal used bare), the same way check_array_literal's own
+        type-checking already does. An element that's ITSELF some
+        other, non-literal array- or slice-typed expression (a
+        Variable, an indexed sub-array, or an array-returning Call
+        used as an element) is a real, deliberately out-of-scope gap:
+        reading a bare array-typed Variable has no side effect worth
+        preserving, but an array-returning Call might, and correctly
+        distinguishing the two -- or materializing either one just to
+        discard it -- isn't implemented here. Raises a clear error
+        rather than silently skipping (which could drop a real side
+        effect) or guessing.
+        """
+        instructions = []
+        for element in expr.elements:
+            if isinstance(element, ArrayLiteral):
+                instructions.extend(self.gen_array_literal_side_effects_only(element))
+                continue
+            element_type = self._type_of(element)
+            if element_type.kind in (TypeKind.ARRAY, TypeKind.SLICE):
+                raise CodegenError(
+                    f"A bare array-literal statement can't have a "
+                    f"{type(element).__name__} element of type "
+                    f"{element_type} -- assign the literal to a "
+                    f"variable first if you need this element's value "
+                    f"or side effect evaluated"
+                )
+            instructions.extend(self.gen_expr_into(element, Register('eax')))
+        return instructions
 
     def gen_expr_into(self, expr: Node, dst: Operand) -> List[Instruction]:
         """Emits the instructions needed to compute `expr` and leave its

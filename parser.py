@@ -79,13 +79,31 @@ decl_stmt, assign_stmt, and expr_stmt all start with a token that could,
 on its own, also start something else -- INT also starts a function's
 return type, IDENTIFIER also starts any expression that happens to begin
 with a variable, and so on. parse_statement resolves this with one
-token of lookahead (peek(1)) rather than backtracking: INT always means
-a declaration (a type can't appear anywhere else a statement could
-start), but IDENTIFIER is ambiguous between "the start of an assignment"
+token of lookahead (peek(1)) rather than backtracking, with one
+exception: IDENTIFIER is ambiguous between "the start of an assignment"
 (`a = ...`) and "the start of some other expression that just happens to
 reference `a`" (`a + 1`, or `a` alone) -- so parse_statement peeks one
 token ahead and only commits to assign_stmt if that next token is
 ASSIGN, falling through to expr_stmt otherwise.
+
+A type-starting token (INT, BOOL, STR, or OPEN_BRACKET) no longer
+unconditionally means a declaration the way it once did: it's also how
+a bare, fully-typed array-literal statement starts (`[3]int[1, 2, 3]`
+alone, with no assignment -- see ArrayLiteral's own docstring for why
+that form, unlike the plain `[1, 2, 3]` one, is a genuine, self-
+describing expression rather than something restricted to a VarDecl's
+own initializer). Both shapes begin by parsing the exact same type, so
+parse_statement parses it once, up front, and only THEN decides which
+this is, based on what immediately follows: an IDENTIFIER (a variable
+name) means a declaration; an ArrayTypeExpr immediately followed by
+another OPEN_BRACKET means the literal's own elements are starting
+right there instead. Committing to parse_type() first here, rather
+than using bounded lookahead the way parse_primary's own, separate
+disambiguation for this same shape does (see _looks_like_typed_array_
+literal), is safe specifically because every statement starting with
+one of these tokens was already required to start with a full type,
+even before typed array literals existed -- there's no valid program
+where committing to parse_type() here could turn out to be wrong.
 
 Declaring a variable twice in the same function, referencing one that
 was never declared, and every type error (mismatched assignment,
@@ -370,13 +388,34 @@ class ArrayLiteral(Node):
     other nested expression, since ArrayLiteral is just one more
     primary-expression shape. Elements don't have to be constants --
     any expression is valid per element (see codegen.py's ARRAYS
-    section for how each one gets evaluated and stored)."""
+    section for how each one gets evaluated and stored).
+
+    type_expr is None for the plain, untyped form above -- which only
+    ever type-checks where an expected type is already known from
+    context (see semantic.py's check_array_literal for why that's true
+    regardless: it's still a real, self-contained inference over the
+    elements themselves, not something borrowed from outside, so this
+    form is restricted to a VarDecl's own initializer purely because
+    that's the only place codegen currently has anywhere to WRITE the
+    result -- see the module docstring's ARRAY LITERALS section in
+    codegen.py). type_expr is set for the fully-typed form,
+    `[3]int[1, 2, 3]` -- an ArrayTypeExpr, parsed exactly like any
+    other type via parse_type() -- which makes the literal entirely
+    self-describing and usable as a genuine, general expression:
+    a bare statement, a VarDecl initializer (redundantly restating a
+    type the declaration already gives, but that's allowed, not an
+    error), or anywhere else an expression is valid. See parse_primary's
+    own bounded-lookahead disambiguation (_looks_like_typed_array_
+    literal) for how `[3]int[...]` is told apart from a plain `[N, ...]`
+    despite both starting with OPEN_BRACKET NUMBER."""
     elements: List[Node] = field(default_factory=list)
+    type_expr: Optional['ArrayTypeExpr'] = None
     resolved_type: Optional[Any] = None
 
     def pretty(self) -> str:
         elems_str = ', '.join(e.pretty() for e in self.elements)
-        return f"ArrayLiteral -> [{elems_str}]"
+        prefix = "" if self.type_expr is None else self.type_expr.pretty() + " "
+        return f"{prefix}ArrayLiteral -> [{elems_str}]"
 
 
 @dataclass
@@ -1118,7 +1157,32 @@ class Parser:
 
     def parse_statement(self) -> Node:
         if self.check(TokenType.INT, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET):
-            return self.parse_var_decl()
+            # A type-starting token could mean EITHER a VarDecl
+            # (`[3]int arr = ...`) or a bare, fully-typed array-literal
+            # expression statement (`[3]int[1, 2, 3]`) -- both start by
+            # parsing the exact same type, so parse it once, up front,
+            # and let whatever follows decide which this actually is:
+            # an IDENTIFIER (a variable name) means a VarDecl; another
+            # OPEN_BRACKET, when the type just parsed is specifically
+            # an ArrayTypeExpr (not a bare scalar name or a
+            # SliceTypeExpr -- slice literals aren't a thing yet),
+            # means the literal's own elements are starting right here
+            # instead. Unlike parse_primary's own, separate
+            # disambiguation for this same shape (see
+            # _looks_like_typed_array_literal), committing to
+            # parse_type() first is safe here specifically because
+            # every statement starting with one of these tokens was
+            # ALREADY required to start with a full type, even before
+            # typed array literals existed -- there's no risk of
+            # misparsing an UNTYPED literal this way, since one can
+            # never validly start a statement at all (see ArrayLiteral's
+            # own docstring in this file for why that form stays
+            # restricted to a VarDecl's own initializer).
+            parsed_type = self.parse_type()
+            if isinstance(parsed_type, ArrayTypeExpr) and self.check(TokenType.OPEN_BRACKET):
+                literal = self.parse_array_literal(type_expr=parsed_type)
+                return ExprStmt(expr=literal)
+            return self.parse_var_decl(var_type=parsed_type)
         if self.check(TokenType.RETURN):
             return self.parse_return()
         if self.check(TokenType.IF):
@@ -1182,8 +1246,15 @@ class Parser:
 
         return If(condition=condition, then_body=then_body, else_body=else_body)
 
-    def parse_var_decl(self) -> VarDecl:
-        var_type = self.parse_type()
+    def parse_var_decl(self, var_type: Optional[Union[str, 'ArrayTypeExpr', 'SliceTypeExpr']] = None) -> VarDecl:
+        """`type NAME` or `type NAME = <expr>`. `var_type`, when
+        already supplied, is a type parse_statement did itself before
+        realizing this is a declaration and not a bare, fully-typed
+        array-literal statement (`[3]int[1, 2, 3]`) -- both start by
+        parsing the exact same type, so parse_statement parses it once
+        and hands it here rather than this method parsing it again."""
+        if var_type is None:
+            var_type = self.parse_type()
         name_tok = self.expect(TokenType.IDENTIFIER, "Expected a variable name")
         init = None
         if self.match(TokenType.ASSIGN):
@@ -1389,6 +1460,9 @@ class Parser:
         if self.check(TokenType.STRING):
             tok = self.advance()
             return StringLiteral(value=_unescape_string_literal(tok.val))
+        if self._looks_like_typed_array_literal():
+            type_expr = self.parse_type()
+            return self.parse_array_literal(type_expr=type_expr)
         if self.check(TokenType.OPEN_BRACKET):
             return self.parse_array_literal()
         if self.check(TokenType.IDENTIFIER):
@@ -1410,12 +1484,52 @@ class Parser:
             f"at line {tok.line}, column {tok.col}"
         )
 
-    def parse_array_literal(self) -> ArrayLiteral:
-        """`[e1, e2, ...]` -- see ArrayLiteral's own docstring for why
+    def _looks_like_typed_array_literal(self) -> bool:
+        """True if the CURRENT position starts a fully-typed array
+        literal (`[3]int[1, 2, 3]`) rather than a plain, untyped one
+        (`[1, 2, 3]`) or a single-element one (`[5]`) -- both of which
+        also start with OPEN_BRACKET, and, for a size-1 case like
+        `[5]`, even start with the identical OPEN_BRACKET NUMBER
+        CLOSE_BRACKET prefix a type's own size bracket does.
+
+        Resolved with BOUNDED lookahead alone -- four tokens, no
+        backtracking -- rather than speculatively parsing a type and
+        rewinding on failure, which this parser has consistently
+        avoided elsewhere (see parse_statement's own one-token
+        dispatch). The one shape that's genuinely unambiguous: a
+        type's own size bracket is `[` NUMBER `]` immediately followed
+        by a type-starting token -- a type keyword, or another `[` for
+        a nested array/slice element type (`[2][2]int[...]`). An
+        untyped literal's closing `]` is never immediately followed by
+        one of those in any valid program (nothing can validly follow
+        a complete expression that way), so checking for that one
+        specific four-token shape is enough to always tell the two
+        apart, including the size-1 edge case: `[5]` alone has nothing
+        of that shape following its `]` (the next token ends the
+        statement, or continues some outer expression, never a type
+        keyword or another `[`), so it's correctly left to parse as a
+        single-element array literal instead.
+        """
+        return (
+            self.check(TokenType.OPEN_BRACKET)
+            and self.peek(1).type == TokenType.NUMBER
+            and self.peek(2).type == TokenType.CLOSE_BRACKET
+            and self.peek(3).type in (TokenType.INT, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET)
+        )
+
+    def parse_array_literal(self, type_expr: Optional['ArrayTypeExpr'] = None) -> ArrayLiteral:
+        """`[e1, e2, ...]`, optionally preceded by an already-parsed
+        type (`type_expr`, from _looks_like_typed_array_literal's own
+        trigger in parse_primary) for the fully-typed form,
+        `[3]int[1, 2, 3]` -- see ArrayLiteral's own docstring for why
         no special handling is needed here for a multi-dimensional
         literal like `[[1,2,3],[4,5,6]]`: each element is just parsed
         via the ordinary parse_expression, which naturally recurses
-        back into this same method for a nested `[...]`."""
+        back into this same method (with type_expr staying None, since
+        only the OUTERMOST literal in `[2][3]int[[1,2,3],[4,5,6]]` is
+        ever preceded by an explicit type -- an inner row is still
+        just `[1,2,3]`, untyped, exactly like the untyped form's own
+        nested rows already were)."""
         self.expect(TokenType.OPEN_BRACKET)
         elements = []
         if not self.check(TokenType.CLOSE_BRACKET):
@@ -1423,7 +1537,7 @@ class Parser:
             while self.match(TokenType.COMMA):
                 elements.append(self.parse_expression())
         self.expect(TokenType.CLOSE_BRACKET, "Expected ']' to close array literal")
-        return ArrayLiteral(elements=elements)
+        return ArrayLiteral(elements=elements, type_expr=type_expr)
 
     def parse_call(self) -> Call:
         name_tok = self.expect(TokenType.IDENTIFIER)
