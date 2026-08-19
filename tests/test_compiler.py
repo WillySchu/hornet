@@ -39,6 +39,7 @@ Organization:
     TestFunctionsWithNoDeclaredReturnType (12 tests)
     TestTypeAnnotation                  ( 4 tests)
     TestPrint                           (12 tests)
+    TestLen                             (17 tests)
     TestAllPathsReturn                  (18 tests)
     TestArrays                          (26 tests)
     TestTypedArrayLiterals              (13 tests)
@@ -53,7 +54,7 @@ Organization:
     TestSliceLiterals                   (16 tests)
     TestSemanticErrors                  (75 tests)
                                         ----------
-                                        422 tests total
+                                        439 tests total
 
 A NOTE ON ARRAYS
 -----------------------------------------------------------------
@@ -2618,6 +2619,198 @@ class TestPrint:
             "    print(333)\n"
             "    return 0",
             "1\n22\n333\n",
+        )
+
+
+# ---------------------------------------------------------------------------
+# `len`: Hornet's second builtin. Returns an array or slice's own length as
+# an ordinary, usable int -- unlike print (Type.VOID), `len(x)` works as a
+# real expression: a loop bound, an operand, anything.
+#
+# Deliberately reuses gen_indexable_base_into DIRECTLY rather than a
+# narrower restriction of its own, the way print's own argument is
+# restricted to a Variable or Index specifically (see TestPrint's own
+# note) -- so len accepts everything gen_indexable_base_into currently
+# does: a Variable, an Index, a Slice expression, a slice-returning Call,
+# or an ArrayLiteral. test_len_on_slice_returning_call_directly and
+# test_len_on_unnamed_slice_expression are the tests that actually prove
+# this -- neither shape would be accepted by print today.
+#
+# test_len_still_bounds_checks_out_of_range_argument and test_len_still_
+# aborts_on_out_of_range_array_index_even_though_length_is_compile_time
+# are the pair that prove the core design decision explicitly: len's
+# argument is FULLY evaluated regardless of whether the resulting length
+# ends up depending on it at all -- an array's own length is a compile-
+# time constant that never actually reads the argument's runtime value,
+# but an out-of-range index inside that same argument still aborts,
+# exactly like any other function argument's evaluation would. The
+# array-literal and slice-literal tests are the same principle from the
+# other direction: len(x) on a fresh literal still fully constructs it
+# (for a slice literal, a real, if wasted, heap allocation) even though
+# only its already-known length is ever used.
+# ---------------------------------------------------------------------------
+
+class TestLen:
+    pytestmark = GCC_SKIP
+
+    def test_len_on_fixed_array(self):
+        assert_exit_code(
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    return len(arr)",
+            5,
+        )
+
+    def test_len_on_named_slice(self):
+        assert_exit_code(
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s = arr[1:4]\n"
+            "    return len(s)",
+            3,
+        )
+
+    def test_len_on_unnamed_slice_expression(self):
+        """Not accepted by print (Variable-or-Index only) -- proves
+        len genuinely inherits gen_indexable_base_into's own, broader
+        set of accepted bases rather than a narrower restriction."""
+        assert_exit_code(
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    return len(arr[1:4])",
+            3,
+        )
+
+    def test_len_on_slice_returning_call_directly(self):
+        """Also not accepted by print -- same reasoning as the
+        unnamed-slice-expression case just above."""
+        assert_program_exit_code(
+            "def []int f([5]int arr):\n"
+            "    return arr[1:4]\n"
+            "\n"
+            "def int main():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    return len(f(arr))\n",
+            3,
+        )
+
+    def test_len_on_array_literal(self):
+        assert_exit_code(
+            "    return len([3]int[1, 2, 3])",
+            3,
+        )
+
+    def test_len_on_slice_literal(self):
+        assert_exit_code(
+            "    return len([]int[1, 2, 3, 4])",
+            4,
+        )
+
+    def test_len_on_sub_array_row(self):
+        assert_exit_code(
+            "    [2][3]int m = [[1, 2, 3], [4, 5, 6]]\n"
+            "    return len(m[0])",
+            3,
+        )
+
+    def test_len_usable_as_loop_bound(self):
+        """len returns a real, usable int -- unlike print, which is
+        Type.VOID and can only ever be a bare statement."""
+        assert_exit_code(
+            "    [4]int arr = [10, 20, 30, 40]\n"
+            "    int total = 0\n"
+            "    int i = 0\n"
+            "    while i < len(arr):\n"
+            "        total = total + arr[i]\n"
+            "        i = i + 1\n"
+            "    return total",
+            100,
+        )
+
+    def test_len_still_bounds_checks_out_of_range_argument(self):
+        """The argument is fully evaluated regardless of whether the
+        result ends up depending on it -- an out-of-range slice bound
+        buried inside len's own argument still aborts."""
+        assert_crashes_with_sigabrt(
+            "    [3]int arr = [1, 2, 3]\n"
+            "    return len(arr[0:10])"
+        )
+
+    def test_len_still_aborts_on_out_of_range_array_index_even_though_length_is_compile_time(self):
+        """The critical test proving this isn't just an accidental
+        side effect of reusing gen_indexable_base_into: an array's own
+        length is a compile-time constant that never actually reads
+        the argument's runtime value at all, yet an out-of-range index
+        buried inside that same argument still genuinely aborts."""
+        assert_crashes_with_sigabrt(
+            "    [2][3]int m = [[1, 2, 3], [4, 5, 6]]\n"
+            "    return len(m[10])"
+        )
+
+    def test_len_argument_side_effect_still_runs(self):
+        assert_program_stdout(
+            "def int se():\n"
+            "    print(77)\n"
+            "    return 0\n"
+            "\n"
+            "def int main():\n"
+            "    [3]int arr = [1, 2, 3]\n"
+            "    int unused = se()\n"
+            "    print(len(arr))\n"
+            "    return 0\n",
+            "77\n3\n",
+        )
+
+    def test_len_on_int_is_rejected(self):
+        assert_semantic_error(
+            "    return len(5)",
+            match="requires an array or slice",
+        )
+
+    def test_len_on_bool_is_rejected(self):
+        assert_semantic_error(
+            "    return len(true)",
+            match="requires an array or slice",
+        )
+
+    def test_len_on_str_is_rejected_with_specific_message(self):
+        """str gets its own, specific "not supported yet" message
+        rather than being folded into the generic type-mismatch --
+        see semantic.py's check_len_call."""
+        assert_semantic_error(
+            "    return len('hello')",
+            match="does not support str arguments yet",
+        )
+
+    def test_len_wrong_argument_count_is_rejected(self):
+        assert_semantic_error(
+            "    [3]int arr = [1, 2, 3]\n"
+            "    return len(arr, 5)",
+            match="expects exactly 1 argument",
+        )
+
+    def test_len_cannot_be_redefined_as_a_function(self):
+        source = (
+            "def int len([3]int arr):\n"
+            "    return 1\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n"
+        )
+        with pytest.raises(SemanticError, match="builtin"):
+            analyze(_parse(source))
+
+    def test_len_on_array_literal_argument_still_evaluates_elements(self):
+        """The literal-argument analog of the earlier bounds-check/
+        side-effect tests: len(x) on a fresh literal still fully
+        constructs it, even though only its already-known length is
+        ever used."""
+        assert_program_stdout(
+            "def int se():\n"
+            "    print(55)\n"
+            "    return 1\n"
+            "\n"
+            "def int main():\n"
+            "    print(len([3]int[se(), 2, 3]))\n"
+            "    return 0\n",
+            "55\n3\n",
         )
 
 

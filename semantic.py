@@ -230,13 +230,13 @@ SLICE ZERO VALUE section.
 
 BUILTINS
 ---------
-`print` is the first (only, so far) builtin -- a callable that isn't an
-ordinary user-defined function and doesn't go through self.functions at
-all. check_call special-cases it before ever consulting self.functions,
-and analyze()'s signature-collection pass rejects any user function
-whose name collides with a builtin (_BUILTIN_FUNCTION_NAMES), so there's
-no ambiguity about which one wins -- a program simply can't define its
-own `print`.
+`print` and `len` are builtins -- callables that aren't ordinary user-
+defined functions and don't go through self.functions at all. check_call
+special-cases each of them before ever consulting self.functions, and
+analyze()'s signature-collection pass rejects any user function whose
+name collides with a builtin (_BUILTIN_FUNCTION_NAMES), so there's no
+ambiguity about which one wins -- a program simply can't define its own
+`print` or `len`.
 
 check_print_call accepts exactly one argument of any REAL type (int,
 bool, str, array, and slice are all printable, and there's no reason to
@@ -247,6 +247,20 @@ void type exists at all; see the FUNCTIONS WITH NO DECLARED RETURN TYPE
 section below. codegen.py is where print's actual behavior (which
 underlying libc call per argument type) lives -- see its own PRINTING
 ARRAYS AND SLICES section for the array/slice case specifically.
+
+check_len_call is print's near-opposite in shape: where print accepts
+almost every type and carves out VOID/NONE as the only exceptions,
+len accepts almost nothing -- only array or slice -- with str explicitly
+rejected by its own, specific "not supported yet" message (a real,
+separable follow-up, not an oversight) rather than folded into the
+same generic rejection every other wrong type gets. Always returns
+Type.INT, a real, useful value unlike print's VOID -- `len(x)` works
+as an ordinary expression (a loop bound, an operand, ...), not just a
+bare statement. codegen.py's gen_len_call_into is where the actual
+array-vs-slice split lives (a compile-time constant vs. a runtime
+descriptor read); see its own docstring for why the argument itself
+is still fully evaluated either way, regardless of whether the
+resulting length ends up depending on its runtime value at all.
 
 TYPES: ANNOTATING THE AST FOR codegen.py
 -------------------------------------------
@@ -613,7 +627,7 @@ def contains_reachable_break(statements: List[Node]) -> bool:
 # a set (not hardcoded string comparisons scattered around) so a second
 # builtin later is "add a name here plus its own check_*/gen_* pair",
 # not a search-and-replace.
-_BUILTIN_FUNCTION_NAMES = {'print'}
+_BUILTIN_FUNCTION_NAMES = {'print', 'len'}
 
 
 # ---------------------------------------------------------------------------
@@ -1181,6 +1195,8 @@ class SemanticAnalyzer:
     def check_call(self, expr: Call) -> Type:
         if expr.name == 'print':
             return self.check_print_call(expr)
+        if expr.name == 'len':
+            return self.check_len_call(expr)
         if expr.name not in self.functions:
             raise SemanticError(f"Call to undeclared function '{expr.name}'")
         param_types, return_type = self.functions[expr.name]
@@ -1244,6 +1260,42 @@ class SemanticAnalyzer:
                 "then print that"
             )
         return Type.VOID
+
+    def check_len_call(self, expr: Call) -> Type:
+        """`len(x)`: x must be array- or slice-typed -- str isn't
+        supported yet (see the module docstring's LEN BUILTIN section
+        for why that's a real, separable follow-up rather than an
+        oversight), and every other type (int, bool, void, none) is
+        rejected by the same, single "must be array or slice" check,
+        with no per-type carve-out needed the way print's own, much
+        more permissive check needs several: len accepts almost
+        nothing, where print accepts almost everything.
+
+        x is still fully type-checked via check_expr regardless of
+        whether codegen ends up needing its computed VALUE for
+        anything (an array's own length is a compile-time constant,
+        never actually read out of the argument at all -- see
+        codegen.py's gen_len_call_into) -- so an invalid expression
+        buried inside x (an undeclared variable, a type error) is
+        still caught here exactly like it would be anywhere else.
+
+        Always returns int -- unlike print, len has a real, useful
+        value, so `len(x)` is usable as an ordinary expression (a loop
+        bound, an operand, ...), not just a bare statement."""
+        if len(expr.args) != 1:
+            raise SemanticError(
+                f"'len' expects exactly 1 argument, got {len(expr.args)}"
+            )
+        arg_type = self.check_expr(expr.args[0])
+        if arg_type == Type.STR:
+            raise SemanticError(
+                "'len' does not support str arguments yet"
+            )
+        if arg_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE):
+            raise SemanticError(
+                f"'len' requires an array or slice argument, got {arg_type}"
+            )
+        return Type.INT
 
     def check_constant(self, expr: Constant) -> Type:
         if isinstance(expr.value, float) and not expr.value.is_integer():

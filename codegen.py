@@ -823,6 +823,42 @@ already imposes on array-typed call arguments, for the same reason: a
 bare ArrayLiteral, Slice, or array/slice-returning Call has no address
 of its own to print through. Assign it to a named variable first.
 
+LEN BUILTIN
+----------------
+`len(x)`, Hornet's second builtin -- gen_len_call_into. Unlike print's
+own restriction just above, len's argument is NOT restricted to a
+Variable or Index: it reuses gen_indexable_base_into directly, so
+whatever that method currently accepts as a base (a Variable, an
+Index, a Slice expression, a slice-returning Call, or an ArrayLiteral)
+is automatically valid for len too, with nothing to keep in sync if
+that set ever grows. Deliberately not narrowed to match print's own,
+older restriction, which predates most of those cases existing at all.
+
+For an ARRAY argument, the returned length is a compile-time Imm --
+the array's own declared size -- never actually read out of the
+argument's runtime value. For a SLICE argument, it's a genuine runtime
+read out of the descriptor's own len field, narrowed through its own
+32-bit register alias the same way every other reader of a slice's
+length already does (Hornet's int is always 32 bits, even though the
+descriptor's own len field occupies a full 8-byte slot).
+
+The argument is still FULLY evaluated in either case, including
+whatever real work is buried inside it (a bounds check, a heap
+allocation, a side-effecting function call), regardless of whether the
+resulting length ends up depending on that work's outcome at all --
+gen_indexable_base_into's own address computation for the ARRAY case
+is simply discarded afterward, unused, rather than being skipped as
+an optimization. This is a deliberate consistency choice, not an
+oversight: `len(arr[i])` still aborts on an out-of-range i even though
+a sub-array's own length never actually depends on i's value, and
+`len([]int[1, 2, 3])` still performs a real, if wasted, heap
+allocation for a length that was already fully known from the
+literal's own shape before a single instruction ran. The alternative
+-- skip evaluation whenever the length happens to be compile-time-
+derivable -- would make len's argument evaluation behave differently
+depending on what shape the argument happens to take, which is a
+worse inconsistency than one rare, low-value wasted allocation.
+
 NONE: THE SLICE ZERO VALUE
 -------------------------------
 `none` (see NoneLiteral's own docstring in parser.py, and semantic.py's
@@ -3953,6 +3989,8 @@ class CodeGenerator:
                 )
             if expr.name == 'print':
                 return self.gen_print_call_into(expr, dst)
+            if expr.name == 'len':
+                return self.gen_len_call_into(expr, dst)
             return self.gen_call_into(expr, dst)
         if isinstance(expr, Unary):
             # Compute the operand into dst first, then apply this node's
@@ -4286,6 +4324,52 @@ class CodeGenerator:
             return instructions
 
         raise CodegenError(f"'print' has no codegen rule for type: {arg_type}")
+
+    def gen_len_call_into(self, expr: Call, dst: Operand) -> List[Instruction]:
+        """`len(x)`: reuses gen_indexable_base_into directly -- the
+        exact same "address plus length, however each is represented"
+        abstraction indexing and slicing already share -- rather than
+        a narrower restriction of its own like print's Variable-or-
+        Index one (see gen_print_call_into's own docstring): whatever
+        gen_indexable_base_into currently accepts as a base (a
+        Variable, an Index, a Slice expression, a slice-returning
+        Call, or an ArrayLiteral) is automatically valid here too,
+        with nothing to keep in sync if that set ever grows.
+
+        x's own address is computed and then simply discarded -- len
+        only ever needs the LENGTH half of gen_indexable_base_into's
+        own return value -- but computing it is not wasted: x is still
+        fully evaluated regardless (any bounds-check or side effect
+        buried in it genuinely runs), matching how any other function
+        argument's evaluation works, whether or not the computed
+        address ends up used for anything afterward. This does mean
+        `len(arr[i])` still aborts if i is out of range, and
+        `len([]int[1, 2, 3])` still performs a real, if wasted, heap
+        allocation -- both deliberate, not something a narrower
+        special case tries to avoid (see the module docstring's LEN
+        BUILTIN section).
+
+        For an ARRAY base, length_operand comes back as an Imm (a
+        compile-time constant -- the array's own declared size, never
+        actually read out of x at runtime at all); for a SLICE base,
+        as the 64-bit len_dst register holding a runtime value read
+        out of the slice's own descriptor -- moved through its own
+        32-bit alias here, matching how every other reader of a
+        slice's length field already narrows it the same way, since
+        Hornet's int is always 32 bits even though the descriptor's
+        own len field is stored in a full 8-byte slot."""
+        if dst != Register('eax'):
+            raise CodegenError(f"Call codegen requires dst == %eax, got: {dst!r}")
+        arg = expr.args[0]
+        len_reg = Register('r12')
+        instructions, length_operand = self.gen_indexable_base_into(
+            arg, Register('rbx'), len_reg
+        )
+        if isinstance(length_operand, Register):
+            instructions.append(Mov(src=Register('r12d'), dst=dst))
+        else:
+            instructions.append(Mov(src=length_operand, dst=dst))
+        return instructions
 
     def _get_int_format_label(self) -> str:
         if self._int_format_label is None:

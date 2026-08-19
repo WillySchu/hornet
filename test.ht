@@ -4,8 +4,7 @@ def str main():
     int i = sliceints()[0]
     print(i)
     [5]int arr = ints()
-    print_arr(arr)
-    print_arr(ints())
+    print(len(arr))
     return ''
 
 
@@ -26,7 +25,3 @@ def []int sliceints():
 def [5]int ints():
     [5]int arr = [1, 2, 3, 4, 5]
     return arr
-
-
-def print_arr([5]int arr):
-    print(arr)
