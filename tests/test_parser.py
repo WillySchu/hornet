@@ -1601,4 +1601,168 @@ def test_parse_if():
     assert expected == p.parse_if()
 
 
-# TODO(will): Test parse_if() through elif and else.
+def test_parse_if():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 4),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.STRING, '\'hi\'', 2, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 2, 7),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 8),
+    ]
+    p = parser.Parser(tokens)
+
+    expected = parser.If(condition=parser.BoolLiteral(value=True), then_body=[parser.ExprStmt(expr=parser.StringLiteral(value='hi'))])
+
+    assert expected == p.parse_if()
+
+
+def test_parse_if_else_no_colon():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 4),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.STRING, '\'hi\'', 2, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 2, 7),
+        lexer.Token(lexer.TokenType.ELSE, 'else', 2, 8),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 12),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected \':\' to start the else body at line 2, column 12')):
+        p.parse_if()
+
+
+def test_parse_if_else_no_newline():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 4),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.STRING, '\'hi\'', 2, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 2, 7),
+        lexer.Token(lexer.TokenType.ELSE, 'else', 2, 8),
+        lexer.Token(lexer.TokenType.COLON, ':', 2, 12),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 13),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected a newline after \':\' at line 2, column 13')):
+        p.parse_if()
+
+
+def test_parse_if_else_no_indent():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 4),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.STRING, '\'hi\'', 2, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 2, 7),
+        lexer.Token(lexer.TokenType.ELSE, 'else', 2, 8),
+        lexer.Token(lexer.TokenType.COLON, ':', 2, 12),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 13),
+        lexer.Token(lexer.TokenType.EOF, '', 3, 1),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an indented block at line 3, column 1')):
+        p.parse_if()
+
+
+def test_parse_if_else_no_dedent():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 4),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.STRING, '\'hi\'', 2, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 2, 7),
+        lexer.Token(lexer.TokenType.ELSE, 'else', 2, 8),
+        lexer.Token(lexer.TokenType.COLON, ':', 2, 12),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 13),
+        lexer.Token(lexer.TokenType.INDENT, '', 3, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 3, 5),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected the end of an indented block at line 3, column 5')):
+        p.parse_if()
+
+
+def test_parse_if_else_no_body():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 4),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.STRING, '\'hi\'', 2, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 2, 7),
+        lexer.Token(lexer.TokenType.ELSE, 'else', 2, 8),
+        lexer.Token(lexer.TokenType.COLON, ':', 2, 12),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 13),
+        lexer.Token(lexer.TokenType.INDENT, '', 3, 1),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 5),
+        lexer.Token(lexer.TokenType.EOF, '', 3, 6),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected at least one statement in this block')):
+        p.parse_if()
+
+
+def test_parse_if_else():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 4),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.STRING, '\'hi\'', 2, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 2, 7),
+        lexer.Token(lexer.TokenType.ELSE, 'else', 2, 8),
+        lexer.Token(lexer.TokenType.COLON, ':', 2, 12),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 13),
+        lexer.Token(lexer.TokenType.INDENT, '', 3, 1),
+        lexer.Token(lexer.TokenType.STRING, '\'bye\'', 3, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 8),
+        lexer.Token(lexer.TokenType.EOF, '', 3, 9),
+    ]
+    p = parser.Parser(tokens)
+
+    expected = parser.If(
+        condition=parser.BoolLiteral(value=True),
+        then_body=[parser.ExprStmt(expr=parser.StringLiteral(value='hi'))],
+        else_body=[parser.ExprStmt(expr=parser.StringLiteral(value='bye'))],
+    )
+
+    assert expected == p.parse_if()
+
+
+def test_parse_if_elif_no_condition():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 4),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.STRING, '\'hi\'', 2, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 2, 7),
+        lexer.Token(lexer.TokenType.ELIF, 'else', 2, 8),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 9),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got TokenType.EOF (\'\') at line 2, column 9')):
+        p.parse_if()
+
+
+# TODO(will): Finish elif and elif + else tests.
