@@ -1756,7 +1756,7 @@ def test_parse_if_elif_no_condition():
         lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
         lexer.Token(lexer.TokenType.STRING, '\'hi\'', 2, 5),
         lexer.Token(lexer.TokenType.DEDENT, '', 2, 7),
-        lexer.Token(lexer.TokenType.ELIF, 'else', 2, 8),
+        lexer.Token(lexer.TokenType.ELIF, 'elif', 2, 8),
         lexer.Token(lexer.TokenType.EOF, '', 2, 9),
     ]
     p = parser.Parser(tokens)
@@ -1765,4 +1765,554 @@ def test_parse_if_elif_no_condition():
         p.parse_if()
 
 
-# TODO(will): Finish elif and elif + else tests.
+def test_parse_if_elif_no_colon():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 4),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.STRING, '\'hi\'', 2, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 2, 7),
+        lexer.Token(lexer.TokenType.ELIF, 'elif', 2, 8),
+        lexer.Token(lexer.TokenType.FALSE, 'false', 2, 13),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 18),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected \':\' to start the if body at line 2, column 18')):
+        p.parse_if()
+
+
+def test_parse_if_elif_no_newline():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 4),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.STRING, '\'hi\'', 2, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 2, 7),
+        lexer.Token(lexer.TokenType.ELIF, 'elif', 2, 8),
+        lexer.Token(lexer.TokenType.FALSE, 'false', 2, 13),
+        lexer.Token(lexer.TokenType.COLON, ':', 2, 18),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 19),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected a newline after \':\' at line 2, column 19')):
+        p.parse_if()
+
+
+def test_parse_if_elif_no_indent():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 4),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.STRING, '\'hi\'', 2, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 2, 7),
+        lexer.Token(lexer.TokenType.ELIF, 'elif', 2, 8),
+        lexer.Token(lexer.TokenType.FALSE, 'false', 2, 13),
+        lexer.Token(lexer.TokenType.COLON, ':', 2, 18),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 19),
+        lexer.Token(lexer.TokenType.EOF, '', 3, 1),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an indented block at line 3, column 1')):
+        p.parse_if()
+
+
+def test_parse_if_elif_no_dedent():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 4),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.STRING, '\'hi\'', 2, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 2, 7),
+        lexer.Token(lexer.TokenType.ELIF, 'elif', 2, 8),
+        lexer.Token(lexer.TokenType.FALSE, 'false', 2, 13),
+        lexer.Token(lexer.TokenType.COLON, ':', 2, 18),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 19),
+        lexer.Token(lexer.TokenType.INDENT, '', 3, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 3, 5),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected the end of an indented block at line 3, column 5')):
+        p.parse_if()
+
+
+def test_parse_if_elif_no_body():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 4),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.STRING, '\'hi\'', 2, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 2, 7),
+        lexer.Token(lexer.TokenType.ELIF, 'elif', 2, 8),
+        lexer.Token(lexer.TokenType.FALSE, 'false', 2, 13),
+        lexer.Token(lexer.TokenType.COLON, ':', 2, 18),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 19),
+        lexer.Token(lexer.TokenType.INDENT, '', 3, 1),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 5),
+        lexer.Token(lexer.TokenType.EOF, '', 3, 6),
+    ]
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape('Expected at least one statement in this block')):
+        p.parse_if()
+
+
+def test_parse_if_elif():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 4),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.STRING, '\'hi\'', 2, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 2, 7),
+        lexer.Token(lexer.TokenType.ELIF, 'elif', 2, 8),
+        lexer.Token(lexer.TokenType.FALSE, 'false', 2, 13),
+        lexer.Token(lexer.TokenType.COLON, ':', 2, 18),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 19),
+        lexer.Token(lexer.TokenType.INDENT, '', 3, 1),
+        lexer.Token(lexer.TokenType.STRING, '\'bye\'', 3, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 9),
+        lexer.Token(lexer.TokenType.EOF, '', 3, 10),
+    ]
+    p = parser.Parser(tokens)
+
+    expected = parser.If(
+        condition=parser.BoolLiteral(value=True),
+        then_body=[parser.ExprStmt(expr=parser.StringLiteral(value='hi'))],
+        else_body=[
+            parser.If(
+                condition=parser.BoolLiteral(value=False),
+                then_body=[parser.ExprStmt(expr=parser.StringLiteral(value='bye'))],
+            ),
+        ],
+    )
+
+    assert expected == p.parse_if()
+
+
+def test_parse_if_elif_else():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 4),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.STRING, '\'hi\'', 2, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 2, 7),
+        lexer.Token(lexer.TokenType.ELIF, 'elif', 2, 8),
+        lexer.Token(lexer.TokenType.FALSE, 'false', 2, 13),
+        lexer.Token(lexer.TokenType.COLON, ':', 2, 18),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 19),
+        lexer.Token(lexer.TokenType.INDENT, '', 3, 1),
+        lexer.Token(lexer.TokenType.STRING, '\'maybe\'', 3, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 9),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 3, 10),
+        lexer.Token(lexer.TokenType.ELSE, 'else', 4, 1),
+        lexer.Token(lexer.TokenType.COLON, ':', 4, 5),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 4, 6),
+        lexer.Token(lexer.TokenType.INDENT, '', 5, 1),
+        lexer.Token(lexer.TokenType.STRING, '\'maybe\'', 5, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 5, 10),
+        lexer.Token(lexer.TokenType.EOF, '', 5, 11),
+    ]
+    p = parser.Parser(tokens)
+
+    expected = parser.If(
+        condition=parser.BoolLiteral(value=True),
+        then_body=[parser.ExprStmt(expr=parser.StringLiteral(value='hi'))],
+        else_body=[
+            parser.If(
+                condition=parser.BoolLiteral(value=False),
+                then_body=[parser.ExprStmt(expr=parser.StringLiteral(value='maybe'))],
+            ),
+            parser.ExprStmt(expr=parser.StringLiteral(value='bye')),
+        ],
+    )
+
+
+def test_parse_if_elif_else_ignore_newlines():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 4),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.STRING, '\'hi\'', 2, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 2, 7),
+        lexer.Token(lexer.TokenType.ELIF, 'elif', 2, 8),
+        lexer.Token(lexer.TokenType.FALSE, 'false', 2, 13),
+        lexer.Token(lexer.TokenType.COLON, ':', 2, 18),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 19),
+        lexer.Token(lexer.TokenType.INDENT, '', 3, 1),
+        lexer.Token(lexer.TokenType.STRING, '\'maybe\'', 3, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 9),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 3, 10),
+        lexer.Token(lexer.TokenType.ELSE, 'else', 4, 1),
+        lexer.Token(lexer.TokenType.COLON, ':', 4, 5),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 4, 6),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 5, 1),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 6, 1),
+        lexer.Token(lexer.TokenType.INDENT, '', 7, 1),
+        lexer.Token(lexer.TokenType.STRING, '\'maybe\'', 7, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 7, 10),
+        lexer.Token(lexer.TokenType.EOF, '', 7, 11),
+    ]
+    p = parser.Parser(tokens)
+
+    expected = parser.If(
+        condition=parser.BoolLiteral(value=True),
+        then_body=[parser.ExprStmt(expr=parser.StringLiteral(value='hi'))],
+        else_body=[
+            parser.If(
+                condition=parser.BoolLiteral(value=False),
+                then_body=[parser.ExprStmt(expr=parser.StringLiteral(value='maybe'))],
+            ),
+            parser.ExprStmt(expr=parser.StringLiteral(value='bye')),
+        ],
+    )
+
+
+def test_parse_var_decl_none_empty():
+    tokens = [
+        lexer.Token(lexer.TokenType.EOF, '', 1, 1),
+    ]
+
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape("Expected a type ('int', 'bool', 'str', '[size]type', or '[]type'), got TokenType.EOF ('') at line 1, column 1")):
+        p.parse_var_decl()
+
+
+def test_parse_var_decl_none_no_name():
+    tokens = [
+        lexer.Token(lexer.TokenType.INT, 'int', 1, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 4),
+    ]
+
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape("Expected a variable name at line 1, column 4")):
+        p.parse_var_decl()
+
+
+def test_parse_var_decl_none_no_assign():
+    tokens = [
+        lexer.Token(lexer.TokenType.INT, 'int', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'x', 1, 4),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 5),
+    ]
+
+    p = parser.Parser(tokens)
+
+    expected = parser.VarDecl(name='x', var_type='int')
+
+    assert expected == p.parse_var_decl()
+
+
+def test_parse_var_decl_none_no_value():
+    tokens = [
+        lexer.Token(lexer.TokenType.INT, 'int', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'x', 1, 4),
+        lexer.Token(lexer.TokenType.ASSIGN, '=', 1, 6),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 7),
+    ]
+
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape("Expected an expression, got TokenType.EOF (\'\') at line 1, column 7")):
+        p.parse_var_decl()
+
+
+def test_parse_var_decl_none():
+    tokens = [
+        lexer.Token(lexer.TokenType.INT, 'int', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'x', 1, 4),
+        lexer.Token(lexer.TokenType.ASSIGN, '=', 1, 6),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 1, 8),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 9),
+    ]
+
+    p = parser.Parser(tokens)
+
+    expected = parser.VarDecl('x', var_type='int', init=parser.Constant(value=1))
+
+    assert expected == p.parse_var_decl()
+
+
+def test_parse_var_decl_pass_type_with_type():
+    tokens = [
+        lexer.Token(lexer.TokenType.INT, 'int', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'x', 1, 4),
+        lexer.Token(lexer.TokenType.ASSIGN, '=', 1, 6),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 1, 8),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 9),
+    ]
+
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape("Expected a variable name at line 1, column 1")):
+        p.parse_var_decl('str')
+
+
+def test_parse_var_decl_pass_type():
+    tokens = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'x', 1, 1),
+        lexer.Token(lexer.TokenType.ASSIGN, '=', 1, 3),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 1, 5),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 6),
+    ]
+
+    p = parser.Parser(tokens)
+
+    expected = parser.VarDecl('x', var_type='int', init=parser.Constant(value=1))
+
+    assert expected == p.parse_var_decl('int')
+
+
+def test_parse_var_decl_pass_wrong_type():
+    tokens = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'x', 1, 1),
+        lexer.Token(lexer.TokenType.ASSIGN, '=', 1, 3),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 1, 5),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 6),
+    ]
+
+    p = parser.Parser(tokens)
+
+    expected = parser.VarDecl('x', var_type='str', init=parser.Constant(value=1))
+
+    assert expected == p.parse_var_decl('str')
+
+
+def test_parse_assign_empty():
+    tokens = [
+        lexer.Token(lexer.TokenType.EOF, '', 1, 1),
+    ]
+
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape("Expected TokenType.IDENTIFIER, got TokenType.EOF (\'\') at line 1, column 1")):
+        p.parse_assign()
+
+
+def test_parse_assign_no_assign():
+    tokens = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 1, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 2),
+    ]
+
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape("Expected an expression, got TokenType.EOF (\'\') at line 1, column 2")):
+        p.parse_assign()
+
+
+def test_parse_assign_no_value():
+    tokens = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 1, 1),
+        lexer.Token(lexer.TokenType.ASSIGN, '=', 1, 2),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 3),
+    ]
+
+    p = parser.Parser(tokens)
+
+    with pytest.raises(parser.ParseError, match=re.escape("Expected an expression, got TokenType.EOF (\'\') at line 1, column 3")):
+        p.parse_assign()
+
+
+def test_parse_assign():
+    tokens = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 1, 1),
+        lexer.Token(lexer.TokenType.ASSIGN, '=', 1, 2),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 1, 3),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 4),
+    ]
+
+    p = parser.Parser(tokens)
+
+    expected = parser.Assign(name='a', value=parser.Constant(value=1))
+
+    assert expected == p.parse_assign()
+
+
+def test_parse_assign_compound_addition():
+    tokens = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 1, 1),
+        lexer.Token(lexer.TokenType.PLUS_ASSIGN, '+=', 1, 2),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 1, 4),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 5),
+    ]
+
+    p = parser.Parser(tokens)
+
+    expected = parser.Assign(name='a', value=parser.Binary(op=parser.BinaryOp.ADD, left=parser.Variable(name='a'), right=parser.Constant(value=1)))
+
+    assert expected == p.parse_assign()
+
+
+def test_parse_assign_compound_subtraction():
+    tokens = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 1, 1),
+        lexer.Token(lexer.TokenType.MINUS_ASSIGN, '-=', 1, 2),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 1, 4),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 5),
+    ]
+
+    p = parser.Parser(tokens)
+
+    expected = parser.Assign(name='a', value=parser.Binary(op=parser.BinaryOp.SUBTRACT, left=parser.Variable(name='a'), right=parser.Constant(value=1)))
+
+    assert expected == p.parse_assign()
+
+
+def test_parse_assign_compound_multiplication():
+    tokens = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 1, 1),
+        lexer.Token(lexer.TokenType.STAR_ASSIGN, '*=', 1, 2),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 1, 4),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 5),
+    ]
+
+    p = parser.Parser(tokens)
+
+    expected = parser.Assign(name='a', value=parser.Binary(op=parser.BinaryOp.MULTIPLY, left=parser.Variable(name='a'), right=parser.Constant(value=1)))
+
+    assert expected == p.parse_assign()
+
+
+def test_parse_assign_compound_division():
+    tokens = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 1, 1),
+        lexer.Token(lexer.TokenType.SLASH_ASSIGN, '/=', 1, 2),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 1, 4),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 5),
+    ]
+
+    p = parser.Parser(tokens)
+
+    expected = parser.Assign(name='a', value=parser.Binary(op=parser.BinaryOp.DIVIDE, left=parser.Variable(name='a'), right=parser.Constant(value=1)))
+
+    assert expected == p.parse_assign()
+
+
+def test_parse_assign_compound_modulo():
+    tokens = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 1, 1),
+        lexer.Token(lexer.TokenType.PERCENT_ASSIGN, '%=', 1, 2),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 1, 4),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 5),
+    ]
+
+    p = parser.Parser(tokens)
+
+    expected = parser.Assign(name='a', value=parser.Binary(op=parser.BinaryOp.MODULO, left=parser.Variable(name='a'), right=parser.Constant(value=1)))
+
+    assert expected == p.parse_assign()
+
+
+def test_parse_assign_compound_bitwise_and():
+    tokens = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 1, 1),
+        lexer.Token(lexer.TokenType.AMPERSAND_ASSIGN, '&=', 1, 2),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 1, 4),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 5),
+    ]
+
+    p = parser.Parser(tokens)
+
+    expected = parser.Assign(name='a', value=parser.Binary(op=parser.BinaryOp.BITWISE_AND, left=parser.Variable(name='a'), right=parser.Constant(value=1)))
+
+    assert expected == p.parse_assign()
+
+
+def test_parse_assign_compound_bitwise_or():
+    tokens = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 1, 1),
+        lexer.Token(lexer.TokenType.PIPE_ASSIGN, '|=', 1, 2),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 1, 4),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 5),
+    ]
+
+    p = parser.Parser(tokens)
+
+    expected = parser.Assign(name='a', value=parser.Binary(op=parser.BinaryOp.BITWISE_OR, left=parser.Variable(name='a'), right=parser.Constant(value=1)))
+
+    assert expected == p.parse_assign()
+
+
+def test_parse_assign_compound_bitwise_xor():
+    tokens = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 1, 1),
+        lexer.Token(lexer.TokenType.CARET_ASSIGN, '^=', 1, 2),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 1, 4),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 5),
+    ]
+
+    p = parser.Parser(tokens)
+
+    expected = parser.Assign(name='a', value=parser.Binary(op=parser.BinaryOp.BITWISE_XOR, left=parser.Variable(name='a'), right=parser.Constant(value=1)))
+
+    assert expected == p.parse_assign()
+
+
+def test_parse_assign_compound_shift_left():
+    tokens = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 1, 1),
+        lexer.Token(lexer.TokenType.SHIFT_LEFT_ASSIGN, '<<=', 1, 2),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 1, 5),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 6),
+    ]
+
+    p = parser.Parser(tokens)
+
+    expected = parser.Assign(name='a', value=parser.Binary(op=parser.BinaryOp.SHIFT_LEFT, left=parser.Variable(name='a'), right=parser.Constant(value=1)))
+
+    assert expected == p.parse_assign()
+
+
+def test_parse_assign_compound_shift_right():
+    tokens = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 1, 1),
+        lexer.Token(lexer.TokenType.SHIFT_RIGHT_ASSIGN, '>>=', 1, 2),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 1, 5),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 6),
+    ]
+
+    p = parser.Parser(tokens)
+
+    expected = parser.Assign(name='a', value=parser.Binary(op=parser.BinaryOp.SHIFT_RIGHT, left=parser.Variable(name='a'), right=parser.Constant(value=1)))
+
+    assert expected == p.parse_assign()
+
+
+# TODO(will): Test parse_expr_stmt_or_index_assign
+
+# TODO(will): Test parse_expression
+
+# TODO(will): Test parse_binary
+
+# TODO(will): Test parse_unary
+
+# TODO(will): Test parse_postfix
+
+# TODO(will): Test parse_index_of_slice
+
+# TODO(will): Test parse_primary
+
+# TODO(will): Test parse_array_literal
+
+# TODO(will): Test parse_call

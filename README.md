@@ -20,6 +20,7 @@ Updates:
 - `in` keyword.
 - Slice literals.
 - Pass function calls to print.
+- Compound index assign.
 - Ternary.
 - For loops.
 - Slice / index an array return directly on function calls.
