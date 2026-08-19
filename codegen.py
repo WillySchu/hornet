@@ -875,15 +875,80 @@ compared to none, are both rejected earlier), so this doesn't need to
 re-derive or defensively check which side is which beyond that.
 
 `none` used as a function argument or return value for a slice-typed
-parameter/return isn't specially handled, and doesn't need to be:
-slice parameters and returns aren't supported in codegen at all yet
-(see the SCOPE section below), so any program attempting either hits
-that existing, unrelated rejection regardless of what's passed.
-`return none` specifically falls through to gen_expr_into's own
-defensive NoneLiteral rejection instead of a more specific message --
-a real, if a little less polished, gap accepted for this first pass,
-since the underlying combination (a slice return) is already entirely
-unimplemented either way.
+parameter/return works correctly now -- see the SLICE PARAMETERS AND
+RETURNS section just below for the calling convention itself, and
+gen_slice_arg_into/gen_return's own NoneLiteral case for how `none`
+specifically flows through it (a {0, 0} pair pushed like any other
+slice argument, or moved directly into %rax:%rdx for a return).
+
+SLICE PARAMETERS AND RETURNS
+-----------------------------------
+A slice crosses a function boundary via TWO registers directly -- its
+own ptr, then len -- matching exactly what a real C compiler does for
+an equivalent `struct{void*,long}` passed or returned by value under
+the SysV ABI: as a PARAMETER, it consumes two consecutive integer
+argument registers (not one register somehow holding "the slice");
+as a RETURN VALUE, it comes back in %rax:%rdx (first eightbyte in
+%rax, second in %rdx) -- not through the hidden-pointer mechanism
+arrays' own returns use, and not copied on entry the way an array
+parameter is (a slice parameter is just an alias, exactly like any
+other slice variable -- see the NONE section above's own note on why
+this is memory-safe by construction: any array that's ever sliced is
+already unconditionally heap-allocated, specifically so a slice can
+safely cross a function boundary like this).
+
+REGISTER-SLOT ACCOUNTING: NO LONGER 1:1
+-----------------------------------------------
+Since a slice now costs 2 of the 6 available argument-register slots
+instead of 1, the mapping from argument/parameter INDEX to register
+INDEX stopped being the simple 1:1 one every OTHER type still uses.
+Both sides track a running slot count instead:
+  - CALLER side: _gen_call_arguments_into, shared by gen_call_into,
+    gen_array_call_into, and gen_slice_call_into, pushes each
+    argument's value(s) in left-to-right order (a slice contributing
+    its ptr, then its len, as two separate pushes) and pops
+    everything back off in exact reverse into the correct register --
+    the same push-then-pop-in-reverse discipline this file already
+    used for ordinary scalar arguments, just with a variable number
+    of slots per argument instead of always one.
+  - CALLEE side: gen_function's own parameter-stashing loop advances
+    its register-index counter by 2 for a slice parameter (stashing
+    TWO consecutive incoming registers into that parameter's own
+    16-byte temp slot) instead of 1.
+_total_arg_slots (caller) and the equivalent inline sum in gen_
+function (callee) both compute "how many slots will this collection
+of arguments/parameters actually need" for their own "too many
+arguments/parameters" check -- no longer just len(args) > 6, since a
+single slice-typed argument or parameter can by itself use half the
+budget.
+
+RETURN VALUE DISPATCH: gen_slice_return_into
+-------------------------------------------------
+Mirrors gen_slice_value_into's own dispatch (Slice / Variable / Call),
+but targets %rax:%rdx directly instead of a Memory destination:
+  - Variable (`return s`): load ptr/len straight out of s's own slot
+    -- no temporary needed at all.
+  - Call (`return otherFn()`, otherFn ALSO returning a slice):
+    genuinely free -- gen_slice_call_into already leaves the callee's
+    own result in %rax/%rdx, exactly where THIS function needs to
+    leave its own, so there's nothing further to do beyond the call
+    itself. (Contrast with an array-returning function's own
+    forwarding, which avoids a COPY too, but still has to thread the
+    SAME hidden-pointer address one level deeper explicitly -- a
+    slice return needs neither a copy NOR any forwarding step at all.)
+  - Slice (`return arr[1:3]`): the one case needing real work --
+    gen_slice_into only knows how to compute a descriptor into a
+    Memory destination, not directly into a register pair, so this
+    materializes it into a dedicated per-function temp slot first
+    (_slice_return_temp_offset, reserved once in gen_function
+    alongside the hidden array-return-pointer slot, whichever of the
+    two a given function's own return type actually needs), then
+    loads that back out into %rax/%rdx.
+NoneLiteral (`return none`) is handled one level up, directly in
+gen_return, not in gen_slice_return_into -- its own resolved type
+(Type.NONE) never equals SLICE, the same reason gen_var_decl/gen_
+assign special-case it before ever reaching their own general
+dispatch (see gen_none_into's own docstring).
 
 SCOPE: WHAT THIS DOESN'T COVER YET
 --------------------------------------
@@ -893,16 +958,6 @@ clear error rather than silently truncating a 16-byte descriptor down
 to a 4-or-8-byte scalar move, which is all their existing flat-copy
 logic knows how to do. A genuinely separable follow-up once plain
 slices are solid, not a gap discovered after the fact.
-
-Slice function PARAMETERS and RETURN VALUES are also not supported --
-gen_function's parameter loop and gen_return both raise a clear
-CodegenError, found by deliberately testing exactly these cases before
-anything else assumed they worked, not by accident. Both are meant to
-cross a function boundary via two registers directly (simpler than
-arrays' own hidden-pointer/copy-on-entry machinery, since a slice's
-descriptor is small and fixed-size rather than arbitrarily large) --
-real, well-understood, separable work, deliberately scoped out of this
-pass rather than rushed.
 """
 
 import argparse
@@ -1707,6 +1762,7 @@ class CodeGenerator:
         # already uses -- kept consistent here rather than reinventing
         # a second "no return type" representation in this file.
         return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type)
+        param_types = [type_from_name(p.type) for p in fn.params]
 
         # An array-typed return needs a hidden pointer -- the caller
         # passes the address to write the result into, as an extra,
@@ -1720,40 +1776,63 @@ class CodeGenerator:
         # the same "reserve a slot, then store the incoming register
         # into it" mechanism every real parameter already uses. See
         # the module docstring's ARRAYS section.
+        #
+        # A slice-typed return needs no hidden pointer at all -- it
+        # comes back in %rax:%rdx directly (see the module docstring's
+        # SLICE PARAMETERS AND RETURNS section) -- but a Slice
+        # expression being returned (as opposed to a Variable or
+        # forwarded Call) still needs somewhere to materialize its
+        # descriptor before it can be split across those two registers
+        # (gen_slice_into only knows how to compute into a Memory
+        # destination) -- this reserves that dedicated 16-byte slot,
+        # used by gen_return's own Slice case, unconditionally rather
+        # than trying to detect whether any particular return statement
+        # will actually need it.
         self._hidden_return_ptr_offset = None
+        self._slice_return_temp_offset = None
         arg_shift = 0
         if return_type.kind == TypeKind.ARRAY:
             self._next_offset -= 8
             self._hidden_return_ptr_offset = self._next_offset
             arg_shift = 1
+        elif return_type.kind == TypeKind.SLICE:
+            self._next_offset -= 16
+            self._slice_return_temp_offset = self._next_offset
 
-        # One extra, purely internal 8-byte slot per parameter, used to
-        # stash its incoming register value immediately, before any
+        # One extra, purely internal temp slot per parameter, used to
+        # stash its incoming register value(s) immediately, before any
         # parameter is actually processed -- see the loop below for
         # why this has to happen up front rather than processing each
         # parameter directly out of its own argument register in turn.
+        # 16 bytes for a slice parameter (its own ptr AND len each
+        # need stashing), 8 for everything else.
         param_temp_offsets = []
-        for _ in fn.params:
-            self._next_offset -= 8
+        for p_type in param_types:
+            width = 16 if p_type.kind == TypeKind.SLICE else 8
+            self._next_offset -= width
             param_temp_offsets.append(self._next_offset)
 
         self._collect_params(fn.params)
         self._collect_locals(fn.body)
         self.scopes = [{}]
 
-        max_params = 6 - arg_shift
-        if len(fn.params) > max_params:
-            reason = (
-                "the hidden output pointer itself uses the first argument "
-                "register, leaving 5"
-                if arg_shift else
-                "this compiler only supports up to 6 (passed via registers "
-                "per the SysV ABI -- stack-passed parameters aren't "
-                "implemented)"
-            )
+        # A slice parameter needs TWO consecutive argument-register
+        # slots (its own ptr, then len), not one -- matching exactly
+        # how a real C compiler would pass a `struct{void*,long}`
+        # parameter, and the same "running slot count, not a straight
+        # per-parameter count" accounting _gen_call_arguments_into
+        # already needs on the CALLER side for the same reason.
+        param_slots = sum(2 if pt.kind == TypeKind.SLICE else 1 for pt in param_types)
+        total_slots = arg_shift + param_slots
+        if total_slots > 6:
             raise CodegenError(
-                f"Function '{fn.name}' has {len(fn.params)} parameters; "
-                f"{reason}"
+                f"Function '{fn.name}' needs {total_slots} argument "
+                f"register(s) for its parameters (a slice-typed "
+                f"parameter needs 2)"
+                + (" plus the hidden array-return pointer" if arg_shift else "")
+                + " -- this compiler only supports up to 6 (passed via "
+                "registers per the SysV ABI -- stack-passed parameters "
+                "aren't implemented)"
             )
 
         instructions: List[Instruction] = [
@@ -1786,9 +1865,15 @@ class CodeGenerator:
         # plain %rbp-relative store -- these never touch %rsp, so
         # there's no stack-alignment concern regardless of how many
         # parameters there are or which ones turn out to need malloc.
+        # A slice parameter stashes TWO consecutive registers (its own
+        # ptr, then len) into its own 16-byte temp slot, advancing the
+        # running register-index counter by 2 instead of 1 -- the same
+        # accounting _gen_call_arguments_into already needs on the
+        # CALLER side, for the same underlying reason (a slice needs
+        # two argument-register slots, not one).
         #
         # SECOND, each parameter is processed using its safely-stashed
-        # value rather than its original argument register. This
+        # value(s) rather than its original argument register(s). This
         # two-pass structure exists specifically because a heap-
         # allocated array parameter (see is_heap_allocated) needs its
         # own malloc call to build an independent copy -- and malloc,
@@ -1805,13 +1890,19 @@ class CodeGenerator:
         # of each parameter's own malloc call, which misaligns %rsp
         # for roughly half of them. Plain %rbp-relative stores sidestep
         # that failure mode entirely, since they never move %rsp.)
-        for i in range(len(fn.params)):
-            reg_index = i + arg_shift
-            instructions.append(MovQ(src=Register(_ARG_REGISTERS_64[reg_index]), dst=Memory('rbp', param_temp_offsets[i])))
+        reg_index = arg_shift
+        for i, p_type in enumerate(param_types):
+            if p_type.kind == TypeKind.SLICE:
+                instructions.append(MovQ(src=Register(_ARG_REGISTERS_64[reg_index]), dst=Memory('rbp', param_temp_offsets[i])))
+                instructions.append(MovQ(src=Register(_ARG_REGISTERS_64[reg_index + 1]), dst=Memory('rbp', param_temp_offsets[i] + 8)))
+                reg_index += 2
+            else:
+                instructions.append(MovQ(src=Register(_ARG_REGISTERS_64[reg_index]), dst=Memory('rbp', param_temp_offsets[i])))
+                reg_index += 1
 
         for i, p in enumerate(fn.params):
             offset = self._bind_param(p)
-            p_type = type_from_name(p.type)
+            p_type = param_types[i]
             temp_offset = param_temp_offsets[i]
             if p_type.kind == TypeKind.ARRAY:
                 if is_heap_allocated(p_type):
@@ -1835,21 +1926,21 @@ class CodeGenerator:
                     instructions.append(MovQ(src=Memory('rbp', temp_offset), dst=Register('rbx')))
                     instructions.extend(self.gen_array_copy(Memory('rbp', offset), Memory('rbx', 0), p_type))
             elif p_type.kind == TypeKind.SLICE:
-                # Not supported yet -- see gen_return's own array-return
-                # check for why this is the same deliberately scoped-
-                # out piece of work (a calling-convention extension: a
-                # slice is meant to cross a function boundary via two
-                # registers directly, per the two-register decision for
-                # slice parameters/returns, not through a stack slot the
-                # way this parameter loop currently assumes). Silently
-                # falling through to the int/bool branch below would
-                # miscompile: a slice's own 16-byte descriptor would be
-                # truncated down to whatever fits in one 32-bit register.
-                raise CodegenError(
-                    f"Parameter '{p.name}' of function '{fn.name}' is "
-                    f"slice-typed ({p_type}) -- slice parameters are not "
-                    f"supported yet"
-                )
+                # A slice parameter is never heap-promoted or copied
+                # the way an array is -- it's just an alias, exactly
+                # like any other slice variable, so this only needs to
+                # copy the two already-stashed values (ptr, len) into
+                # its own permanent slot; no malloc, no is_heap_
+                # allocated check. The underlying array it points to
+                # (if any) is already guaranteed to outlive this call
+                # regardless, by construction: any array that's ever
+                # sliced is unconditionally heap-allocated (see is_
+                # heap_allocated's second trigger) specifically so a
+                # slice can safely cross a function boundary like this.
+                instructions.append(MovQ(src=Memory('rbp', temp_offset), dst=Register('rax')))
+                instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
+                instructions.append(MovQ(src=Memory('rbp', temp_offset + 8), dst=Register('rax')))
+                instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset + 8)))
             elif p_type == Type.STR:
                 instructions.append(MovQ(src=Memory('rbp', temp_offset), dst=Register('rax')))
                 instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
@@ -2407,6 +2498,16 @@ class CodeGenerator:
             always exactly 16 bytes regardless of element type, so a
             fixed two-field copy (no loop needed at all) is both
             simpler and avoids that mismatch entirely.
+          - Call (e.g. `[]int s = otherFn()`, where otherFn also
+            returns a slice): gen_slice_call_into already leaves the
+            callee's own result in %rax (ptr) and %rdx (len) -- see
+            its own docstring -- so this just copies those two
+            registers into dst_mem, nothing more elaborate needed.
+        NoneLiteral is NOT handled here -- its own resolved type
+        (Type.NONE) never matches SLICE, so it can't even reach this
+        method through _gen_store's ordinary dispatch; see
+        gen_none_into and gen_var_decl/gen_assign's own NoneLiteral
+        short-circuit for why that's handled one level up instead.
         """
         if isinstance(expr, Slice):
             return self.gen_slice_into(expr, dst_mem)
@@ -2418,6 +2519,11 @@ class CodeGenerator:
                 MovQ(src=Memory('rbp', src_offset + 8), dst=Register('rax')),
                 MovQ(src=Register('rax'), dst=Memory(dst_mem.base, dst_mem.offset + 8)),
             ]
+        if isinstance(expr, Call):
+            instructions = self.gen_slice_call_into(expr)
+            instructions.append(MovQ(src=Register('rax'), dst=Memory(dst_mem.base, dst_mem.offset)))
+            instructions.append(MovQ(src=Register('rdx'), dst=Memory(dst_mem.base, dst_mem.offset + 8)))
+            return instructions
         raise CodegenError(f"No codegen rule for a slice-typed value: {expr!r}")
 
     def gen_array_copy(self, dst_mem: Memory, src_mem: Memory, array_type: Type) -> List[Instruction]:
@@ -2529,6 +2635,116 @@ class CodeGenerator:
             f"it to a variable first"
         )
 
+    def _total_arg_slots(self, args: List[Node]) -> int:
+        """How many argument registers `args` will collectively need
+        -- 2 for each slice-typed (or `none`) argument, 1 for
+        everything else. `none`'s own resolved type (Type.NONE) never
+        equals SLICE, so it's checked for separately here -- the same
+        "check isinstance(expr, NoneLiteral) directly rather than
+        relying on its own resolved type" pattern gen_var_decl/
+        gen_assign/gen_return already use, safe for the same reason:
+        semantic.py's _types_compatible already guarantees `none` is
+        only ever valid where a slice is expected, since slices are
+        the only nilable type that exists. Shared by every call-
+        codegen entry point's own "too many arguments" check."""
+        return sum(
+            2 if self._type_of(a).kind == TypeKind.SLICE or isinstance(a, NoneLiteral) else 1
+            for a in args
+        )
+
+    def gen_slice_arg_into(self, expr: Node, ptr_dst: Register, len_dst: Register) -> List[Instruction]:
+        """Computes a slice-typed call ARGUMENT's own ptr/len directly
+        into ptr_dst/len_dst. Restricted to a Variable (a named slice)
+        or NoneLiteral (`none`) -- the same restriction slice bases
+        have everywhere else in this file (see
+        gen_indexable_base_into's own docstring): a bare Slice
+        expression (`foo(arr[1:3])`) has no pre-existing descriptor to
+        read, and would need the same temporary-materialization
+        mechanism this codebase has consistently deferred elsewhere --
+        assign it to a named variable first."""
+        if isinstance(expr, NoneLiteral):
+            return [
+                MovQ(src=Imm(0), dst=ptr_dst),
+                MovQ(src=Imm(0), dst=len_dst),
+            ]
+        if isinstance(expr, Variable):
+            offset = self._local_offset(expr.name)
+            return [
+                MovQ(src=Memory('rbp', offset), dst=ptr_dst),
+                MovQ(src=Memory('rbp', offset + 8), dst=len_dst),
+            ]
+        raise CodegenError(
+            f"A slice-typed call argument must be a variable or "
+            f"'none', not {type(expr).__name__} -- assign it to a "
+            f"variable first"
+        )
+
+    def _gen_call_arguments_into(self, args: List[Node], reg_shift: int = 0) -> List[Instruction]:
+        """Shared by gen_call_into, gen_array_call_into, and
+        gen_slice_call_into: evaluates every argument -- in order,
+        each via the ordinary gen_expr_into (a scalar), gen_array_arg_
+        address_into (an array), or gen_slice_arg_into (a slice or
+        none, which needs TWO consecutive register slots, not one) --
+        immediately pushing each one's resulting value(s) onto the
+        stack before moving on to the next. Only *after* every
+        argument has been safely computed and stacked does this start
+        popping everything back off, in reverse, into the actual SysV
+        argument registers (see _ARG_REGISTERS_64).
+
+        This "compute and stack everything, then pop into place" order
+        is what avoids the same register-clobbering hazard that
+        motivated saving %rbx/%r12/%r13/%r14 across calls in the first
+        place (see the module docstring's FUNCTIONS section): if
+        argument 2 happens to be a nested call and argument 1's value
+        were sitting in a scratch register instead of safely on the
+        stack while argument 2 gets computed, argument 2's own use of
+        that same scratch register would corrupt argument 1.
+
+        `reg_shift` shifts every argument's own register slot later by
+        that many positions -- 1 for a call to a function that returns
+        an array (whose hidden output pointer already occupies the
+        first slot, pushed/popped separately by gen_array_call_into
+        itself, outside this method entirely), 0 otherwise.
+
+        Because a slice argument needs two consecutive slots, the
+        mapping from argument index to register index isn't the
+        simple 1:1 one it used to be -- this tracks a running slot
+        count instead, matching exactly how a real C compiler would
+        place `struct{void*,long}` arguments among ordinary scalar
+        ones: pushed in the same left-to-right order as written (a
+        slice contributing its ptr, then its len), and popped in exact
+        reverse, so each slot lands in its own correct register
+        regardless of whether it came from a whole scalar argument or
+        half of a slice one.
+        """
+        instructions: List[Instruction] = []
+        arg_slot_counts = []
+        for arg in args:
+            arg_type = self._type_of(arg)
+            if arg_type.kind == TypeKind.SLICE or isinstance(arg, NoneLiteral):
+                instructions.extend(self.gen_slice_arg_into(arg, Register('rax'), Register('rdx')))
+                instructions.append(Push(Register('rax')))
+                instructions.append(Push(Register('rdx')))
+                arg_slot_counts.append(2)
+            elif arg_type.kind == TypeKind.ARRAY:
+                instructions.extend(self.gen_array_arg_address_into(arg, Register('rax')))
+                instructions.append(Push(Register('rax')))
+                arg_slot_counts.append(1)
+            else:
+                instructions.extend(self.gen_expr_into(arg, Register('eax')))
+                instructions.append(Push(Register('rax')))
+                arg_slot_counts.append(1)
+
+        slot = sum(arg_slot_counts) - 1 + reg_shift
+        for count in reversed(arg_slot_counts):
+            if count == 2:
+                instructions.append(Pop(Register(_ARG_REGISTERS_64[slot])))
+                instructions.append(Pop(Register(_ARG_REGISTERS_64[slot - 1])))
+            else:
+                instructions.append(Pop(Register(_ARG_REGISTERS_64[slot])))
+            slot -= count
+        return instructions
+
     def gen_array_call_into(self, dst_mem: Memory, expr: Call, array_type: Type) -> List[Instruction]:
         """Calls a function that returns an array, writing its result
         directly into dst_mem via the hidden-pointer convention: the
@@ -2552,32 +2768,23 @@ class CodeGenerator:
         -- anything that might otherwise clobber a register holding it)
         -- the same push-before-evaluating-something-else discipline
         used everywhere else in this file a value needs to survive past
-        a sub-expression. Each argument is then pushed in turn (an
-        array-typed one as an address via gen_array_arg_address_into,
-        anything else as a value via the ordinary gen_expr_into) and
-        popped back off in reverse, into registers shifted one position
-        past the hidden pointer -- exactly gen_call_into's own
-        push-then-pop-in-reverse pattern, just with that one-position
-        shift threaded through.
+        a sub-expression. Every other argument is handled by
+        _gen_call_arguments_into (reg_shift=1, since the hidden pointer
+        already occupies the first register slot) -- see its own
+        docstring for how a slice-typed argument's own two slots are
+        placed correctly among any ordinary scalar/array ones.
         """
-        if len(expr.args) > 5:
+        total_slots = 1 + self._total_arg_slots(expr.args)  # +1: the hidden pointer itself
+        if total_slots > 6:
             raise CodegenError(
-                f"Call to '{expr.name}' has {len(expr.args)} arguments; "
-                f"a call to a function that returns an array supports "
-                f"at most 5 (the hidden output pointer itself uses the "
-                f"first argument register)"
+                f"Call to '{expr.name}' needs {total_slots} argument "
+                f"register(s) (the hidden output pointer uses one, "
+                f"and a slice-typed argument needs 2) -- this compiler "
+                f"only supports up to 6"
             )
         instructions = self._gen_address_of_memory_into(dst_mem, Register('rax'))
         instructions.append(Push(Register('rax')))
-        for arg in expr.args:
-            arg_type = self._type_of(arg)
-            if arg_type.kind == TypeKind.ARRAY:
-                instructions.extend(self.gen_array_arg_address_into(arg, Register('rax')))
-            else:
-                instructions.extend(self.gen_expr_into(arg, Register('eax')))
-            instructions.append(Push(Register('rax')))
-        for i in reversed(range(len(expr.args))):
-            instructions.append(Pop(Register(_ARG_REGISTERS_64[i + 1])))  # +1: shifted past the hidden pointer
+        instructions.extend(self._gen_call_arguments_into(expr.args, reg_shift=1))
         instructions.append(Pop(Register('rdi')))
         instructions.append(CallInstr(expr.name))
         return instructions
@@ -2988,6 +3195,24 @@ class CodeGenerator:
         if stmt.value is None:
             return self._gen_epilogue()
 
+        if isinstance(stmt.value, NoneLiteral):
+            # none's own resolved type (Type.NONE) never equals SLICE
+            # -- semantic.py's _types_compatible is what lets `return
+            # none` through despite that (see its own docstring), and
+            # already guarantees it's only ever valid when THIS
+            # function's own declared return type IS a slice, since
+            # slices are the only nilable type that exists -- safe to
+            # assume without the function's own return type being
+            # threaded through explicitly, matching how
+            # gen_slice_none_comparison_into makes the same kind of
+            # assumption.
+            instructions = [
+                MovQ(src=Imm(0), dst=Register('rax')),
+                MovQ(src=Imm(0), dst=Register('rdx')),
+            ]
+            instructions.extend(self._gen_epilogue())
+            return instructions
+
         # An array-typed return writes directly through the hidden
         # pointer this function received (see gen_function's own
         # prologue handling and the module docstring's ARRAYS section)
@@ -3008,28 +3233,56 @@ class CodeGenerator:
             instructions = [MovQ(src=Memory('rbp', self._hidden_return_ptr_offset), dst=ptr_reg)]
             instructions.extend(self.gen_array_value_into(stmt.value, Memory('rax', 0), value_type))
         elif value_type.kind == TypeKind.SLICE:
-            # Not supported yet -- see the parameter-side rejection in
-            # gen_function's own parameter loop for why (a slice is
-            # meant to cross a function boundary via two registers
-            # directly, per the two-register decision for slice
-            # parameters/returns, not through a hidden pointer the way
-            # arrays' returns work). A clear error here, rather than
-            # falling through to gen_expr_into below (which would
-            # itself raise, but with a less specific message -- see
-            # its own Variable-case rejection).
-            raise CodegenError(
-                f"Returning a slice ({value_type}) is not supported yet"
-            )
+            instructions = self.gen_slice_return_into(stmt.value)
         else:
             dst = Register('eax')
             instructions = self.gen_expr_into(stmt.value, dst)
-        # None of the epilogue touches %eax/%rax, so a scalar return
-        # value computed above is unaffected regardless of what these
-        # registers held during the body (e.g. if the return expression
-        # itself did string work that reused them as scratch in
-        # between).
+        # None of the epilogue touches %eax/%rax/%rdx, so a scalar or
+        # slice return value computed above is unaffected regardless
+        # of what these registers held during the body (e.g. if the
+        # return expression itself did string work that reused them
+        # as scratch in between).
         instructions.extend(self._gen_epilogue())
         return instructions
+
+    def gen_slice_return_into(self, expr: Node) -> List[Instruction]:
+        """Computes a slice-typed return VALUE directly into %rax
+        (ptr) and %rdx (len) -- the two-register slice return
+        convention (see the module docstring's SLICE PARAMETERS AND
+        RETURNS section). Dispatches on what kind of expression is
+        producing the value:
+          - Variable (`return s`): load ptr/len directly out of s's
+            own %rbp-relative slot -- no temp needed at all.
+          - Call (`return otherFn()`, where otherFn ALSO returns a
+            slice): genuinely free -- gen_slice_call_into already
+            leaves the callee's own result sitting in %rax/%rdx
+            exactly where THIS function needs to leave its own, so
+            nothing further is needed beyond the call itself.
+          - Slice (`return arr[1:3]`): the one case that needs real
+            work -- gen_slice_into only knows how to compute a
+            descriptor into a Memory destination, not directly into a
+            register pair, so this materializes it into a dedicated
+            per-function temp slot first (_slice_return_temp_offset,
+            reserved once in gen_function alongside the hidden array-
+            return-pointer slot), then loads that back out into
+            %rax/%rdx.
+        NoneLiteral is handled one level up, in gen_return itself, not
+        here -- see its own comment for why.
+        """
+        if isinstance(expr, Variable):
+            offset = self._local_offset(expr.name)
+            return [
+                MovQ(src=Memory('rbp', offset), dst=Register('rax')),
+                MovQ(src=Memory('rbp', offset + 8), dst=Register('rdx')),
+            ]
+        if isinstance(expr, Call):
+            return self.gen_slice_call_into(expr)
+        if isinstance(expr, Slice):
+            instructions = self.gen_slice_into(expr, Memory('rbp', self._slice_return_temp_offset))
+            instructions.append(MovQ(src=Memory('rbp', self._slice_return_temp_offset), dst=Register('rax')))
+            instructions.append(MovQ(src=Memory('rbp', self._slice_return_temp_offset + 8), dst=Register('rdx')))
+            return instructions
+        raise CodegenError(f"No codegen rule for a slice-typed return value: {expr!r}")
 
     def gen_if(self, stmt: If) -> List[Instruction]:
         """Computes the condition into %eax and compares it to 0, exactly
@@ -3274,6 +3527,19 @@ class CodeGenerator:
                     f"via gen_expr_into -- arrays don't fit in a single "
                     f"register; use gen_array_value_into instead"
                 )
+            if self._type_of(expr).kind == TypeKind.SLICE:
+                # Same reasoning, for the same underlying cause: a
+                # slice-returning call's result comes back in %rax:%rdx
+                # (see gen_slice_call_into), two registers, which can't
+                # land in a single `dst` here either. Only ever reached
+                # via gen_slice_value_into's own Call case (VarDecl/
+                # Assign) or gen_return's own forwarding case.
+                raise CodegenError(
+                    f"Cannot call '{expr.name}' (which returns a slice) "
+                    f"via gen_expr_into -- a slice descriptor doesn't "
+                    f"fit in a single register; use gen_slice_call_into "
+                    f"instead"
+                )
             if expr.name == 'print':
                 return self.gen_print_call_into(expr, dst)
             return self.gen_call_into(expr, dst)
@@ -3440,57 +3706,66 @@ class CodeGenerator:
         return instructions
 
     def gen_call_into(self, expr: Call, dst: Operand) -> List[Instruction]:
-        """`name(arg1, arg2, ...)`: evaluates every argument -- in
-        order, each via the ordinary gen_expr_into, so an argument that
-        is itself a nested call, a string concatenation, or any other
-        arbitrarily complex expression works correctly -- immediately
-        pushing each one's result onto the stack before moving on to the
-        next. Only *after* every argument has been safely computed and
-        stacked does this start popping them back off, in reverse, into
-        the actual SysV argument registers (see _ARG_REGISTERS_64).
-
-        This "compute and stack everything, then pop into place" order
-        is what avoids the same register-clobbering hazard that
-        motivated saving %rbx/%r12/%r13/%r14 across calls in the first
-        place (see the module docstring's FUNCTIONS section): if
-        argument 2 happens to be a string concatenation and argument 1's
-        value were sitting in a scratch register instead of safely on
-        the stack while argument 2 gets computed, argument 2's own use
-        of that same scratch register would corrupt argument 1.
+        """`name(arg1, arg2, ...)`: evaluates and passes every
+        argument via the shared _gen_call_arguments_into (see its own
+        docstring for the full push-then-pop-in-reverse discipline,
+        and how a slice-typed argument's own two register slots are
+        placed correctly among any ordinary scalar/array ones), then
+        calls the function.
 
         The result already ends up exactly where gen_expr_into's
         contract expects it (%rax/%eax, matching `dst`, which is always
         Register('eax') throughout this file), so there's nothing left
-        to move once the call returns.
+        to move once the call returns. This method is never reached at
+        all for a callee that returns an array or a slice -- see
+        gen_array_call_into and gen_slice_call_into, each with their
+        own, incompatible return-value convention (a hidden pointer,
+        or %rax:%rdx) that doesn't fit a single generic `dst`.
         """
-        if len(expr.args) > 6:
+        total_slots = self._total_arg_slots(expr.args)
+        if total_slots > 6:
             raise CodegenError(
-                f"Call to '{expr.name}' has {len(expr.args)} arguments; "
-                f"this compiler only supports up to 6 (passed via "
-                f"registers per the SysV ABI -- stack-passed arguments "
-                f"aren't implemented)"
+                f"Call to '{expr.name}' needs {total_slots} argument "
+                f"register(s) (a slice-typed argument needs 2); this "
+                f"compiler only supports up to 6 (passed via registers "
+                f"per the SysV ABI -- stack-passed arguments aren't "
+                f"implemented)"
             )
         if dst != Register('eax'):
             raise CodegenError(f"Call codegen requires dst == %eax, got: {dst!r}")
 
-        instructions: List[Instruction] = []
-        for arg in expr.args:
-            arg_type = self._type_of(arg)
-            if arg_type.kind == TypeKind.ARRAY:
-                # This callee doesn't itself return an array (that's
-                # gen_array_call_into's job), but it can still ACCEPT
-                # one as a parameter -- e.g. `def int sum_array([3]int
-                # arr): ...` -- passed the same way either way: the
-                # address of an existing variable or sub-array, per
-                # gen_array_arg_address_into's own restriction, since
-                # the callee copies from it into its own local slot on
-                # entry regardless of which kind of call brought it in.
-                instructions.extend(self.gen_array_arg_address_into(arg, Register('rax')))
-            else:
-                instructions.extend(self.gen_expr_into(arg, Register('eax')))
-            instructions.append(Push(Register('rax')))
-        for i in reversed(range(len(expr.args))):
-            instructions.append(Pop(Register(_ARG_REGISTERS_64[i])))
+        instructions = self._gen_call_arguments_into(expr.args)
+        instructions.append(CallInstr(expr.name))
+        return instructions
+
+    def gen_slice_call_into(self, expr: Call) -> List[Instruction]:
+        """Calls a function that returns a slice. The result ends up
+        in %rax (ptr) and %rdx (len) by the SysV ABI's own convention
+        for a small, all-integer-eightbyte struct return (see the
+        module docstring's SLICE PARAMETERS AND RETURNS section) --
+        exactly where every caller of this method already expects to
+        find it, so there's nothing to move afterward, unlike
+        gen_call_into's own scalar case (which explicitly targets
+        whatever `dst` the caller asked for). No hidden pointer is
+        involved at all, unlike gen_array_call_into -- a slice
+        descriptor fits in two ordinary registers, so this is actually
+        SIMPLER than the array case, not an extension of it. This is
+        also what makes forwarding one slice-returning call's result
+        straight out of another free (`return bar()`, where bar also
+        returns a slice): the callee already leaves its result exactly
+        where THIS function needs to leave its own -- see gen_return's
+        own docstring.
+        """
+        total_slots = self._total_arg_slots(expr.args)
+        if total_slots > 6:
+            raise CodegenError(
+                f"Call to '{expr.name}' needs {total_slots} argument "
+                f"register(s) (a slice-typed argument needs 2); this "
+                f"compiler only supports up to 6 (passed via registers "
+                f"per the SysV ABI -- stack-passed arguments aren't "
+                f"implemented)"
+            )
+        instructions = self._gen_call_arguments_into(expr.args)
         instructions.append(CallInstr(expr.name))
         return instructions
 

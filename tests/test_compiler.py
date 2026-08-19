@@ -45,11 +45,12 @@ Organization:
     TestHeapAllocatedArrays             (12 tests)
     TestSlices                          (10 tests)
     TestSliceBoundsChecking             ( 6 tests)
+    TestSliceParametersAndReturns       (15 tests)
     TestPrintArraysAndSlices            (11 tests)
     TestNone                            (17 tests)
     TestSemanticErrors                  (75 tests)
                                         ----------
-                                        367 tests total
+                                        382 tests total
 
 A NOTE ON ARRAYS
 -----------------------------------------------------------------
@@ -159,17 +160,74 @@ exactly right (a strict `ja`, not `jae`) -- getting this wrong in
 either direction would either reject valid empty slices or silently
 accept a genuinely out-of-range one.
 
-test_slice_parameter_not_supported_yet and
-test_slice_return_not_supported_yet aren't gaps found by accident --
-each was caught by deliberately compiling exactly that case and
-checking the generated assembly, before any test asserted anything
-about it: neither was rejected at first, and a slice's own 16-byte
-descriptor was silently truncated down to whatever fit in one 32-bit
-register instead. Both a function parameter and a return value are
-meant to cross a function boundary via two registers directly (the
-two-register decision for slice parameters/returns), not through the
-stack-slot or hidden-pointer mechanisms arrays use -- that convention
-is real, separable follow-up work, not implemented yet.
+test_slice_parameter and test_slice_return, in this class, cover the
+basic shape of crossing a function boundary at all -- they replaced
+what used to be test_slice_parameter_not_supported_yet and test_slice_
+return_not_supported_yet, back when neither was implemented. Both gaps
+were caught by deliberately compiling exactly that case and checking
+the generated assembly, before any test asserted anything about it:
+neither was rejected at first, and a slice's own 16-byte descriptor
+was silently truncated down to whatever fit in one 32-bit register
+instead. See TestSliceParametersAndReturns for the full calling-
+convention implementation and its own, much more thorough coverage
+(register-slot interleaving, the exact 6-vs-7-slot boundary, aliasing
+across a call, forwarding a returned slice for free, and more).
+
+A NOTE ON TestSliceParametersAndReturns
+-----------------------------------------------------------------
+A slice crosses a function boundary via TWO registers directly -- its
+own ptr, then len -- matching exactly what a real C compiler does for
+an equivalent `struct{void*,long}` passed or returned by value under
+the SysV ABI: as a parameter, it consumes two consecutive integer
+argument registers; as a return value, it comes back in %rax:%rdx.
+Neither a hidden pointer (arrays' own return convention) nor a copy
+(arrays' own parameter convention) is involved at all -- a slice
+parameter is just an alias crossing the boundary, exactly like any
+other slice variable.
+
+test_slice_interleaved_with_scalar_parameters and test_two_slices_
+and_two_scalars_are_exactly_six_slots are the tests that actually
+prove the trickiest part of this feature holds, not just that a slice
+CAN be a parameter: since a slice now costs 2 of the 6 available
+argument-register slots instead of 1, the mapping from argument/
+parameter INDEX to register INDEX stopped being 1:1 on both the
+caller side (_gen_call_arguments_into) and the callee side
+(gen_function's own parameter loop) -- both now track a running slot
+count instead, and these tests confirm a slice's own two slots land
+correctly among ordinary scalar ones regardless of position, not just
+when a slice happens to be the only or the last parameter.
+
+test_exactly_six_slots_from_three_slice_parameters and test_seven_
+slots_from_three_slices_and_a_scalar_is_rejected are the positive/
+negative pair proving the boundary itself is exactly right: 6 slots
+accepted, 7 cleanly rejected with a clear message -- not silently
+truncated or off by one in either direction, which an easy mis-count
+in the running-slot arithmetic could otherwise produce without any
+test noticing.
+
+test_writing_through_a_slice_parameter_mutates_callers_array is the
+test that actually proves a slice parameter is a genuine alias
+crossing the function boundary, not a copy -- the same aliasing
+guarantee slices already have within a single function, now verified
+to survive a call. test_forwarding_a_slice_returning_calls_result is
+the free case the %rax:%rdx convention was specifically chosen for:
+gen_slice_call_into already leaves a callee's own result exactly
+where a caller needs to leave its own, so `return bar()` (bar also
+returning a slice) costs nothing beyond the call itself -- no
+intermediate copy, unlike an array-returning function's own hidden-
+pointer forwarding (which avoids a copy too, but still has to thread
+the SAME address one level deeper explicitly).
+
+test_slice_parameter_with_heap_allocated_array_parameter confirms a
+slice parameter's own register-based passing and an array parameter's
+own copy-on-entry mechanism (heap-backed, in that test, since the
+array involved exceeds the stack-array threshold) coexist correctly
+in the same call, each going through its own, independent, unrelated
+code path. test_slice_argument_must_be_a_variable_or_none is the same
+deliberate restriction slice bases have everywhere else in this
+codebase (indexing, print, re-slicing) applied here too, for the same
+reason: a bare Slice expression has no pre-existing descriptor to
+read at a call site.
 
 A NOTE ON TestPrintArraysAndSlices
 -----------------------------------------------------------------
@@ -3107,7 +3165,7 @@ class TestArrays:
         )
         ast = _parse(source)
         analyze(ast)  # semantically fine -- the limit is codegen-level only
-        with pytest.raises(CodegenError, match="leaving 5"):
+        with pytest.raises(CodegenError, match="needs 7 argument register"):
             generate_asm(ast, platform=ASM_PLATFORM)
 
     def test_array_literal_as_direct_call_argument_not_supported(self):
@@ -3548,51 +3606,40 @@ class TestSlices:
             return_type="bool",
         )
 
-    def test_slice_parameter_not_supported_yet(self):
-        """A real, deliberate gap -- not silent mishandling. A slice
-        is meant to cross a function boundary via two registers
-        directly (the two-register decision for slice parameters/
-        returns), not through a stack slot the way an ordinary
-        parameter's copy-on-entry works -- that mechanism hasn't been
-        built yet. Found during development by proactively testing
-        this exact case, not by waiting for it to be reported: without
-        this check, the parameter loop silently treated a slice's own
-        16-byte descriptor as if it were a plain 4-byte int, truncating
-        it rather than raising any error at all."""
-        source = (
+    def test_slice_parameter(self):
+        """A slice parameter is passed via two registers (its own
+        ptr, then len) directly, per the SysV ABI's own rule for a
+        16-byte, two-integer-eightbyte struct -- not through a stack
+        slot the way an ordinary scalar parameter's copy-on-entry
+        works, and not copied the way an array parameter is (a slice
+        parameter is just an alias, exactly like any other slice
+        variable)."""
+        assert_program_exit_code(
             "def int first([]int s):\n"
             "    return s[0]\n"
             "\n"
             "def int main():\n"
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
             "    []int s = arr[1:4]\n"
-            "    return first(s)\n"
+            "    return first(s)\n",
+            2,
         )
-        ast = _parse(source)
-        analyze(ast)  # semantically fine -- the gap is codegen-level only
-        with pytest.raises(CodegenError, match="slice parameters are not supported yet"):
-            generate_asm(ast, platform=ASM_PLATFORM)
 
-    def test_slice_return_not_supported_yet(self):
-        """The return-side counterpart to the parameter gap above --
-        also found by proactively testing, not by waiting for a
-        report: falling through to the ordinary scalar return path
-        would otherwise raise too (gen_expr_into's own Variable-case
-        rejection), but with a less specific message, so this is
-        checked explicitly in gen_return itself instead."""
-        source = (
+    def test_slice_return(self):
+        """A slice return value comes back in %rax:%rdx directly --
+        the SysV ABI's own convention for a small, all-integer-
+        eightbyte struct return -- not through the hidden-pointer
+        mechanism arrays use."""
+        assert_program_exit_code(
             "def []int make():\n"
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
             "    return arr[1:4]\n"
             "\n"
             "def int main():\n"
             "    []int s = make()\n"
-            "    return s[0]\n"
+            "    return s[0]\n",
+            2,
         )
-        ast = _parse(source)
-        analyze(ast)  # semantically fine -- the gap is codegen-level only
-        with pytest.raises(CodegenError, match="Returning a slice .* is not supported yet"):
-            generate_asm(ast, platform=ASM_PLATFORM)
 
 
 class TestSliceBoundsChecking:
@@ -3667,6 +3714,291 @@ class TestSliceBoundsChecking:
         )
         assert result.returncode == -signal.SIGABRT
         assert "slice bounds out of range" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Slice parameters and return values: a slice crosses a function
+# boundary via TWO registers directly -- its own ptr, then len -- not
+# through a hidden pointer the way an array's return does, and not
+# copied on entry the way an array parameter is. This matches exactly
+# what a real C compiler does for an equivalent `struct{void*,long}`
+# passed or returned by value under the SysV ABI: as a PARAMETER, it
+# consumes two consecutive integer argument registers; as a RETURN
+# VALUE, it comes back in %rax:%rdx (first eightbyte in %rax, second
+# in %rdx).
+#
+# test_slice_interleaved_with_scalar_parameters and
+# test_two_slices_and_two_scalars_are_exactly_six_slots are the tests
+# that actually prove the trickiest part of this feature holds: since
+# a slice now costs 2 of the 6 available argument-register slots
+# instead of 1, the mapping from argument/parameter INDEX to register
+# INDEX is no longer 1:1 -- both the caller side
+# (_gen_call_arguments_into) and the callee side (gen_function's own
+# parameter loop) track a running slot count instead, and these tests
+# are what confirm a slice's own two slots land correctly among
+# ordinary scalar ones on both sides, not just when a slice happens to
+# be the only or the last parameter.
+#
+# test_exactly_six_slots_from_three_slice_parameters and
+# test_seven_slots_from_three_slices_and_a_scalar_is_rejected are the
+# positive/negative pair proving the boundary itself is exactly
+# right: 6 slots must be accepted, 7 must be cleanly rejected, not
+# silently truncated or off by one in either direction.
+#
+# test_writing_through_a_slice_parameter_mutates_callers_array is the
+# test that actually proves a slice parameter is a genuine alias
+# crossing the function boundary, not a copy -- matching the same
+# aliasing guarantee slices already have within a single function.
+# test_forwarding_a_slice_returning_calls_result is the free case the
+# %rax:%rdx convention was specifically chosen for: gen_slice_call_
+# into already leaves a callee's own result exactly where a caller
+# needs to leave its own, so `return bar()` (bar also returning a
+# slice) costs nothing beyond the call itself.
+# ---------------------------------------------------------------------------
+
+class TestSliceParametersAndReturns:
+    pytestmark = GCC_SKIP
+
+    def test_multiple_slice_parameters(self):
+        assert_program_exit_code(
+            "def int sum_two([]int a, []int b):\n"
+            "    return a[0] + b[0]\n"
+            "\n"
+            "def int main():\n"
+            "    [3]int x = [10, 20, 30]\n"
+            "    [3]int y = [1, 2, 3]\n"
+            "    []int sx = x[0:3]\n"
+            "    []int sy = y[0:3]\n"
+            "    return sum_two(sx, sy)\n",
+            11,
+        )
+
+    def test_slice_interleaved_with_scalar_parameters(self):
+        """The test that actually proves the register-slot accounting
+        holds, not just that a slice CAN be a parameter: a slice
+        between two scalars needs its own two slots to land in the
+        right registers without disturbing either scalar's own slot."""
+        assert_program_exit_code(
+            "def int f(int a, []int s, int b):\n"
+            "    return a + s[0] + s[1] + b\n"
+            "\n"
+            "def int main():\n"
+            "    [3]int arr = [10, 20, 30]\n"
+            "    []int s = arr[0:3]\n"
+            "    return f(1, s, 2)\n",
+            33,
+        )
+
+    def test_writing_through_a_slice_parameter_mutates_callers_array(self):
+        """Proves a slice parameter is a genuine alias crossing the
+        function boundary, not a copy -- the same aliasing guarantee
+        slices already have within a single function, now verified to
+        survive a call."""
+        assert_program_exit_code(
+            "def mutate([]int s):\n"
+            "    s[0] = 42\n"
+            "\n"
+            "def int main():\n"
+            "    [3]int arr = [1, 2, 3]\n"
+            "    []int s = arr[0:3]\n"
+            "    mutate(s)\n"
+            "    return arr[0]\n",
+            42,
+        )
+
+    def test_recursive_function_with_a_slice_parameter(self):
+        assert_program_exit_code(
+            "def int sum_slice([]int s, int i):\n"
+            "    if i >= 5:\n"
+            "        return 0\n"
+            "    return s[i] + sum_slice(s, i + 1)\n"
+            "\n"
+            "def int main():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s = arr[0:5]\n"
+            "    return sum_slice(s, 0)\n",
+            15,
+        )
+
+    def test_forwarding_a_slice_returning_calls_result(self):
+        """The free case the %rax:%rdx convention was specifically
+        chosen for: gen_slice_call_into already leaves a callee's own
+        result exactly where a caller needs to leave its own, so this
+        costs nothing beyond the call itself -- no intermediate copy,
+        unlike an array-returning function's own hidden-pointer
+        forwarding, which still needs the SAME address threaded one
+        level deeper (though also without a copy)."""
+        assert_program_exit_code(
+            "def []int inner():\n"
+            "    [3]int arr = [7, 8, 9]\n"
+            "    return arr[0:3]\n"
+            "\n"
+            "def []int outer():\n"
+            "    return inner()\n"
+            "\n"
+            "def int main():\n"
+            "    []int s = outer()\n"
+            "    return s[0] + s[1] + s[2]\n",
+            24,
+        )
+
+    def test_printing_a_slice_parameter(self):
+        assert_program_stdout(
+            "def show([]int s):\n"
+            "    print(s)\n"
+            "\n"
+            "def int main():\n"
+            "    [3]int arr = [4, 5, 6]\n"
+            "    []int s = arr[0:3]\n"
+            "    show(s)\n"
+            "    return 0\n",
+            "[]int[4, 5, 6]\n",
+        )
+
+    def test_reslicing_a_received_slice_parameter(self):
+        assert_program_exit_code(
+            "def int second_half([]int s):\n"
+            "    []int half = s[2:4]\n"
+            "    return half[0] + half[1]\n"
+            "\n"
+            "def int main():\n"
+            "    [4]int arr = [10, 20, 30, 40]\n"
+            "    []int s = arr[0:4]\n"
+            "    return second_half(s)\n",
+            70,
+        )
+
+    def test_returning_none_from_a_slice_returning_function(self):
+        assert_program_exit_code(
+            "def []int maybe(bool give):\n"
+            "    if give:\n"
+            "        [2]int arr = [1, 2]\n"
+            "        return arr[0:2]\n"
+            "    return none\n"
+            "\n"
+            "def bool main():\n"
+            "    []int s = maybe(false)\n"
+            "    return s == none\n",
+            1,
+        )
+
+    def test_array_parameter_and_slice_parameter_together(self):
+        assert_program_exit_code(
+            "def int combo([3]int arr, []int s):\n"
+            "    return arr[0] + s[0]\n"
+            "\n"
+            "def int main():\n"
+            "    [3]int a = [100, 200, 300]\n"
+            "    [2]int b = [5, 6]\n"
+            "    []int s = b[0:2]\n"
+            "    return combo(a, s)\n",
+            105,
+        )
+
+    def test_slice_parameter_with_heap_allocated_array_parameter(self):
+        """A slice parameter's own register-based passing has nothing
+        to do with an array parameter's own copy-on-entry mechanism
+        (heap-backed here, since 5000 ints exceeds the stack-array
+        threshold) -- this confirms the two coexist correctly in the
+        same call, each going through its own, independent path."""
+        assert_program_exit_code(
+            "def int combo([5000]int big, []int s):\n"
+            "    return big[0] + big[4999] + s[0]\n"
+            "\n"
+            "def int main():\n"
+            "    [5000]int huge\n"
+            "    huge[0] = 1\n"
+            "    huge[4999] = 2\n"
+            "    [1]int small = [100]\n"
+            "    []int s = small[0:1]\n"
+            "    return combo(huge, s)\n",
+            103,
+        )
+
+    def test_mix_of_real_slice_and_none_arguments(self):
+        assert_program_exit_code(
+            "def bool f([]int a, []int b):\n"
+            "    return a != none and b == none\n"
+            "\n"
+            "def bool main():\n"
+            "    [3]int arr = [1, 2, 3]\n"
+            "    []int s = arr[0:3]\n"
+            "    return f(s, none)\n",
+            1,
+        )
+
+    def test_exactly_six_slots_from_three_slice_parameters(self):
+        """The positive half of the boundary pair: three slice
+        parameters alone need exactly 6 register slots -- the limit
+        itself -- and must be accepted, not rejected off by one."""
+        assert_program_exit_code(
+            "def int f([]int a, []int b, []int c):\n"
+            "    return a[0] + b[0] + c[0]\n"
+            "\n"
+            "def int main():\n"
+            "    [1]int x = [1]\n"
+            "    [1]int y = [2]\n"
+            "    [1]int z = [3]\n"
+            "    []int sx = x[0:1]\n"
+            "    []int sy = y[0:1]\n"
+            "    []int sz = z[0:1]\n"
+            "    return f(sx, sy, sz)\n",
+            6,
+        )
+
+    def test_seven_slots_from_three_slices_and_a_scalar_is_rejected(self):
+        """The negative half of the boundary pair: one more scalar
+        parameter pushes the same three slices over the 6-slot limit,
+        and must be cleanly rejected -- not silently truncated."""
+        source = (
+            "def int f([]int a, []int b, []int c, int d):\n"
+            "    return a[0] + b[0] + c[0] + d\n"
+            "\n"
+            "def int main():\n"
+            "    [1]int x = [1]\n"
+            "    [1]int y = [2]\n"
+            "    [1]int z = [3]\n"
+            "    []int sx = x[0:1]\n"
+            "    []int sy = y[0:1]\n"
+            "    []int sz = z[0:1]\n"
+            "    return f(sx, sy, sz, 4)\n"
+        )
+        ast = _parse(source)
+        analyze(ast)  # semantically fine -- the limit is codegen-level only
+        with pytest.raises(CodegenError, match="needs 7 argument register"):
+            generate_asm(ast, platform=ASM_PLATFORM)
+
+    def test_two_slices_and_two_scalars_are_exactly_six_slots(self):
+        assert_program_exit_code(
+            "def int f(int a, []int s1, int b, []int s2):\n"
+            "    return a + s1[0] + b + s2[0]\n"
+            "\n"
+            "def int main():\n"
+            "    [1]int x = [10]\n"
+            "    [1]int y = [20]\n"
+            "    []int sx = x[0:1]\n"
+            "    []int sy = y[0:1]\n"
+            "    return f(1, sx, 2, sy)\n",
+            33,
+        )
+
+    def test_slice_argument_must_be_a_variable_or_none(self):
+        """The same restriction slice bases have everywhere else in
+        this codebase (indexing, print, re-slicing): a bare Slice
+        expression has no pre-existing descriptor to read at a call
+        site -- assign it to a named variable first."""
+        source = (
+            "def int f([]int s):\n"
+            "    return s[0]\n"
+            "\n"
+            "def int main():\n"
+            "    [3]int arr = [1, 2, 3]\n"
+            "    return f(arr[0:3])\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        with pytest.raises(CodegenError, match="assign it to a variable first"):
+            generate_asm(ast, platform=ASM_PLATFORM)
 
 
 # ---------------------------------------------------------------------------
@@ -3996,22 +4328,20 @@ class TestNone:
             return_type="bool",
         )
 
-    def test_slice_parameter_with_none_argument_hits_existing_restriction(self):
-        """`none` doesn't need its own rejection here -- slice
-        parameters aren't supported in codegen at all yet (see
-        TestSlices), so this hits that existing, unrelated error
-        regardless of what's passed at the call site."""
-        source = (
+    def test_none_as_a_slice_argument(self):
+        """Now that slice parameters are supported, `none` passed as
+        a slice-typed argument works correctly -- the callee receives
+        a genuinely nil slice ({ptr: 0, len: 0}), so indexing into it
+        aborts exactly like indexing into any other zero-length slice
+        would (see TestSliceBoundsChecking)."""
+        result = compile_and_run(
             "def int first([]int s):\n"
             "    return s[0]\n"
             "\n"
             "def int main():\n"
             "    return first(none)\n"
         )
-        ast = _parse(source)
-        analyze(ast)  # semantically fine -- none is a valid []int argument
-        with pytest.raises(CodegenError, match="slice parameters are not supported yet"):
-            generate_asm(ast, platform=ASM_PLATFORM)
+        assert result.returncode == -signal.SIGABRT
 
 
 # ---------------------------------------------------------------------------

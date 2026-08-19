@@ -19,7 +19,6 @@ Updates:
 - Index into unnamed slices.
 - Slices in arrays.
 - `in` keyword.
-- Pass and return slices.
 - Slice literals.
 - Array literals?
 - Ternary.
