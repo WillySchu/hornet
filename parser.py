@@ -271,6 +271,54 @@ class BoolLiteral(Node):
 
 
 @dataclass
+class NoneLiteral(Node):
+    """`none` -- Hornet's nil-style zero value, analogous to Go's own
+    `nil`, but deliberately narrower: Go's nil has no fixed type of its
+    own at all, adapting to whatever nilable type context expects it
+    via Go's general untyped-constant mechanism (the same one numeric
+    literals use there). Hornet has no untyped-constant mechanism for
+    ANY literal yet, so building one just for `none` would be a much
+    bigger structural change than adding a value -- every expression's
+    type is currently derivable purely from itself and its children,
+    with no context needed, and an untyped node would break that.
+
+    Instead, NoneLiteral resolves to one single, fixed, purely-internal
+    type, Type.NONE (see semantic.py) -- checked for COMPATIBILITY,
+    not equality, specifically wherever a value flows into a slice-
+    typed context (a VarDecl initializer, an Assign, a function
+    argument, a return value, or one side of ==/!=) -- see semantic.py's
+    _types_compatible. From the outside this behaves like Go's nil for
+    everything usable today; only the internal mechanism is narrower.
+
+    Only slices are nilable so far -- none is NOT compatible with
+    int/bool/str/array, even though str is also a pointer under the
+    hood at the machine level. Extending this to other composite/
+    reference types, if any come along later, is real, separable
+    follow-up work, not implemented yet.
+
+    At the machine level, none becomes the {ptr: 0, len: 0} slice
+    descriptor (see codegen.py's gen_none_into) -- the same shape
+    Go's own nil slice has: a valid, safely-indexable-into-nothing
+    slice with no backing array, not a special, separately-tracked
+    null flag. Every existing slice operation (indexing, printing,
+    re-slicing) already handles a zero-length slice correctly -- see
+    TestSliceBoundsChecking's own positive control for `arr[5:5]` in
+    test_compiler.py -- so a none-valued slice needs no new mechanism
+    for those, only for producing the {0, 0} descriptor in the first
+    place, and for comparing a slice against none directly. That
+    comparison (`s == none`) checks specifically the descriptor's
+    `ptr` field against 0, matching Go's own nil-vs-empty-slice
+    distinction: a real, zero-length slice sliced from a real array
+    (e.g. `arr[5:5]`) has a non-null pointer and is NOT `== none`,
+    even though both are equally safe, equally zero-length slices for
+    every other purpose."""
+    resolved_type: Optional[Any] = None
+
+    def pretty(self) -> str:
+        return "NoneLiteral"
+
+
+@dataclass
 class StringLiteral(Node):
     """`'...'`. `value` holds the string's *actual* content -- quotes
     already stripped and escape sequences already resolved (`\\'` -> `'`,
@@ -1335,6 +1383,9 @@ class Parser:
         if self.check(TokenType.TRUE, TokenType.FALSE):
             tok = self.advance()
             return BoolLiteral(value=(tok.type == TokenType.TRUE))
+        if self.check(TokenType.NONE):
+            self.advance()
+            return NoneLiteral()
         if self.check(TokenType.STRING):
             tok = self.advance()
             return StringLiteral(value=_unescape_string_literal(tok.val))

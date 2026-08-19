@@ -185,6 +185,49 @@ print itself is Type.VOID now -- its own docstring used to say
 outright that it returned a hardcoded, meaningless int 0 specifically
 *because* there was no real void type to give it; see check_print_call.
 
+NONE
+-----
+`none` -- Hornet's nil-style zero value, analogous to Go's own `nil`,
+but deliberately narrower internally: Go's own nil has no fixed type
+of its own at all, adapting to whatever nilable type context expects
+it via Go's general untyped-constant mechanism (the same one numeric
+literals use there). Hornet has no untyped-constant mechanism for ANY
+literal yet, so building one just for `none` would be a much bigger
+structural change than adding a value -- every expression's type is
+currently derivable purely from itself and its children, with no
+context needed, and an untyped node would break that invariant
+everywhere check_expr is called. See NoneLiteral's own docstring in
+parser.py for the full reasoning.
+
+Instead, `none` resolves to one single, fixed, internal type, Type.NONE
+(a fifth singleton alongside INT/BOOL/STR/VOID -- see Type.NONE's own
+docstring), and _types_compatible checks COMPATIBILITY -- not equality
+-- specifically wherever a value flows into a slice-typed context: a
+VarDecl initializer, an Assign, an IndexAssign, a function-call
+argument, or a return value all go through it now instead of a bare
+`!=` comparison. From the outside this behaves like Go's own nil for
+everything usable today (`[]int s = none`, `if s == none`); only the
+internal mechanism is narrower. Only slices are nilable so far -- none
+is NOT compatible with int/bool/str/array, even though str is also a
+pointer under the hood at the machine level. Extending this to other
+composite/reference types, if any come along later, is real, separable
+follow-up work, not implemented here.
+
+Equality (`==`/`!=`) has no such fixed "target" side the way an
+assignment does -- either operand could be the none one -- so
+check_binary checks for a slice-vs-none pair directly rather than
+going through _types_compatible, before falling through to its
+existing array/slice/void rejection (which NONE now also joins, for
+the same reason VOID is there: `none == none` would otherwise
+trivially type-check, comparing two "nothing"s to each other the same
+way two void results would).
+
+codegen.py is where `none`'s actual runtime representation (a {ptr: 0,
+len: 0} slice descriptor -- Go's own nil slice shape) and the ptr-only
+comparison that implements `s == none` correctly (matching Go's own
+nil-vs-empty-slice distinction) both live -- see its own NONE: THE
+SLICE ZERO VALUE section.
+
 BUILTINS
 ---------
 `print` is the first (only, so far) builtin -- a callable that isn't an
@@ -345,6 +388,7 @@ from parser import (
     Index,
     IndexAssign,
     Node,
+    NoneLiteral,
     Param,
     Parser,
     Program,
@@ -371,6 +415,8 @@ class TypeKind(Enum):
     ARRAY = auto()
     SLICE = auto()
     VOID = auto()  # see Type.VOID's own docstring below -- purely internal
+    NONE = auto()  # see Type.NONE's own docstring below -- user-writable
+                   # (via the `none` literal), but never as a DECLARED type
 
 
 @dataclass(frozen=True)
@@ -442,6 +488,17 @@ Type.STR = Type(TypeKind.STR)
 # would make a legitimately void expression indistinguishable from
 # one semantic analysis simply hadn't reached yet.
 Type.VOID = Type(TypeKind.VOID)
+# A fifth singleton, ALSO kept deliberately out of _TYPE_NAMES below --
+# despite `none` being a real, user-writable keyword (unlike `void`,
+# which has none), it's only ever reachable through parse_primary's own
+# NoneLiteral production, never through parse_type. There is, and is
+# meant to be, no way to write `none x` as a declaration -- `none` is
+# a VALUE (Hornet's nil-style zero value for slices, analogous to Go's
+# own nil -- see NoneLiteral's own docstring in parser.py), never a
+# type annotation. Comparing against Type.NONE directly (rather than
+# via _TYPE_NAMES/type_from_name, which stay reserved for real,
+# declarable types) is check_expr's own NoneLiteral case's job.
+Type.NONE = Type(TypeKind.NONE)
 
 
 _TYPE_NAMES = {
@@ -716,6 +773,31 @@ class SemanticAnalyzer:
         else:
             raise SemanticError(f"No semantic rule for statement: {stmt!r}")
 
+    def _types_compatible(self, value_type: Type, target_type: Type) -> bool:
+        """True if a value of `value_type` can be used where
+        `target_type` is expected -- ordinary type equality, OR the
+        one exception this language allows: `none` (Type.NONE) is
+        compatible with ANY slice type, representing that slice's
+        zero/nil value (see NoneLiteral's own docstring in parser.py).
+        Deliberately narrow, at least for now: none is compatible with
+        a slice target and nothing else -- not int/bool/str/array,
+        even though str is also a pointer under the hood at the
+        machine level. Extending this to other composite/reference
+        types, if any come along later, is real, separable follow-up
+        work, not implemented here.
+
+        Shared by every site a value flows into an already-typed slot
+        with a clear "this is the expected type" side -- a VarDecl
+        initializer, an Assign, an IndexAssign, a function-call
+        argument, a return value -- so `none` becomes valid at all of
+        them uniformly, with nothing to remember re-adding per site.
+        Equality between two operands with no such fixed side (`==`/
+        `!=`) is checked separately, directly in check_binary, since
+        neither operand there is "the target" the other must match."""
+        if value_type == target_type:
+            return True
+        return value_type == Type.NONE and target_type.kind == TypeKind.SLICE
+
     def analyze_var_decl(self, stmt: VarDecl) -> None:
         declared_type = type_from_name(stmt.var_type)
         if stmt.init is not None:
@@ -723,7 +805,7 @@ class SemanticAnalyzer:
             # self-referential initializer (`int a = a`) correctly fails
             # as "undeclared variable" rather than reading itself.
             init_type = self.check_expr(stmt.init)
-            if init_type != declared_type:
+            if not self._types_compatible(init_type, declared_type):
                 raise SemanticError(
                     f"Cannot initialize '{stmt.name}' (declared {declared_type}) "
                     f"with a value of type {init_type}"
@@ -733,7 +815,7 @@ class SemanticAnalyzer:
     def analyze_assign(self, stmt: Assign) -> None:
         declared_type = self._lookup(stmt.name)  # may resolve to an enclosing scope
         value_type = self.check_expr(stmt.value)
-        if value_type != declared_type:
+        if not self._types_compatible(value_type, declared_type):
             raise SemanticError(
                 f"Cannot assign a value of type {value_type} to '{stmt.name}' "
                 f"(declared {declared_type})"
@@ -742,7 +824,7 @@ class SemanticAnalyzer:
     def analyze_index_assign(self, stmt: IndexAssign) -> None:
         element_type = self._check_indexable_and_index(stmt.array, stmt.index)
         value_type = self.check_expr(stmt.value)
-        if value_type != element_type:
+        if not self._types_compatible(value_type, element_type):
             raise SemanticError(
                 f"Cannot assign a value of type {value_type} to an array "
                 f"element of type {element_type}"
@@ -838,7 +920,7 @@ class SemanticAnalyzer:
                 f"return a value (got {value_type}) -- use a bare "
                 f"'return' instead"
             )
-        if value_type != return_type:
+        if not self._types_compatible(value_type, return_type):
             raise SemanticError(
                 f"Function is declared to return {return_type}, but this "
                 f"'return' statement returns {value_type}"
@@ -931,6 +1013,8 @@ class SemanticAnalyzer:
             result = self.check_constant(expr)
         elif isinstance(expr, BoolLiteral):
             result = Type.BOOL
+        elif isinstance(expr, NoneLiteral):
+            result = Type.NONE
         elif isinstance(expr, StringLiteral):
             result = Type.STR
         elif isinstance(expr, Variable):
@@ -995,7 +1079,7 @@ class SemanticAnalyzer:
             )
         for i, (arg, expected_type) in enumerate(zip(expr.args, param_types), start=1):
             actual_type = self.check_expr(arg)
-            if actual_type != expected_type:
+            if not self._types_compatible(actual_type, expected_type):
                 raise SemanticError(
                     f"Argument {i} to '{expr.name}' should be "
                     f"{expected_type}, got {actual_type}"
@@ -1039,6 +1123,12 @@ class SemanticAnalyzer:
             raise SemanticError(
                 "'print' cannot be called with the result of a function "
                 "that has no declared return type -- there's no value there to print"
+            )
+        if arg_type == Type.NONE:
+            raise SemanticError(
+                "'print' cannot be called with a bare 'none' -- store it "
+                "in a slice-typed variable first (e.g. `[]int s = none`), "
+                "then print that"
             )
         return Type.VOID
 
@@ -1102,6 +1192,21 @@ class SemanticAnalyzer:
             return Type.BOOL
 
         if op in _EQUALITY_OPS:
+            # A slice compared to `none` (in EITHER order) is the one
+            # exception to the array/slice/void/none rejection just
+            # below -- `s == none` / `none == s`, checking whether a
+            # slice is the nil/zero-value slice (see NoneLiteral's own
+            # docstring in parser.py). Checked first, before the
+            # general rejection, since it's the one case that's
+            # actually meaningful and allowed to proceed rather than
+            # be rejected by it.
+            none_vs_slice = (
+                (left_type == Type.NONE and right_type.kind == TypeKind.SLICE) or
+                (right_type == Type.NONE and left_type.kind == TypeKind.SLICE)
+            )
+            if none_vs_slice:
+                return Type.BOOL
+
             # Array and slice operands are rejected outright, even when
             # both sides are the exact same type -- codegen.py has no
             # element-wise array-comparison logic (unlike str, which
@@ -1129,8 +1234,22 @@ class SemanticAnalyzer:
             # one place two void operands could accidentally match each
             # other instead of a real type, so it needs its own,
             # explicit check.
-            if left_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.VOID) or right_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.VOID):
-                raise SemanticError(f"'{op.symbol()}' does not support array, slice, or void operands")
+            #
+            # NONE is rejected here for the SAME reason as VOID
+            # (`none == none` would otherwise trivially type-check,
+            # comparing two "nothing"s the same way two void results
+            # would), EXCEPT for the one case already handled above.
+            # Every OTHER place `none` might flow (VarDecl, Assign,
+            # function argument, return value) already allows it
+            # specifically via _types_compatible, which has a real
+            # target type to check none against -- equality has no
+            # such fixed target on either side, so this needed its own
+            # explicit exception rather than reusing that helper as-is.
+            if left_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE) or right_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE):
+                raise SemanticError(
+                    f"'{op.symbol()}' does not support array, slice, void, "
+                    f"or none operands, except comparing a slice to none"
+                )
             if left_type != right_type:
                 raise SemanticError(
                     f"Cannot compare {left_type} to {right_type} with "

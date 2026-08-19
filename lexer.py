@@ -74,6 +74,7 @@ class TokenType(Enum):
     WHILE = auto()
     BREAK = auto()
     CONTINUE = auto()
+    NONE = auto()
 
     # Special
     NEWLINE = auto()
@@ -140,6 +141,7 @@ class Lexer():
             'while': TokenType.WHILE,
             'break': TokenType.BREAK,
             'continue': TokenType.CONTINUE,
+            'none': TokenType.NONE,
         }
 
         # Compile master regex pattern
@@ -167,11 +169,11 @@ class Lexer():
             ('SHIFT_RIGHT',           r'>>'),    # LESS_THAN/GREATER_THAN below, or those
                                                   # single-char rules would consume one '<'/'>'
                                                   # at a time and never let this match.
-            ('PLUS_ASSIGN',      r'\+='),   # Compound assignment -- each of these must
-            ('MINUS_ASSIGN',     r'\-='),   # come before its corresponding single-character
-            ('STAR_ASSIGN',      r'\*='),   # operator rule below, for the same greedy-
-            ('SLASH_ASSIGN',     r'/='),    # single-char-match-first reason as SHIFT_LEFT/
-            ('PERCENT_ASSIGN',   r'%='),    # SHIFT_RIGHT above.
+            ('PLUS_ASSIGN',      r'\+='),        # Compound assignment -- each of these must
+            ('MINUS_ASSIGN',     r'\-='),        # come before its corresponding single-character
+            ('STAR_ASSIGN',      r'\*='),        # operator rule below, for the same greedy-
+            ('SLASH_ASSIGN',     r'/='),         # single-char-match-first reason as SHIFT_LEFT/
+            ('PERCENT_ASSIGN',   r'%='),         # SHIFT_RIGHT above.
             ('AMPERSAND_ASSIGN', r'&='),
             ('PIPE_ASSIGN',      r'\|='),
             ('CARET_ASSIGN',     r'\^='),
@@ -186,7 +188,7 @@ class Lexer():
             ('LESS_THAN',     r'<'),
             ('COLON',         r':'),               # Colon
             ('COMMA',         r','),
-            ('ASSIGN',        r'='),                # Assignment operator
+            ('ASSIGN',        r'='),               # Assignment operator
             ('PLUS',          r'\+'),              # Add
             ('MINUS',         r'\-'),              # Subtract
             ('STAR',          r'\*'),              # Multiply

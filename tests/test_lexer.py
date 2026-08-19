@@ -1038,3 +1038,14 @@ def test_while_break_continue():
         lexer.Token(lexer.TokenType.EOF, '', 13, 1),
     ]
     assert expected == res
+
+
+def test_none():
+    res = lexer.lex('tests/none.ht')
+    expected = [
+        lexer.Token(lexer.TokenType.NONE, 'none', 1, 1),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 5),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 1),
+    ]
+
+    assert expected == res

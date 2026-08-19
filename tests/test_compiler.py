@@ -46,9 +46,10 @@ Organization:
     TestSlices                          (10 tests)
     TestSliceBoundsChecking             ( 6 tests)
     TestPrintArraysAndSlices            (11 tests)
+    TestNone                            (17 tests)
     TestSemanticErrors                  (75 tests)
                                         ----------
-                                        350 tests total
+                                        367 tests total
 
 A NOTE ON ARRAYS
 -----------------------------------------------------------------
@@ -202,6 +203,48 @@ argument_not_supported and its Slice-expression counterpart are the
 same deliberate restriction gen_array_arg_address_into already
 imposes on array-typed call arguments, applied here for the same
 reason: neither has an address of its own to print through.
+
+A NOTE ON TestNone
+-----------------------
+`none` is Hornet's nil-style zero value, analogous to Go's own `nil`
+-- only slices are nilable so far. Internally it's given one single,
+fixed type (Type.NONE, see semantic.py), checked for COMPATIBILITY
+(not equality) at the handful of sites a value flows into a slice-
+typed context, rather than a fully general untyped-constant mechanism
+the way Go's own nil actually works -- see NoneLiteral's own docstring
+in parser.py for why that's a deliberately narrower, but from-the-
+outside equivalent, mechanism for what's needed right now.
+
+test_real_empty_slice_is_not_equal_to_none and test_real_nonempty_
+slice_is_not_equal_to_none together are what actually prove the
+subtlest, easiest-to-get-wrong part of this feature: `s == none`
+checks specifically the slice descriptor's own `ptr` field, not its
+length, matching Go's own well-known nil-vs-empty-slice distinction --
+`arr[5:5]` is a real, zero-length slice with a non-null pointer, and
+is NOT `== none`, even though it's equally safe and equally
+zero-length as a genuinely nil slice for every other purpose. Checking
+length instead of (or in addition to) the pointer would have silently
+conflated two states this test deliberately keeps apart.
+
+test_indexing_a_none_valued_slice_aborts, test_printing_a_none_valued_
+slice, and test_reslicing_a_none_valued_slice_at_zero_zero together
+confirm the other half of the design: a none-valued slice's {0, 0}
+descriptor needed no new mechanism at all for indexing, printing, or
+re-slicing, since every one of those already handles an ordinary
+zero-length slice correctly (see TestSliceBoundsChecking's own
+`arr[5:5]` positive control) -- gen_none_into only had to produce that
+descriptor once, not teach any existing slice operation a new case.
+
+test_comparing_none_to_none_is_rejected exists for the same underlying
+reason test_comparing_two_void_call_results_is_rejected does in
+TestFunctionsWithNoDeclaredReturnType: `Type.NONE == Type.NONE` would
+otherwise trivially type-check by ordinary structural equality alone,
+so it needed its own explicit exclusion in check_binary, not just the
+slice-vs-none exception. test_slice_parameter_with_none_argument_hits_
+existing_restriction is the reminder that `none` doesn't need its own
+codegen-level rejection for slice parameters/returns -- those aren't
+supported in codegen at all yet (see TestSlices), so any program using
+them hits that existing, unrelated error regardless of what's passed.
 
 A NOTE ON TestFunctionsWithNoDeclaredReturnType
 -----------------------------------------------------------------
@@ -2236,7 +2279,7 @@ class TestFunctionsWithNoDeclaredReturnType:
             "    return log(1) == log(2)\n"
         )
         ast = _parse(source)
-        with pytest.raises(SemanticError, match="does not support array, slice, or void operands"):
+        with pytest.raises(SemanticError, match="does not support array, slice, void, or none operands"):
             analyze(ast)
 
 
@@ -3781,6 +3824,197 @@ class TestPrintArraysAndSlices:
 
 
 # ---------------------------------------------------------------------------
+# `none`: Hornet's nil-style zero value, analogous to Go's own `nil`, but
+# deliberately narrower internally -- see NoneLiteral's own docstring in
+# parser.py for why this doesn't need a general untyped-constant
+# mechanism (which this language has no other reason to have) to work
+# for everything usable today. Only slices are nilable so far.
+#
+# test_real_empty_slice_is_not_equal_to_none is the test that actually
+# proves the subtlest, easiest-to-get-wrong part of this feature: a
+# real, zero-length slice sliced from a real array (`arr[5:5]`) is NOT
+# `== none`, even though it's equally safe and equally zero-length for
+# every other purpose (indexing, printing, re-slicing) as a genuinely
+# nil one -- matching Go's own well-known nil-vs-empty-slice
+# distinction. Getting this wrong in either direction (checking length
+# instead of the pointer, or checking both) would silently conflate two
+# states Go -- and this test -- deliberately keeps apart.
+#
+# test_indexing_a_none_valued_slice_aborts and
+# test_printing_a_none_valued_slice confirm the OTHER half of the
+# design: a none-valued slice's {0, 0} descriptor needs no new
+# mechanism at all for indexing or printing, since both already handle
+# an ordinary zero-length slice correctly (see TestSliceBoundsChecking's
+# own `arr[5:5]` positive control) -- gen_none_into only had to produce
+# that descriptor, not teach every existing slice operation a new case.
+# ---------------------------------------------------------------------------
+
+class TestNone:
+    pytestmark = GCC_SKIP
+
+    def test_slice_vardecl_with_none(self):
+        assert_stdout(
+            "    []int s = none\n"
+            "    print(s)\n"
+            "    return 0",
+            "[]int[]\n",
+        )
+
+    def test_slice_assign_with_none(self):
+        assert_stdout(
+            "    [3]int arr = [1, 2, 3]\n"
+            "    []int s = arr[0:3]\n"
+            "    s = none\n"
+            "    print(s)\n"
+            "    return 0",
+            "[]int[]\n",
+        )
+
+    def test_none_valued_slice_equals_none(self):
+        assert_exit_code(
+            "    []int s = none\n"
+            "    return s == none",
+            1,
+            return_type="bool",
+        )
+
+    def test_real_empty_slice_is_not_equal_to_none(self):
+        """The test that actually proves the subtlest part of this
+        feature holds: `arr[5:5]` is a real, zero-length slice with a
+        non-null pointer -- equally safe and equally zero-length as a
+        genuinely nil slice for every other purpose, but NOT `==
+        none`, matching Go's own nil-vs-empty-slice distinction."""
+        assert_exit_code(
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s = arr[5:5]\n"
+            "    return s == none",
+            0,
+            return_type="bool",
+        )
+
+    def test_real_nonempty_slice_is_not_equal_to_none(self):
+        assert_exit_code(
+            "    [3]int arr = [1, 2, 3]\n"
+            "    []int s = arr[0:3]\n"
+            "    return s == none",
+            0,
+            return_type="bool",
+        )
+
+    def test_none_on_the_left_side(self):
+        assert_exit_code(
+            "    []int s = none\n"
+            "    return none == s",
+            1,
+            return_type="bool",
+        )
+
+    def test_not_equal_with_none(self):
+        assert_exit_code(
+            "    [3]int arr = [1, 2, 3]\n"
+            "    []int s = arr[0:3]\n"
+            "    return s != none",
+            1,
+            return_type="bool",
+        )
+
+    def test_indexing_a_none_valued_slice_aborts(self):
+        """A none-valued slice's length is 0, so this hits the exact
+        same bounds check (and the exact same "array index out of
+        bounds" message) as indexing into any other empty slice --
+        no none-specific codegen needed for this at all."""
+        assert_crashes_with_sigabrt(
+            "    []int s = none\n"
+            "    return s[0]"
+        )
+
+    def test_printing_a_none_valued_slice(self):
+        assert_stdout(
+            "    []int s = none\n"
+            "    print(s)\n"
+            "    return 0",
+            "[]int[]\n",
+        )
+
+    def test_reslicing_a_none_valued_slice_at_zero_zero(self):
+        """`s[0:0]` on a none-valued slice produces ANOTHER
+        none-equal slice ({0,0} + 0*stride = {0,0}) -- confirming
+        gen_slice_into's existing machinery handles a none-valued base
+        correctly with no special-casing, the same way indexing and
+        printing already do."""
+        assert_exit_code(
+            "    []int s = none\n"
+            "    []int s2 = s[0:0]\n"
+            "    return s2 == none",
+            1,
+            return_type="bool",
+        )
+
+    def test_int_vardecl_with_none_is_rejected(self):
+        assert_semantic_error(
+            "    int x = none\n"
+            "    return 0",
+            match="Cannot initialize",
+        )
+
+    def test_str_vardecl_with_none_is_rejected(self):
+        assert_semantic_error(
+            "    str x = none\n"
+            "    return 0",
+            match="Cannot initialize",
+        )
+
+    def test_array_vardecl_with_none_is_rejected(self):
+        assert_semantic_error(
+            "    [3]int arr = none\n"
+            "    return 0",
+            match="Cannot initialize",
+        )
+
+    def test_print_bare_none_is_rejected(self):
+        assert_semantic_error(
+            "    print(none)\n"
+            "    return 0",
+            match="cannot be called with a bare 'none'",
+        )
+
+    def test_comparing_none_to_none_is_rejected(self):
+        """`none == none` would otherwise trivially type-check --
+        Type.NONE equals itself the same way any type does -- so this
+        needed its own explicit exclusion, not just the slice-vs-none
+        exception (see check_binary's own comment)."""
+        assert_semantic_error(
+            "    return none == none",
+            match="does not support array, slice, void, or none operands",
+            return_type="bool",
+        )
+
+    def test_comparing_int_to_none_is_rejected(self):
+        assert_semantic_error(
+            "    return 5 == none",
+            match="does not support array, slice, void, or none operands",
+            return_type="bool",
+        )
+
+    def test_slice_parameter_with_none_argument_hits_existing_restriction(self):
+        """`none` doesn't need its own rejection here -- slice
+        parameters aren't supported in codegen at all yet (see
+        TestSlices), so this hits that existing, unrelated error
+        regardless of what's passed at the call site."""
+        source = (
+            "def int first([]int s):\n"
+            "    return s[0]\n"
+            "\n"
+            "def int main():\n"
+            "    return first(none)\n"
+        )
+        ast = _parse(source)
+        analyze(ast)  # semantically fine -- none is a valid []int argument
+        with pytest.raises(CodegenError, match="slice parameters are not supported yet"):
+            generate_asm(ast, platform=ASM_PLATFORM)
+
+
+# ---------------------------------------------------------------------------
 # Semantic analysis: scope/declaration checking and the strict int/bool
 # type system. These never reach codegen -- each one asserts that
 # analyze() itself raises SemanticError -- so they don't need gcc and
@@ -4489,7 +4723,7 @@ class TestSemanticErrors:
             "    [3]int a = [1, 2, 3]\n"
             "    [3]int b = [1, 2, 3]\n"
             "    return a == b",
-            match="does not support array, slice, or void operands",
+            match="does not support array, slice, void, or none operands",
             return_type="bool",
         )
 

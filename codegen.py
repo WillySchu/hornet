@@ -828,6 +828,63 @@ already imposes on array-typed call arguments, for the same reason: a
 bare ArrayLiteral, Slice, or array/slice-returning Call has no address
 of its own to print through. Assign it to a named variable first.
 
+NONE: THE SLICE ZERO VALUE
+-------------------------------
+`none` (see NoneLiteral's own docstring in parser.py, and semantic.py's
+own NONE section) becomes a {ptr: 0, len: 0} slice descriptor at the
+machine level -- the same shape Go's own nil slice has. Every existing
+slice operation (indexing, printing, re-slicing) already handles a
+zero-length slice correctly -- see TestSliceBoundsChecking's own
+`arr[5:5]` positive control in test_compiler.py -- so a none-valued
+slice needed no new mechanism for any of those; only two genuinely new
+pieces were needed: producing the {0, 0} descriptor in the first
+place (gen_none_into), and comparing a slice against `none` directly
+(gen_slice_none_comparison_into).
+
+gen_none_into is called directly from gen_var_decl/gen_assign's own
+NoneLiteral short-circuit, rather than folded into
+gen_slice_value_into's existing dispatch -- unlike every OTHER kind of
+slice-producing expression there (a Slice expression, a Variable
+holding one), a NoneLiteral's own resolved type (Type.NONE) never
+equals the slice type it's being stored into, so the caller has to
+already know and pass the TARGET type explicitly. gen_slice_value_into
+itself never needed a target-type parameter before this, since every
+other case's own resolved type already matched what needed to be
+stored -- this is the one place that invariant doesn't hold, so it's
+handled one level up instead of restructuring that method's signature
+for every existing caller.
+
+gen_slice_none_comparison_into checks specifically the slice
+descriptor's own `ptr` field against 0 -- not its length -- matching
+Go's own well-known nil-vs-empty-slice distinction: a real, zero-length
+slice sliced from a real array (e.g. `arr[5:5]`) has a non-null
+pointer and is NOT `== none`, even though it's equally safe and
+equally zero-length as a genuinely nil slice for every other purpose.
+This needed a new CmpQ instruction (64-bit compare) alongside the
+existing, 32-bit-only Cmp: every OTHER comparison in this language
+compares int/bool values, for which cmpl is exactly right, but a
+pointer is a full 64-bit value, and comparing only its low 32 bits
+against zero could, in principle, miss a real, non-null pointer whose
+low 32 bits happen to be zero. gen_binary_into dispatches EQUAL/
+NOT_EQUAL here whenever either operand is slice-typed, before ever
+reaching the ordinary single-register stack-spill scheme below it --
+semantic.py's check_binary already guarantees, by the time this is
+reached, that exactly one side is slice-typed and the other is
+none-typed (a real slice compared to another real slice, or none
+compared to none, are both rejected earlier), so this doesn't need to
+re-derive or defensively check which side is which beyond that.
+
+`none` used as a function argument or return value for a slice-typed
+parameter/return isn't specially handled, and doesn't need to be:
+slice parameters and returns aren't supported in codegen at all yet
+(see the SCOPE section below), so any program attempting either hits
+that existing, unrelated rejection regardless of what's passed.
+`return none` specifically falls through to gen_expr_into's own
+defensive NoneLiteral rejection instead of a more specific message --
+a real, if a little less polished, gap accepted for this first pass,
+since the underlying combination (a slice return) is already entirely
+unimplemented either way.
+
 SCOPE: WHAT THIS DOESN'T COVER YET
 --------------------------------------
 An array whose ELEMENTS are themselves slices (`[3][]int`) isn't
@@ -869,6 +926,7 @@ from parser import (
     Index,
     IndexAssign,
     Node,
+    NoneLiteral,
     Param,
     Parser,
     Program,
@@ -985,6 +1043,25 @@ class Cmp(Instruction):
     src: Operand
     dst: Operand
     mnemonic = "cmpl"
+
+    def operands(self) -> List[str]:
+        return [self.src.emit(), self.dst.emit()]
+
+
+@dataclass
+class CmpQ(Instruction):
+    """64-bit compare (`cmpq`) -- the CmpQ counterpart to Cmp (`cmpl`,
+    32-bit), for the one case that needs it: checking a slice
+    descriptor's own 64-bit `ptr` field against 0 (see
+    gen_slice_none_comparison_into). Every OTHER comparison in this
+    language compares 32-bit int/bool values, for which Cmp's cmpl is
+    exactly right -- but a pointer is a full 64-bit value, and
+    comparing only its low 32 bits against zero could, in principle
+    (however unlikely for any real address in practice), miss a real,
+    non-null pointer whose low 32 bits happen to be zero."""
+    src: Operand
+    dst: Operand
+    mnemonic = "cmpq"
 
     def operands(self) -> List[str]:
         return [self.src.emit(), self.dst.emit()]
@@ -2270,6 +2347,48 @@ class CodeGenerator:
         instructions.append(MovQ(src=high_reg, dst=Memory(dst_mem.base, dst_mem.offset + 8)))
         return instructions
 
+    def gen_none_into(self, dst_mem: Memory, target_type: Type) -> List[Instruction]:
+        """Writes `none`'s own zero-value representation into dst_mem,
+        for whichever nilable type target_type actually is. Only
+        slices are nilable so far (see NoneLiteral's own docstring in
+        parser.py) -- a {ptr: 0, len: 0} descriptor, the same shape
+        Go's own nil slice has: a valid, safely-indexable-into-nothing
+        slice with no backing array, not a special, separately-tracked
+        null flag. Every existing slice operation (indexing, printing,
+        re-slicing) already handles a zero-length slice correctly --
+        see TestSliceBoundsChecking's own positive control for
+        `arr[5:5]` -- so this is the ONLY new codegen a none-valued
+        slice needs on the producing side; comparing one against
+        `none` again (see gen_slice_none_comparison_into) is the only
+        other.
+
+        Called directly from gen_var_decl/gen_assign's own NoneLiteral
+        short-circuit, rather than being folded into
+        gen_slice_value_into's own dispatch -- unlike every OTHER kind
+        of slice-producing expression there (a Slice expression, a
+        Variable holding one), a NoneLiteral's own resolved type
+        (Type.NONE) never equals the slice type it's being stored
+        into, so the caller has to already know and pass the TARGET
+        type; gen_slice_value_into's whole existing dispatch, by
+        contrast, only ever needs the expression itself, since every
+        other case's own type already matches what needs to be stored.
+
+        Defensively re-checks target_type.kind here even though
+        semantic.py's own _types_compatible already guarantees `none`
+        was only ever allowed through for a slice target -- the same
+        "codegen doesn't blindly trust its input" posture
+        gen_array_copy's own array-of-slices rejection already takes.
+        """
+        if target_type.kind != TypeKind.SLICE:
+            raise CodegenError(
+                f"'none' is only supported as a slice's zero value "
+                f"right now, not {target_type}"
+            )
+        return [
+            MovQ(src=Imm(0), dst=Memory(dst_mem.base, dst_mem.offset)),
+            MovQ(src=Imm(0), dst=Memory(dst_mem.base, dst_mem.offset + 8)),
+        ]
+
     def gen_slice_value_into(self, expr: Node, dst_mem: Memory) -> List[Instruction]:
         """Stores a slice-typed expression's VALUE (its {ptr, len}
         descriptor) into dst_mem. Dispatched on what kind of
@@ -2749,10 +2868,26 @@ class CodeGenerator:
             return instructions
         if stmt.init is None:
             return []
+        if isinstance(stmt.init, NoneLiteral):
+            # none's own resolved type (Type.NONE) never equals
+            # var_type -- semantic.py's _types_compatible is what lets
+            # this declaration through despite that (see its own
+            # docstring) -- so this needs var_type, the TARGET type,
+            # passed explicitly, rather than going through _gen_store's
+            # ordinary dispatch, which only ever needs the value
+            # expression itself since every OTHER kind of value's own
+            # resolved type already matches what needs to be stored.
+            return self.gen_none_into(Memory('rbp', offset), var_type)
         return self._gen_store(offset, stmt.init)
 
     def gen_assign(self, stmt: Assign) -> List[Instruction]:
         offset = self._local_offset(stmt.name)
+        if isinstance(stmt.value, NoneLiteral):
+            # See gen_var_decl's own identical case just above for why
+            # this needs the TARGET type (the variable's own declared
+            # type), not stmt.value's own resolved type (Type.NONE).
+            var_type = self._local_type(stmt.name)
+            return self.gen_none_into(Memory('rbp', offset), var_type)
         value_type = self._type_of(stmt.value)
         if value_type.kind == TypeKind.ARRAY and is_heap_allocated(value_type):
             # Reuses the EXISTING allocation from this variable's own
@@ -3063,6 +3198,27 @@ class CodeGenerator:
                 "slices don't fit in a single register; use "
                 "gen_slice_value_into instead"
             )
+        if isinstance(expr, NoneLiteral):
+            # Never reachable in correct codegen either, for a
+            # different reason than ArrayLiteral/Slice above: none IS
+            # small enough to fit in a register (its own {0, 0}
+            # descriptor is exactly what gen_none_into writes), but it
+            # has no ONE fixed target type of its own to compute INTO
+            # -- see gen_none_into's own docstring for why its callers
+            # (gen_var_decl/gen_assign's own NoneLiteral short-circuit)
+            # have to already know and pass the target type explicitly,
+            # something gen_expr_into's own signature has no way to
+            # supply. A slice-vs-none comparison (`s == none`) is
+            # handled entirely separately too, via
+            # gen_slice_none_comparison_into, dispatched from
+            # gen_binary_into before it would ever reach here.
+            raise CodegenError(
+                "Cannot compute 'none' via gen_expr_into -- it's only "
+                "supported as a slice's zero value (see gen_none_into) "
+                "or as one side of a slice comparison (see "
+                "gen_slice_none_comparison_into), never as a general-"
+                "purpose expression value"
+            )
         if isinstance(expr, Variable):
             offset = self._local_offset(expr.name)
             var_type = self._local_type(expr.name)
@@ -3173,6 +3329,22 @@ class CodeGenerator:
         if not isinstance(dst, Register):
             raise CodegenError(f"Binary codegen requires a register destination, got: {dst!r}")
 
+        # A slice compared to `none` (in either order -- `s == none`
+        # and `none == s` both reach here) needs its own dedicated
+        # codegen too, for a related but distinct reason from AND/OR
+        # above: a slice's "value" is a 16-byte descriptor, which
+        # can't flow through the ordinary single-register stack-spill
+        # scheme below the way an int/bool/str value can. semantic.py's
+        # check_binary already guarantees, by the time this is reached,
+        # that exactly one side is slice-typed and the other is none-
+        # typed -- a real slice compared to another real slice
+        # (`s1 == s2`), or none compared to none, is rejected earlier
+        # -- so this doesn't need to re-derive or defensively check
+        # which side is which beyond that.
+        if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
+            if self._type_of(expr.left).kind == TypeKind.SLICE or self._type_of(expr.right).kind == TypeKind.SLICE:
+                return self.gen_slice_none_comparison_into(expr, dst)
+
         scratch = Register('ecx')  # holds the right-hand value while combining
         instructions = self.gen_expr_into(expr.left, dst)   # dst = left
         instructions.append(Push(as_qword_register(dst)))   # save left on the stack
@@ -3180,6 +3352,48 @@ class CodeGenerator:
         instructions.append(Mov(src=dst, dst=scratch))       # scratch = right
         instructions.append(Pop(as_qword_register(dst)))     # dst = left (restored)
         instructions.extend(self.gen_binary_op(expr.op, src=scratch, dst=dst))
+        return instructions
+
+    def gen_slice_none_comparison_into(self, expr: Binary, dst: Register) -> List[Instruction]:
+        """Computes `slice_expr == none` or `slice_expr != none` (in
+        either operand order) into dst -- checking specifically
+        whether the slice's own `ptr` field is null, matching Go's
+        own nil-vs-empty-slice distinction (see NoneLiteral's own
+        docstring in parser.py): a real, zero-length slice sliced
+        from a real array (e.g. `arr[5:5]`) has a non-null pointer
+        and is NOT `== none`, even though both are equally safe,
+        equally zero-length slices for every other purpose (indexing,
+        printing, re-slicing).
+
+        semantic.py's check_binary already guarantees, by the time
+        this is reached, that exactly one operand is slice-typed and
+        the other is none-typed -- so this doesn't need to re-derive
+        or defensively check which side is which beyond picking out
+        whichever one IS slice-typed.
+
+        Reuses gen_indexable_base_into for the slice's own address
+        (see its own docstring for why the base must be a bare
+        Variable when it's slice-typed) even though only the address,
+        not the length it also computes, is actually needed here --
+        one harmless, unused extra load rather than a second, narrower
+        helper that would duplicate its Variable-vs-Index and array-
+        vs-slice handling for a single call site.
+
+        Uses CmpQ (64-bit), not the ordinary 32-bit Cmp every other
+        comparison in this file uses -- a pointer is a full 64-bit
+        value, and checking only its low 32 bits against zero could,
+        in principle, miss a real, non-null pointer whose low 32 bits
+        happen to be zero.
+        """
+        slice_expr = expr.left if self._type_of(expr.left).kind == TypeKind.SLICE else expr.right
+        addr_reg = Register('rbx')
+        len_reg = Register('r12')  # unused here; gen_indexable_base_into always computes it
+        instructions, _ = self.gen_indexable_base_into(slice_expr, addr_reg, len_reg)
+        instructions.append(CmpQ(src=Imm(0), dst=addr_reg))
+        cc = 'e' if expr.op == BinaryOp.EQUAL else 'ne'
+        byte_dst = as_byte_register(dst)
+        instructions.append(SetCC(cc=cc, operand=byte_dst))
+        instructions.append(MovZX(src=byte_dst, dst=dst))
         return instructions
 
     def gen_short_circuit(
