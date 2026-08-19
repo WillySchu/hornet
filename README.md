@@ -16,13 +16,13 @@ Binary Ops:
 Updates:
 - `assert`
 - `len` function.
-- Index into unnamed slices.
 - Slices in arrays.
 - `in` keyword.
 - Slice literals.
 - Array literals?
 - Ternary.
 - For loops.
+- Slice / index an array return directly on function calls.
 - Free memory `malloc`ed by string concatenation.
 - Bounds Check Elimination.
 - Stack based params to get around parameter limit.

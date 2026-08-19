@@ -46,11 +46,12 @@ Organization:
     TestSlices                          (10 tests)
     TestSliceBoundsChecking             ( 6 tests)
     TestSliceParametersAndReturns       (15 tests)
+    TestIndexingUnnamedSlices           (11 tests)
     TestPrintArraysAndSlices            (11 tests)
     TestNone                            (17 tests)
     TestSemanticErrors                  (75 tests)
                                         ----------
-                                        382 tests total
+                                        393 tests total
 
 A NOTE ON ARRAYS
 -----------------------------------------------------------------
@@ -3999,6 +4000,154 @@ class TestSliceParametersAndReturns:
         analyze(ast)
         with pytest.raises(CodegenError, match="assign it to a variable first"):
             generate_asm(ast, platform=ASM_PLATFORM)
+
+
+# ---------------------------------------------------------------------------
+# Indexing (and slicing) directly into an UNNAMED slice expression's own
+# result -- `arr[:][0]`, or `matrix[:][0][0]` -- without first assigning
+# the intermediate slice to a named variable. This closes a gap
+# explicitly left open when slices themselves were first built:
+# gen_indexable_base_into used to require a slice-typed base be a bare
+# Variable, since a Slice expression's own result is a freshly computed
+# descriptor with no pre-existing address to take.
+#
+# The fix materializes an unnamed Slice expression into a dedicated,
+# per-function scratch slot (_unnamed_slice_temp_offset, reserved
+# unconditionally in gen_function) and immediately reads it back out
+# into registers -- test_two_independent_materializations_in_one_
+# expression and test_materialization_inside_a_slice_bound_expression
+# are the tests that actually prove reusing ONE shared slot for this,
+# rather than a fresh one per nesting level, is genuinely safe:
+# gen_slice_into and gen_index_address_into both already compute their
+# own base FIRST and immediately drain it into registers (protected on
+# the real stack) before evaluating anything else, so a deeper
+# materialization's own write to the shared slot always happens (and is
+# always fully consumed) strictly before a shallower one writes there
+# too -- the same nested-lifetime discipline that makes one call stack
+# safe for recursion of any depth, just applied to one scratch memory
+# slot instead. Getting this wrong would show up as silently wrong
+# values from a mid-expression materialization stomping on another
+# still-pending one, not a crash -- exactly why these two tests, not
+# just the two basic examples, are the ones that matter most here.
+#
+# test_writing_through_an_unnamed_sliced_index and test_indexing_out_
+# of_bounds_on_an_unnamed_slice confirm the fix generalizes correctly
+# to the OTHER consumers of gen_indexable_base_into beyond plain
+# reading -- writing through an index, and the runtime bounds check --
+# not just the read path the two headline examples exercise.
+# ---------------------------------------------------------------------------
+
+class TestIndexingUnnamedSlices:
+    pytestmark = GCC_SKIP
+
+    def test_indexing_a_sliced_array_directly(self):
+        """`[3]int arr = [1, 2, 3]; arr[:][0]` -- the first of the two
+        motivating examples."""
+        assert_exit_code(
+            "    [3]int arr = [1, 2, 3]\n"
+            "    return arr[:][0]",
+            1,
+        )
+
+    def test_indexing_a_sliced_2d_array_directly(self):
+        """`[2][2]int arr = [[1, 2], [3, 4]]; arr[:][0][0]` -- the
+        second motivating example, one indexing level deeper."""
+        assert_exit_code(
+            "    [2][2]int arr = [[1, 2], [3, 4]]\n"
+            "    return arr[:][0][0]",
+            1,
+        )
+
+    def test_deep_chain_reslicing_then_indexing(self):
+        assert_exit_code(
+            "    [5]int arr = [10, 20, 30, 40, 50]\n"
+            "    return arr[:][1:3][0]",
+            20,
+        )
+
+    def test_named_slice_resliced_unnamed_then_indexed(self):
+        assert_exit_code(
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s = arr[1:4]\n"
+            "    return s[:][0:2][1]",
+            3,
+        )
+
+    def test_slice_returning_call_as_unnamed_base(self):
+        """A slice-returning function's result is already sitting in
+        %rax:%rdx by the two-register return convention -- this is
+        actually SIMPLER to use as an unnamed base than a Slice
+        expression is, needing no scratch slot at all."""
+        assert_program_exit_code(
+            "def []int make():\n"
+            "    [3]int arr = [7, 8, 9]\n"
+            "    return arr[0:3]\n"
+            "\n"
+            "def int main():\n"
+            "    return make()[0]\n",
+            7,
+        )
+
+    def test_slice_returning_call_chained_deeper(self):
+        assert_program_exit_code(
+            "def []int make():\n"
+            "    [3]int arr = [7, 8, 9]\n"
+            "    return arr[0:3]\n"
+            "\n"
+            "def int main():\n"
+            "    return make()[0:2][1]\n",
+            8,
+        )
+
+    def test_writing_through_an_unnamed_sliced_index(self):
+        assert_exit_code(
+            "    [3]int arr = [1, 2, 3]\n"
+            "    arr[:][0] = 99\n"
+            "    return arr[0]",
+            99,
+        )
+
+    def test_very_deep_nesting_of_unnamed_slices(self):
+        assert_stdout(
+            "    [4]int arr = [11, 22, 33, 44]\n"
+            "    print(arr[:][:][:][0])\n"
+            "    return 0",
+            "11\n",
+        )
+
+    def test_indexing_out_of_bounds_on_an_unnamed_slice_aborts(self):
+        assert_crashes_with_sigabrt(
+            "    [3]int arr = [1, 2, 3]\n"
+            "    return arr[:][10]"
+        )
+
+    def test_two_independent_materializations_in_one_expression(self):
+        """The strongest stress test of the 'one shared scratch slot
+        is safe' reasoning: both operands of this addition need their
+        OWN, separate materialization, and neither may be allowed to
+        corrupt the other's still-pending one."""
+        assert_stdout(
+            "    [3]int arr1 = [10, 20, 30]\n"
+            "    [3]int arr2 = [1, 2, 3]\n"
+            "    print(arr1[:][0] + arr2[:][0])\n"
+            "    return 0",
+            "11\n",
+        )
+
+    def test_materialization_inside_a_slice_bound_expression(self):
+        """An even more specific stress test: the materialization
+        happens while EVALUATING one of the outer slice's own low/high
+        bounds, after that outer slice's own base has already been
+        computed and protected on the stack -- proving the shared slot
+        is safe to reuse even mid-computation of an unrelated slice
+        expression, not just between two entirely separate ones."""
+        assert_stdout(
+            "    [5]int arr = [100, 200, 300, 400, 500]\n"
+            "    [1]int idx_holder = [2]\n"
+            "    print(arr[idx_holder[:][0]:5][0])\n"
+            "    return 0",
+            "300\n",
+        )
 
 
 # ---------------------------------------------------------------------------

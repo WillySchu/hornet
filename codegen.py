@@ -715,20 +715,15 @@ own bounds-check comparison, and gen_slice_into's three-way one,
 each just work with whichever Operand comes back, uniformly, with no
 separate code path needed per base kind.
 
-The base must be a bare Variable when it's slice-typed -- not another
-Slice (or, in principle, an Index yielding a slice, though that's not
-otherwise reachable yet) node directly. A Slice expression's own
-result is a freshly computed descriptor with no pre-existing address
-to take; chaining `[...]` straight off one (`arr[1:5][0:2]`, or
-`matrix[0:2][1]` without first naming `matrix[0:2]`) isn't supported
-yet -- assign the intermediate result to a named variable first
-(`[][3]int rows = matrix[0:2]; rows[1]`), which already works, since
-THAT base is an ordinary Variable. A real, deliberate scope boundary,
-not an oversight: supporting it would need a temporary-materialization
-mechanism (somewhere to put a slice value that has no variable of its
-own yet) that doesn't exist, and neither of the two use cases this
-feature was actually scoped around -- slicing a named slice, slicing a
-named array's outer dimension -- needs it.
+The base can now be a Variable (a named slice, loaded directly out of
+its own slot), a Slice expression itself (`arr[:][0]`, or
+`matrix[:][0][0]` -- materialized into a dedicated scratch slot first;
+see the INDEXING INTO UNNAMED SLICES section below for the full
+design), or a Call to a slice-returning function (whose result is
+already sitting in %rax:%rdx, needing no materialization at all). An
+Index yielding a slice (indexing into an array/slice OF slices) still
+isn't reachable -- that would require a constructible array of
+slices, which doesn't exist yet (see gen_array_copy's own rejection).
 
 BOUNDS CHECKING: A DIFFERENT BOUNDARY THAN INDEXING'S OWN
 -----------------------------------------------------------------
@@ -949,6 +944,63 @@ gen_return, not in gen_slice_return_into -- its own resolved type
 (Type.NONE) never equals SLICE, the same reason gen_var_decl/gen_
 assign special-case it before ever reaching their own general
 dispatch (see gen_none_into's own docstring).
+
+INDEXING INTO UNNAMED SLICES
+-----------------------------------
+`arr[:][0]`, or `matrix[:][0][0]` -- indexing (or re-slicing) directly
+into a Slice expression's own result, without first assigning it to a
+named variable. gen_indexable_base_into used to require a Variable
+here, since a Slice expression's own result is a freshly computed
+descriptor with no pre-existing address to take; this closes that gap
+by giving it somewhere to put one: a dedicated, per-function scratch
+slot (_unnamed_slice_temp_offset, 16 bytes, reserved unconditionally
+in gen_function for every function, not just ones that happen to use
+it) that a Slice base gets materialized into via gen_slice_into, then
+immediately read back out of into addr_dst/len_dst -- the exact same
+"compute into a Memory destination" contract gen_slice_into already
+had for every other caller, just with a throwaway destination instead
+of a real variable's own slot. A Call base (a slice-returning function
+used directly, `make()[0]`) doesn't even need this: its result is
+already sitting in %rax:%rdx by the two-register return convention,
+so this just moves those two registers into addr_dst/len_dst directly.
+
+WHY ONE SHARED SCRATCH SLOT IS SAFE UNDER ARBITRARY NESTING
+-------------------------------------------------------------------
+Reusing a SINGLE shared slot for every Slice materialization -- rather
+than a fresh one per nesting level -- relies on how gen_slice_into and
+gen_index_address_into are both already structured: each computes its
+OWN base's address/length FIRST, immediately consumes it (into
+registers, then protects those on the real CPU stack before evaluating
+anything else -- e.g. a slice's own low/high bounds, or an index
+expression, either of which could itself trigger another
+materialization), and only ever WRITES its own result into a
+destination as the very LAST step. That means a deeper level's own
+write to the shared slot always happens -- and is always fully drained
+back into registers -- strictly BEFORE the shallower level that
+triggered it writes ITS OWN result there. This is the same strictly-
+nested lifetime discipline that makes reusing one call stack safe for
+recursion of any depth, just applied to one scratch memory slot instead
+of the stack itself. Verified directly, not just reasoned about: a
+binary expression whose two operands each need their own, independent
+materialization (`arr1[:][0] + arr2[:][0]`), and a slice expression
+whose own low bound itself requires materializing a DIFFERENT unnamed
+slice (`arr[idx_holder[:][0]:5]`) both compute correctly -- see
+test_compiler.py's TestIndexingUnnamedSlices for both, and its own
+module-level note for why these two specifically, not just the two
+headline examples, are what actually stress-test this reasoning.
+
+Kept entirely SEPARATE from _slice_return_temp_offset above, rather
+than reusing it for both purposes: the same reasoning would, in fact,
+make sharing that one safe too, but two small, obviously-correct-by-
+construction slots are worth more than the 16 bytes saved by relying
+on a shared one being safe across two conceptually distinct purposes.
+
+Deliberately still out of scope: an unnamed slice used directly as a
+function-call argument (`foo(arr[:])`) or as print's own argument
+(`print(arr[:])`) -- both keep their existing, separate "must be a
+named Variable" restrictions (gen_slice_arg_into, gen_print_call_into),
+unrelated to and unaffected by this fix, which is specifically about
+gen_indexable_base_into's own base-of-`[...]` restriction.
 
 SCOPE: WHAT THIS DOESN'T COVER YET
 --------------------------------------
@@ -1799,6 +1851,26 @@ class CodeGenerator:
             self._next_offset -= 16
             self._slice_return_temp_offset = self._next_offset
 
+        # A second, similarly-shaped 16-byte slot -- reserved
+        # unconditionally for EVERY function, not just ones that
+        # return a slice -- used by gen_indexable_base_into to
+        # materialize an unnamed Slice expression's descriptor when
+        # it's used directly as the base of a `[...]` chain (e.g.
+        # `arr[:][0]`, or `matrix[:][0][0]`), rather than requiring it
+        # be assigned to a named variable first. See gen_indexable_
+        # base_into's own docstring for why reusing a single shared
+        # slot is safe even under arbitrarily deep nesting (each
+        # materialization is fully consumed -- read out into
+        # registers -- before any subsequent one can write to it
+        # again, the same way a call stack's own frames nest), and why
+        # this is kept entirely SEPARATE from _slice_return_temp_offset
+        # above rather than reusing it: both would, in fact, still be
+        # safe to share by that same reasoning, but two small, always-
+        # correct-by-construction slots are worth more than the 16
+        # bytes saved by proving a shared one is safe too.
+        self._next_offset -= 16
+        self._unnamed_slice_temp_offset = self._next_offset
+
         # One extra, purely internal temp slot per parameter, used to
         # stash its incoming register value(s) immediately, before any
         # parameter is actually processed -- see the loop below for
@@ -2179,33 +2251,85 @@ class CodeGenerator:
         kind of Operand comes back for their own bounds-check
         comparison.
 
-        `expr` must be a Variable or an Index -- not another Slice
-        node directly. A Slice expression's own result is a freshly
-        computed descriptor with no pre-existing address to take;
-        chaining `[...]` straight off one (`arr[1:5][0:2]`, or
-        `matrix[0:2][1]` without first naming `matrix[0:2]`) isn't
-        supported yet -- assign the intermediate result to a named
-        variable first (`[][3]int rows = matrix[0:2]; rows[1]`), which
-        already works, since THAT base is an ordinary Variable.
+        A slice-typed `expr` can be a Variable (a named slice, loaded
+        directly out of its own %rbp-relative slot), a Slice (an
+        UNNAMED slice expression used directly as a base -- e.g.
+        `arr[:][0]`, or `matrix[:][0][0]` -- materialized into a
+        dedicated, per-function scratch slot, _unnamed_slice_temp_
+        offset, via gen_slice_into, then immediately read back out
+        into addr_dst/len_dst), or a Call to a function that itself
+        returns a slice (whose result is already sitting in %rax/%rdx
+        by the two-register return convention -- see the module
+        docstring's SLICE PARAMETERS AND RETURNS section -- so this
+        just moves those two registers into addr_dst/len_dst directly,
+        no scratch slot needed at all).
+
+        Reusing ONE shared scratch slot for every Slice materialization
+        -- rather than a fresh one per nesting level -- is safe under
+        arbitrarily deep chaining (`arr[:][0:2][0]`, and so on)
+        specifically because of how gen_slice_into and gen_index_
+        address_into are both already structured: each computes its
+        OWN base's address/length FIRST, immediately consumes it (into
+        addr_dst/len_dst, then protects those on the real CPU stack
+        before evaluating anything else), and only ever WRITES its own
+        result into a destination as the very LAST step. That means a
+        deeper level's own write to the shared slot always happens (and
+        is always fully drained back into registers) strictly BEFORE
+        the shallower level that triggered it writes its own result
+        there -- the same strictly-nested lifetime discipline that
+        makes reusing one call stack safe for recursion of any depth,
+        just applied to one scratch memory slot instead of the stack.
+        An Index base (indexing into an array/slice OF slices) isn't
+        included here -- that would require a constructible array of
+        slices, which doesn't exist yet (see gen_array_copy's own
+        rejection) -- and neither is an ArrayLiteral or array-returning
+        Call as a slice base, since neither can ever BE slice-typed.
+
+        `expr` being anything else (a bare ArrayLiteral or a Call
+        returning something other than an array/slice can't reach here
+        at all, being neither array- nor slice-typed) falls through to
+        the final CodegenError below.
         """
         base_type = self._type_of(expr)
         if base_type.kind == TypeKind.ARRAY:
             instructions = self.gen_array_address_into(expr, addr_dst)
             return instructions, Imm(base_type.size)
         if base_type.kind == TypeKind.SLICE:
-            if not isinstance(expr, Variable):
-                raise CodegenError(
-                    f"Cannot use a {type(expr).__name__} directly as "
-                    f"the base of an index or slice expression when "
-                    f"it's slice-typed -- assign it to a named "
-                    f"variable first"
-                )
-            offset = self._local_offset(expr.name)
-            instructions = [
-                MovQ(src=Memory('rbp', offset + 8), dst=len_dst),
-                MovQ(src=Memory('rbp', offset), dst=addr_dst),
-            ]
-            return instructions, len_dst
+            if isinstance(expr, Variable):
+                offset = self._local_offset(expr.name)
+                instructions = [
+                    MovQ(src=Memory('rbp', offset + 8), dst=len_dst),
+                    MovQ(src=Memory('rbp', offset), dst=addr_dst),
+                ]
+                return instructions, len_dst
+            if isinstance(expr, Slice):
+                temp = self._unnamed_slice_temp_offset
+                instructions = self.gen_slice_into(expr, Memory('rbp', temp))
+                instructions.append(MovQ(src=Memory('rbp', temp + 8), dst=len_dst))
+                instructions.append(MovQ(src=Memory('rbp', temp), dst=addr_dst))
+                return instructions, len_dst
+            if isinstance(expr, Call):
+                # Pushed onto the stack before either destination is
+                # written, then popped in reverse -- robust regardless
+                # of what addr_dst/len_dst actually are, even if one
+                # of them happens to alias %rax or %rdx itself (not
+                # reachable with today's callers, all of which pick
+                # dedicated registers distinct from both, but this
+                # doesn't need to depend on that staying true): two
+                # sequential plain MovQs straight from %rax/%rdx could,
+                # in the wrong order, have the first write clobber a
+                # value the second still needed to read.
+                instructions = self.gen_slice_call_into(expr)
+                instructions.append(Push(Register('rax')))
+                instructions.append(Push(Register('rdx')))
+                instructions.append(Pop(len_dst))
+                instructions.append(Pop(addr_dst))
+                return instructions, len_dst
+            raise CodegenError(
+                f"Cannot use a {type(expr).__name__} directly as the "
+                f"base of an index or slice expression when it's "
+                f"slice-typed -- assign it to a named variable first"
+            )
         raise CodegenError(f"Cannot index or slice a value of type {base_type}")
 
     def gen_array_address_into(self, expr: Node, dst: Register) -> List[Instruction]:
