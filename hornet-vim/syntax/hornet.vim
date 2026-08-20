@@ -58,7 +58,7 @@ syn keyword hornetLogicalOperator and or not
 " Builtins and identifiers
 " ---------------------------------------------------------------------------
 
-syn keyword hornetBuiltin print len
+syn keyword hornetBuiltin print len append
 
 " A name immediately followed by "(" is a call. This deliberately also
 " catches user-defined functions; builtin names have their own stronger

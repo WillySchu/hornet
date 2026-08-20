@@ -681,14 +681,19 @@ cap exists specifically to support `append` -- knowing how much spare
 room a slice's own backing array still has (beyond its current len) is
 what lets append sometimes write into that EXISTING array instead of
 always allocating a fresh one, the mechanism that makes appending in a
-loop amortized O(n) rather than O(n^2). At every producer here --
-literals, re-slicing, none -- cap is currently set equal to len; a
-re-slice doesn't yet inherit its base's own remaining capacity the way
-it eventually will (see gen_slice_into's own docstring), and no
-append-driven over-allocation exists yet either. This descriptor used
-to be 16 bytes, {pointer, length} only, before cap was added -- see the
-SLICE PARAMETERS AND RETURNS section below for the real, cascading
-consequence that had on how a slice crosses a function boundary.
+loop amortized O(n) rather than O(n^2). At a slice LITERAL or `none`,
+cap is set equal to len -- a freshly-created backing array is sized to
+exactly fit its own elements, with no spare room to grow into yet.
+Re-slicing is different: cap = base_cap - low, inheriting the base's
+own remaining capacity from the new starting point (Go's actual
+re-slicing rule -- see gen_slice_into's own docstring), which is
+exactly what lets a re-sliced view grow into room a PRIOR append, or
+the base's own construction, already reserved -- see the APPEND
+BUILTIN section below for the full story this makes possible. This
+descriptor used to be 16 bytes, {pointer, length} only, before cap was
+added -- see the SLICE PARAMETERS AND RETURNS section below for the
+real, cascading consequence that had on how a slice crosses a function
+boundary.
 
 SAFETY: WHY EVERY SLICED ARRAY IS HEAP-ALLOCATED
 -------------------------------------------------------
@@ -874,6 +879,97 @@ literal's own shape before a single instruction ran. The alternative
 derivable -- would make len's argument evaluation behave differently
 depending on what shape the argument happens to take, which is a
 worse inconsistency than one rare, low-value wasted allocation.
+
+APPEND BUILTIN
+-------------------
+`append(s, value)`, Hornet's third builtin -- gen_append_call_into --
+Go-style: returns a NEW {ptr, len, cap} descriptor rather than
+mutating s in place. s itself is never touched; the result is written
+to wherever the call's own value flows (a VarDecl, an Assign, ...) via
+gen_slice_value_into's own dispatch, exactly like any other slice-
+producing expression.
+
+s is restricted to a Variable or `none` -- deliberately narrower than
+len's own "whatever gen_indexable_base_into accepts" generality (a
+re-slice, an Index, a slice-returning Call): append exists
+specifically to feed a reassignment (`x = append(x, v)`), and
+materializing an arbitrary slice EXPRESSION into a scratch slot first,
+just to immediately read it back out as an input, isn't taken on for
+that comparatively rare shape. A real, visible restriction, not a
+silently discovered gap.
+
+REUSE VS. REALLOCATE: THE GROWTH POLICY
+-----------------------------------------------
+s's own ptr/len/cap are loaded into CALLEE-SAVED registers (%rbx/%r12/
+%r13) up front, not caller-saved ones -- specifically because the
+reallocating path below calls malloc, which (like any real, ABI-
+conforming function) is free to clobber any caller-saved register but
+is OBLIGATED to preserve callee-saved ones, the exact same guarantee
+gen_array_literal_heap_alloc_into and gen_function's own heap-
+allocated-parameter handling already rely on.
+
+The decision itself is a single comparison: len >= cap means no spare
+room -- the only way that can happen, given the invariant len <= cap
+always holds, is len == cap exactly -- so `jae` is both correct and
+sufficient, no separate "is it exactly equal" check needed.
+
+REUSE (len < cap): the new element is written directly into the
+EXISTING backing array, at ptr + len*element_width -- s's own array,
+fully intact and unaffected, since s's own len field is never
+touched. This is the observable aliasing the whole growth policy
+exists to make possible: a slice produced by re-slicing with spare
+capacity (see the SLICES section's own note on cap = base_cap - low),
+or by a PRIOR append that over-allocated, can have a later append
+write into storage some OTHER slice still watches -- not a bug this
+design works around, but the mechanism that makes appending in a loop
+amortized O(n) rather than O(n^2) in the first place.
+
+REALLOCATE (len == cap): new_cap is computed from cap alone (see the
+growth-policy arithmetic below), a fresh block of new_cap*element_
+width bytes is malloc'd, the existing len elements are copied into it
+via a genuine RUNTIME loop -- len is a runtime value here, unlike
+every other array copy in this file (gen_array_copy's own flat-copy
+loop), which always moves a compile-time-known total width -- and only
+then is the new element written into the new array. Each loop
+iteration reuses gen_array_copy anyway, for exactly ONE element's
+worth of data: that method's own logic (copy type_byte_width(T) bytes,
+dispatching on leaf_type(T) for the per-chunk width) already
+generalizes correctly to a single, arbitrary-type value, not just a
+whole array, so no separate "copy one value" helper was needed just
+for this loop body. The OLD backing array is simply never freed,
+matching this compiler's existing no-`free`-anywhere memory model
+everywhere else.
+
+GROWTH POLICY: new_cap = cap*2 if cap < 256, else cap + cap//4, with a
+cap==0 floor of 1. This is the general max(needed, doubled-or-
+quartered) formula simplified, not a different rule: reallocation only
+ever happens when len == cap exactly, so `needed` (len+1) is always
+cap+1, and doubling already exceeds cap+1 for any cap >= 1 (quartering
+trivially does too, for cap >= 256) -- the max only actually matters,
+and only ever resolves in needed's favor, at cap == 0, which is
+exactly the explicit floor case here. cap/4 is computed via a right
+shift by 2 (arithmetic, though cap's own non-negativity means a
+logical shift would give the identical result) rather than idiv --
+idiv can't take an immediate divisor at all on x86 (see IDiv's own
+docstring), and a shift is simpler besides.
+
+WRITING THE NEW ELEMENT: _gen_write_value_at_address_into
+-------------------------------------------------------------------
+Both the reuse and reallocate paths need to write the newly-appended
+element at a COMPUTED address (not a fixed offset), with the
+element's own type possibly being scalar, array, or slice -- shared
+between them via one helper rather than duplicated. For an array or
+slice element type, this just hands the computed address straight to
+gen_array_value_into/gen_slice_value_into as an ordinary Memory
+destination -- both already protect an arbitrary base internally (see
+their own docstrings). For a scalar, the address is protected
+manually, matching gen_array_literal_into's own scalar-element pattern
+exactly: push it, compute the value (which could itself involve a
+function call that clobbers the address register, if the value
+expression is arbitrarily complex), stash the computed value in %r8/
+%r8d, pop the address back, then write from %r8/%r8d -- never straight
+from %eax/%rax, which popping the address back into would otherwise
+have to clobber.
 
 NONE: THE SLICE ZERO VALUE
 -------------------------------
@@ -2496,19 +2592,34 @@ class CodeGenerator:
         instructions.extend(self.gen_array_literal_into(Memory('rax', 0), expr, array_type))
         return instructions
 
-    def gen_indexable_base_into(self, expr: Node, addr_dst: Register, len_dst: Register) -> Tuple[List[Instruction], Union[Imm, Register]]:
+    def gen_indexable_base_into(self, expr: Node, addr_dst: Register, len_dst: Register, cap_dst: Register) -> Tuple[List[Instruction], Union[Imm, Register], Union[Imm, Register]]:
         """Computes the address of `expr`'s own data into `addr_dst`,
-        and returns (instructions, length_operand): length_operand is
-        an Imm (a compile-time constant) when `expr` is array-typed,
-        or `len_dst` itself (populated with a runtime value read out
-        of a slice's own descriptor) when `expr` is slice-typed.
-        Shared by gen_index_address_into (indexing, `base[i]`) and
-        gen_slice_into (slicing, `base[low:high]`) -- both need
-        exactly this same "address plus length, however each is
-        represented" information about whatever's on the left of a
-        `[...]` expression, and both already have to branch on which
-        kind of Operand comes back for their own bounds-check
-        comparison.
+        and returns (instructions, length_operand, cap_operand): each
+        operand is an Imm (a compile-time constant, equal to the
+        array's own declared size for BOTH len and cap -- an array has
+        no separate capacity concept of its own) when `expr` is
+        array-typed, or `len_dst`/`cap_dst` themselves (populated with
+        a runtime value read out of a slice's own descriptor) when
+        `expr` is slice-typed. cap_dst is computed and populated
+        unconditionally, even by callers (gen_index_address_into) that
+        never read it back out afterward -- cheap enough (one extra
+        Imm, or one extra runtime read alongside the len one already
+        happening) that a single, uniform three-value contract beats
+        making it optional.
+
+        Shared by gen_index_address_into (indexing, `base[i]`, which
+        never needs cap: an index equal to len is already out of
+        bounds regardless of any spare room past it) and gen_slice_
+        into (slicing, `base[low:high]`, which needs cap for both its
+        own bounds check and the result's own capacity -- see its own
+        docstring), and now gen_append_call_into too (which needs all
+        three fields as genuine input values, not just for a bounds
+        check) -- all three need exactly this same "address plus
+        length (plus, now, capacity), however each is represented"
+        information about whatever's on the left of a `[...]`
+        expression or append's own first argument, and each already
+        has to branch on which kind of Operand comes back for its own
+        use of length.
 
         A slice-typed `expr` can be a Variable (a named slice, loaded
         directly out of its own %rbp-relative slot), a Slice (an
@@ -2516,11 +2627,11 @@ class CodeGenerator:
         `arr[:][0]`, or `matrix[:][0][0]` -- materialized into a
         dedicated, per-function scratch slot, _unnamed_slice_temp_
         offset, via gen_slice_into, then immediately read back out
-        into addr_dst/len_dst), a Call to a function that itself
-        returns a slice (materialized into that exact same scratch
-        slot, via gen_slice_call_into, then read back out the same
-        way -- it used to arrive already sitting in %rax/%rdx by a
-        dedicated two-register return convention, needing no scratch
+        into addr_dst/len_dst/cap_dst), a Call to a function that
+        itself returns a slice (materialized into that exact same
+        scratch slot, via gen_slice_call_into, then read back out the
+        same way -- it used to arrive already sitting in %rax/%rdx by
+        a dedicated two-register return convention, needing no scratch
         slot at all, back when a slice's own descriptor still fit two
         registers; see the module docstring's SLICE PARAMETERS AND
         RETURNS section for why that's no longer true), or an Index
@@ -2572,23 +2683,25 @@ class CodeGenerator:
             if isinstance(expr, ArrayLiteral):
                 instructions = self.gen_array_literal_heap_alloc_into(expr)
                 instructions.append(MovQ(src=Register('rax'), dst=addr_dst))
-                return instructions, Imm(base_type.size)
+                return instructions, Imm(base_type.size), Imm(base_type.size)
             instructions = self.gen_array_address_into(expr, addr_dst)
-            return instructions, Imm(base_type.size)
+            return instructions, Imm(base_type.size), Imm(base_type.size)
         if base_type.kind == TypeKind.SLICE:
             if isinstance(expr, Variable):
                 offset = self._local_offset(expr.name)
                 instructions = [
                     MovQ(src=Memory('rbp', offset + 8), dst=len_dst),
+                    MovQ(src=Memory('rbp', offset + 16), dst=cap_dst),
                     MovQ(src=Memory('rbp', offset), dst=addr_dst),
                 ]
-                return instructions, len_dst
+                return instructions, len_dst, cap_dst
             if isinstance(expr, Slice):
                 temp = self._unnamed_slice_temp_offset
                 instructions = self.gen_slice_into(expr, Memory('rbp', temp))
                 instructions.append(MovQ(src=Memory('rbp', temp + 8), dst=len_dst))
+                instructions.append(MovQ(src=Memory('rbp', temp + 16), dst=cap_dst))
                 instructions.append(MovQ(src=Memory('rbp', temp), dst=addr_dst))
-                return instructions, len_dst
+                return instructions, len_dst, cap_dst
             if isinstance(expr, Index):
                 # A slice-typed Index result (e.g. `rows[0]`, one
                 # element of an array OF slices, used directly as the
@@ -2599,8 +2712,9 @@ class CodeGenerator:
                 temp = self._unnamed_slice_temp_offset
                 instructions = self.gen_slice_value_into(expr, Memory('rbp', temp))
                 instructions.append(MovQ(src=Memory('rbp', temp + 8), dst=len_dst))
+                instructions.append(MovQ(src=Memory('rbp', temp + 16), dst=cap_dst))
                 instructions.append(MovQ(src=Memory('rbp', temp), dst=addr_dst))
-                return instructions, len_dst
+                return instructions, len_dst, cap_dst
             if isinstance(expr, Call):
                 # A slice-returning Call now writes through the hidden-
                 # pointer convention (see gen_slice_call_into), just
@@ -2613,8 +2727,9 @@ class CodeGenerator:
                 temp = self._unnamed_slice_temp_offset
                 instructions = self.gen_slice_call_into(Memory('rbp', temp), expr)
                 instructions.append(MovQ(src=Memory('rbp', temp + 8), dst=len_dst))
+                instructions.append(MovQ(src=Memory('rbp', temp + 16), dst=cap_dst))
                 instructions.append(MovQ(src=Memory('rbp', temp), dst=addr_dst))
-                return instructions, len_dst
+                return instructions, len_dst, cap_dst
             raise CodegenError(
                 f"Cannot use a {type(expr).__name__} directly as the "
                 f"base of an index or slice expression when it's "
@@ -2701,10 +2816,15 @@ class CodeGenerator:
 
         # len_reg only matters for a slice base (a runtime length);
         # picked dynamically, distinct from dst, since dst could in
-        # principle be any register a caller passes.
+        # principle be any register a caller passes. cap_reg is never
+        # actually read afterward -- ordinary indexing never needs
+        # capacity, only length -- but gen_indexable_base_into's own
+        # contract always populates it, so this still needs a real,
+        # distinct register to receive it into, picked the same way.
         len_reg = Register('rdx' if dst.name != 'rdx' else 'r10')
+        cap_reg = next(Register(r) for r in ('rdx', 'r10', 'r11') if r not in (dst.name, len_reg.name))
 
-        instructions, length_operand = self.gen_indexable_base_into(expr.array, dst, len_reg)
+        instructions, length_operand, _ = self.gen_indexable_base_into(expr.array, dst, len_reg, cap_reg)
         instructions.append(Push(dst))
         is_runtime_length = isinstance(length_operand, Register)
         if is_runtime_length:
@@ -2768,22 +2888,26 @@ class CodeGenerator:
         -- unlike ordinary indexing (see gen_index_address_into),
         where an index equal to the array's own size is already out
         of bounds, `low` and `high` are both allowed to equal the
-        base's own length (`arr[5:5]` on a 5-element array is a valid,
-        empty-slice-producing expression) -- so the boundary itself
-        genuinely differs here, not just the label it jumps to.
+        base's own CAP (`arr[5:5]` on a 5-element array, or `s[5:5]`
+        on a slice whose own cap is 5 even if its len is smaller, is a
+        valid, empty-slice-producing expression) -- so the boundary
+        itself genuinely differs here, not just the label it jumps to.
 
-        cap is set equal to the newly-computed len (high - low) here,
-        not the base's own remaining capacity (base_cap - low) -- the
-        re-slicing rule real Go has, where a re-sliced view inherits
-        room to grow into whatever's left of its PARENT's own backing
-        array. That's a deliberate, temporary narrowing: this bounds
-        check still only validates against the base's own LEN (not its
-        cap), matching every check here before cap existed at all --
-        both are follow-up work, landing together with `append` itself
-        rather than disconnected from it, since a genuinely cap-aware
-        re-slice is otherwise unobservable and untestable in isolation
-        (nothing yet can produce a slice whose cap differs from its
-        len for one to actually inherit).
+        Checked against CAP, not len -- `high` may reach all the way
+        to the base's own remaining CAPACITY, matching Go's actual
+        re-slicing rule, not just its current length. This is what
+        lets a re-sliced view grow into room a PRIOR append (or the
+        base's own construction) already reserved: cap is computed as
+        base_cap - low below, inheriting the base's own remaining
+        capacity from the new starting point, rather than simply
+        matching the newly-computed len (high - low) the way it used
+        to before cap-aware re-slicing existed -- see the module
+        docstring's APPEND BUILTIN section for why this and `append`
+        itself landed together rather than as two separate,
+        sequential pieces of work: with every other slice-producing
+        site setting cap equal to len, there was no way to observe or
+        test a genuinely cap-aware re-slice until append existed to
+        first produce a slice whose cap differs from its len at all.
 
         dst_mem.base is protected on the stack too, whenever it isn't
         'rbp', across ALL of the above -- pushed before even
@@ -2819,18 +2943,29 @@ class CodeGenerator:
 
         addr_reg = Register('rbx')
         len_reg = Register('r11')
-        base_instructions, length_operand = self.gen_indexable_base_into(expr.array, addr_reg, len_reg)
+        cap_reg = Register('r14')
+        base_instructions, length_operand, cap_operand = self.gen_indexable_base_into(expr.array, addr_reg, len_reg, cap_reg)
         instructions.extend(base_instructions)
         is_runtime_length = isinstance(length_operand, Register)
 
         instructions.append(Push(addr_reg))
         if is_runtime_length:
+            # Pushed cap BEFORE len (the reverse of the field order in
+            # the descriptor itself) specifically so len ends up on
+            # TOP of the stack -- preserving, unchanged, the existing
+            # "peek at (%rsp) for len's own default" logic just below,
+            # which predates cap existing at all.
+            instructions.append(Push(cap_reg))
             instructions.append(Push(len_reg))
 
         # Resolve `high` before `low`, so that defaulting it (when the
         # base's length is a runtime value) can safely peek the top of
         # the stack -- nothing else has been pushed since the length
-        # was, right above.
+        # was, right above. high still defaults to the base's own LEN
+        # here, not its cap -- `arr[3:]` means "from 3 to the current
+        # end", exactly as before; only the UPPER BOUND high is
+        # allowed to reach when explicitly given (checked below) has
+        # changed, not what an omitted one defaults to.
         if expr.high is not None:
             instructions.extend(self.gen_expr_into(expr.high, Register('eax')))
         elif is_runtime_length:
@@ -2854,17 +2989,43 @@ class CodeGenerator:
         instructions.append(Pop(high_reg))
         if is_runtime_length:
             instructions.append(Pop(len_reg))
+            instructions.append(Pop(cap_reg))
         instructions.append(Pop(addr_reg))
 
-        # Bounds check: 0 <= low <= high <= length.
+        # Bounds check: 0 <= low <= high <= CAP -- not len. This is
+        # the real, deliberate change from before cap existed: Go's
+        # own re-slicing rule allows high to reach all the way to the
+        # base's remaining CAPACITY, not just its current length,
+        # which is exactly what lets a re-slice grow into room a
+        # PRIOR append (or the base's own construction) already
+        # reserved. `low` is bounded by cap too, for the same reason
+        # (low can equal cap, producing a valid, empty, zero-capacity
+        # slice at the very end -- the base case a chain of further
+        # re-slices or appends would still handle correctly).
         fail_label = self._get_bounds_check_fail_label("slice bounds out of range")
-        length_op = Register('r11d') if is_runtime_length else length_operand
-        instructions.append(Cmp(src=length_op, dst=low_32))
+        cap_op = Register('r14d') if is_runtime_length else cap_operand
+        instructions.append(Cmp(src=cap_op, dst=low_32))
         instructions.append(Ja(fail_label))
-        instructions.append(Cmp(src=length_op, dst=high_32))
+        instructions.append(Cmp(src=cap_op, dst=high_32))
         instructions.append(Ja(fail_label))
         instructions.append(Cmp(src=high_32, dst=low_32))
         instructions.append(Ja(fail_label))
+
+        # new_cap = cap - low -- the base's own remaining capacity
+        # from the new starting point, matching Go's actual re-slicing
+        # rule (see this method's own docstring for the growth-policy
+        # motivation: this is what lets `append` sometimes grow a
+        # re-sliced view into its parent's own backing array instead
+        # of always allocating fresh). Computed into its own register,
+        # BEFORE low is scaled below, for the same reason new_len
+        # (high - low, just after) already has to be: scaling would
+        # destroy the unscaled value both of these still need. Mov
+        # (not MovQ) here since cap_op may be a 32-bit Imm (an array
+        # base) as easily as a 32-bit register (a slice base) -- both
+        # are valid Mov sources into a 32-bit destination alike.
+        new_cap_32 = Register('r13d')
+        instructions.append(Mov(src=cap_op, dst=new_cap_32))
+        instructions.append(Sub(src=low_32, dst=new_cap_32))
 
         # len = high - low, computed BEFORE low is scaled below --
         # scaling would destroy the unscaled value this still needs.
@@ -2884,10 +3045,7 @@ class CodeGenerator:
             instructions.append(Pop(Register(dst_mem.base)))
         instructions.append(MovQ(src=addr_reg, dst=Memory(dst_mem.base, dst_mem.offset)))
         instructions.append(MovQ(src=high_reg, dst=Memory(dst_mem.base, dst_mem.offset + 8)))
-        # cap == len for now -- see this method's own docstring for
-        # why a re-slice doesn't yet inherit its base's own remaining
-        # capacity the way it eventually will.
-        instructions.append(MovQ(src=high_reg, dst=Memory(dst_mem.base, dst_mem.offset + 16)))
+        instructions.append(MovQ(src=Register('r13'), dst=Memory(dst_mem.base, dst_mem.offset + 16)))
         return instructions
 
     def gen_none_into(self, dst_mem: Memory, target_type: Type) -> List[Instruction]:
@@ -3038,6 +3196,8 @@ class CodeGenerator:
             ]
 
         if isinstance(expr, Call):
+            if expr.name == 'append':
+                return self.gen_append_call_into(expr, dst_mem)
             return self.gen_slice_call_into(dst_mem, expr)
 
         if isinstance(expr, Index):
@@ -3071,6 +3231,258 @@ class CodeGenerator:
             return instructions
 
         raise CodegenError(f"No codegen rule for a slice-typed value: {expr!r}")
+
+    def _gen_write_value_at_address_into(self, value_expr: Node, element_type: Type, addr_reg: Register) -> List[Instruction]:
+        """Writes value_expr (evaluated as element_type) into
+        Memory(addr_reg, 0) -- shared by gen_append_call_into's own
+        reuse and reallocate paths, both of which need to write the
+        newly-appended element at a computed (not fixed-offset)
+        address, with the element's own type possibly being scalar,
+        array, or slice.
+
+        For an ARRAY or SLICE element type, this just hands addr_reg
+        straight to gen_array_value_into/gen_slice_value_into as an
+        ordinary Memory destination -- both already protect an
+        arbitrary base internally (see their own docstrings), so
+        there's nothing extra to do here. For a scalar (int/bool/str),
+        addr_reg is protected manually, matching gen_array_literal_
+        into's own scalar-element pattern exactly: push addr_reg,
+        compute the value (which could itself involve a function call
+        that clobbers addr_reg, if value_expr is arbitrarily complex),
+        stash the computed value in %r8/%r8d (a register distinct from
+        addr_reg in every actual call site), pop addr_reg back, then
+        write from %r8/%r8d -- never straight from %eax/%rax, which
+        popping addr_reg back into would otherwise have to clobber."""
+        if element_type.kind == TypeKind.SLICE:
+            return self.gen_slice_value_into(value_expr, Memory(addr_reg.name, 0))
+        if element_type.kind == TypeKind.ARRAY:
+            return self.gen_array_value_into(value_expr, Memory(addr_reg.name, 0), element_type)
+        instructions = [Push(addr_reg)]
+        instructions.extend(self.gen_expr_into(value_expr, Register('eax')))
+        if element_type == Type.STR:
+            instructions.append(MovQ(src=Register('rax'), dst=Register('r8')))
+            instructions.append(Pop(addr_reg))
+            instructions.append(MovQ(src=Register('r8'), dst=Memory(addr_reg.name, 0)))
+        else:
+            instructions.append(Mov(src=Register('eax'), dst=Register('r8d')))
+            instructions.append(Pop(addr_reg))
+            instructions.append(Mov(src=Register('r8d'), dst=Memory(addr_reg.name, 0)))
+        return instructions
+
+    def gen_append_call_into(self, expr: Call, dst_mem: Memory) -> List[Instruction]:
+        """`append(s, value)` -- Go-style: writes a NEW {ptr, len, cap}
+        descriptor into dst_mem, never mutating s's own three fields
+        (s keeps pointing at exactly what it always did, with exactly
+        its own original len and cap) -- see the module docstring's
+        APPEND BUILTIN section for the full growth-and-aliasing story
+        this is built around.
+
+        s (expr.args[0]) is restricted to a Variable or NoneLiteral --
+        narrower than len's own, deliberately broad "whatever
+        gen_indexable_base_into accepts" restriction (a re-slice, an
+        Index, a slice-returning Call, ...): append exists specifically
+        to feed a reassignment (`x = append(x, v)`), and the added
+        complexity of materializing an arbitrary slice EXPRESSION into
+        a scratch slot first, just to immediately read it back out as
+        an input here, isn't taken on for that comparatively rare
+        shape. A real, visible restriction, not silently decided --
+        flagged as a deliberate scope choice, not an oversight.
+
+        s's own three fields are loaded into CALLEE-SAVED registers
+        (%rbx/%r12/%r13 for ptr/len/cap) -- not caller-saved ones --
+        specifically because the REALLOCATE path below calls malloc,
+        which (like any real, ABI-conforming function) is free to
+        clobber any caller-saved register but is OBLIGATED to preserve
+        callee-saved ones; the exact same guarantee gen_array_literal_
+        heap_alloc_into and gen_function's own heap-allocated-parameter
+        handling already rely on.
+
+        The reuse-vs-reallocate decision is a single comparison: len
+        >= cap means no spare room (the only way that can happen,
+        given the invariant len <= cap always holds, is len == cap
+        exactly), so `jae` -- not `jne` or `jg` -- is both correct and
+        sufficient.
+
+        REUSE PATH (len < cap): the new element is written directly
+        into the EXISTING backing array, at ptr + len*element_width --
+        s's own array, still fully intact and unaffected, since s's
+        own len field is never touched. This is the observable
+        aliasing this whole growth policy exists to make possible: a
+        LATER append on some other slice that shares this same backing
+        array (e.g. one produced by an earlier append that over-
+        allocated) can see this write, and vice versa.
+
+        REALLOCATE PATH (len == cap): new_cap is computed from cap
+        alone (the growth policy -- see below), a fresh block of
+        new_cap*element_width bytes is malloc'd, the existing len
+        elements are copied into it via a genuine RUNTIME loop (len is
+        a runtime value here, unlike every other array copy in this
+        file, which always moves a compile-time-known number of
+        bytes -- see the loop's own comments), and only then is the
+        new element written into the new array. The OLD backing array
+        is simply never freed, matching this compiler's existing
+        no-`free`-anywhere memory model everywhere else.
+
+        GROWTH POLICY: new_cap = cap*2 if cap < 256, else cap +
+        cap//4, with a cap==0 floor of 1. This is the general max(len+1,
+        doubled-or-quartered) formula simplified: reallocation only
+        ever happens when len == cap exactly, so `needed` (len+1) is
+        always cap+1, and doubling already exceeds cap+1 for any cap
+        >= 1 (quartering trivially does too, for cap >= 256) -- the
+        max only actually matters, and only ever resolves in needed's
+        favor, at cap == 0, which is exactly the explicit floor case
+        here. cap/4 is computed via a right shift by 2 (arithmetic,
+        though cap's own non-negativity means a logical shift would
+        give the identical result) rather than idiv -- idiv can't take
+        an immediate divisor at all on x86, and a shift is simpler
+        besides.
+
+        Both paths write value into its final resting place via
+        _gen_write_value_at_address_into, sharing one implementation
+        for a scalar, array, or slice element type alike, and both
+        protect dst_mem.base (whenever it isn't 'rbp') across their own
+        entire computation the same way every other slice-producing
+        case in this file does -- popped back only immediately before
+        the final three-field write actually needs it.
+        """
+        slice_arg, value_arg = expr.args
+        if not isinstance(slice_arg, (Variable, NoneLiteral)):
+            raise CodegenError(
+                f"'append' requires a variable (or 'none') as its "
+                f"first argument, not {type(slice_arg).__name__} -- "
+                f"assign it to a variable first"
+            )
+        slice_type = self._type_of(slice_arg)
+        element_type = slice_type.element_type
+        element_width = type_byte_width(element_type)
+
+        protect_dst = dst_mem.base != 'rbp'
+        instructions = []
+        if protect_dst:
+            instructions.append(Push(Register(dst_mem.base)))
+
+        r_ptr = Register('rbx')
+        r_len = Register('r12')
+        r_cap = Register('r13')
+        r_len_32 = Register('r12d')
+        r_cap_32 = Register('r13d')
+
+        if isinstance(slice_arg, NoneLiteral):
+            instructions.append(MovQ(src=Imm(0), dst=r_ptr))
+            instructions.append(MovQ(src=Imm(0), dst=r_len))
+            instructions.append(MovQ(src=Imm(0), dst=r_cap))
+        else:
+            offset = self._local_offset(slice_arg.name)
+            instructions.append(MovQ(src=Memory('rbp', offset), dst=r_ptr))
+            instructions.append(MovQ(src=Memory('rbp', offset + 8), dst=r_len))
+            instructions.append(MovQ(src=Memory('rbp', offset + 16), dst=r_cap))
+
+        realloc_label = self.new_label("append_realloc")
+        end_label = self.new_label("append_end")
+
+        # len >= cap (equivalently, given len <= cap always, len ==
+        # cap exactly) means no spare room -- must reallocate.
+        instructions.append(Cmp(src=r_cap_32, dst=r_len_32))
+        instructions.append(Jae(realloc_label))
+
+        # REUSE PATH: len < cap. target = ptr + len*element_width.
+        target_addr = Register('r10')
+        instructions.append(MovQ(src=r_ptr, dst=target_addr))
+        instructions.append(Mov(src=r_len_32, dst=Register('r11d')))
+        instructions.append(IMul(src=Imm(element_width), dst=Register('r11d')))
+        instructions.append(AddQ(src=Register('r11'), dst=target_addr))
+        instructions.extend(self._gen_write_value_at_address_into(value_arg, element_type, target_addr))
+        instructions.append(Add(src=Imm(1), dst=r_len_32))
+        if protect_dst:
+            instructions.append(Pop(Register(dst_mem.base)))
+        instructions.append(MovQ(src=r_ptr, dst=Memory(dst_mem.base, dst_mem.offset)))
+        instructions.append(MovQ(src=r_len, dst=Memory(dst_mem.base, dst_mem.offset + 8)))
+        instructions.append(MovQ(src=r_cap, dst=Memory(dst_mem.base, dst_mem.offset + 16)))
+        instructions.append(Jmp(end_label))
+
+        # REALLOCATE PATH: len == cap. Compute new_cap from cap alone
+        # (see this method's own docstring for the growth-policy
+        # arithmetic), in place -- the old cap value is never needed
+        # again once this decides new_cap, so overwriting r_cap_32
+        # here is safe.
+        instructions.append(Label(realloc_label))
+        zero_label = self.new_label("append_cap_zero")
+        quarter_label = self.new_label("append_cap_quarter")
+        growth_done_label = self.new_label("append_growth_done")
+
+        instructions.append(Cmp(src=Imm(0), dst=r_cap_32))
+        instructions.append(Je(zero_label))
+        instructions.append(Cmp(src=Imm(256), dst=r_cap_32))
+        instructions.append(Jae(quarter_label))
+        instructions.append(IMul(src=Imm(2), dst=r_cap_32))
+        instructions.append(Jmp(growth_done_label))
+        instructions.append(Label(zero_label))
+        instructions.append(Mov(src=Imm(1), dst=r_cap_32))
+        instructions.append(Jmp(growth_done_label))
+        instructions.append(Label(quarter_label))
+        instructions.append(Mov(src=r_cap_32, dst=Register('eax')))
+        instructions.append(Mov(src=Imm(2), dst=Register('ecx')))
+        instructions.append(ShiftRightArithmetic(dst=r_cap_32))
+        instructions.append(Add(src=Register('eax'), dst=r_cap_32))
+        instructions.append(Label(growth_done_label))
+        # r_cap_32 (and, via the zero-extension a 32-bit write always
+        # gives its own 64-bit register, r_cap itself) now holds
+        # new_cap.
+
+        instructions.append(Mov(src=r_cap_32, dst=Register('edi')))
+        instructions.append(IMul(src=Imm(element_width), dst=Register('edi')))
+        instructions.append(CallInstr('malloc'))
+        r_new_ptr = Register('r14')
+        instructions.append(MovQ(src=Register('rax'), dst=r_new_ptr))
+
+        # Copy the existing len elements from the OLD array (r_ptr)
+        # into the NEW one (r_new_ptr), element_width bytes each -- a
+        # genuine RUNTIME loop, since len is a runtime value here,
+        # unlike every other array copy in this file (gen_array_copy's
+        # own flat-copy loop), which always moves a compile-time-known
+        # total width. Each iteration reuses gen_array_copy anyway, for
+        # exactly ONE element's worth of data (type_byte_width(element_
+        # type) bytes, dispatching on leaf_type(element_type) for the
+        # per-chunk width) -- that method's own logic already
+        # generalizes correctly to a single, arbitrary-type value, not
+        # just a whole array, so no separate "copy one value" helper
+        # was needed just for this loop body.
+        loop_start_label = self.new_label("append_copy_loop")
+        loop_done_label = self.new_label("append_copy_done")
+        i_32 = Register('r9d')
+        instructions.append(Mov(src=Imm(0), dst=i_32))
+        instructions.append(Label(loop_start_label))
+        instructions.append(Cmp(src=r_len_32, dst=i_32))
+        instructions.append(Jae(loop_done_label))
+        instructions.append(Mov(src=i_32, dst=Register('r11d')))
+        instructions.append(IMul(src=Imm(element_width), dst=Register('r11d')))
+        instructions.append(MovQ(src=r_ptr, dst=Register('r10')))
+        instructions.append(AddQ(src=Register('r11'), dst=Register('r10')))
+        instructions.append(MovQ(src=r_new_ptr, dst=Register('r8')))
+        instructions.append(AddQ(src=Register('r11'), dst=Register('r8')))
+        instructions.extend(self.gen_array_copy(Memory('r8', 0), Memory('r10', 0), element_type))
+        instructions.append(Add(src=Imm(1), dst=i_32))
+        instructions.append(Jmp(loop_start_label))
+        instructions.append(Label(loop_done_label))
+
+        # Write the new element at new_ptr + len*element_width -- the
+        # one slot the copy loop above deliberately left untouched.
+        target_addr2 = Register('r10')
+        instructions.append(MovQ(src=r_new_ptr, dst=target_addr2))
+        instructions.append(Mov(src=r_len_32, dst=Register('r11d')))
+        instructions.append(IMul(src=Imm(element_width), dst=Register('r11d')))
+        instructions.append(AddQ(src=Register('r11'), dst=target_addr2))
+        instructions.extend(self._gen_write_value_at_address_into(value_arg, element_type, target_addr2))
+
+        instructions.append(Add(src=Imm(1), dst=r_len_32))
+        if protect_dst:
+            instructions.append(Pop(Register(dst_mem.base)))
+        instructions.append(MovQ(src=r_new_ptr, dst=Memory(dst_mem.base, dst_mem.offset)))
+        instructions.append(MovQ(src=r_len, dst=Memory(dst_mem.base, dst_mem.offset + 8)))
+        instructions.append(MovQ(src=r_cap, dst=Memory(dst_mem.base, dst_mem.offset + 16)))
+
+        instructions.append(Label(end_label))
+        return instructions
 
     def gen_array_copy(self, dst_mem: Memory, src_mem: Memory, array_type: Type) -> List[Instruction]:
         """Copies array_type's worth of data from src_mem to dst_mem --
@@ -4348,10 +4760,10 @@ class CodeGenerator:
         Reuses gen_indexable_base_into for the slice's own address
         (see its own docstring for why the base must be a bare
         Variable when it's slice-typed) even though only the address,
-        not the length it also computes, is actually needed here --
-        one harmless, unused extra load rather than a second, narrower
-        helper that would duplicate its Variable-vs-Index and array-
-        vs-slice handling for a single call site.
+        not the length or capacity it also computes, is actually
+        needed here -- two harmless, unused extra loads rather than a
+        second, narrower helper that would duplicate its Variable-vs-
+        Index and array-vs-slice handling for a single call site.
 
         Uses CmpQ (64-bit), not the ordinary 32-bit Cmp every other
         comparison in this file uses -- a pointer is a full 64-bit
@@ -4362,7 +4774,8 @@ class CodeGenerator:
         slice_expr = expr.left if self._type_of(expr.left).kind == TypeKind.SLICE else expr.right
         addr_reg = Register('rbx')
         len_reg = Register('r12')  # unused here; gen_indexable_base_into always computes it
-        instructions, _ = self.gen_indexable_base_into(slice_expr, addr_reg, len_reg)
+        cap_reg = Register('r13')  # unused here too
+        instructions, _, _ = self.gen_indexable_base_into(slice_expr, addr_reg, len_reg, cap_reg)
         instructions.append(CmpQ(src=Imm(0), dst=addr_reg))
         cc = 'e' if expr.op == BinaryOp.EQUAL else 'ne'
         byte_dst = as_byte_register(dst)
@@ -4502,8 +4915,8 @@ class CodeGenerator:
                     f"typed, not {type(arg).__name__} -- assign it to "
                     f"a variable first"
                 )
-            instructions, length_operand = self.gen_indexable_base_into(
-                arg, Register('rbx'), Register('r12')
+            instructions, length_operand, _ = self.gen_indexable_base_into(
+                arg, Register('rbx'), Register('r12'), Register('r13')
             )
             instructions.extend(self._gen_print_static(str(arg_type)))
             instructions.extend(self._gen_print_collection(length_operand, arg_type))
@@ -4592,8 +5005,9 @@ class CodeGenerator:
             raise CodegenError(f"Call codegen requires dst == %eax, got: {dst!r}")
         arg = expr.args[0]
         len_reg = Register('r12')
-        instructions, length_operand = self.gen_indexable_base_into(
-            arg, Register('rbx'), len_reg
+        cap_reg = Register('r13')
+        instructions, length_operand, _ = self.gen_indexable_base_into(
+            arg, Register('rbx'), len_reg, cap_reg
         )
         if isinstance(length_operand, Register):
             instructions.append(Mov(src=Register('r12d'), dst=dst))

@@ -14,9 +14,13 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
+- `append` to unnamed slices.
+- Structs.
+- Fix print for collections to build str buffer and call print once.
 - `assert`
 - `in` keyword.
 - Pass function calls to print.
+- `cap` builtin?
 - Compound index assign.
 - Ternary.
 - For loops.
@@ -26,14 +30,13 @@ Updates:
 - Stack based params to get around parameter limit.
 - Pass array literals to function calls.
 - Explore per frame vs per array heap promotion.
-- Append.
 - Array equality.
 - Slice equality?
 - Escape analysis for arrays and slices.
-- `type` Type.
-- Fix print for collections to build str buffer and call print once.
+- `type` Type?
 - Variadic functions.
 - Make `append` variadic.
+- Spread operator.
 - GC...
 - `is` keyword.
 - Pointers?

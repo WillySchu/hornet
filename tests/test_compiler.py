@@ -47,6 +47,8 @@ Organization:
     TestHeapAllocatedArrays             (12 tests)
     TestSlices                          (10 tests)
     TestSliceBoundsChecking             ( 6 tests)
+    TestCapAwareSlicing                 ( 4 tests)
+    TestAppend                          (15 tests)
     TestSliceParametersAndReturns       (15 tests)
     TestIndexingUnnamedSlices           (11 tests)
     TestPrintArraysAndSlices            (11 tests)
@@ -58,7 +60,7 @@ Organization:
     TestIndexAssignIntoArrayOfSlices    ( 5 tests)
     TestSemanticErrors                  (75 tests)
                                         ----------
-                                        456 tests total
+                                        475 tests total
 
 A NOTE ON ARRAYS
 -----------------------------------------------------------------
@@ -229,30 +231,34 @@ across a call, forwarding a returned slice for free, and more).
 
 A NOTE ON TestSliceParametersAndReturns
 -----------------------------------------------------------------
-A slice crosses a function boundary via TWO registers directly -- its
-own ptr, then len -- matching exactly what a real C compiler does for
-an equivalent `struct{void*,long}` passed or returned by value under
-the SysV ABI: as a parameter, it consumes two consecutive integer
-argument registers; as a return value, it comes back in %rax:%rdx.
-Neither a hidden pointer (arrays' own return convention) nor a copy
-(arrays' own parameter convention) is involved at all -- a slice
-parameter is just an alias crossing the boundary, exactly like any
-other slice variable.
+A slice crosses a function boundary via three consecutive integer
+argument registers as a PARAMETER (its own ptr, len, then cap --
+matching exactly what a real C compiler does for an equivalent
+`struct{void*,long,long}` passed by value under the SysV ABI), and via
+the same hidden-output-pointer convention arrays already use as a
+RETURN VALUE -- not copied on entry the way an array parameter is (a
+slice parameter is just an alias crossing the boundary, exactly like
+any other slice variable). A slice return used to work differently:
+its whole descriptor fit in two registers (%rax:%rdx directly, the
+SysV ABI's own convention for a small, all-integer eightbyte struct
+return, needing no hidden pointer at all) before cap was added as a
+third field grew it past what any two- or three-register return shape
+this compiler has precedent for could hold.
 
-test_slice_interleaved_with_scalar_parameters and test_two_slices_
-and_two_scalars_are_exactly_six_slots are the tests that actually
-prove the trickiest part of this feature holds, not just that a slice
-CAN be a parameter: since a slice now costs 2 of the 6 available
-argument-register slots instead of 1, the mapping from argument/
-parameter INDEX to register INDEX stopped being 1:1 on both the
-caller side (_gen_call_arguments_into) and the callee side
-(gen_function's own parameter loop) -- both now track a running slot
-count instead, and these tests confirm a slice's own two slots land
-correctly among ordinary scalar ones regardless of position, not just
-when a slice happens to be the only or the last parameter.
+test_slice_interleaved_with_scalar_parameters and test_one_slice_and_
+three_scalars_are_exactly_six_slots are the tests that actually prove
+the trickiest part of this feature holds, not just that a slice CAN be
+a parameter: since a slice now costs 3 of the 6 available argument-
+register slots instead of 1, the mapping from argument/parameter INDEX
+to register INDEX stopped being 1:1 on both the caller side
+(_gen_call_arguments_into) and the callee side (gen_function's own
+parameter loop) -- both now track a running slot count instead, and
+these tests confirm a slice's own three slots land correctly among
+ordinary scalar ones regardless of position, not just when a slice
+happens to be the only or the last parameter.
 
-test_exactly_six_slots_from_three_slice_parameters and test_seven_
-slots_from_three_slices_and_a_scalar_is_rejected are the positive/
+test_exactly_six_slots_from_two_slice_parameters and test_seven_
+slots_from_two_slices_and_a_scalar_is_rejected are the positive/
 negative pair proving the boundary itself is exactly right: 6 slots
 accepted, 7 cleanly rejected with a clear message -- not silently
 truncated or off by one in either direction, which an easy mis-count
@@ -264,13 +270,15 @@ test that actually proves a slice parameter is a genuine alias
 crossing the function boundary, not a copy -- the same aliasing
 guarantee slices already have within a single function, now verified
 to survive a call. test_forwarding_a_slice_returning_calls_result is
-the free case the %rax:%rdx convention was specifically chosen for:
-gen_slice_call_into already leaves a callee's own result exactly
-where a caller needs to leave its own, so `return bar()` (bar also
-returning a slice) costs nothing beyond the call itself -- no
-intermediate copy, unlike an array-returning function's own hidden-
-pointer forwarding (which avoids a copy too, but still has to thread
-the SAME address one level deeper explicitly).
+the free case the hidden-pointer return convention makes possible:
+gen_slice_call_into just passes the SAME destination address one
+level deeper, so `return bar()` (bar also returning a slice) costs
+nothing beyond the call itself -- no intermediate copy, exactly like
+an array-returning function's own hidden-pointer forwarding already
+works (a slice's own return used to work differently here, coming
+back directly in %rax:%rdx instead -- see codegen.py's own SLICE
+PARAMETERS AND RETURNS section for why that stopped being possible
+once a slice's own descriptor grew a third field, cap).
 
 test_slice_parameter_with_heap_allocated_array_parameter confirms a
 slice parameter's own register-based passing and an array parameter's
@@ -4044,10 +4052,10 @@ class TestSlices:
         )
 
     def test_slice_return(self):
-        """A slice return value comes back in %rax:%rdx directly --
-        the SysV ABI's own convention for a small, all-integer-
-        eightbyte struct return -- not through the hidden-pointer
-        mechanism arrays use."""
+        """A slice return value now goes through the same hidden-
+        output-pointer mechanism arrays already use -- not through a
+        plain %rax:%rdx pair the way it used to, back when a slice's
+        own descriptor still fit two registers."""
         assert_program_exit_code(
             "def []int make():\n"
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
@@ -4136,29 +4144,29 @@ class TestSliceBoundsChecking:
 
 # ---------------------------------------------------------------------------
 # Slice parameters and return values: a slice crosses a function
-# boundary via TWO registers directly -- its own ptr, then len -- not
-# through a hidden pointer the way an array's return does, and not
-# copied on entry the way an array parameter is. This matches exactly
-# what a real C compiler does for an equivalent `struct{void*,long}`
-# passed or returned by value under the SysV ABI: as a PARAMETER, it
-# consumes two consecutive integer argument registers; as a RETURN
-# VALUE, it comes back in %rax:%rdx (first eightbyte in %rax, second
-# in %rdx).
+# boundary via THREE consecutive integer argument registers as a
+# PARAMETER (its own ptr, len, then cap -- matching exactly what a real
+# C compiler does for an equivalent `struct{void*,long,long}` passed by
+# value under the SysV ABI), not copied on entry the way an array
+# parameter is. As a RETURN VALUE, it now goes through the same hidden-
+# output-pointer convention arrays already use -- not through a plain
+# %rax:%rdx pair the way it used to, back when a slice's own descriptor
+# still fit two registers, before cap was added as a third field.
 #
 # test_slice_interleaved_with_scalar_parameters and
-# test_two_slices_and_two_scalars_are_exactly_six_slots are the tests
+# test_one_slice_and_three_scalars_are_exactly_six_slots are the tests
 # that actually prove the trickiest part of this feature holds: since
-# a slice now costs 2 of the 6 available argument-register slots
+# a slice now costs 3 of the 6 available argument-register slots
 # instead of 1, the mapping from argument/parameter INDEX to register
 # INDEX is no longer 1:1 -- both the caller side
 # (_gen_call_arguments_into) and the callee side (gen_function's own
 # parameter loop) track a running slot count instead, and these tests
-# are what confirm a slice's own two slots land correctly among
+# are what confirm a slice's own three slots land correctly among
 # ordinary scalar ones on both sides, not just when a slice happens to
 # be the only or the last parameter.
 #
-# test_exactly_six_slots_from_three_slice_parameters and
-# test_seven_slots_from_three_slices_and_a_scalar_is_rejected are the
+# test_exactly_six_slots_from_two_slice_parameters and
+# test_seven_slots_from_two_slices_and_a_scalar_is_rejected are the
 # positive/negative pair proving the boundary itself is exactly
 # right: 6 slots must be accepted, 7 must be cleanly rejected, not
 # silently truncated or off by one in either direction.
@@ -4168,11 +4176,285 @@ class TestSliceBoundsChecking:
 # crossing the function boundary, not a copy -- matching the same
 # aliasing guarantee slices already have within a single function.
 # test_forwarding_a_slice_returning_calls_result is the free case the
-# %rax:%rdx convention was specifically chosen for: gen_slice_call_
-# into already leaves a callee's own result exactly where a caller
-# needs to leave its own, so `return bar()` (bar also returning a
-# slice) costs nothing beyond the call itself.
+# hidden-pointer return convention makes possible: gen_slice_call_into
+# just passes the SAME destination address one level deeper, so
+# `return bar()` (bar also returning a slice) costs nothing beyond the
+# call itself.
 # ---------------------------------------------------------------------------
+
+class TestCapAwareSlicing:
+    """Re-slicing honors cap, not just len -- Go's own re-slicing rule:
+    `high` may reach all the way to a base's remaining CAPACITY, not
+    just its current length, and the result inherits that remaining
+    capacity (base_cap - low) rather than simply matching its own new
+    length. This is what makes `append` sometimes able to grow a
+    re-sliced view into its parent's own backing array -- see
+    TestAppend's own note on why these two features only really
+    became observable, and testable, together.
+
+    test_reslice_extends_beyond_len_but_within_cap and test_extending_
+    beyond_cap_still_aborts are the positive/negative pair that
+    actually prove the boundary moved from len to cap, not just that
+    SOME slicing still works: the positive case would have been
+    rejected under the old, len-only bounds check, and the negative
+    case confirms cap itself is still a real, enforced limit, not
+    removed entirely.
+    """
+    pytestmark = GCC_SKIP
+
+    def test_reslice_extends_beyond_len_but_within_cap(self):
+        assert_exit_code(
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s = arr[0:2]\n"
+            "    []int t = s[0:5]\n"
+            "    return t[0] + t[1] + t[2] + t[3] + t[4]",
+            15,
+        )
+
+    def test_extending_beyond_cap_still_aborts(self):
+        assert_crashes_with_sigabrt(
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s = arr[0:2]\n"
+            "    []int t = s[0:6]\n"
+            "    return 0"
+        )
+
+    def test_reslice_starting_partway_through_inherits_remaining_capacity(self):
+        """cap = base_cap - low, not just base_cap -- a re-slice that
+        doesn't start at zero still correctly accounts for the
+        offset."""
+        assert_exit_code(
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s = arr[1:2]\n"
+            "    []int t = s[0:4]\n"
+            "    return t[0] + t[1] + t[2] + t[3]",
+            2 + 3 + 4 + 5,
+        )
+
+    def test_omitted_high_still_defaults_to_len_not_cap(self):
+        """`arr[3:]` still means "from 3 to the current end" -- the
+        default for an OMITTED high bound is unaffected by cap-aware
+        slicing; only the upper limit an EXPLICIT high is allowed to
+        reach changed."""
+        assert_exit_code(
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s = arr[0:2]\n"
+            "    []int t = s[1:]\n"
+            "    return len(t)",
+            1,
+        )
+
+
+# ---------------------------------------------------------------------------
+# `append(s, value)`, Hornet's third builtin -- Go-style: returns a NEW
+# slice rather than mutating s in place. The underlying array doubles in
+# size on resize up to 256 elements, then grows by 1.25x after -- see
+# codegen.py's own gen_append_call_into for the full growth-and-aliasing
+# story this is built around.
+#
+# This landed together with cap-aware re-slicing (TestCapAwareSlicing),
+# not as two separate, sequential pieces of work: with every OTHER
+# slice-producing site setting cap equal to len, there was no way for a
+# Hornet program to ever produce a slice with cap > len until append
+# existed to create one -- so cap-aware re-slicing would have been
+# genuinely unobservable, and untestable, in isolation. The two features
+# are really one and the same underlying capability, viewed from its two
+# different ends (a slice with spare capacity, and something that
+# actually uses that spare capacity).
+#
+# test_append_reuses_backing_array_when_capacity_allows is the single
+# most important test in this whole class: it's the one that actually
+# proves the growth policy DOES something, not just that append works
+# mechanically. Every other test here could pass even if append always,
+# unconditionally reallocated on every call (matching the ordinary
+# semantics but throwing away the entire point of a growth policy) --
+# this one specifically requires spare capacity to be reused rather than
+# discarded, observable only because writing through the returned slice
+# is visible through the ORIGINAL backing array too.
+#
+# test_deliberate_restriction_first_argument_must_be_a_variable documents
+# a real, visible scope decision, not a discovered gap: append's first
+# argument is deliberately narrower than len's own "whatever gen_
+# indexable_base_into accepts" generality, since append exists
+# specifically to feed a reassignment (`x = append(x, v)`), and the
+# added complexity of materializing an arbitrary slice EXPRESSION into a
+# scratch slot first isn't taken on for a comparatively rare shape.
+# ---------------------------------------------------------------------------
+
+class TestAppend:
+    pytestmark = GCC_SKIP
+
+    def test_basic_append(self):
+        """The user's own original example."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    []int x = []int[1, 2]\n"
+            "    []int y = append(x, 3)\n"
+            "    print(x)\n"
+            "    print(y)\n"
+            "    return 0\n",
+            "[]int[1, 2]\n[]int[1, 2, 3]\n",
+        )
+
+    def test_append_reuses_backing_array_when_capacity_allows(self):
+        """THE test proving the growth policy actually does something
+        -- see this class's own module-level note. A re-slice with
+        spare capacity (cap > len, thanks to cap-aware re-slicing)
+        gets appended to; the write must land in the ORIGINAL array's
+        own backing storage, observable by reading straight out of it,
+        not just out of the returned slice."""
+        assert_exit_code(
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s = arr[0:2]\n"
+            "    []int t = append(s, 99)\n"
+            "    return arr[2]",
+            99,
+        )
+
+    def test_append_past_capacity_reallocates_without_disturbing_original(self):
+        assert_exit_code(
+            "    []int x = []int[1, 2]\n"
+            "    []int y = append(x, 3)\n"
+            "    y[0] = 999\n"
+            "    return x[0]",
+            1,
+        )
+
+    def test_second_append_reuses_the_first_reallocations_spare_capacity(self):
+        """Proves the amortization actually chains: the FIRST append
+        (len 2 -> 3, forced to reallocate to cap 4) leaves spare room
+        a SECOND append (len 3 -> 4) can reuse without reallocating
+        again."""
+        assert_exit_code(
+            "    []int x = []int[1, 2]\n"
+            "    []int y = append(x, 3)\n"
+            "    y = append(y, 4)\n"
+            "    return y[0] + y[1] + y[2] + y[3]",
+            10,
+        )
+
+    def test_append_to_none(self):
+        assert_exit_code(
+            "    []int x = none\n"
+            "    []int y = append(x, 42)\n"
+            "    return y[0]",
+            42,
+        )
+
+    def test_append_with_str_element(self):
+        assert_stdout(
+            "    []str x = []str['a', 'b']\n"
+            "    []str y = append(x, 'c')\n"
+            "    print(y)\n"
+            "    return 0",
+            "[]str['a', 'b', 'c']\n",
+        )
+
+    def test_append_with_array_element_type(self):
+        assert_exit_code(
+            "    [][2]int rows = [][2]int[[1, 2]]\n"
+            "    [][2]int rows2 = append(rows, [2]int[3, 4])\n"
+            "    return rows2[0][0] + rows2[0][1] + rows2[1][0] + rows2[1][1]",
+            1 + 2 + 3 + 4,
+        )
+
+    def test_append_nested_slice_construction(self):
+        """The value being appended flows through the same recursive
+        _check_value_flowing_into treatment any other value flowing
+        into an already-typed slot gets -- an untyped literal
+        appended to a slice-of-slices correctly constructs a fresh,
+        nested slice for the new element."""
+        assert_exit_code(
+            "    [][]int rows = [][]int[[1, 2]]\n"
+            "    [][]int rows2 = append(rows, [5, 6])\n"
+            "    return rows2[0][0] + rows2[0][1] + rows2[1][0] + rows2[1][1]",
+            1 + 2 + 5 + 6,
+        )
+
+    def test_many_appends_in_a_loop_retain_every_value(self):
+        """A real stress test across many reallocations, not just one
+        -- every one of 300 sequentially appended values must still be
+        readable afterward, proving the reuse/reallocate transitions
+        chain correctly over many iterations, not just the first one
+        or two."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    []int x = none\n"
+            "    int i = 0\n"
+            "    while i < 300:\n"
+            "        x = append(x, i)\n"
+            "        i = i + 1\n"
+            "    int total = 0\n"
+            "    int j = 0\n"
+            "    while j < 300:\n"
+            "        total = total + x[j]\n"
+            "        j = j + 1\n"
+            "    return total - 30000\n",
+            (44850 - 30000) % 256,
+        )
+
+    def test_growth_policy_boundary_at_256(self):
+        """257 sequential appends cross the growth policy's own
+        double-vs-quarter boundary (at cap == 256) at least once --
+        len must still come out exactly right on the far side."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    []int x = none\n"
+            "    int i = 0\n"
+            "    while i < 257:\n"
+            "        x = append(x, 1)\n"
+            "        i = i + 1\n"
+            "    return len(x)\n",
+            257 % 256,
+        )
+
+    def test_wrong_argument_count_is_rejected(self):
+        assert_semantic_error(
+            "    []int x = []int[1, 2]\n"
+            "    []int y = append(x)\n"
+            "    return 0",
+            match="expects exactly 2 arguments",
+        )
+
+    def test_non_slice_first_argument_is_rejected(self):
+        assert_semantic_error(
+            "    []int y = append(5, 3)\n"
+            "    return 0",
+            match="requires a slice as its first argument",
+        )
+
+    def test_element_type_mismatch_is_rejected(self):
+        assert_semantic_error(
+            "    []int x = []int[1, 2]\n"
+            "    []int y = append(x, true)\n"
+            "    return 0",
+        )
+
+    def test_cannot_be_redefined_as_a_function(self):
+        source = (
+            "def int append([]int a, int b):\n"
+            "    return 1\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n"
+        )
+        with pytest.raises(SemanticError, match="builtin"):
+            analyze(_parse(source))
+
+    def test_deliberate_restriction_first_argument_must_be_a_variable(self):
+        """A real, visible scope decision, not a discovered gap -- see
+        this class's own module-level note for why."""
+        source = (
+            "def int main():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int y = append(arr[0:2], 9)\n"
+            "    return 0\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        with pytest.raises(CodegenError, match="variable.*first argument"):
+            generate_asm(ast, platform=ASM_PLATFORM)
+
 
 class TestSliceParametersAndReturns:
     pytestmark = GCC_SKIP
@@ -4239,13 +4521,16 @@ class TestSliceParametersAndReturns:
         )
 
     def test_forwarding_a_slice_returning_calls_result(self):
-        """The free case the %rax:%rdx convention was specifically
-        chosen for: gen_slice_call_into already leaves a callee's own
-        result exactly where a caller needs to leave its own, so this
-        costs nothing beyond the call itself -- no intermediate copy,
-        unlike an array-returning function's own hidden-pointer
-        forwarding, which still needs the SAME address threaded one
-        level deeper (though also without a copy)."""
+        """The free case the hidden-pointer return convention makes
+        possible: gen_slice_call_into just passes the SAME destination
+        address one level deeper, so this costs nothing beyond the
+        call itself -- no intermediate copy, exactly like an array-
+        returning function's own hidden-pointer forwarding already
+        works. Used to be free for a different reason -- a slice
+        return coming back directly in %rax:%rdx meant there was
+        nothing to copy OR forward at all -- before cap grew a slice's
+        own descriptor past what that two-register convention could
+        hold."""
         assert_program_exit_code(
             "def []int inner():\n"
             "    [3]int arr = [7, 8, 9]\n"
@@ -4487,10 +4772,13 @@ class TestIndexingUnnamedSlices:
         )
 
     def test_slice_returning_call_as_unnamed_base(self):
-        """A slice-returning function's result is already sitting in
-        %rax:%rdx by the two-register return convention -- this is
-        actually SIMPLER to use as an unnamed base than a Slice
-        expression is, needing no scratch slot at all."""
+        """A slice-returning function's result is materialized through
+        the same shared scratch slot the Slice/Index cases use, then
+        read back out the same way -- it used to be even simpler than
+        that, arriving already sitting in %rax:%rdx by a dedicated
+        two-register return convention, needing no scratch slot at
+        all, back when a slice's own descriptor still fit two
+        registers."""
         assert_program_exit_code(
             "def []int make():\n"
             "    [3]int arr = [7, 8, 9]\n"

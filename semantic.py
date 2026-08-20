@@ -230,13 +230,14 @@ SLICE ZERO VALUE section.
 
 BUILTINS
 ---------
-`print` and `len` are builtins -- callables that aren't ordinary user-
-defined functions and don't go through self.functions at all. check_call
-special-cases each of them before ever consulting self.functions, and
-analyze()'s signature-collection pass rejects any user function whose
-name collides with a builtin (_BUILTIN_FUNCTION_NAMES), so there's no
-ambiguity about which one wins -- a program simply can't define its own
-`print` or `len`.
+`print`, `len`, and `append` are builtins -- callables that aren't
+ordinary user-defined functions and don't go through self.functions at
+all. check_call special-cases each of them before ever consulting
+self.functions, and analyze()'s signature-collection pass rejects any
+user function whose name collides with a builtin
+(_BUILTIN_FUNCTION_NAMES), so there's no ambiguity about which one
+wins -- a program simply can't define its own `print`, `len`, or
+`append`.
 
 check_print_call accepts exactly one argument of any REAL type (int,
 bool, str, array, and slice are all printable, and there's no reason to
@@ -261,6 +262,22 @@ array-vs-slice split lives (a compile-time constant vs. a runtime
 descriptor read); see its own docstring for why the argument itself
 is still fully evaluated either way, regardless of whether the
 resulting length ends up depending on its runtime value at all.
+
+check_append_call requires a slice as its first argument and a value
+matching that slice's own element type as its second, always returning
+the same slice type back (append never changes what a slice is a slice
+OF, only how many elements are in it). The value flows into the
+element type via _check_value_flowing_into, not a plain check_expr --
+the same recursive treatment analyze_var_decl/analyze_assign/
+analyze_index_assign already give a value flowing into an already-
+typed slot, so `append(rows, [5, 6])` on a slice-of-slices correctly
+constructs a fresh, nested slice for the new element. Unlike len,
+check_append_call doesn't restrict what KIND of expression the first
+argument is -- that's a codegen-level restriction (see codegen.py's
+gen_append_call_into for why it's deliberately narrower there than
+len's own), not a type-checking one. codegen.py's own APPEND BUILTIN
+section covers the actual growth-and-aliasing mechanics, which
+semantic.py has no need to know anything about.
 
 TYPES: ANNOTATING THE AST FOR codegen.py
 -------------------------------------------
@@ -624,10 +641,12 @@ def contains_reachable_break(statements: List[Node]) -> bool:
 
 # Names that are builtins rather than ordinary user-definable functions
 # -- see check_call and the module docstring's BUILTINS section. Kept as
-# a set (not hardcoded string comparisons scattered around) so a second
-# builtin later is "add a name here plus its own check_*/gen_* pair",
-# not a search-and-replace.
-_BUILTIN_FUNCTION_NAMES = {'print', 'len'}
+# a set (not hardcoded string comparisons scattered around) so adding
+# another builtin later is "add a name here plus its own check_*/gen_*
+# pair", not a search-and-replace -- print and len were both added this
+# way in turn, and append (the third) is what actually exercised that
+# claim for the first time.
+_BUILTIN_FUNCTION_NAMES = {'print', 'len', 'append'}
 
 
 # ---------------------------------------------------------------------------
@@ -1229,6 +1248,8 @@ class SemanticAnalyzer:
             return self.check_print_call(expr)
         if expr.name == 'len':
             return self.check_len_call(expr)
+        if expr.name == 'append':
+            return self.check_append_call(expr)
         if expr.name not in self.functions:
             raise SemanticError(f"Call to undeclared function '{expr.name}'")
         param_types, return_type = self.functions[expr.name]
@@ -1328,6 +1349,53 @@ class SemanticAnalyzer:
                 f"'len' requires an array or slice argument, got {arg_type}"
             )
         return Type.INT
+
+    def check_append_call(self, expr: Call) -> Type:
+        """`append(s, value)`, Hornet's third builtin -- Go-style:
+        returns a NEW slice rather than mutating s in place (see
+        codegen.py's own APPEND BUILTIN section for the full growth-
+        and-aliasing story).
+
+        s must be slice-typed; value must match its own element type,
+        checked via _check_value_flowing_into rather than a plain
+        check_expr -- the same recursive treatment analyze_var_decl/
+        analyze_assign/analyze_index_assign already give a value
+        flowing into an already-typed slot, so appending an untyped
+        array literal into a slice-of-slices (`append(rows, [5, 6])`)
+        correctly constructs a fresh, nested slice for the new
+        element, exactly like assigning one directly already does.
+
+        Always returns s's own slice type -- the NEW slice's type is
+        identical to the one appended to, obviously, since append
+        never changes what a slice is a slice OF, only how many
+        elements are in it.
+
+        Doesn't restrict what KIND of expression s itself is (a bare
+        Variable, an Index, a re-slice, ...) -- that's a codegen-level
+        restriction (see gen_append_call_into's own docstring for why
+        it's currently narrower than, say, len's), not a type-checking
+        one; matching the same layering print's and len's own
+        argument-shape restrictions already have.
+        """
+        if len(expr.args) != 2:
+            raise SemanticError(
+                f"'append' expects exactly 2 arguments, got {len(expr.args)}"
+            )
+        slice_arg, value_arg = expr.args
+        slice_type = self.check_expr(slice_arg)
+        if slice_type.kind != TypeKind.SLICE:
+            raise SemanticError(
+                f"'append' requires a slice as its first argument, "
+                f"got {slice_type}"
+            )
+        value_type = self._check_value_flowing_into(value_arg, slice_type.element_type)
+        if not self._types_compatible(value_type, slice_type.element_type):
+            raise SemanticError(
+                f"'append' cannot append a value of type {value_type} "
+                f"to a {slice_type} (element type "
+                f"{slice_type.element_type})"
+            )
+        return slice_type
 
     def check_constant(self, expr: Constant) -> Type:
         if isinstance(expr.value, float) and not expr.value.is_integer():
