@@ -52,9 +52,13 @@ Organization:
     TestPrintArraysAndSlices            (11 tests)
     TestNone                            (17 tests)
     TestSliceLiterals                   (16 tests)
+    TestNestedSlices                    ( 6 tests)
+    TestChainedSliceIndexing            ( 2 tests)
+    TestArrayOfSlicesCopying            ( 4 tests)
+    TestIndexAssignIntoArrayOfSlices    ( 5 tests)
     TestSemanticErrors                  (75 tests)
                                         ----------
-                                        439 tests total
+                                        456 tests total
 
 A NOTE ON ARRAYS
 -----------------------------------------------------------------
@@ -4957,6 +4961,258 @@ class TestSliceLiterals:
         analyze(ast)
         with pytest.raises(CodegenError, match="assign it to a variable first"):
             generate_asm(ast, platform=ASM_PLATFORM)
+
+
+# ---------------------------------------------------------------------------
+# Nested slices: a slice (or array) whose own ELEMENT type is itself a
+# slice -- `[][]int`, `[2][]int`, arbitrarily deep. Slice literals and
+# typed array literals both already worked one level deep (an array of
+# arrays, or a slice of arrays), but genuinely nested slice construction
+# -- a slice OF slices -- surfaced two real, separate gaps:
+#
+# 1. A semantic.py bug, not a deliberate scope boundary: check_array_
+#    literal's own element-checking loop called check_expr directly on
+#    each element rather than routing through _check_value_flowing_into,
+#    so an untyped inner literal never got the "this constructs a
+#    nested slice" treatment -- only a literal's own, TOP-level value
+#    ever did. `[][2]int` (an inner ARRAY element) happened to keep
+#    working by coincidence, since plain type equality was all THAT
+#    case ever needed -- which is exactly what masked the gap until a
+#    genuinely nested SLICE was tried. The same bug-class turned out to
+#    exist in two more places doing the identical "value flows into an
+#    already-typed slot" check: analyze_index_assign, and (on the
+#    codegen side, dispatching on the wrong type entirely)
+#    gen_index_assign itself.
+#
+# 2. A real, deliberately-scoped-out codegen gap: an array whose
+#    ELEMENTS are themselves slices was explicitly rejected in two
+#    places (gen_array_literal_into, gen_array_copy) as known,
+#    separable follow-up work. Closing it needed gen_slice_value_into
+#    generalized to handle an arbitrary destination (not just an
+#    ordinary local slot) -- see its own docstring -- which in turn
+#    needed gen_slice_into itself generalized the same way, since it
+#    used to explicitly assert dst_mem.base == 'rbp' and refuse
+#    anything else. TestChainedSliceIndexing and TestIndexAssignInto
+#    ArrayOfSlices are the two, closely-related pieces that fell out
+#    of that same generalization along the way, not separately
+#    requested but naturally in scope once gen_slice_value_into and
+#    gen_indexable_base_into both needed to handle a slice-typed Index
+#    result anyway.
+#
+# test_shallow_copy_semantics is the test that actually pins down a
+# real design decision, not just a mechanical fix: copying an array of
+# slices is a SHALLOW copy of each element's own {ptr, len} descriptor
+# -- matching how copying a bare slice variable (`s2 = s1`) already
+# works -- not a deep, recursive re-allocation. Mutating through the
+# copy's own element is observable through the original, since they
+# share the same backing data.
+# ---------------------------------------------------------------------------
+
+class TestNestedSlices:
+    pytestmark = GCC_SKIP
+
+    def test_typed_nested_slice_literal(self):
+        """The user's own, originally-failing example."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    [][]int rows = [][]int[[1, 2], [3, 4]]\n"
+            "    []int r0 = rows[0]\n"
+            "    []int r1 = rows[1]\n"
+            "    return r0[0] + r0[1] + r1[0] + r1[1]\n",
+            10,
+        )
+
+    def test_untyped_nested_slice_literal(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    [][]int rows = [[1, 2], [3, 4]]\n"
+            "    []int r0 = rows[0]\n"
+            "    []int r1 = rows[1]\n"
+            "    return r0[0] + r0[1] + r1[0] + r1[1]\n",
+            10,
+        )
+
+    def test_deeply_nested_slice_of_slice_of_slice(self):
+        """Proves the fix is genuinely recursive, not a one-level-deep
+        patch -- semantic.py's _check_value_flowing_into calling back
+        into check_array_literal, which calls back into it again,
+        naturally handles arbitrary depth with no special-casing."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    [][][]int x = [][][]int[[[1, 2], [3, 4]], [[5, 6], [7, 8]]]\n"
+            "    [][]int mid = x[0]\n"
+            "    []int inner = mid[1]\n"
+            "    return inner[0] + inner[1]\n",
+            7,
+        )
+
+    def test_fixed_size_array_of_slices_construction(self):
+        """The array-typed form (`[N][]int`, a fixed-size array whose
+        elements are slices), not just the slice-of-slices form --
+        exercises gen_array_literal_into's own new SLICE-element case
+        directly."""
+        assert_exit_code(
+            "    [2][]int rows = [2][]int[[1, 2], [3, 4]]\n"
+            "    return rows[0][0] + rows[0][1] + rows[1][0] + rows[1][1]",
+            10,
+        )
+
+    def test_empty_nested_slice_literal_is_not_nil(self):
+        assert_exit_code(
+            "    [][]int x = [][]int[[]int[], []int[]]\n"
+            "    return x[0] == none",
+            0,
+            return_type="bool",
+        )
+
+    def test_printing_array_of_slices(self):
+        """The outer type prefix appears once; inner slice elements
+        don't repeat their own `[]int` prefix -- matching the same
+        convention an ordinary array-of-arrays already follows."""
+        assert_stdout(
+            "    [2][]int rows = [2][]int[[1, 2], [3, 4]]\n"
+            "    print(rows)\n"
+            "    return 0",
+            "[2][]int[[1, 2], [3, 4]]\n",
+        )
+
+
+class TestChainedSliceIndexing:
+    """`rows[0][1]` -- indexing directly into a slice-typed Index
+    result, with no intermediate named variable. A real, separate gap
+    from construction: gen_indexable_base_into's own Slice-as-base case
+    existed already (`arr[:][0]`), but an Index-as-base case (`rows[0]`
+    itself used as a further base) didn't -- its own docstring used to
+    say so explicitly, tied to array-of-slices not being constructible
+    at all yet."""
+    pytestmark = GCC_SKIP
+
+    def test_chained_index_into_array_of_slices(self):
+        assert_exit_code(
+            "    [][]int rows = [][]int[[1, 2], [3, 4]]\n"
+            "    return rows[0][0] + rows[0][1] + rows[1][0] + rows[1][1]",
+            10,
+        )
+
+    def test_triple_chained_index(self):
+        assert_exit_code(
+            "    [][][]int x = [][][]int[[[1, 2], [3, 4]], [[5, 6], [7, 8]]]\n"
+            "    return x[0][1][0] + x[1][0][1]",
+            9,
+        )
+
+
+class TestArrayOfSlicesCopying:
+    """gen_array_copy's own, previously-rejected leaf-slice case --
+    the second of the two things explicitly requested alongside
+    construction. A SHALLOW copy of each element's own {ptr, len}
+    descriptor, matching how copying a bare slice variable (`s2 = s1`)
+    already works -- see test_shallow_copy_semantics, the test that
+    actually pins this design choice down rather than just exercising
+    the mechanics."""
+    pytestmark = GCC_SKIP
+
+    def test_variable_to_variable_copy(self):
+        assert_exit_code(
+            "    [2][]int x = [2][]int[[1, 2], [3, 4]]\n"
+            "    [2][]int y = x\n"
+            "    return y[0][0] + y[0][1] + y[1][0] + y[1][1]",
+            10,
+        )
+
+    def test_as_function_parameter(self):
+        assert_program_exit_code(
+            "def int sumIt([2][]int rows):\n"
+            "    return rows[0][0] + rows[0][1] + rows[1][0] + rows[1][1]\n"
+            "\n"
+            "def int main():\n"
+            "    [2][]int x = [2][]int[[1, 2], [3, 4]]\n"
+            "    return sumIt(x)\n",
+            10,
+        )
+
+    def test_returned_by_value(self):
+        assert_program_exit_code(
+            "def [2][]int makeRows():\n"
+            "    [2][]int x = [2][]int[[5, 6], [7, 8]]\n"
+            "    return x\n"
+            "\n"
+            "def int main():\n"
+            "    [2][]int y = makeRows()\n"
+            "    return y[0][0] + y[0][1] + y[1][0] + y[1][1]\n",
+            26,
+        )
+
+    def test_shallow_copy_semantics(self):
+        """The design decision this whole class exists to pin down:
+        the copy's own slice elements point at the SAME backing data
+        as the original's, not independently, recursively re-allocated
+        ones -- mutating through the copy is observable through the
+        original."""
+        assert_exit_code(
+            "    [][]int x = [][]int[[1, 2], [3, 4]]\n"
+            "    [][]int y = x\n"
+            "    y[0][0] = 99\n"
+            "    return x[0][0]",
+            99,
+        )
+
+
+class TestIndexAssignIntoArrayOfSlices:
+    """`rows[i] = value` where the indexed element is itself slice-
+    typed -- gen_index_assign's own, previously-scalar-only dispatch,
+    and analyze_index_assign's own, previously-plain check_expr call,
+    needed the exact same _check_value_flowing_into treatment
+    analyze_var_decl/analyze_assign already had, just at a third call
+    site."""
+    pytestmark = GCC_SKIP
+
+    def test_assign_named_slice_variable(self):
+        assert_exit_code(
+            "    [2][]int rows = [2][]int[[1, 2], [3, 4]]\n"
+            "    []int other = []int[9, 9, 9]\n"
+            "    rows[0] = other\n"
+            "    return rows[0][0] + rows[0][1] + rows[0][2]",
+            27,
+        )
+
+    def test_assign_typed_slice_literal(self):
+        assert_exit_code(
+            "    [2][]int rows = [2][]int[[1, 2], [3, 4]]\n"
+            "    rows[0] = []int[9, 9, 9]\n"
+            "    return rows[0][0] + rows[0][1] + rows[0][2]",
+            27,
+        )
+
+    def test_assign_untyped_literal(self):
+        """The specific case that surfaced this gap: an untyped array
+        literal assigned directly into a slice-typed indexed element."""
+        assert_exit_code(
+            "    [2][]int rows = [2][]int[[1, 2], [3, 4]]\n"
+            "    rows[0] = [9, 9, 9]\n"
+            "    return rows[0][0] + rows[0][1] + rows[0][2]",
+            27,
+        )
+
+    def test_scalar_index_assign_still_works(self):
+        """Regression check: gen_index_assign's dispatch now derives
+        element_type from stmt.array's own type rather than stmt.
+        value's -- confirms the ordinary scalar path is unaffected."""
+        assert_exit_code(
+            "    [3]int arr = [1, 2, 3]\n"
+            "    arr[1] = 99\n"
+            "    return arr[1]",
+            99,
+        )
+
+    def test_str_index_assign_still_works(self):
+        assert_stdout(
+            "    [2]str arr = ['a', 'b']\n"
+            "    arr[0] = 'z'\n"
+            "    print(arr)\n"
+            "    return 0",
+            "[2]str['z', 'b']\n",
+        )
 
 
 class TestNone:

@@ -878,8 +878,23 @@ class SemanticAnalyzer:
             )
 
     def analyze_index_assign(self, stmt: IndexAssign) -> None:
+        """`array[index] = value`. value flows into the indexed
+        element's own type the same way any other value flows into an
+        already-typed slot -- via _check_value_flowing_into, not a
+        plain check_expr -- so an untyped array literal assigned
+        directly into a SLICE-typed element (`rows[0] = [9, 9, 9]`,
+        one element of an array OF slices) gets the same recursive
+        slice-construction treatment analyze_var_decl/analyze_assign
+        already give a VarDecl/Assign's own value (see that method's
+        own docstring). Found as the same bug-class in a third
+        location, not a hypothetical extension: `rows[0] =
+        someNamedSlice` and the explicitly-typed `rows[0] =
+        []int[9, 9, 9]` both already worked (their own values already
+        carry a real SLICE type by the time they reach here), which is
+        exactly what masked this gap until the untyped form specifically
+        was tried."""
         element_type = self._check_indexable_and_index(stmt.array, stmt.index)
-        value_type = self.check_expr(stmt.value)
+        value_type = self._check_value_flowing_into(stmt.value, element_type)
         if not self._types_compatible(value_type, element_type):
             raise SemanticError(
                 f"Cannot assign a value of type {value_type} to an array "
@@ -1120,10 +1135,7 @@ class SemanticAnalyzer:
         _types_compatible check used everywhere else a value flows
         into an already-typed slot (a VarDecl initializer, an
         Assign, ...), so `none` would be just as valid an element here
-        as it is anywhere else a slice is expected (not reachable in
-        practice yet, since an array of slices can't be constructed --
-        see codegen.py's gen_array_copy -- but the type system doesn't
-        need to know that to already get it right).
+        as it is anywhere else a slice is expected.
 
         expected_element_type, when supplied (and type_expr is still
         None): used for an UNTYPED literal flowing directly into an
@@ -1147,6 +1159,26 @@ class SemanticAnalyzer:
         type`'s own ArrayTypeExpr validation), which is what makes
         zero genuinely uninformative only in that one, fully-untyped
         case.
+
+        Both typed paths check each element via _check_value_flowing_
+        into rather than a plain check_expr -- not just an ordinary
+        recursive call, but the SAME recursive-slice-construction
+        treatment analyze_var_decl/analyze_assign already give a
+        top-level value: an untyped ArrayLiteral element flowing into
+        a SLICE-kind expected type (e.g. `[][]int rows = [][]int[[1,
+        2], [3, 4]]` -- the OUTER literal's own element type is []int,
+        a slice, so each INNER `[1, 2]`/`[3, 4]` needs this same
+        treatment recursively) is what makes genuinely nested slice
+        construction -- a slice of slices, arbitrarily deep -- fall
+        out for free, rather than only ever working one level deep.
+        A plain check_expr here would infer each inner literal as an
+        ordinary ARRAY ([2]int), which would then correctly fail the
+        _types_compatible check against the expected SLICE type --
+        this was a real, found bug, not a hypothetical one: `[][2]int`
+        (array-typed inner elements matching an array-typed expected
+        element) happened to still work by coincidence, since ordinary
+        type equality was all that case ever needed, which is exactly
+        what masked the gap until a genuinely nested slice was tried.
         """
         if expr.type_expr is not None:
             declared_type = type_from_name(expr.type_expr)
@@ -1157,7 +1189,7 @@ class SemanticAnalyzer:
                     f"element(s)"
                 )
             for i, element in enumerate(expr.elements, start=1):
-                element_type = self.check_expr(element)
+                element_type = self._check_value_flowing_into(element, declared_type.element_type)
                 if not self._types_compatible(element_type, declared_type.element_type):
                     raise SemanticError(
                         f"Array literal declares element type "
@@ -1168,7 +1200,7 @@ class SemanticAnalyzer:
 
         if expected_element_type is not None:
             for i, element in enumerate(expr.elements, start=1):
-                element_type = self.check_expr(element)
+                element_type = self._check_value_flowing_into(element, expected_element_type)
                 if not self._types_compatible(element_type, expected_element_type):
                     raise SemanticError(
                         f"Array literal's elements must all be "

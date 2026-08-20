@@ -1152,14 +1152,68 @@ unrelated gap: a bare statement slicing an ordinary, already-existing
 array (`arr[:]` alone) was already broken before slice literals
 existed at all.
 
-SCOPE: WHAT THIS DOESN'T COVER YET
---------------------------------------
-An array whose ELEMENTS are themselves slices (`[3][]int`) isn't
-supported -- gen_array_copy and gen_array_literal_into both raise a
-clear error rather than silently truncating a 16-byte descriptor down
-to a 4-or-8-byte scalar move, which is all their existing flat-copy
-logic knows how to do. A genuinely separable follow-up once plain
-slices are solid, not a gap discovered after the fact.
+NESTED SLICES
+------------------
+A slice (or array) whose own ELEMENT type is itself a slice --
+`[][]int`, `[2][]int`, arbitrarily deep. This used to be the one thing
+explicitly scoped out as separable follow-up work -- gen_array_copy
+and gen_array_literal_into both used to raise a clear error rather
+than silently truncate a 16-byte descriptor down to a 4-or-8-byte
+scalar move, which is all their existing flat-copy logic knew how to
+do.
+
+Closing that gap turned out to need one thing beyond just teaching
+those two methods a new leaf width: gen_slice_value_into (the shared
+"produce a slice-typed value into a Memory destination" dispatch --
+Slice, Variable, Call, Index, ArrayLiteral) had to be made safe to call
+with an ARBITRARY destination, not just an ordinary local slot, since
+writing a slice-typed ARRAY ELEMENT means dst_mem.base is the outer
+array's own base -- 'rbp' if it's stack-allocated, or 'rax' if it's
+heap-allocated (every slice literal's own backing array always is).
+That in turn meant gen_slice_into itself needed the same treatment --
+it used to explicitly assert dst_mem.base == 'rbp' and refuse anything
+else, since nothing before this ever needed to write a slice value
+anywhere but an ordinary local. See gen_slice_value_into's own
+docstring for the full case-by-case account of what each of its five
+cases needed (a genuinely new register-clobbering risk in three of
+them, once dst_mem.base could be something other than 'rbp' -- the
+same class of bug this file has hit before in this exact area, not a
+hypothetical one).
+
+Two closely-related pieces fell out of that same generalization,
+neither separately requested but both a small, natural extension of
+it: gen_indexable_base_into gained an Index-as-base case (`rows[0][1]`,
+chaining directly into a slice-typed indexing result with no
+intermediate named variable -- reusing gen_slice_value_into's own,
+new Index case through the same shared scratch slot the existing
+Slice-as-base case already used), and gen_index_assign gained a
+SLICE-element case (`rows[i] = someSlice`), deriving element_type from
+the INDEXED ARRAY's own type rather than the VALUE's -- the value's
+own resolved type is wrong for exactly the same reason it was wrong in
+gen_var_decl/gen_assign before those were fixed (see gen_index_assign's
+own docstring): an untyped literal flowing into a slice-typed element
+has its own resolved type set to the ARRAY it builds, not the slice
+it's being treated as.
+
+Copying an array of slices (gen_array_copy's own new 16-byte leaf
+case) is a SHALLOW copy of each element's own {ptr, len} descriptor --
+matching how copying a bare slice variable (`s2 = s1`) already works,
+not a deep, recursive re-allocation. A real, deliberate consistency
+choice: the copy's own slice elements end up pointing at the exact
+same backing data the original's do.
+
+On the semantic.py side, the underlying bug that made all of this
+worth discovering in the first place wasn't a scope decision at all:
+check_array_literal's own element-checking loop called check_expr
+directly on each element rather than routing through _check_value_
+flowing_into, so an untyped INNER literal never got the "this
+constructs a nested slice" treatment -- only a literal's own, TOP-
+level value ever did. `[][2]int` (an array-typed inner element)
+happened to keep working by coincidence, since plain type equality was
+all THAT case ever needed -- which is exactly what masked the gap
+until a genuinely nested SLICE was tried. The identical bug-class
+turned out to exist in one more place doing the same "value flows into
+an already-typed slot" check: analyze_index_assign.
 """
 
 import argparse
@@ -2477,24 +2531,24 @@ class CodeGenerator:
 
         Reusing ONE shared scratch slot for every Slice materialization
         -- rather than a fresh one per nesting level -- is safe under
-        arbitrarily deep chaining (`arr[:][0:2][0]`, and so on)
-        specifically because of how gen_slice_into and gen_index_
-        address_into are both already structured: each computes its
-        OWN base's address/length FIRST, immediately consumes it (into
-        addr_dst/len_dst, then protects those on the real CPU stack
-        before evaluating anything else), and only ever WRITES its own
-        result into a destination as the very LAST step. That means a
-        deeper level's own write to the shared slot always happens (and
-        is always fully drained back into registers) strictly BEFORE
-        the shallower level that triggered it writes its own result
-        there -- the same strictly-nested lifetime discipline that
-        makes reusing one call stack safe for recursion of any depth,
-        just applied to one scratch memory slot instead of the stack.
-        An Index base (indexing into an array/slice OF slices) isn't
-        included here -- that would require a constructible array of
-        slices, which doesn't exist yet (see gen_array_copy's own
-        rejection) -- and neither is an array-returning Call as a
-        SLICE base, since it can never actually BE slice-typed.
+        arbitrarily deep chaining (`arr[:][0:2][0]`, `rows[0][1]`, and
+        so on) specifically because of how gen_slice_into and gen_
+        index_address_into are both already structured: each computes
+        its OWN base's address/length FIRST, immediately consumes it
+        (into addr_dst/len_dst, then protects those on the real CPU
+        stack before evaluating anything else), and only ever WRITES
+        its own result into a destination as the very LAST step. That
+        means a deeper level's own write to the shared slot always
+        happens (and is always fully drained back into registers)
+        strictly BEFORE the shallower level that triggered it writes
+        its own result there -- the same strictly-nested lifetime
+        discipline that makes reusing one call stack safe for
+        recursion of any depth, just applied to one scratch memory
+        slot instead of the stack. An Index base (e.g. `rows[0][1]`,
+        indexing into an array/slice OF slices) reuses this exact same
+        scratch slot too, via gen_slice_value_into's own Index case --
+        neither is an array-returning Call as a SLICE base, since it
+        can never actually BE slice-typed.
 
         `expr` being anything else (a Call returning something other
         than an array/slice can't reach here at all, being neither
@@ -2523,6 +2577,18 @@ class CodeGenerator:
                 instructions.append(MovQ(src=Memory('rbp', temp + 8), dst=len_dst))
                 instructions.append(MovQ(src=Memory('rbp', temp), dst=addr_dst))
                 return instructions, len_dst
+            if isinstance(expr, Index):
+                # A slice-typed Index result (e.g. `rows[0]`, one
+                # element of an array OF slices, used directly as the
+                # base of a further `[...]`) -- materialized through
+                # the exact same scratch slot the Slice case just
+                # above uses, via gen_slice_value_into's own Index
+                # case, then immediately read back out the same way.
+                temp = self._unnamed_slice_temp_offset
+                instructions = self.gen_slice_value_into(expr, Memory('rbp', temp))
+                instructions.append(MovQ(src=Memory('rbp', temp + 8), dst=len_dst))
+                instructions.append(MovQ(src=Memory('rbp', temp), dst=addr_dst))
+                return instructions, len_dst
             if isinstance(expr, Call):
                 # Pushed onto the stack before either destination is
                 # written, then popped in reverse -- robust regardless
@@ -2546,6 +2612,7 @@ class CodeGenerator:
                 f"slice-typed -- assign it to a named variable first"
             )
         raise CodegenError(f"Cannot index or slice a value of type {base_type}")
+
 
     def gen_array_address_into(self, expr: Node, dst: Register) -> List[Instruction]:
         """Computes the ADDRESS of an array-typed expression -- a
@@ -2696,28 +2763,42 @@ class CodeGenerator:
         empty-slice-producing expression) -- so the boundary itself
         genuinely differs here, not just the label it jumps to.
 
-        Assumes dst_mem.base is 'rbp' -- an ordinary local slot, not a
-        computed address in some other register -- since nothing in
-        this turn's scope ever generates a slice value anywhere else
-        (slices cross function boundaries via two registers directly,
-        never through a hidden pointer the way arrays' returns are, so
-        there's no equivalent "write through a received address" case
-        yet). Checked explicitly rather than assumed silently, since a
-        wrong assumption here would corrupt whatever dst_mem.base
-        happens to hold, not just produce a wrong slice.
+        dst_mem.base is protected on the stack too, whenever it isn't
+        'rbp', across ALL of the above -- pushed before even
+        gen_indexable_base_into runs (the earliest point it could be
+        clobbered: an ArrayLiteral base mallocs, via
+        gen_array_literal_heap_alloc_into, and any evaluated low/high
+        expression always targets %eax/%rax like every other
+        expression in this file does) and popped back right before the
+        final two writes, nested as the OUTERMOST push/pop pair around
+        this method's own existing stack discipline -- everything else
+        this method already pushes and pops happens strictly between
+        the two, so nothing about their own relative ordering changes.
+        Needed once a slice-typed value can be produced somewhere other
+        than an ordinary local slot: an array literal whose OWN
+        elements are themselves slices (`[][]int rows = [][]int[[1,
+        2], [3, 4]]`) writes each element by calling this method with
+        dst_mem.base equal to the OUTER array's own base -- 'rbp' if
+        it's stack-allocated, or 'rax' if it's heap-allocated (every
+        slice literal's own backing array always is -- see gen_array_
+        literal_heap_alloc_into). Found necessary by the same class of
+        real bug this file has hit before in this exact area (see
+        gen_array_literal_into's own docstring), not assumed
+        defensively -- this method used to just assert dst_mem.base ==
+        'rbp' and refuse anything else, rather than risk it silently.
         """
-        if dst_mem.base != 'rbp':
-            raise CodegenError(
-                "gen_slice_into currently only supports writing into "
-                "an ordinary local slot (dst_mem.base == 'rbp')"
-            )
+        protect_dst = dst_mem.base != 'rbp'
+        instructions = []
+        if protect_dst:
+            instructions.append(Push(Register(dst_mem.base)))
 
         base_type = self._type_of(expr.array)
         element_stride = type_byte_width(base_type.element_type)
 
         addr_reg = Register('rbx')
         len_reg = Register('r11')
-        instructions, length_operand = self.gen_indexable_base_into(expr.array, addr_reg, len_reg)
+        base_instructions, length_operand = self.gen_indexable_base_into(expr.array, addr_reg, len_reg)
+        instructions.extend(base_instructions)
         is_runtime_length = isinstance(length_operand, Register)
 
         instructions.append(Push(addr_reg))
@@ -2773,6 +2854,12 @@ class CodeGenerator:
         instructions.append(IMul(src=Imm(element_stride), dst=low_32))
         instructions.append(AddQ(src=low_reg, dst=addr_reg))
 
+        # dst_mem.base is only needed again now, for these final two
+        # writes -- restored here, after every other computation above
+        # (including the bounds check, which never falls through to
+        # here on failure at all -- it aborts) has already finished.
+        if protect_dst:
+            instructions.append(Pop(Register(dst_mem.base)))
         instructions.append(MovQ(src=addr_reg, dst=Memory(dst_mem.base, dst_mem.offset)))
         instructions.append(MovQ(src=high_reg, dst=Memory(dst_mem.base, dst_mem.offset + 8)))
         return instructions
@@ -2821,48 +2908,143 @@ class CodeGenerator:
 
     def gen_slice_value_into(self, expr: Node, dst_mem: Memory) -> List[Instruction]:
         """Stores a slice-typed expression's VALUE (its {ptr, len}
-        descriptor) into dst_mem. Dispatched on what kind of
-        expression is producing the value:
-          - Slice (e.g. `arr[1:3]`): computed directly (see
-            gen_slice_into).
+        descriptor) into dst_mem -- an arbitrary Memory operand, not
+        just an ordinary local slot: dst_mem.base is 'rax' whenever
+        this is writing a SLICE-typed element into an array literal
+        whose OWN backing storage is heap-allocated (which every
+        slice literal's own backing array always is -- see gen_array_
+        literal_heap_alloc_into), the case that first made every one
+        of the cases below need real protection rather than assuming
+        'rbp'. Dispatched on what kind of expression is producing the
+        value:
+          - Slice (e.g. `arr[1:3]`, or a slice LITERAL, `[]int[1, 2,
+            3]`, parsed as one -- see parser.py's own _parse_
+            bracketed_literal): computed directly, protecting
+            dst_mem.base internally across its own, considerably more
+            involved computation (see gen_slice_into's own docstring).
           - Variable (e.g. `s2 = s1`): a flat 16-byte copy of an
             existing slice's own descriptor. Deliberately NOT routed
             through gen_array_copy, even though that method's own
             flat-copy loop could technically move 16 bytes just as
-            well as any other width: gen_array_copy's own defensive
-            rejection of a slice LEAF type (see its docstring) is
-            specifically about an ARRAY whose ELEMENTS are slices, not
-            about copying a bare slice descriptor itself, which is
-            exactly what this case is -- and a slice's descriptor is
-            always exactly 16 bytes regardless of element type, so a
-            fixed two-field copy (no loop needed at all) is both
-            simpler and avoids that mismatch entirely.
+            well as any other width: gen_array_copy's own handling of
+            a slice LEAF type is specifically about an ARRAY whose
+            ELEMENTS are slices, not about copying a bare slice
+            descriptor itself, which is exactly what this case is --
+            and a slice's descriptor is always exactly 16 bytes
+            regardless of element type, so a fixed two-field copy (no
+            loop needed at all) is both simpler and avoids that
+            mismatch entirely. Uses %r8/%r9 as scratch, not %rax --
+            dst_mem.base is never %r8 or %r9 anywhere in this file (its
+            only two established values are 'rbp' and 'rax'), so this
+            case needs no push/pop protection at all, unlike the
+            others: the ORIGINAL version of this case used %rax as
+            scratch for both fields, which was silently wrong whenever
+            dst_mem.base happened to BE 'rax' -- the second field's
+            write would have used the just-loaded VALUE as the base
+            address instead of the real one, since %rax no longer held
+            it by then. Simply never triggered before this method was
+            ever called with anything but dst_mem.base == 'rbp'.
           - Call (e.g. `[]int s = otherFn()`, where otherFn also
             returns a slice): gen_slice_call_into already leaves the
             callee's own result in %rax (ptr) and %rdx (len) -- see
-            its own docstring -- so this just copies those two
-            registers into dst_mem, nothing more elaborate needed.
+            its own docstring -- moved into %r8/%r9 immediately
+            (before dst_mem.base can be restored, if protected) since
+            a real function call is free to clobber any caller-saved
+            register, including whatever dst_mem.base names.
+          - Index (e.g. `[]int r = rows[0]`, reading one slice-typed
+            element out of an array OF slices): the element's own
+            address is computed first (gen_index_address_into), then
+            its 16-byte descriptor is read through it -- structurally
+            the same flat copy the Variable case does, just from a
+            computed address rather than a fixed local offset.
+          - ArrayLiteral (e.g. `[]int s = [1, 2, 3]`, an UNTYPED
+            literal flowing directly into a slice-typed target -- see
+            semantic.py's _check_value_flowing_into and check_array_
+            literal's own expected_element_type parameter for how this
+            gets recognized during type-checking; note the general,
+            TYPED form, `[]int[1, 2, 3]`, never reaches this case at
+            all, since it parses as a Slice wrapping an ArrayLiteral,
+            not a bare one -- see the Slice case above): mallocs a
+            fresh backing array and writes the literal's own elements
+            into it (gen_array_literal_heap_alloc_into), exactly like
+            gen_indexable_base_into's own, separate ArrayLiteral case
+            does for the general, typed form -- both ultimately need
+            identical work, just reached from different call sites.
+
+        Every case that does real work between "start" and "write the
+        result into dst_mem" -- every one except Variable, per its own
+        note above -- protects dst_mem.base on the stack across that
+        work whenever it isn't 'rbp', computing the result into a
+        scratch register pair (%r8/%r9, or gen_slice_into's own
+        internal registers) first and restoring dst_mem.base only
+        immediately before the final writes use it. This generalizes
+        what gen_array_literal_into's own scalar-element case already
+        established for a single value; see its docstring for the
+        real bug (not a hypothetical one) that made it necessary there
+        -- the exact same class of bug applies here, just for a
+        16-byte value produced across more instructions instead of a
+        4-or-8-byte one produced by a single gen_expr_into call.
+
         NoneLiteral is NOT handled here -- its own resolved type
         (Type.NONE) never matches SLICE, so it can't even reach this
         method through _gen_store's ordinary dispatch; see
         gen_none_into and gen_var_decl/gen_assign's own NoneLiteral
         short-circuit for why that's handled one level up instead.
         """
+        protect_dst = dst_mem.base != 'rbp'
+
         if isinstance(expr, Slice):
             return self.gen_slice_into(expr, dst_mem)
+
         if isinstance(expr, Variable):
             src_offset = self._local_offset(expr.name)
             return [
-                MovQ(src=Memory('rbp', src_offset), dst=Register('rax')),
-                MovQ(src=Register('rax'), dst=Memory(dst_mem.base, dst_mem.offset)),
-                MovQ(src=Memory('rbp', src_offset + 8), dst=Register('rax')),
-                MovQ(src=Register('rax'), dst=Memory(dst_mem.base, dst_mem.offset + 8)),
+                MovQ(src=Memory('rbp', src_offset), dst=Register('r8')),
+                MovQ(src=Register('r8'), dst=Memory(dst_mem.base, dst_mem.offset)),
+                MovQ(src=Memory('rbp', src_offset + 8), dst=Register('r9')),
+                MovQ(src=Register('r9'), dst=Memory(dst_mem.base, dst_mem.offset + 8)),
             ]
+
         if isinstance(expr, Call):
-            instructions = self.gen_slice_call_into(expr)
-            instructions.append(MovQ(src=Register('rax'), dst=Memory(dst_mem.base, dst_mem.offset)))
-            instructions.append(MovQ(src=Register('rdx'), dst=Memory(dst_mem.base, dst_mem.offset + 8)))
+            instructions = []
+            if protect_dst:
+                instructions.append(Push(Register(dst_mem.base)))
+            instructions.extend(self.gen_slice_call_into(expr))
+            instructions.append(MovQ(src=Register('rax'), dst=Register('r8')))
+            instructions.append(MovQ(src=Register('rdx'), dst=Register('r9')))
+            if protect_dst:
+                instructions.append(Pop(Register(dst_mem.base)))
+            instructions.append(MovQ(src=Register('r8'), dst=Memory(dst_mem.base, dst_mem.offset)))
+            instructions.append(MovQ(src=Register('r9'), dst=Memory(dst_mem.base, dst_mem.offset + 8)))
             return instructions
+
+        if isinstance(expr, Index):
+            instructions = []
+            if protect_dst:
+                instructions.append(Push(Register(dst_mem.base)))
+            addr_reg = Register('r10')
+            instructions.extend(self.gen_index_address_into(expr, addr_reg))
+            instructions.append(MovQ(src=Memory(addr_reg.name, 0), dst=Register('r8')))
+            instructions.append(MovQ(src=Memory(addr_reg.name, 8), dst=Register('r9')))
+            if protect_dst:
+                instructions.append(Pop(Register(dst_mem.base)))
+            instructions.append(MovQ(src=Register('r8'), dst=Memory(dst_mem.base, dst_mem.offset)))
+            instructions.append(MovQ(src=Register('r9'), dst=Memory(dst_mem.base, dst_mem.offset + 8)))
+            return instructions
+
+        if isinstance(expr, ArrayLiteral):
+            instructions = []
+            if protect_dst:
+                instructions.append(Push(Register(dst_mem.base)))
+            instructions.extend(self.gen_array_literal_heap_alloc_into(expr))
+            instructions.append(MovQ(src=Register('rax'), dst=Register('r8')))
+            element_count = len(expr.elements)
+            if protect_dst:
+                instructions.append(Pop(Register(dst_mem.base)))
+            instructions.append(MovQ(src=Register('r8'), dst=Memory(dst_mem.base, dst_mem.offset)))
+            instructions.append(MovQ(src=Imm(element_count), dst=Memory(dst_mem.base, dst_mem.offset + 8)))
+            return instructions
+
         raise CodegenError(f"No codegen rule for a slice-typed value: {expr!r}")
 
     def gen_array_copy(self, dst_mem: Memory, src_mem: Memory, array_type: Type) -> List[Instruction]:
@@ -2877,13 +3059,19 @@ class CodeGenerator:
         element's own width (see type_byte_width/leaf_type).
 
         An array whose ELEMENTS are themselves slices (`[3][]int`) is
-        explicitly rejected rather than silently miscompiled: this
-        loop only knows how to move a leaf-typed value 4 or 8 bytes at
-        a time, and a slice descriptor is neither -- it's a 16-byte,
-        two-field {ptr, len} unit that would need its own copy logic,
-        not a flat scalar move. Not yet implemented; a genuinely
-        separable follow-up once plain slices are solid, not a gap
-        discovered after the fact.
+        handled the exact same way as any other leaf type, just with a
+        16-byte width (two sequential 8-byte movqs -- the pointer,
+        then the length -- through the same scratch register, rather
+        than the single movl/movq every other leaf width uses): this
+        is a SHALLOW copy of each element's own {ptr, len} descriptor,
+        matching how copying an ordinary, bare slice variable (`s2 =
+        s1`, see gen_slice_value_into's own Variable case) already
+        works -- the copy's own slice elements end up pointing at the
+        exact same backing data the original's do, not independently,
+        recursively re-allocated ones. This is deliberate, not a
+        shortcut: it's the array counterpart of the very same,
+        already-established slice value semantics, not a new rule
+        invented for this case.
 
         The scratch register shuttling each element's value between
         src and dst is picked dynamically to differ from BOTH src_mem's
@@ -2900,15 +3088,10 @@ class CodeGenerator:
         anywhere. rcx and rdx are never used as a Memory base anywhere
         else in this file, so picking whichever of rax/rcx/rdx isn't
         already one of the two bases here stays correct even if that
-        ever changes."""
+        ever changes -- unaffected by the 16-byte case just above,
+        which reuses this exact same scratch register for its own two,
+        sequential 8-byte moves, rather than needing a second one."""
         leaf = leaf_type(array_type)
-        if leaf.kind == TypeKind.SLICE:
-            raise CodegenError(
-                f"An array whose elements are slices ({array_type}) is "
-                f"not supported yet -- copying one would need to move "
-                f"each element's full {{pointer, length}} descriptor, "
-                f"not a single scalar value"
-            )
         used_bases = {src_mem.base, dst_mem.base}
         scratch_64, scratch_32 = next(
             (r64, r32) for r64, r32 in [('rax', 'eax'), ('rcx', 'ecx'), ('rdx', 'edx')]
@@ -2921,7 +3104,14 @@ class CodeGenerator:
         while off < total:
             src = Memory(src_mem.base, src_mem.offset + off)
             dst = Memory(dst_mem.base, dst_mem.offset + off)
-            if width == 8:
+            if width == 16:
+                instructions.append(MovQ(src=src, dst=Register(scratch_64)))
+                instructions.append(MovQ(src=Register(scratch_64), dst=dst))
+                src2 = Memory(src_mem.base, src_mem.offset + off + 8)
+                dst2 = Memory(dst_mem.base, dst_mem.offset + off + 8)
+                instructions.append(MovQ(src=src2, dst=Register(scratch_64)))
+                instructions.append(MovQ(src=Register(scratch_64), dst=dst2))
+            elif width == 8:
                 instructions.append(MovQ(src=src, dst=Register(scratch_64)))
                 instructions.append(MovQ(src=Register(scratch_64), dst=dst))
             else:
@@ -3135,10 +3325,17 @@ class CodeGenerator:
         for why this takes a general Memory operand rather than a bare
         offset. Each element is evaluated via the ordinary
         gen_expr_into (so an element can be any expression, not just a
-        constant), except when the element type is ITSELF an array -- a
+        constant), except when the element type is ITSELF an array (a
         multi-dimensional literal's "elements" are themselves
-        ArrayLiterals, handled by recursing through gen_array_value_into
-        (which dispatches straight back here).
+        ArrayLiterals, handled by recursing through gen_array_value_into,
+        which dispatches straight back here) or a SLICE (an array whose
+        elements are slices -- `[N][]int` -- e.g. the synthesized outer
+        literal a slice-of-slices literal always is, `[][]int[[1, 2],
+        [3, 4]]` -- handled by gen_slice_value_into, exactly like any
+        other slice-producing expression; each element there might be
+        an untyped ArrayLiteral needing a fresh backing allocation of
+        its own, a named slice Variable, another Slice expression, or
+        anything else that method already covers).
 
         dst_mem's own base register is protected on the stack across
         each element's value computation whenever it isn't 'rbp' --
@@ -3147,18 +3344,19 @@ class CodeGenerator:
         is never clobbered by gen_expr_into, so no protection is needed
         there, but a computed or received address held in a general-
         purpose register (e.g. Memory('rax', 0), the hidden return
-        pointer for a literal returned directly -- `return [1,2,3]`)
-        is exactly the kind of register gen_expr_into's own value
+        pointer for a literal returned directly -- `return [1,2,3]`,
+        or a slice literal's own freshly-mallocd backing array) is
+        exactly the kind of register gen_expr_into's own value
         computation, which always targets %eax/%rax, can and did
         clobber -- silently overwriting the destination address before
-        a single element was ever actually written through it."""
+        a single element was ever actually written through it. The
+        SLICE case needs no protection of its own here, unlike the
+        scalar case just below: gen_slice_value_into already protects
+        dst_mem.base internally across whatever real work producing a
+        slice value takes (see its own docstring), so by the time it
+        returns, dst_mem.base is guaranteed correct again -- this loop
+        can just call it directly and move on to the next element."""
         element_type = array_type.element_type
-        if element_type.kind == TypeKind.SLICE:
-            raise CodegenError(
-                f"An array literal whose elements are slices ({array_type}) "
-                f"is not supported yet -- see gen_array_copy's own "
-                f"docstring for the same gap on the copy side"
-            )
         element_width = type_byte_width(element_type)
         protect_dst = dst_mem.base != 'rbp'
         instructions = []
@@ -3166,6 +3364,9 @@ class CodeGenerator:
             elem_mem = Memory(dst_mem.base, dst_mem.offset + i * element_width)
             if element_type.kind == TypeKind.ARRAY:
                 instructions.extend(self.gen_array_value_into(elem_expr, elem_mem, element_type))
+                continue
+            if element_type.kind == TypeKind.SLICE:
+                instructions.extend(self.gen_slice_value_into(elem_expr, elem_mem))
                 continue
             if protect_dst:
                 instructions.append(Push(Register(dst_mem.base)))
@@ -3486,18 +3687,42 @@ class CodeGenerator:
         runtime bounds check), protects it on the stack while the
         value expression is evaluated (the same push-before-recursing
         pattern used throughout this file), then writes through it.
-        The element's own type decides the store width exactly like
-        _gen_store does for an ordinary variable -- str needs `movq`,
-        everything else `movl`. An array-typed element (writing a
-        whole sub-array via `matrix[i] = other_row`) isn't reachable
-        here at all: IndexAssign's own grammar only ever produces a
-        single leaf-level element write; a whole-row assignment would
-        need `matrix[i]` to appear as an ordinary Assign target, which
+        The element's own DECLARED type -- derived from stmt.array's
+        own type, not stmt.value's -- decides the store width exactly
+        like _gen_store does for an ordinary variable -- str needs
+        `movq`, everything else `movl`, and a SLICE element (`rows[i]
+        = someSlice`, one element of an array OF slices) needs its own
+        16-byte descriptor write, via gen_slice_value_into -- which
+        already protects an arbitrary dst_mem.base internally (see its
+        own docstring), so this can just hand it Memory('rax', 0)
+        directly rather than needing its own, separate push/pop
+        dance the way the scalar path below still does.
+
+        Deliberately NOT stmt.value's own resolved type (self._type_of
+        (stmt.value)), the way this used to be computed: an UNTYPED
+        array literal flowing into a SLICE-typed element (`rows[0] =
+        [9, 9, 9]`) has its own resolved type set to the ARRAY it
+        actually builds (see semantic.py's _check_value_flowing_into),
+        not the slice it's being treated as -- so dispatching on the
+        VALUE's own type would miss this case entirely and fall
+        through to the scalar path below, the same bug-class already
+        fixed in gen_var_decl/gen_assign (see their own docstrings)
+        and analyze_index_assign, just at a third call site.
+
+        An ARRAY-typed element (writing a whole sub-array via
+        `matrix[i] = other_row`) isn't reachable here at all:
+        IndexAssign's own grammar only ever produces a single
+        leaf-level element write; a whole-row assignment would need
+        `matrix[i]` to appear as an ordinary Assign target, which
         parser.py doesn't produce (see IndexAssign's own docstring).
         """
-        element_type = self._type_of(stmt.value)
+        base_type = self._type_of(stmt.array)
+        element_type = base_type.element_type
         addr_reg = Register('rax')
         instructions = self.gen_index_address_into(Index(array=stmt.array, index=stmt.index), addr_reg)
+        if element_type.kind == TypeKind.SLICE:
+            instructions.extend(self.gen_slice_value_into(stmt.value, Memory('rax', 0)))
+            return instructions
         instructions.append(Push(addr_reg))
         if element_type == Type.STR:
             instructions.extend(self.gen_expr_into(stmt.value, Register('eax')))

@@ -15,7 +15,6 @@ Binary Ops:
 
 Updates:
 - `assert`
-- Slices in arrays.
 - `in` keyword.
 - Pass function calls to print.
 - Compound index assign.
