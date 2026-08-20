@@ -32,6 +32,8 @@ Updates:
 - Escape analysis for arrays and slices.
 - `type` Type.
 - Fix print for collections to build str buffer and call print once.
+- Variadic functions.
+- Make `append` variadic.
 - GC...
 - `is` keyword.
 - Pointers?

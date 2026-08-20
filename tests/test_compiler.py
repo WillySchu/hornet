@@ -4345,59 +4345,55 @@ class TestSliceParametersAndReturns:
             1,
         )
 
-    def test_exactly_six_slots_from_three_slice_parameters(self):
-        """The positive half of the boundary pair: three slice
-        parameters alone need exactly 6 register slots -- the limit
-        itself -- and must be accepted, not rejected off by one."""
+    def test_exactly_six_slots_from_two_slice_parameters(self):
+        """The positive half of the boundary pair: two slice
+        parameters alone need exactly 6 register slots (3 each, now
+        that a slice's own descriptor carries ptr/len/cap) -- the
+        limit itself -- and must be accepted, not rejected off by
+        one."""
         assert_program_exit_code(
-            "def int f([]int a, []int b, []int c):\n"
-            "    return a[0] + b[0] + c[0]\n"
+            "def int f([]int a, []int b):\n"
+            "    return a[0] + b[0]\n"
             "\n"
             "def int main():\n"
             "    [1]int x = [1]\n"
             "    [1]int y = [2]\n"
-            "    [1]int z = [3]\n"
             "    []int sx = x[0:1]\n"
             "    []int sy = y[0:1]\n"
-            "    []int sz = z[0:1]\n"
-            "    return f(sx, sy, sz)\n",
-            6,
+            "    return f(sx, sy)\n",
+            3,
         )
 
-    def test_seven_slots_from_three_slices_and_a_scalar_is_rejected(self):
+    def test_seven_slots_from_two_slices_and_a_scalar_is_rejected(self):
         """The negative half of the boundary pair: one more scalar
-        parameter pushes the same three slices over the 6-slot limit,
+        parameter pushes the same two slices over the 6-slot limit,
         and must be cleanly rejected -- not silently truncated."""
         source = (
-            "def int f([]int a, []int b, []int c, int d):\n"
-            "    return a[0] + b[0] + c[0] + d\n"
+            "def int f([]int a, []int b, int c):\n"
+            "    return a[0] + b[0] + c\n"
             "\n"
             "def int main():\n"
             "    [1]int x = [1]\n"
             "    [1]int y = [2]\n"
-            "    [1]int z = [3]\n"
             "    []int sx = x[0:1]\n"
             "    []int sy = y[0:1]\n"
-            "    []int sz = z[0:1]\n"
-            "    return f(sx, sy, sz, 4)\n"
+            "    return f(sx, sy, 3)\n"
         )
         ast = _parse(source)
         analyze(ast)  # semantically fine -- the limit is codegen-level only
         with pytest.raises(CodegenError, match="needs 7 argument register"):
             generate_asm(ast, platform=ASM_PLATFORM)
 
-    def test_two_slices_and_two_scalars_are_exactly_six_slots(self):
+    def test_one_slice_and_three_scalars_are_exactly_six_slots(self):
         assert_program_exit_code(
-            "def int f(int a, []int s1, int b, []int s2):\n"
-            "    return a + s1[0] + b + s2[0]\n"
+            "def int f(int a, []int s, int b, int c):\n"
+            "    return a + s[0] + b + c\n"
             "\n"
             "def int main():\n"
             "    [1]int x = [10]\n"
-            "    [1]int y = [20]\n"
             "    []int sx = x[0:1]\n"
-            "    []int sy = y[0:1]\n"
-            "    return f(1, sx, 2, sy)\n",
-            33,
+            "    return f(1, sx, 2, 3)\n",
+            16,
         )
 
     def test_slice_argument_must_be_a_variable_or_none(self):
