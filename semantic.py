@@ -1371,11 +1371,13 @@ class SemanticAnalyzer:
         elements are in it.
 
         Doesn't restrict what KIND of expression s itself is (a bare
-        Variable, an Index, a re-slice, ...) -- that's a codegen-level
-        restriction (see gen_append_call_into's own docstring for why
-        it's currently narrower than, say, len's), not a type-checking
-        one; matching the same layering print's and len's own
-        argument-shape restrictions already have.
+        Variable, an Index, a re-slice, a whole slice literal, ...) --
+        matching gen_append_call_into's own generality on the codegen
+        side now (any slice-typed expression materializes into the
+        shared unnamed-slice scratch slot if it isn't already a bare
+        Variable or `none`), unlike print's and len's own argument-
+        shape restrictions, which are real and still enforced only at
+        the codegen layer for those two.
         """
         if len(expr.args) != 2:
             raise SemanticError(

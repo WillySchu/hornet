@@ -49,7 +49,7 @@ Organization:
     TestSlices                          (10 tests)
     TestSliceBoundsChecking             ( 6 tests)
     TestCapAwareSlicing                 ( 4 tests)
-    TestAppend                          (15 tests)
+    TestAppend                          (21 tests)
     TestSliceParametersAndReturns       (15 tests)
     TestIndexingUnnamedSlices           (11 tests)
     TestPrintArraysAndSlices            (11 tests)
@@ -62,7 +62,7 @@ Organization:
     TestSemanticErrors                  (75 tests)
     TestComments                        (11 tests)
                                         ----------
-                                        495 tests total
+                                        501 tests total
 
 A NOTE ON ARRAYS
 -----------------------------------------------------------------
@@ -4519,13 +4519,31 @@ class TestCapAwareSlicing:
 # discarded, observable only because writing through the returned slice
 # is visible through the ORIGINAL backing array too.
 #
-# test_deliberate_restriction_first_argument_must_be_a_variable documents
-# a real, visible scope decision, not a discovered gap: append's first
-# argument is deliberately narrower than len's own "whatever gen_
-# indexable_base_into accepts" generality, since append exists
-# specifically to feed a reassignment (`x = append(x, v)`), and the
-# added complexity of materializing an arbitrary slice EXPRESSION into a
-# scratch slot first isn't taken on for a comparatively rare shape.
+# test_first_argument_can_be_an_unnamed_slice_expression (and its several
+# siblings just after it) document a restriction that USED to be here and
+# no longer is: append's first argument was originally narrower than
+# len's own "whatever gen_indexable_base_into accepts" generality (a bare
+# Variable or `none` only), on the theory that append exists specifically
+# to feed a reassignment (`x = append(x, v)`) and materializing an
+# arbitrary slice EXPRESSION into a scratch slot first, just to
+# immediately read it back out as an input, wasn't worth it for a
+# comparatively rare shape. That theory didn't hold up -- `append([]int[],
+# 1)`, building a slice from scratch in a single expression, turned out to
+# be exactly the shape someone reached for -- so the restriction was
+# lifted: any slice-typed expression works now (a slice literal, a
+# re-slice, an Index, another append call, a slice-returning function
+# call, ...), each materialized into the same shared, per-function
+# unnamed-slice scratch slot gen_indexable_base_into's own Slice-base case
+# already used, via gen_slice_value_into.
+#
+# test_unnamed_reslice_still_reuses_backing_array_when_capacity_allows is
+# the one that matters most among the new ones: it re-runs this class's
+# own most important existing test (see the note on
+# test_append_reuses_backing_array_when_capacity_allows above), but with
+# the re-slice passed directly as append's own first argument rather than
+# through a named variable first -- proving the growth policy's aliasing
+# behavior survives the materialization step, not just that materializing
+# an unnamed slice compiles at all.
 # ---------------------------------------------------------------------------
 
 class TestAppend:
@@ -4688,19 +4706,71 @@ class TestAppend:
         with pytest.raises(SemanticError, match="builtin"):
             analyze(_parse(source))
 
-    def test_deliberate_restriction_first_argument_must_be_a_variable(self):
-        """A real, visible scope decision, not a discovered gap -- see
-        this class's own module-level note for why."""
-        source = (
-            "def int main():\n"
-            "    [5]int arr = [1, 2, 3, 4, 5]\n"
-            "    []int y = append(arr[0:2], 9)\n"
-            "    return 0\n"
+    def test_first_argument_can_be_an_unnamed_slice_literal(self):
+        """The user's own originally-reported example: building a
+        slice from scratch and appending to it in a single
+        expression, with no intermediate named variable at all."""
+        assert_exit_code(
+            "    []int s = append([]int[], 1)\n"
+            "    return s[0]",
+            1,
         )
-        ast = _parse(source)
-        analyze(ast)
-        with pytest.raises(CodegenError, match="variable.*first argument"):
-            generate_asm(ast, platform=ASM_PLATFORM)
+
+    def test_first_argument_can_be_an_unnamed_non_empty_slice_literal(self):
+        assert_exit_code(
+            "    []int s = append([]int[1, 2], 3)\n"
+            "    return s[0] + s[1] + s[2]",
+            6,
+        )
+
+    def test_first_argument_can_be_an_unnamed_reslice(self):
+        assert_exit_code(
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s = append(arr[0:2], 99)\n"
+            "    return s[0] + s[1] + s[2]",
+            102,
+        )
+
+    def test_unnamed_reslice_still_reuses_backing_array_when_capacity_allows(self):
+        """Re-runs this class's own most important existing test (see
+        test_append_reuses_backing_array_when_capacity_allows above),
+        but with the re-slice passed directly as append's own first
+        argument -- proving the growth policy's aliasing behavior
+        survives materialization into the scratch slot, not just that
+        an unnamed re-slice compiles at all."""
+        assert_exit_code(
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int t = append(arr[0:2], 99)\n"
+            "    return arr[2]",
+            99,
+        )
+
+    def test_first_argument_can_be_an_unnamed_slice_returning_call(self):
+        assert_program_exit_code(
+            "def []int makeSlice():\n"
+            "    return []int[10, 20]\n"
+            "\n"
+            "def int main():\n"
+            "    []int s = append(makeSlice(), 30)\n"
+            "    return s[0] + s[1] + s[2]\n",
+            60,
+        )
+
+    def test_nested_append_calls(self):
+        """append's own result, itself unnamed, used directly as the
+        first argument to another append call."""
+        assert_exit_code(
+            "    []int s = append(append([]int[1], 2), 3)\n"
+            "    return s[0] + s[1] + s[2]",
+            6,
+        )
+
+    def test_unnamed_slice_of_slices_literal(self):
+        assert_exit_code(
+            "    [][]int rows = append([][]int[], [1, 2])\n"
+            "    return rows[0][0] + rows[0][1]",
+            3,
+        )
 
 
 class TestSliceParametersAndReturns:

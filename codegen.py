@@ -919,14 +919,22 @@ to wherever the call's own value flows (a VarDecl, an Assign, ...) via
 gen_slice_value_into's own dispatch, exactly like any other slice-
 producing expression.
 
-s is restricted to a Variable or `none` -- deliberately narrower than
-len's own "whatever gen_indexable_base_into accepts" generality (a
-re-slice, an Index, a slice-returning Call): append exists
-specifically to feed a reassignment (`x = append(x, v)`), and
-materializing an arbitrary slice EXPRESSION into a scratch slot first,
-just to immediately read it back out as an input, isn't taken on for
-that comparatively rare shape. A real, visible restriction, not a
-silently discovered gap.
+s can be ANY slice-typed expression, not just a bare Variable or
+`none` -- a re-slice, an Index, a whole slice literal, another
+append call, a slice-returning function call, ... A bare Variable or
+`none` is handled inline (no extra work needed: `none`'s own zero
+descriptor is just three immediate zeros, and a Variable's own
+{ptr, len, cap} already lives in a known stack slot); anything else
+is first materialized into the same shared, per-function unnamed-
+slice scratch slot gen_indexable_base_into's own Slice-base case
+already uses, via gen_slice_value_into, then read back out exactly
+like a Variable's own slot would be. This used to be restricted to
+just a Variable or `none`, on the theory that append exists
+specifically to feed a reassignment (`x = append(x, v)`) and the
+extra materialization step wasn't worth it for what looked like a
+rare shape -- lifted once `append([]int[], 1)`, building a slice from
+scratch in a single expression, turned out to be exactly the shape
+someone actually reached for.
 
 REUSE VS. REALLOCATE: THE GROWTH POLICY
 -----------------------------------------------
@@ -3602,16 +3610,26 @@ class CodeGenerator:
         APPEND BUILTIN section for the full growth-and-aliasing story
         this is built around.
 
-        s (expr.args[0]) is restricted to a Variable or NoneLiteral --
-        narrower than len's own, deliberately broad "whatever
-        gen_indexable_base_into accepts" restriction (a re-slice, an
-        Index, a slice-returning Call, ...): append exists specifically
-        to feed a reassignment (`x = append(x, v)`), and the added
-        complexity of materializing an arbitrary slice EXPRESSION into
-        a scratch slot first, just to immediately read it back out as
-        an input here, isn't taken on for that comparatively rare
-        shape. A real, visible restriction, not silently decided --
-        flagged as a deliberate scope choice, not an oversight.
+        s (expr.args[0]) can be any slice-typed expression -- a bare
+        Variable or `none` (materialized inline, no scratch slot
+        needed), or anything else (a slice literal, a re-slice, an
+        Index, a slice-returning Call, ...), which gets materialized
+        into the shared per-function scratch slot (_unnamed_slice_
+        temp_offset -- see gen_indexable_base_into's own Slice-base
+        case for the same pattern already used there) via gen_slice_
+        value_into, then read back out exactly like a Variable's own
+        slot would be. This used to be restricted to just a Variable
+        or NoneLiteral, on the theory that append exists specifically
+        to feed a reassignment (`x = append(x, v)`) and a bare slice
+        expression as its own first argument would be rare enough not
+        to justify the extra materialization step -- lifted once that
+        turned out to matter in practice (`append([]int[], 1)`, for
+        instance, needs exactly this to build a slice from scratch in
+        a single expression). The materialization itself needs no
+        special handling for what it's protecting: gen_slice_value_
+        into already protects an arbitrary destination base
+        internally, and the scratch slot here is always 'rbp'-based,
+        so there's nothing dst_mem-shaped for it to clobber.
 
         s's own three fields are loaded into CALLEE-SAVED registers
         (%rbx/%r12/%r13 for ptr/len/cap) -- not caller-saved ones --
@@ -3671,12 +3689,6 @@ class CodeGenerator:
         the final three-field write actually needs it.
         """
         slice_arg, value_arg = expr.args
-        if not isinstance(slice_arg, (Variable, NoneLiteral)):
-            raise CodegenError(
-                f"'append' requires a variable (or 'none') as its "
-                f"first argument, not {type(slice_arg).__name__} -- "
-                f"assign it to a variable first"
-            )
         slice_type = self._type_of(slice_arg)
         element_type = slice_type.element_type
         element_width = type_byte_width(element_type)
@@ -3696,11 +3708,26 @@ class CodeGenerator:
             instructions.append(MovQ(src=Imm(0), dst=r_ptr))
             instructions.append(MovQ(src=Imm(0), dst=r_len))
             instructions.append(MovQ(src=Imm(0), dst=r_cap))
-        else:
+        elif isinstance(slice_arg, Variable):
             offset = self._local_offset(slice_arg.name)
             instructions.append(MovQ(src=Memory('rbp', offset), dst=r_ptr))
             instructions.append(MovQ(src=Memory('rbp', offset + 8), dst=r_len))
             instructions.append(MovQ(src=Memory('rbp', offset + 16), dst=r_cap))
+        else:
+            # Any other slice-typed expression (a slice literal, a
+            # re-slice, an Index, a slice-returning Call, ...): build
+            # its own {ptr, len, cap} descriptor into the shared,
+            # per-function unnamed-slice scratch slot first, then read
+            # it back out exactly like a Variable's own slot would be.
+            # This scratch slot is always 'rbp'-based, so there's
+            # nothing here for gen_slice_value_into's own dst_mem
+            # protection to need to guard against beyond what it
+            # already does internally.
+            scratch = self._unnamed_slice_temp_offset
+            instructions.extend(self.gen_slice_value_into(slice_arg, Memory('rbp', scratch)))
+            instructions.append(MovQ(src=Memory('rbp', scratch), dst=r_ptr))
+            instructions.append(MovQ(src=Memory('rbp', scratch + 8), dst=r_len))
+            instructions.append(MovQ(src=Memory('rbp', scratch + 16), dst=r_cap))
 
         realloc_label = self.new_label("append_realloc")
         end_label = self.new_label("append_end")

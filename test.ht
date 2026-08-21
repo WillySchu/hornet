@@ -1,22 +1,8 @@
 def str main():
     [5]int arr = [1, 2, 3, 4, 5]
     []int sl = sliceints(arr)
-    '[]int sl = arr[:]'
+    sl = append([]int[], 1)
     print(sl)
-    print(sl[0])
-    print(arr)
-    arr[0] = 10
-    print(sl)
-    print(sl[0])
-    print(arr)
-    sl = append(sl, 6)
-    print(sl)
-    print(sl[0])
-    print(arr)
-    arr[0] = 1
-    print(sl)
-    print(sl[0])
-    print(arr)
     return ''
 
 
