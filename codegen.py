@@ -695,30 +695,60 @@ added -- see the SLICE PARAMETERS AND RETURNS section below for the
 real, cascading consequence that had on how a slice crosses a function
 boundary.
 
-SAFETY: WHY EVERY SLICED ARRAY IS HEAP-ALLOCATED
--------------------------------------------------------
+SAFETY: WHY A SLICED ARRAY MIGHT NEED TO OUTLIVE ITS OWN FRAME
+-------------------------------------------------------------------
 Slicing something that lives on the stack creates a real dangling-
 pointer risk the moment the function that declared it returns -- a
 problem plain arrays never had, since every array-typed value is
 always either copied (assignment, parameter passing) or written
 through a caller-provided pointer before the frame that held it tears
-down (return values). A slice is different in kind: it's designed to
-outlive the exact call that created it, aliasing storage that has to
-still be there afterward.
+down (return values). A slice is different in kind: it CAN be designed
+to outlive the exact call that created it, aliasing storage that has
+to still be there afterward -- but only if it actually escapes; a
+slice used purely within the function that made it never needs its
+backing array to survive past that function's own return at all.
 
-Rather than build a real escape-analysis pass to decide case by case
-which sliced arrays actually need to survive, ANY array that's ever
-sliced is unconditionally heap-allocated (see is_heap_allocated's
-second trigger condition, alongside the existing size threshold) --
-reusing the exact machinery size-based stack safety already built and
-tested, not a new mechanism. This is conservative (an array sliced
-only for strictly local use still gets promoted, even though nothing
-about that particular slice needed to survive the function), but it's
-memory-safe by construction and needed zero new allocation or
-addressing logic: gen_array_address_into and gen_indexable_base_into
-below already handle a heap- vs. stack-allocated array identically,
-so a sliced array simply flows through the same paths every heap-
-promoted array already does.
+The original plan here was to sidestep deciding that case by case:
+heap-allocate ANY array that's ever sliced, unconditionally, reusing
+the exact machinery size-based stack safety already had, rather than
+building a real escape-analysis pass. That plan was documented in this
+exact section, repeatedly, as though it had actually been built --
+it never was. is_heap_allocated only ever checked size; there was no
+second trigger anywhere in the code. The result was a real, live
+memory-safety bug: a small array, sliced, with the slice returned,
+kept its stack-allocated inline slot regardless of any of that,
+leaving the returned slice's own pointer field dangling into a torn-
+down stack frame the moment anything else got called before reading
+it again. Found by compiling and running an actual program that did
+exactly this -- see analyze_array_escapes's own docstring, and its
+module-level test note in test_compiler.py, for the full account.
+
+What actually exists now is a real escape analysis (analyze_array_
+escapes, run once per function in gen_function, before _collect_
+params/_collect_locals need its answer) -- intraprocedural and flow-
+insensitive, not the simpler "any sliced array escapes" rule this
+section used to (inaccurately) describe: it tracks, for every slice-
+typed variable, which array-typed declaration(s) it might be backed by
+(through direct slicing, re-slicing, plain slice-to-slice copies, and
+`append`), and only promotes an array if something backed by it
+actually flows into a `return` or gets passed to a user-defined
+function call (treated as escaping unconditionally, without tracing
+into the callee -- see analyze_array_escapes's own docstring for why
+that, and its other explicitly-scoped limitation -- array-of-slices
+elements aren't tracked at all -- are each real, deliberate boundaries
+rather than gaps found by accident). CodeGenerator._is_array_heap_
+allocated is where this result combines with is_heap_allocated's own,
+independent size check -- either reason alone is sufficient -- and is
+what every caller that used to call is_heap_allocated directly for a
+SPECIFIC, named variable now goes through instead.
+
+This needed no new addressing logic of its own: gen_array_address_into
+and gen_indexable_base_into below already handled a heap- vs. stack-
+allocated array identically (the whole point of routing every such
+decision through one check in the first place), so an array found to
+escape simply flows through the exact same paths every size-promoted
+array already did -- only the DECISION of which arrays qualify grew
+more precise, not the mechanism that acts on it.
 
 ADDRESS AND LENGTH: gen_indexable_base_into
 -----------------------------------------------
@@ -1034,10 +1064,13 @@ integer argument registers directly -- matching exactly what a real C
 compiler does for an equivalent `struct{void*,long,long}` passed by
 value under the SysV ABI -- and is never copied on entry the way an
 array parameter is: a slice parameter is just an alias, exactly like
-any other slice variable (see the NONE section above's own note on why
-this is memory-safe by construction: any array that's ever sliced is
-already unconditionally heap-allocated, specifically so a slice can
-safely cross a function boundary like this).
+any other slice variable. This is safe by construction, not by luck:
+analyze_array_escapes treats passing a slice as an argument to any
+user-defined function call as escaping (see its own docstring) --
+exactly this situation -- so whatever array backs it in the CALLER is
+already guaranteed to be heap-allocated by the time the call happens,
+regardless of what this function goes on to do with its own copy of
+that alias.
 
 As a RETURN VALUE, a slice now uses the exact same hidden-output-
 pointer convention arrays already established (see the ARRAYS section
@@ -1320,7 +1353,7 @@ an already-typed slot" check: analyze_index_assign.
 
 import argparse
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 from lexer import lex
 from parser import (
@@ -2024,18 +2057,263 @@ _STACK_ARRAY_LIMIT_BYTES = 16384
 
 def is_heap_allocated(t: Type) -> bool:
     """Whether a value of type `t` is heap-allocated rather than stored
-    inline in its own stack slot -- true for an array type whose total
-    footprint (type_byte_width) exceeds _STACK_ARRAY_LIMIT_BYTES, false
-    for every scalar type and every array under the limit. This is the
-    one place that decision is made; every caller that needs to know
-    -- stack allocation width, how to compute a variable's address,
-    how to read or write its value -- goes through this rather than
-    re-deriving it, so the threshold only ever needs to change in one
-    place. Purely a function of the type itself, not of any per-
-    variable state, so it's never stored anywhere -- anywhere codegen
-    already has the Type (via _local_type or _type_of), it can just
-    call this directly."""
+    inline in its own stack slot purely because of its OWN size -- true
+    for an array type whose total footprint (type_byte_width) exceeds
+    _STACK_ARRAY_LIMIT_BYTES, false for every scalar type and every
+    array under the limit. Purely a function of the type itself, not of
+    any per-variable state, so it's never stored anywhere -- anywhere
+    codegen already has the Type (via _local_type or _type_of), it can
+    just call this directly.
+
+    This is NOT the only reason a particular array ends up heap-
+    allocated any more -- see analyze_array_escapes below for the
+    other, independent trigger (a small array that backs a slice which
+    escapes the function it's declared in still needs to survive past
+    that function's own return, regardless of its size) -- so a
+    caller deciding whether a SPECIFIC, NAMED variable needs heap
+    allocation should go through CodeGenerator._is_array_heap_allocated
+    instead, which combines this size check with that escape-analysis
+    result; this function alone only ever answers the size half of
+    that question."""
     return t.kind == TypeKind.ARRAY and type_byte_width(t) > _STACK_ARRAY_LIMIT_BYTES
+
+
+def analyze_array_escapes(fn: Function, param_types: List[Type]) -> Set[int]:
+    """Returns the set of id()s -- of this function's own VarDecl or
+    Param nodes -- for array-typed declarations that need to be heap-
+    allocated because a slice backed by them might outlive this
+    function's own call, REGARDLESS of their own size. This is what
+    closes the real memory-safety gap size-based heap promotion alone
+    left open: a small, stack-allocated array, sliced and returned
+    (directly, or via a named slice variable, or after an `append`
+    that happened to reuse its backing storage), leaves the returned
+    slice's own pointer field dangling into a stack frame that's
+    already been torn down by the time anything reads it again.
+
+    An intraprocedural, FLOW-INSENSITIVE analysis: it doesn't reason
+    about the order statements execute in, or which branch of an
+    if/while actually runs -- every assignment to a given slice
+    variable ANYWHERE in the function is unioned together into one
+    combined "what might this be backed by" answer, used uniformly
+    wherever that variable is read. This is a real, deliberate
+    simplification (a variable reused for two logically-unrelated
+    slices at different points in the same function gets treated as
+    if it could be either one everywhere), not an oversight -- it
+    avoids needing a genuine fixed-point dataflow pass over branches
+    and loops, which true flow sensitivity would require even before
+    any function calls enter the picture, for a level of precision
+    ordinary code doesn't often need. Two further, real limitations,
+    each deliberately out of scope for now rather than silently
+    mishandled:
+      - Purely INTRAprocedural: a slice passed as an argument to any
+        user-defined function call is conservatively treated as
+        escaping unconditionally, without looking at what the callee
+        actually does with it (does it store it somewhere that
+        outlives the call, or just read it and let it go). A real
+        interprocedural version would need a per-function escape
+        SUMMARY, computed for every function in dependency order --
+        and since Hornet allows recursion, computing those soundly
+        needs a genuine fixed-point iteration over the call graph, not
+        a single pass. That's a substantially larger undertaking than
+        this, and left for its own, separate follow-up.
+      - A slice stored as an ARRAY-OF-SLICES element (`rows[i] =
+        arr[:]`) isn't tracked at all here -- this analysis follows
+        aliasing through slice-typed VARIABLES only, not through
+        array elements. Also left as a separate, explicitly-known
+        follow-up rather than silently mishandled.
+
+    The algorithm itself has two phases:
+      1. Walk the function body once (recursing into every If's own
+         then_body/else_body and every While's own body, maintaining a
+         scope stack so a name resolves to the SPECIFIC declaration it
+         actually refers to at that point -- Hornet allows shadowing a
+         name in a nested block, so a plain name-based lookup would
+         risk conflating two entirely different variables), building:
+           - direct_backing: for each slice-typed declaration, which
+             array-typed declaration(s) it's ever directly sliced from
+             (`s = arr[low:high]`, or `s = matrix[i][low:high]` --
+             indexing into a multi-dimensional array's own row is
+             still a view into the SAME backing storage, not a copy,
+             so this unwraps nested Index nodes down to their root
+             Variable rather than requiring a bare one).
+           - slice_deps: for each slice-typed declaration, which OTHER
+             slice-typed declaration(s) it might in turn be derived
+             from (re-slicing a slice, a plain slice-to-slice copy, or
+             `append`, which might reuse its own first argument's
+             backing array).
+           - escaping_slices / escaping_arrays: declarations directly
+             marked as escaping, from a `return` statement's own value
+             or a slice/array-typed argument passed to a user-defined
+             call (found via a full recursive scan of every expression
+             for a nested Call, not just ones at a statement's own top
+             level -- `return foo(bar(s))` still needs `s` to be
+             checked as bar's own argument even though the RETURN
+             itself is really about foo's result, not s directly).
+      2. Compute the transitive closure from escaping_slices, following
+         slice_deps edges (an ordinary graph reachability walk -- BFS
+         via an explicit stack, not recursion, so it can't stack-
+         overflow on a pathologically long dependency chain), unioning
+         in direct_backing at every slice declaration reached along the
+         way, plus escaping_arrays found directly. The result is
+         exactly the set of array declarations that need to survive
+         past this function's own return.
+    """
+    array_decls: Set[int] = set()
+    slice_decls: Set[int] = set()
+    direct_backing: Dict[int, Set[int]] = {}
+    slice_deps: Dict[int, Set[int]] = {}
+    escaping_slices: Set[int] = set()
+    escaping_arrays: Set[int] = set()
+
+    scopes: List[Dict[str, int]] = [{}]
+
+    def resolve(name: str) -> Optional[int]:
+        for scope in reversed(scopes):
+            if name in scope:
+                return scope[name]
+        return None
+
+    def declare(name: str, decl_id: int, decl_type: Type) -> None:
+        scopes[-1][name] = decl_id
+        if decl_type.kind == TypeKind.ARRAY:
+            array_decls.add(decl_id)
+        elif decl_type.kind == TypeKind.SLICE:
+            slice_decls.add(decl_id)
+            direct_backing.setdefault(decl_id, set())
+            slice_deps.setdefault(decl_id, set())
+
+    for p, p_type in zip(fn.params, param_types):
+        declare(p.name, id(p), p_type)
+
+    def root_variable_name(expr: Node) -> Optional[str]:
+        while isinstance(expr, Index):
+            expr = expr.array
+        return expr.name if isinstance(expr, Variable) else None
+
+    def contribution(value_expr: Node) -> Tuple[Optional[int], Optional[int]]:
+        """Returns (array_decl_id, slice_decl_id) -- whichever ONE of
+        the two value_expr's own aliasing actually resolves to (never
+        both), or (None, None) if it isn't backed by any of this
+        function's own declarations at all (a fresh literal, `none`,
+        an ordinary user-function call's own return value, ...)."""
+        if isinstance(value_expr, Slice):
+            base_name = root_variable_name(value_expr.array)
+            if base_name is not None:
+                base_id = resolve(base_name)
+                if base_id in array_decls:
+                    return base_id, None
+                if base_id in slice_decls:
+                    return None, base_id
+        elif isinstance(value_expr, Variable):
+            src_id = resolve(value_expr.name)
+            if src_id in slice_decls:
+                return None, src_id
+        elif isinstance(value_expr, Call) and value_expr.name == 'append':
+            slice_arg = value_expr.args[0]
+            if isinstance(slice_arg, Variable):
+                src_id = resolve(slice_arg.name)
+                if src_id in slice_decls:
+                    return None, src_id
+        return None, None
+
+    def scan_expr_for_escaping_calls(expr: Node) -> None:
+        if isinstance(expr, Call):
+            if expr.name not in ('print', 'len', 'append'):
+                for arg in expr.args:
+                    array_id, slice_id = contribution(arg)
+                    if array_id is not None:
+                        escaping_arrays.add(array_id)
+                    if slice_id is not None:
+                        escaping_slices.add(slice_id)
+            for arg in expr.args:
+                scan_expr_for_escaping_calls(arg)
+        elif isinstance(expr, Binary):
+            scan_expr_for_escaping_calls(expr.left)
+            scan_expr_for_escaping_calls(expr.right)
+        elif isinstance(expr, Unary):
+            scan_expr_for_escaping_calls(expr.operand)
+        elif isinstance(expr, Index):
+            scan_expr_for_escaping_calls(expr.array)
+            scan_expr_for_escaping_calls(expr.index)
+        elif isinstance(expr, Slice):
+            scan_expr_for_escaping_calls(expr.array)
+            if expr.low is not None:
+                scan_expr_for_escaping_calls(expr.low)
+            if expr.high is not None:
+                scan_expr_for_escaping_calls(expr.high)
+        elif isinstance(expr, ArrayLiteral):
+            for element in expr.elements:
+                scan_expr_for_escaping_calls(element)
+        # Variable, Constant, BoolLiteral, StringLiteral, NoneLiteral:
+        # leaves, nothing further to recurse into.
+
+    def walk_statements(statements: List[Node]) -> None:
+        for stmt in statements:
+            if isinstance(stmt, VarDecl):
+                var_type = type_from_name(stmt.var_type)
+                declare(stmt.name, id(stmt), var_type)
+                if stmt.init is not None:
+                    if var_type.kind == TypeKind.SLICE:
+                        array_id, slice_id = contribution(stmt.init)
+                        if array_id is not None:
+                            direct_backing[id(stmt)].add(array_id)
+                        if slice_id is not None:
+                            slice_deps[id(stmt)].add(slice_id)
+                    scan_expr_for_escaping_calls(stmt.init)
+            elif isinstance(stmt, Assign):
+                target_id = resolve(stmt.name)
+                if target_id in slice_decls:
+                    array_id, slice_id = contribution(stmt.value)
+                    if array_id is not None:
+                        direct_backing[target_id].add(array_id)
+                    if slice_id is not None:
+                        slice_deps[target_id].add(slice_id)
+                scan_expr_for_escaping_calls(stmt.value)
+            elif isinstance(stmt, IndexAssign):
+                scan_expr_for_escaping_calls(stmt.array)
+                scan_expr_for_escaping_calls(stmt.index)
+                scan_expr_for_escaping_calls(stmt.value)
+            elif isinstance(stmt, Return):
+                if stmt.value is not None:
+                    array_id, slice_id = contribution(stmt.value)
+                    if array_id is not None:
+                        escaping_arrays.add(array_id)
+                    if slice_id is not None:
+                        escaping_slices.add(slice_id)
+                    scan_expr_for_escaping_calls(stmt.value)
+            elif isinstance(stmt, ExprStmt):
+                scan_expr_for_escaping_calls(stmt.expr)
+            elif isinstance(stmt, If):
+                scan_expr_for_escaping_calls(stmt.condition)
+                scopes.append({})
+                walk_statements(stmt.then_body)
+                scopes.pop()
+                if stmt.else_body is not None:
+                    scopes.append({})
+                    walk_statements(stmt.else_body)
+                    scopes.pop()
+            elif isinstance(stmt, While):
+                scan_expr_for_escaping_calls(stmt.condition)
+                scopes.append({})
+                walk_statements(stmt.body)
+                scopes.pop()
+            # Break, Continue: nothing to do.
+
+    walk_statements(fn.body)
+
+    result: Set[int] = set(escaping_arrays)
+    visited: Set[int] = set()
+    stack: List[int] = list(escaping_slices)
+    while stack:
+        slice_id = stack.pop()
+        if slice_id in visited:
+            continue
+        visited.add(slice_id)
+        result |= direct_backing.get(slice_id, set())
+        for dep in slice_deps.get(slice_id, set()):
+            if dep not in visited:
+                stack.append(dep)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -2123,6 +2401,17 @@ class CodeGenerator:
         # a second "no return type" representation in this file.
         return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type)
         param_types = [type_from_name(p.type) for p in fn.params]
+
+        # Which of THIS function's own array declarations need to be
+        # heap-allocated because a slice backed by them might outlive
+        # this function's own return, regardless of their own size --
+        # see analyze_array_escapes's own docstring for the full
+        # algorithm. Computed once, up front, since _collect_params/
+        # _collect_locals (just below) already need to know this to
+        # decide how much stack space each declaration's own slot
+        # takes (8 bytes for a heap pointer vs. the array's own full
+        # width) -- this has to exist before either of them run.
+        self._escaping_array_ids = analyze_array_escapes(fn, param_types)
 
         # An array- OR slice-typed return needs a hidden pointer -- the
         # caller passes the address to write the result into, as an
@@ -2281,7 +2570,7 @@ class CodeGenerator:
             p_type = param_types[i]
             temp_offset = param_temp_offsets[i]
             if p_type.kind == TypeKind.ARRAY:
-                if is_heap_allocated(p_type):
+                if self._is_array_heap_allocated(id(p), p_type):
                     # Needs its own, independent heap copy -- exactly
                     # like the stack-allocated case below, just backed
                     # by malloc'd memory instead of an inline slot --
@@ -2309,10 +2598,11 @@ class CodeGenerator:
                 # into its own permanent slot; no malloc, no is_heap_
                 # allocated check. The underlying array it points to
                 # (if any) is already guaranteed to outlive this call
-                # regardless, by construction: any array that's ever
-                # sliced is unconditionally heap-allocated (see is_
-                # heap_allocated's second trigger) specifically so a
-                # slice can safely cross a function boundary like this.
+                # regardless: analyze_array_escapes treats passing a
+                # slice as an argument to a user-defined call (which is
+                # exactly how THIS parameter got here) as escaping, so
+                # whatever array backs it in the CALLER is already
+                # heap-allocated by the time this function even starts.
                 instructions.append(MovQ(src=Memory('rbp', temp_offset), dst=Register('rax')))
                 instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
                 instructions.append(MovQ(src=Memory('rbp', temp_offset + 8), dst=Register('rax')))
@@ -2377,7 +2667,7 @@ class CodeGenerator:
         was decremented for so far."""
         for p in params:
             p_type = type_from_name(p.type)
-            width = 8 if is_heap_allocated(p_type) else type_byte_width(p_type)
+            width = 8 if self._is_array_heap_allocated(id(p), p_type) else type_byte_width(p_type)
             self._next_offset -= width
             self._var_offsets[id(p)] = self._next_offset
 
@@ -2385,11 +2675,12 @@ class CodeGenerator:
         """The Param counterpart to _bind_local -- registers `p`'s name
         and declared type (as a real semantic.Type, via type_from_name,
         not the raw parser-level string/ArrayTypeExpr -- see
-        _local_type's own docstring for why) in the current scope,
-        pointing at the permanent offset _collect_params already
-        assigned it."""
+        _local_type's own docstring for why), plus id(p) itself (see
+        _local_decl_id's own docstring for why that's needed
+        alongside the type and offset), in the current scope, pointing
+        at the permanent offset _collect_params already assigned it."""
         offset = self._var_offsets[id(p)]
-        self.scopes[-1][p.name] = (offset, type_from_name(p.type))
+        self.scopes[-1][p.name] = (offset, type_from_name(p.type), id(p))
         return offset
 
     def _collect_locals(self, statements: List[Node]) -> None:
@@ -2422,7 +2713,7 @@ class CodeGenerator:
         for stmt in statements:
             if isinstance(stmt, VarDecl):
                 var_type = type_from_name(stmt.var_type)
-                width = 8 if is_heap_allocated(var_type) else type_byte_width(var_type)
+                width = 8 if self._is_array_heap_allocated(id(stmt), var_type) else type_byte_width(var_type)
                 self._next_offset -= width
                 self._var_offsets[id(stmt)] = self._next_offset
             elif isinstance(stmt, If):
@@ -2453,12 +2744,13 @@ class CodeGenerator:
         self.scopes.pop()
 
     def _bind_local(self, stmt: VarDecl) -> int:
-        """Registers `stmt`'s name -- and its declared type, needed by
-        _local_type -- in the current (innermost) generation-time
-        scope, pointing at the permanent offset _collect_locals already
-        assigned this exact VarDecl node, and returns that offset."""
+        """Registers `stmt`'s name -- its declared type, needed by
+        _local_type, and id(stmt) itself, needed by _local_decl_id --
+        in the current (innermost) generation-time scope, pointing at
+        the permanent offset _collect_locals already assigned this
+        exact VarDecl node, and returns that offset."""
         offset = self._var_offsets[id(stmt)]
-        self.scopes[-1][stmt.name] = (offset, type_from_name(stmt.var_type))
+        self.scopes[-1][stmt.name] = (offset, type_from_name(stmt.var_type), id(stmt))
         return offset
 
     def _local_offset(self, name: str) -> int:
@@ -2471,13 +2763,13 @@ class CodeGenerator:
         """Used specifically where a Variable's *offset* is also being
         looked up right alongside it (see gen_expr_into's Variable case,
         and gen_array_address_into) -- both come from the same
-        (offset, Type) tuple in the same scope-stack entry, which
-        codegen has to maintain regardless of _type_of's existence,
-        since resolved_type has no way to encode *which* stack slot a
-        name refers to. This is deliberately not replaced by _type_of
-        below, even though it would give the same answer for a
-        Variable node -- see _type_of's own docstring for why the two
-        coexist rather than one replacing the other.
+        (offset, Type, decl_id) tuple in the same scope-stack entry,
+        which codegen has to maintain regardless of _type_of's
+        existence, since resolved_type has no way to encode *which*
+        stack slot a name refers to. This is deliberately not replaced
+        by _type_of below, even though it would give the same answer
+        for a Variable node -- see _type_of's own docstring for why the
+        two coexist rather than one replacing the other.
 
         Returns a real semantic.Type (via type_from_name, called once
         up front in _bind_local/_bind_param, not re-derived here) --
@@ -2488,6 +2780,39 @@ class CodeGenerator:
             if name in scope:
                 return scope[name][1]
         raise CodegenError(f"Reference to undeclared variable '{name}'")
+
+    def _local_decl_id(self, name: str) -> int:
+        """Returns id(the VarDecl or Param node) that `name` currently
+        resolves to -- the third element of the same (offset, Type,
+        decl_id) tuple _local_offset/_local_type already read the
+        first two of, kept in the SAME scope-stack lookup (rather than
+        a separate, parallel name-to-id table) specifically so this
+        respects shadowing exactly like they do: Hornet allows
+        re-declaring a name in a nested if/while block, so a plain
+        name alone doesn't uniquely identify a declaration the way
+        id() of the actual AST node does. Used by _is_array_heap_
+        allocated to look up whether THIS SPECIFIC declaration (not
+        just any variable that happens to share its name) was found to
+        escape by analyze_array_escapes."""
+        for scope in reversed(self.scopes):
+            if name in scope:
+                return scope[name][2]
+        raise CodegenError(f"Reference to undeclared variable '{name}'")
+
+    def _is_array_heap_allocated(self, decl_id: int, t: Type) -> bool:
+        """Whether the SPECIFIC array-typed declaration identified by
+        decl_id (id() of its own VarDecl or Param node) needs to be
+        heap-allocated -- combining is_heap_allocated's own, pure
+        size check with analyze_array_escapes's own, independent
+        result (computed once per function, in gen_function, and
+        cached in self._escaping_array_ids): either reason alone is
+        sufficient. This is the actual decision point every one of
+        this file's 8 call sites that used to call is_heap_allocated
+        directly now goes through instead, each passing whichever
+        decl_id it has on hand -- id(a VarDecl or Param) directly, or
+        self._local_decl_id(name) wherever only a Variable's own name
+        is available at that point."""
+        return is_heap_allocated(t) or decl_id in self._escaping_array_ids
 
     def _type_of(self, expr: Node) -> Type:
         """Reads the type semantic.py already resolved and annotated
@@ -2763,7 +3088,7 @@ class CodeGenerator:
         if isinstance(expr, Variable):
             offset = self._local_offset(expr.name)
             array_type = self._local_type(expr.name)
-            if is_heap_allocated(array_type):
+            if self._is_array_heap_allocated(self._local_decl_id(expr.name), array_type):
                 return [MovQ(src=Memory('rbp', offset), dst=dst)]
             return [LeaQFrame(offset=offset, dst=dst)]
         if isinstance(expr, Index):
@@ -3935,7 +4260,7 @@ class CodeGenerator:
         if isinstance(expr, Variable):
             src_offset = self._local_offset(expr.name)
             src_type = self._local_type(expr.name)
-            if is_heap_allocated(src_type):
+            if self._is_array_heap_allocated(self._local_decl_id(expr.name), src_type):
                 load_ptr = self._gen_protecting_dst_across(
                     dst_mem, [MovQ(src=Memory('rbp', src_offset), dst=Register('rbx'))]
                 )
@@ -4072,7 +4397,7 @@ class CodeGenerator:
         # unwritten, if there's no initializer to write through it.
         offset = self._bind_local(stmt)
         var_type = self._local_type(stmt.name)
-        if is_heap_allocated(var_type):
+        if self._is_array_heap_allocated(id(stmt), var_type):
             # A fresh backing allocation, made exactly once here at
             # declaration time -- see gen_assign's own array case for
             # why a later assignment reuses this same allocation
@@ -4145,7 +4470,7 @@ class CodeGenerator:
             instructions.append(MovQ(src=Imm(len(stmt.value.elements)), dst=Memory('rbp', offset + 8)))
             return instructions
         value_type = self._type_of(stmt.value)
-        if value_type.kind == TypeKind.ARRAY and is_heap_allocated(value_type):
+        if value_type.kind == TypeKind.ARRAY and self._is_array_heap_allocated(self._local_decl_id(stmt.name), value_type):
             # Reuses the EXISTING allocation from this variable's own
             # declaration -- a fixed-size array's footprint never
             # changes across its lifetime, so there's nothing to

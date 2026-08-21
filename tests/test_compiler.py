@@ -45,6 +45,7 @@ Organization:
     TestTypedArrayLiterals              (13 tests)
     TestBoundsChecking                  ( 4 tests)
     TestHeapAllocatedArrays             (12 tests)
+    TestArrayEscapeAnalysis             ( 9 tests)
     TestSlices                          (10 tests)
     TestSliceBoundsChecking             ( 6 tests)
     TestCapAwareSlicing                 ( 4 tests)
@@ -60,7 +61,7 @@ Organization:
     TestIndexAssignIntoArrayOfSlices    ( 5 tests)
     TestSemanticErrors                  (75 tests)
                                         ----------
-                                        475 tests total
+                                        484 tests total
 
 A NOTE ON ARRAYS
 -----------------------------------------------------------------
@@ -3928,16 +3929,261 @@ class TestHeapAllocatedArrays:
 # of these failed, slices would just be a more awkward way to copy an
 # array, not a real view.
 #
-# Any array that's ever sliced is unconditionally heap-allocated (see
-# codegen.py's is_heap_allocated and its own ARRAYS section) --
-# reusing the size-based promotion machinery with a second trigger --
-# specifically so a slice can never outlive the stack frame its
-# backing array would otherwise have lived in. That promotion isn't
-# exercised directly in this class; it's implicit in every test here
-# that slices anything, since the alternative (a dangling view into a
-# torn-down stack frame) is exactly the memory-safety hole this
-# feature was scoped to close from day one.
+# Any array that's ever sliced used to be claimed here as unconditionally
+# heap-allocated -- that was never actually true (is_heap_allocated only
+# ever checked size; see TestArrayEscapeAnalysis for the real mechanism,
+# and its own module-level note for the bug this gap caused in practice).
+# What actually keeps every test in this class safe is that none of them
+# let a slice outlive the stack frame its own backing array lives in --
+# see TestArrayEscapeAnalysis for what happens, and what's now done about
+# it, when one does.
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Array escape analysis: which array-typed declarations need to be heap-
+# allocated because a slice backed by them might outlive the function
+# they're declared in, independent of their own size. Before this
+# existed, is_heap_allocated only ever checked size -- a small array that
+# got sliced and had the slice returned kept its stack-allocated inline
+# slot regardless, leaving the returned slice's own pointer field
+# dangling into a stack frame that's already torn down by the time
+# anything reads it again. This was a REAL bug, not a hypothetical one:
+# it was found by compiling and running a real program (a function
+# taking a small array parameter, slicing it, and returning that slice),
+# where the corruption only became visible once enough OTHER function
+# calls ran between producing the slice and reading it again -- exactly
+# the "undefined behavior doesn't reliably manifest" trap that also means
+# a passing runtime-output test here doesn't, by itself, prove a given
+# array correctly escaped; see this class's own heavy use of asm-
+# inspection (checking for a real `malloc` call, via generate_asm
+# directly) precisely to sidestep that trap, rather than trusting that a
+# clean-looking exit code means nothing went wrong.
+#
+# The analysis itself is intraprocedural and FLOW-INSENSITIVE (see
+# analyze_array_escapes's own docstring in codegen.py for the full
+# algorithm and the two deliberate limitations that come with that
+# choice): every assignment to a slice-typed variable anywhere in a
+# function is unioned together into one combined answer for "what might
+# this be backed by", used everywhere that variable is read, rather than
+# tracking which value it holds at each specific point in the code.
+#
+# test_local_array_sliced_but_not_returned_stays_on_the_stack is the
+# single most important test in this whole class, arguably more important
+# than the bug-fix tests themselves: it's what actually proves this is a
+# genuinely more precise analysis, not just "heap-allocate every array
+# that's ever sliced" wearing a fancier name. Every bug-fix test here
+# could pass even under that cruder rule; this one specifically requires
+# a small, sliced, but non-escaping array to remain stack-allocated, and
+# would fail under it.
+#
+# test_array_of_slices_element_is_a_known_gap documents, rather than
+# hides, the one thing explicitly deferred alongside this work: a slice
+# stored as an array-of-slices ELEMENT isn't tracked by this analysis at
+# all (it only follows aliasing through slice-typed variables), so the
+# backing array in that specific shape is still left stack-allocated,
+# unsafely, exactly as before this analysis existed.
+# ---------------------------------------------------------------------------
+
+class TestArrayEscapeAnalysis:
+    pytestmark = GCC_SKIP
+
+    def test_small_sliced_parameter_returned_no_longer_corrupts(self):
+        """The user's own, originally-reported bug: a function takes a
+        small array PARAMETER, slices it, and returns that slice --
+        with enough subsequent function-call activity in the caller to
+        make a dangling stack pointer's corruption actually visible if
+        the parameter were still stack-allocated."""
+        assert_program_stdout(
+            "def []int sliceints([5]int arr):\n"
+            "    []int a = arr[:]\n"
+            "    return a\n"
+            "\n"
+            "def int helper(int x):\n"
+            "    int a = x + 1\n"
+            "    int b = a + 1\n"
+            "    return a + b\n"
+            "\n"
+            "def int main():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int sl = sliceints(arr)\n"
+            "    int junk = helper(1)\n"
+            "    junk = helper(2)\n"
+            "    junk = helper(3)\n"
+            "    print(sl)\n"
+            "    return 0\n",
+            "[]int[1, 2, 3, 4, 5]\n",
+        )
+
+    def test_small_sliced_parameter_returned_is_actually_heap_allocated(self):
+        """The asm-level confirmation behind the test just above --
+        not just "the output looked right this time" (which undefined
+        behavior can produce by coincidence), but a genuine `malloc`
+        call sized to the array's own exact footprint."""
+        source = (
+            "def []int sliceints([5]int arr):\n"
+            "    []int a = arr[:]\n"
+            "    return a\n"
+            "\n"
+            "def int main():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int sl = sliceints(arr)\n"
+            "    return sl[0]\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        assert "malloc" in asm
+        assert "$20" in asm  # 5 ints * 4 bytes
+
+    def test_local_array_sliced_but_not_returned_stays_on_the_stack(self):
+        """THE test proving this is genuinely more precise than
+        "heap-allocate every array that's ever sliced" -- see this
+        class's own module-level note. A small array, sliced, but the
+        slice never escapes the function at all: must NOT be
+        promoted."""
+        source = (
+            "def int main():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s = arr[0:2]\n"
+            "    return s[0] + s[1]\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        assert "malloc" not in asm
+
+    def test_array_passed_by_value_not_sliced_stays_on_the_stack(self):
+        """A small array passed to another function, never sliced at
+        all -- ordinary value-semantics copying, nothing for escape
+        analysis to even consider. Confirms passing an array as a
+        plain argument doesn't itself trigger promotion."""
+        source = (
+            "def int helper([5]int a):\n"
+            "    return a[0]\n"
+            "\n"
+            "def int main():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    return helper(arr)\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        assert "malloc" not in asm
+
+    def test_transitive_reslicing_chain_escapes_correctly(self):
+        """arr backs s1, s1 backs s2, s2 is returned -- the analysis
+        has to follow the chain through TWO slice-to-slice hops, not
+        just one direct slice-of-an-array step, to find that arr
+        itself needs to escape."""
+        assert_program_exit_code(
+            "def []int make():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s1 = arr[0:3]\n"
+            "    []int s2 = s1[0:2]\n"
+            "    return s2\n"
+            "\n"
+            "def int helper(int x):\n"
+            "    int a = x + 1\n"
+            "    return a\n"
+            "\n"
+            "def int main():\n"
+            "    []int r = make()\n"
+            "    int junk = helper(1)\n"
+            "    junk = helper(2)\n"
+            "    junk = helper(3)\n"
+            "    return r[0] + r[1]\n",
+            3,
+        )
+
+    def test_append_chain_escapes_correctly(self):
+        """arr backs s1, s1 backs s2 via append (which might reuse
+        s1's own backing storage) -- append has to be treated as a
+        slice-to-slice dependency, not a fresh, unrelated value, for
+        this to work."""
+        assert_program_exit_code(
+            "def []int make():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s1 = arr[0:2]\n"
+            "    []int s2 = append(s1, 99)\n"
+            "    return s2\n"
+            "\n"
+            "def int helper(int x):\n"
+            "    int a = x + 1\n"
+            "    return a\n"
+            "\n"
+            "def int main():\n"
+            "    []int r = make()\n"
+            "    int junk = helper(1)\n"
+            "    junk = helper(2)\n"
+            "    return r[0] + r[1] + r[2]\n",
+            102,
+        )
+
+    def test_slicing_a_row_of_a_multi_dimensional_array_escapes_the_whole_array(self):
+        """Indexing into a multi-dimensional array's own row is still a
+        view into the SAME backing storage, not a copy -- slicing
+        `matrix[1]` has to be recognized as aliasing `matrix` itself,
+        not silently missed just because the base is an Index rather
+        than a bare Variable."""
+        assert_program_exit_code(
+            "def []int getRow():\n"
+            "    [2][3]int matrix = [[1, 2, 3], [4, 5, 6]]\n"
+            "    return matrix[1][0:2]\n"
+            "\n"
+            "def int helper(int x):\n"
+            "    int a = x + 1\n"
+            "    return a\n"
+            "\n"
+            "def int main():\n"
+            "    []int r = getRow()\n"
+            "    int junk = helper(1)\n"
+            "    junk = helper(2)\n"
+            "    return r[0] + r[1]\n",
+            9,
+        )
+
+    def test_slice_passed_to_another_function_conservatively_escapes(self):
+        """A slice handed to a user-defined function call is treated as
+        escaping unconditionally -- this analysis never looks at what
+        the callee actually does with it (a real interprocedural
+        version would need a per-function escape summary computed in
+        dependency order, a substantially larger undertaking left for
+        its own follow-up)."""
+        source = (
+            "def int sumFirstTwo([]int s):\n"
+            "    return s[0] + s[1]\n"
+            "\n"
+            "def int main():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s = arr[0:3]\n"
+            "    return sumFirstTwo(s)\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        assert "malloc" in asm
+
+    def test_array_of_slices_element_is_a_known_gap(self):
+        """Documents, rather than hides, the one thing explicitly
+        deferred alongside this analysis: a slice stored as an array-
+        of-slices ELEMENT isn't tracked at all (aliasing is only
+        followed through slice-typed VARIABLES) -- so the array it's
+        sliced from is still, unsafely, left stack-allocated. This
+        assertion is expected to start FAILING the day this gap gets
+        closed -- when it does, delete this test, not fix it to match
+        new behavior."""
+        source = (
+            "def [1][]int makeRows():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    [1][]int rows\n"
+            "    rows[0] = arr[0:2]\n"
+            "    return rows\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        assert "malloc" not in asm
+
 
 class TestSlices:
     pytestmark = GCC_SKIP

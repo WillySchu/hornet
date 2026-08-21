@@ -14,7 +14,9 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
+- Comments!
 - `append` to unnamed slices.
+- Escape arrays backing slice elements of an array / slice that is returned.
 - Structs.
 - Fix print for collections to build str buffer and call print once.
 - `assert`

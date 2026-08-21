@@ -1,4 +1,14 @@
 def int main():
-    ints [2]int = [1, 2]
-    a = 2
-    return ints
+    [5]int arr = [1, 2, 3, 4, 5]
+    print(arr)
+    []int sl = sliceints(arr)
+    print(arr)
+    'sl = append(sl, 6)'
+    return 0
+
+
+def []int sliceints([5]int arr):
+    print(arr)
+    arr[0] = 10
+    print(arr)
+    return arr[:]

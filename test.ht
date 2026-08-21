@@ -1,10 +1,22 @@
 def str main():
-    []int sl = sliceints()
+    [5]int arr = [1, 2, 3, 4, 5]
+    []int sl = sliceints(arr)
+    '[]int sl = arr[:]'
     print(sl)
-    int i = sliceints()[0]
-    print(i)
-    [5]int arr = ints()
-    print(len(arr))
+    print(sl[0])
+    print(arr)
+    arr[0] = 10
+    print(sl)
+    print(sl[0])
+    print(arr)
+    sl = append(sl, 6)
+    print(sl)
+    print(sl[0])
+    print(arr)
+    arr[0] = 1
+    print(sl)
+    print(sl[0])
+    print(arr)
     return ''
 
 
@@ -17,8 +29,8 @@ def str world(str p):
     return 'world' + p
 
 
-def []int sliceints():
-    [5]int arr = [1, 2, 3, 4, 5]
+def []int sliceints([5]int arr):
+    []int a = arr[:]
     return arr[:]
 
 

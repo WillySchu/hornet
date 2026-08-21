@@ -467,17 +467,17 @@ class Slice(Node):
     """`array[low:high]` -- a VIEW into `array` spanning [low, high):
     low inclusive, high exclusive, matching Go's own convention (which
     this whole feature is deliberately modeled on). Produces a Slice-
-    typed VALUE (conceptually a {pointer, length} descriptor -- see
-    codegen.py's eventual SLICES section for the concrete
-    representation), not a copy of the underlying elements: a slice is
-    a genuine alias into its base's own backing storage, unlike plain
-    array assignment (`arr2 = arr1`), which already copies. This is
-    exactly the aliasing surface that makes size-based stack safety's
-    heap-promotion policy load-bearing rather than optional once
-    slicing exists -- see codegen.py's ARRAYS section for the
-    existing mechanism this reuses (a second trigger for
-    is_heap_allocated: "is this array ever sliced", not just "is it
-    over the size threshold").
+    typed VALUE (conceptually a {pointer, length, capacity} descriptor
+    -- see codegen.py's SLICES section for the concrete representation),
+    not a copy of the underlying elements: a slice is a genuine alias
+    into its base's own backing storage, unlike plain array assignment
+    (`arr2 = arr1`), which already copies. This is exactly the aliasing
+    surface that makes stack safety genuinely load-bearing once slicing
+    exists, not merely a nice-to-have: a slice that outlives the stack
+    frame its own backing array lives in becomes a dangling pointer the
+    moment that frame is torn down -- see codegen.py's own analyze_
+    array_escapes for the actual mechanism (an escape analysis, not
+    just a size check) that decides which arrays need to survive that.
 
     `array` can be EITHER Array-typed or Slice-typed -- slicing a
     slice (`s2 = s[1:3]`) and slicing the outer dimension of a multi-
