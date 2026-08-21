@@ -60,8 +60,9 @@ Organization:
     TestArrayOfSlicesCopying            ( 4 tests)
     TestIndexAssignIntoArrayOfSlices    ( 5 tests)
     TestSemanticErrors                  (75 tests)
+    TestComments                        (11 tests)
                                         ----------
-                                        484 tests total
+                                        495 tests total
 
 A NOTE ON ARRAYS
 -----------------------------------------------------------------
@@ -6640,3 +6641,156 @@ class TestSemanticErrors:
             "    return r[0]\n"
         )
         analyze(ast)  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# Single-line comments: `#` to end of line. Purely a lexer-level feature --
+# the COMMENT rule is discarded exactly like SKIP (whitespace) is, and never
+# reaches the parser at all, so none of these tests are really testing the
+# parser or codegen; they're testing that the lexer correctly makes a
+# comment invisible to everything downstream, in every position one could
+# plausibly appear.
+#
+# The one genuinely lexer-specific subtlety here is indentation: this
+# language's indentation tracking works by waiting for the first token on a
+# line that ISN'T itself NEWLINE or SKIP before measuring how deep that line
+# is indented (see lexer.py's own _handle_indentation and the comment
+# alongside its call site) -- which is also exactly how a blank line already
+# avoided needing special-case handling before comments existed at all.
+# COMMENT joins that same exclusion list, so a comment-only line falls out
+# of the SAME existing mechanism for free, with no separate logic written
+# for it. test_comment_only_line_as_first_content_in_a_block and
+# test_comment_only_line_does_not_affect_dedent are the two tests that
+# actually prove that holds, not just that comments are ignored in general:
+# a comment-only line sitting at the WRONG indentation (shallower or deeper
+# than the real code around it) must never itself trigger an INDENT/DEDENT,
+# or be mistaken for the block's first real line.
+# ---------------------------------------------------------------------------
+
+class TestComments:
+    pytestmark = GCC_SKIP
+
+    def test_comment_only_line_inside_a_block(self):
+        assert_exit_code(
+            "    # just a comment, does nothing\n"
+            "    return 42",
+            42,
+        )
+
+    def test_trailing_comment_after_a_statement(self):
+        assert_exit_code(
+            "    int x = 5  # set x to five\n"
+            "    return x",
+            5,
+        )
+
+    def test_trailing_comment_on_the_def_line_itself(self):
+        assert_program_exit_code(
+            "def int add(int a, int b):  # adds two ints\n"
+            "    return a + b\n"
+            "\n"
+            "def int main():\n"
+            "    return add(3, 4)\n",
+            7,
+        )
+
+    def test_leading_comment_before_a_function_definition(self):
+        assert_program_exit_code(
+            "# This function adds two numbers.\n"
+            "def int add(int a, int b):\n"
+            "    return a + b\n"
+            "\n"
+            "def int main():\n"
+            "    return add(3, 4)\n",
+            7,
+        )
+
+    def test_hash_inside_a_string_literal_is_not_a_comment(self):
+        """The whole point of the STRING rule already consuming its
+        entire match (opening quote to closing quote) before anything
+        else gets a chance to look inside it -- a '#' embedded in a
+        string must stay part of the string's own value, not truncate
+        it or start a comment mid-literal."""
+        assert_stdout(
+            "    str s = 'value # 42'\n"
+            "    print(s)\n"
+            "    return 0",
+            "value # 42\n",
+        )
+
+    def test_comment_only_line_as_first_content_in_a_block(self):
+        """A comment as the very first line of a function body, before
+        any real statement -- indentation must still be measured from
+        the first REAL line (the `if`), exactly as if the comment
+        line didn't exist, not from the comment's own (irrelevant)
+        indentation."""
+        assert_exit_code(
+            "    # nothing real here yet\n"
+            "    if true:\n"
+            "        return 1\n"
+            "    return 0",
+            1,
+        )
+
+    def test_comment_only_line_does_not_affect_dedent(self):
+        """A comment-only line sitting between a nested block and the
+        code that follows it, indented shallower than the block it
+        interrupts -- must not itself be mistaken for the dedent, or
+        for a second one lower down that only comes from real code."""
+        assert_exit_code(
+            "    if true:\n"
+            "        int x = 1\n"
+            "    # back to the outer level, just a comment\n"
+            "    return 99",
+            99,
+        )
+
+    def test_multiple_consecutive_comment_only_lines(self):
+        assert_exit_code(
+            "    # first comment\n"
+            "    # second comment\n"
+            "    # third comment\n"
+            "    return 7",
+            7,
+        )
+
+    def test_empty_comment(self):
+        """A bare '#' with nothing after it -- still a complete,
+        valid (if content-free) comment."""
+        assert_exit_code(
+            "    #\n"
+            "    return 3",
+            3,
+        )
+
+    def test_comment_as_the_last_line_of_the_file_no_trailing_newline(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    return 0\n"
+            "# trailing comment, no newline after this one",
+            0,
+        )
+
+    def test_comments_do_not_disturb_multi_level_nesting(self):
+        """Comments scattered at every nesting depth around a genuinely
+        nested if/while structure -- the real test of whether comment
+        handling composes with indentation tracking generally, not
+        just in isolated single-level cases."""
+        assert_exit_code(
+            "    # top level\n"
+            "    int total = 0\n"
+            "    int i = 0\n"
+            "    while i < 5:\n"
+            "        # inside the loop\n"
+            "        if i == 2:\n"
+            "            # inside the if\n"
+            "            total = total + 10\n"
+            "        else:\n"
+            "            # inside the else\n"
+            "            total = total + 1\n"
+            "        # back at loop level\n"
+            "        i = i + 1\n"
+            "    # after the loop\n"
+            "    return total",
+            14,  # 1 + 1 + 10 + 1 + 1 = 14
+        )

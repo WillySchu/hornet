@@ -198,6 +198,19 @@ class Lexer():
             ('AMPERSAND',     r'&'),               # Bitwise AND
             ('PIPE',          r'\|'),              # Bitwise OR
             ('CARET',         r'\^'),              # Bitwise XOR
+            ('COMMENT',       r'#[^\n]*'),          # Single-line comment -- from '#' to
+                                                     # end of line, NOT including the
+                                                     # newline itself, so the newline
+                                                     # still gets tokenized normally right
+                                                     # after and statement-termination
+                                                     # logic doesn't need to know comments
+                                                     # exist at all. Placed here, next to
+                                                     # SKIP, since both are discarded
+                                                     # rather than producing a real token
+                                                     # -- see tokenize()'s own handling of
+                                                     # both, and _handle_indentation's
+                                                     # exclusion of both from what counts
+                                                     # as a line's first real content.
             ('SKIP',          r'[ \t\r]+'),        # Spaces and tabs
             ('MISMATCH',      r'.'),               # Any other character (error)
         ]
@@ -338,6 +351,8 @@ class Lexer():
                 self.tokens.append(Token(TokenType.SHIFT_LEFT_ASSIGN, value, self.line, column))
             elif kind == 'SHIFT_RIGHT_ASSIGN':
                 self.tokens.append(Token(TokenType.SHIFT_RIGHT_ASSIGN, value, self.line, column))
+            elif kind == 'COMMENT':
+                continue
             elif kind == 'SKIP':
                 continue
             elif kind == 'MISMATCH':

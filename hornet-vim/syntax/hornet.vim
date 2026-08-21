@@ -72,6 +72,12 @@ syn match hornetFunction /\h\w*\ze\s*(/
 syn match hornetDelimiter /[(),:;\[\]]/
 
 " ---------------------------------------------------------------------------
+" Comments
+" ---------------------------------------------------------------------------
+
+syn match hornetComment "#.*$"
+
+" ---------------------------------------------------------------------------
 " Highlight links
 " ---------------------------------------------------------------------------
 
@@ -96,5 +102,7 @@ hi def link hornetLogicalOperator Boolean
 hi def link hornetBuiltin Function
 hi def link hornetFunction Function
 hi def link hornetDelimiter Delimiter
+
+hi def link hornetComment Comment
 
 let b:current_syntax = "hornet"

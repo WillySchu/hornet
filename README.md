@@ -14,7 +14,6 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- Comments!
 - `append` to unnamed slices.
 - Escape arrays backing slice elements of an array / slice that is returned.
 - Structs.
