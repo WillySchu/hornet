@@ -19,7 +19,6 @@ Updates:
 - `==` for structs.
 - Fix print for collections to build str buffer and call print once.
 - Print for structs.
-- Escape arrays backing arrays / slices assigned via indexing, e.g. `matrix[i][j] = arr[:]`.
 - `fuction` type.
 - Methods.
 - `assert`

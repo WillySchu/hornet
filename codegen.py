@@ -2304,8 +2304,14 @@ def analyze_array_escapes(fn: Function, param_types: List[Type], structs: Dict[s
     AGGREGATE -- today, specifically an array- or slice-of-slices
     (`rows[i] = arr[:]`) -- see AGGREGATES AND SLOTS below for what
     that word is doing here and why it's phrased more generally than
-    "array-of-slices" alone. Three further, real limitations, each
-    deliberately out of scope for now rather than silently mishandled:
+    "array-of-slices" alone, and for how this now composes correctly
+    at ANY depth: `matrix[i][j] = arr[:]` (an aggregate reached
+    through a further Index, not a bare Variable) and `s1[0:3][0:2]`
+    (a Slice reached through another Slice, with no intermediate
+    named variable at all) both resolve to the correct root
+    declaration's own shared slot, not just the single-hop case. Two
+    further, real limitations, each deliberately out of scope for now
+    rather than silently mishandled:
       - Purely INTRAprocedural: a slice passed as an argument to any
         user-defined function call is conservatively treated as
         escaping unconditionally, without looking at what the callee
@@ -2317,12 +2323,6 @@ def analyze_array_escapes(fn: Function, param_types: List[Type], structs: Dict[s
         needs a genuine fixed-point iteration over the call graph, not
         a single pass. That's a substantially larger undertaking than
         this, and left for its own, separate follow-up.
-      - Only ONE level of aggregate nesting is tracked: `rows[i] =
-        arr[:]` where `rows` is a bare Variable is handled, but
-        `matrix[i][j] = arr[:]` (an aggregate reached through a
-        further Index, not a bare Variable) is not -- IndexAssign's
-        own target has to resolve directly to a declared aggregate,
-        matching the single-hop treatment elsewhere in this analysis.
       - A slice stored as an element of something that ISN'T itself a
         declared local or parameter -- e.g. through a pointer-like
         indirection this language doesn't actually have -- was never
@@ -2384,18 +2384,46 @@ def analyze_array_escapes(fn: Function, param_types: List[Type], structs: Dict[s
 
          Only one KIND of slot exists right now: indexed_slot_of
          recognizes `rows[i]` (an Index) or `rows[i] = ...`
-         (IndexAssign's own target) where `rows` is a bare Variable
-         declared with an array or slice element type that's ITSELF
-         slice-typed, and maps it to the slot key _INDEXED_ELEMENTS_
-         SLOT -- a single, SHARED slot for the whole declaration,
-         regardless of which actual index `i` evaluates to at runtime,
-         since indices are dynamic values this analysis can't
-         distinguish without real per-index tracking (a different,
-         larger undertaking, and not attempted here -- see the
-         limitations list above). This is exactly the "one combined
-         blob per declaration" flow-insensitive treatment a bare slice
-         variable already gets, just extended to an aggregate's
-         elements collectively.
+         (IndexAssign's own target) -- and, more generally, any chain
+         of Index and/or Slice operations reached through however many
+         further Index/Slice steps precede it (`matrix[i][j]`,
+         `s1[0:3][0:2]`, any mix, at any depth -- see root_variable_
+         name, which unwraps the whole chain down to whatever bare
+         Variable underlies it) -- where indexing the immediate base
+         ONE more time would yield a slice-typed result, and maps the
+         ROOT declaration to the slot key _INDEXED_ELEMENTS_SLOT -- a
+         single, SHARED slot for the whole declaration, regardless of
+         which actual index evaluates to what at runtime, or how many
+         levels of indexing/re-slicing separate a particular access
+         from that root, since indices are dynamic values this
+         analysis can't distinguish without real per-index tracking (a
+         different, larger undertaking, and not attempted here -- see
+         the limitations list above). This is exactly the "one
+         combined blob per declaration" flow-insensitive treatment a
+         bare slice variable already gets, just extended to an
+         aggregate's elements collectively, at whatever depth they're
+         reached from.
+
+         The "one more level would yield a slice" guard is checked
+         directly against the immediate base's own resolved_type (its
+         element_type, specifically), NOT via a recursive "does this
+         eventually contain a slice somewhere" walk -- those are
+         answering two different questions, and conflating them is a
+         real bug an earlier version of this had: for `rows[0][0]`
+         where rows: [1][]int, the outer Index's own base is `rows[0]`
+         (itself slice-typed), and indexing that ONE more time yields
+         an INT, not a slice -- reading a plain int value OUT of a
+         slice has nothing to do with rows' own role as a slice-
+         holding aggregate, and must NOT resolve to rows' own slot
+         just because rows, considered as a whole, happens to contain
+         a slice somewhere. whole_value_node_of's OWN check (does the
+         aggregate, taken as a whole, contain a slice at ANY depth of
+         array nesting -- see _contains_slice) is the right question
+         for a WHOLE-VALUE read (`return rows`, no indexing at all);
+         indexed_slot_of's own, narrower, one-level check is the right
+         question for "would indexing this ONE more time give me a
+         slice" -- and both are needed, for different callers, rather
+         than one subsuming the other.
 
          WHOLE-VALUE READS OF AN AGGREGATE ALSO GO THROUGH THE SAME
          SLOT, not a separate one: `return rows`, `rows2 = rows`, and
@@ -2512,24 +2540,76 @@ def analyze_array_escapes(fn: Function, param_types: List[Type], structs: Dict[s
     # identifier, so this can never collide with a future field-name slot.
 
     def indexed_slot_of(base_expr: Node) -> Optional[int]:
-        """Recognizes `base_expr` as a bare Variable, declared with an
-        array- or slice-of-slices type, that Index/IndexAssign is
-        accessing -- e.g. the `rows` in `rows[i]` or `rows[i] = ...` --
-        and returns that declaration's own shared indexed-elements slot
-        id (see slot_node_id), or None if base_expr doesn't resolve to
-        one at all (a different kind of base entirely, an aggregate
-        whose element type isn't itself slice-typed, or an expression
-        more complex than a bare Variable -- see this function's own
-        single-hop limitation, documented in this analysis's own
-        docstring). Just a Variable-shaped wrapper around whole_value_
-        node_of, which does the actual resolution and is what makes
-        indexed access and whole-value access of the same aggregate
-        share one node rather than getting two disconnected ones --
-        see WHOLE-VALUE READS OF AN AGGREGATE ALSO GO THROUGH THE SAME
-        SLOT above for why that sharing is load-bearing, not cosmetic."""
-        if not isinstance(base_expr, Variable):
+        """Recognizes `base_expr` as something that, indexed ONE more
+        time, produces a slice -- `rows` in `rows[i]` (where rows is
+        an array/slice of slices), `matrix[i]` in `matrix[i][j]`
+        (where indexing matrix[i] one more time reaches a slice, even
+        though matrix[i] ITSELF is still an array), `s1[0:3]` in
+        `s1[0:3][0:2]`, any mix of Index/Slice at any depth -- and
+        resolves it to whatever ROOT Variable underlies the whole
+        chain (see root_variable_name), returning that root's own
+        shared indexed-elements slot id (see slot_node_id).
+
+        The guard here is deliberately checking base_expr's own
+        IMMEDIATE element_type (does indexing base_expr ONE more time
+        yield a slice), NOT whole_value_node_of's own, separate
+        _contains_slice check (does the aggregate contain a slice at
+        ANY depth) -- these are answering two different questions, and
+        conflating them is a real bug this function used to have: for
+        `rows[0][0]` where rows: [1][]int, the OUTER Index's own base
+        is `rows[0]` (itself slice-typed), and indexing that ONE more
+        time yields an INT, not a slice -- reading a plain int value
+        OUT of a slice has nothing to do with rows' own role as a
+        slice-holding aggregate at all, and must NOT resolve to rows'
+        own slot just because rows, considered as a whole, happens to
+        contain a slice somewhere. Checking base_expr's own element_
+        type directly (rather than recursing arbitrarily deep the way
+        _contains_slice does) is exactly precise enough for this,
+        specifically because base_expr's own resolved_type already
+        reflects however many prior levels of indexing produced it --
+        there's never a need to look any further than one level ahead
+        from here.
+
+        Returns None if base_expr's own type isn't an array or slice
+        at all, if indexing it one more time wouldn't yield a slice,
+        or if the chain doesn't resolve to a bare Variable at its root
+        (a Call, an ArrayLiteral, ...)."""
+        base_type = base_expr.resolved_type
+        if base_type is None or base_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE):
             return None
-        return whole_value_node_of(base_expr.name)
+        element_type = base_type.element_type
+        if element_type is None or element_type.kind != TypeKind.SLICE:
+            return None
+        root_name = root_variable_name(base_expr)
+        if root_name is None:
+            return None
+        return whole_value_node_of(root_name)
+
+    def _contains_slice(t: Type) -> bool:
+        """True if `t` is itself a slice, or is an array whose element
+        type contains a slice at ANY depth of further array nesting
+        (`[N]T`, `[N][M]T`, `[N][M][K]T`, ...) -- e.g. True for `[]int`
+        directly, for `[5][]int` (one level), and for `[5][3][]int`
+        (two levels), with no depth limit. Does NOT recurse into a
+        STRUCT's own fields: semantic.py's own struct-collection pass
+        already rejects any struct with a slice-typed field, directly
+        or transitively (see _field_contains_slice there), so by the
+        time this ever runs, a struct is already guaranteed slice-
+        free -- this can safely treat STRUCT as an ordinary, non-slice
+        leaf, the same as INT/BOOL/STR, without needing to check.
+        Used by whole_value_node_of to decide whether a declaration is
+        an aggregate whose elements need the shared indexed-elements
+        slot treatment (see AGGREGATES AND SLOTS in this analysis's
+        own docstring) -- checking at ANY depth, not just one level,
+        is what closes the "2D (or deeper) array-of-slices" gap a
+        depth-one check would otherwise still have, independent of
+        (and in addition to) root_variable_name's own, separate fix
+        for unwrapping a multi-level access CHAIN down to its root."""
+        if t.kind == TypeKind.SLICE:
+            return True
+        if t.kind == TypeKind.ARRAY:
+            return _contains_slice(t.element_type)
+        return False
 
     def whole_value_node_of(name: str) -> Optional[int]:
         """Resolves `name` to the node id this analysis's graph uses
@@ -2545,21 +2625,40 @@ def analyze_array_escapes(fn: Function, param_types: List[Type], structs: Dict[s
         each other. Falls back to `name`'s own bare declaration id for
         an ORDINARY slice-typed declaration (not an aggregate at all),
         exactly like before this function existed. Returns None if
-        `name` doesn't resolve to anything this analysis tracks."""
+        `name` doesn't resolve to anything this analysis tracks.
+
+        The aggregate check itself (_contains_slice, on name's own
+        element_type) looks arbitrarily far down through array
+        nesting, not just one level -- `[5][]int` (one level) and
+        `[5][3][]int` (two levels) both correctly resolve to `name`'s
+        own shared slot, not just the former."""
         decl_id = resolve(name)
         if decl_id is None:
             return None
         decl_type = decl_types.get(decl_id)
         if decl_type is not None and decl_type.kind in (TypeKind.ARRAY, TypeKind.SLICE):
             element_type = decl_type.element_type
-            if element_type is not None and element_type.kind == TypeKind.SLICE:
+            if element_type is not None and _contains_slice(element_type):
                 return slot_node_id(decl_id, _INDEXED_ELEMENTS_SLOT)
         if decl_id in slice_decls:
             return decl_id
         return None
 
     def root_variable_name(expr: Node) -> Optional[str]:
-        while isinstance(expr, Index):
+        """Unwraps a chain of Index AND Slice nodes down to whatever
+        bare Variable, if any, ultimately sits underneath -- e.g. for
+        `matrix[i][j]`, `s1[0:3][0:2]`, or a mix of the two, all the
+        way down to the root -- since NEITHER indexing NOR re-slicing
+        changes which declaration's own backing storage a value
+        traces back to (a Slice is a VIEW, an Index reads out of the
+        SAME underlying storage), so the whole chain, regardless of
+        length or which of the two operations appears at each step,
+        resolves to the SAME root for this analysis's own flow-
+        insensitive purposes. Returns None if the chain bottoms out at
+        anything else (a Call, an ArrayLiteral, ...) -- neither of
+        those is backed by one of THIS function's own named
+        declarations at all, so there's nothing to resolve to."""
+        while isinstance(expr, (Index, Slice)):
             expr = expr.array
         return expr.name if isinstance(expr, Variable) else None
 

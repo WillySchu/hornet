@@ -45,7 +45,7 @@ Organization:
     TestTypedArrayLiterals              (13 tests)
     TestBoundsChecking                  ( 4 tests)
     TestHeapAllocatedArrays             (12 tests)
-    TestArrayEscapeAnalysis             (17 tests)
+    TestArrayEscapeAnalysis             (21 tests)
     TestSlices                          (10 tests)
     TestSliceBoundsChecking             ( 6 tests)
     TestCapAwareSlicing                 ( 4 tests)
@@ -63,7 +63,7 @@ Organization:
     TestComments                        (11 tests)
     TestStructs                         (32 tests)
                                         ----------
-                                        541 tests total
+                                        545 tests total
 
 A NOTE ON ARRAYS
 -----------------------------------------------------------------
@@ -3990,12 +3990,26 @@ class TestHeapAllocatedArrays:
 # element of such a container, anywhere in the function, is unioned into
 # one combined answer for the container as a whole, exactly the same
 # "one blob per declaration" treatment, just extended to a container's
-# elements collectively rather than per-index. What's still a real,
-# separate limitation -- not silently missing -- is a container reached
-# through a further Index rather than a bare Variable (`matrix[i][j] =
-# arr[:]`); test_deeper_container_nesting_is_a_known_gap documents that
-# one the same way this class's own array-of-slices gap used to be
-# documented, before today.
+# elements collectively rather than per-index.
+#
+# test_deeply_nested_container_escapes_correctly and test_chained_
+# reslicing_with_no_intermediate_variable_escapes_correctly close a
+# SECOND, separately-rooted gap that used to be explicitly documented
+# here as known and deferred: a container reached through a further
+# Index (`matrix[i][j] = arr[:]`), or a Slice chained directly on
+# another Slice with no intermediate named variable at all
+# (`s1[0:3][0:2]`), both now correctly resolve to their own root
+# declaration's shared slot, at any depth -- not just the single-hop
+# case. test_scalar_read_through_a_slice_element_does_not_escape is the
+# precision test for THIS specific fix, mirroring test_local_array_
+# sliced_but_not_returned_stays_on_the_stack's own role for the array-
+# of-slices case above: closing the deeper-nesting gap by conflating
+# "does indexing this one more time yield a slice" with "does this
+# aggregate contain a slice somewhere" was a real bug found while
+# fixing it, not a hypothetical -- reading a plain int back OUT of a
+# slice element must never be mistaken for touching the container's own
+# slice-holding role just because the container, considered as a whole,
+# happens to hold a slice somewhere.
 # ---------------------------------------------------------------------------
 
 class TestArrayEscapeAnalysis:
@@ -4362,21 +4376,116 @@ class TestArrayEscapeAnalysis:
             102,
         )
 
-    def test_deeper_container_nesting_is_a_known_gap(self):
-        """A genuinely different, narrower limitation than the one
-        this class used to document: IndexAssign's own target has to
-        resolve directly to a declared container (a bare Variable) --
-        `matrix[i][j] = arr[:]`, where the target is reached through a
-        further Index rather than a bare Variable, is not tracked.
-        This assertion is expected to start FAILING the day THIS gap
-        gets closed -- when it does, delete this test, not fix it to
-        match new behavior."""
+    def test_deeply_nested_container_escapes_correctly(self):
+        """The gap this class used to document as known and deferred:
+        a container reached through a further Index, not a bare
+        Variable (`matrix[i][j] = arr[:]`), must still resolve to its
+        own root declaration's shared slot -- verified end to end,
+        with enough intervening function-call activity to actually
+        surface corruption if the array were left stack-allocated."""
+        assert_program_stdout(
+            "def [1][1][]int makeMatrix():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    [1][1][]int matrix\n"
+            "    matrix[0][0] = arr[0:2]\n"
+            "    return matrix\n"
+            "\n"
+            "def int helper(int x):\n"
+            "    int a = x + 1\n"
+            "    int b = a + 1\n"
+            "    return a + b\n"
+            "\n"
+            "def int main():\n"
+            "    [1][1][]int m = makeMatrix()\n"
+            "    int junk = helper(1)\n"
+            "    junk = helper(2)\n"
+            "    junk = helper(3)\n"
+            "    print(m[0][0])\n"
+            "    return 0\n",
+            "[]int[1, 2]\n",
+        )
+
+    def test_deeply_nested_container_is_actually_heap_allocated(self):
+        """The asm-level confirmation behind the test just above."""
         source = (
             "def [1][1][]int makeMatrix():\n"
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
             "    [1][1][]int matrix\n"
             "    matrix[0][0] = arr[0:2]\n"
             "    return matrix\n"
+            "\n"
+            "def int main():\n"
+            "    [1][1][]int m = makeMatrix()\n"
+            "    return m[0][0][0]\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        assert "malloc" in asm
+
+    def test_chained_reslicing_with_no_intermediate_variable_escapes_correctly(self):
+        """The second, separately-rooted gap this class used to
+        document as known and deferred: a Slice chained directly on
+        another Slice, with no intermediate named variable at all
+        (`s1[0:3][0:2]`), must still resolve to the correct root."""
+        assert_program_stdout(
+            "def []int make():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s1 = arr[0:3]\n"
+            "    []int s2 = s1[0:3][0:2]\n"
+            "    return s2\n"
+            "\n"
+            "def int helper(int x):\n"
+            "    int a = x + 1\n"
+            "    int b = a + 1\n"
+            "    return a + b\n"
+            "\n"
+            "def int main():\n"
+            "    []int s = make()\n"
+            "    int junk = helper(1)\n"
+            "    junk = helper(2)\n"
+            "    junk = helper(3)\n"
+            "    print(s)\n"
+            "    return 0\n",
+            "[]int[1, 2]\n",
+        )
+
+    def test_chained_reslicing_directly_off_an_array_escapes_correctly(self):
+        """The same gap, one level shallower still: chaining a
+        re-slice directly off an array, with no intermediate slice
+        variable of ANY kind."""
+        source = (
+            "def []int make():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s = arr[0:3][0:2]\n"
+            "    return s\n"
+            "\n"
+            "def int main():\n"
+            "    []int s = make()\n"
+            "    return s[0]\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        assert "malloc" in asm
+
+    def test_scalar_read_through_a_slice_element_does_not_escape(self):
+        """THE precision test for the deeper-nesting fix, mirroring
+        test_local_array_sliced_but_not_returned_stays_on_the_stack's
+        own role above: `rows[0][0]` reads a plain int back OUT of a
+        slice element -- indexing that slice ONE more time yields an
+        int, not another slice, so this must NOT be mistaken for
+        touching rows' own slice-holding role just because rows, taken
+        as a whole, happens to contain a slice somewhere. Conflating
+        those two questions was a real bug found while fixing the
+        deeper-nesting gap, not a hypothetical -- this is the test
+        that would have caught it."""
+        source = (
+            "def int main():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    [1][]int rows\n"
+            "    rows[0] = arr[0:2]\n"
+            "    return rows[0][0]\n"
         )
         ast = _parse(source)
         analyze(ast)
