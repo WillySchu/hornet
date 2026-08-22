@@ -45,7 +45,7 @@ Organization:
     TestTypedArrayLiterals              (13 tests)
     TestBoundsChecking                  ( 4 tests)
     TestHeapAllocatedArrays             (12 tests)
-    TestArrayEscapeAnalysis             ( 9 tests)
+    TestArrayEscapeAnalysis             (17 tests)
     TestSlices                          (10 tests)
     TestSliceBoundsChecking             ( 6 tests)
     TestCapAwareSlicing                 ( 4 tests)
@@ -62,7 +62,7 @@ Organization:
     TestSemanticErrors                  (75 tests)
     TestComments                        (11 tests)
                                         ----------
-                                        501 tests total
+                                        509 tests total
 
 A NOTE ON ARRAYS
 -----------------------------------------------------------------
@@ -3962,11 +3962,13 @@ class TestHeapAllocatedArrays:
 #
 # The analysis itself is intraprocedural and FLOW-INSENSITIVE (see
 # analyze_array_escapes's own docstring in codegen.py for the full
-# algorithm and the two deliberate limitations that come with that
-# choice): every assignment to a slice-typed variable anywhere in a
-# function is unioned together into one combined answer for "what might
-# this be backed by", used everywhere that variable is read, rather than
-# tracking which value it holds at each specific point in the code.
+# algorithm and its remaining deliberate limitations): every assignment
+# to a slice-typed variable -- or write into an array- or slice-of-
+# slices element -- anywhere in a function is unioned together into one
+# combined answer for "what might this be backed by", used everywhere
+# that variable or container is read, rather than tracking which value
+# it holds (or which element holds what) at each specific point in the
+# code.
 #
 # test_local_array_sliced_but_not_returned_stays_on_the_stack is the
 # single most important test in this whole class, arguably more important
@@ -3977,12 +3979,20 @@ class TestHeapAllocatedArrays:
 # a small, sliced, but non-escaping array to remain stack-allocated, and
 # would fail under it.
 #
-# test_array_of_slices_element_is_a_known_gap documents, rather than
-# hides, the one thing explicitly deferred alongside this work: a slice
-# stored as an array-of-slices ELEMENT isn't tracked by this analysis at
-# all (it only follows aliasing through slice-typed variables), so the
-# backing array in that specific shape is still left stack-allocated,
-# unsafely, exactly as before this analysis existed.
+# test_array_of_slices_element_escapes_correctly and its several siblings
+# just after it close a gap that used to be explicitly documented here as
+# known and deferred: a slice stored as an array- or slice-of-slices
+# ELEMENT (`rows[i] = arr[:]`) is now tracked, flow-insensitively, the
+# very same way a bare slice variable already was -- every write into ANY
+# element of such a container, anywhere in the function, is unioned into
+# one combined answer for the container as a whole, exactly the same
+# "one blob per declaration" treatment, just extended to a container's
+# elements collectively rather than per-index. What's still a real,
+# separate limitation -- not silently missing -- is a container reached
+# through a further Index rather than a bare Variable (`matrix[i][j] =
+# arr[:]`); test_deeper_container_nesting_is_a_known_gap documents that
+# one the same way this class's own array-of-slices gap used to be
+# documented, before today.
 # ---------------------------------------------------------------------------
 
 class TestArrayEscapeAnalysis:
@@ -4164,21 +4174,206 @@ class TestArrayEscapeAnalysis:
         asm = generate_asm(ast, platform=ASM_PLATFORM)
         assert "malloc" in asm
 
-    def test_array_of_slices_element_is_a_known_gap(self):
-        """Documents, rather than hides, the one thing explicitly
-        deferred alongside this analysis: a slice stored as an array-
-        of-slices ELEMENT isn't tracked at all (aliasing is only
-        followed through slice-typed VARIABLES) -- so the array it's
-        sliced from is still, unsafely, left stack-allocated. This
-        assertion is expected to start FAILING the day this gap gets
-        closed -- when it does, delete this test, not fix it to match
-        new behavior."""
+    def test_array_of_slices_element_escapes_correctly(self):
+        """The gap this class used to document as known and deferred:
+        a slice stored into an array-of-slices ELEMENT (`rows[0] =
+        arr[:]`), with the whole container later returned, must make
+        the array it was sliced from escape too."""
+        assert_program_stdout(
+            "def [1][]int makeRows():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    [1][]int rows\n"
+            "    rows[0] = arr[0:2]\n"
+            "    return rows\n"
+            "\n"
+            "def int helper(int x):\n"
+            "    int a = x + 1\n"
+            "    int b = a + 1\n"
+            "    return a + b\n"
+            "\n"
+            "def int main():\n"
+            "    [1][]int r = makeRows()\n"
+            "    int junk = helper(1)\n"
+            "    junk = helper(2)\n"
+            "    junk = helper(3)\n"
+            "    print(r[0])\n"
+            "    return 0\n",
+            "[]int[1, 2]\n",
+        )
+
+    def test_array_of_slices_element_is_actually_heap_allocated(self):
+        """The asm-level confirmation behind the test just above."""
         source = (
             "def [1][]int makeRows():\n"
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
             "    [1][]int rows\n"
             "    rows[0] = arr[0:2]\n"
             "    return rows\n"
+            "\n"
+            "def int main():\n"
+            "    [1][]int r = makeRows()\n"
+            "    return r[0][0]\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        assert "malloc" in asm
+
+    def test_slice_of_slices_element_escapes_correctly(self):
+        """The same gap, but the container itself is a SLICE-of-slices
+        (`[][]int`) rather than an array-of-slices -- a genuinely
+        different declaration shape (its outer kind is already SLICE,
+        not ARRAY) that has to be recognized as a container too, not
+        just the array-of-slices case."""
+        assert_exit_code(
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    [][]int rows = [][]int[[]int[]]\n"
+            "    rows[0] = arr[0:2]\n"
+            "    return len(rows[0])",
+            2,
+        )
+
+    def test_reading_a_container_element_directly_escapes_it(self):
+        """`return rows[0]` -- reading and returning a single element,
+        never touching the container's own name at all -- must be
+        recognized as an escape exactly like `return rows` itself
+        would be."""
+        assert_program_exit_code(
+            "def []int makeRow():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    [1][]int rows\n"
+            "    rows[0] = arr[0:2]\n"
+            "    return rows[0]\n"
+            "\n"
+            "def int helper(int x):\n"
+            "    int a = x + 1\n"
+            "    return a\n"
+            "\n"
+            "def int main():\n"
+            "    []int r = makeRow()\n"
+            "    int junk = helper(1)\n"
+            "    junk = helper(2)\n"
+            "    return r[0] + r[1]\n",
+            3,
+        )
+
+    def test_container_element_passed_to_another_function_conservatively_escapes(self):
+        """A container element, materialized into a named variable and
+        handed to a user-defined function call, gets the same
+        conservative treatment a bare slice variable already does --
+        escaping unconditionally, without looking at what the callee
+        does with it. (A bare Index expression can't be passed
+        directly as a slice-typed call argument at all -- a separate,
+        pre-existing restriction unrelated to this analysis -- so this
+        goes through an intermediate variable, exactly the shape
+        contribution() itself needs to resolve correctly here.)"""
+        source = (
+            "def int sumFirstTwo([]int s):\n"
+            "    return s[0] + s[1]\n"
+            "\n"
+            "def int main():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    [1][]int rows\n"
+            "    rows[0] = arr[0:2]\n"
+            "    []int e = rows[0]\n"
+            "    return sumFirstTwo(e)\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        assert "malloc" in asm
+
+    def test_container_element_never_read_does_not_trigger_promotion(self):
+        """THE precision test for this whole extension, mirroring
+        test_local_array_sliced_but_not_returned_stays_on_the_stack
+        above: a slice written into a container element that's never
+        returned, passed anywhere, or read back out through anything
+        that escapes -- must NOT promote the backing array. Every
+        other test in this class could pass even if writing into ANY
+        container element unconditionally promoted its own backing
+        array; this one specifically requires that NOT to happen."""
+        source = (
+            "def int main():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    [1][]int rows\n"
+            "    rows[0] = arr[0:2]\n"
+            "    return rows[0][0]\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        assert "malloc" not in asm
+
+    def test_slice_variable_backed_by_local_array_assigned_into_container_element(self):
+        """Transitive: a plain slice VARIABLE (itself backed by a
+        local array) flows into a container element, and the
+        container is what actually escapes -- the dependency has to
+        chain through both the variable-to-array and the container-
+        to-variable links."""
+        assert_program_exit_code(
+            "def [1][]int makeRows():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s = arr[0:3]\n"
+            "    [1][]int rows\n"
+            "    rows[0] = s\n"
+            "    return rows\n"
+            "\n"
+            "def int helper(int x):\n"
+            "    int a = x + 1\n"
+            "    return a\n"
+            "\n"
+            "def int main():\n"
+            "    [1][]int r = makeRows()\n"
+            "    int junk = helper(1)\n"
+            "    junk = helper(2)\n"
+            "    return r[0][0] + r[0][1] + r[0][2]\n",
+            6,
+        )
+
+    def test_append_into_a_container_element_escapes_correctly(self):
+        """append's own first argument might reuse ITS OWN backing
+        storage (see gen_append_call_into) -- so appending to a
+        container element, and returning the RESULT as a fresh
+        variable (not the container itself), still has to trace back
+        to the array the element was originally sliced from. This is
+        the test that actually isolates the fix: it fails without
+        contribution() recursing into append's own first argument
+        rather than only handling a bare Variable there."""
+        assert_program_exit_code(
+            "def []int makeRow():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    [1][]int rows\n"
+            "    rows[0] = arr[0:2]\n"
+            "    []int s = append(rows[0], 99)\n"
+            "    return s\n"
+            "\n"
+            "def int helper(int x):\n"
+            "    int a = x + 1\n"
+            "    return a\n"
+            "\n"
+            "def int main():\n"
+            "    []int r = makeRow()\n"
+            "    int junk = helper(1)\n"
+            "    junk = helper(2)\n"
+            "    return r[0] + r[1] + r[2]\n",
+            102,
+        )
+
+    def test_deeper_container_nesting_is_a_known_gap(self):
+        """A genuinely different, narrower limitation than the one
+        this class used to document: IndexAssign's own target has to
+        resolve directly to a declared container (a bare Variable) --
+        `matrix[i][j] = arr[:]`, where the target is reached through a
+        further Index rather than a bare Variable, is not tracked.
+        This assertion is expected to start FAILING the day THIS gap
+        gets closed -- when it does, delete this test, not fix it to
+        match new behavior."""
+        source = (
+            "def [1][1][]int makeMatrix():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    [1][1][]int matrix\n"
+            "    matrix[0][0] = arr[0:2]\n"
+            "    return matrix\n"
         )
         ast = _parse(source)
         analyze(ast)

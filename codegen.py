@@ -2110,9 +2110,21 @@ def analyze_array_escapes(fn: Function, param_types: List[Type]) -> Set[int]:
     avoids needing a genuine fixed-point dataflow pass over branches
     and loops, which true flow sensitivity would require even before
     any function calls enter the picture, for a level of precision
-    ordinary code doesn't often need. Two further, real limitations,
-    each deliberately out of scope for now rather than silently
-    mishandled:
+    ordinary code doesn't often need. The SAME flow-insensitive
+    treatment now also covers a slice stored as an ARRAY- or SLICE-OF-
+    SLICES element (`rows[i] = arr[:]`): every write into ANY element
+    of such a container, anywhere in the function, is unioned into one
+    combined answer for the container AS A WHOLE, used uniformly
+    whenever ANY element is read back out (or the container itself is
+    returned or passed to a call) -- exactly the same "one combined
+    blob per declaration" treatment a bare slice variable already
+    gets, just extended to a container's elements collectively rather
+    than tracked per-index (which isn't attempted at all: index
+    expressions can be arbitrary runtime values, and distinguishing
+    `rows[0]` from `rows[1]` would need real per-index precision, a
+    different and larger undertaking than this). Three further, real
+    limitations, each deliberately out of scope for now rather than
+    silently mishandled:
       - Purely INTRAprocedural: a slice passed as an argument to any
         user-defined function call is conservatively treated as
         escaping unconditionally, without looking at what the callee
@@ -2124,11 +2136,16 @@ def analyze_array_escapes(fn: Function, param_types: List[Type]) -> Set[int]:
         needs a genuine fixed-point iteration over the call graph, not
         a single pass. That's a substantially larger undertaking than
         this, and left for its own, separate follow-up.
-      - A slice stored as an ARRAY-OF-SLICES element (`rows[i] =
-        arr[:]`) isn't tracked at all here -- this analysis follows
-        aliasing through slice-typed VARIABLES only, not through
-        array elements. Also left as a separate, explicitly-known
-        follow-up rather than silently mishandled.
+      - Only ONE level of container nesting is tracked: `rows[i] =
+        arr[:]` where `rows` is a bare Variable is handled, but
+        `matrix[i][j] = arr[:]` (a container reached through a further
+        Index, not a bare Variable) is not -- IndexAssign's own target
+        has to resolve directly to a declared container, matching the
+        single-hop treatment elsewhere in this analysis.
+      - A slice stored as an element of something that ISN'T itself a
+        declared local or parameter -- e.g. through a pointer-like
+        indirection this language doesn't actually have -- was never
+        in scope to begin with and remains so.
 
     The algorithm itself has two phases:
       1. Walk the function body once (recursing into every If's own
@@ -2137,18 +2154,21 @@ def analyze_array_escapes(fn: Function, param_types: List[Type]) -> Set[int]:
          actually refers to at that point -- Hornet allows shadowing a
          name in a nested block, so a plain name-based lookup would
          risk conflating two entirely different variables), building:
-           - direct_backing: for each slice-typed declaration, which
-             array-typed declaration(s) it's ever directly sliced from
-             (`s = arr[low:high]`, or `s = matrix[i][low:high]` --
-             indexing into a multi-dimensional array's own row is
-             still a view into the SAME backing storage, not a copy,
-             so this unwraps nested Index nodes down to their root
-             Variable rather than requiring a bare one).
-           - slice_deps: for each slice-typed declaration, which OTHER
-             slice-typed declaration(s) it might in turn be derived
-             from (re-slicing a slice, a plain slice-to-slice copy, or
-             `append`, which might reuse its own first argument's
-             backing array).
+           - direct_backing: for each slice-typed declaration (now
+             including a container declaration's own combined entry --
+             see CONTAINERS below), which array-typed declaration(s)
+             it's ever directly sliced from (`s = arr[low:high]`, or
+             `s = matrix[i][low:high]` -- indexing into a multi-
+             dimensional array's own row is still a view into the SAME
+             backing storage, not a copy, so this unwraps nested Index
+             nodes down to their root Variable rather than requiring a
+             bare one).
+           - slice_deps: for each slice-typed declaration (containers
+             included), which OTHER slice-typed declaration(s) or
+             container(s) it might in turn be derived from (re-slicing
+             a slice, a plain slice-to-slice copy, `append` -- which
+             might reuse its own first argument's backing array -- or
+             reading an element back out of a container).
            - escaping_slices / escaping_arrays: declarations directly
              marked as escaping, from a `return` statement's own value
              or a slice/array-typed argument passed to a user-defined
@@ -2157,6 +2177,29 @@ def analyze_array_escapes(fn: Function, param_types: List[Type]) -> Set[int]:
              level -- `return foo(bar(s))` still needs `s` to be
              checked as bar's own argument even though the RETURN
              itself is really about foo's result, not s directly).
+
+         CONTAINERS: a declaration whose element_type is itself slice-
+         typed (`[N][]int`, `[][]int`, or deeper -- though only one
+         level of container nesting is actually tracked, see above) is
+         additionally registered as its own node in the very SAME
+         slice_decls/direct_backing/slice_deps structures a bare slice
+         variable uses -- not a separate, parallel graph -- so it
+         needs no new closure logic of its own: `rows[i] = arr[:]`
+         (an IndexAssign whose own target resolves directly to such a
+         container) contributes to that container's OWN direct_
+         backing/slice_deps exactly like a VarDecl's init or an
+         Assign's value would for a bare slice variable, and reading
+         `rows[i]` back out (an Index expression whose own base
+         resolves to a container) resolves to that SAME container node
+         in contribution() below, exactly like reading a bare slice
+         Variable resolves to its own node. An array-typed container
+         (`[N][]int`) is registered in BOTH array_decls (for its own,
+         unrelated existing role -- e.g. `rows[0:2]`, slicing the
+         container itself, still works via the existing array_decls/
+         root_variable_name path) and this unified slice-tracking
+         structure (for its role as a holder of slice elements) --
+         these are two independent things a single declaration can be,
+         not a conflict between them.
       2. Compute the transitive closure from escaping_slices, following
          slice_deps edges (an ordinary graph reachability walk -- BFS
          via an explicit stack, not recursion, so it can't stack-
@@ -2168,6 +2211,7 @@ def analyze_array_escapes(fn: Function, param_types: List[Type]) -> Set[int]:
     """
     array_decls: Set[int] = set()
     slice_decls: Set[int] = set()
+    container_decls: Set[int] = set()
     direct_backing: Dict[int, Set[int]] = {}
     slice_deps: Dict[int, Set[int]] = {}
     escaping_slices: Set[int] = set()
@@ -2185,10 +2229,24 @@ def analyze_array_escapes(fn: Function, param_types: List[Type]) -> Set[int]:
         scopes[-1][name] = decl_id
         if decl_type.kind == TypeKind.ARRAY:
             array_decls.add(decl_id)
-        elif decl_type.kind == TypeKind.SLICE:
-            slice_decls.add(decl_id)
-            direct_backing.setdefault(decl_id, set())
-            slice_deps.setdefault(decl_id, set())
+        if decl_type.kind in (TypeKind.ARRAY, TypeKind.SLICE):
+            if decl_type.element_type is not None and decl_type.element_type.kind == TypeKind.SLICE:
+                # A container of slices -- e.g. [N][]int or [][]int --
+                # gets its own combined node in the SAME slice-tracking
+                # structures a bare slice variable uses (see CONTAINERS
+                # in this function's own docstring), regardless of
+                # whether it was already added to array_decls above:
+                # holding slice elements is an independent role from
+                # whatever else this exact declaration's own outer type
+                # already makes it.
+                container_decls.add(decl_id)
+                slice_decls.add(decl_id)
+                direct_backing.setdefault(decl_id, set())
+                slice_deps.setdefault(decl_id, set())
+            elif decl_type.kind == TypeKind.SLICE:
+                slice_decls.add(decl_id)
+                direct_backing.setdefault(decl_id, set())
+                slice_deps.setdefault(decl_id, set())
 
     for p, p_type in zip(fn.params, param_types):
         declare(p.name, id(p), p_type)
@@ -2203,7 +2261,12 @@ def analyze_array_escapes(fn: Function, param_types: List[Type]) -> Set[int]:
         the two value_expr's own aliasing actually resolves to (never
         both), or (None, None) if it isn't backed by any of this
         function's own declarations at all (a fresh literal, `none`,
-        an ordinary user-function call's own return value, ...)."""
+        an ordinary user-function call's own return value, ...). A
+        container's own combined node (see CONTAINERS above) is
+        returned as the second element here exactly like a bare slice
+        Variable's own id would be -- callers don't need to know or
+        care that it came from indexing into a container rather than
+        reading a plain slice variable directly."""
         if isinstance(value_expr, Slice):
             base_name = root_variable_name(value_expr.array)
             if base_name is not None:
@@ -2216,13 +2279,33 @@ def analyze_array_escapes(fn: Function, param_types: List[Type]) -> Set[int]:
             src_id = resolve(value_expr.name)
             if src_id in slice_decls:
                 return None, src_id
+        elif isinstance(value_expr, Index):
+            # Reading an element back out of a declared container --
+            # e.g. `rows[i]` -- resolves to that container's own
+            # combined node. Only a direct Variable base is handled
+            # (matching the single-hop container-nesting limit
+            # documented above); a further-nested Index base (indexing
+            # into a container reached through another container) is
+            # not.
+            if isinstance(value_expr.array, Variable):
+                base_id = resolve(value_expr.array.name)
+                if base_id in container_decls:
+                    return None, base_id
         elif isinstance(value_expr, Call) and value_expr.name == 'append':
-            slice_arg = value_expr.args[0]
-            if isinstance(slice_arg, Variable):
-                src_id = resolve(slice_arg.name)
-                if src_id in slice_decls:
-                    return None, src_id
+            # append's own first argument might reuse ITS OWN backing
+            # storage (the reuse path -- see gen_append_call_into), so
+            # whatever that argument itself resolves to is exactly
+            # this call's own contribution too. Recursing into
+            # contribution() here (rather than only handling a bare
+            # Variable) means append's first argument gets the SAME
+            # treatment any other slice-valued expression already
+            # does -- a container element (`append(rows[0], v)`), an
+            # unnamed slice expression (`append(arr[0:2], v)`), or
+            # even another append call's own result -- not just a
+            # named slice variable.
+            return contribution(value_expr.args[0])
         return None, None
+
 
     def scan_expr_for_escaping_calls(expr: Node) -> None:
         if isinstance(expr, Call):
@@ -2278,6 +2361,14 @@ def analyze_array_escapes(fn: Function, param_types: List[Type]) -> Set[int]:
                         slice_deps[target_id].add(slice_id)
                 scan_expr_for_escaping_calls(stmt.value)
             elif isinstance(stmt, IndexAssign):
+                if isinstance(stmt.array, Variable):
+                    container_id = resolve(stmt.array.name)
+                    if container_id in container_decls:
+                        array_id, slice_id = contribution(stmt.value)
+                        if array_id is not None:
+                            direct_backing[container_id].add(array_id)
+                        if slice_id is not None:
+                            slice_deps[container_id].add(slice_id)
                 scan_expr_for_escaping_calls(stmt.array)
                 scan_expr_for_escaping_calls(stmt.index)
                 scan_expr_for_escaping_calls(stmt.value)
@@ -4815,7 +4906,7 @@ class CodeGenerator:
         # out-of-range bound still aborts here, matching how any other
         # bare expression statement's real instructions genuinely run
         # -- see this method's own opening comment), so this just
-        # reuses the same per-function scratch slot gen_indexable_
+        # reuses the same per-function scratch slot[O gen_indexable_
         # base_into's own Slice-base case already uses (_unnamed_
         # slice_temp_offset) and discards the result -- nothing ever
         # reads it. Covers both a bare slice LITERAL statement

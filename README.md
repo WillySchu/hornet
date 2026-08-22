@@ -14,9 +14,9 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- Escape arrays backing slice elements of an array / slice that is returned.
 - Structs.
 - Fix print for collections to build str buffer and call print once.
+- Escape arrays backing arrays / slices assigned via indexing, e.g. `matrix[i][j] = arr[:]`.
 - `assert`
 - `in` keyword.
 - Pass function calls to print.
