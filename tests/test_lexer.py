@@ -1049,3 +1049,28 @@ def test_none():
     ]
 
     assert expected == res
+
+
+def test_comment():
+    res = lexer.lex('tests/comment.ht')
+    expected = [
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 31),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 23),
+        lexer.Token(lexer.TokenType.EOF, '', 3, 1),
+    ]
+
+    assert expected == res
+
+
+def test_dot():
+    res = lexer.lex('tests/dot.ht')
+    #assert res[0].col == 31
+    expected = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'this', 1, 1),
+        lexer.Token(lexer.TokenType.DOT, '.', 1, 5),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'that', 1, 6),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 10),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 1),
+    ]
+
+    assert expected == res
