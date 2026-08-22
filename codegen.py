@@ -2111,20 +2111,12 @@ def analyze_array_escapes(fn: Function, param_types: List[Type]) -> Set[int]:
     and loops, which true flow sensitivity would require even before
     any function calls enter the picture, for a level of precision
     ordinary code doesn't often need. The SAME flow-insensitive
-    treatment now also covers a slice stored as an ARRAY- or SLICE-OF-
-    SLICES element (`rows[i] = arr[:]`): every write into ANY element
-    of such a container, anywhere in the function, is unioned into one
-    combined answer for the container AS A WHOLE, used uniformly
-    whenever ANY element is read back out (or the container itself is
-    returned or passed to a call) -- exactly the same "one combined
-    blob per declaration" treatment a bare slice variable already
-    gets, just extended to a container's elements collectively rather
-    than tracked per-index (which isn't attempted at all: index
-    expressions can be arbitrary runtime values, and distinguishing
-    `rows[0]` from `rows[1]` would need real per-index precision, a
-    different and larger undertaking than this). Three further, real
-    limitations, each deliberately out of scope for now rather than
-    silently mishandled:
+    treatment now also covers a slice stored as an element of an
+    AGGREGATE -- today, specifically an array- or slice-of-slices
+    (`rows[i] = arr[:]`) -- see AGGREGATES AND SLOTS below for what
+    that word is doing here and why it's phrased more generally than
+    "array-of-slices" alone. Three further, real limitations, each
+    deliberately out of scope for now rather than silently mishandled:
       - Purely INTRAprocedural: a slice passed as an argument to any
         user-defined function call is conservatively treated as
         escaping unconditionally, without looking at what the callee
@@ -2136,12 +2128,12 @@ def analyze_array_escapes(fn: Function, param_types: List[Type]) -> Set[int]:
         needs a genuine fixed-point iteration over the call graph, not
         a single pass. That's a substantially larger undertaking than
         this, and left for its own, separate follow-up.
-      - Only ONE level of container nesting is tracked: `rows[i] =
+      - Only ONE level of aggregate nesting is tracked: `rows[i] =
         arr[:]` where `rows` is a bare Variable is handled, but
-        `matrix[i][j] = arr[:]` (a container reached through a further
-        Index, not a bare Variable) is not -- IndexAssign's own target
-        has to resolve directly to a declared container, matching the
-        single-hop treatment elsewhere in this analysis.
+        `matrix[i][j] = arr[:]` (an aggregate reached through a
+        further Index, not a bare Variable) is not -- IndexAssign's
+        own target has to resolve directly to a declared aggregate,
+        matching the single-hop treatment elsewhere in this analysis.
       - A slice stored as an element of something that ISN'T itself a
         declared local or parameter -- e.g. through a pointer-like
         indirection this language doesn't actually have -- was never
@@ -2154,68 +2146,134 @@ def analyze_array_escapes(fn: Function, param_types: List[Type]) -> Set[int]:
          actually refers to at that point -- Hornet allows shadowing a
          name in a nested block, so a plain name-based lookup would
          risk conflating two entirely different variables), building:
-           - direct_backing: for each slice-typed declaration (now
-             including a container declaration's own combined entry --
-             see CONTAINERS below), which array-typed declaration(s)
-             it's ever directly sliced from (`s = arr[low:high]`, or
+           - direct_backing: for each trackable node (a slice-typed
+             declaration OR an aggregate's own slot -- see AGGREGATES
+             AND SLOTS below), which array-typed declaration(s) it's
+             ever directly sliced from (`s = arr[low:high]`, or
              `s = matrix[i][low:high]` -- indexing into a multi-
              dimensional array's own row is still a view into the SAME
              backing storage, not a copy, so this unwraps nested Index
              nodes down to their root Variable rather than requiring a
              bare one).
-           - slice_deps: for each slice-typed declaration (containers
-             included), which OTHER slice-typed declaration(s) or
-             container(s) it might in turn be derived from (re-slicing
-             a slice, a plain slice-to-slice copy, `append` -- which
+           - slice_deps: for each trackable node, which OTHER trackable
+             node(s) it might in turn be derived from (re-slicing a
+             slice, a plain slice-to-slice copy, `append` -- which
              might reuse its own first argument's backing array -- or
-             reading an element back out of a container).
-           - escaping_slices / escaping_arrays: declarations directly
-             marked as escaping, from a `return` statement's own value
-             or a slice/array-typed argument passed to a user-defined
-             call (found via a full recursive scan of every expression
-             for a nested Call, not just ones at a statement's own top
+             reading an element back out of an aggregate).
+           - escaping_slices / escaping_arrays: nodes directly marked
+             as escaping, from a `return` statement's own value or a
+             slice/array-typed argument passed to a user-defined call
+             (found via a full recursive scan of every expression for
+             a nested Call, not just ones at a statement's own top
              level -- `return foo(bar(s))` still needs `s` to be
              checked as bar's own argument even though the RETURN
              itself is really about foo's result, not s directly).
 
-         CONTAINERS: a declaration whose element_type is itself slice-
-         typed (`[N][]int`, `[][]int`, or deeper -- though only one
-         level of container nesting is actually tracked, see above) is
-         additionally registered as its own node in the very SAME
-         slice_decls/direct_backing/slice_deps structures a bare slice
-         variable uses -- not a separate, parallel graph -- so it
-         needs no new closure logic of its own: `rows[i] = arr[:]`
-         (an IndexAssign whose own target resolves directly to such a
-         container) contributes to that container's OWN direct_
-         backing/slice_deps exactly like a VarDecl's init or an
-         Assign's value would for a bare slice variable, and reading
-         `rows[i]` back out (an Index expression whose own base
-         resolves to a container) resolves to that SAME container node
-         in contribution() below, exactly like reading a bare slice
-         Variable resolves to its own node. An array-typed container
-         (`[N][]int`) is registered in BOTH array_decls (for its own,
-         unrelated existing role -- e.g. `rows[0:2]`, slicing the
-         container itself, still works via the existing array_decls/
-         root_variable_name path) and this unified slice-tracking
-         structure (for its role as a holder of slice elements) --
-         these are two independent things a single declaration can be,
-         not a conflict between them.
+         AGGREGATES AND SLOTS: this is the piece that exists purely to
+         make the NEXT thing built on top of this analysis (struct
+         support) a small addition rather than a third near-copy of
+         very similar logic -- see the module's own note on why this
+         was worth doing as its own, standalone step before struct
+         work starts. An "aggregate" is any declaration that can hold
+         MULTIPLE independently-accessed values, at least one of which
+         might be slice-typed -- today, that's exactly the array- and
+         slice-of-slices case, but a struct is exactly this too, just
+         with named fields instead of indices. A "slot" identifies
+         WHICH part of the aggregate is being accessed; slot_node_id
+         gives every distinct (aggregate declaration, slot) pair its
+         own stable, synthesized node id (a small negative integer,
+         guaranteed distinct from every real id() -- id() is always a
+         positive address in CPython -- and from every other slot's own
+         id, generated once per pair and memoized in aggregate_slot_ids
+         for every later request), then registers THAT id in the very
+         SAME slice_decls/direct_backing/slice_deps structures a bare
+         slice-typed declaration already uses. Nothing downstream --
+         not the transitive closure walk, not contribution()'s own
+         callers -- needs to know or care whether a node id it's
+         holding came from id()-ing a real declaration or from
+         slot_node_id: they're both just integers in the same graph.
+
+         Only one KIND of slot exists right now: indexed_slot_of
+         recognizes `rows[i]` (an Index) or `rows[i] = ...`
+         (IndexAssign's own target) where `rows` is a bare Variable
+         declared with an array or slice element type that's ITSELF
+         slice-typed, and maps it to the slot key _INDEXED_ELEMENTS_
+         SLOT -- a single, SHARED slot for the whole declaration,
+         regardless of which actual index `i` evaluates to at runtime,
+         since indices are dynamic values this analysis can't
+         distinguish without real per-index tracking (a different,
+         larger undertaking, and not attempted here -- see the
+         limitations list above). This is exactly the "one combined
+         blob per declaration" flow-insensitive treatment a bare slice
+         variable already gets, just extended to an aggregate's
+         elements collectively.
+
+         WHOLE-VALUE READS OF AN AGGREGATE ALSO GO THROUGH THE SAME
+         SLOT, not a separate one: `return rows`, `rows2 = rows`, and
+         `rows` passed as a call argument all resolve to indexed_slot_
+         of's own node (via whole_value_node_of, contribution()'s and
+         the VarDecl/Assign target-resolution's shared entry point for
+         "what node tracks whatever this name's value is"), exactly
+         like reading `rows[i]` does -- not a second, disconnected node
+         that happens to sit next to it. This matters concretely, not
+         just tidily: `rows` and `rows2` in `rows2 = rows` alias the
+         SAME backing storage (copying a slice descriptor is a shallow,
+         alias-preserving copy, the same as anywhere else in this
+         language), so a later `rows[0] = arr[:]` has to still be
+         visible through `rows2[0]` -- and, just as much, through a
+         bare `return rows2` -- for this analysis to stay sound. This
+         wasn't a hypothetical worth hardening pre-emptively: an
+         earlier version of this exact refactor gave whole-aggregate
+         reads their OWN separate node instead of sharing indexed_slot_
+         of's, and `return rows` (with nothing ever indexing into it
+         at all) silently stopped resolving to anything -- caught by
+         testing the refactor against the very scenarios it was
+         supposed to preserve, not found by inspection.
+
+         When struct support lands, a FIELD access (`s.my_ints`) would
+         get its own analogous function -- say, field_slot_of -- doing
+         the same shape of recognition (a bare Variable declared with a
+         struct type, whose SPECIFIC named field is slice-typed) but
+         computing a genuinely PRECISE slot key from the field's own
+         name rather than one shared sentinel: unlike a dynamic array
+         index, a field name is known statically, so `s.a` and `s.b`
+         can -- and should -- get their OWN separate slots rather than
+         being lumped together the way `rows[i]` and `rows[j]` have to
+         be. slot_node_id already supports this without any change:
+         it's already keyed on an arbitrary slot value, not hardcoded
+         to the one sentinel indexed_slot_of happens to use today. And
+         whole_value_node_of would need the analogous extension too --
+         a bare `Variable` referring to a struct falls back to it
+         exactly like an aggregate-of-slices does, so `return s` has to
+         resolve to (the union of) that struct's own field slots the
+         same deliberate way `return rows` resolves to indexed_slot_
+         of's.
+
+         An array-typed aggregate (`[N][]int`) is registered in BOTH
+         array_decls (for its own, unrelated existing role -- e.g.
+         `rows[0:2]`, slicing the aggregate itself, still works via the
+         existing array_decls/root_variable_name path) and, via its
+         slot(s), the unified slice-tracking structure (for its role as
+         a holder of slice elements) -- these are two independent
+         things a single declaration can be, not a conflict between
+         them.
       2. Compute the transitive closure from escaping_slices, following
          slice_deps edges (an ordinary graph reachability walk -- BFS
          via an explicit stack, not recursion, so it can't stack-
          overflow on a pathologically long dependency chain), unioning
-         in direct_backing at every slice declaration reached along the
-         way, plus escaping_arrays found directly. The result is
-         exactly the set of array declarations that need to survive
-         past this function's own return.
+         in direct_backing at every node reached along the way, plus
+         escaping_arrays found directly. The result is exactly the set
+         of array declarations that need to survive past this
+         function's own return.
     """
     array_decls: Set[int] = set()
     slice_decls: Set[int] = set()
-    container_decls: Set[int] = set()
+    decl_types: Dict[int, Type] = {}
     direct_backing: Dict[int, Set[int]] = {}
     slice_deps: Dict[int, Set[int]] = {}
     escaping_slices: Set[int] = set()
     escaping_arrays: Set[int] = set()
+    aggregate_slot_ids: Dict[Tuple[int, str], int] = {}
 
     scopes: List[Dict[str, int]] = [{}]
 
@@ -2227,29 +2285,89 @@ def analyze_array_escapes(fn: Function, param_types: List[Type]) -> Set[int]:
 
     def declare(name: str, decl_id: int, decl_type: Type) -> None:
         scopes[-1][name] = decl_id
+        decl_types[decl_id] = decl_type
         if decl_type.kind == TypeKind.ARRAY:
             array_decls.add(decl_id)
-        if decl_type.kind in (TypeKind.ARRAY, TypeKind.SLICE):
-            if decl_type.element_type is not None and decl_type.element_type.kind == TypeKind.SLICE:
-                # A container of slices -- e.g. [N][]int or [][]int --
-                # gets its own combined node in the SAME slice-tracking
-                # structures a bare slice variable uses (see CONTAINERS
-                # in this function's own docstring), regardless of
-                # whether it was already added to array_decls above:
-                # holding slice elements is an independent role from
-                # whatever else this exact declaration's own outer type
-                # already makes it.
-                container_decls.add(decl_id)
-                slice_decls.add(decl_id)
-                direct_backing.setdefault(decl_id, set())
-                slice_deps.setdefault(decl_id, set())
-            elif decl_type.kind == TypeKind.SLICE:
-                slice_decls.add(decl_id)
-                direct_backing.setdefault(decl_id, set())
-                slice_deps.setdefault(decl_id, set())
+        if decl_type.kind == TypeKind.SLICE:
+            slice_decls.add(decl_id)
+            direct_backing.setdefault(decl_id, set())
+            slice_deps.setdefault(decl_id, set())
 
     for p, p_type in zip(fn.params, param_types):
         declare(p.name, id(p), p_type)
+
+    def slot_node_id(container_id: int, slot: str) -> int:
+        """The one piece of plumbing every aggregate kind shares --
+        see AGGREGATES AND SLOTS above. Deliberately agnostic to what
+        `slot` actually means (an index-sentinel today, a field name
+        once structs exist): callers decide what a slot IS; this just
+        gives each distinct (container_id, slot) pair a stable node id
+        in the shared slice-tracking graph, synthesizing one the first
+        time that exact pair is seen and returning the same one every
+        time after."""
+        key = (container_id, slot)
+        if key not in aggregate_slot_ids:
+            node_id = -(len(aggregate_slot_ids) + 1)  # always negative;
+            # id() is always a positive address in CPython, so this can
+            # never collide with a real declaration's own node id.
+            aggregate_slot_ids[key] = node_id
+            slice_decls.add(node_id)
+            direct_backing.setdefault(node_id, set())
+            slice_deps.setdefault(node_id, set())
+        return aggregate_slot_ids[key]
+
+    _INDEXED_ELEMENTS_SLOT = '[]'  # the one shared slot indexed_slot_of
+    # uses for a whole array-/slice-of-slices declaration, regardless of
+    # which actual index is involved (see AGGREGATES AND SLOTS above for
+    # why) -- chosen because '[' and ']' can never appear in a Hornet
+    # identifier, so this can never collide with a future field-name slot.
+
+    def indexed_slot_of(base_expr: Node) -> Optional[int]:
+        """Recognizes `base_expr` as a bare Variable, declared with an
+        array- or slice-of-slices type, that Index/IndexAssign is
+        accessing -- e.g. the `rows` in `rows[i]` or `rows[i] = ...` --
+        and returns that declaration's own shared indexed-elements slot
+        id (see slot_node_id), or None if base_expr doesn't resolve to
+        one at all (a different kind of base entirely, an aggregate
+        whose element type isn't itself slice-typed, or an expression
+        more complex than a bare Variable -- see this function's own
+        single-hop limitation, documented in this analysis's own
+        docstring). Just a Variable-shaped wrapper around whole_value_
+        node_of, which does the actual resolution and is what makes
+        indexed access and whole-value access of the same aggregate
+        share one node rather than getting two disconnected ones --
+        see WHOLE-VALUE READS OF AN AGGREGATE ALSO GO THROUGH THE SAME
+        SLOT above for why that sharing is load-bearing, not cosmetic."""
+        if not isinstance(base_expr, Variable):
+            return None
+        return whole_value_node_of(base_expr.name)
+
+    def whole_value_node_of(name: str) -> Optional[int]:
+        """Resolves `name` to the node id this analysis's graph uses
+        to track EVERYTHING relevant about the value it holds --
+        deliberately shared with indexed_slot_of's own notion of "the
+        declaration's indexed-elements slot" when `name` is an
+        aggregate-of-slices, since a whole-aggregate read (`return
+        rows`, `rows2 = rows`, `rows` passed to a call) has to be
+        treated as being just as capable of exposing ANY element's own
+        backing as reading one element out directly is -- they're the
+        SAME underlying storage, so they get the SAME node, not two
+        disconnected ones that would silently stop propagating into
+        each other. Falls back to `name`'s own bare declaration id for
+        an ORDINARY slice-typed declaration (not an aggregate at all),
+        exactly like before this function existed. Returns None if
+        `name` doesn't resolve to anything this analysis tracks."""
+        decl_id = resolve(name)
+        if decl_id is None:
+            return None
+        decl_type = decl_types.get(decl_id)
+        if decl_type is not None and decl_type.kind in (TypeKind.ARRAY, TypeKind.SLICE):
+            element_type = decl_type.element_type
+            if element_type is not None and element_type.kind == TypeKind.SLICE:
+                return slot_node_id(decl_id, _INDEXED_ELEMENTS_SLOT)
+        if decl_id in slice_decls:
+            return decl_id
+        return None
 
     def root_variable_name(expr: Node) -> Optional[str]:
         while isinstance(expr, Index):
@@ -2261,11 +2379,11 @@ def analyze_array_escapes(fn: Function, param_types: List[Type]) -> Set[int]:
         the two value_expr's own aliasing actually resolves to (never
         both), or (None, None) if it isn't backed by any of this
         function's own declarations at all (a fresh literal, `none`,
-        an ordinary user-function call's own return value, ...). A
-        container's own combined node (see CONTAINERS above) is
+        an ordinary user-function call's own return value, ...). An
+        aggregate's own slot id (see AGGREGATES AND SLOTS above) is
         returned as the second element here exactly like a bare slice
         Variable's own id would be -- callers don't need to know or
-        care that it came from indexing into a container rather than
+        care that it came from indexing into an aggregate rather than
         reading a plain slice variable directly."""
         if isinstance(value_expr, Slice):
             base_name = root_variable_name(value_expr.array)
@@ -2276,21 +2394,16 @@ def analyze_array_escapes(fn: Function, param_types: List[Type]) -> Set[int]:
                 if base_id in slice_decls:
                     return None, base_id
         elif isinstance(value_expr, Variable):
-            src_id = resolve(value_expr.name)
-            if src_id in slice_decls:
-                return None, src_id
+            node_id = whole_value_node_of(value_expr.name)
+            if node_id is not None:
+                return None, node_id
         elif isinstance(value_expr, Index):
-            # Reading an element back out of a declared container --
-            # e.g. `rows[i]` -- resolves to that container's own
-            # combined node. Only a direct Variable base is handled
-            # (matching the single-hop container-nesting limit
-            # documented above); a further-nested Index base (indexing
-            # into a container reached through another container) is
-            # not.
-            if isinstance(value_expr.array, Variable):
-                base_id = resolve(value_expr.array.name)
-                if base_id in container_decls:
-                    return None, base_id
+            # Reading an element back out of a declared aggregate --
+            # e.g. `rows[i]` -- resolves to that aggregate's own
+            # indexed-elements slot.
+            slot_id = indexed_slot_of(value_expr.array)
+            if slot_id is not None:
+                return None, slot_id
         elif isinstance(value_expr, Call) and value_expr.name == 'append':
             # append's own first argument might reuse ITS OWN backing
             # storage (the reuse path -- see gen_append_call_into), so
@@ -2299,7 +2412,7 @@ def analyze_array_escapes(fn: Function, param_types: List[Type]) -> Set[int]:
             # contribution() here (rather than only handling a bare
             # Variable) means append's first argument gets the SAME
             # treatment any other slice-valued expression already
-            # does -- a container element (`append(rows[0], v)`), an
+            # does -- an aggregate element (`append(rows[0], v)`), an
             # unnamed slice expression (`append(arr[0:2], v)`), or
             # even another append call's own result -- not just a
             # named slice variable.
@@ -2344,31 +2457,31 @@ def analyze_array_escapes(fn: Function, param_types: List[Type]) -> Set[int]:
                 var_type = type_from_name(stmt.var_type)
                 declare(stmt.name, id(stmt), var_type)
                 if stmt.init is not None:
-                    if var_type.kind == TypeKind.SLICE:
+                    target_node = whole_value_node_of(stmt.name)
+                    if target_node is not None:
                         array_id, slice_id = contribution(stmt.init)
                         if array_id is not None:
-                            direct_backing[id(stmt)].add(array_id)
+                            direct_backing[target_node].add(array_id)
                         if slice_id is not None:
-                            slice_deps[id(stmt)].add(slice_id)
+                            slice_deps[target_node].add(slice_id)
                     scan_expr_for_escaping_calls(stmt.init)
             elif isinstance(stmt, Assign):
-                target_id = resolve(stmt.name)
-                if target_id in slice_decls:
+                target_node = whole_value_node_of(stmt.name)
+                if target_node is not None:
                     array_id, slice_id = contribution(stmt.value)
                     if array_id is not None:
-                        direct_backing[target_id].add(array_id)
+                        direct_backing[target_node].add(array_id)
                     if slice_id is not None:
-                        slice_deps[target_id].add(slice_id)
+                        slice_deps[target_node].add(slice_id)
                 scan_expr_for_escaping_calls(stmt.value)
             elif isinstance(stmt, IndexAssign):
-                if isinstance(stmt.array, Variable):
-                    container_id = resolve(stmt.array.name)
-                    if container_id in container_decls:
-                        array_id, slice_id = contribution(stmt.value)
-                        if array_id is not None:
-                            direct_backing[container_id].add(array_id)
-                        if slice_id is not None:
-                            slice_deps[container_id].add(slice_id)
+                slot_id = indexed_slot_of(stmt.array)
+                if slot_id is not None:
+                    array_id, slice_id = contribution(stmt.value)
+                    if array_id is not None:
+                        direct_backing[slot_id].add(array_id)
+                    if slice_id is not None:
+                        slice_deps[slot_id].add(slice_id)
                 scan_expr_for_escaping_calls(stmt.array)
                 scan_expr_for_escaping_calls(stmt.index)
                 scan_expr_for_escaping_calls(stmt.value)
@@ -4906,7 +5019,7 @@ class CodeGenerator:
         # out-of-range bound still aborts here, matching how any other
         # bare expression statement's real instructions genuinely run
         # -- see this method's own opening comment), so this just
-        # reuses the same per-function scratch slot[O gen_indexable_
+        # reuses the same per-function scratch slot gen_indexable_
         # base_into's own Slice-base case already uses (_unnamed_
         # slice_temp_offset) and discards the result -- nothing ever
         # reads it. Covers both a bare slice LITERAL statement

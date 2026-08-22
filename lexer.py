@@ -23,6 +23,7 @@ class TokenType(Enum):
     CLOSE_BRACKET = auto()
     COLON = auto()
     COMMA = auto()
+    DOT = auto()
 
     # Operators
     ASSIGN = auto()
@@ -75,6 +76,7 @@ class TokenType(Enum):
     BREAK = auto()
     CONTINUE = auto()
     NONE = auto()
+    STRUCT = auto()
 
     # Special
     NEWLINE = auto()
@@ -142,6 +144,7 @@ class Lexer():
             'break': TokenType.BREAK,
             'continue': TokenType.CONTINUE,
             'none': TokenType.NONE,
+            'struct': TokenType.STRUCT,
         }
 
         # Compile master regex pattern
@@ -198,19 +201,21 @@ class Lexer():
             ('AMPERSAND',     r'&'),               # Bitwise AND
             ('PIPE',          r'\|'),              # Bitwise OR
             ('CARET',         r'\^'),              # Bitwise XOR
-            ('COMMENT',       r'#[^\n]*'),          # Single-line comment -- from '#' to
-                                                     # end of line, NOT including the
-                                                     # newline itself, so the newline
-                                                     # still gets tokenized normally right
-                                                     # after and statement-termination
-                                                     # logic doesn't need to know comments
-                                                     # exist at all. Placed here, next to
-                                                     # SKIP, since both are discarded
-                                                     # rather than producing a real token
-                                                     # -- see tokenize()'s own handling of
-                                                     # both, and _handle_indentation's
-                                                     # exclusion of both from what counts
-                                                     # as a line's first real content.
+            ('DOT',           r'\.'),
+
+            ('COMMENT',       r'#[^\n]*'),         # Single-line comment -- from '#' to
+                                                    # end of line, NOT including the
+                                                    # newline itself, so the newline
+                                                    # still gets tokenized normally right
+                                                    # after and statement-termination
+                                                    # logic doesn't need to know comments
+                                                    # exist at all. Placed here, next to
+                                                    # SKIP, since both are discarded
+                                                    # rather than producing a real token
+                                                    # -- see tokenize()'s own handling of
+                                                    # both, and _handle_indentation's
+                                                    # exclusion of both from what counts
+                                                    # as a line's first real content.
             ('SKIP',          r'[ \t\r]+'),        # Spaces and tabs
             ('MISMATCH',      r'.'),               # Any other character (error)
         ]
@@ -266,7 +271,7 @@ class Lexer():
             value = match.group(kind)
             column = match.start() - self.line_start + 1
 
-            if self.at_line_start and kind not in ('NEWLINE', 'SKIP'):
+            if self.at_line_start and kind not in ('NEWLINE', 'SKIP', 'COMMENT'):
                 self._handle_indentation(column - 1)
                 self.at_line_start = False
 
@@ -351,6 +356,8 @@ class Lexer():
                 self.tokens.append(Token(TokenType.SHIFT_LEFT_ASSIGN, value, self.line, column))
             elif kind == 'SHIFT_RIGHT_ASSIGN':
                 self.tokens.append(Token(TokenType.SHIFT_RIGHT_ASSIGN, value, self.line, column))
+            elif kind == 'DOT':
+                self.tokens.append(Token(TokenType.DOT, value, self.line, column))
             elif kind == 'COMMENT':
                 continue
             elif kind == 'SKIP':
