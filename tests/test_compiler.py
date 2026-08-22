@@ -61,8 +61,9 @@ Organization:
     TestIndexAssignIntoArrayOfSlices    ( 5 tests)
     TestSemanticErrors                  (75 tests)
     TestComments                        (11 tests)
+    TestStructs                         (32 tests)
                                         ----------
-                                        509 tests total
+                                        541 tests total
 
 A NOTE ON ARRAYS
 -----------------------------------------------------------------
@@ -654,7 +655,7 @@ import pytest
 
 from codegen import CodegenError, generate_asm
 from lexer import lex
-from parser import Parser
+from parser import Parser, ParseError
 from semantic import SemanticError, analyze
 
 
@@ -2489,14 +2490,16 @@ class TestTypeAnnotation:
         )
 
     def test_codegen_without_semantic_analysis_raises_clear_error(self):
-        """_type_of's defensive check: codegen invoked on an AST that
-        skipped semantic.analyze() (so no node has a resolved_type)
-        must fail with a clear, actionable CodegenError -- matching
+        """codegen invoked on an AST that skipped semantic.analyze()
+        (so Program itself has no struct_registry, stamped on only by
+        analyze's own struct-collection pass -- see generate()'s own
+        defensive check, the first thing it does) must fail with a
+        clear, actionable CodegenError -- matching _type_of's and
         _local_offset's own established posture -- rather than a bare
         AttributeError or, worse, silently wrong codegen."""
         ast = _parse("def int main():\n    return 1 + 2\n")
         # Deliberately not calling analyze(ast) here.
-        with pytest.raises(CodegenError, match="has no resolved type"):
+        with pytest.raises(CodegenError, match="no struct registry"):
             generate_asm(ast, platform=ASM_PLATFORM)
 
 
@@ -7059,3 +7062,551 @@ class TestComments:
             "    return total",
             14,  # 1 + 1 + 10 + 1 + 1 = 14
         )
+
+# ---------------------------------------------------------------------------
+# Structs: `struct Name: <field>+`, a new, NOMINAL type with named,
+# ordered, heterogeneous fields, read and written via `.` (`p.x`,
+# `p.x = 1`). Value semantics throughout, exactly like an array -- copied
+# on VarDecl init, plain Assign, parameter passing, and return, never
+# aliased -- see codegen.py's own STRUCTS section for the full design,
+# including why the copy mechanism needed no new machinery at all
+# (gen_array_copy's own flat-byte-chunking loop, generalized to any leaf
+# width, already handles a struct correctly with no field-by-field
+# recursion).
+#
+# What's deliberately NOT covered here, each a real, enforced scope
+# boundary rather than a silently discovered gap (see codegen.py's own
+# STRUCTS section for the full reasoning behind each):
+#   - No struct literal syntax -- every struct value in this phase is
+#     built field-by-field, through a VarDecl followed by individual
+#     FieldAssign statements.
+#   - No slice-typed fields (directly, through an array, or through a
+#     nested struct) -- explicitly REJECTED by semantic.py, not merely
+#     unimplemented, since a struct escaping a function with an
+#     unguarded slice field would silently reintroduce the exact
+#     dangling-pointer bug analyze_array_escapes exists to prevent
+#     elsewhere. See test_slice_typed_field_is_rejected and its
+#     siblings.
+#   - No `==` on structs, and no `print` on a struct (deferred pending a
+#     real string-building facility -- see codegen.py's own note).
+#
+# test_value_semantics_local_copy and test_value_semantics_across_a_call
+# are the two tests that matter most in this whole class: they're what
+# actually prove a struct copies rather than aliases, the foundational
+# claim everything else here builds on. Every other positive test could
+# pass even if structs silently aliased instead of copying (field reads/
+# writes would still "work"); these two specifically require that NOT to
+# be true.
+# ---------------------------------------------------------------------------
+
+class TestStructs:
+    pytestmark = GCC_SKIP
+
+    def test_basic_field_read_and_write(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    Point p\n"
+            "    p.x = 3\n"
+            "    p.y = 4\n"
+            "    return p.x + p.y\n",
+            7,
+        )
+
+    def test_field_to_field_copy(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    Point p\n"
+            "    p.x = 3\n"
+            "    p.y = 4\n"
+            "    Point q\n"
+            "    q.x = p.x\n"
+            "    q.y = p.y\n"
+            "    return q.x + q.y\n",
+            7,
+        )
+
+    def test_whole_struct_assignment(self):
+        """`q = p`, not field-by-field -- exercises gen_struct_value_
+        into's own Variable case (a flat copy via gen_array_copy), not
+        gen_field_assign at all."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    Point p\n"
+            "    p.x = 3\n"
+            "    p.y = 4\n"
+            "    Point q\n"
+            "    q = p\n"
+            "    return q.x + q.y\n",
+            7,
+        )
+
+    def test_value_semantics_local_copy(self):
+        """THE test proving a struct copies rather than aliases: `Point
+        q = p` then mutating q must never affect p."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    Point p\n"
+            "    p.x = 3\n"
+            "    p.y = 4\n"
+            "    Point q = p\n"
+            "    q.x = 99\n"
+            "    return p.x\n",
+            3,
+        )
+
+    def test_value_semantics_across_a_call(self):
+        """The parameter-passing counterpart to test_value_semantics_
+        local_copy: mutating a struct PARAMETER inside a function must
+        never affect the caller's own struct."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "\n"
+            "def int mutate(Point p):\n"
+            "    p.x = 999\n"
+            "    return p.x\n"
+            "\n"
+            "def int main():\n"
+            "    Point p\n"
+            "    p.x = 5\n"
+            "    int result = mutate(p)\n"
+            "    return p.x\n",
+            5,
+        )
+
+    def test_nested_struct_field_access(self):
+        assert_program_exit_code(
+            "struct Inner:\n"
+            "    int v\n"
+            "struct Outer:\n"
+            "    Inner inner\n"
+            "\n"
+            "def int main():\n"
+            "    Outer o\n"
+            "    o.inner.v = 42\n"
+            "    return o.inner.v\n",
+            42,
+        )
+
+    def test_struct_field_containing_another_struct_assigned_wholesale(self):
+        assert_program_exit_code(
+            "struct Inner:\n"
+            "    int v\n"
+            "struct Outer:\n"
+            "    Inner inner\n"
+            "\n"
+            "def int main():\n"
+            "    Inner i\n"
+            "    i.v = 7\n"
+            "    Outer o\n"
+            "    o.inner = i\n"
+            "    return o.inner.v\n",
+            7,
+        )
+
+    def test_array_of_structs(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    [3]Point pts\n"
+            "    pts[0].x = 1\n"
+            "    pts[0].y = 2\n"
+            "    pts[1].x = 3\n"
+            "    pts[1].y = 4\n"
+            "    return pts[0].x + pts[0].y + pts[1].x + pts[1].y\n",
+            10,
+        )
+
+    def test_array_typed_field_indexed(self):
+        """`b.data[0]` -- an array-typed FIELD, indexed further. Needed
+        its own fix in gen_array_address_into (a Field case, for
+        exactly this shape) -- found by this test failing outright,
+        not by inspection."""
+        assert_program_exit_code(
+            "struct Row:\n"
+            "    [3]int data\n"
+            "\n"
+            "def int main():\n"
+            "    Row r\n"
+            "    r.data[0] = 10\n"
+            "    r.data[2] = 20\n"
+            "    return r.data[0] + r.data[2]\n",
+            30,
+        )
+
+    def test_struct_as_function_parameter(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int sumPoint(Point p):\n"
+            "    return p.x + p.y\n"
+            "\n"
+            "def int main():\n"
+            "    Point p\n"
+            "    p.x = 3\n"
+            "    p.y = 4\n"
+            "    return sumPoint(p)\n",
+            7,
+        )
+
+    def test_struct_as_function_return_type(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def Point makePoint(int x, int y):\n"
+            "    Point p\n"
+            "    p.x = x\n"
+            "    p.y = y\n"
+            "    return p\n"
+            "\n"
+            "def int main():\n"
+            "    Point p = makePoint(3, 4)\n"
+            "    return p.x + p.y\n",
+            7,
+        )
+
+    def test_forwarding_a_struct_returning_call(self):
+        """`return bar()`, forwarding another struct-returning call's
+        result straight out -- free, via gen_struct_value_into's own
+        Call case, exactly like the identical array/slice case
+        already is (the same destination address passed one level
+        deeper, no intermediate copy)."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def Point makePoint(int x, int y):\n"
+            "    Point p\n"
+            "    p.x = x\n"
+            "    p.y = y\n"
+            "    return p\n"
+            "\n"
+            "def Point forwardPoint(int x, int y):\n"
+            "    return makePoint(x, y)\n"
+            "\n"
+            "def int main():\n"
+            "    Point p = forwardPoint(3, 4)\n"
+            "    return p.x + p.y\n",
+            7,
+        )
+
+    def test_passing_a_struct_field_as_an_argument(self):
+        """`foo(s.inner)` -- a struct-typed argument that's a Field,
+        not a bare Variable, the one real addition a struct argument
+        needed beyond what an array argument already had."""
+        assert_program_exit_code(
+            "struct Inner:\n"
+            "    int v\n"
+            "struct Outer:\n"
+            "    Inner inner\n"
+            "\n"
+            "def int getV(Inner i):\n"
+            "    return i.v\n"
+            "\n"
+            "def int main():\n"
+            "    Outer o\n"
+            "    o.inner.v = 42\n"
+            "    return getV(o.inner)\n",
+            42,
+        )
+
+    def test_large_struct_is_heap_allocated(self):
+        """A struct over _STACK_ARRAY_LIMIT_BYTES gets the identical
+        heap-promotion treatment a large array already does -- and the
+        parameter-copy convention still works correctly through the
+        resulting pointer (not just declaration)."""
+        assert_program_exit_code(
+            "struct Big:\n"
+            "    [5000]int data\n"
+            "\n"
+            "def int useBig(Big b):\n"
+            "    return b.data[0] + b.data[4999]\n"
+            "\n"
+            "def int main():\n"
+            "    Big b\n"
+            "    b.data[0] = 10\n"
+            "    b.data[4999] = 20\n"
+            "    return useBig(b)\n",
+            30,
+        )
+
+    def test_large_struct_actually_uses_malloc(self):
+        """The asm-level confirmation behind the test just above."""
+        source = (
+            "struct Big:\n"
+            "    [5000]int data\n"
+            "\n"
+            "def int main():\n"
+            "    Big b\n"
+            "    return b.data[0]\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        assert "malloc" in asm
+
+    def test_forward_reference(self):
+        """Struct A, declared first, references struct B, declared
+        later in the same file -- only possible because struct names
+        are all reserved up front, before any struct's own fields are
+        resolved (see _collect_structs's own pass 1)."""
+        assert_program_exit_code(
+            "struct A:\n"
+            "    B b\n"
+            "struct B:\n"
+            "    int v\n"
+            "\n"
+            "def int main():\n"
+            "    A a\n"
+            "    a.b.v = 5\n"
+            "    return a.b.v\n",
+            5,
+        )
+
+    def test_duplicate_struct_name_is_rejected(self):
+        source = (
+            "struct Foo:\n"
+            "    int a\n"
+            "struct Foo:\n"
+            "    int b\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n"
+        )
+        with pytest.raises(SemanticError, match="already declared"):
+            analyze(_parse(source))
+
+    def test_duplicate_field_name_is_rejected(self):
+        source = (
+            "struct Foo:\n"
+            "    int a\n"
+            "    int a\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n"
+        )
+        with pytest.raises(SemanticError, match="already declared"):
+            analyze(_parse(source))
+
+    def test_unknown_field_access_is_rejected(self):
+        source = (
+            "struct Point:\n"
+            "    int x\n"
+            "\n"
+            "def int main():\n"
+            "    Point p\n"
+            "    return p.y\n"
+        )
+        with pytest.raises(SemanticError, match="no field"):
+            analyze(_parse(source))
+
+    def test_field_access_on_non_struct_type_is_rejected(self):
+        source = (
+            "def int main():\n"
+            "    int x = 5\n"
+            "    return x.foo\n"
+        )
+        with pytest.raises(SemanticError, match="non-struct"):
+            analyze(_parse(source))
+
+    def test_wrong_typed_field_assignment_is_rejected(self):
+        source = (
+            "struct Point:\n"
+            "    int x\n"
+            "\n"
+            "def int main():\n"
+            "    Point p\n"
+            "    p.x = true\n"
+            "    return 0\n"
+        )
+        with pytest.raises(SemanticError, match="Cannot assign"):
+            analyze(_parse(source))
+
+    def test_unknown_struct_type_name_is_rejected(self):
+        source = (
+            "def int main():\n"
+            "    Bar b\n"
+            "    return 0\n"
+        )
+        with pytest.raises(SemanticError, match="Unknown type"):
+            analyze(_parse(source))
+
+    def test_direct_self_containment_is_rejected(self):
+        source = (
+            "struct Foo:\n"
+            "    Foo f\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n"
+        )
+        with pytest.raises(SemanticError, match="cannot contain itself"):
+            analyze(_parse(source))
+
+    def test_mutual_cycle_is_rejected(self):
+        source = (
+            "struct A:\n"
+            "    B b\n"
+            "struct B:\n"
+            "    A a\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n"
+        )
+        with pytest.raises(SemanticError, match="cannot contain itself"):
+            analyze(_parse(source))
+
+    def test_cycle_via_array_field_is_rejected(self):
+        """`[5]B` counts as containment for cycle purposes, exactly
+        like a direct field would -- an array embeds its element
+        inline, N times over, so this is exactly as size-infinite as
+        a direct cycle."""
+        source = (
+            "struct A:\n"
+            "    [5]B b\n"
+            "struct B:\n"
+            "    A a\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n"
+        )
+        with pytest.raises(SemanticError, match="cannot contain itself"):
+            analyze(_parse(source))
+
+    def test_struct_containing_array_of_different_struct_is_fine(self):
+        """The positive control for the two cycle tests above: an
+        array of a DIFFERENT, non-cyclic struct must NOT be rejected."""
+        ast = _parse(
+            "struct Point:\n"
+            "    int x\n"
+            "struct Triangle:\n"
+            "    [3]Point vertices\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_nominal_typing_two_structs_with_same_fields_are_different_types(self):
+        """Two structs with identical field lists but different
+        declared names are different types -- falls out of Type's own
+        structural equality over its new struct_name field, with no
+        field-by-field comparison ever happening (see semantic.py's
+        own Type docstring)."""
+        source = (
+            "struct A:\n"
+            "    int v\n"
+            "struct B:\n"
+            "    int v\n"
+            "\n"
+            "def int useA(A a):\n"
+            "    return a.v\n"
+            "\n"
+            "def int main():\n"
+            "    B b\n"
+            "    b.v = 5\n"
+            "    return useA(b)\n"
+        )
+        with pytest.raises(SemanticError, match="should be A, got B"):
+            analyze(_parse(source))
+
+    def test_slice_typed_field_is_rejected(self):
+        """A real, enforced boundary, not an accidental gap -- see
+        codegen.py's own STRUCTS section for why: without this, a
+        slice written into a field, or the whole struct copied via an
+        ordinary flat byte copy, would silently compile with no error
+        at all, while the array backing that slice could still be left
+        stack-allocated and outlive the frame it came from."""
+        source = (
+            "struct Row:\n"
+            "    []int values\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n"
+        )
+        with pytest.raises(SemanticError, match="slice-typed"):
+            analyze(_parse(source))
+
+    def test_array_of_slices_field_is_rejected(self):
+        """The same rejection, one level of array-wrapping deeper --
+        _field_contains_slice unwraps array nesting at any depth, not
+        just a bare slice field."""
+        source = (
+            "struct Rows:\n"
+            "    [3][]int values\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n"
+        )
+        with pytest.raises(SemanticError, match="slice-typed"):
+            analyze(_parse(source))
+
+    def test_slice_field_nested_through_another_struct_is_rejected(self):
+        """The same rejection again, reached transitively through a
+        nested struct field -- _field_contains_slice recurses into a
+        nested struct's own already-resolved fields, not just the
+        immediate field list."""
+        source = (
+            "struct Inner:\n"
+            "    []int values\n"
+            "struct Outer:\n"
+            "    Inner inner\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n"
+        )
+        with pytest.raises(SemanticError, match="slice-typed"):
+            analyze(_parse(source))
+
+    def test_ordinary_array_field_is_not_rejected(self):
+        """The positive control for the three slice-field rejection
+        tests above: an ordinary (non-slice) array field must NOT be
+        rejected."""
+        ast = _parse(
+            "struct Fixed:\n"
+            "    [3]int values\n"
+            "\n"
+            "def int main():\n"
+            "    Fixed f\n"
+            "    return f.values[0]\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_compound_assignment_to_a_field_is_rejected(self):
+        """`p.x += 1` -- rejected at parse time, matching IndexAssign's
+        own identical restriction and for the identical reason (see
+        FieldAssign's own docstring in parser.py)."""
+        source = (
+            "struct Point:\n"
+            "    int x\n"
+            "\n"
+            "def int main():\n"
+            "    Point p\n"
+            "    p.x += 1\n"
+            "    return 0\n"
+        )
+        with pytest.raises(ParseError, match="Compound assignment"):
+            _parse(source)

@@ -498,7 +498,7 @@ class Slice(Node):
     actually generated.
 
     Deliberately NOT a valid assignment target -- `arr[1:3] = ...`
-    doesn't parse as anything at all (parse_expr_stmt_or_index_assign's
+    doesn't parse as anything at all (parse_expr_stmt_or_assign's
     existing isinstance(expr, Index) check already excludes this
     automatically, simply because Slice is a different class; no
     changes were needed there to get this for free). This matches Go,
@@ -692,6 +692,82 @@ class IndexAssign(Node):
 
 
 @dataclass
+class Field(Node):
+    """`base.name` -- reads a single field out of a struct-typed
+    `base`. Unlike Index, there's no separate "nested" shape to worry
+    about for a multi-level chain (`a.b.c`): it's just Field(base=
+    Field(base=Variable('a'), name='b'), name='c'), one node per '.',
+    exactly mirroring how Index nests for `matrix[i][j]` -- and the
+    two kinds of suffix chain together freely too (`a.b[0]`, `arr[0].f`,
+    `a.b.c[0].d`), since parse_postfix's own loop builds both in a
+    single pass with no special-casing for which comes first (see its
+    own docstring)."""
+    base: Node
+    name: str
+    resolved_type: Optional[Any] = None
+
+    def pretty(self) -> str:
+        return f"Field -> [{self.base.pretty()}, {self.name}]"
+
+
+@dataclass
+class FieldAssign(Node):
+    """`base.name = value` -- writes a single struct field. Mirrors
+    IndexAssign exactly, one level over: `base` is the expression
+    being accessed -- a bare Variable for `s.f = v`, or itself a
+    Field or Index node for a longer chain (`s.inner.f = v`,
+    `s.rows[0].f = v`, `rows[0].f.g = v`) -- built the same way
+    IndexAssign's own multi-dimensional target is, by parsing the
+    whole left-hand expression first and reinterpreting it as an
+    assignment target afterward (see parse_expr_stmt_or_assign).
+
+    Like IndexAssign, compound assignment (`s.f += 1`) is deliberately
+    rejected with a clear error rather than silently mis-parsed or
+    silently accepted -- for the identical reason IndexAssign's own
+    docstring gives: a target like `s.rows[i()].f` could contain a
+    side-effecting sub-expression that a naive desugaring into
+    `s.rows[i()].f = s.rows[i()].f + 1` would evaluate twice."""
+    base: Node
+    name: str
+    value: Node
+
+    def pretty(self) -> str:
+        return f"FieldAssign(name: {self.name}) -> [{self.base.pretty()}, {self.value.pretty()}]"
+
+
+@dataclass
+class StructField(Node):
+    """One field declaration inside a struct body: `type name`, with
+    no initializer -- a struct has no per-field default VALUES the way
+    a VarDecl can have; every field simply starts at its own type's
+    zero value (0 for int, false for bool, '' for str, a zeroed
+    backing for an array, ...) until explicitly assigned, the same way
+    an uninitialized local variable already does."""
+    name: str
+    field_type: Union[str, 'ArrayTypeExpr', 'SliceTypeExpr']
+
+    def pretty(self) -> str:
+        return f"StructField(name: {self.name}, type: {self.field_type})"
+
+
+@dataclass
+class StructDef(Node):
+    """`struct Name: <field>+` -- declares a new, NOMINAL type (see
+    semantic.py's own struct-registry pass for what nominal typing
+    means here and why it falls out naturally from how Type's own
+    equality already works). Field order is preserved exactly as
+    written, since it determines both codegen's own memory layout
+    (fields are laid out at sequential byte offsets in declaration
+    order, with no reordering) and print's own field-printing order."""
+    name: str
+    fields: List[StructField] = field(default_factory=list)
+
+    def pretty(self) -> str:
+        fields_str = '; '.join(f.pretty() for f in self.fields)
+        return f"StructDef(name: {self.name}) -> {fields_str}"
+
+
+@dataclass
 class ExprStmt(Node):
     """A bare expression used as a full statement, e.g. `2 + 2` on its
     own line -- evaluated for any side effects (there are none yet, but
@@ -819,9 +895,12 @@ class Function(Node):
 @dataclass
 class Program(Node):
     functions: List[Function] = field(default_factory=list)
+    structs: List[StructDef] = field(default_factory=list)
 
     def pretty(self) -> str:
-        return '\n'.join(f"Program -> {fn.pretty()}" for fn in self.functions)
+        struct_lines = [f"Program -> {sd.pretty()}" for sd in self.structs]
+        fn_lines = [f"Program -> {fn.pretty()}" for fn in self.functions]
+        return '\n'.join(struct_lines + fn_lines)
 
     def __repr__(self) -> str:
         return self.pretty()
@@ -1047,22 +1126,68 @@ class Parser:
 
     def parse_program(self) -> Program:
         functions = []
+        structs = []
         self.skip_newlines()
         while not self.at_end():
-            functions.append(self.parse_function())
+            if self.check(TokenType.STRUCT):
+                structs.append(self.parse_struct_def())
+            else:
+                functions.append(self.parse_function())
             self.skip_newlines()
-        return Program(functions=functions)
+        return Program(functions=functions, structs=structs)
+
+    def parse_struct_def(self) -> StructDef:
+        """`struct Name: <field>+` -- a top-level declaration, parsed
+        the same general way a function is: header line, then an
+        indented block, with the lexer's own INDENT/DEDENT tokens (see
+        lexer.py's tokenize()) already doing the real work of finding
+        where the body starts and ends, regardless of what's actually
+        being indented. Each field line is just `type name` -- no
+        initializer, no assignment -- so this reuses parse_type()
+        directly rather than parse_var_decl (which exists specifically
+        to also handle an optional `= value` a struct field can't
+        have)."""
+        self.expect(TokenType.STRUCT, "Expected 'struct'")
+        name_tok = self.expect(TokenType.IDENTIFIER, "Expected a struct name")
+        self.expect(TokenType.COLON, "Expected ':' to start the struct body")
+        self.expect(TokenType.NEWLINE, "Expected a newline after ':'")
+        self.skip_newlines()
+        self.expect(TokenType.INDENT, "Expected an indented struct body")
+        self.skip_newlines()
+        fields: List[StructField] = []
+        while not self.check(TokenType.DEDENT) and not self.at_end():
+            field_type = self.parse_type()
+            field_name_tok = self.expect(TokenType.IDENTIFIER, "Expected a field name")
+            self.expect(TokenType.NEWLINE, "Expected a newline after a field declaration")
+            fields.append(StructField(name=field_name_tok.val, field_type=field_type))
+            self.skip_newlines()
+        self.expect(TokenType.DEDENT, "Expected a dedent to end the struct body")
+        if not fields:
+            raise ParseError(
+                f"Expected at least one field in struct '{name_tok.val}'"
+            )
+        return StructDef(name=name_tok.val, fields=fields)
 
     def parse_function(self) -> Function:
         self.expect(TokenType.DEF, "Expected 'def' to start a function definition")
-        # A type keyword or '[' starts a return type; anything else --
-        # in practice always IDENTIFIER, since that's what a function
-        # name always starts with -- means the return type was omitted
-        # entirely: this function has no declared return type at all
-        # (see Function's own docstring). One token of lookahead is
-        # enough to tell these apart unambiguously: a function name can
-        # never itself BE a type keyword, since those are reserved.
-        if self.check(TokenType.INT, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET):
+        # A type keyword or '[' starts a return type unambiguously --
+        # a function name can never itself be one of those, since
+        # they're reserved. A struct-typed return (`def Point make():`)
+        # is the one case that genuinely needs a SECOND token of
+        # lookahead rather than just the first: IDENTIFIER alone is
+        # ambiguous between "this is a return type name" (`Point` in
+        # `def Point make():`) and "this is the function's own name,
+        # with no declared return type at all" (`make` in
+        # `def make():`) -- exactly the same two-vs-one-IDENTIFIER
+        # disambiguation parse_statement's own struct-typed-VarDecl
+        # check already needs, for the identical underlying reason
+        # (struct names are ordinary identifiers, not reserved
+        # keywords, so there's no way to tell "this identifier is a
+        # type" from "this identifier is something else" with only one
+        # token of lookahead).
+        if self.check(TokenType.INT, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET) or (
+            self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.IDENTIFIER
+        ):
             return_type = self.parse_type()
         else:
             return_type = None
@@ -1140,11 +1265,20 @@ class Parser:
             return ArrayTypeExpr(size=size, element_type=element_type)
         if self.check(TokenType.INT, TokenType.BOOL, TokenType.STR):
             return self.advance().val
+        if self.check(TokenType.IDENTIFIER):
+            # A struct type reference (`MyStruct`) -- the parser has no
+            # symbol table and doesn't know or care whether this name
+            # actually names a declared struct; it just accepts any
+            # identifier here and hands the bare string on, exactly
+            # like it already does for 'int'/'bool'/'str' above.
+            # semantic.py's own struct-registry pass is what actually
+            # validates the name (see type_from_name).
+            return self.advance().val
         tok = self.current()
         raise ParseError(
-            f"Expected a type ('int', 'bool', 'str', '[size]type', or "
-            f"'[]type'), got {tok.type} ('{tok.val}') at line {tok.line}, "
-            f"column {tok.col}"
+            f"Expected a type ('int', 'bool', 'str', a struct name, "
+            f"'[size]type', or '[]type'), got {tok.type} ('{tok.val}') "
+            f"at line {tok.line}, column {tok.col}"
         )
 
     def parse_block(self) -> List[Node]:
@@ -1212,9 +1346,22 @@ class Parser:
             return self.parse_break()
         if self.check(TokenType.CONTINUE):
             return self.parse_continue()
+        if self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.IDENTIFIER:
+            # Two consecutive identifiers can only mean a struct-typed
+            # VarDecl (`MyStruct x = ...`, or `MyStruct x` with no
+            # initializer -- structs have no literal syntax yet to
+            # disambiguate against, unlike the INT/BOOL/STR/
+            # OPEN_BRACKET case above, so there's no second check
+            # needed here the way there is there). A bare IDENTIFIER
+            # alone is NOT enough to signal this -- it's otherwise
+            # ambiguous with a variable reference, a function call, a
+            # field access, ... -- so this needs the SECOND token to
+            # disambiguate before parse_type() is ever called.
+            parsed_type = self.parse_type()
+            return self.parse_var_decl(var_type=parsed_type)
         if self.check(TokenType.IDENTIFIER) and self.peek(1).type in _ASSIGNMENT_TOKENS:
             return self.parse_assign()
-        return self.parse_expr_stmt_or_index_assign()
+        return self.parse_expr_stmt_or_assign()
 
     def parse_while(self) -> While:
         self.expect(TokenType.WHILE, "Expected 'while'")
@@ -1322,38 +1469,47 @@ class Parser:
         value = self.parse_expression()
         return Return(value=value)
 
-    def parse_expr_stmt_or_index_assign(self) -> Node:
-        """Handles two statement shapes that -- unlike plain `a = ...`
-        -- can't be told apart by a single token of lookahead: a bare
-        expression statement (`arr[i] + 1`, or just `foo()`), and an
-        index-assignment (`arr[i] = value`, or `matrix[i][j] = value`
-        for deeper nesting). The number of `[...]` pairs on the left
-        varies, so instead of trying to look ahead through however many
-        of them there might be, this just parses the leading expression
-        through the ordinary machinery first (which already builds
-        nested Index nodes for however many brackets follow -- see
-        parse_postfix), then decides based on what comes next.
+    def parse_expr_stmt_or_assign(self) -> Node:
+        """Handles three statement shapes that -- unlike plain
+        `a = ...` -- can't be told apart by a single token of
+        lookahead: a bare expression statement (`arr[i] + 1`, or just
+        `foo()`), an index-assignment (`arr[i] = value`, or
+        `matrix[i][j] = value` for deeper nesting), and a field-
+        assignment (`s.f = value`, or `s.inner.f = value` /
+        `s.rows[0].f = value` for a longer chain). The number and mix
+        of `[...]`/`.name` suffixes on the left varies, so instead of
+        trying to look ahead through however many of them there might
+        be, this just parses the leading expression through the
+        ordinary machinery first (which already builds nested Index
+        and Field nodes for however many suffixes follow, in whatever
+        order -- see parse_postfix), then decides based on what kind of
+        node came out and what comes next.
 
-        Only plain `=` is handled here -- `arr[i] += 1` and the other
-        compound forms are deliberately rejected with a clear error
-        rather than silently mis-parsed (see IndexAssign's own
-        docstring for why compound index-assignment isn't supported
-        yet at all, not just here)."""
+        Only plain `=` is handled for either assignable shape --
+        `arr[i] += 1` and `s.f += 1` are both deliberately rejected
+        with a clear error rather than silently mis-parsed (see
+        IndexAssign's and FieldAssign's own docstrings for why compound
+        assignment isn't supported yet at all, not just here)."""
         expr = self.parse_expression()
         if self.check(TokenType.ASSIGN):
-            if not isinstance(expr, Index):
-                tok = self.current()
-                raise ParseError(
-                    f"Left-hand side of '=' is not assignable "
-                    f"at line {tok.line}, column {tok.col}"
-                )
-            self.advance()
-            value = self.parse_expression()
-            return IndexAssign(array=expr.array, index=expr.index, value=value)
-        if isinstance(expr, Index) and self.current().type in _COMPOUND_ASSIGN_OPS:
+            if isinstance(expr, Index):
+                self.advance()
+                value = self.parse_expression()
+                return IndexAssign(array=expr.array, index=expr.index, value=value)
+            if isinstance(expr, Field):
+                self.advance()
+                value = self.parse_expression()
+                return FieldAssign(base=expr.base, name=expr.name, value=value)
             tok = self.current()
             raise ParseError(
-                f"Compound assignment to an array element ('{tok.val}') "
+                f"Left-hand side of '=' is not assignable "
+                f"at line {tok.line}, column {tok.col}"
+            )
+        if isinstance(expr, (Index, Field)) and self.current().type in _COMPOUND_ASSIGN_OPS:
+            tok = self.current()
+            article_and_kind = "an array element" if isinstance(expr, Index) else "a struct field"
+            raise ParseError(
+                f"Compound assignment to {article_and_kind} ('{tok.val}') "
                 f"is not supported yet -- write it as a plain '=' instead "
                 f"at line {tok.line}, column {tok.col}"
             )
@@ -1408,31 +1564,38 @@ class Parser:
         return self.parse_postfix()
 
     def parse_postfix(self) -> Node:
-        """Wraps a primary expression with zero or more `[...]`
-        suffixes -- each one either an index (`matrix[i][j]`, parsed
-        here as `parse_primary` producing the `matrix` Variable, then
-        this loop wrapping it in two nested Index nodes, one per
+        """Wraps a primary expression with zero or more `[...]` or
+        `.name` suffixes -- `[...]` is either an index (`matrix[i][j]`,
+        parsed here as `parse_primary` producing the `matrix` Variable,
+        then this loop wrapping it in two nested Index nodes, one per
         bracket pair -- see Index's own docstring for why that nesting,
         rather than a single Index carrying a list of indices, is the
         right shape) or a slice (`arr[low:high]`, see
         _parse_index_or_slice for how the two are told apart within one
-        `[...]` pair). Either shape can chain with the other --
-        `s[1:3][0]` (index into a slice) and `matrix[0:2][1]` (index
-        into a slice of rows) both fall out of this same loop with no
-        special-casing, exactly like chained indexing already did.
+        `[...]` pair); `.name` is a field access (`s.f`, wrapped in a
+        Field node the same nesting way -- see Field's own docstring).
+        All three shapes chain together freely, in any order -- `a.b[0]`,
+        `arr[0].f`, `s[1:3][0]`, `a.b.c[0].d` -- falling out of this one
+        loop with no special-casing for which suffix comes first or how
+        many of each follow, exactly like chained indexing alone
+        already did before Field existed.
 
         Sits between parse_unary and parse_primary specifically so
-        indexing/slicing binds TIGHTER than a prefix unary operator:
-        `-arr[0]` has to mean `-(arr[0])`, not `(-arr)[0]` (which
-        wouldn't even type-check, since unary '-' requires an int
+        indexing/slicing/field-access all bind TIGHTER than a prefix
+        unary operator: `-arr[0]` has to mean `-(arr[0])`, not `(-arr)[0]`
+        (which wouldn't even type-check, since unary '-' requires an int
         operand, not an array) -- and it does, here, since parse_unary's
         own base case (no unary operator present) calls straight into
         this method rather than parse_primary directly.
         """
         expr = self.parse_primary()
-        while self.check(TokenType.OPEN_BRACKET):
-            self.advance()
-            expr = self.parse_index_or_slice(expr)
+        while self.check(TokenType.OPEN_BRACKET, TokenType.DOT):
+            if self.match(TokenType.DOT):
+                name_tok = self.expect(TokenType.IDENTIFIER, "Expected a field name after '.'")
+                expr = Field(base=expr, name=name_tok.val)
+            else:
+                self.advance()
+                expr = self.parse_index_or_slice(expr)
         return expr
 
     def parse_index_or_slice(self, array_expr: Node) -> Node:

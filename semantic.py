@@ -22,9 +22,9 @@ code for programs already known to be valid -- it doesn't need to
 THE TYPE SYSTEM
 -----------------
 `int` and `bool` were the first two types (see semantic.Type for the
-full, current set -- `str`, fixed-size arrays, and slices have all
-been added since, each with their own typing rules documented at
-their own check_* method rather than repeated here). This is a
+full, current set -- `str`, fixed-size arrays, slices, and structs
+have all been added since, each with their own typing rules documented
+at their own check_* method rather than repeated here). This is a
 genuinely *strong* static type system in the traditional PL sense:
 there is no implicit conversion between them in either direction. A
 bool is not a 0-or-1 int that happens to print differently -- it's a
@@ -414,6 +414,8 @@ from parser import (
     Constant,
     Continue,
     ExprStmt,
+    Field,
+    FieldAssign,
     Function,
     If,
     Index,
@@ -427,6 +429,8 @@ from parser import (
     Slice,
     SliceTypeExpr,
     StringLiteral,
+    StructDef,
+    StructField,
     Unary,
     UnaryOp,
     VarDecl,
@@ -445,6 +449,7 @@ class TypeKind(Enum):
     STR = auto()
     ARRAY = auto()
     SLICE = auto()
+    STRUCT = auto()
     VOID = auto()  # see Type.VOID's own docstring below -- purely internal
     NONE = auto()  # see Type.NONE's own docstring below -- user-writable
                    # (via the `none` literal), but never as a DECLARED type
@@ -453,15 +458,19 @@ class TypeKind(Enum):
 @dataclass(frozen=True)
 class Type:
     """A type in this language: one of the three scalars (kind alone,
-    element_type/size both None), an array (kind=ARRAY, element_type
-    the Type one level down, size that dimension's fixed length), or a
-    slice (kind=SLICE, element_type the Type one level down, size
-    always None -- a slice's LENGTH is a runtime property of the slice
-    VALUE, not part of its type the way an array's size is; see
-    SliceTypeExpr's own docstring in parser.py). Two slices of the
-    same element type are the same Type regardless of how long either
-    one happens to be at runtime, unlike two arrays of different
-    sizes, which are different types even with the same element type.
+    element_type/size/struct_name all None), an array (kind=ARRAY,
+    element_type the Type one level down, size that dimension's fixed
+    length), a slice (kind=SLICE, element_type the Type one level
+    down, size always None -- a slice's LENGTH is a runtime property
+    of the slice VALUE, not part of its type the way an array's size
+    is; see SliceTypeExpr's own docstring in parser.py), or a struct
+    (kind=STRUCT, struct_name the struct's own declared name, element_
+    type/size both None -- a struct's own field LAYOUT lives in the
+    struct registry, keyed by this same name, not duplicated onto
+    every Type instance that refers to it). Two slices of the same
+    element type are the same Type regardless of how long either one
+    happens to be at runtime, unlike two arrays of different sizes,
+    which are different types even with the same element type.
 
     Frozen specifically to get structural equality and hashing for
     free from the dataclass machinery, rather than writing __eq__ by
@@ -481,16 +490,30 @@ class Type:
     what makes `Type(SLICE, Type.INT) == Type(SLICE, Type.INT)` true
     regardless of which two separate Type objects produced it, with no
     additional code needed for SLICE specifically.
+
+    This is ALSO exactly what gives struct types NOMINAL equality (two
+    structs with identical field lists but different declared names
+    are different types) essentially for free, rather than needing a
+    separate mechanism: struct_name is just one more field this same
+    structural-equality machinery already compares, so `Type(STRUCT,
+    struct_name='Point') == Type(STRUCT, struct_name='Point')` is True
+    (same name, same type) and `!= Type(STRUCT, struct_name='Vector')`
+    is True (different name, different type, regardless of whether
+    Point and Vector happen to declare the exact same fields) with no
+    field-by-field comparison ever entering into it at all.
     """
     kind: TypeKind
     element_type: Optional['Type'] = None  # set when kind == ARRAY or SLICE
     size: Optional[int] = None             # only set when kind == ARRAY
+    struct_name: Optional[str] = None      # only set when kind == STRUCT
 
     def __str__(self) -> str:
         if self.kind == TypeKind.ARRAY:
             return f"[{self.size}]{self.element_type}"
         if self.kind == TypeKind.SLICE:
             return f"[]{self.element_type}"
+        if self.kind == TypeKind.STRUCT:
+            return self.struct_name
         return self.kind.name.lower()
 
 
@@ -539,35 +562,71 @@ _TYPE_NAMES = {
 }
 
 
-def type_from_name(type_expr) -> Type:
+@dataclass
+class StructInfo:
+    """Everything semantic analysis (and, via Program.struct_registry,
+    codegen) needs to know about one declared struct: its own name
+    (redundant with whatever key it's stored under in a registry dict,
+    but kept here too so a StructInfo is self-describing on its own --
+    useful in error messages and anywhere one gets passed around
+    without its own dict key close at hand) and its fields, as an
+    ordinary dict from field name to that field's own resolved Type.
+    Field ORDER matters and is preserved here exactly as declared --
+    a plain dict already does this (insertion order, since Python
+    3.7), so no separate ordered-list structure is needed alongside
+    it -- since it determines both codegen's own memory layout (fields
+    are laid out at sequential byte offsets in declaration order) and
+    print's own field-printing order."""
+    name: str
+    fields: Dict[str, Type]
+
+
+def type_from_name(type_expr, structs: Dict[str, StructInfo]) -> Type:
     """Converts a parsed type expression (VarDecl.var_type /
-    Function.return_type / Param.type, straight from parser.py) into a
-    Type. `type_expr` is a plain str ('int'/'bool'/'str') for a scalar
-    type, an ArrayTypeExpr for an array type, or a SliceTypeExpr for a
-    slice type (see their own docstrings in parser.py) -- handled here
-    by recursing on element_type, which is itself a plain str,
-    another ArrayTypeExpr, or another SliceTypeExpr, naturally
-    bottoming out at a scalar and handling arbitrarily-nested types
-    (`[2][3]int`, `[][]int`, `[][3]int`, ...) with no depth limit or
-    special-casing for "how many dimensions" or "which mix of array
-    and slice".
+    Function.return_type / Param.type / StructField.field_type,
+    straight from parser.py) into a Type. `type_expr` is a plain str
+    for a scalar type OR a struct name (see below), an ArrayTypeExpr
+    for an array type, or a SliceTypeExpr for a slice type (see their
+    own docstrings in parser.py) -- handled here by recursing on
+    element_type, which is itself a plain str, another ArrayTypeExpr,
+    or another SliceTypeExpr, naturally bottoming out at a scalar or
+    struct name and handling arbitrarily-nested types (`[2][3]int`,
+    `[][]int`, `[][3]int`, `[]MyStruct`, ...) with no depth limit or
+    special-casing for "how many dimensions" or "which mix of array,
+    slice, and struct".
+
+    `structs` is this program's own struct registry (see StructInfo),
+    already fully built by the time this is ever called with a
+    struct-name type_expr -- see SemanticAnalyzer.analyze's own
+    struct-collection pass, which runs before function signatures (and
+    therefore before anything that might reference a struct type) are
+    resolved at all. A REQUIRED parameter, not one defaulted to an
+    empty dict: every call site in this file and in codegen.py was
+    updated to pass its own analyzer's or function's struct registry
+    through when struct support was added, specifically so a call site
+    that got missed fails loudly (a TypeError for a missing argument)
+    rather than silently misresolving any struct-typed declaration it
+    happens to touch as "unknown type".
 
     Only ever fails for a program that isn't syntactically valid in
-    the first place -- parse_type() already restricts a scalar
-    type_expr to 'int'/'bool'/'str', and already validates an
-    ArrayTypeExpr's size is a positive whole number at parse time --
-    so the KeyError case here is a defensive check, not a user-facing
-    validation path."""
+    the first place, OR references a type name that isn't a declared
+    struct -- parse_type() already restricts a scalar type_expr to
+    'int'/'bool'/'str'/an identifier, and already validates an
+    ArrayTypeExpr's size is a positive whole number at parse time, so
+    the only genuinely user-facing failure here is an unrecognized
+    identifier; the dict lookups are otherwise a defensive check, not
+    a user-facing validation path in their own right."""
     if isinstance(type_expr, ArrayTypeExpr):
-        element = type_from_name(type_expr.element_type)
+        element = type_from_name(type_expr.element_type, structs)
         return Type(TypeKind.ARRAY, element_type=element, size=type_expr.size)
     if isinstance(type_expr, SliceTypeExpr):
-        element = type_from_name(type_expr.element_type)
+        element = type_from_name(type_expr.element_type, structs)
         return Type(TypeKind.SLICE, element_type=element)
-    try:
+    if type_expr in _TYPE_NAMES:
         return _TYPE_NAMES[type_expr]
-    except KeyError:
-        raise SemanticError(f"Unknown type '{type_expr}'")
+    if type_expr in structs:
+        return Type(TypeKind.STRUCT, struct_name=type_expr)
+    raise SemanticError(f"Unknown type '{type_expr}'")
 
 
 def always_returns(statements: List[Node]) -> bool:
@@ -697,14 +756,26 @@ class SemanticAnalyzer:
         self.scopes: List[Dict[str, Type]] = []
         self.loop_depth = 0  # how many enclosing `while` loops we're currently inside
         self.functions: Dict[str, tuple] = {}  # name -> (List[Type] param types, Type return type)
+        self.structs: Dict[str, StructInfo] = {}  # name -> resolved fields; see _collect_structs
 
     def analyze(self, program: Program) -> None:
-        # First pass: collect every function's signature before checking
-        # any function's body. This is what makes call order not matter
-        # -- a function can call one defined later in the file, or call
-        # itself recursively -- since by the time analyze_function ever
-        # looks anything up in self.functions, every signature is
-        # already there. See the module docstring's FUNCTIONS section.
+        # First pass, ahead of even function signatures: collect every
+        # struct definition. Struct types can appear as a parameter or
+        # return type, so they have to already be fully resolved before
+        # function signatures are -- see _collect_structs's own
+        # docstring for why THIS pass itself needs two separate sub-
+        # passes internally (struct names first, then field types),
+        # the same forward-reference reasoning one level up.
+        self.structs = self._collect_structs(program.structs)
+        program.struct_registry = self.structs  # stashed for codegen.py's own use
+
+        # Second pass: collect every function's signature before
+        # checking any function's body. This is what makes call order
+        # not matter -- a function can call one defined later in the
+        # file, or call itself recursively -- since by the time
+        # analyze_function ever looks anything up in self.functions,
+        # every signature is already there. See the module docstring's
+        # FUNCTIONS section.
         self.functions = {}
         for fn in program.functions:
             if fn.name in _BUILTIN_FUNCTION_NAMES:
@@ -714,13 +785,163 @@ class SemanticAnalyzer:
                 )
             if fn.name in self.functions:
                 raise SemanticError(f"Function '{fn.name}' is already declared")
-            param_types = [type_from_name(p.type) for p in fn.params]
-            return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type)
+            param_types = [type_from_name(p.type, self.structs) for p in fn.params]
+            return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.structs)
             self.functions[fn.name] = (param_types, return_type)
 
-        # Second pass: now check each function's own body.
+        # Third pass: now check each function's own body.
         for fn in program.functions:
             self.analyze_function(fn)
+
+    def _collect_structs(self, struct_defs: List[StructDef]) -> Dict[str, StructInfo]:
+        """Builds this program's own struct registry (see StructInfo)
+        in four separate sub-passes, each depending on the last one
+        having already finished for every struct, not just whichever
+        one happens to be up next in declaration order:
+
+        1. Reserve every struct's own NAME up front (as a None
+           placeholder in the registry dict), rejecting a duplicate
+           name immediately. This is what makes a forward reference
+           work (`struct A: B b` followed later by `struct B: ...`):
+           by the time pass 2 resolves A's own field types, B's name
+           is already a recognized key in the registry dict, even
+           though B's own fields haven't been filled in yet -- and
+           type_from_name's own struct-name check only ever needs
+           NAME membership, never the associated value, so a None
+           placeholder is exactly as good as a real StructInfo for
+           that purpose at this point.
+        2. Resolve each struct's own field types (via type_from_name,
+           passing this same registry-in-progress), rejecting a
+           duplicate field name within one struct, and replace that
+           struct's own None placeholder with a real StructInfo.
+        3. Only once EVERY struct's own fields are fully resolved,
+           check each one for a cycle (see _check_struct_contains) --
+           cycle detection needs the real, resolved field types to
+           walk, not just which names exist, so it has to be its own
+           pass after 1 and 2 both fully finish, not interleaved with
+           either.
+        4. For the identical reason (needs every struct's own fields
+           already resolved, including ones reached transitively
+           through another struct field), reject any struct with a
+           field that's slice-typed, or that contains a slice at any
+           depth of array/struct nesting (see _field_contains_slice) --
+           a real, deliberate scope boundary for this phase, not
+           silently left unguarded: a struct value flowing out of a
+           function needs the identical escape-analysis treatment
+           array-of-slices and slice-of-slices elements already have
+           (see codegen.py's own analyze_array_escapes and its
+           AGGREGATES AND SLOTS section), which hasn't been built for
+           struct fields yet. Without this check, a slice-typed field
+           would silently compile -- writing into it, or copying the
+           whole struct via an ordinary flat byte copy, hits no error
+           at all -- while the array backing that slice could still be
+           left stack-allocated and outlive the frame it came from,
+           exactly the dangling-pointer bug analyze_array_escapes
+           exists to prevent elsewhere. Rejecting it here, explicitly,
+           turns "happens to be blocked by other, unrelated codegen
+           gaps today" into an intentional boundary that stays correct
+           even after those other gaps eventually get filled in.
+        """
+        registry: Dict[str, StructInfo] = {}
+        for sd in struct_defs:
+            if sd.name in registry:
+                raise SemanticError(f"Struct '{sd.name}' is already declared")
+            registry[sd.name] = None
+
+        for sd in struct_defs:
+            fields: Dict[str, Type] = {}
+            for f in sd.fields:
+                if f.name in fields:
+                    raise SemanticError(
+                        f"Field '{f.name}' is already declared in struct '{sd.name}'"
+                    )
+                fields[f.name] = type_from_name(f.field_type, registry)
+            registry[sd.name] = StructInfo(name=sd.name, fields=fields)
+
+        for sd in struct_defs:
+            self._check_struct_contains(sd.name, registry, path=[])
+
+        for sd in struct_defs:
+            for field_name, field_type in registry[sd.name].fields.items():
+                if self._field_contains_slice(field_type, registry):
+                    raise SemanticError(
+                        f"Field '{field_name}' of struct '{sd.name}' is "
+                        f"slice-typed (directly, or through an array or "
+                        f"nested struct) -- slice-typed struct fields "
+                        f"aren't supported yet"
+                    )
+
+        return registry
+
+    def _field_contains_slice(self, field_type: Type, registry: Dict[str, StructInfo]) -> bool:
+        """True if field_type is itself a slice, or contains one at
+        any depth of array wrapping or struct nesting -- see _collect_
+        structs's own pass 4 for why this is checked explicitly rather
+        than left as an accidental gap. Only ever called once every
+        struct's own fields are already fully resolved (pass 4 runs
+        after passes 2 and 3), so recursing into a nested struct's own
+        fields here is always safe -- unlike _check_struct_contains's
+        identical timing requirement, for the identical reason."""
+        if field_type.kind == TypeKind.SLICE:
+            return True
+        if field_type.kind == TypeKind.ARRAY:
+            return self._field_contains_slice(field_type.element_type, registry)
+        if field_type.kind == TypeKind.STRUCT:
+            return any(
+                self._field_contains_slice(nested_type, registry)
+                for nested_type in registry[field_type.struct_name].fields.values()
+            )
+        return False
+
+    def _check_struct_contains(self, name: str, registry: Dict[str, StructInfo], path: List[str]) -> None:
+        """DFS over the struct-containment graph -- struct X has an
+        edge to struct Y if X has a field whose type is Y, DIRECTLY or
+        through any depth of array wrapping (`[5]Y`, `[2][3]Y`, ...),
+        since an array embeds its element inline, N times over, so a
+        struct containing an array of a struct that (directly or
+        transitively) contains the FIRST struct is exactly as size-
+        infinite as directly containing itself would be. A SLICE field
+        (`[]Y`) deliberately does NOT count as an edge here: a slice's
+        own backing storage is a separate, runtime-sized allocation,
+        not embedded inline in the containing struct's own layout, so
+        `struct A: []A elements` doesn't make A's own size depend on
+        itself at all -- it's a real, useful pattern (a tree or linked
+        structure built from slices), explicitly left for a later phase
+        alongside slice-typed fields generally (see _collect_structs's
+        own pass 4, which is what actually rejects a slice-typed field
+        for NOW, on entirely separate grounds from cycles -- this
+        method has no opinion on whether slice fields are ALLOWED, only
+        on whether they'd create a cycle if they were).
+
+        `path` is the chain of struct names visited to reach `name`,
+        purely for a readable error message -- a real cycle stops this
+        DFS from ever needing memoization against already-fully-
+        explored, cycle-free structs the way a general-purpose cycle
+        detector might for efficiency: struct counts are small enough
+        that re-walking a shared, cycle-free dependency from multiple
+        starting points costs nothing worth guarding against."""
+        if name in path:
+            cycle = ' -> '.join(path + [name])
+            raise SemanticError(
+                f"Struct '{name}' cannot contain itself, directly or "
+                f"transitively: {cycle}"
+            )
+        info = registry[name]
+        for field_type in info.fields.values():
+            contained = self._directly_embedded_struct_name(field_type)
+            if contained is not None:
+                self._check_struct_contains(contained, registry, path + [name])
+
+    @staticmethod
+    def _directly_embedded_struct_name(field_type: Type) -> Optional[str]:
+        """If `field_type` is a struct, or an array (at any nesting
+        depth) OF a struct, returns that struct's own name -- see
+        _check_struct_contains's own docstring for exactly why arrays
+        count here and slices don't. Returns None for a scalar field,
+        a slice-typed field (of anything), or an array of scalars."""
+        while field_type.kind == TypeKind.ARRAY:
+            field_type = field_type.element_type
+        return field_type.struct_name if field_type.kind == TypeKind.STRUCT else None
 
     def analyze_function(self, fn: Function) -> None:
         self.scopes = [{}]  # fresh, single-level scope stack per function
@@ -730,8 +951,8 @@ class SemanticAnalyzer:
         # name checking for free (`def int f(int a, int a):` collides in
         # this same scope exactly like `int a` twice in a row would).
         for p in fn.params:
-            self._declare(p.name, type_from_name(p.type))
-        return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type)
+            self._declare(p.name, type_from_name(p.type, self.structs))
+        return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.structs)
         for stmt in fn.body:
             self.analyze_statement(stmt, return_type)
         # Checked last, after every statement is individually known to
@@ -791,6 +1012,8 @@ class SemanticAnalyzer:
             self.analyze_assign(stmt)
         elif isinstance(stmt, IndexAssign):
             self.analyze_index_assign(stmt)
+        elif isinstance(stmt, FieldAssign):
+            self.analyze_field_assign(stmt)
         elif isinstance(stmt, Return):
             self.analyze_return(stmt, return_type)
         elif isinstance(stmt, If):
@@ -874,7 +1097,7 @@ class SemanticAnalyzer:
         return self.check_expr(expr)
 
     def analyze_var_decl(self, stmt: VarDecl) -> None:
-        declared_type = type_from_name(stmt.var_type)
+        declared_type = type_from_name(stmt.var_type, self.structs)
         if stmt.init is not None:
             # Checked before `stmt.name` is added to scope below, so a
             # self-referential initializer (`int a = a`) correctly fails
@@ -918,6 +1141,28 @@ class SemanticAnalyzer:
             raise SemanticError(
                 f"Cannot assign a value of type {value_type} to an array "
                 f"element of type {element_type}"
+            )
+
+    def analyze_field_assign(self, stmt: FieldAssign) -> None:
+        """`base.name = value` -- mirrors analyze_index_assign exactly,
+        one level over: value flows into the field's own declared type
+        via _check_value_flowing_into, not a plain check_expr, so an
+        untyped array literal assigned directly into a slice-typed
+        field gets the same recursive slice-construction treatment
+        every other already-typed slot (a VarDecl, an Assign, an
+        IndexAssign's own element) already gives one. Slice-typed
+        fields aren't supported yet at all as of this phase (see the
+        module's own note on why), so this doesn't currently get
+        exercised by that specific case in practice -- but the check is
+        written the general way regardless, exactly like analyze_
+        index_assign's own already is, rather than only handling the
+        field types this phase happens to support."""
+        field_type = self._check_struct_and_field(stmt.base, stmt.name)
+        value_type = self._check_value_flowing_into(stmt.value, field_type)
+        if not self._types_compatible(value_type, field_type):
+            raise SemanticError(
+                f"Cannot assign a value of type {value_type} to field "
+                f"'{stmt.name}' of type {field_type}"
             )
 
     def _check_indexable_and_index(self, base_expr: Node, index_expr: Node) -> Type:
@@ -1113,6 +1358,8 @@ class SemanticAnalyzer:
             result = self.check_array_literal(expr)
         elif isinstance(expr, Index):
             result = self.check_index(expr)
+        elif isinstance(expr, Field):
+            result = self.check_field(expr)
         elif isinstance(expr, Slice):
             result = self.check_slice(expr)
         elif isinstance(expr, Call):
@@ -1200,7 +1447,7 @@ class SemanticAnalyzer:
         what masked the gap until a genuinely nested slice was tried.
         """
         if expr.type_expr is not None:
-            declared_type = type_from_name(expr.type_expr)
+            declared_type = type_from_name(expr.type_expr, self.structs)
             if len(expr.elements) != declared_type.size:
                 raise SemanticError(
                     f"Array literal declares type {declared_type} (size "
@@ -1242,6 +1489,31 @@ class SemanticAnalyzer:
 
     def check_index(self, expr: Index) -> Type:
         return self._check_indexable_and_index(expr.array, expr.index)
+
+    def check_field(self, expr: Field) -> Type:
+        return self._check_struct_and_field(expr.base, expr.name)
+
+    def _check_struct_and_field(self, base_expr: Node, field_name: str) -> Type:
+        """Shared by check_field (reading `base.name`) and
+        analyze_field_assign (writing `base.name = value`), mirroring
+        _check_indexable_and_index's own shared-helper shape one level
+        over: check base_expr's own type is actually a struct, look up
+        field_name in that struct's own registered field list, and
+        return the field's own type -- or raise a clear error at
+        whichever of the two things actually went wrong (base_expr
+        isn't struct-typed at all, or it is but this particular struct
+        has no field by this name)."""
+        base_type = self.check_expr(base_expr)
+        if base_type.kind != TypeKind.STRUCT:
+            raise SemanticError(
+                f"Cannot access field '{field_name}' on non-struct type {base_type}"
+            )
+        struct_info = self.structs[base_type.struct_name]
+        if field_name not in struct_info.fields:
+            raise SemanticError(
+                f"Struct '{base_type.struct_name}' has no field '{field_name}'"
+            )
+        return struct_info.fields[field_name]
 
     def check_call(self, expr: Call) -> Type:
         if expr.name == 'print':

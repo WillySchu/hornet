@@ -1357,6 +1357,177 @@ all THAT case ever needed -- which is exactly what masked the gap
 until a genuinely nested SLICE was tried. The identical bug-class
 turned out to exist in one more place doing the same "value flows into
 an already-typed slot" check: analyze_index_assign.
+
+STRUCTS
+--------
+A struct declares a new, NOMINAL type -- `struct Point: int x; int y`
+-- with its own named, ordered, heterogeneous fields, read and written
+via `.` (`p.x`, `p.x = 1`). Value semantics throughout, exactly like an
+array: copied on VarDecl initialization, plain Assign, parameter
+passing, and return, never aliased -- so `q = p` (both Point) makes an
+independent copy, and mutating one afterward never affects the other.
+This isn't a separate rule invented for struct; it's the SAME rule
+arrays already established, just for a different-shaped value.
+
+NOMINAL TYPING, FOR FREE: two structs with identical field lists but
+different declared names are different types (`struct A: int v` and
+`struct B: int v` don't type-check interchangeably) -- and this falls
+out of Type's own existing structural-equality dataclass machinery
+with no new mechanism at all. Type gained one new field, struct_name;
+two Type(STRUCT, struct_name='Point') instances already compare equal
+via ordinary dataclass equality (same name -> same type), and a
+different name already compares unequal, without ever needing to
+compare the two structs' own field lists against each other. See
+semantic.py's own Type docstring for the fuller version of this
+argument.
+
+FIELD LAYOUT: sequential byte offsets in declaration order, no padding
+or alignment ever inserted between fields (x86-64 doesn't require
+aligned access the way some architectures do, the same reasoning
+_frame_size's own docstring already gives for why a stack frame's own
+locals need none either) -- see _field_offset, which is exactly the
+same "sum of what came before" computation type_byte_width itself
+already does for a struct's own TOTAL width, just stopping partway
+through. A struct can contain another struct as a field (nested
+structs), or an array of structs (`[3]Point`) -- both handled by
+type_byte_width's own new STRUCT case (sum of type_byte_width over
+each field, recursively) with no special-casing needed beyond that one
+addition.
+
+THE REGISTRY: a struct's own field list lives in a StructInfo
+(semantic.py), keyed by name in a registry dict built once, before
+even function signatures are resolved, by SemanticAnalyzer's own
+struct-collection pass (see its own docstring for why THAT needs two
+internal sub-passes: reserving every name up front is what makes a
+forward reference -- struct A, declared first, referencing struct B,
+declared later in the same file -- resolve correctly). That registry
+is stashed onto Program.struct_registry once analysis finishes, which
+is how CodeGenerator gets its own copy (self.struct_registry, read
+once at the very start of generate() -- see its own defensive check
+for what happens if a caller skips semantic.analyze() entirely) --
+the same "resolve once, thread the result through everywhere it's
+needed" shape type_from_name's own structs parameter already
+established, extended here to codegen.py's own side of that same
+boundary. Cycle detection (a struct can never contain itself, directly
+or transitively) lives entirely in semantic.py, since it only needs to
+reason about which struct names exist and how their fields reference
+each other, never about layout or codegen at all -- see _check_struct_
+contains's own docstring for exactly which field shapes count as
+"containment" (a direct or array-embedded struct field does; a SLICE-
+typed one deliberately doesn't, since a slice's own backing storage is
+a separate runtime allocation, not embedded inline -- see SLICE-TYPED
+FIELDS below for why that distinction matters beyond just cycle
+detection).
+
+THE COPY MECHANISM NEEDED NO NEW MACHINERY AT ALL: gen_array_copy's
+own flat-byte-chunking loop, generalized to handle ANY leaf width (not
+just the three -- 4, 8, 24 -- it used to hardcode) rather than
+recursing field by field, is already exactly correct for copying a
+struct. This isn't a coincidence or a shortcut: this language has no
+reference counting, no copy constructor, and no write barrier
+anywhere, so a flat, raw copy of every byte a value occupies is ALWAYS
+semantically identical to copying it "as" whatever fields or elements
+those bytes represent -- which is exactly why an array-of-slices
+element (24 bytes: pointer, then length, then cap, copied as three
+sequential movqs) already worked before struct existed at all: that
+IS a flat byte copy, already producing the correct shallow, alias-
+preserving semantics slice values need everywhere else. A struct
+containing a nested array, slice, or another struct needs nothing
+more than this same flat copy, for the identical reason.
+
+FIELD ADDRESS COMPUTATION mirrors index address computation one level
+over: gen_struct_address_into (a Variable, a Field for a nested chain,
+or an Index for a struct-typed array element -- deliberately NOT a
+struct-returning Call, matching this file's established restriction on
+other unnamed-expression bases; assign it to a named variable first)
+and gen_field_address_into (adds the field's own byte offset on top).
+gen_array_address_into also gained a Field case of its own, for the
+`b.data[0]` shape -- an array-typed FIELD, indexed further -- since
+Field can now appear anywhere Variable or Index already could as the
+base of an array address computation.
+
+CALLING CONVENTION: identical to an array's in every respect -- a
+struct-typed return uses the same hidden-output-pointer convention
+(gen_struct_call_into is a thin, separately-named wrapper around gen_
+array_call_into, since that method's own body never actually reads its
+array_type argument at all -- the callee is the one that knows its own
+return type's width and writes exactly that many bytes through the
+pointer it receives, regardless of what produced that pointer), and a
+struct-typed parameter is copied on entry exactly like an array one is
+(including the heap-vs-stack decision below), via the same gen_array_
+copy this section already covered. A struct-typed call ARGUMENT passes
+its address the same way an array argument does, with one real
+addition: it can be a Field (`foo(s.inner)`), which arrays never
+needed, since a struct field is a new kind of "named location" arrays
+don't have.
+
+HEAP PROMOTION: is_heap_allocated's own size check now covers STRUCT
+alongside ARRAY -- a large struct (over _STACK_ARRAY_LIMIT_BYTES) gets
+promoted to the heap exactly like a large array would, for the
+identical reason (one huge local or parameter blowing the stack on its
+own). analyze_array_escapes itself was NOT extended to structs in this
+phase -- see SLICE-TYPED FIELDS below.
+
+WHAT'S DELIBERATELY NOT SUPPORTED YET, each a real, explicit scope
+boundary rather than a silently discovered gap:
+  - SLICE-TYPED FIELDS (`struct Row: []int values`). A struct
+    containing a slice raises the identical escape-analysis question
+    array-of-slices and slice-of-slices elements already needed an
+    answer for (see analyze_array_escapes's own AGGREGATES AND SLOTS
+    section) -- if a struct value escapes a function, does the array
+    backing one of its slice fields need to escape too? The escape
+    analysis was DELIBERATELY generalized (the slot_node_id mechanism,
+    keyed on an arbitrary slot value rather than hardcoded to array
+    indexing) specifically so a THIRD case -- a struct field, keyed by
+    its own NAME rather than one shared index-sentinel, giving natural
+    per-field precision no dynamic array index could ever get for free
+    -- could be added as a small, well-scoped follow-up rather than a
+    third near-copy of existing logic. That follow-up hasn't happened
+    yet; until it does, semantic.py's own struct-collection pass
+    explicitly REJECTS a slice-typed field (directly, through an
+    array, or through a nested struct -- see _field_contains_slice) --
+    a real, enforced boundary, not merely an unsupported shape that
+    happens not to come up: without it, writing a slice into a field,
+    or copying the whole struct via the ordinary flat byte copy this
+    section already covered, would silently compile with no error at
+    all, while the array backing that slice could still be left
+    stack-allocated and outlive the frame it came from -- exactly the
+    dangling-pointer bug analyze_array_escapes exists to prevent
+    everywhere else. This is also exactly why cycle detection's own
+    array-counts/slice-doesn't distinction (see THE REGISTRY above)
+    matters beyond just cycle detection: the day slice fields ARE
+    supported, a struct containing itself through one (`struct Node:
+    []Node children`) is expected to become a real, intentional,
+    supported pattern -- explicitly NOT something cycle detection
+    should ever have been rejecting in the first place, which is why
+    it was scoped correctly from day one rather than needing a later
+    carve-out.
+  - A STRUCT LITERAL (`Point{x: 1, y: 2}` or similar). Every struct
+    value in this phase is built field-by-field, through an ordinary
+    VarDecl (implicitly zero-valued) followed by individual FieldAssign
+    statements -- there's no single-expression way to construct a
+    fully-populated struct value yet. Deferred by explicit choice, not
+    because it's hard: the concrete syntax was an open design question
+    (a brace-delimited composite literal needs new lexer tokens that
+    don't exist yet; a positional, call-like form risks colliding with
+    ordinary function-call parsing, since this compiler's parser has no
+    symbol table to disambiguate "MyStruct(...)" from an ordinary call
+    at parse time) left for its own follow-up once actually needed.
+  - `==` ON STRUCTS. Two structs' equality isn't checked or generated
+    at all yet -- deferred rather than building field-by-field
+    structural comparison for a phase that doesn't need it yet.
+  - `print` ON A STRUCT. Deliberately skipped for this phase, and NOT
+    a small addition being deferred for lack of time: printing already
+    works by building a fixed format string per call site (see
+    PRINTING ARRAYS AND SLICES above) and reaching for a single, fixed
+    libc call: this doesn't extend cleanly to a struct's own,
+    arbitrarily-nested field structure the way it already barely does
+    for arrays. The right fix is a real string-BUILDING facility (an
+    actual growable buffer, assembled with real control flow, rather
+    than one fixed format string chosen once at compile time) that
+    print for every type -- not just struct -- should eventually route
+    through, which is its own, separate undertaking, out of scope for
+    struct support itself.
 """
 
 import argparse
@@ -1375,6 +1546,8 @@ from parser import (
     Constant,
     Continue,
     ExprStmt,
+    Field,
+    FieldAssign,
     Function,
     If,
     Index,
@@ -1393,7 +1566,7 @@ from parser import (
     Variable,
     While,
 )
-from semantic import analyze, type_from_name, Type, TypeKind
+from semantic import analyze, type_from_name, Type, TypeKind, StructInfo
 
 
 # ---------------------------------------------------------------------------
@@ -1990,28 +2163,38 @@ _ARG_REGISTERS_32 = ['edi', 'esi', 'edx', 'ecx', 'r8d', 'r9d']
 _CALLEE_SAVED_SCRATCH_REGISTERS = ['rbx', 'r12', 'r13', 'r14']
 
 
-def type_byte_width(t: Type) -> int:
+def type_byte_width(t: Type, structs: Dict[str, StructInfo]) -> int:
     """Total bytes needed to store a value of type `t`: 4 for int/bool,
     8 for str (a pointer), 24 for a slice (its own fixed-size
     descriptor -- {ptr, len, cap}, 8 bytes each, in that order,
     matching Go's own slice header layout -- see the SLICES section --
     regardless of what it's a slice OF: two slices of different
     element types are still both 24 bytes, unlike two arrays of
-    different element types or sizes), and recursively `size *
+    different element types or sizes), recursively `size *
     type_byte_width(element_type)` for an array -- its full, flattened
     stack footprint, matching how it's laid out contiguously in
     row-major order regardless of how many dimensions it has (see the
-    ARRAYS section). This is the one place that recursion lives; every
-    caller that needs an array's total size (stack allocation,
-    whole-array copies) or the shift-per-index (address computation)
-    goes through this or leaf_type below rather than re-deriving
-    either."""
+    ARRAYS section) -- and, for a struct, the SUM of type_byte_width
+    over each of its own fields' types, in declaration order (see the
+    STRUCTS section) -- exactly the same "flatten it and add up the
+    pieces" idea the array case already uses, just over a
+    heterogeneous field list instead of N copies of one element type.
+    `structs` is this program's own struct registry (see StructInfo in
+    semantic.py), needed to look up a struct type's own field list by
+    name; threaded through every recursive call the same way type_
+    from_name's own registry parameter is. This is the one place that
+    recursion lives; every caller that needs an array's or struct's
+    total size (stack allocation, whole-value copies) or the shift-
+    per-index/per-field (address computation) goes through this or
+    leaf_type below rather than re-deriving either."""
     if t.kind == TypeKind.ARRAY:
-        return t.size * type_byte_width(t.element_type)
+        return t.size * type_byte_width(t.element_type, structs)
     if t.kind == TypeKind.SLICE:
         return 24
     if t.kind == TypeKind.STR:
         return 8
+    if t.kind == TypeKind.STRUCT:
+        return sum(type_byte_width(field_type, structs) for field_type in structs[t.struct_name].fields.values())
     return 4  # INT, BOOL
 
 
@@ -2063,15 +2246,21 @@ def leaf_type(t: Type) -> Type:
 _STACK_ARRAY_LIMIT_BYTES = 16384
 
 
-def is_heap_allocated(t: Type) -> bool:
+def is_heap_allocated(t: Type, structs: Dict[str, StructInfo]) -> bool:
     """Whether a value of type `t` is heap-allocated rather than stored
     inline in its own stack slot purely because of its OWN size -- true
-    for an array type whose total footprint (type_byte_width) exceeds
-    _STACK_ARRAY_LIMIT_BYTES, false for every scalar type and every
-    array under the limit. Purely a function of the type itself, not of
-    any per-variable state, so it's never stored anywhere -- anywhere
-    codegen already has the Type (via _local_type or _type_of), it can
-    just call this directly.
+    for an array OR STRUCT type whose total footprint (type_byte_width)
+    exceeds _STACK_ARRAY_LIMIT_BYTES, false for every scalar type and
+    every array/struct under the limit. A struct gets exactly the same
+    size-based treatment an array already does -- both are value types
+    whose own footprint is a genuine, unbounded property of their own
+    declared shape (an array's size, or a struct's own field list),
+    not something this compiler controls -- so the identical risk
+    (one huge local or parameter blowing the stack on its own) applies
+    equally to both, and gets the identical fix. Purely a function of
+    the type itself, not of any per-variable state, so it's never
+    stored anywhere -- anywhere codegen already has the Type (via
+    _local_type or _type_of), it can just call this directly.
 
     This is NOT the only reason a particular array ends up heap-
     allocated any more -- see analyze_array_escapes below for the
@@ -2079,14 +2268,14 @@ def is_heap_allocated(t: Type) -> bool:
     escapes the function it's declared in still needs to survive past
     that function's own return, regardless of its size) -- so a
     caller deciding whether a SPECIFIC, NAMED variable needs heap
-    allocation should go through CodeGenerator._is_array_heap_allocated
+    allocation should go through CodeGenerator._is_heap_allocated
     instead, which combines this size check with that escape-analysis
     result; this function alone only ever answers the size half of
     that question."""
-    return t.kind == TypeKind.ARRAY and type_byte_width(t) > _STACK_ARRAY_LIMIT_BYTES
+    return t.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and type_byte_width(t, structs) > _STACK_ARRAY_LIMIT_BYTES
 
 
-def analyze_array_escapes(fn: Function, param_types: List[Type]) -> Set[int]:
+def analyze_array_escapes(fn: Function, param_types: List[Type], structs: Dict[str, StructInfo]) -> Set[int]:
     """Returns the set of id()s -- of this function's own VarDecl or
     Param nodes -- for array-typed declarations that need to be heap-
     allocated because a slice backed by them might outlive this
@@ -2454,7 +2643,7 @@ def analyze_array_escapes(fn: Function, param_types: List[Type]) -> Set[int]:
     def walk_statements(statements: List[Node]) -> None:
         for stmt in statements:
             if isinstance(stmt, VarDecl):
-                var_type = type_from_name(stmt.var_type)
+                var_type = type_from_name(stmt.var_type, structs)
                 declare(stmt.name, id(stmt), var_type)
                 if stmt.init is not None:
                     target_node = whole_value_node_of(stmt.name)
@@ -2548,6 +2737,15 @@ class CodeGenerator:
         self.scopes: List[Dict[str, tuple]] = []  # name -> (offset, Type), generation-time; see LOCAL VARIABLES
         self.loop_labels: List[tuple] = []  # stack of (start_label, end_label), innermost last; see LOOPS
         self.string_literals: List[tuple] = []  # (label, content) pairs; see STRINGS
+        # Set once, at the very start of generate(), from Program.
+        # struct_registry (itself stashed there by semantic.analyze --
+        # see SemanticAnalyzer.analyze's own struct-collection pass).
+        # Declared here defensively (an empty dict, not left unset) so
+        # a bug that somehow calls a method needing this before
+        # generate() itself runs fails with a clear "unknown struct"
+        # or "no such field" error rather than an AttributeError from
+        # nowhere.
+        self.struct_registry: Dict[str, StructInfo] = {}
         # Lazily created, then cached and reused for the rest of this
         # compilation -- see gen_print_call_into and the module
         # docstring's BUILTINS section for why these specifically (and
@@ -2597,6 +2795,22 @@ class CodeGenerator:
         return label
 
     def generate(self, program: Program) -> AsmProgram:
+        # getattr, not direct attribute access: Program.struct_registry
+        # is stamped on by semantic.analyze() (see SemanticAnalyzer.
+        # analyze's own struct-collection pass), not a field the
+        # dataclass itself declares -- an AST that skipped analyze()
+        # entirely simply won't have it at all. Matching _type_of's own
+        # "has no resolved type" defensive check one level up: fail
+        # with a clear, actionable CodegenError right here, at the
+        # very first thing generate() does, rather than a bare
+        # AttributeError from whatever the first struct-registry
+        # lookup happens to be further down.
+        if not hasattr(program, 'struct_registry'):
+            raise CodegenError(
+                "Program has no struct registry -- semantic.analyze() "
+                "must run before codegen (see compile_to_asm)"
+            )
+        self.struct_registry = program.struct_registry
         functions = [self.gen_function(fn) for fn in program.functions]
         return AsmProgram(functions=functions, string_literals=self.string_literals)
 
@@ -2611,8 +2825,8 @@ class CodeGenerator:
         # same internal-only sentinel semantic.py's own analyze_function
         # already uses -- kept consistent here rather than reinventing
         # a second "no return type" representation in this file.
-        return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type)
-        param_types = [type_from_name(p.type) for p in fn.params]
+        return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.struct_registry)
+        param_types = [type_from_name(p.type, self.struct_registry) for p in fn.params]
 
         # Which of THIS function's own array declarations need to be
         # heap-allocated because a slice backed by them might outlive
@@ -2623,7 +2837,7 @@ class CodeGenerator:
         # decide how much stack space each declaration's own slot
         # takes (8 bytes for a heap pointer vs. the array's own full
         # width) -- this has to exist before either of them run.
-        self._escaping_array_ids = analyze_array_escapes(fn, param_types)
+        self._escaping_array_ids = analyze_array_escapes(fn, param_types, self.struct_registry)
 
         # An array- OR slice-typed return needs a hidden pointer -- the
         # caller passes the address to write the result into, as an
@@ -2652,7 +2866,7 @@ class CodeGenerator:
         # deeper, with no intermediate copy ever materialized.
         self._hidden_return_ptr_offset = None
         arg_shift = 0
-        if return_type.kind in (TypeKind.ARRAY, TypeKind.SLICE):
+        if return_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
             self._next_offset -= 8
             self._hidden_return_ptr_offset = self._next_offset
             arg_shift = 1
@@ -2781,19 +2995,19 @@ class CodeGenerator:
             offset = self._bind_param(p)
             p_type = param_types[i]
             temp_offset = param_temp_offsets[i]
-            if p_type.kind == TypeKind.ARRAY:
-                if self._is_array_heap_allocated(id(p), p_type):
+            if p_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT):
+                if self._is_heap_allocated(id(p), p_type):
                     # Needs its own, independent heap copy -- exactly
                     # like the stack-allocated case below, just backed
                     # by malloc'd memory instead of an inline slot --
                     # to preserve value semantics across the call:
                     # mutating this parameter must never affect the
-                    # caller's own array. %rbx holds the caller's
-                    # pointer across the malloc call itself: it's
-                    # callee-saved, so malloc (a well-behaved, ABI-
-                    # conforming function) is obligated to preserve it,
-                    # the same guarantee gen_string_concat_into's own
-                    # malloc/strlen/strcpy calls already rely on.
+                    # caller's own array or struct. %rbx holds the
+                    # caller's pointer across the malloc call itself:
+                    # it's callee-saved, so malloc (a well-behaved,
+                    # ABI-conforming function) is obligated to preserve
+                    # it, the same guarantee gen_string_concat_into's
+                    # own malloc/strlen/strcpy calls already rely on.
                     instructions.append(MovQ(src=Memory('rbp', temp_offset), dst=Register('rbx')))
                     instructions.extend(self._gen_malloc_array(p_type))
                     instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
@@ -2878,8 +3092,8 @@ class CodeGenerator:
         counting down from wherever it already is, agnostic to what it
         was decremented for so far."""
         for p in params:
-            p_type = type_from_name(p.type)
-            width = 8 if self._is_array_heap_allocated(id(p), p_type) else type_byte_width(p_type)
+            p_type = type_from_name(p.type, self.struct_registry)
+            width = 8 if self._is_heap_allocated(id(p), p_type) else type_byte_width(p_type, self.struct_registry)
             self._next_offset -= width
             self._var_offsets[id(p)] = self._next_offset
 
@@ -2892,7 +3106,7 @@ class CodeGenerator:
         alongside the type and offset), in the current scope, pointing
         at the permanent offset _collect_params already assigned it."""
         offset = self._var_offsets[id(p)]
-        self.scopes[-1][p.name] = (offset, type_from_name(p.type), id(p))
+        self.scopes[-1][p.name] = (offset, type_from_name(p.type, self.struct_registry), id(p))
         return offset
 
     def _collect_locals(self, statements: List[Node]) -> None:
@@ -2924,8 +3138,8 @@ class CodeGenerator:
         end, regardless of how the space within it is subdivided."""
         for stmt in statements:
             if isinstance(stmt, VarDecl):
-                var_type = type_from_name(stmt.var_type)
-                width = 8 if self._is_array_heap_allocated(id(stmt), var_type) else type_byte_width(var_type)
+                var_type = type_from_name(stmt.var_type, self.struct_registry)
+                width = 8 if self._is_heap_allocated(id(stmt), var_type) else type_byte_width(var_type, self.struct_registry)
                 self._next_offset -= width
                 self._var_offsets[id(stmt)] = self._next_offset
             elif isinstance(stmt, If):
@@ -2962,7 +3176,7 @@ class CodeGenerator:
         the permanent offset _collect_locals already assigned this
         exact VarDecl node, and returns that offset."""
         offset = self._var_offsets[id(stmt)]
-        self.scopes[-1][stmt.name] = (offset, type_from_name(stmt.var_type), id(stmt))
+        self.scopes[-1][stmt.name] = (offset, type_from_name(stmt.var_type, self.struct_registry), id(stmt))
         return offset
 
     def _local_offset(self, name: str) -> int:
@@ -3011,20 +3225,24 @@ class CodeGenerator:
                 return scope[name][2]
         raise CodegenError(f"Reference to undeclared variable '{name}'")
 
-    def _is_array_heap_allocated(self, decl_id: int, t: Type) -> bool:
-        """Whether the SPECIFIC array-typed declaration identified by
-        decl_id (id() of its own VarDecl or Param node) needs to be
-        heap-allocated -- combining is_heap_allocated's own, pure
-        size check with analyze_array_escapes's own, independent
-        result (computed once per function, in gen_function, and
-        cached in self._escaping_array_ids): either reason alone is
+    def _is_heap_allocated(self, decl_id: int, t: Type) -> bool:
+        """Whether the SPECIFIC array- or struct-typed declaration
+        identified by decl_id (id() of its own VarDecl or Param node)
+        needs to be heap-allocated -- combining is_heap_allocated's
+        own, pure size check (now covering both array and struct) with
+        analyze_array_escapes's own, independent result (computed once
+        per function, in gen_function, and cached in self._escaping_
+        array_ids -- an array-specific trigger only, since a struct
+        can't itself back a slice the way an array can, at least not
+        in this phase -- see the module's own note on why slice-typed
+        struct fields aren't supported yet): either reason alone is
         sufficient. This is the actual decision point every one of
-        this file's 8 call sites that used to call is_heap_allocated
+        this file's call sites that used to call is_heap_allocated
         directly now goes through instead, each passing whichever
         decl_id it has on hand -- id(a VarDecl or Param) directly, or
         self._local_decl_id(name) wherever only a Variable's own name
         is available at that point."""
-        return is_heap_allocated(t) or decl_id in self._escaping_array_ids
+        return is_heap_allocated(t, self.struct_registry) or decl_id in self._escaping_array_ids
 
     def _type_of(self, expr: Node) -> Type:
         """Reads the type semantic.py already resolved and annotated
@@ -3121,7 +3339,7 @@ class CodeGenerator:
         the same reason.
         """
         array_type = self._type_of(expr)
-        width = max(1, type_byte_width(array_type))
+        width = max(1, type_byte_width(array_type, self.struct_registry))
         instructions = [
             Mov(src=Imm(width), dst=Register('edi')),
             CallInstr('malloc'),
@@ -3274,14 +3492,101 @@ class CodeGenerator:
             )
         raise CodegenError(f"Cannot index or slice a value of type {base_type}")
 
+    def _field_offset(self, struct_name: str, field_name: str) -> int:
+        """Returns the byte offset of `field_name` within a value of
+        the named struct type -- the sum of every PRECEDING field's
+        own width, in declaration order (StructInfo.fields is an
+        ordinary dict, which already preserves insertion order -- see
+        its own docstring in semantic.py). No padding or alignment is
+        ever inserted between fields: x86-64 doesn't require aligned
+        access the way some architectures do, the same reasoning
+        _frame_size's own docstring already gives for why a stack
+        frame's own locals need none either, so this is exactly the
+        same "sum of what came before" computation type_byte_width
+        itself already does for a struct's own TOTAL width, just
+        stopping partway through instead of summing everything."""
+        offset = 0
+        for name, field_type in self.struct_registry[struct_name].fields.items():
+            if name == field_name:
+                return offset
+            offset += type_byte_width(field_type, self.struct_registry)
+        raise CodegenError(f"Struct '{struct_name}' has no field '{field_name}'")
+
+    def gen_struct_address_into(self, expr: Node, dst: Register) -> List[Instruction]:
+        """Computes the ADDRESS of a struct-typed expression -- a
+        Variable referring to a struct-typed local or parameter, a
+        Field node that itself resolves to a nested struct (`a.inner`,
+        the outer field of a chain like `a.inner.v`), or an Index node
+        that resolves to a struct-typed array element (`rows[0]`,
+        where `rows` is an array of structs) -- into the 64-bit
+        register `dst`. Mirrors gen_array_address_into exactly, one
+        level over -- see its own docstring for why a heap-allocated
+        Variable needs a genuinely different instruction (a movq to
+        LOAD the pointer its own slot holds) rather than just a
+        different offset, which applies identically here.
+
+        A struct-returning Call as a field's own base (`makePoint(1,
+        2).x`) is deliberately NOT supported yet -- matching this
+        file's own established restriction on other unnamed-expression
+        bases (see gen_slice_arg_into's identical one for a slice-typed
+        call argument): materializing an arbitrary struct-returning
+        expression into a scratch slot just to immediately read one
+        field back out isn't taken on for what both cases judge to be
+        a comparatively rare shape. Assign it to a named variable
+        first."""
+        if isinstance(expr, Variable):
+            offset = self._local_offset(expr.name)
+            struct_type = self._local_type(expr.name)
+            if self._is_heap_allocated(self._local_decl_id(expr.name), struct_type):
+                return [MovQ(src=Memory('rbp', offset), dst=dst)]
+            return [LeaQFrame(offset=offset, dst=dst)]
+        if isinstance(expr, Field):
+            return self.gen_field_address_into(expr, dst)
+        if isinstance(expr, Index):
+            return self.gen_index_address_into(expr, dst)
+        if isinstance(expr, Call):
+            raise CodegenError(
+                f"Cannot use a Call directly as the base of a field "
+                f"access when it's struct-typed -- assign it to a "
+                f"named variable first"
+            )
+        raise CodegenError(f"Cannot compute a struct address for: {expr!r}")
+
+    def gen_field_address_into(self, expr: Field, dst: Register) -> List[Instruction]:
+        """Computes the address of `expr.base.expr.name` into `dst` (a
+        64-bit register) -- the shared foundation for reading a field
+        (gen_expr_into's Field case) and writing one (gen_field_
+        assign), exactly mirroring gen_index_address_into's own role
+        for Index one level over. expr.base's own address is computed
+        first (via gen_struct_address_into, which recurses through
+        however many further Field/Index links precede this one --
+        `a.b.c`, `rows[0].f`, ... -- with no depth limit, the same way
+        gen_array_address_into's own Index recursion has none), then
+        the field's own byte offset (see _field_offset) is added on
+        top -- skipped entirely when it's zero (the field is first in
+        its own struct's declaration order), since `addq $0, dst`
+        would be correct but pointlessly wasteful."""
+        base_type = self._type_of(expr.base)
+        if base_type.kind != TypeKind.STRUCT:
+            raise CodegenError(
+                f"Cannot access field '{expr.name}' on a value of "
+                f"non-struct type {base_type}"
+            )
+        offset = self._field_offset(base_type.struct_name, expr.name)
+        instructions = self.gen_struct_address_into(expr.base, dst)
+        if offset:
+            instructions.append(AddQ(src=Imm(offset), dst=dst))
+        return instructions
 
     def gen_array_address_into(self, expr: Node, dst: Register) -> List[Instruction]:
         """Computes the ADDRESS of an array-typed expression -- a
-        Variable referring to an array-typed local, or an Index node
+        Variable referring to an array-typed local, an Index node
         that itself resolves to a sub-array (the outer dimensions of a
-        multi-dimensional access) -- into the 64-bit register `dst`.
-        `dst` must already be a 64-bit register (e.g. Register('rax'),
-        not Register('eax')) -- addresses are always 64-bit values,
+        multi-dimensional access), or a Field node that resolves to an
+        array-typed struct field (`b.data`, then indexed further as
+        `b.data[0]`) -- into the 64-bit register `dst`. `dst` must
+        already be a 64-bit register (e.g. Register('rax'), not
+        Register('eax')) -- addresses are always 64-bit values,
         regardless of how wide the array's own elements are.
 
         A heap-allocated Variable (see is_heap_allocated) needs a
@@ -3300,11 +3605,13 @@ class CodeGenerator:
         if isinstance(expr, Variable):
             offset = self._local_offset(expr.name)
             array_type = self._local_type(expr.name)
-            if self._is_array_heap_allocated(self._local_decl_id(expr.name), array_type):
+            if self._is_heap_allocated(self._local_decl_id(expr.name), array_type):
                 return [MovQ(src=Memory('rbp', offset), dst=dst)]
             return [LeaQFrame(offset=offset, dst=dst)]
         if isinstance(expr, Index):
             return self.gen_index_address_into(expr, dst)
+        if isinstance(expr, Field):
+            return self.gen_field_address_into(expr, dst)
         raise CodegenError(f"Cannot compute an array address for: {expr!r}")
 
     def gen_index_address_into(self, expr: Index, dst: Register) -> List[Instruction]:
@@ -3349,7 +3656,7 @@ class CodeGenerator:
         step.
         """
         array_type = self._type_of(expr.array)
-        element_stride = type_byte_width(array_type.element_type)
+        element_stride = type_byte_width(array_type.element_type, self.struct_registry)
 
         # len_reg only matters for a slice base (a runtime length);
         # picked dynamically, distinct from dst, since dst could in
@@ -3476,7 +3783,7 @@ class CodeGenerator:
             instructions.append(Push(Register(dst_mem.base)))
 
         base_type = self._type_of(expr.array)
-        element_stride = type_byte_width(base_type.element_type)
+        element_stride = type_byte_width(base_type.element_type, self.struct_registry)
 
         addr_reg = Register('rbx')
         len_reg = Register('r11')
@@ -3895,7 +4202,7 @@ class CodeGenerator:
         slice_arg, value_arg = expr.args
         slice_type = self._type_of(slice_arg)
         element_type = slice_type.element_type
-        element_width = type_byte_width(element_type)
+        element_width = type_byte_width(element_type, self.struct_registry)
 
         protect_dst = dst_mem.base != 'rbp'
         instructions = []
@@ -4045,32 +4352,43 @@ class CodeGenerator:
         both arbitrary Memory operands (e.g. Memory('rbp', -24) for a
         fixed local's own slot, or Memory('rbx', 0) for a computed
         address held in %rbx) -- via a flat sequence of movl/movq
-        instructions, one per leaf-typed element. A multi-dimensional
-        array is just one contiguous block of leaf values in row-major
-        order for copying purposes, so no per-dimension logic is
-        needed here at all, just the total byte width and the leaf
-        element's own width (see type_byte_width/leaf_type).
+        instructions. A multi-dimensional array is just one contiguous
+        block of leaf values in row-major order for copying purposes,
+        so no per-dimension logic is needed here at all, just the
+        total byte width and the leaf element's own width (see
+        type_byte_width/leaf_type).
 
-        An array whose ELEMENTS are themselves slices (`[3][]int`) is
-        handled the exact same way as any other leaf type, just with a
-        24-byte width (three sequential 8-byte movqs -- the pointer,
-        then the length, then the cap -- through the same scratch
-        register, rather than the single movl/movq every other leaf
-        width uses): this is a SHALLOW copy of each element's own
-        {ptr, len, cap} descriptor, matching how copying an ordinary,
-        bare slice variable (`s2 = s1`, see gen_slice_value_into's own
-        Variable case) already works -- the copy's own slice elements
-        end up pointing at the exact same backing data the original's
-        do, not independently, recursively re-allocated ones. This is
-        deliberate, not a shortcut: it's the array counterpart of the
-        very same, already-established slice value semantics, not a
-        new rule invented for this case.
+        Each leaf-sized chunk is copied as a flat run of 8-byte movqs
+        followed by one final 4-byte movl if the leaf's own width
+        isn't itself a multiple of 8 -- correct for ANY leaf width,
+        not just the three (4 for int/bool, 8 for str, 24 for a slice
+        descriptor) this used to hardcode explicitly. That generality
+        is exactly what a STRUCT leaf needs (a struct's own width can
+        be any multiple of 4: 12, 20, 28, ... depending on its fields),
+        and it needed no field-by-field recursion to get there: a raw,
+        flat copy of every byte a value occupies is ALWAYS semantically
+        identical to copying it "as" whatever logical type or fields
+        those bytes represent, given this language's value semantics
+        throughout -- there's no reference counting, no copy-
+        constructor, and no write barrier anywhere in this language
+        that a flat byte copy could possibly get wrong. This is exactly
+        why a slice ELEMENT (24 bytes: pointer, then length, then cap)
+        already worked before struct existed at all: those three
+        sequential 8-byte movqs ARE a flat byte copy of the descriptor,
+        which is exactly the shallow, alias-preserving copy slice
+        values already get everywhere else (`s2 = s1`, see gen_slice_
+        value_into's own Variable case) -- not a special case invented
+        for arrays specifically. A struct containing a nested array,
+        slice, or another struct needs nothing more than this same
+        flat copy, for the identical reason: whatever's nested is
+        already just more contiguous bytes within the outer value's
+        own footprint.
 
-        The scratch register shuttling each element's value between
-        src and dst is picked dynamically to differ from BOTH src_mem's
-        and dst_mem's own base register -- otherwise loading a value
-        into it would destroy the very address a later iteration still
-        needs to read from or write to. Found as a real bug during
+        The scratch register shuttling each chunk's value between src
+        and dst is picked dynamically to differ from BOTH src_mem's and
+        dst_mem's own base register -- otherwise loading a value into
+        it would destroy the very address a later iteration still needs
+        to read from or write to. Found as a real bug during
         development, not a hypothetical one: gen_return passes
         Memory('rax', 0) as the destination when writing an array
         directly through a received hidden return pointer, and
@@ -4080,37 +4398,38 @@ class CodeGenerator:
         element's value was loaded, before it could even be written
         anywhere. rcx and rdx are never used as a Memory base anywhere
         else in this file, so picking whichever of rax/rcx/rdx isn't
-        already one of the two bases here stays correct even if that
-        ever changes -- unaffected by the 24-byte case just above,
-        which reuses this exact same scratch register for its own
-        three, sequential 8-byte moves, rather than needing a second
-        one."""
+        already one of the two bases here stays correct regardless of
+        how many 8- or 4-byte chunks a single leaf's own copy needs."""
         leaf = leaf_type(array_type)
         used_bases = {src_mem.base, dst_mem.base}
         scratch_64, scratch_32 = next(
             (r64, r32) for r64, r32 in [('rax', 'eax'), ('rcx', 'ecx'), ('rdx', 'edx')]
             if r64 not in used_bases
         )
-        width = type_byte_width(leaf)
-        total = type_byte_width(array_type)
+        leaf_width = type_byte_width(leaf, self.struct_registry)
+        total = type_byte_width(array_type, self.struct_registry)
         instructions = []
         off = 0
         while off < total:
-            src = Memory(src_mem.base, src_mem.offset + off)
-            dst = Memory(dst_mem.base, dst_mem.offset + off)
-            if width == 24:
-                for field_offset in (0, 8, 16):
-                    field_src = Memory(src_mem.base, src_mem.offset + off + field_offset)
-                    field_dst = Memory(dst_mem.base, dst_mem.offset + off + field_offset)
-                    instructions.append(MovQ(src=field_src, dst=Register(scratch_64)))
-                    instructions.append(MovQ(src=Register(scratch_64), dst=field_dst))
-            elif width == 8:
-                instructions.append(MovQ(src=src, dst=Register(scratch_64)))
-                instructions.append(MovQ(src=Register(scratch_64), dst=dst))
-            else:
-                instructions.append(Mov(src=src, dst=Register(scratch_32)))
-                instructions.append(Mov(src=Register(scratch_32), dst=dst))
-            off += width
+            # Copy exactly leaf_width bytes starting at offset `off`:
+            # as many 8-byte movq chunks as fit, then one trailing
+            # 4-byte movl if leaf_width isn't itself a multiple of 8
+            # (type_byte_width's own recursive definition guarantees
+            # leaf_width is always a multiple of 4, so this always
+            # covers it exactly, with no remainder left over).
+            chunk_off = 0
+            while leaf_width - chunk_off >= 8:
+                field_src = Memory(src_mem.base, src_mem.offset + off + chunk_off)
+                field_dst = Memory(dst_mem.base, dst_mem.offset + off + chunk_off)
+                instructions.append(MovQ(src=field_src, dst=Register(scratch_64)))
+                instructions.append(MovQ(src=Register(scratch_64), dst=field_dst))
+                chunk_off += 8
+            if leaf_width - chunk_off == 4:
+                field_src = Memory(src_mem.base, src_mem.offset + off + chunk_off)
+                field_dst = Memory(dst_mem.base, dst_mem.offset + off + chunk_off)
+                instructions.append(Mov(src=field_src, dst=Register(scratch_32)))
+                instructions.append(Mov(src=Register(scratch_32), dst=field_dst))
+            off += leaf_width
         return instructions
 
     def _gen_address_of_memory_into(self, mem: Memory, dst: Register) -> List[Instruction]:
@@ -4256,6 +4575,21 @@ class CodeGenerator:
                 instructions.extend(self.gen_array_arg_address_into(arg, Register('rax')))
                 instructions.append(Push(Register('rax')))
                 arg_slot_counts.append(1)
+            elif arg_type.kind == TypeKind.STRUCT:
+                # Same convention as an array argument just above --
+                # pass the address, let the callee copy from it on
+                # entry (see gen_function's parameter loop) -- via
+                # gen_struct_address_into directly rather than gen_
+                # array_arg_address_into, since a struct argument can
+                # also be a Field (`foo(s.inner)`), which that method
+                # doesn't handle at all; it already rejects a struct-
+                # returning Call the same way gen_array_arg_address_
+                # into rejects an array-returning one, for the
+                # identical reason (assign it to a named variable
+                # first).
+                instructions.extend(self.gen_struct_address_into(arg, Register('rax')))
+                instructions.append(Push(Register('rax')))
+                arg_slot_counts.append(1)
             else:
                 instructions.extend(self.gen_expr_into(arg, Register('eax')))
                 instructions.append(Push(Register('rax')))
@@ -4350,6 +4684,24 @@ class CodeGenerator:
         instructions.append(CallInstr(expr.name))
         return instructions
 
+    def gen_struct_call_into(self, dst_mem: Memory, expr: Call) -> List[Instruction]:
+        """Calls a function that returns a struct, writing its result
+        directly into dst_mem via the exact same hidden-pointer
+        convention gen_array_call_into already uses -- see its own
+        docstring for the full reasoning, unchanged in every respect:
+        neither method's own body actually reads its (array- or
+        struct-typed) destination's width at all, since the callee is
+        the one that knows how many bytes its own return type needs
+        and writes exactly that many through the pointer it receives
+        -- so the exact same mechanism serves both without needing its
+        own struct-specific variant beyond this thin, separately-named
+        entry point (kept distinct from gen_array_call_into itself
+        purely so gen_struct_value_into's own Call case reads the same
+        way its Variable/Field/Index cases do -- one clearly-named
+        method per expression kind -- not because the underlying code
+        needs to differ at all)."""
+        return self.gen_array_call_into(dst_mem, expr, None)
+
     def gen_array_literal_into(self, dst_mem: Memory, expr: ArrayLiteral, array_type: Type) -> List[Instruction]:
         """Stores an array literal's elements directly into consecutive
         memory locations starting at dst_mem -- almost always a fixed
@@ -4389,7 +4741,7 @@ class CodeGenerator:
         returns, dst_mem.base is guaranteed correct again -- this loop
         can just call it directly and move on to the next element."""
         element_type = array_type.element_type
-        element_width = type_byte_width(element_type)
+        element_width = type_byte_width(element_type, self.struct_registry)
         protect_dst = dst_mem.base != 'rbp'
         instructions = []
         for i, elem_expr in enumerate(expr.elements):
@@ -4491,7 +4843,7 @@ class CodeGenerator:
         if isinstance(expr, Variable):
             src_offset = self._local_offset(expr.name)
             src_type = self._local_type(expr.name)
-            if self._is_array_heap_allocated(self._local_decl_id(expr.name), src_type):
+            if self._is_heap_allocated(self._local_decl_id(expr.name), src_type):
                 load_ptr = self._gen_protecting_dst_across(
                     dst_mem, [MovQ(src=Memory('rbp', src_offset), dst=Register('rbx'))]
                 )
@@ -4505,6 +4857,59 @@ class CodeGenerator:
         if isinstance(expr, Call):
             return self.gen_array_call_into(dst_mem, expr, array_type)
         raise CodegenError(f"No codegen rule for an array-typed value: {expr!r}")
+
+    def gen_struct_value_into(self, expr: Node, dst_mem: Memory, struct_type: Type) -> List[Instruction]:
+        """Stores a struct-typed expression's VALUE into dst_mem,
+        matching struct_type's own shape -- the struct counterpart to
+        gen_array_value_into just above, one level over, dispatched on
+        what kind of expression is producing the value:
+          - Variable: a copy from wherever the source's data actually
+            lives (via gen_array_copy, which already handles ANY
+            value's own flat byte copy correctly -- struct included,
+            see its own docstring for why no field-by-field recursion
+            is needed) into dst_mem, mirroring the array case's own
+            heap-vs-stack handling exactly.
+          - Field (a nested struct field, e.g. `Point p = outer.
+            inner`): its SOURCE address is computed first (gen_field_
+            address_into), then copied from that computed address --
+            the struct-specific case the array version doesn't need at
+            all, since Index already plays this same role for arrays
+            (an array can't itself be "a field" the way this specific
+            expression shape can be a struct).
+          - Index (a struct-typed array element, e.g. `Point p =
+            rows[i]`): mirrors the array case's own Index handling
+            exactly, via gen_index_address_into.
+          - Call (a function returning a struct): calls through the
+            hidden-output-pointer convention, writing directly into
+            dst_mem -- see gen_struct_call_into.
+
+        No ArrayLiteral-equivalent case exists here at all: a struct
+        literal isn't supported yet as of this phase (field-by-field
+        assignment only -- see the module's own note on why), so
+        there's nothing analogous to construct in place the way an
+        untyped array/slice literal can be."""
+        if isinstance(expr, Variable):
+            src_offset = self._local_offset(expr.name)
+            src_type = self._local_type(expr.name)
+            if self._is_heap_allocated(self._local_decl_id(expr.name), src_type):
+                load_ptr = self._gen_protecting_dst_across(
+                    dst_mem, [MovQ(src=Memory('rbp', src_offset), dst=Register('rbx'))]
+                )
+                return load_ptr + self.gen_array_copy(dst_mem, Memory('rbx', 0), struct_type)
+            return self.gen_array_copy(dst_mem, Memory('rbp', src_offset), struct_type)
+        if isinstance(expr, Field):
+            addr_instructions = self._gen_protecting_dst_across(
+                dst_mem, self.gen_field_address_into(expr, Register('rbx'))
+            )
+            return addr_instructions + self.gen_array_copy(dst_mem, Memory('rbx', 0), struct_type)
+        if isinstance(expr, Index):
+            addr_instructions = self._gen_protecting_dst_across(
+                dst_mem, self.gen_index_address_into(expr, Register('rbx'))
+            )
+            return addr_instructions + self.gen_array_copy(dst_mem, Memory('rbx', 0), struct_type)
+        if isinstance(expr, Call):
+            return self.gen_struct_call_into(dst_mem, expr)
+        raise CodegenError(f"No codegen rule for a struct-typed value: {expr!r}")
 
     def _get_bounds_check_fail_label(self, message: str) -> str:
         """Lazily creates a per-function, per-message label that every
@@ -4587,6 +4992,8 @@ class CodeGenerator:
             return self.gen_assign(stmt)
         if isinstance(stmt, IndexAssign):
             return self.gen_index_assign(stmt)
+        if isinstance(stmt, FieldAssign):
+            return self.gen_field_assign(stmt)
         if isinstance(stmt, Return):
             return self.gen_return(stmt)
         if isinstance(stmt, If):
@@ -4613,7 +5020,7 @@ class CodeGenerator:
         preserve value semantics across the call -- exactly like a
         stack-allocated parameter already gets via gen_array_copy, just
         backed by malloc'd memory instead of an inline slot)."""
-        size = type_byte_width(array_type)
+        size = type_byte_width(array_type, self.struct_registry)
         return [Mov(src=Imm(size), dst=Register('edi')), CallInstr('malloc')]
 
     def gen_var_decl(self, stmt: VarDecl) -> List[Instruction]:
@@ -4628,7 +5035,7 @@ class CodeGenerator:
         # unwritten, if there's no initializer to write through it.
         offset = self._bind_local(stmt)
         var_type = self._local_type(stmt.name)
-        if self._is_array_heap_allocated(id(stmt), var_type):
+        if self._is_heap_allocated(id(stmt), var_type):
             # A fresh backing allocation, made exactly once here at
             # declaration time -- see gen_assign's own array case for
             # why a later assignment reuses this same allocation
@@ -4643,7 +5050,10 @@ class CodeGenerator:
             instructions = self._gen_malloc_array(var_type)
             instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
             if stmt.init is not None:
-                instructions.extend(self.gen_array_value_into(stmt.init, Memory('rax', 0), var_type))
+                if var_type.kind == TypeKind.STRUCT:
+                    instructions.extend(self.gen_struct_value_into(stmt.init, Memory('rax', 0), var_type))
+                else:
+                    instructions.extend(self.gen_array_value_into(stmt.init, Memory('rax', 0), var_type))
             return instructions
         if stmt.init is None:
             return []
@@ -4701,15 +5111,18 @@ class CodeGenerator:
             instructions.append(MovQ(src=Imm(len(stmt.value.elements)), dst=Memory('rbp', offset + 8)))
             return instructions
         value_type = self._type_of(stmt.value)
-        if value_type.kind == TypeKind.ARRAY and self._is_array_heap_allocated(self._local_decl_id(stmt.name), value_type):
+        if value_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and self._is_heap_allocated(self._local_decl_id(stmt.name), value_type):
             # Reuses the EXISTING allocation from this variable's own
-            # declaration -- a fixed-size array's footprint never
-            # changes across its lifetime, so there's nothing to
-            # reallocate here, only to load the existing pointer and
-            # write the new value through it, exactly like gen_return
-            # does for the hidden pointer it receives.
+            # declaration -- a fixed-size array's (or struct's own)
+            # footprint never changes across its lifetime, so there's
+            # nothing to reallocate here, only to load the existing
+            # pointer and write the new value through it, exactly like
+            # gen_return does for the hidden pointer it receives.
             instructions = [MovQ(src=Memory('rbp', offset), dst=Register('rax'))]
-            instructions.extend(self.gen_array_value_into(stmt.value, Memory('rax', 0), value_type))
+            if value_type.kind == TypeKind.STRUCT:
+                instructions.extend(self.gen_struct_value_into(stmt.value, Memory('rax', 0), value_type))
+            else:
+                instructions.extend(self.gen_array_value_into(stmt.value, Memory('rax', 0), value_type))
             return instructions
         return self._gen_store(offset, stmt.value)
 
@@ -4755,6 +5168,8 @@ class CodeGenerator:
         if element_type.kind == TypeKind.SLICE:
             instructions.extend(self.gen_slice_value_into(stmt.value, Memory('rax', 0)))
             return instructions
+        if element_type.kind == TypeKind.STRUCT:
+            return instructions + self.gen_struct_value_into(stmt.value, Memory('rax', 0), element_type)
         instructions.append(Push(addr_reg))
         if element_type == Type.STR:
             instructions.extend(self.gen_expr_into(stmt.value, Register('eax')))
@@ -4768,27 +5183,88 @@ class CodeGenerator:
             instructions.append(Mov(src=Register('r8d'), dst=Memory('rax', 0)))
         return instructions
 
+    def gen_field_assign(self, stmt: FieldAssign) -> List[Instruction]:
+        """`base.name = value` -- mirrors gen_index_assign exactly, one
+        level over: computes the target field's address (via
+        gen_field_address_into), protects it on the stack while the
+        value expression is evaluated, then writes through it. The
+        field's own DECLARED type -- derived from stmt.base's own
+        struct type, not stmt.value's -- decides the store width
+        exactly like gen_index_assign already does for an array
+        element, for the identical reason (an untyped literal flowing
+        into an already-typed slot has its OWN resolved type set to
+        whatever it actually built, not the slot's type -- see
+        gen_index_assign's own docstring).
+
+        A STRUCT-typed field (`s.inner = otherInner`) is handled the
+        same way an array-typed field would be if IndexAssign could
+        ever produce one (which, per its own docstring, it can't) --
+        via gen_struct_value_into's own flat copy, since a field write
+        of a whole struct value is exactly as much "copy N bytes" as
+        any other struct value production is. An array-typed field
+        (`s.arr = otherArr`) works the same way, via gen_array_value_
+        into -- unlike IndexAssign, FieldAssign's own grammar CAN
+        produce this shape (a struct field can itself be a whole
+        array, and `.` doesn't consume it element by element the way
+        `[...]` does), so this needs a real case for it, not just a
+        comment explaining why it's unreachable."""
+        field_type = self._check_struct_and_field_type(stmt.base, stmt.name)
+        addr_reg = Register('rax')
+        instructions = self.gen_field_address_into(stmt, addr_reg)
+        if field_type.kind == TypeKind.SLICE:
+            instructions.extend(self.gen_slice_value_into(stmt.value, Memory('rax', 0)))
+            return instructions
+        if field_type.kind == TypeKind.STRUCT:
+            return instructions + self.gen_struct_value_into(stmt.value, Memory('rax', 0), field_type)
+        if field_type.kind == TypeKind.ARRAY:
+            return instructions + self.gen_array_value_into(stmt.value, Memory('rax', 0), field_type)
+        instructions.append(Push(addr_reg))
+        if field_type == Type.STR:
+            instructions.extend(self.gen_expr_into(stmt.value, Register('eax')))
+            instructions.append(MovQ(src=Register('rax'), dst=Register('r8')))  # value survives the pop below
+            instructions.append(Pop(addr_reg))
+            instructions.append(MovQ(src=Register('r8'), dst=Memory('rax', 0)))
+        else:
+            instructions.extend(self.gen_expr_into(stmt.value, Register('eax')))
+            instructions.append(Mov(src=Register('eax'), dst=Register('r8d')))
+            instructions.append(Pop(addr_reg))
+            instructions.append(Mov(src=Register('r8d'), dst=Memory('rax', 0)))
+        return instructions
+
+    def _check_struct_and_field_type(self, base_expr: Node, field_name: str) -> Type:
+        """Returns field_name's own declared type within base_expr's
+        own struct type -- shared by gen_field_assign and gen_field_
+        address_into's own callers wherever the field's type (not just
+        its address) is needed, mirroring semantic.py's own _check_
+        struct_and_field, just returning a Type instead of raising on
+        an invalid access (already validated by the time codegen ever
+        runs -- see compile_to_asm)."""
+        base_type = self._type_of(base_expr)
+        return self.struct_registry[base_type.struct_name].fields[field_name]
+
     def _gen_store(self, offset: int, value_expr: Node) -> List[Instruction]:
         """Shared by VarDecl-with-initializer and Assign: both are just
         "compute this expression, then write the result into that
         variable's slot". Which store instruction depends on the
-        value's type: an array can't fit into a single register at
-        all, so it's dispatched to gen_array_value_into entirely
-        separately (see its own docstring); a slice is a fixed-size
-        24-byte descriptor, dispatched to gen_slice_value_into (see
-        its own docstring) the same way; a str is an 8-byte pointer
-        sitting in %rax and needs `movq`; int/bool are still the
-        original 4-byte `movl %eax, ...` -- everything about
-        gen_expr_into/gen_binary_into/gen_unary_op's own internals
-        stays exactly as it always has, oblivious to str (or arrays,
-        or slices) entirely; only this one call site needs to ask
-        "which width, or which entirely different mechanism, am I
-        storing"."""
+        value's type: an array or a struct can't fit into a single
+        register at all, so each is dispatched to gen_array_value_into
+        or gen_struct_value_into entirely separately (see their own
+        docstrings); a slice is a fixed-size 24-byte descriptor,
+        dispatched to gen_slice_value_into (see its own docstring) the
+        same way; a str is an 8-byte pointer sitting in %rax and needs
+        `movq`; int/bool are still the original 4-byte `movl %eax,
+        ...` -- everything about gen_expr_into/gen_binary_into/
+        gen_unary_op's own internals stays exactly as it always has,
+        oblivious to str (or arrays, slices, or structs) entirely;
+        only this one call site needs to ask "which width, or which
+        entirely different mechanism, am I storing"."""
         value_type = self._type_of(value_expr)
         if value_type.kind == TypeKind.ARRAY:
             return self.gen_array_value_into(value_expr, Memory('rbp', offset), value_type)
         if value_type.kind == TypeKind.SLICE:
             return self.gen_slice_value_into(value_expr, Memory('rbp', offset))
+        if value_type.kind == TypeKind.STRUCT:
+            return self.gen_struct_value_into(value_expr, Memory('rbp', offset), value_type)
         instructions = self.gen_expr_into(value_expr, Register('eax'))
         if value_type == Type.STR:
             instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
@@ -4870,6 +5346,19 @@ class CodeGenerator:
             ptr_reg = Register('rax')
             instructions = [MovQ(src=Memory('rbp', self._hidden_return_ptr_offset), dst=ptr_reg)]
             instructions.extend(self.gen_slice_value_into(stmt.value, Memory('rax', 0)))
+        elif value_type.kind == TypeKind.STRUCT:
+            # Same hidden-pointer mechanism, one more time -- see this
+            # method's own comment just above for the full reasoning,
+            # unchanged in every respect for struct: gen_struct_value_
+            # into already knows how to write into an arbitrary Memory
+            # destination (a fixed local slot OR a received pointer
+            # alike), so `return bar()` (forwarding another struct-
+            # returning call's result) is exactly as free here as it
+            # already is for arrays and slices, via gen_struct_value_
+            # into's own Call case.
+            ptr_reg = Register('rax')
+            instructions = [MovQ(src=Memory('rbp', self._hidden_return_ptr_offset), dst=ptr_reg)]
+            instructions.extend(self.gen_struct_value_into(stmt.value, Memory('rax', 0), value_type))
         else:
             dst = Register('eax')
             instructions = self.gen_expr_into(stmt.value, dst)
@@ -5161,6 +5650,13 @@ class CodeGenerator:
                     f"gen_expr_into -- slices don't fit in a single "
                     f"register; use gen_slice_value_into instead"
                 )
+            if var_type.kind == TypeKind.STRUCT:
+                raise CodegenError(
+                    f"Cannot read struct-typed variable '{expr.name}' via "
+                    f"gen_expr_into -- a struct doesn't fit in a single "
+                    f"register; use gen_struct_value_into or "
+                    f"gen_struct_address_into instead"
+                )
             if var_type == Type.STR:
                 return [MovQ(src=Memory('rbp', offset), dst=as_qword_register(dst))]
             return [Mov(src=Memory('rbp', offset), dst=dst)]
@@ -5179,9 +5675,48 @@ class CodeGenerator:
                     "don't fit in a single register; use "
                     "gen_array_value_into or gen_array_address_into instead"
                 )
+            if element_type.kind == TypeKind.STRUCT:
+                # Same reasoning, for a struct-typed array element
+                # (`rows[i]` where rows is an array of structs) --
+                # `Point p = rows[i]` is handled via gen_struct_value_
+                # into instead.
+                raise CodegenError(
+                    "Cannot read a struct-typed array element via "
+                    "gen_expr_into -- a struct doesn't fit in a single "
+                    "register; use gen_struct_value_into or "
+                    "gen_struct_address_into instead"
+                )
             addr_reg = as_qword_register(dst)
             instructions = self.gen_index_address_into(expr, addr_reg)
             if element_type == Type.STR:
+                instructions.append(MovQ(src=Memory(addr_reg.name, 0), dst=addr_reg))
+            else:
+                instructions.append(Mov(src=Memory(addr_reg.name, 0), dst=dst))
+            return instructions
+        if isinstance(expr, Field):
+            field_type = self._type_of(expr)
+            if field_type.kind == TypeKind.ARRAY:
+                raise CodegenError(
+                    "Cannot read an array-typed field via gen_expr_into "
+                    "-- arrays don't fit in a single register; use "
+                    "gen_array_value_into or gen_array_address_into instead"
+                )
+            if field_type.kind == TypeKind.SLICE:
+                raise CodegenError(
+                    "Cannot read a slice-typed field via gen_expr_into -- "
+                    "slices don't fit in a single register; use "
+                    "gen_slice_value_into instead"
+                )
+            if field_type.kind == TypeKind.STRUCT:
+                raise CodegenError(
+                    "Cannot read a struct-typed field via gen_expr_into -- "
+                    "a struct doesn't fit in a single register; use "
+                    "gen_struct_value_into or gen_struct_address_into "
+                    "instead"
+                )
+            addr_reg = as_qword_register(dst)
+            instructions = self.gen_field_address_into(expr, addr_reg)
+            if field_type == Type.STR:
                 instructions.append(MovQ(src=Memory(addr_reg.name, 0), dst=addr_reg))
             else:
                 instructions.append(Mov(src=Memory(addr_reg.name, 0), dst=dst))
@@ -5213,6 +5748,15 @@ class CodeGenerator:
                     f"via gen_expr_into -- a slice descriptor doesn't "
                     f"fit in a single register; use gen_slice_call_into "
                     f"instead"
+                )
+            if self._type_of(expr).kind == TypeKind.STRUCT:
+                # Same reasoning again, for a struct-returning call --
+                # only ever reached via gen_struct_value_into's own
+                # Call case or gen_return's own forwarding case.
+                raise CodegenError(
+                    f"Cannot call '{expr.name}' (which returns a struct) "
+                    f"via gen_expr_into -- a struct doesn't fit in a "
+                    f"single register; use gen_struct_call_into instead"
                 )
             if expr.name == 'print':
                 return self.gen_print_call_into(expr, dst)
@@ -5728,7 +6272,7 @@ class CodeGenerator:
         expression.
         """
         element_type = collection_type.element_type
-        element_stride = type_byte_width(element_type)
+        element_stride = type_byte_width(element_type, self.struct_registry)
         is_runtime_length = isinstance(length_operand, Register)
 
         ADDR = Register('rbx')
