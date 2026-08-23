@@ -14,10 +14,12 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
+- Better pretty print for AST.
 - Struct literal syntax.
 - `==` for structs.
 - Fix print for collections to build str buffer and call print once.
 - Print for structs.
+- Add source location for error messages from semantic analysis.
 - `fuction` type.
 - Methods.
 - `assert`
@@ -37,6 +39,7 @@ Updates:
 - Slice equality?
 - Escape analysis for arrays and slices.
 - `type` Type?
+- Dedpulicate emitted type descriptors when we call print()
 - Variadic functions.
 - Make `append` variadic.
 - Spread operator.

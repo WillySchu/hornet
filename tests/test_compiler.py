@@ -653,7 +653,7 @@ from pathlib import Path
 
 import pytest
 
-from codegen import CodegenError, generate_asm
+from codegen.codegen import CodegenError, generate_asm
 from lexer import lex
 from parser import Parser, ParseError
 from semantic import SemanticError, analyze
