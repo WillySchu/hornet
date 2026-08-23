@@ -1,25 +1,7 @@
 def str main():
     [5]int arr = [1, 2, 3, 4, 5]
-    []int sl = sliceints(arr)
-    sl = append([]int[], 1)
+    [][]int sl = [[1, 2], [3, 4]]
+    print(sl)
+    sl[0][0] = 10
     print(sl)
     return ''
-
-
-def str hello():
-    str hello = 'hello'
-    return hello
-
-
-def str world(str p):
-    return 'world' + p
-
-
-def []int sliceints([5]int arr):
-    []int a = arr[:]
-    return arr[:]
-
-
-def [5]int ints():
-    [5]int arr = [1, 2, 3, 4, 5]
-    return arr

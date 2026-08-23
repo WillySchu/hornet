@@ -795,7 +795,7 @@ class SemanticAnalyzer:
 
     def _collect_structs(self, struct_defs: List[StructDef]) -> Dict[str, StructInfo]:
         """Builds this program's own struct registry (see StructInfo)
-        in four separate sub-passes, each depending on the last one
+        in three separate sub-passes, each depending on the last one
         having already finished for every struct, not just whichever
         one happens to be up next in declaration order:
 
@@ -813,34 +813,24 @@ class SemanticAnalyzer:
         2. Resolve each struct's own field types (via type_from_name,
            passing this same registry-in-progress), rejecting a
            duplicate field name within one struct, and replace that
-           struct's own None placeholder with a real StructInfo.
+           struct's own None placeholder with a real StructInfo. A
+           field's own type can be anything, including a slice
+           (directly, or through an array or nested struct) -- see
+           codegen.py's own analyze_array_escapes, specifically
+           field_slot_of and _contains_slice's own STRUCT case, for
+           how a slice-typed field's own backing array gets the
+           identical escape-analysis treatment array-of-slices and
+           slice-of-slices elements already have. This phase used to
+           reject a slice-typed field outright, as its own explicit
+           pass 4 here, while that escape-analysis extension hadn't
+           been built yet; now that it has, there's nothing left for
+           this pass to guard against.
         3. Only once EVERY struct's own fields are fully resolved,
            check each one for a cycle (see _check_struct_contains) --
            cycle detection needs the real, resolved field types to
            walk, not just which names exist, so it has to be its own
            pass after 1 and 2 both fully finish, not interleaved with
            either.
-        4. For the identical reason (needs every struct's own fields
-           already resolved, including ones reached transitively
-           through another struct field), reject any struct with a
-           field that's slice-typed, or that contains a slice at any
-           depth of array/struct nesting (see _field_contains_slice) --
-           a real, deliberate scope boundary for this phase, not
-           silently left unguarded: a struct value flowing out of a
-           function needs the identical escape-analysis treatment
-           array-of-slices and slice-of-slices elements already have
-           (see codegen.py's own analyze_array_escapes and its
-           AGGREGATES AND SLOTS section), which hasn't been built for
-           struct fields yet. Without this check, a slice-typed field
-           would silently compile -- writing into it, or copying the
-           whole struct via an ordinary flat byte copy, hits no error
-           at all -- while the array backing that slice could still be
-           left stack-allocated and outlive the frame it came from,
-           exactly the dangling-pointer bug analyze_array_escapes
-           exists to prevent elsewhere. Rejecting it here, explicitly,
-           turns "happens to be blocked by other, unrelated codegen
-           gaps today" into an intentional boundary that stays correct
-           even after those other gaps eventually get filled in.
         """
         registry: Dict[str, StructInfo] = {}
         for sd in struct_defs:
@@ -861,37 +851,7 @@ class SemanticAnalyzer:
         for sd in struct_defs:
             self._check_struct_contains(sd.name, registry, path=[])
 
-        for sd in struct_defs:
-            for field_name, field_type in registry[sd.name].fields.items():
-                if self._field_contains_slice(field_type, registry):
-                    raise SemanticError(
-                        f"Field '{field_name}' of struct '{sd.name}' is "
-                        f"slice-typed (directly, or through an array or "
-                        f"nested struct) -- slice-typed struct fields "
-                        f"aren't supported yet"
-                    )
-
         return registry
-
-    def _field_contains_slice(self, field_type: Type, registry: Dict[str, StructInfo]) -> bool:
-        """True if field_type is itself a slice, or contains one at
-        any depth of array wrapping or struct nesting -- see _collect_
-        structs's own pass 4 for why this is checked explicitly rather
-        than left as an accidental gap. Only ever called once every
-        struct's own fields are already fully resolved (pass 4 runs
-        after passes 2 and 3), so recursing into a nested struct's own
-        fields here is always safe -- unlike _check_struct_contains's
-        identical timing requirement, for the identical reason."""
-        if field_type.kind == TypeKind.SLICE:
-            return True
-        if field_type.kind == TypeKind.ARRAY:
-            return self._field_contains_slice(field_type.element_type, registry)
-        if field_type.kind == TypeKind.STRUCT:
-            return any(
-                self._field_contains_slice(nested_type, registry)
-                for nested_type in registry[field_type.struct_name].fields.values()
-            )
-        return False
 
     def _check_struct_contains(self, name: str, registry: Dict[str, StructInfo], path: List[str]) -> None:
         """DFS over the struct-containment graph -- struct X has an
@@ -905,13 +865,12 @@ class SemanticAnalyzer:
         own backing storage is a separate, runtime-sized allocation,
         not embedded inline in the containing struct's own layout, so
         `struct A: []A elements` doesn't make A's own size depend on
-        itself at all -- it's a real, useful pattern (a tree or linked
-        structure built from slices), explicitly left for a later phase
-        alongside slice-typed fields generally (see _collect_structs's
-        own pass 4, which is what actually rejects a slice-typed field
-        for NOW, on entirely separate grounds from cycles -- this
-        method has no opinion on whether slice fields are ALLOWED, only
-        on whether they'd create a cycle if they were).
+        itself at all -- it's a real, genuinely supported pattern (a
+        tree or linked structure built from slices), not merely
+        tolerated: this method's own job is only ever "would this
+        create a size-infinite cycle", and a slice field never can, by
+        construction, regardless of whether slice-typed fields
+        themselves are otherwise allowed.
 
         `path` is the chain of struct names visited to reach `name`,
         purely for a readable error message -- a real cycle stops this
@@ -1147,16 +1106,14 @@ class SemanticAnalyzer:
         """`base.name = value` -- mirrors analyze_index_assign exactly,
         one level over: value flows into the field's own declared type
         via _check_value_flowing_into, not a plain check_expr, so an
-        untyped array literal assigned directly into a slice-typed
-        field gets the same recursive slice-construction treatment
-        every other already-typed slot (a VarDecl, an Assign, an
-        IndexAssign's own element) already gives one. Slice-typed
-        fields aren't supported yet at all as of this phase (see the
-        module's own note on why), so this doesn't currently get
-        exercised by that specific case in practice -- but the check is
-        written the general way regardless, exactly like analyze_
-        index_assign's own already is, rather than only handling the
-        field types this phase happens to support."""
+        untyped array literal (or slice literal) assigned directly
+        into a slice-typed field gets the same recursive slice-
+        construction treatment every other already-typed slot (a
+        VarDecl, an Assign, an IndexAssign's own element) already
+        gives one -- written the general way from the start, exactly
+        like analyze_index_assign's own already was, rather than only
+        handling the field types a given phase happened to support at
+        the time."""
         field_type = self._check_struct_and_field(stmt.base, stmt.name)
         value_type = self._check_value_flowing_into(stmt.value, field_type)
         if not self._types_compatible(value_type, field_type):

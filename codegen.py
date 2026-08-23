@@ -1465,44 +1465,127 @@ HEAP PROMOTION: is_heap_allocated's own size check now covers STRUCT
 alongside ARRAY -- a large struct (over _STACK_ARRAY_LIMIT_BYTES) gets
 promoted to the heap exactly like a large array would, for the
 identical reason (one huge local or parameter blowing the stack on its
-own). analyze_array_escapes itself was NOT extended to structs in this
-phase -- see SLICE-TYPED FIELDS below.
+own). This is entirely independent of the ESCAPE-based promotion a
+slice field's own backing array might separately need -- see SLICE-
+TYPED FIELDS below -- the two triggers are combined by CodeGenerator's
+own _is_heap_allocated, exactly the way they already are for arrays.
+
+SLICE-TYPED FIELDS (`struct Row: []int values`) are fully supported,
+including escape analysis: if a struct value escapes a function, the
+array backing any of its slice fields' own values escapes with it,
+via analyze_array_escapes's own field_slot_of, added alongside
+indexed_slot_of (see AGGREGATES AND SLOTS in its own docstring) --
+resolving a Field access the same way indexed_slot_of already resolves
+an Index one, down to whatever ROOT Variable underlies the whole
+access chain (root_variable_name, now unwrapping Field alongside Index
+and Slice), then to that root's own shared aggregate-elements slot.
+This is also exactly why cycle detection's own array-counts/slice-
+doesn't distinction (see THE REGISTRY above) mattered even while slice
+fields were still rejected outright: `struct Node: []Node children` --
+a self-referential struct through a slice, a real tree or linked
+structure -- is now the genuinely supported pattern that exclusion was
+always meant to enable, not something cycle detection would ever have
+needed a later carve-out for.
+Deliberately ONE combined slot per struct declaration, not a separate
+one per distinct field (`p.a` and `p.b` share the same slot, even
+though a field name -- unlike a dynamic array index -- is known
+statically and so could in principle get its own precise one): true
+per-field precision would mean a struct-to-struct copy of just PART of
+a struct (`i = outer.inner`) needs to precisely propagate only the
+sub-struct's own field slots to `i`'s own, a genuinely larger
+mechanism than this analysis's existing "resolve to exactly one node"
+shape supports without a much bigger refactor. Lumping every field of
+a given declaration into one shared slot instead keeps this an
+incremental extension of the exact same machinery indexed_slot_of
+already established, at the cost of the identical kind of precision
+loss already accepted for array elements (`rows[0]` and `rows[1]`
+already share one slot too) -- sound, just coarser than necessary for
+two logically-independent slice fields on the same struct. Building
+this closed semantic.py's own explicit rejection of slice-typed
+fields, which existed for exactly as long as this analysis didn't:
+without it, writing a slice into a field, or copying the whole struct
+via the ordinary flat byte copy this section already covered, would
+have silently compiled with no error at all, while the array backing
+that slice could still have been left stack-allocated and outlived
+the frame it came from.
+
+Building this surfaced two real, separately-rooted bugs in the
+ESCAPE analysis's own pre-existing machinery, both found by testing
+(compiling, linking, and running the resulting binary with a large
+intervening stack write specifically designed to clobber a wrongly-
+stack-allocated array), not by inspection -- neither is specific to
+struct fields at all, even though building fields is what surfaced
+them:
+  - contribution()'s own Slice case used to resolve the thing being
+    re-sliced (`rows[0][0:2]`, or the new `p.values[0:2]`) via root_
+    variable_name straight to its raw declaration and check plain
+    array/slice-declaration-set membership -- correct when the thing
+    being re-sliced is a bare Variable, but wrong when it's itself
+    reading a slice out of an aggregate: `rows[0][0:2]` resolved to
+    `rows` itself (an array declaration, so the membership check
+    matched), not to whatever `rows[0]`'s own slice descriptor
+    actually points at. Fixed by a new _unwrap_slices helper (unwraps
+    just the re-slicing chain, stopping at an Index or Field rather
+    than continuing through it the way root_variable_name does) that
+    lets contribution() try indexed_slot_of/field_slot_of FIRST, with
+    the original root-based check surviving as a fallback for the
+    genuinely different case of slicing a plain sub-array row out of
+    a multi-dimensional array with no slices involved at all
+    (`matrix[1][0:2]`) -- the first version of this fix broke exactly
+    that case, caught immediately by the existing test suite.
+  - field_slot_of needs an actual Field node (base and name together)
+    to do its own resolution, and FieldAssign was initially passed
+    directly on the theory that duck-typing (it only ever reads
+    .base/.name, which FieldAssign has exactly like Field does) would
+    work the same way it already does at other call sites in this
+    file. It doesn't here: root_variable_name's own isinstance check,
+    which field_slot_of calls into, only recognizes Index/Slice/Field
+    -- not FieldAssign -- so passing stmt directly silently failed to
+    unwrap anything at all, always returning None. Every write to a
+    slice-typed field was consequently untracked. Fixed by
+    constructing an actual Field(base=stmt.base, name=stmt.name) at
+    the walk_statements call site instead.
+
+A third, unrelated gap surfaced alongside these: gen_field_assign
+never had a NoneLiteral short-circuit before dispatching to gen_
+slice_value_into, unlike gen_var_decl and gen_assign, which both
+already needed one (none's own resolved type, Type.NONE, never equals
+the slice type it's flowing into, so gen_slice_value_into's own
+dispatch -- which only ever needs the expression itself, since every
+OTHER kind of value's resolved type already matches what needs to be
+stored -- has no case for it). This was never reachable before slice-
+typed fields existed at all, so it was never exercised until now;
+fixed the same way the other two call sites already handle it, via
+gen_none_into.
 
 WHAT'S DELIBERATELY NOT SUPPORTED YET, each a real, explicit scope
 boundary rather than a silently discovered gap:
-  - SLICE-TYPED FIELDS (`struct Row: []int values`). A struct
-    containing a slice raises the identical escape-analysis question
-    array-of-slices and slice-of-slices elements already needed an
-    answer for (see analyze_array_escapes's own AGGREGATES AND SLOTS
-    section) -- if a struct value escapes a function, does the array
-    backing one of its slice fields need to escape too? The escape
-    analysis was DELIBERATELY generalized (the slot_node_id mechanism,
-    keyed on an arbitrary slot value rather than hardcoded to array
-    indexing) specifically so a THIRD case -- a struct field, keyed by
-    its own NAME rather than one shared index-sentinel, giving natural
-    per-field precision no dynamic array index could ever get for free
-    -- could be added as a small, well-scoped follow-up rather than a
-    third near-copy of existing logic. That follow-up hasn't happened
-    yet; until it does, semantic.py's own struct-collection pass
-    explicitly REJECTS a slice-typed field (directly, through an
-    array, or through a nested struct -- see _field_contains_slice) --
-    a real, enforced boundary, not merely an unsupported shape that
-    happens not to come up: without it, writing a slice into a field,
-    or copying the whole struct via the ordinary flat byte copy this
-    section already covered, would silently compile with no error at
-    all, while the array backing that slice could still be left
-    stack-allocated and outlive the frame it came from -- exactly the
-    dangling-pointer bug analyze_array_escapes exists to prevent
-    everywhere else. This is also exactly why cycle detection's own
-    array-counts/slice-doesn't distinction (see THE REGISTRY above)
-    matters beyond just cycle detection: the day slice fields ARE
-    supported, a struct containing itself through one (`struct Node:
-    []Node children`) is expected to become a real, intentional,
-    supported pattern -- explicitly NOT something cycle detection
-    should ever have been rejecting in the first place, which is why
-    it was scoped correctly from day one rather than needing a later
-    carve-out.
   - A STRUCT LITERAL (`Point{x: 1, y: 2}` or similar). Every struct
+    value in this phase is built field-by-field, through an ordinary
+    VarDecl (implicitly zero-valued) followed by individual FieldAssign
+    statements -- there's no single-expression way to construct a
+    fully-populated struct value yet. Deferred by explicit choice, not
+    because it's hard: the concrete syntax was an open design question
+    (a brace-delimited composite literal needs new lexer tokens that
+    don't exist yet; a positional, call-like form risks colliding with
+    ordinary function-call parsing, since this compiler's parser has no
+    symbol table to disambiguate "MyStruct(...)" from an ordinary call
+    at parse time) left for its own follow-up once actually needed.
+  - `==` ON STRUCTS. Two structs' equality isn't checked or generated
+    at all yet -- deferred rather than building field-by-field
+    structural comparison for a phase that doesn't need it yet.
+  - `print` ON A STRUCT. Deliberately skipped for this phase, and NOT
+    a small addition being deferred for lack of time: printing already
+    works by building a fixed format string per call site (see
+    PRINTING ARRAYS AND SLICES above) and reaching for a single, fixed
+    libc call: this doesn't extend cleanly to a struct's own,
+    arbitrarily-nested field structure the way it already barely does
+    for arrays. The right fix is a real string-BUILDING facility (an
+    actual growable buffer, assembled with real control flow, rather
+    than one fixed format string chosen once at compile time) that
+    print for every type -- not just struct -- should eventually route
+    through, which is its own, separate undertaking, out of scope for
+    struct support itself.
     value in this phase is built field-by-field, through an ordinary
     VarDecl (implicitly zero-valued) followed by individual FieldAssign
     statements -- there's no single-expression way to construct a
@@ -2391,7 +2474,7 @@ def analyze_array_escapes(fn: Function, param_types: List[Type], structs: Dict[s
          name, which unwraps the whole chain down to whatever bare
          Variable underlies it) -- where indexing the immediate base
          ONE more time would yield a slice-typed result, and maps the
-         ROOT declaration to the slot key _INDEXED_ELEMENTS_SLOT -- a
+         ROOT declaration to the slot key _AGGREGATE_ELEMENTS_SLOT -- a
          single, SHARED slot for the whole declaration, regardless of
          which actual index evaluates to what at runtime, or how many
          levels of indexing/re-slicing separate a particular access
@@ -2447,24 +2530,35 @@ def analyze_array_escapes(fn: Function, param_types: List[Type], structs: Dict[s
          testing the refactor against the very scenarios it was
          supposed to preserve, not found by inspection.
 
-         When struct support lands, a FIELD access (`s.my_ints`) would
-         get its own analogous function -- say, field_slot_of -- doing
-         the same shape of recognition (a bare Variable declared with a
-         struct type, whose SPECIFIC named field is slice-typed) but
-         computing a genuinely PRECISE slot key from the field's own
-         name rather than one shared sentinel: unlike a dynamic array
-         index, a field name is known statically, so `s.a` and `s.b`
-         can -- and should -- get their OWN separate slots rather than
-         being lumped together the way `rows[i]` and `rows[j]` have to
-         be. slot_node_id already supports this without any change:
-         it's already keyed on an arbitrary slot value, not hardcoded
-         to the one sentinel indexed_slot_of happens to use today. And
-         whole_value_node_of would need the analogous extension too --
+         FIELD access (`s.my_ints`) got its own analogous function --
+         field_slot_of -- doing the same shape of recognition (does
+         accessing this thing resolve to a declaration whose type
+         needs the aggregate-elements slot treatment) one kind of
+         access over. It deliberately does NOT give each field its
+         own separate, precise slot the way a field name's static
+         (unlike a dynamic array index) would in principle allow --
+         `s.a` and `s.b` share the SAME slot as each other, and as any
+         other field of the same declaration, exactly the "one
+         combined blob" treatment `rows[i]` and `rows[j]` already get.
+         Per-field precision was the original plan, but building it
+         out surfaced a real complication: a struct-to-struct copy of
+         just PART of a struct (`i = outer.inner`, copying one field's
+         own sub-struct without touching outer's OTHER fields) would
+         need to precisely propagate only the sub-struct's own field
+         slots to `i`'s own -- correct, but a genuinely larger
+         mechanism than contribution()'s existing "resolve to exactly
+         one node" shape supports without a much bigger refactor.
+         Lumping every field into one shared slot per declaration
+         keeps this an incremental extension of exactly the same
+         machinery indexed_slot_of already established, at the cost of
+         the identical kind of precision loss already accepted for
+         array elements -- sound, just coarser than strictly necessary
+         for two logically-independent slice fields on the same
+         struct. whole_value_node_of got the analogous extension too --
          a bare `Variable` referring to a struct falls back to it
-         exactly like an aggregate-of-slices does, so `return s` has to
-         resolve to (the union of) that struct's own field slots the
-         same deliberate way `return rows` resolves to indexed_slot_
-         of's.
+         exactly like an aggregate-of-slices does, so `return s`
+         resolves to that struct's own single combined slot the same
+         deliberate way `return rows` resolves to indexed_slot_of's.
 
          An array-typed aggregate (`[N][]int`) is registered in BOTH
          array_decls (for its own, unrelated existing role -- e.g.
@@ -2533,11 +2627,18 @@ def analyze_array_escapes(fn: Function, param_types: List[Type], structs: Dict[s
             slice_deps.setdefault(node_id, set())
         return aggregate_slot_ids[key]
 
-    _INDEXED_ELEMENTS_SLOT = '[]'  # the one shared slot indexed_slot_of
-    # uses for a whole array-/slice-of-slices declaration, regardless of
-    # which actual index is involved (see AGGREGATES AND SLOTS above for
-    # why) -- chosen because '[' and ']' can never appear in a Hornet
-    # identifier, so this can never collide with a future field-name slot.
+    _AGGREGATE_ELEMENTS_SLOT = '[]'  # the one shared slot for a WHOLE
+    # aggregate declaration -- an array-/slice-of-slices (used by
+    # indexed_slot_of) or a struct containing a slice-typed field, at
+    # any depth of nesting (used by field_slot_of below) -- regardless
+    # of which specific index or field is involved (see AGGREGATES AND
+    # SLOTS above for why); the SAME sentinel serves both kinds of
+    # aggregate, not two separate ones, since a given declaration is
+    # always either array/slice-shaped or struct-shaped, never both,
+    # so there's never a risk of the two meanings colliding for the
+    # same declaration. Chosen because '[' and ']' can never appear in
+    # a Hornet identifier, so this can never collide with an actual
+    # field name either, if a per-field sentinel were ever needed.
 
     def indexed_slot_of(base_expr: Node) -> Optional[int]:
         """Recognizes `base_expr` as something that, indexed ONE more
@@ -2585,30 +2686,116 @@ def analyze_array_escapes(fn: Function, param_types: List[Type], structs: Dict[s
             return None
         return whole_value_node_of(root_name)
 
+    def field_slot_of(field_expr: Field) -> Optional[int]:
+        """Recognizes field_expr (`p.values`, `p.inner.values`, ...)
+        as a struct field access that reads or writes a value needing
+        this analysis's own tracking -- the field itself is slice-
+        typed, or is an aggregate (array or struct) that itself
+        contains a slice at some depth (see _contains_slice) -- and
+        resolves it to whatever ROOT Variable underlies the whole
+        access chain (see root_variable_name, which unwraps Field,
+        Index, and Slice together, in any mix), returning that root's
+        own shared aggregate-elements slot id (see slot_node_id) --
+        the SAME slot indexed_slot_of gives an array/slice-of-slices
+        declaration, and whole_value_node_of gives a struct considered
+        as a whole. Deliberately ONE combined slot per root
+        declaration, not a separate one per distinct field path (`p.a`
+        and `p.b` share the SAME slot, even though a field name -- unlike
+        a dynamic array index -- is known statically and so COULD in
+        principle get its own precise one): giving every field its own
+        slot would mean a struct-to-struct copy of just a PART of a
+        struct (`i = outer.inner`, copying one field's own sub-struct
+        without touching outer's OTHER fields) needs to precisely
+        propagate only the sub-struct's own field slots to `i`'s own
+        -- correct, but a genuinely larger mechanism than this
+        analysis's existing "resolve to exactly one node" shape
+        supports without a much bigger refactor. Lumping every field
+        of a given declaration into one shared slot instead keeps this
+        an incremental extension of the exact same machinery indexed_
+        slot_of already established, at the cost of the identical kind
+        of precision loss already accepted for array elements (`rows[0]`
+        and `rows[1]` already share one slot too) -- sound (a write
+        into any field still correctly makes anything the WHOLE
+        declaration reaches escape when it needs to), just coarser
+        than necessary in the specific case of two logically-
+        independent slice fields on the same struct.
+
+        Mirrors indexed_slot_of's own "one more level" guard exactly,
+        one kind of access over: checking field_expr's OWN resolved
+        field type directly (not a recursive walk of the root struct's
+        EVERY field) is what keeps this precise for the identical
+        reason indexed_slot_of needs to be -- `p.x` (a plain int
+        field) must NOT resolve to p's own combined slot just because
+        p, considered as a whole, happens to have some OTHER slice-
+        typed field; only a field access that itself touches slice-
+        shaped storage does.
+
+        Returns None if field_expr's base isn't struct-typed, that
+        struct is unknown, or field_expr.name isn't a real field of it
+        (all three already guaranteed impossible by the time semantic
+        analysis has passed -- this stays defensive rather than
+        assuming), if the field's own type doesn't contain a slice at
+        all, or if the chain doesn't resolve to a bare Variable at its
+        root."""
+        base_type = field_expr.base.resolved_type
+        if base_type is None or base_type.kind != TypeKind.STRUCT:
+            return None
+        struct_info = structs.get(base_type.struct_name)
+        if struct_info is None or field_expr.name not in struct_info.fields:
+            return None
+        field_type = struct_info.fields[field_expr.name]
+        if not _contains_slice(field_type):
+            return None
+        root_name = root_variable_name(field_expr)
+        if root_name is None:
+            return None
+        return whole_value_node_of(root_name)
+
     def _contains_slice(t: Type) -> bool:
-        """True if `t` is itself a slice, or is an array whose element
-        type contains a slice at ANY depth of further array nesting
-        (`[N]T`, `[N][M]T`, `[N][M][K]T`, ...) -- e.g. True for `[]int`
-        directly, for `[5][]int` (one level), and for `[5][3][]int`
-        (two levels), with no depth limit. Does NOT recurse into a
-        STRUCT's own fields: semantic.py's own struct-collection pass
-        already rejects any struct with a slice-typed field, directly
-        or transitively (see _field_contains_slice there), so by the
-        time this ever runs, a struct is already guaranteed slice-
-        free -- this can safely treat STRUCT as an ordinary, non-slice
-        leaf, the same as INT/BOOL/STR, without needing to check.
-        Used by whole_value_node_of to decide whether a declaration is
-        an aggregate whose elements need the shared indexed-elements
-        slot treatment (see AGGREGATES AND SLOTS in this analysis's
-        own docstring) -- checking at ANY depth, not just one level,
-        is what closes the "2D (or deeper) array-of-slices" gap a
-        depth-one check would otherwise still have, independent of
-        (and in addition to) root_variable_name's own, separate fix
-        for unwrapping a multi-level access CHAIN down to its root."""
+        """True if `t` is itself a slice, or contains one at ANY depth
+        of further array nesting (`[N]T`, `[N][M]T`, ...) or struct
+        field nesting (a struct field, a nested struct's own field,
+        ...), in any mix of the two -- e.g. True for `[]int` directly,
+        for `[5][]int`, for a struct with a `[]int` field, for a
+        struct with an `[5]OtherStruct` field where OtherStruct itself
+        has a slice-typed field, and so on, with no depth limit either
+        way. Recursing into a STRUCT's own fields (via `structs`, this
+        program's own registry, closed over from analyze_array_
+        escapes's own parameter) is safe from infinite recursion even
+        for a self-referential struct (`struct Node: []Node children`,
+        now a real, legal, intentional pattern once slice-typed fields
+        are supported at all -- see semantic.py's own _check_struct_
+        contains for why a slice field is deliberately NOT treated as
+        a sizing cycle): the SLICE case above is always checked FIRST
+        and returns True immediately without recursing any further, so
+        this can never recurse back into the SAME struct through a
+        slice field -- and semantic.py's own cycle detection already
+        guarantees the only way a struct could ever reach itself again
+        at all is THROUGH one, since a direct or array-embedded self-
+        reference is rejected outright. Any struct cycle that could
+        exist by the time this ever runs is therefore guaranteed to
+        pass through a slice-typed field, which this returns True for
+        without descending any further -- so this recursion always
+        terminates.
+
+        Used by whole_value_node_of (does a WHOLE declaration's own
+        type need the shared aggregate-elements slot treatment) and by
+        field_slot_of (does accessing a SPECIFIC field need it) -- see
+        AGGREGATES AND SLOTS in this analysis's own docstring. Checking
+        at ANY depth, not just one level, in either direction, is what
+        closes the "2D (or deeper) array-of-slices" gap a depth-one
+        check would otherwise still have, independent of (and in
+        addition to) root_variable_name's own, separate fix for
+        unwrapping a multi-level access CHAIN down to its root."""
         if t.kind == TypeKind.SLICE:
             return True
         if t.kind == TypeKind.ARRAY:
             return _contains_slice(t.element_type)
+        if t.kind == TypeKind.STRUCT:
+            struct_info = structs.get(t.struct_name)
+            if struct_info is None:
+                return False
+            return any(_contains_slice(field_type) for field_type in struct_info.fields.values())
         return False
 
     def whole_value_node_of(name: str) -> Optional[int]:
@@ -2622,45 +2809,100 @@ def analyze_array_escapes(fn: Function, param_types: List[Type], structs: Dict[s
         backing as reading one element out directly is -- they're the
         SAME underlying storage, so they get the SAME node, not two
         disconnected ones that would silently stop propagating into
-        each other. Falls back to `name`'s own bare declaration id for
-        an ORDINARY slice-typed declaration (not an aggregate at all),
-        exactly like before this function existed. Returns None if
-        `name` doesn't resolve to anything this analysis tracks.
+        each other. The identical reasoning now covers a STRUCT
+        declaration too: `return p` has to be just as capable of
+        exposing any of p's own slice-typed fields' backing as reading
+        one field out directly is, so a struct whose type contains a
+        slice at some depth (see _contains_slice) also resolves here,
+        to the SAME shared slot field_slot_of gives its own individual
+        fields -- see AGGREGATES AND SLOTS for why a struct's fields
+        are deliberately lumped into ONE combined slot per declaration
+        rather than getting their own separate ones. Falls back to
+        `name`'s own bare declaration id for an ORDINARY slice-typed
+        declaration (not an aggregate at all), exactly like before
+        this function existed. Returns None if `name` doesn't resolve
+        to anything this analysis tracks.
 
-        The aggregate check itself (_contains_slice, on name's own
-        element_type) looks arbitrarily far down through array
-        nesting, not just one level -- `[5][]int` (one level) and
-        `[5][3][]int` (two levels) both correctly resolve to `name`'s
-        own shared slot, not just the former."""
+        The aggregate check itself (_contains_slice) looks arbitrarily
+        far down through array nesting AND struct field nesting, in
+        any mix, not just one level or one kind -- `[5][]int` (array
+        nesting), a struct with a `[]int` field (struct nesting), and
+        a struct with an array-of-structs field where THAT struct has
+        a slice field (both, mixed) all correctly resolve to `name`'s
+        own shared slot."""
         decl_id = resolve(name)
         if decl_id is None:
             return None
         decl_type = decl_types.get(decl_id)
-        if decl_type is not None and decl_type.kind in (TypeKind.ARRAY, TypeKind.SLICE):
-            element_type = decl_type.element_type
-            if element_type is not None and _contains_slice(element_type):
-                return slot_node_id(decl_id, _INDEXED_ELEMENTS_SLOT)
+        if decl_type is not None:
+            if decl_type.kind in (TypeKind.ARRAY, TypeKind.SLICE):
+                element_type = decl_type.element_type
+                if element_type is not None and _contains_slice(element_type):
+                    return slot_node_id(decl_id, _AGGREGATE_ELEMENTS_SLOT)
+            elif decl_type.kind == TypeKind.STRUCT and _contains_slice(decl_type):
+                return slot_node_id(decl_id, _AGGREGATE_ELEMENTS_SLOT)
         if decl_id in slice_decls:
             return decl_id
         return None
 
+
     def root_variable_name(expr: Node) -> Optional[str]:
-        """Unwraps a chain of Index AND Slice nodes down to whatever
-        bare Variable, if any, ultimately sits underneath -- e.g. for
-        `matrix[i][j]`, `s1[0:3][0:2]`, or a mix of the two, all the
-        way down to the root -- since NEITHER indexing NOR re-slicing
-        changes which declaration's own backing storage a value
-        traces back to (a Slice is a VIEW, an Index reads out of the
-        SAME underlying storage), so the whole chain, regardless of
-        length or which of the two operations appears at each step,
-        resolves to the SAME root for this analysis's own flow-
-        insensitive purposes. Returns None if the chain bottoms out at
+        """Unwraps a chain of Index, Slice, AND Field nodes down to
+        whatever bare Variable, if any, ultimately sits underneath --
+        e.g. for `matrix[i][j]`, `s1[0:3][0:2]`, `p.inner.values`, or
+        any mix of the three, all the way down to the root -- since
+        NEITHER indexing, NOR re-slicing, NOR field access changes
+        which declaration's own backing storage a value traces back
+        to (a Slice is a VIEW, an Index reads out of the SAME
+        underlying storage, and a Field reads out of the SAME
+        underlying storage one level over -- a struct's own fields are
+        embedded inline in its own layout, not a separate allocation,
+        exactly the same relationship an array has to its own
+        elements), so the whole chain, regardless of length or which
+        of the three operations appears at each step, resolves to the
+        SAME root for this analysis's own flow-insensitive purposes.
+        Index and Slice both expose the thing being unwrapped as
+        `.array`; Field exposes it as `.base` instead -- the two
+        attribute names are handled explicitly rather than assuming
+        one covers both. Returns None if the chain bottoms out at
         anything else (a Call, an ArrayLiteral, ...) -- neither of
         those is backed by one of THIS function's own named
         declarations at all, so there's nothing to resolve to."""
-        while isinstance(expr, (Index, Slice)):
-            expr = expr.array
+        while isinstance(expr, (Index, Slice, Field)):
+            expr = expr.base if isinstance(expr, Field) else expr.array
         return expr.name if isinstance(expr, Variable) else None
+
+    def _unwrap_slices(expr: Node) -> Node:
+        """Unwraps a chain of Slice nodes (re-slicing, `s[0:3][0:2]`)
+        down to whatever is actually being sliced underneath -- a bare
+        Variable, an Index (reading an element out of an aggregate),
+        or a Field (reading a struct field) -- since re-slicing never
+        changes what backs a value: it's always exactly whatever
+        backed the thing being re-sliced, at any depth of re-slicing.
+        Deliberately does NOT unwrap Index or Field the way root_
+        variable_name does (all the way down to a bare Variable) --
+        this stops one level earlier, specifically so contribution's
+        own Slice case can distinguish "the innermost thing being
+        sliced is a bare Variable" (root_variable_name's own job, a
+        RAW array/slice declaration) from "the innermost thing being
+        sliced is itself reading a slice out of an aggregate"
+        (indexed_slot_of's/field_slot_of's own job, an aggregate's own
+        combined slot) -- these need genuinely different resolution,
+        not the same one, and conflating them was a real, separately-
+        rooted bug: `rows[0][0:2]` (re-slicing an aggregate ELEMENT)
+        used to resolve via root_variable_name straight to `rows`
+        itself, then check raw array_decls membership -- which matched
+        (rows IS an array declaration), but resolved to the WRONG
+        thing entirely: rows' own storage, not whatever rows[0]'s own
+        slice descriptor actually points at. Found the same way the
+        deeper-indexing and chained-re-slicing gaps were: by tracing
+        through what SHOULD happen for a shape not yet covered by an
+        existing test, then confirming the gap end to end (compiling,
+        running, and forcing a large intervening stack write to
+        actually surface the corruption) before fixing it."""
+        while isinstance(expr, Slice):
+            expr = expr.array
+        return expr
 
     def contribution(value_expr: Node) -> Tuple[Optional[int], Optional[int]]:
         """Returns (array_decl_id, slice_decl_id) -- whichever ONE of
@@ -2674,7 +2916,31 @@ def analyze_array_escapes(fn: Function, param_types: List[Type], structs: Dict[s
         care that it came from indexing into an aggregate rather than
         reading a plain slice variable directly."""
         if isinstance(value_expr, Slice):
-            base_name = root_variable_name(value_expr.array)
+            # Re-slicing never changes what backs a value, so unwrap
+            # any further re-slicing FIRST (`s[0:3][0:2]`) down to
+            # whatever's actually being sliced -- see _unwrap_slices's
+            # own docstring for why this stops at, rather than through,
+            # an Index or Field: those need indexed_slot_of's/field_
+            # slot_of's own aggregate-slot resolution tried FIRST, with
+            # a fallback to the plain root-declaration check right
+            # below when that resolution doesn't apply -- e.g.
+            # `matrix[1][0:2]` (slicing a plain SUB-ARRAY row out of a
+            # multi-dimensional array with no slices involved anywhere)
+            # has inner = Index(matrix, 1), but indexed_slot_of(matrix)
+            # correctly returns None (indexing matrix one more time
+            # yields another array, not a slice) -- so this must still
+            # fall through to resolving matrix itself as the raw array
+            # that needs to escape, exactly like the plain-Variable
+            # case just below already does.
+            inner = _unwrap_slices(value_expr.array)
+            slot_id = None
+            if isinstance(inner, Index):
+                slot_id = indexed_slot_of(inner.array)
+            elif isinstance(inner, Field):
+                slot_id = field_slot_of(inner)
+            if slot_id is not None:
+                return None, slot_id
+            base_name = root_variable_name(inner)
             if base_name is not None:
                 base_id = resolve(base_name)
                 if base_id in array_decls:
@@ -2690,6 +2956,15 @@ def analyze_array_escapes(fn: Function, param_types: List[Type], structs: Dict[s
             # e.g. `rows[i]` -- resolves to that aggregate's own
             # indexed-elements slot.
             slot_id = indexed_slot_of(value_expr.array)
+            if slot_id is not None:
+                return None, slot_id
+        elif isinstance(value_expr, Field):
+            # Reading a slice-typed (or slice-containing) field back
+            # out of a declared struct -- e.g. `p.values` -- resolves
+            # to that struct's own combined aggregate-elements slot,
+            # structurally identical to the Index case just above, one
+            # kind of access over.
+            slot_id = field_slot_of(value_expr)
             if slot_id is not None:
                 return None, slot_id
         elif isinstance(value_expr, Call) and value_expr.name == 'append':
@@ -2736,6 +3011,15 @@ def analyze_array_escapes(fn: Function, param_types: List[Type], structs: Dict[s
         elif isinstance(expr, ArrayLiteral):
             for element in expr.elements:
                 scan_expr_for_escaping_calls(element)
+        elif isinstance(expr, Field):
+            # A pre-existing gap this closes alongside the struct-
+            # field escape work, not something new introduced by it:
+            # `foo(bar()).x` (a nested call underneath a Field access)
+            # needs bar()'s own argument-escaping check just as much
+            # as any other sub-expression does -- this was never
+            # reached at all before, regardless of whether the field
+            # itself ends up being slice-relevant.
+            scan_expr_for_escaping_calls(expr.base)
         # Variable, Constant, BoolLiteral, StringLiteral, NoneLiteral:
         # leaves, nothing further to recurse into.
 
@@ -2772,6 +3056,28 @@ def analyze_array_escapes(fn: Function, param_types: List[Type], structs: Dict[s
                         slice_deps[slot_id].add(slice_id)
                 scan_expr_for_escaping_calls(stmt.array)
                 scan_expr_for_escaping_calls(stmt.index)
+                scan_expr_for_escaping_calls(stmt.value)
+            elif isinstance(stmt, FieldAssign):
+                # Mirrors IndexAssign exactly, one kind of access over
+                # -- field_slot_of needs an actual Field node, not
+                # stmt directly: root_variable_name's own isinstance
+                # check (which field_slot_of calls into) only
+                # recognizes Index/Slice/Field, not FieldAssign, so
+                # duck-typing stmt.base/stmt.name through it silently
+                # fails to unwrap anything at all, always returning
+                # None -- a real bug this construction fixes, found by
+                # testing (a struct escaping via return, with a slice
+                # field previously written through FieldAssign, failed
+                # to promote its own backing array at all) rather than
+                # by inspection.
+                slot_id = field_slot_of(Field(base=stmt.base, name=stmt.name))
+                if slot_id is not None:
+                    array_id, slice_id = contribution(stmt.value)
+                    if array_id is not None:
+                        direct_backing[slot_id].add(array_id)
+                    if slice_id is not None:
+                        slice_deps[slot_id].add(slice_id)
+                scan_expr_for_escaping_calls(stmt.base)
                 scan_expr_for_escaping_calls(stmt.value)
             elif isinstance(stmt, Return):
                 if stmt.value is not None:
@@ -3331,16 +3637,21 @@ class CodeGenerator:
         own, pure size check (now covering both array and struct) with
         analyze_array_escapes's own, independent result (computed once
         per function, in gen_function, and cached in self._escaping_
-        array_ids -- an array-specific trigger only, since a struct
-        can't itself back a slice the way an array can, at least not
-        in this phase -- see the module's own note on why slice-typed
-        struct fields aren't supported yet): either reason alone is
-        sufficient. This is the actual decision point every one of
-        this file's call sites that used to call is_heap_allocated
-        directly now goes through instead, each passing whichever
-        decl_id it has on hand -- id(a VarDecl or Param) directly, or
-        self._local_decl_id(name) wherever only a Variable's own name
-        is available at that point."""
+        array_ids -- an array-specific trigger only, since the actual,
+        terminal backing storage a slice descriptor ever points at is
+        always a real array, never a struct directly, regardless of
+        whether the slice was reached through an array-of-slices
+        container or a struct's own slice-typed field: either kind of
+        container might itself need promoting for size (is_heap_
+        allocated's own check), but never merely because a slice
+        somewhere within it escapes -- see analyze_array_escapes's own
+        AGGREGATES AND SLOTS section for the full reasoning): either
+        reason alone is sufficient. This is the actual decision point
+        every one of this file's call sites that used to call is_heap_
+        allocated directly now goes through instead, each passing
+        whichever decl_id it has on hand -- id(a VarDecl or Param)
+        directly, or self._local_decl_id(name) wherever only a
+        Variable's own name is available at that point."""
         return is_heap_allocated(t, self.struct_registry) or decl_id in self._escaping_array_ids
 
     def _type_of(self, expr: Node) -> Type:
@@ -3488,11 +3799,15 @@ class CodeGenerator:
         a dedicated two-register return convention, needing no scratch
         slot at all, back when a slice's own descriptor still fit two
         registers; see the module docstring's SLICE PARAMETERS AND
-        RETURNS section for why that's no longer true), or an Index
+        RETURNS section for why that's no longer true), an Index
         yielding a slice (`rows[0][1]`, one element of an array OF
         slices used directly as a further base -- materialized into
         that same scratch slot too, via gen_slice_value_into's own
-        Index case).
+        Index case), or a Field yielding a slice (`p.values[0]`, a
+        struct's own slice-typed field used directly as a further
+        base -- materialized into that same scratch slot, via gen_
+        slice_value_into's own Field case, the identical mechanism
+        one level over).
 
         An ARRAY-typed `expr` can ALSO be an ArrayLiteral directly --
         not an existing Variable/Index at all, but a freshly-created
@@ -3563,6 +3878,20 @@ class CodeGenerator:
                 # the exact same scratch slot the Slice case just
                 # above uses, via gen_slice_value_into's own Index
                 # case, then immediately read back out the same way.
+                temp = self._unnamed_slice_temp_offset
+                instructions = self.gen_slice_value_into(expr, Memory('rbp', temp))
+                instructions.append(MovQ(src=Memory('rbp', temp + 8), dst=len_dst))
+                instructions.append(MovQ(src=Memory('rbp', temp + 16), dst=cap_dst))
+                instructions.append(MovQ(src=Memory('rbp', temp), dst=addr_dst))
+                return instructions, len_dst, cap_dst
+            if isinstance(expr, Field):
+                # A slice-typed Field result (e.g. `p.values`, a
+                # struct's own slice-typed field, used directly as the
+                # base of a further `[...]`) -- structurally identical
+                # to the Index case just above, one level over:
+                # materialized through the exact same shared scratch
+                # slot, via gen_slice_value_into's own Field case, then
+                # immediately read back out the same way.
                 temp = self._unnamed_slice_temp_offset
                 instructions = self.gen_slice_value_into(expr, Memory('rbp', temp))
                 instructions.append(MovQ(src=Memory('rbp', temp + 8), dst=len_dst))
@@ -4085,6 +4414,11 @@ class CodeGenerator:
             its 24-byte descriptor is read through it -- structurally
             the same flat copy the Variable case does, just from a
             computed address rather than a fixed local offset.
+          - Field (e.g. `[]int r = p.values`, reading a slice-typed
+            STRUCT FIELD): structurally identical to the Index case
+            just above, one level over -- the field's own address is
+            computed first (gen_field_address_into), then its 24-byte
+            descriptor is read through it the same way.
           - ArrayLiteral (e.g. `[]int s = [1, 2, 3]`, an UNTYPED
             literal flowing directly into a slice-typed target -- see
             semantic.py's _check_value_flowing_into and check_array_
@@ -4149,6 +4483,22 @@ class CodeGenerator:
                 instructions.append(Push(Register(dst_mem.base)))
             addr_reg = Register('r11')
             instructions.extend(self.gen_index_address_into(expr, addr_reg))
+            instructions.append(MovQ(src=Memory(addr_reg.name, 0), dst=Register('r8')))
+            instructions.append(MovQ(src=Memory(addr_reg.name, 8), dst=Register('r9')))
+            instructions.append(MovQ(src=Memory(addr_reg.name, 16), dst=Register('r10')))
+            if protect_dst:
+                instructions.append(Pop(Register(dst_mem.base)))
+            instructions.append(MovQ(src=Register('r8'), dst=Memory(dst_mem.base, dst_mem.offset)))
+            instructions.append(MovQ(src=Register('r9'), dst=Memory(dst_mem.base, dst_mem.offset + 8)))
+            instructions.append(MovQ(src=Register('r10'), dst=Memory(dst_mem.base, dst_mem.offset + 16)))
+            return instructions
+
+        if isinstance(expr, Field):
+            instructions = []
+            if protect_dst:
+                instructions.append(Push(Register(dst_mem.base)))
+            addr_reg = Register('r11')
+            instructions.extend(self.gen_field_address_into(expr, addr_reg))
             instructions.append(MovQ(src=Memory(addr_reg.name, 0), dst=Register('r8')))
             instructions.append(MovQ(src=Memory(addr_reg.name, 8), dst=Register('r9')))
             instructions.append(MovQ(src=Memory(addr_reg.name, 16), dst=Register('r10')))
@@ -5306,11 +5656,29 @@ class CodeGenerator:
         produce this shape (a struct field can itself be a whole
         array, and `.` doesn't consume it element by element the way
         `[...]` does), so this needs a real case for it, not just a
-        comment explaining why it's unreachable."""
+        comment explaining why it's unreachable.
+
+        A NoneLiteral value flowing into a slice-typed field (`s.values
+        = none`) needs the identical short-circuit gen_var_decl/gen_
+        assign already have, checked BEFORE the SLICE dispatch below
+        rather than falling into gen_slice_value_into's own ordinary
+        dispatch -- for the identical reason those two already need
+        it: none's own resolved type (Type.NONE) never equals the
+        field's own declared type, so gen_slice_value_into's dispatch
+        (which only ever needs the expression itself, since every
+        OTHER kind of value's own resolved type already matches what
+        needs to be stored) has no case for it at all. This was a
+        real, separately-rooted gap found by testing, not caught by
+        gen_field_assign's own original design: FieldAssign simply
+        didn't exist as a reachable path for a slice-typed value until
+        slice-typed fields were supported at all, so this short-
+        circuit was never needed until now."""
         field_type = self._check_struct_and_field_type(stmt.base, stmt.name)
         addr_reg = Register('rax')
         instructions = self.gen_field_address_into(stmt, addr_reg)
         if field_type.kind == TypeKind.SLICE:
+            if isinstance(stmt.value, NoneLiteral):
+                return instructions + self.gen_none_into(Memory('rax', 0), field_type)
             instructions.extend(self.gen_slice_value_into(stmt.value, Memory('rax', 0)))
             return instructions
         if field_type.kind == TypeKind.STRUCT:

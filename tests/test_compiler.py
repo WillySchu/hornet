@@ -61,9 +61,9 @@ Organization:
     TestIndexAssignIntoArrayOfSlices    ( 5 tests)
     TestSemanticErrors                  (75 tests)
     TestComments                        (11 tests)
-    TestStructs                         (32 tests)
+    TestStructs                         (43 tests)
                                         ----------
-                                        545 tests total
+                                        556 tests total
 
 A NOTE ON ARRAYS
 -----------------------------------------------------------------
@@ -7189,15 +7189,25 @@ class TestComments:
 #   - No struct literal syntax -- every struct value in this phase is
 #     built field-by-field, through a VarDecl followed by individual
 #     FieldAssign statements.
-#   - No slice-typed fields (directly, through an array, or through a
-#     nested struct) -- explicitly REJECTED by semantic.py, not merely
-#     unimplemented, since a struct escaping a function with an
-#     unguarded slice field would silently reintroduce the exact
-#     dangling-pointer bug analyze_array_escapes exists to prevent
-#     elsewhere. See test_slice_typed_field_is_rejected and its
-#     siblings.
 #   - No `==` on structs, and no `print` on a struct (deferred pending a
 #     real string-building facility -- see codegen.py's own note).
+#
+# Slice-typed fields (`struct Row: []int values`, directly, through an
+# array, or through a nested struct) used to be explicitly rejected here
+# too, for the identical reason arrays needed their own escape analysis
+# built out before they could be trusted: a struct escaping a function
+# with an unguarded slice field would silently reintroduce the exact
+# dangling-pointer bug analyze_array_escapes exists to prevent elsewhere.
+# That extension (field_slot_of, alongside indexed_slot_of -- see
+# codegen.py's own AGGREGATES AND SLOTS section) is now built, so slice-
+# typed fields are fully supported -- see test_slice_typed_field_basic_
+# read_and_write and its siblings below, especially test_struct_
+# escaping_via_return_promotes_slice_field_backing and test_non_
+# escaping_slice_field_stays_stack_allocated, which are to THIS
+# extension what test_local_array_sliced_but_not_returned_stays_on_the_
+# stack is to the array case: proof this is a genuinely sound AND
+# precise analysis, not just "heap-allocate every array a struct's
+# field is ever sliced from" wearing a fancier name.
 #
 # test_value_semantics_local_copy and test_value_semantics_across_a_call
 # are the two tests that matter most in this whole class: they're what
@@ -7642,58 +7652,68 @@ class TestStructs:
         with pytest.raises(SemanticError, match="should be A, got B"):
             analyze(_parse(source))
 
-    def test_slice_typed_field_is_rejected(self):
-        """A real, enforced boundary, not an accidental gap -- see
-        codegen.py's own STRUCTS section for why: without this, a
-        slice written into a field, or the whole struct copied via an
-        ordinary flat byte copy, would silently compile with no error
-        at all, while the array backing that slice could still be left
-        stack-allocated and outlive the frame it came from."""
-        source = (
+    def test_slice_typed_field_basic_read_and_write(self):
+        """Slice-typed fields (`struct Row: []int values`) are fully
+        supported: semantic.py used to reject this outright as an
+        explicit scope boundary, until codegen.py's escape analysis
+        was extended (field_slot_of, alongside indexed_slot_of) to
+        give a slice field's own backing array the identical treatment
+        an array-of-slices element already has -- see codegen.py's own
+        STRUCTS section and analyze_array_escapes's own AGGREGATES AND
+        SLOTS section for the full design."""
+        assert_program_exit_code(
             "struct Row:\n"
             "    []int values\n"
             "\n"
             "def int main():\n"
-            "    return 0\n"
+            "    Row r\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    r.values = arr[0:3]\n"
+            "    return r.values[0] + r.values[1] + r.values[2]\n",
+            6,
         )
-        with pytest.raises(SemanticError, match="slice-typed"):
-            analyze(_parse(source))
 
-    def test_array_of_slices_field_is_rejected(self):
-        """The same rejection, one level of array-wrapping deeper --
-        _field_contains_slice unwraps array nesting at any depth, not
-        just a bare slice field."""
-        source = (
+    def test_array_of_slices_field_is_supported(self):
+        """A slice field nested one level of array-wrapping deeper
+        (`[N][]int`) -- _contains_slice unwraps array nesting at any
+        depth, not just a bare slice field, the identical check
+        whole_value_node_of already uses for a plain array-of-slices
+        declaration."""
+        assert_program_exit_code(
             "struct Rows:\n"
-            "    [3][]int values\n"
+            "    [2][]int values\n"
             "\n"
             "def int main():\n"
-            "    return 0\n"
+            "    Rows r\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    r.values[0] = arr[0:2]\n"
+            "    r.values[1] = arr[2:4]\n"
+            "    return r.values[0][0] + r.values[1][0]\n",
+            4,
         )
-        with pytest.raises(SemanticError, match="slice-typed"):
-            analyze(_parse(source))
 
-    def test_slice_field_nested_through_another_struct_is_rejected(self):
-        """The same rejection again, reached transitively through a
-        nested struct field -- _field_contains_slice recurses into a
-        nested struct's own already-resolved fields, not just the
-        immediate field list."""
-        source = (
+    def test_slice_field_nested_through_another_struct_is_supported(self):
+        """A slice field reached transitively through a nested struct
+        field -- _contains_slice recurses into a nested struct's own
+        registered fields, not just the immediate field list."""
+        assert_program_exit_code(
             "struct Inner:\n"
             "    []int values\n"
             "struct Outer:\n"
             "    Inner inner\n"
             "\n"
             "def int main():\n"
-            "    return 0\n"
+            "    Outer o\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    o.inner.values = arr[0:2]\n"
+            "    return o.inner.values[0] + o.inner.values[1]\n",
+            3,
         )
-        with pytest.raises(SemanticError, match="slice-typed"):
-            analyze(_parse(source))
 
     def test_ordinary_array_field_is_not_rejected(self):
-        """The positive control for the three slice-field rejection
-        tests above: an ordinary (non-slice) array field must NOT be
-        rejected."""
+        """The positive control for the slice-related field tests
+        throughout this class: an ordinary (non-slice) array field
+        must never be treated as needing any of this machinery."""
         ast = _parse(
             "struct Fixed:\n"
             "    [3]int values\n"
@@ -7703,6 +7723,307 @@ class TestStructs:
             "    return f.values[0]\n"
         )
         analyze(ast)  # should not raise
+
+    def test_self_referential_struct_via_slice_field(self):
+        """`struct Node: []Node children` -- explicitly the motivating
+        pattern cycle detection was scoped to allow from day one (see
+        semantic.py's own _check_struct_contains): a slice field never
+        counts as a sizing cycle, since its own backing storage is a
+        separate, runtime-sized allocation, not embedded inline. Now
+        that slice-typed fields are supported at all, this is a real,
+        legal, intentional pattern -- a tree or linked structure built
+        from slices -- not merely tolerated."""
+        assert_program_exit_code(
+            "struct Node:\n"
+            "    int value\n"
+            "    []Node children\n"
+            "\n"
+            "def int main():\n"
+            "    Node n\n"
+            "    n.value = 42\n"
+            "    return n.value\n",
+            42,
+        )
+
+    def test_none_flows_into_a_slice_typed_field(self):
+        """`r.values = none` -- needed its own fix in gen_field_assign
+        (a NoneLiteral short-circuit before the SLICE dispatch,
+        mirroring gen_var_decl's/gen_assign's own identical one) --
+        found by testing, not by inspection: FieldAssign simply wasn't
+        a reachable path for any slice-typed value at all until slice-
+        typed fields were supported, so this gap was never exercised
+        until now."""
+        assert_program_exit_code(
+            "struct Row:\n"
+            "    []int values\n"
+            "\n"
+            "def int main():\n"
+            "    Row r\n"
+            "    r.values = none\n"
+            "    return len(r.values)\n",
+            0,
+        )
+
+    def test_untyped_array_literal_flows_into_a_slice_typed_field(self):
+        """`r.values = [1, 2, 3]` -- an untyped array literal assigned
+        directly into a slice-typed field gets the same recursive
+        slice-construction treatment every other already-typed slot
+        (a VarDecl, an Assign, an IndexAssign's own element) already
+        gives one, via _check_value_flowing_into -- built the general
+        way from the start in analyze_field_assign, so this needed no
+        semantic.py changes at all once slice-typed fields were
+        allowed through."""
+        assert_program_exit_code(
+            "struct Row:\n"
+            "    []int values\n"
+            "\n"
+            "def int main():\n"
+            "    Row r\n"
+            "    r.values = [1, 2, 3]\n"
+            "    return r.values[0] + r.values[1] + r.values[2]\n",
+            6,
+        )
+
+    def test_writing_a_scalar_element_of_a_slice_typed_field(self):
+        """`r.values[0] = 99` -- writing a plain int into an ELEMENT
+        of a slice-typed field, as opposed to writing a whole slice
+        INTO the field itself (test_slice_typed_field_basic_read_and_
+        write, above) -- an ordinary IndexAssign whose own target
+        happens to be a Field, needing no changes anywhere at all: the
+        field's own address is computed once (gen_field_address_into),
+        then indexing through it is identical to indexing through any
+        other slice."""
+        assert_program_exit_code(
+            "struct Row:\n"
+            "    []int values\n"
+            "\n"
+            "def int main():\n"
+            "    Row r\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    r.values = arr[0:3]\n"
+            "    r.values[0] = 99\n"
+            "    return r.values[0]\n",
+            99,
+        )
+
+    def test_wrong_typed_value_assigned_to_a_slice_typed_field_is_rejected(self):
+        source = (
+            "struct Row:\n"
+            "    []int values\n"
+            "\n"
+            "def int main():\n"
+            "    Row r\n"
+            "    r.values = 5\n"
+            "    return 0\n"
+        )
+        with pytest.raises(SemanticError, match="Cannot assign"):
+            analyze(_parse(source))
+
+    # -- escape analysis: does a slice field's own backing array get --
+    # -- correctly promoted when it needs to survive past its own    --
+    # -- frame? Every test below actually compiles, links, and RUNS  --
+    # -- the resulting binary, with a large intervening stack write  --
+    # -- specifically designed to clobber a wrongly-stack-allocated  --
+    # -- array if the analysis got it wrong -- this is exactly the   --
+    # -- same kind of test that already caught two real, genuine     --
+    # -- bugs while this feature was being built (see codegen.py's   --
+    # -- own contribution() and its _unwrap_slices helper): isolated --
+    # -- analysis alone said the wrong thing in both cases, and only --
+    # -- forcing the corruption to actually manifest end to end      --
+    # -- caught it.
+
+    def test_struct_escaping_via_return_promotes_slice_field_backing(self):
+        """THE core test for this whole extension: a struct value
+        returned out of the function that built it must make its own
+        slice field's backing array survive past that function's own
+        frame -- verified by actually corrupting the stack region
+        that array used to occupy before ever reading the field back
+        out."""
+        assert_program_exit_code(
+            "struct Row:\n"
+            "    []int values\n"
+            "\n"
+            "def Row makeRow():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    Row r\n"
+            "    r.values = arr[0:3]\n"
+            "    return r\n"
+            "\n"
+            "def int clobber():\n"
+            "    [20]int junk\n"
+            "    int i = 0\n"
+            "    while i < 20:\n"
+            "        junk[i] = 999\n"
+            "        i = i + 1\n"
+            "    return junk[0]\n"
+            "\n"
+            "def int main():\n"
+            "    Row r = makeRow()\n"
+            "    int j = clobber()\n"
+            "    return r.values[0] + r.values[1] + r.values[2]\n",
+            6,
+        )
+
+    def test_non_escaping_slice_field_stays_stack_allocated(self):
+        """THE precision test for this whole extension, mirroring
+        test_local_array_sliced_but_not_returned_stays_on_the_stack's
+        own role for plain slices: a struct whose slice field never
+        escapes must NOT force its own backing array onto the heap.
+        Every other test in this block could pass even if writing a
+        slice into ANY field unconditionally promoted its own backing
+        array; this one specifically requires that not to happen."""
+        source = (
+            "struct Row:\n"
+            "    []int values\n"
+            "\n"
+            "def int main():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    Row r\n"
+            "    r.values = arr[0:3]\n"
+            "    return r.values[0]\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        assert "malloc" not in asm
+
+    def test_reslicing_a_struct_slice_field_escapes_correctly(self):
+        """`r.values[0:2]` -- re-slicing a struct's OWN slice field --
+        was a real, separately-rooted bug found while building this
+        feature: contribution()'s own Slice case used to resolve the
+        thing being re-sliced via root_variable_name straight to its
+        raw declaration, which is correct for a bare Variable but
+        wrong for an aggregate element or field -- see _unwrap_slices
+        and contribution()'s own updated docstring for the full
+        story. This affected plain array-of-slices re-slicing too
+        (`rows[0][0:2]`), not just struct fields -- see
+        TestArrayEscapeAnalysis for that side of the same fix."""
+        assert_program_exit_code(
+            "struct Row:\n"
+            "    []int values\n"
+            "\n"
+            "def []int makeSub():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    Row r\n"
+            "    r.values = arr[0:3]\n"
+            "    []int s = r.values[0:2]\n"
+            "    return s\n"
+            "\n"
+            "def int clobber():\n"
+            "    [20]int junk\n"
+            "    int i = 0\n"
+            "    while i < 20:\n"
+            "        junk[i] = 999\n"
+            "        i = i + 1\n"
+            "    return junk[0]\n"
+            "\n"
+            "def int main():\n"
+            "    []int s = makeSub()\n"
+            "    int j = clobber()\n"
+            "    return s[0] + s[1]\n",
+            3,
+        )
+
+    def test_struct_to_struct_copy_propagates_slice_field_backing(self):
+        """`Row q = r` -- copying a whole struct value must still make
+        the copy's own field reach whatever backs the original's own
+        slice field, since both share the exact same underlying
+        storage (a struct copy is a shallow, alias-preserving flat
+        byte copy, exactly like an array-of-slices copy already is) --
+        falls out for free from whole_value_node_of giving BOTH `r`
+        and `q` the identical shared slot for their own struct type,
+        no separate propagation logic needed."""
+        assert_program_exit_code(
+            "struct Row:\n"
+            "    []int values\n"
+            "\n"
+            "def Row makeRow():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    Row r\n"
+            "    r.values = arr[0:3]\n"
+            "    Row q = r\n"
+            "    return q\n"
+            "\n"
+            "def int clobber():\n"
+            "    [20]int junk\n"
+            "    int i = 0\n"
+            "    while i < 20:\n"
+            "        junk[i] = 999\n"
+            "        i = i + 1\n"
+            "    return junk[0]\n"
+            "\n"
+            "def int main():\n"
+            "    Row r = makeRow()\n"
+            "    int j = clobber()\n"
+            "    return r.values[0] + r.values[1]\n",
+            3,
+        )
+
+    def test_struct_slice_field_as_parameter_escapes_correctly(self):
+        """A struct passed as a function PARAMETER, with its own
+        slice field's value extracted and returned back out --
+        exercises the parameter-copy convention (a struct parameter is
+        copied on entry, exactly like an array one) alongside field
+        escape tracking together."""
+        assert_program_exit_code(
+            "struct Row:\n"
+            "    []int values\n"
+            "\n"
+            "def []int extract(Row r):\n"
+            "    return r.values\n"
+            "\n"
+            "def []int makeSub():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    Row r\n"
+            "    r.values = arr[0:3]\n"
+            "    return extract(r)\n"
+            "\n"
+            "def int clobber():\n"
+            "    [20]int junk\n"
+            "    int i = 0\n"
+            "    while i < 20:\n"
+            "        junk[i] = 999\n"
+            "        i = i + 1\n"
+            "    return junk[0]\n"
+            "\n"
+            "def int main():\n"
+            "    []int s = makeSub()\n"
+            "    int j = clobber()\n"
+            "    return s[0] + s[1]\n",
+            3,
+        )
+
+    def test_append_on_a_struct_slice_field_escapes_correctly(self):
+        """`append(r.values, v)` -- append's own first argument
+        already recurses through contribution() for any slice-valued
+        expression, not just a bare Variable, so a struct's own field
+        needed no separate fix here -- it falls out of field_slot_of
+        being wired into contribution()'s own Field case."""
+        assert_program_exit_code(
+            "struct Row:\n"
+            "    []int values\n"
+            "\n"
+            "def []int makeAppended():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    Row r\n"
+            "    r.values = arr[0:2]\n"
+            "    []int s = append(r.values, 99)\n"
+            "    return s\n"
+            "\n"
+            "def int clobber():\n"
+            "    [20]int junk\n"
+            "    int i = 0\n"
+            "    while i < 20:\n"
+            "        junk[i] = 999\n"
+            "        i = i + 1\n"
+            "    return junk[0]\n"
+            "\n"
+            "def int main():\n"
+            "    []int s = makeAppended()\n"
+            "    int j = clobber()\n"
+            "    return s[0] + s[1] + s[2]\n",
+            102,
+        )
 
     def test_compound_assignment_to_a_field_is_rejected(self):
         """`p.x += 1` -- rejected at parse time, matching IndexAssign's

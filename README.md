@@ -14,7 +14,6 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- Slice typed fields in structs.
 - Struct literal syntax.
 - `==` for structs.
 - Fix print for collections to build str buffer and call print once.
