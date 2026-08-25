@@ -813,66 +813,77 @@ rather than popping keeps it protected for the bounds check that
 comes later, without needing a separate temporary slot just to hold a
 value that's already sitting exactly where it needs to be.
 
-PRINTING ARRAYS AND SLICES
--------------------------------
-`print` on an array or slice formats as `TYPE[elem, elem, ...]` --
-e.g. `[3]int[1, 2, 3]` or `[]int[1, 2, 3]` -- the type prefix
-(str(arg_type), matching semantic.Type.__str__ exactly, so no new
-formatting logic was needed for it) appearing exactly once, at the
-outermost level, never repeated for a nested row (a [2][3]int prints
-as `[2][3]int[[1, 2, 3], [4, 5, 6]]`, not with "[3]int" repeated on
-each inner row). A str element is quoted inside a collection
-(`'alice'`) even though a bare str argument to print still prints
-unquoted -- two different, both intentional, conventions, matching
-how most languages format a string differently in a collection/repr
-context than when printed bare.
+PRINTING
+-------------
+`print(x)` works for every type -- int, bool, str, array, slice, and
+struct -- through a single, uniform pipeline (gen_print_call_into):
+allocate a small growable buffer, compute the address of x's own
+value, call hornet_stringify(value_addr, type_desc, quote_strings=0,
+&buf_state) to append x's own textual representation onto that
+buffer, append a trailing newline, write() the result to stdout, then
+free() the buffer. See gen_print_call_into's own docstring for the
+full step-by-step and exactly why step order matters (the buffer is
+allocated BEFORE value_addr is computed, not after, to avoid a value
+needing to survive an internal malloc call in a register -- the exact
+bug class found and fixed in gen_buffer_append_bytes_into, see its own
+docstring).
 
-Built as a sequence of direct printf calls -- one piece at a time
-(the type prefix, each bracket, each separator, each element) -- via
-_gen_print_static/_gen_print_quoted_str/_gen_print_int_value/
-_gen_print_bool_value, rather than materializing one big string via
-malloc and printing it in one shot. That alternative would need a new
-int-to-string conversion step this language has no other reason to
-have: every existing int print already goes straight to printf's own
-%d formatting, never through an intermediate string buffer -- adding
-one just for this would be real, separable work (buffer sizing, how
-it interacts with str's existing memory-leak policy) for a feature
-that doesn't otherwise need it. The trade-off is more instructions per
-print call on a collection than a scalar -- a reasonable one for a
-teaching compiler, not an accident.
+hornet_stringify itself (build_stringify_function) is a single,
+hand-built AsmFunction -- not derived from any Hornet source, and not
+duplicated per print() call site -- that recursively converts ANY
+value into bytes appended onto a shared buffer, dispatching at
+runtime on a small integer KIND tag read from that value's own type
+descriptor (_get_or_build_type_descriptor lazily builds one static
+descriptor per distinct Type, memoized by structural identity so a
+self-referential struct's own descriptor -- e.g. `struct Node: []Node
+children` -- terminates correctly: the descriptor's own label is
+reserved before recursing into its element type, so the recursive
+reference resolves to an already-known label rather than looping
+forever). It's added to the program's own function list only if
+print() is actually used anywhere (see generate()'s own _print_used
+check) -- a program that never prints shouldn't pay for it.
 
-gen_print_collection: ONE LOOP, NOT UNROLLED-VS-LOOPED
-------------------------------------------------------------
-An array's length is known at compile time; a slice's is only known
-at runtime. Rather than unroll an array's printing at compile time
-(fewer instructions, but a second code path to maintain) and loop only
-for a slice, _gen_print_collection uses ONE uniform runtime loop for
-both, reusing gen_indexable_base_into's own "address plus length,
-either an Imm or a runtime register" abstraction directly -- the
-comparison that ends the loop just works with whichever Operand comes
-back, uniformly, exactly like gen_index_address_into's own bounds
-check already does.
+Formatting, by kind:
+  int/bool/str: the same as printing one bare -- digits, "true"/
+    "false", or (quoted with single quotes, UNLESS this is the
+    outermost value of the whole print() call -- see quote_strings)
+    the string's own bytes.
+  array/slice: `NAME[elem, elem, ...]` -- e.g. `[3]int[1, 2, 3]` or
+    `[]int[1, 2, 3]` -- NAME is the type's own name (matching
+    semantic.Type.__str__ exactly: "[3]int", "[]int", ...), read out
+    of the type descriptor's own second field (see _get_or_build_
+    type_descriptor) and printed at EVERY level a value of this kind
+    appears, not just the outermost one a print() call names
+    directly -- a nested row of a [2][3]int shows its own "[3]int"
+    name too (`[2][3]int[[3]int[1, 2, 3], [3]int[4, 5, 6]]`), rather
+    than suppressing it just because it's nested.
+  struct: `NAME(field: value, field: value, ...)` -- NAME is the
+    struct's own declared name (e.g. "Point"), read out of the type
+    descriptor the same way, then each field's own declared name,
+    ": ", then its value, in declaration order, read at runtime out
+    of the struct's own type descriptor (a list of (name, type_desc,
+    byte_offset) triples), not unrolled per field at compile time --
+    the same "one loop, not one code path per shape" choice
+    arrays/slices already made over compile-time unrolling, extended
+    one level further. Like array/slice, this name is printed at
+    every level, so a struct field that's itself a struct shows its
+    own name too (`Outer(inner: Inner(v: 99))`).
 
-%rbx (the base address), %r12 (the length, when it's a runtime value),
-and %r13 (the loop counter) are all CALLEE-SAVED, not the caller-saved
-scratch (rax, rcx, rdx, ...) most of this file's transient
-computations already use -- because all three have to survive across
-every printf/puts call the loop body makes, at least one per element,
-and a well-behaved libc call is obligated to preserve a callee-saved
-register the same way another Hornet function already has to. A
-nested array element (this method's own recursive case, for a multi-
-dimensional array's rows) protects all three on the stack across the
-RECURSIVE call specifically, since that call reuses these same three
-physical registers for its own, independent address/length/counter --
-the same push-before-recursing discipline used everywhere else in this
-file a value needs to survive evaluating something else, just applied
-to a whole recursive call instead of a single sub-expression.
+Every element or field VALUE nested inside a collection or struct is
+printed with quote_strings=1 hardcoded at that specific recursive call
+site -- a str nested this way is always quoted, unambiguous next to
+its own neighbors, regardless of whether the OUTERMOST print() call's
+own argument was quoted (it never is: quote_strings=0 always, at the
+one, single call site gen_print_call_into itself makes).
 
-print's own argument, when array- or slice-typed, is restricted to a
-Variable or Index -- the same restriction gen_array_arg_address_into
-already imposes on array-typed call arguments, for the same reason: a
-bare ArrayLiteral, Slice, or array/slice-returning Call has no address
-of its own to print through. Assign it to a named variable first.
+print's own argument, when array-, slice-, or struct-typed, is
+restricted to a Variable, Field, or Index -- the same restriction
+gen_array_arg_address_into already imposes on array-typed call
+arguments, for the same reason: a bare literal, or a call returning
+one of these types, has no address of its own to print through, and
+(unlike a scalar int/bool/str) these can be arbitrarily large, so
+there's no fixed-size scratch slot that could safely hold an
+arbitrary one anyway. Assign it to a named variable first.
 
 LEN BUILTIN
 ----------------
@@ -1574,49 +1585,23 @@ boundary rather than a silently discovered gap:
   - `==` ON STRUCTS. Two structs' equality isn't checked or generated
     at all yet -- deferred rather than building field-by-field
     structural comparison for a phase that doesn't need it yet.
-  - `print` ON A STRUCT. Deliberately skipped for this phase, and NOT
-    a small addition being deferred for lack of time: printing already
-    works by building a fixed format string per call site (see
-    PRINTING ARRAYS AND SLICES above) and reaching for a single, fixed
-    libc call: this doesn't extend cleanly to a struct's own,
-    arbitrarily-nested field structure the way it already barely does
-    for arrays. The right fix is a real string-BUILDING facility (an
-    actual growable buffer, assembled with real control flow, rather
-    than one fixed format string chosen once at compile time) that
-    print for every type -- not just struct -- should eventually route
-    through, which is its own, separate undertaking, out of scope for
-    struct support itself.
-    value in this phase is built field-by-field, through an ordinary
-    VarDecl (implicitly zero-valued) followed by individual FieldAssign
-    statements -- there's no single-expression way to construct a
-    fully-populated struct value yet. Deferred by explicit choice, not
-    because it's hard: the concrete syntax was an open design question
-    (a brace-delimited composite literal needs new lexer tokens that
-    don't exist yet; a positional, call-like form risks colliding with
-    ordinary function-call parsing, since this compiler's parser has no
-    symbol table to disambiguate "MyStruct(...)" from an ordinary call
-    at parse time) left for its own follow-up once actually needed.
-  - `==` ON STRUCTS. Two structs' equality isn't checked or generated
-    at all yet -- deferred rather than building field-by-field
-    structural comparison for a phase that doesn't need it yet.
-  - `print` ON A STRUCT. Deliberately skipped for this phase, and NOT
-    a small addition being deferred for lack of time: printing already
-    works by building a fixed format string per call site (see
-    PRINTING ARRAYS AND SLICES above) and reaching for a single, fixed
-    libc call: this doesn't extend cleanly to a struct's own,
-    arbitrarily-nested field structure the way it already barely does
-    for arrays. The right fix is a real string-BUILDING facility (an
-    actual growable buffer, assembled with real control flow, rather
-    than one fixed format string chosen once at compile time) that
-    print for every type -- not just struct -- should eventually route
-    through, which is its own, separate undertaking, out of scope for
-    struct support itself.
+
+(`print` on a struct was ALSO deliberately deferred at this point in
+the project's own history -- printing then still worked by building a
+fixed format string per call site, which didn't extend cleanly to a
+struct's own arbitrarily-nested field structure. That gap has since
+been closed: see the module docstring's own PRINTING section above
+for the real, growable-buffer-based mechanism -- hornet_stringify --
+that now backs every type's own print output, struct included.)
 """
+
 
 import argparse
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple, Union
 
+from codegen.escape_analysis import analyze_array_escapes, is_heap_allocated
+from codegen.utils import leaf_type, type_byte_width
 from lexer import lex
 from parser import (
     ArrayLiteral,
@@ -1888,6 +1873,35 @@ class IDiv(Instruction):
 
 
 @dataclass
+class Div(Instruction):
+    """Divides the 64-bit %edx:%eax pair by `operand` (UNSIGNED, unlike
+    IDiv). Quotient in %eax, remainder in %edx, same as IDiv -- the
+    only difference is the interpretation of the bits, so %edx must be
+    explicitly zeroed first (`movl $0, %edx`), never sign-extended via
+    Cdq, which would inject a sign bit into a value this instruction is
+    about to treat as having none.
+
+    Exists specifically for converting an int's own MAGNITUDE to
+    decimal digits (see the print machinery's own int-to-string
+    conversion) without ever risking a signed-overflow trap: negating
+    INT_MIN in ordinary 32-bit two's complement doesn't actually change
+    its bit pattern at all (there's no positive counterpart to negate
+    to), but that SAME bit pattern, read as unsigned rather than
+    signed, correctly represents INT_MIN's own magnitude
+    (2147483648) -- a value that doesn't fit in a signed 32-bit int at
+    all, but fits an unsigned one perfectly. Dividing that magnitude
+    with Div rather than IDiv is what lets the digit-extraction loop
+    stay in ordinary 32-bit arithmetic throughout, with no need for a
+    64-bit widening step anywhere, while still handling every int
+    value -- including this one specific edge case -- correctly."""
+    operand: Operand
+    mnemonic = "divl"
+
+    def operands(self) -> List[str]:
+        return [self.operand.emit()]
+
+
+@dataclass
 class And(Instruction):
     """dst &= src (bitwise AND)."""
     src: Operand
@@ -2058,6 +2072,27 @@ class MovQ(Instruction):
 
 
 @dataclass
+class MovB(Instruction):
+    """8-bit mov (`movb`). Needed the first time this compiler ever
+    copies a single BYTE to or from memory, as opposed to a 4-byte
+    int/bool or an 8-byte pointer/qword -- see the print-buffer growth
+    machinery this exists for. Both operands must already be 8-bit
+    themselves (an 8-bit register alias, e.g. Register('al') via
+    as_byte_register, an Imm, or a byte-addressed Memory location) --
+    unlike Mov/MovQ, there's no separate 8-bit General-purpose register
+    name at all (%al IS %eax's own low byte, not a distinct register),
+    so passing a 32-bit Register here would silently assemble as
+    something else entirely rather than raising a clear error; callers
+    are responsible for using as_byte_register first."""
+    src: Operand
+    dst: Operand
+    mnemonic = "movb"
+
+    def operands(self) -> List[str]:
+        return [self.src.emit(), self.dst.emit()]
+
+
+@dataclass
 class SubQ(Instruction):
     """64-bit subtract (`subq`). Used exactly once per function, in the
     prologue, to reserve stack space for locals: `subq $N, %rsp`."""
@@ -2157,6 +2192,37 @@ class Ja(Instruction):
 
 
 @dataclass
+class Jle(Instruction):
+    """Jump to `target` if the last Cmp found dst <= src, using a
+    SIGNED interpretation -- unlike Jae/Ja, which are unsigned
+    (array/slice lengths and indices, where a negative value needs to
+    be caught by reinterpreting it as huge). Needed for the print
+    buffer's own bulk-append growth check (see gen_buffer_append_
+    bytes_into): comparing `needed` against `cap`, both ordinary,
+    already-validated non-negative ints where a signed comparison is
+    the natural, and here equivalent, choice -- matching how every
+    ordinary int comparison elsewhere in this file (_COMPARISON_
+    CONDITION_CODES) is already signed by default."""
+    target: str
+    mnemonic = "jle"
+
+    def operands(self) -> List[str]:
+        return [self.target]
+
+
+@dataclass
+class Jg(Instruction):
+    """Jump to `target` if the last Cmp found dst > src, using a
+    SIGNED interpretation -- the strict-inequality counterpart to
+    Jle, for the identical reason and the identical use site."""
+    target: str
+    mnemonic = "jg"
+
+    def operands(self) -> List[str]:
+        return [self.target]
+
+
+@dataclass
 class Ret(Instruction):
     mnemonic = "ret"
 
@@ -2177,6 +2243,20 @@ class AsmProgram:
     # live at the AsmProgram level and get emitted once, in a shared
     # `.data` block, by Emitter (see its emit()).
     string_literals: List[tuple] = field(default_factory=list)
+    # (label, fields) pairs for every runtime type descriptor built for
+    # the print machinery (see CodeGenerator._get_or_build_type_
+    # descriptor) -- the first place this compiler has ever needed any
+    # runtime type information at all, since every other type-driven
+    # decision anywhere else happens entirely at compile time. Each
+    # `fields` entry is a flat list of ints (emitted as a literal
+    # `.quad N`) and label-name strings (emitted as `.quad label`, a
+    # perfectly ordinary assembler/linker relocation -- the same
+    # mechanism behind a vtable or jump table in any real compiled
+    # language, nothing new at the ASSEMBLY level, just new on this
+    # compiler's own emission side). Structured identically to string_
+    # literals for the identical reason: static, immutable, not tied to
+    # any one function's own frame.
+    type_descriptors: List[tuple] = field(default_factory=list)
 
 
 # 32-bit register name -> its 8-bit low-byte alias (e.g. %eax -> %al).
@@ -2186,6 +2266,9 @@ class AsmProgram:
 # alongside whatever new registers the code generator starts using.
 _BYTE_REGISTER_ALIASES = {
     'eax': 'al',
+    'edx': 'dl',  # needed by the print machinery's own int-to-decimal
+    # conversion, which computes each digit as a remainder in %edx and
+    # needs to write it out as a single byte.
 }
 
 
@@ -2246,880 +2329,63 @@ _ARG_REGISTERS_32 = ['edi', 'esi', 'edx', 'ecx', 'r8d', 'r9d']
 _CALLEE_SAVED_SCRATCH_REGISTERS = ['rbx', 'r12', 'r13', 'r14']
 
 
-def type_byte_width(t: Type, structs: Dict[str, StructInfo]) -> int:
-    """Total bytes needed to store a value of type `t`: 4 for int/bool,
-    8 for str (a pointer), 24 for a slice (its own fixed-size
-    descriptor -- {ptr, len, cap}, 8 bytes each, in that order,
-    matching Go's own slice header layout -- see the SLICES section --
-    regardless of what it's a slice OF: two slices of different
-    element types are still both 24 bytes, unlike two arrays of
-    different element types or sizes), recursively `size *
-    type_byte_width(element_type)` for an array -- its full, flattened
-    stack footprint, matching how it's laid out contiguously in
-    row-major order regardless of how many dimensions it has (see the
-    ARRAYS section) -- and, for a struct, the SUM of type_byte_width
-    over each of its own fields' types, in declaration order (see the
-    STRUCTS section) -- exactly the same "flatten it and add up the
-    pieces" idea the array case already uses, just over a
-    heterogeneous field list instead of N copies of one element type.
-    `structs` is this program's own struct registry (see StructInfo in
-    semantic.py), needed to look up a struct type's own field list by
-    name; threaded through every recursive call the same way type_
-    from_name's own registry parameter is. This is the one place that
-    recursion lives; every caller that needs an array's or struct's
-    total size (stack allocation, whole-value copies) or the shift-
-    per-index/per-field (address computation) goes through this or
-    leaf_type below rather than re-deriving either."""
-    if t.kind == TypeKind.ARRAY:
-        return t.size * type_byte_width(t.element_type, structs)
-    if t.kind == TypeKind.SLICE:
-        return 24
-    if t.kind == TypeKind.STR:
-        return 8
-    if t.kind == TypeKind.STRUCT:
-        return sum(type_byte_width(field_type, structs) for field_type in structs[t.struct_name].fields.values())
-    return 4  # INT, BOOL
+# Kind tags for the print machinery's own runtime type descriptors --
+# see CodeGenerator._get_or_build_type_descriptor and AsmProgram's own
+# type_descriptors field. Plain small ints, embedded directly as a
+# descriptor's own first .quad field; the hand-built stringify runtime
+# function (see PRINTING) switches on this to decide how to interpret
+# everything that follows it in that same descriptor.
+_TYPEDESC_INT = 0
+_TYPEDESC_BOOL = 1
+_TYPEDESC_STR = 2
+_TYPEDESC_ARRAY = 3
+_TYPEDESC_SLICE = 4
+_TYPEDESC_STRUCT = 5
 
 
-def leaf_type(t: Type) -> Type:
-    """Recursively unwraps array types to find the innermost, non-array
-    element type -- e.g. for [2][3]int, the leaf type is int. Used
-    wherever codegen needs to know the actual SCALAR type stored at
-    the bottom of a (possibly multi-dimensional) array, e.g. to decide
-    whether a flat element-by-element copy should move 4 or 8 bytes at
-    a time -- a multi-dimensional array is just one contiguous block
-    of leaf values for copying purposes, with no per-dimension logic
-    needed once this is known.
-
-    Stops at a SLICE the same way it already stops at STR -- neither
-    is unwrapped further, since both are copied as one fixed-size
-    unit (a pointer, or a {pointer, length} pair) rather than
-    recursed into element by element. An array whose ELEMENTS are
-    themselves slices (`[3][]int`) is a real gap this leaves --
-    gen_array_copy's own flat-copy loop only knows how to move 4 or 8
-    bytes at a time, not a slice descriptor's 16 -- see its own
-    docstring for the explicit, deliberate rejection this leads to,
-    rather than a silent miscompile."""
-    while t.kind == TypeKind.ARRAY:
-        t = t.element_type
-    return t
-
-
-# Fixed, hardcoded threshold for size-based stack safety (see the
-# module docstring's ARRAYS section). Any array-typed local or
-# parameter whose total flattened footprint (type_byte_width) exceeds
-# this many bytes is heap-allocated instead of living inline in its
-# own stack slot -- a deliberately simple, PER-ARRAY check, not a
-# per-frame budget: it catches the single-array case (one huge local
-# or parameter that would blow the stack on its own) but not, say,
-# five moderately-sized arrays in the same function each individually
-# under the limit, or a moderate array in a deeply recursive call
-# chain. Both are known, accepted gaps, not oversights -- closing them
-# would mean summing every local's width per frame (or per call
-# chain), which is real additional complexity for a problem this
-# simple, per-array check already solves for the common case that
-# actually matters: one array declared far too large for the stack.
-#
-# 16KB, not the more "principled" 4KB single-page size: generous
-# enough that ordinary matrix-shaped code (e.g. a [50][50]int, exactly
-# 10000 bytes) doesn't get quietly promoted to the heap by surprise,
-# while still leaving a wide safety margin against the default ~8MB
-# stack budget even under moderate recursion (8MB / 16KB = 512
-# same-sized frames before exhaustion).
-_STACK_ARRAY_LIMIT_BYTES = 16384
-
-
-def is_heap_allocated(t: Type, structs: Dict[str, StructInfo]) -> bool:
-    """Whether a value of type `t` is heap-allocated rather than stored
-    inline in its own stack slot purely because of its OWN size -- true
-    for an array OR STRUCT type whose total footprint (type_byte_width)
-    exceeds _STACK_ARRAY_LIMIT_BYTES, false for every scalar type and
-    every array/struct under the limit. A struct gets exactly the same
-    size-based treatment an array already does -- both are value types
-    whose own footprint is a genuine, unbounded property of their own
-    declared shape (an array's size, or a struct's own field list),
-    not something this compiler controls -- so the identical risk
-    (one huge local or parameter blowing the stack on its own) applies
-    equally to both, and gets the identical fix. Purely a function of
-    the type itself, not of any per-variable state, so it's never
-    stored anywhere -- anywhere codegen already has the Type (via
-    _local_type or _type_of), it can just call this directly.
-
-    This is NOT the only reason a particular array ends up heap-
-    allocated any more -- see analyze_array_escapes below for the
-    other, independent trigger (a small array that backs a slice which
-    escapes the function it's declared in still needs to survive past
-    that function's own return, regardless of its size) -- so a
-    caller deciding whether a SPECIFIC, NAMED variable needs heap
-    allocation should go through CodeGenerator._is_heap_allocated
-    instead, which combines this size check with that escape-analysis
-    result; this function alone only ever answers the size half of
-    that question."""
-    return t.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and type_byte_width(t, structs) > _STACK_ARRAY_LIMIT_BYTES
-
-
-def analyze_array_escapes(fn: Function, param_types: List[Type], structs: Dict[str, StructInfo]) -> Set[int]:
-    """Returns the set of id()s -- of this function's own VarDecl or
-    Param nodes -- for array-typed declarations that need to be heap-
-    allocated because a slice backed by them might outlive this
-    function's own call, REGARDLESS of their own size. This is what
-    closes the real memory-safety gap size-based heap promotion alone
-    left open: a small, stack-allocated array, sliced and returned
-    (directly, or via a named slice variable, or after an `append`
-    that happened to reuse its backing storage), leaves the returned
-    slice's own pointer field dangling into a stack frame that's
-    already been torn down by the time anything reads it again.
-
-    An intraprocedural, FLOW-INSENSITIVE analysis: it doesn't reason
-    about the order statements execute in, or which branch of an
-    if/while actually runs -- every assignment to a given slice
-    variable ANYWHERE in the function is unioned together into one
-    combined "what might this be backed by" answer, used uniformly
-    wherever that variable is read. This is a real, deliberate
-    simplification (a variable reused for two logically-unrelated
-    slices at different points in the same function gets treated as
-    if it could be either one everywhere), not an oversight -- it
-    avoids needing a genuine fixed-point dataflow pass over branches
-    and loops, which true flow sensitivity would require even before
-    any function calls enter the picture, for a level of precision
-    ordinary code doesn't often need. The SAME flow-insensitive
-    treatment now also covers a slice stored as an element of an
-    AGGREGATE -- today, specifically an array- or slice-of-slices
-    (`rows[i] = arr[:]`) -- see AGGREGATES AND SLOTS below for what
-    that word is doing here and why it's phrased more generally than
-    "array-of-slices" alone, and for how this now composes correctly
-    at ANY depth: `matrix[i][j] = arr[:]` (an aggregate reached
-    through a further Index, not a bare Variable) and `s1[0:3][0:2]`
-    (a Slice reached through another Slice, with no intermediate
-    named variable at all) both resolve to the correct root
-    declaration's own shared slot, not just the single-hop case. Two
-    further, real limitations, each deliberately out of scope for now
-    rather than silently mishandled:
-      - Purely INTRAprocedural: a slice passed as an argument to any
-        user-defined function call is conservatively treated as
-        escaping unconditionally, without looking at what the callee
-        actually does with it (does it store it somewhere that
-        outlives the call, or just read it and let it go). A real
-        interprocedural version would need a per-function escape
-        SUMMARY, computed for every function in dependency order --
-        and since Hornet allows recursion, computing those soundly
-        needs a genuine fixed-point iteration over the call graph, not
-        a single pass. That's a substantially larger undertaking than
-        this, and left for its own, separate follow-up.
-      - A slice stored as an element of something that ISN'T itself a
-        declared local or parameter -- e.g. through a pointer-like
-        indirection this language doesn't actually have -- was never
-        in scope to begin with and remains so.
-
-    The algorithm itself has two phases:
-      1. Walk the function body once (recursing into every If's own
-         then_body/else_body and every While's own body, maintaining a
-         scope stack so a name resolves to the SPECIFIC declaration it
-         actually refers to at that point -- Hornet allows shadowing a
-         name in a nested block, so a plain name-based lookup would
-         risk conflating two entirely different variables), building:
-           - direct_backing: for each trackable node (a slice-typed
-             declaration OR an aggregate's own slot -- see AGGREGATES
-             AND SLOTS below), which array-typed declaration(s) it's
-             ever directly sliced from (`s = arr[low:high]`, or
-             `s = matrix[i][low:high]` -- indexing into a multi-
-             dimensional array's own row is still a view into the SAME
-             backing storage, not a copy, so this unwraps nested Index
-             nodes down to their root Variable rather than requiring a
-             bare one).
-           - slice_deps: for each trackable node, which OTHER trackable
-             node(s) it might in turn be derived from (re-slicing a
-             slice, a plain slice-to-slice copy, `append` -- which
-             might reuse its own first argument's backing array -- or
-             reading an element back out of an aggregate).
-           - escaping_slices / escaping_arrays: nodes directly marked
-             as escaping, from a `return` statement's own value or a
-             slice/array-typed argument passed to a user-defined call
-             (found via a full recursive scan of every expression for
-             a nested Call, not just ones at a statement's own top
-             level -- `return foo(bar(s))` still needs `s` to be
-             checked as bar's own argument even though the RETURN
-             itself is really about foo's result, not s directly).
-
-         AGGREGATES AND SLOTS: this is the piece that exists purely to
-         make the NEXT thing built on top of this analysis (struct
-         support) a small addition rather than a third near-copy of
-         very similar logic -- see the module's own note on why this
-         was worth doing as its own, standalone step before struct
-         work starts. An "aggregate" is any declaration that can hold
-         MULTIPLE independently-accessed values, at least one of which
-         might be slice-typed -- today, that's exactly the array- and
-         slice-of-slices case, but a struct is exactly this too, just
-         with named fields instead of indices. A "slot" identifies
-         WHICH part of the aggregate is being accessed; slot_node_id
-         gives every distinct (aggregate declaration, slot) pair its
-         own stable, synthesized node id (a small negative integer,
-         guaranteed distinct from every real id() -- id() is always a
-         positive address in CPython -- and from every other slot's own
-         id, generated once per pair and memoized in aggregate_slot_ids
-         for every later request), then registers THAT id in the very
-         SAME slice_decls/direct_backing/slice_deps structures a bare
-         slice-typed declaration already uses. Nothing downstream --
-         not the transitive closure walk, not contribution()'s own
-         callers -- needs to know or care whether a node id it's
-         holding came from id()-ing a real declaration or from
-         slot_node_id: they're both just integers in the same graph.
-
-         Only one KIND of slot exists right now: indexed_slot_of
-         recognizes `rows[i]` (an Index) or `rows[i] = ...`
-         (IndexAssign's own target) -- and, more generally, any chain
-         of Index and/or Slice operations reached through however many
-         further Index/Slice steps precede it (`matrix[i][j]`,
-         `s1[0:3][0:2]`, any mix, at any depth -- see root_variable_
-         name, which unwraps the whole chain down to whatever bare
-         Variable underlies it) -- where indexing the immediate base
-         ONE more time would yield a slice-typed result, and maps the
-         ROOT declaration to the slot key _AGGREGATE_ELEMENTS_SLOT -- a
-         single, SHARED slot for the whole declaration, regardless of
-         which actual index evaluates to what at runtime, or how many
-         levels of indexing/re-slicing separate a particular access
-         from that root, since indices are dynamic values this
-         analysis can't distinguish without real per-index tracking (a
-         different, larger undertaking, and not attempted here -- see
-         the limitations list above). This is exactly the "one
-         combined blob per declaration" flow-insensitive treatment a
-         bare slice variable already gets, just extended to an
-         aggregate's elements collectively, at whatever depth they're
-         reached from.
-
-         The "one more level would yield a slice" guard is checked
-         directly against the immediate base's own resolved_type (its
-         element_type, specifically), NOT via a recursive "does this
-         eventually contain a slice somewhere" walk -- those are
-         answering two different questions, and conflating them is a
-         real bug an earlier version of this had: for `rows[0][0]`
-         where rows: [1][]int, the outer Index's own base is `rows[0]`
-         (itself slice-typed), and indexing that ONE more time yields
-         an INT, not a slice -- reading a plain int value OUT of a
-         slice has nothing to do with rows' own role as a slice-
-         holding aggregate, and must NOT resolve to rows' own slot
-         just because rows, considered as a whole, happens to contain
-         a slice somewhere. whole_value_node_of's OWN check (does the
-         aggregate, taken as a whole, contain a slice at ANY depth of
-         array nesting -- see _contains_slice) is the right question
-         for a WHOLE-VALUE read (`return rows`, no indexing at all);
-         indexed_slot_of's own, narrower, one-level check is the right
-         question for "would indexing this ONE more time give me a
-         slice" -- and both are needed, for different callers, rather
-         than one subsuming the other.
-
-         WHOLE-VALUE READS OF AN AGGREGATE ALSO GO THROUGH THE SAME
-         SLOT, not a separate one: `return rows`, `rows2 = rows`, and
-         `rows` passed as a call argument all resolve to indexed_slot_
-         of's own node (via whole_value_node_of, contribution()'s and
-         the VarDecl/Assign target-resolution's shared entry point for
-         "what node tracks whatever this name's value is"), exactly
-         like reading `rows[i]` does -- not a second, disconnected node
-         that happens to sit next to it. This matters concretely, not
-         just tidily: `rows` and `rows2` in `rows2 = rows` alias the
-         SAME backing storage (copying a slice descriptor is a shallow,
-         alias-preserving copy, the same as anywhere else in this
-         language), so a later `rows[0] = arr[:]` has to still be
-         visible through `rows2[0]` -- and, just as much, through a
-         bare `return rows2` -- for this analysis to stay sound. This
-         wasn't a hypothetical worth hardening pre-emptively: an
-         earlier version of this exact refactor gave whole-aggregate
-         reads their OWN separate node instead of sharing indexed_slot_
-         of's, and `return rows` (with nothing ever indexing into it
-         at all) silently stopped resolving to anything -- caught by
-         testing the refactor against the very scenarios it was
-         supposed to preserve, not found by inspection.
-
-         FIELD access (`s.my_ints`) got its own analogous function --
-         field_slot_of -- doing the same shape of recognition (does
-         accessing this thing resolve to a declaration whose type
-         needs the aggregate-elements slot treatment) one kind of
-         access over. It deliberately does NOT give each field its
-         own separate, precise slot the way a field name's static
-         (unlike a dynamic array index) would in principle allow --
-         `s.a` and `s.b` share the SAME slot as each other, and as any
-         other field of the same declaration, exactly the "one
-         combined blob" treatment `rows[i]` and `rows[j]` already get.
-         Per-field precision was the original plan, but building it
-         out surfaced a real complication: a struct-to-struct copy of
-         just PART of a struct (`i = outer.inner`, copying one field's
-         own sub-struct without touching outer's OTHER fields) would
-         need to precisely propagate only the sub-struct's own field
-         slots to `i`'s own -- correct, but a genuinely larger
-         mechanism than contribution()'s existing "resolve to exactly
-         one node" shape supports without a much bigger refactor.
-         Lumping every field into one shared slot per declaration
-         keeps this an incremental extension of exactly the same
-         machinery indexed_slot_of already established, at the cost of
-         the identical kind of precision loss already accepted for
-         array elements -- sound, just coarser than strictly necessary
-         for two logically-independent slice fields on the same
-         struct. whole_value_node_of got the analogous extension too --
-         a bare `Variable` referring to a struct falls back to it
-         exactly like an aggregate-of-slices does, so `return s`
-         resolves to that struct's own single combined slot the same
-         deliberate way `return rows` resolves to indexed_slot_of's.
-
-         An array-typed aggregate (`[N][]int`) is registered in BOTH
-         array_decls (for its own, unrelated existing role -- e.g.
-         `rows[0:2]`, slicing the aggregate itself, still works via the
-         existing array_decls/root_variable_name path) and, via its
-         slot(s), the unified slice-tracking structure (for its role as
-         a holder of slice elements) -- these are two independent
-         things a single declaration can be, not a conflict between
-         them.
-      2. Compute the transitive closure from escaping_slices, following
-         slice_deps edges (an ordinary graph reachability walk -- BFS
-         via an explicit stack, not recursion, so it can't stack-
-         overflow on a pathologically long dependency chain), unioning
-         in direct_backing at every node reached along the way, plus
-         escaping_arrays found directly. The result is exactly the set
-         of array declarations that need to survive past this
-         function's own return.
-    """
-    array_decls: Set[int] = set()
-    slice_decls: Set[int] = set()
-    decl_types: Dict[int, Type] = {}
-    direct_backing: Dict[int, Set[int]] = {}
-    slice_deps: Dict[int, Set[int]] = {}
-    escaping_slices: Set[int] = set()
-    escaping_arrays: Set[int] = set()
-    aggregate_slot_ids: Dict[Tuple[int, str], int] = {}
-
-    scopes: List[Dict[str, int]] = [{}]
-
-    def resolve(name: str) -> Optional[int]:
-        for scope in reversed(scopes):
-            if name in scope:
-                return scope[name]
-        return None
-
-    def declare(name: str, decl_id: int, decl_type: Type) -> None:
-        scopes[-1][name] = decl_id
-        decl_types[decl_id] = decl_type
-        if decl_type.kind == TypeKind.ARRAY:
-            array_decls.add(decl_id)
-        if decl_type.kind == TypeKind.SLICE:
-            slice_decls.add(decl_id)
-            direct_backing.setdefault(decl_id, set())
-            slice_deps.setdefault(decl_id, set())
-
-    for p, p_type in zip(fn.params, param_types):
-        declare(p.name, id(p), p_type)
-
-    def slot_node_id(container_id: int, slot: str) -> int:
-        """The one piece of plumbing every aggregate kind shares --
-        see AGGREGATES AND SLOTS above. Deliberately agnostic to what
-        `slot` actually means (an index-sentinel today, a field name
-        once structs exist): callers decide what a slot IS; this just
-        gives each distinct (container_id, slot) pair a stable node id
-        in the shared slice-tracking graph, synthesizing one the first
-        time that exact pair is seen and returning the same one every
-        time after."""
-        key = (container_id, slot)
-        if key not in aggregate_slot_ids:
-            node_id = -(len(aggregate_slot_ids) + 1)  # always negative;
-            # id() is always a positive address in CPython, so this can
-            # never collide with a real declaration's own node id.
-            aggregate_slot_ids[key] = node_id
-            slice_decls.add(node_id)
-            direct_backing.setdefault(node_id, set())
-            slice_deps.setdefault(node_id, set())
-        return aggregate_slot_ids[key]
-
-    _AGGREGATE_ELEMENTS_SLOT = '[]'  # the one shared slot for a WHOLE
-    # aggregate declaration -- an array-/slice-of-slices (used by
-    # indexed_slot_of) or a struct containing a slice-typed field, at
-    # any depth of nesting (used by field_slot_of below) -- regardless
-    # of which specific index or field is involved (see AGGREGATES AND
-    # SLOTS above for why); the SAME sentinel serves both kinds of
-    # aggregate, not two separate ones, since a given declaration is
-    # always either array/slice-shaped or struct-shaped, never both,
-    # so there's never a risk of the two meanings colliding for the
-    # same declaration. Chosen because '[' and ']' can never appear in
-    # a Hornet identifier, so this can never collide with an actual
-    # field name either, if a per-field sentinel were ever needed.
-
-    def indexed_slot_of(base_expr: Node) -> Optional[int]:
-        """Recognizes `base_expr` as something that, indexed ONE more
-        time, produces a slice -- `rows` in `rows[i]` (where rows is
-        an array/slice of slices), `matrix[i]` in `matrix[i][j]`
-        (where indexing matrix[i] one more time reaches a slice, even
-        though matrix[i] ITSELF is still an array), `s1[0:3]` in
-        `s1[0:3][0:2]`, any mix of Index/Slice at any depth -- and
-        resolves it to whatever ROOT Variable underlies the whole
-        chain (see root_variable_name), returning that root's own
-        shared indexed-elements slot id (see slot_node_id).
-
-        The guard here is deliberately checking base_expr's own
-        IMMEDIATE element_type (does indexing base_expr ONE more time
-        yield a slice), NOT whole_value_node_of's own, separate
-        _contains_slice check (does the aggregate contain a slice at
-        ANY depth) -- these are answering two different questions, and
-        conflating them is a real bug this function used to have: for
-        `rows[0][0]` where rows: [1][]int, the OUTER Index's own base
-        is `rows[0]` (itself slice-typed), and indexing that ONE more
-        time yields an INT, not a slice -- reading a plain int value
-        OUT of a slice has nothing to do with rows' own role as a
-        slice-holding aggregate at all, and must NOT resolve to rows'
-        own slot just because rows, considered as a whole, happens to
-        contain a slice somewhere. Checking base_expr's own element_
-        type directly (rather than recursing arbitrarily deep the way
-        _contains_slice does) is exactly precise enough for this,
-        specifically because base_expr's own resolved_type already
-        reflects however many prior levels of indexing produced it --
-        there's never a need to look any further than one level ahead
-        from here.
-
-        Returns None if base_expr's own type isn't an array or slice
-        at all, if indexing it one more time wouldn't yield a slice,
-        or if the chain doesn't resolve to a bare Variable at its root
-        (a Call, an ArrayLiteral, ...)."""
-        base_type = base_expr.resolved_type
-        if base_type is None or base_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE):
-            return None
-        element_type = base_type.element_type
-        if element_type is None or element_type.kind != TypeKind.SLICE:
-            return None
-        root_name = root_variable_name(base_expr)
-        if root_name is None:
-            return None
-        return whole_value_node_of(root_name)
-
-    def field_slot_of(field_expr: Field) -> Optional[int]:
-        """Recognizes field_expr (`p.values`, `p.inner.values`, ...)
-        as a struct field access that reads or writes a value needing
-        this analysis's own tracking -- the field itself is slice-
-        typed, or is an aggregate (array or struct) that itself
-        contains a slice at some depth (see _contains_slice) -- and
-        resolves it to whatever ROOT Variable underlies the whole
-        access chain (see root_variable_name, which unwraps Field,
-        Index, and Slice together, in any mix), returning that root's
-        own shared aggregate-elements slot id (see slot_node_id) --
-        the SAME slot indexed_slot_of gives an array/slice-of-slices
-        declaration, and whole_value_node_of gives a struct considered
-        as a whole. Deliberately ONE combined slot per root
-        declaration, not a separate one per distinct field path (`p.a`
-        and `p.b` share the SAME slot, even though a field name -- unlike
-        a dynamic array index -- is known statically and so COULD in
-        principle get its own precise one): giving every field its own
-        slot would mean a struct-to-struct copy of just a PART of a
-        struct (`i = outer.inner`, copying one field's own sub-struct
-        without touching outer's OTHER fields) needs to precisely
-        propagate only the sub-struct's own field slots to `i`'s own
-        -- correct, but a genuinely larger mechanism than this
-        analysis's existing "resolve to exactly one node" shape
-        supports without a much bigger refactor. Lumping every field
-        of a given declaration into one shared slot instead keeps this
-        an incremental extension of the exact same machinery indexed_
-        slot_of already established, at the cost of the identical kind
-        of precision loss already accepted for array elements (`rows[0]`
-        and `rows[1]` already share one slot too) -- sound (a write
-        into any field still correctly makes anything the WHOLE
-        declaration reaches escape when it needs to), just coarser
-        than necessary in the specific case of two logically-
-        independent slice fields on the same struct.
-
-        Mirrors indexed_slot_of's own "one more level" guard exactly,
-        one kind of access over: checking field_expr's OWN resolved
-        field type directly (not a recursive walk of the root struct's
-        EVERY field) is what keeps this precise for the identical
-        reason indexed_slot_of needs to be -- `p.x` (a plain int
-        field) must NOT resolve to p's own combined slot just because
-        p, considered as a whole, happens to have some OTHER slice-
-        typed field; only a field access that itself touches slice-
-        shaped storage does.
-
-        Returns None if field_expr's base isn't struct-typed, that
-        struct is unknown, or field_expr.name isn't a real field of it
-        (all three already guaranteed impossible by the time semantic
-        analysis has passed -- this stays defensive rather than
-        assuming), if the field's own type doesn't contain a slice at
-        all, or if the chain doesn't resolve to a bare Variable at its
-        root."""
-        base_type = field_expr.base.resolved_type
-        if base_type is None or base_type.kind != TypeKind.STRUCT:
-            return None
-        struct_info = structs.get(base_type.struct_name)
-        if struct_info is None or field_expr.name not in struct_info.fields:
-            return None
-        field_type = struct_info.fields[field_expr.name]
-        if not _contains_slice(field_type):
-            return None
-        root_name = root_variable_name(field_expr)
-        if root_name is None:
-            return None
-        return whole_value_node_of(root_name)
-
-    def _contains_slice(t: Type) -> bool:
-        """True if `t` is itself a slice, or contains one at ANY depth
-        of further array nesting (`[N]T`, `[N][M]T`, ...) or struct
-        field nesting (a struct field, a nested struct's own field,
-        ...), in any mix of the two -- e.g. True for `[]int` directly,
-        for `[5][]int`, for a struct with a `[]int` field, for a
-        struct with an `[5]OtherStruct` field where OtherStruct itself
-        has a slice-typed field, and so on, with no depth limit either
-        way. Recursing into a STRUCT's own fields (via `structs`, this
-        program's own registry, closed over from analyze_array_
-        escapes's own parameter) is safe from infinite recursion even
-        for a self-referential struct (`struct Node: []Node children`,
-        now a real, legal, intentional pattern once slice-typed fields
-        are supported at all -- see semantic.py's own _check_struct_
-        contains for why a slice field is deliberately NOT treated as
-        a sizing cycle): the SLICE case above is always checked FIRST
-        and returns True immediately without recursing any further, so
-        this can never recurse back into the SAME struct through a
-        slice field -- and semantic.py's own cycle detection already
-        guarantees the only way a struct could ever reach itself again
-        at all is THROUGH one, since a direct or array-embedded self-
-        reference is rejected outright. Any struct cycle that could
-        exist by the time this ever runs is therefore guaranteed to
-        pass through a slice-typed field, which this returns True for
-        without descending any further -- so this recursion always
-        terminates.
-
-        Used by whole_value_node_of (does a WHOLE declaration's own
-        type need the shared aggregate-elements slot treatment) and by
-        field_slot_of (does accessing a SPECIFIC field need it) -- see
-        AGGREGATES AND SLOTS in this analysis's own docstring. Checking
-        at ANY depth, not just one level, in either direction, is what
-        closes the "2D (or deeper) array-of-slices" gap a depth-one
-        check would otherwise still have, independent of (and in
-        addition to) root_variable_name's own, separate fix for
-        unwrapping a multi-level access CHAIN down to its root."""
-        if t.kind == TypeKind.SLICE:
-            return True
-        if t.kind == TypeKind.ARRAY:
-            return _contains_slice(t.element_type)
-        if t.kind == TypeKind.STRUCT:
-            struct_info = structs.get(t.struct_name)
-            if struct_info is None:
-                return False
-            return any(_contains_slice(field_type) for field_type in struct_info.fields.values())
-        return False
-
-    def whole_value_node_of(name: str) -> Optional[int]:
-        """Resolves `name` to the node id this analysis's graph uses
-        to track EVERYTHING relevant about the value it holds --
-        deliberately shared with indexed_slot_of's own notion of "the
-        declaration's indexed-elements slot" when `name` is an
-        aggregate-of-slices, since a whole-aggregate read (`return
-        rows`, `rows2 = rows`, `rows` passed to a call) has to be
-        treated as being just as capable of exposing ANY element's own
-        backing as reading one element out directly is -- they're the
-        SAME underlying storage, so they get the SAME node, not two
-        disconnected ones that would silently stop propagating into
-        each other. The identical reasoning now covers a STRUCT
-        declaration too: `return p` has to be just as capable of
-        exposing any of p's own slice-typed fields' backing as reading
-        one field out directly is, so a struct whose type contains a
-        slice at some depth (see _contains_slice) also resolves here,
-        to the SAME shared slot field_slot_of gives its own individual
-        fields -- see AGGREGATES AND SLOTS for why a struct's fields
-        are deliberately lumped into ONE combined slot per declaration
-        rather than getting their own separate ones. Falls back to
-        `name`'s own bare declaration id for an ORDINARY slice-typed
-        declaration (not an aggregate at all), exactly like before
-        this function existed. Returns None if `name` doesn't resolve
-        to anything this analysis tracks.
-
-        The aggregate check itself (_contains_slice) looks arbitrarily
-        far down through array nesting AND struct field nesting, in
-        any mix, not just one level or one kind -- `[5][]int` (array
-        nesting), a struct with a `[]int` field (struct nesting), and
-        a struct with an array-of-structs field where THAT struct has
-        a slice field (both, mixed) all correctly resolve to `name`'s
-        own shared slot."""
-        decl_id = resolve(name)
-        if decl_id is None:
-            return None
-        decl_type = decl_types.get(decl_id)
-        if decl_type is not None:
-            if decl_type.kind in (TypeKind.ARRAY, TypeKind.SLICE):
-                element_type = decl_type.element_type
-                if element_type is not None and _contains_slice(element_type):
-                    return slot_node_id(decl_id, _AGGREGATE_ELEMENTS_SLOT)
-            elif decl_type.kind == TypeKind.STRUCT and _contains_slice(decl_type):
-                return slot_node_id(decl_id, _AGGREGATE_ELEMENTS_SLOT)
-        if decl_id in slice_decls:
-            return decl_id
-        return None
-
-
-    def root_variable_name(expr: Node) -> Optional[str]:
-        """Unwraps a chain of Index, Slice, AND Field nodes down to
-        whatever bare Variable, if any, ultimately sits underneath --
-        e.g. for `matrix[i][j]`, `s1[0:3][0:2]`, `p.inner.values`, or
-        any mix of the three, all the way down to the root -- since
-        NEITHER indexing, NOR re-slicing, NOR field access changes
-        which declaration's own backing storage a value traces back
-        to (a Slice is a VIEW, an Index reads out of the SAME
-        underlying storage, and a Field reads out of the SAME
-        underlying storage one level over -- a struct's own fields are
-        embedded inline in its own layout, not a separate allocation,
-        exactly the same relationship an array has to its own
-        elements), so the whole chain, regardless of length or which
-        of the three operations appears at each step, resolves to the
-        SAME root for this analysis's own flow-insensitive purposes.
-        Index and Slice both expose the thing being unwrapped as
-        `.array`; Field exposes it as `.base` instead -- the two
-        attribute names are handled explicitly rather than assuming
-        one covers both. Returns None if the chain bottoms out at
-        anything else (a Call, an ArrayLiteral, ...) -- neither of
-        those is backed by one of THIS function's own named
-        declarations at all, so there's nothing to resolve to."""
-        while isinstance(expr, (Index, Slice, Field)):
-            expr = expr.base if isinstance(expr, Field) else expr.array
-        return expr.name if isinstance(expr, Variable) else None
-
-    def _unwrap_slices(expr: Node) -> Node:
-        """Unwraps a chain of Slice nodes (re-slicing, `s[0:3][0:2]`)
-        down to whatever is actually being sliced underneath -- a bare
-        Variable, an Index (reading an element out of an aggregate),
-        or a Field (reading a struct field) -- since re-slicing never
-        changes what backs a value: it's always exactly whatever
-        backed the thing being re-sliced, at any depth of re-slicing.
-        Deliberately does NOT unwrap Index or Field the way root_
-        variable_name does (all the way down to a bare Variable) --
-        this stops one level earlier, specifically so contribution's
-        own Slice case can distinguish "the innermost thing being
-        sliced is a bare Variable" (root_variable_name's own job, a
-        RAW array/slice declaration) from "the innermost thing being
-        sliced is itself reading a slice out of an aggregate"
-        (indexed_slot_of's/field_slot_of's own job, an aggregate's own
-        combined slot) -- these need genuinely different resolution,
-        not the same one, and conflating them was a real, separately-
-        rooted bug: `rows[0][0:2]` (re-slicing an aggregate ELEMENT)
-        used to resolve via root_variable_name straight to `rows`
-        itself, then check raw array_decls membership -- which matched
-        (rows IS an array declaration), but resolved to the WRONG
-        thing entirely: rows' own storage, not whatever rows[0]'s own
-        slice descriptor actually points at. Found the same way the
-        deeper-indexing and chained-re-slicing gaps were: by tracing
-        through what SHOULD happen for a shape not yet covered by an
-        existing test, then confirming the gap end to end (compiling,
-        running, and forcing a large intervening stack write to
-        actually surface the corruption) before fixing it."""
-        while isinstance(expr, Slice):
-            expr = expr.array
-        return expr
-
-    def contribution(value_expr: Node) -> Tuple[Optional[int], Optional[int]]:
-        """Returns (array_decl_id, slice_decl_id) -- whichever ONE of
-        the two value_expr's own aliasing actually resolves to (never
-        both), or (None, None) if it isn't backed by any of this
-        function's own declarations at all (a fresh literal, `none`,
-        an ordinary user-function call's own return value, ...). An
-        aggregate's own slot id (see AGGREGATES AND SLOTS above) is
-        returned as the second element here exactly like a bare slice
-        Variable's own id would be -- callers don't need to know or
-        care that it came from indexing into an aggregate rather than
-        reading a plain slice variable directly."""
-        if isinstance(value_expr, Slice):
-            # Re-slicing never changes what backs a value, so unwrap
-            # any further re-slicing FIRST (`s[0:3][0:2]`) down to
-            # whatever's actually being sliced -- see _unwrap_slices's
-            # own docstring for why this stops at, rather than through,
-            # an Index or Field: those need indexed_slot_of's/field_
-            # slot_of's own aggregate-slot resolution tried FIRST, with
-            # a fallback to the plain root-declaration check right
-            # below when that resolution doesn't apply -- e.g.
-            # `matrix[1][0:2]` (slicing a plain SUB-ARRAY row out of a
-            # multi-dimensional array with no slices involved anywhere)
-            # has inner = Index(matrix, 1), but indexed_slot_of(matrix)
-            # correctly returns None (indexing matrix one more time
-            # yields another array, not a slice) -- so this must still
-            # fall through to resolving matrix itself as the raw array
-            # that needs to escape, exactly like the plain-Variable
-            # case just below already does.
-            inner = _unwrap_slices(value_expr.array)
-            slot_id = None
-            if isinstance(inner, Index):
-                slot_id = indexed_slot_of(inner.array)
-            elif isinstance(inner, Field):
-                slot_id = field_slot_of(inner)
-            if slot_id is not None:
-                return None, slot_id
-            base_name = root_variable_name(inner)
-            if base_name is not None:
-                base_id = resolve(base_name)
-                if base_id in array_decls:
-                    return base_id, None
-                if base_id in slice_decls:
-                    return None, base_id
-        elif isinstance(value_expr, Variable):
-            node_id = whole_value_node_of(value_expr.name)
-            if node_id is not None:
-                return None, node_id
-        elif isinstance(value_expr, Index):
-            # Reading an element back out of a declared aggregate --
-            # e.g. `rows[i]` -- resolves to that aggregate's own
-            # indexed-elements slot.
-            slot_id = indexed_slot_of(value_expr.array)
-            if slot_id is not None:
-                return None, slot_id
-        elif isinstance(value_expr, Field):
-            # Reading a slice-typed (or slice-containing) field back
-            # out of a declared struct -- e.g. `p.values` -- resolves
-            # to that struct's own combined aggregate-elements slot,
-            # structurally identical to the Index case just above, one
-            # kind of access over.
-            slot_id = field_slot_of(value_expr)
-            if slot_id is not None:
-                return None, slot_id
-        elif isinstance(value_expr, Call) and value_expr.name == 'append':
-            # append's own first argument might reuse ITS OWN backing
-            # storage (the reuse path -- see gen_append_call_into), so
-            # whatever that argument itself resolves to is exactly
-            # this call's own contribution too. Recursing into
-            # contribution() here (rather than only handling a bare
-            # Variable) means append's first argument gets the SAME
-            # treatment any other slice-valued expression already
-            # does -- an aggregate element (`append(rows[0], v)`), an
-            # unnamed slice expression (`append(arr[0:2], v)`), or
-            # even another append call's own result -- not just a
-            # named slice variable.
-            return contribution(value_expr.args[0])
-        return None, None
-
-
-    def scan_expr_for_escaping_calls(expr: Node) -> None:
-        if isinstance(expr, Call):
-            if expr.name not in ('print', 'len', 'append'):
-                for arg in expr.args:
-                    array_id, slice_id = contribution(arg)
-                    if array_id is not None:
-                        escaping_arrays.add(array_id)
-                    if slice_id is not None:
-                        escaping_slices.add(slice_id)
-            for arg in expr.args:
-                scan_expr_for_escaping_calls(arg)
-        elif isinstance(expr, Binary):
-            scan_expr_for_escaping_calls(expr.left)
-            scan_expr_for_escaping_calls(expr.right)
-        elif isinstance(expr, Unary):
-            scan_expr_for_escaping_calls(expr.operand)
-        elif isinstance(expr, Index):
-            scan_expr_for_escaping_calls(expr.array)
-            scan_expr_for_escaping_calls(expr.index)
-        elif isinstance(expr, Slice):
-            scan_expr_for_escaping_calls(expr.array)
-            if expr.low is not None:
-                scan_expr_for_escaping_calls(expr.low)
-            if expr.high is not None:
-                scan_expr_for_escaping_calls(expr.high)
-        elif isinstance(expr, ArrayLiteral):
-            for element in expr.elements:
-                scan_expr_for_escaping_calls(element)
-        elif isinstance(expr, Field):
-            # A pre-existing gap this closes alongside the struct-
-            # field escape work, not something new introduced by it:
-            # `foo(bar()).x` (a nested call underneath a Field access)
-            # needs bar()'s own argument-escaping check just as much
-            # as any other sub-expression does -- this was never
-            # reached at all before, regardless of whether the field
-            # itself ends up being slice-relevant.
-            scan_expr_for_escaping_calls(expr.base)
-        # Variable, Constant, BoolLiteral, StringLiteral, NoneLiteral:
-        # leaves, nothing further to recurse into.
-
-    def walk_statements(statements: List[Node]) -> None:
-        for stmt in statements:
-            if isinstance(stmt, VarDecl):
-                var_type = type_from_name(stmt.var_type, structs)
-                declare(stmt.name, id(stmt), var_type)
-                if stmt.init is not None:
-                    target_node = whole_value_node_of(stmt.name)
-                    if target_node is not None:
-                        array_id, slice_id = contribution(stmt.init)
-                        if array_id is not None:
-                            direct_backing[target_node].add(array_id)
-                        if slice_id is not None:
-                            slice_deps[target_node].add(slice_id)
-                    scan_expr_for_escaping_calls(stmt.init)
-            elif isinstance(stmt, Assign):
-                target_node = whole_value_node_of(stmt.name)
-                if target_node is not None:
-                    array_id, slice_id = contribution(stmt.value)
-                    if array_id is not None:
-                        direct_backing[target_node].add(array_id)
-                    if slice_id is not None:
-                        slice_deps[target_node].add(slice_id)
-                scan_expr_for_escaping_calls(stmt.value)
-            elif isinstance(stmt, IndexAssign):
-                slot_id = indexed_slot_of(stmt.array)
-                if slot_id is not None:
-                    array_id, slice_id = contribution(stmt.value)
-                    if array_id is not None:
-                        direct_backing[slot_id].add(array_id)
-                    if slice_id is not None:
-                        slice_deps[slot_id].add(slice_id)
-                scan_expr_for_escaping_calls(stmt.array)
-                scan_expr_for_escaping_calls(stmt.index)
-                scan_expr_for_escaping_calls(stmt.value)
-            elif isinstance(stmt, FieldAssign):
-                # Mirrors IndexAssign exactly, one kind of access over
-                # -- field_slot_of needs an actual Field node, not
-                # stmt directly: root_variable_name's own isinstance
-                # check (which field_slot_of calls into) only
-                # recognizes Index/Slice/Field, not FieldAssign, so
-                # duck-typing stmt.base/stmt.name through it silently
-                # fails to unwrap anything at all, always returning
-                # None -- a real bug this construction fixes, found by
-                # testing (a struct escaping via return, with a slice
-                # field previously written through FieldAssign, failed
-                # to promote its own backing array at all) rather than
-                # by inspection.
-                slot_id = field_slot_of(Field(base=stmt.base, name=stmt.name))
-                if slot_id is not None:
-                    array_id, slice_id = contribution(stmt.value)
-                    if array_id is not None:
-                        direct_backing[slot_id].add(array_id)
-                    if slice_id is not None:
-                        slice_deps[slot_id].add(slice_id)
-                scan_expr_for_escaping_calls(stmt.base)
-                scan_expr_for_escaping_calls(stmt.value)
-            elif isinstance(stmt, Return):
-                if stmt.value is not None:
-                    array_id, slice_id = contribution(stmt.value)
-                    if array_id is not None:
-                        escaping_arrays.add(array_id)
-                    if slice_id is not None:
-                        escaping_slices.add(slice_id)
-                    scan_expr_for_escaping_calls(stmt.value)
-            elif isinstance(stmt, ExprStmt):
-                scan_expr_for_escaping_calls(stmt.expr)
-            elif isinstance(stmt, If):
-                scan_expr_for_escaping_calls(stmt.condition)
-                scopes.append({})
-                walk_statements(stmt.then_body)
-                scopes.pop()
-                if stmt.else_body is not None:
-                    scopes.append({})
-                    walk_statements(stmt.else_body)
-                    scopes.pop()
-            elif isinstance(stmt, While):
-                scan_expr_for_escaping_calls(stmt.condition)
-                scopes.append({})
-                walk_statements(stmt.body)
-                scopes.pop()
-            # Break, Continue: nothing to do.
-
-    walk_statements(fn.body)
-
-    result: Set[int] = set(escaping_arrays)
-    visited: Set[int] = set()
-    stack: List[int] = list(escaping_slices)
-    while stack:
-        slice_id = stack.pop()
-        if slice_id in visited:
-            continue
-        visited.add(slice_id)
-        result |= direct_backing.get(slice_id, set())
-        for dep in slice_deps.get(slice_id, set()):
-            if dep not in visited:
-                stack.append(dep)
-    return result
+# Fixed %rbp-relative local-slot layout for the hand-built hornet_
+# stringify runtime function (see CodeGenerator.build_stringify_
+# function) -- every local this function ever needs, across every
+# branch, gets its own distinct 8-byte slot (16 for the itoa scratch),
+# never reused between branches even though ARRAY/SLICE and STRUCT are
+# mutually exclusive within one call: stack space is cheap, and giving
+# every value an unambiguous, permanent name is worth far more than
+# the handful of bytes saved by overlapping slots across branches that
+# never actually run together. All are spilled-to-immediately-on-entry
+# and reloaded-as-needed throughout, rather than kept live in
+# registers across this function's own recursive calls to itself --
+# registers don't survive a nested call the way a value in a fixed
+# %rbp-relative slot does, and getting that distinction wrong (keeping
+# something "cached" in a register across a call that might itself
+# need that same register) is exactly the shape of bug that cost real
+# time earlier in this same effort (see gen_buffer_append_bytes_into's
+# own %ecx-across-malloc story) -- so here, deliberately, NOTHING
+# stays in a register across a call unless that call's own contract
+# explicitly guarantees it (a callee-saved register, used the same way
+# gen_append_call_into already relies on malloc preserving %rbx/%r12/
+# %r13).
+_STRINGIFY_VALUE_ADDR = -8
+_STRINGIFY_TYPE_DESC = -16
+_STRINGIFY_QUOTE_STRINGS = -24
+_STRINGIFY_BUF_STATE_ADDR = -32
+_STRINGIFY_ITOA_SCRATCH = -48       # 16 bytes: -48 .. -33
+_STRINGIFY_LOOP_INDEX = -56
+_STRINGIFY_ELEM_ADDR = -64
+_STRINGIFY_ELEM_TYPE_DESC = -72
+_STRINGIFY_COLLECTION_LENGTH = -80
+_STRINGIFY_ELEM_WIDTH = -88
+_STRINGIFY_FIELD_COUNT = -96
+_STRINGIFY_FIELD_NAME_ADDR = -104
+_STRINGIFY_STR_PTR_SCRATCH = -112
+_STRINGIFY_STR_LEN_SCRATCH = -120
+_STRINGIFY_SLICE_BASE_PTR = -128    # a slice's own backing-array pointer, read from value_addr's
+                                     # own runtime {ptr, len, cap} descriptor -- ARRAY's own
+                                     # value_addr already points AT the data directly, but SLICE's
+                                     # own value_addr points at a descriptor one level of
+                                     # indirection away, so this needs its own slot
+_STRINGIFY_FIELD_TYPE_DESC = -136
+_STRINGIFY_FIELD_OFFSET = -144
+_STRINGIFY_FRAME_SIZE = 144  # already a multiple of 16; see build_stringify_function's own alignment note
 
 
 # ---------------------------------------------------------------------------
@@ -3142,6 +2408,7 @@ class CodeGenerator:
         self.scopes: List[Dict[str, tuple]] = []  # name -> (offset, Type), generation-time; see LOCAL VARIABLES
         self.loop_labels: List[tuple] = []  # stack of (start_label, end_label), innermost last; see LOOPS
         self.string_literals: List[tuple] = []  # (label, content) pairs; see STRINGS
+        self.type_descriptors: List[tuple] = []  # (label, fields) pairs; see PRINTING and AsmProgram's own docstring
         # Set once, at the very start of generate(), from Program.
         # struct_registry (itself stashed there by semantic.analyze --
         # see SemanticAnalyzer.analyze's own struct-collection pass).
@@ -3157,9 +2424,15 @@ class CodeGenerator:
         # only these) get a small dedicated cache rather than following
         # string_literals' usual "every occurrence gets its own label,
         # no dedup" policy.
-        self._int_format_label = None
         self._true_str_label = None
         self._false_str_label = None
+        self._comma_space_label = None  # ", " -- the print machinery's own element/field separator
+        self._colon_space_label = None  # ": " -- between a struct field's own name and its value
+        # Set the first time gen_print_call_into actually runs; checked
+        # in generate() to decide whether hornet_stringify itself needs
+        # to be added to the program's own function list at all --
+        # a program that never calls print() shouldn't pay for it.
+        self._print_used = False
         # Lazily created, but with different lifetimes from each other
         # -- see _get_bounds_check_fail_label/_get_bounds_check_message_
         # label's own docstrings. The fail labels are reset per function
@@ -3217,7 +2490,9 @@ class CodeGenerator:
             )
         self.struct_registry = program.struct_registry
         functions = [self.gen_function(fn) for fn in program.functions]
-        return AsmProgram(functions=functions, string_literals=self.string_literals)
+        if self._print_used:
+            functions.append(self.build_stringify_function())
+        return AsmProgram(functions=functions, string_literals=self.string_literals, type_descriptors=self.type_descriptors)
 
     def gen_function(self, fn: Function) -> AsmFunction:
         # Fresh allocator state per function -- variables don't persist
@@ -3292,6 +2567,35 @@ class CodeGenerator:
         # frames nest).
         self._next_offset -= 24
         self._unnamed_slice_temp_offset = self._next_offset
+
+        # A third, small (8-byte) scratch slot -- also reserved
+        # unconditionally for every function -- used by gen_print_
+        # call_into to materialize a non-Variable int/bool/str
+        # argument (e.g. `print(x + 1)`, `print(a.name)`) so hornet_
+        # stringify always has a real address to read from, exactly
+        # the same "one shared slot, safe because each use is fully
+        # consumed before the next one can start" reasoning as the
+        # unnamed-slice slot just above -- see gen_print_call_into's
+        # own docstring for why array/slice/struct arguments don't
+        # need (and can't safely share) a slot like this one: those
+        # can be arbitrarily large, so print requires a Variable or
+        # Index for them instead of ever materializing a copy.
+        self._next_offset -= 8
+        self._print_scalar_temp_offset = self._next_offset
+
+        # A fourth scratch slot (24 bytes) -- the {ptr, len, cap}
+        # triple gen_print_call_into's own growable buffer lives in.
+        # Reserved unconditionally alongside the others above, for the
+        # same reason: a print() call's own buffer setup needs
+        # somewhere real to live for the duration of one print() call,
+        # and reusing a single shared slot is safe by the same
+        # non-overlapping-lifetime argument -- one print() call's own
+        # buffer is fully written out and freed before the next one
+        # (or any nested print inside a printed expression's own
+        # evaluation, though print itself never returns a value that
+        # could be printed again) could possibly start using this slot.
+        self._next_offset -= 24
+        self._print_buf_state_temp_offset = self._next_offset
 
         # One extra, purely internal temp slot per parameter, used to
         # stash its incoming register value(s) immediately, before any
@@ -4174,7 +3478,7 @@ class CodeGenerator:
         capacity from the new starting point, rather than simply
         matching the newly-computed len (high - low) the way it used
         to before cap-aware re-slicing existed -- see the module
-        docstring's APPEND BUILTIN section for why this and `append`
+        docstring's APPEND BUILTIN section for why this and `append[O`
         itself landed together rather than as two separate,
         sequential pieces of work: with every other slice-producing
         site setting cap equal to len, there was no way to observe or
@@ -4562,6 +3866,151 @@ class CodeGenerator:
             instructions.append(Mov(src=Register('r8d'), dst=Memory(addr_reg.name, 0)))
         return instructions
 
+    def _gen_grow_and_append_one_into(
+        self,
+        r_ptr: Register, r_len: Register, r_len_32: Register,
+        r_cap: Register, r_cap_32: Register,
+        element_width: int,
+        copy_one_element,
+        write_new_value_at,
+    ) -> List[Instruction]:
+        """The reuse-vs-reallocate growth core shared by gen_append_
+        call_into and (see gen_buffer_append_byte_into) the print
+        buffer's own single-byte append -- factored out of what used
+        to be gen_append_call_into's own, sole implementation of this
+        exact policy, specifically so a second, parallel copy of the
+        identical growth arithmetic never has to exist. See gen_
+        append_call_into's own docstring for the growth-policy
+        arithmetic itself (new_cap = cap*2 if cap < 256, else cap +
+        cap//4, with a cap==0 floor of 1) and the reuse-vs-reallocate
+        reasoning behind it -- unchanged here, just no longer
+        duplicated.
+
+        Operates entirely on registers the caller has already loaded
+        with a live {ptr, len, cap} triple (both the 64-bit register
+        and its own 32-bit view, passed explicitly as a pair for each
+        of len/cap, matching how every other place in this file that
+        needs both already keeps them as two separate Register values
+        rather than deriving one from the other) -- never on a Memory
+        location directly. Loading the initial triple from wherever it
+        actually lives, and writing the final one back out afterward
+        (or, for the print buffer's own case, simply leaving it live in
+        registers across many further appends without ever touching
+        Memory at all), is entirely the caller's own responsibility.
+
+        Internally fixed scratch, matching gen_append_call_into's own
+        original, unfactored version exactly: %r8/%r8d, %r9d, %r10/
+        %r10d, %r11/%r11d, %eax/%ecx, and %r14. Callers must choose
+        their own ptr/len/cap registers to avoid these.
+
+        `copy_one_element(dst_addr, src_addr)` is called once per
+        existing element, ONLY on the reallocate path, to move it from
+        the old backing array into the new one -- gen_append_call_into
+        passes one that calls gen_array_copy for element_type; the
+        print buffer passes one that just moves a single byte.
+
+        `write_new_value_at(target_addr)` is called exactly once, at
+        the correct final address for the newly appended element (in
+        whichever backing array ends up live -- the original, on the
+        reuse path, or the freshly malloc'd one, on the reallocate
+        path) -- gen_append_call_into passes one that evaluates an
+        arbitrary Hornet expression via _gen_write_value_at_address_
+        into; the print buffer passes one that writes an already-
+        computed raw byte operand directly. Neither callback needs to
+        know how the other one works, or how growth itself is decided.
+
+        On return, r_ptr/r_len/r_cap (and their 32-bit views) hold the
+        FINAL triple: len always incremented by exactly one, ptr
+        repointed to a fresh block if reallocation happened,
+        unchanged otherwise."""
+        instructions = []
+        realloc_label = self.new_label("append_realloc")
+        end_label = self.new_label("append_end")
+
+        # len >= cap (equivalently, given len <= cap always, len ==
+        # cap exactly) means no spare room -- must reallocate.
+        instructions.append(Cmp(src=r_cap_32, dst=r_len_32))
+        instructions.append(Jae(realloc_label))
+
+        # REUSE PATH: len < cap. target = ptr + len*element_width.
+        target_addr = Register('r10')
+        instructions.append(MovQ(src=r_ptr, dst=target_addr))
+        instructions.append(Mov(src=r_len_32, dst=Register('r11d')))
+        instructions.append(IMul(src=Imm(element_width), dst=Register('r11d')))
+        instructions.append(AddQ(src=Register('r11'), dst=target_addr))
+        instructions.extend(write_new_value_at(target_addr))
+        instructions.append(Add(src=Imm(1), dst=r_len_32))
+        instructions.append(Jmp(end_label))
+
+        # REALLOCATE PATH: len == cap. new_cap computed from cap alone,
+        # in place -- the old cap value is never needed again once
+        # this decides new_cap, so overwriting r_cap_32 here is safe.
+        instructions.append(Label(realloc_label))
+        zero_label = self.new_label("append_cap_zero")
+        quarter_label = self.new_label("append_cap_quarter")
+        growth_done_label = self.new_label("append_growth_done")
+
+        instructions.append(Cmp(src=Imm(0), dst=r_cap_32))
+        instructions.append(Je(zero_label))
+        instructions.append(Cmp(src=Imm(256), dst=r_cap_32))
+        instructions.append(Jae(quarter_label))
+        instructions.append(IMul(src=Imm(2), dst=r_cap_32))
+        instructions.append(Jmp(growth_done_label))
+        instructions.append(Label(zero_label))
+        instructions.append(Mov(src=Imm(1), dst=r_cap_32))
+        instructions.append(Jmp(growth_done_label))
+        instructions.append(Label(quarter_label))
+        instructions.append(Mov(src=r_cap_32, dst=Register('eax')))
+        instructions.append(Mov(src=Imm(2), dst=Register('ecx')))
+        instructions.append(ShiftRightArithmetic(dst=r_cap_32))
+        instructions.append(Add(src=Register('eax'), dst=r_cap_32))
+        instructions.append(Label(growth_done_label))
+        # r_cap_32 (and, via the zero-extension a 32-bit write always
+        # gives its own 64-bit register, r_cap itself) now holds
+        # new_cap.
+
+        instructions.append(Mov(src=r_cap_32, dst=Register('edi')))
+        instructions.append(IMul(src=Imm(element_width), dst=Register('edi')))
+        instructions.append(CallInstr('malloc'))
+        r_new_ptr = Register('r14')
+        instructions.append(MovQ(src=Register('rax'), dst=r_new_ptr))
+
+        # Copy the existing len elements from the OLD array (r_ptr)
+        # into the NEW one (r_new_ptr) via copy_one_element, a genuine
+        # RUNTIME loop since len is a runtime value here.
+        loop_start_label = self.new_label("append_copy_loop")
+        loop_done_label = self.new_label("append_copy_done")
+        i_32 = Register('r9d')
+        instructions.append(Mov(src=Imm(0), dst=i_32))
+        instructions.append(Label(loop_start_label))
+        instructions.append(Cmp(src=r_len_32, dst=i_32))
+        instructions.append(Jae(loop_done_label))
+        instructions.append(Mov(src=i_32, dst=Register('r11d')))
+        instructions.append(IMul(src=Imm(element_width), dst=Register('r11d')))
+        instructions.append(MovQ(src=r_ptr, dst=Register('r10')))
+        instructions.append(AddQ(src=Register('r11'), dst=Register('r10')))
+        instructions.append(MovQ(src=r_new_ptr, dst=Register('r8')))
+        instructions.append(AddQ(src=Register('r11'), dst=Register('r8')))
+        instructions.extend(copy_one_element(Register('r8'), Register('r10')))
+        instructions.append(Add(src=Imm(1), dst=i_32))
+        instructions.append(Jmp(loop_start_label))
+        instructions.append(Label(loop_done_label))
+
+        # Write the new element at new_ptr + len*element_width -- the
+        # one slot the copy loop above deliberately left untouched.
+        target_addr2 = Register('r10')
+        instructions.append(MovQ(src=r_new_ptr, dst=target_addr2))
+        instructions.append(Mov(src=r_len_32, dst=Register('r11d')))
+        instructions.append(IMul(src=Imm(element_width), dst=Register('r11d')))
+        instructions.append(AddQ(src=Register('r11'), dst=target_addr2))
+        instructions.extend(write_new_value_at(target_addr2))
+
+        instructions.append(Add(src=Imm(1), dst=r_len_32))
+        instructions.append(MovQ(src=r_new_ptr, dst=r_ptr))
+
+        instructions.append(Label(end_label))
+        return instructions
+
     def gen_append_call_into(self, expr: Call, dst_mem: Memory) -> List[Instruction]:
         """`append(s, value)` -- Go-style: writes a NEW {ptr, len, cap}
         descriptor into dst_mem, never mutating s's own three fields
@@ -4593,60 +4042,25 @@ class CodeGenerator:
 
         s's own three fields are loaded into CALLEE-SAVED registers
         (%rbx/%r12/%r13 for ptr/len/cap) -- not caller-saved ones --
-        specifically because the REALLOCATE path below calls malloc,
-        which (like any real, ABI-conforming function) is free to
-        clobber any caller-saved register but is OBLIGATED to preserve
-        callee-saved ones; the exact same guarantee gen_array_literal_
-        heap_alloc_into and gen_function's own heap-allocated-parameter
-        handling already rely on.
+        specifically because the REALLOCATE path (inside _gen_grow_
+        and_append_one_into) calls malloc, which (like any real, ABI-
+        conforming function) is free to clobber any caller-saved
+        register but is OBLIGATED to preserve callee-saved ones -- the
+        exact same guarantee gen_array_literal_heap_alloc_into and
+        gen_function's own heap-allocated-parameter handling already
+        rely on.
 
-        The reuse-vs-reallocate decision is a single comparison: len
-        >= cap means no spare room (the only way that can happen,
-        given the invariant len <= cap always holds, is len == cap
-        exactly), so `jae` -- not `jne` or `jg` -- is both correct and
-        sufficient.
-
-        REUSE PATH (len < cap): the new element is written directly
-        into the EXISTING backing array, at ptr + len*element_width --
-        s's own array, still fully intact and unaffected, since s's
-        own len field is never touched. This is the observable
-        aliasing this whole growth policy exists to make possible: a
-        LATER append on some other slice that shares this same backing
-        array (e.g. one produced by an earlier append that over-
-        allocated) can see this write, and vice versa.
-
-        REALLOCATE PATH (len == cap): new_cap is computed from cap
-        alone (the growth policy -- see below), a fresh block of
-        new_cap*element_width bytes is malloc'd, the existing len
-        elements are copied into it via a genuine RUNTIME loop (len is
-        a runtime value here, unlike every other array copy in this
-        file, which always moves a compile-time-known number of
-        bytes -- see the loop's own comments), and only then is the
-        new element written into the new array. The OLD backing array
-        is simply never freed, matching this compiler's existing
-        no-`free`-anywhere memory model everywhere else.
-
-        GROWTH POLICY: new_cap = cap*2 if cap < 256, else cap +
-        cap//4, with a cap==0 floor of 1. This is the general max(len+1,
-        doubled-or-quartered) formula simplified: reallocation only
-        ever happens when len == cap exactly, so `needed` (len+1) is
-        always cap+1, and doubling already exceeds cap+1 for any cap
-        >= 1 (quartering trivially does too, for cap >= 256) -- the
-        max only actually matters, and only ever resolves in needed's
-        favor, at cap == 0, which is exactly the explicit floor case
-        here. cap/4 is computed via a right shift by 2 (arithmetic,
-        though cap's own non-negativity means a logical shift would
-        give the identical result) rather than idiv -- idiv can't take
-        an immediate divisor at all on x86, and a shift is simpler
-        besides.
-
-        Both paths write value into its final resting place via
-        _gen_write_value_at_address_into, sharing one implementation
-        for a scalar, array, or slice element type alike, and both
-        protect dst_mem.base (whenever it isn't 'rbp') across their own
-        entire computation the same way every other slice-producing
-        case in this file does -- popped back only immediately before
-        the final three-field write actually needs it.
+        The actual growth policy -- the reuse-vs-reallocate decision,
+        the growth-policy arithmetic itself, the copy-existing-
+        elements loop -- lives entirely in _gen_grow_and_append_one_
+        into now, shared with the print buffer's own single-byte
+        append; this method's own remaining job is just materializing
+        s into registers beforehand, and writing the final triple to
+        dst_mem afterward, protecting dst_mem.base (whenever it isn't
+        'rbp') across the whole thing the same way every other slice-
+        producing case in this file does -- popped back only
+        immediately before the final three-field write actually
+        needs it.
         """
         slice_arg, value_arg = expr.args
         slice_type = self._type_of(slice_arg)
@@ -4689,112 +4103,1022 @@ class CodeGenerator:
             instructions.append(MovQ(src=Memory('rbp', scratch + 8), dst=r_len))
             instructions.append(MovQ(src=Memory('rbp', scratch + 16), dst=r_cap))
 
-        realloc_label = self.new_label("append_realloc")
-        end_label = self.new_label("append_end")
+        instructions.extend(self._gen_grow_and_append_one_into(
+            r_ptr, r_len, r_len_32, r_cap, r_cap_32, element_width,
+            copy_one_element=lambda dst, src: self.gen_array_copy(
+                Memory(dst.name, 0), Memory(src.name, 0), element_type
+            ),
+            write_new_value_at=lambda target: self._gen_write_value_at_address_into(
+                value_arg, element_type, target
+            ),
+        ))
 
-        # len >= cap (equivalently, given len <= cap always, len ==
-        # cap exactly) means no spare room -- must reallocate.
-        instructions.append(Cmp(src=r_cap_32, dst=r_len_32))
-        instructions.append(Jae(realloc_label))
-
-        # REUSE PATH: len < cap. target = ptr + len*element_width.
-        target_addr = Register('r10')
-        instructions.append(MovQ(src=r_ptr, dst=target_addr))
-        instructions.append(Mov(src=r_len_32, dst=Register('r11d')))
-        instructions.append(IMul(src=Imm(element_width), dst=Register('r11d')))
-        instructions.append(AddQ(src=Register('r11'), dst=target_addr))
-        instructions.extend(self._gen_write_value_at_address_into(value_arg, element_type, target_addr))
-        instructions.append(Add(src=Imm(1), dst=r_len_32))
         if protect_dst:
             instructions.append(Pop(Register(dst_mem.base)))
         instructions.append(MovQ(src=r_ptr, dst=Memory(dst_mem.base, dst_mem.offset)))
         instructions.append(MovQ(src=r_len, dst=Memory(dst_mem.base, dst_mem.offset + 8)))
         instructions.append(MovQ(src=r_cap, dst=Memory(dst_mem.base, dst_mem.offset + 16)))
-        instructions.append(Jmp(end_label))
+        return instructions
 
-        # REALLOCATE PATH: len == cap. Compute new_cap from cap alone
-        # (see this method's own docstring for the growth-policy
-        # arithmetic), in place -- the old cap value is never needed
-        # again once this decides new_cap, so overwriting r_cap_32
-        # here is safe.
-        instructions.append(Label(realloc_label))
-        zero_label = self.new_label("append_cap_zero")
-        quarter_label = self.new_label("append_cap_quarter")
-        growth_done_label = self.new_label("append_growth_done")
+    def gen_buffer_append_byte_into(
+        self,
+        r_ptr: Register, r_len: Register, r_len_32: Register,
+        r_cap: Register, r_cap_32: Register,
+        byte_value: Operand,
+    ) -> List[Instruction]:
+        """Appends exactly ONE byte to a growable byte buffer already
+        held in r_ptr/r_len/r_cap (and their own 32-bit views) -- the
+        print machinery's own single-character append, sharing the
+        identical growth policy `append()` itself uses (see _gen_
+        grow_and_append_one_into) with element_width=1 and a byte-
+        sized write/copy in place of a general Hornet element type's
+        own gen_array_copy/_gen_write_value_at_address_into.
 
-        instructions.append(Cmp(src=Imm(0), dst=r_cap_32))
-        instructions.append(Je(zero_label))
-        instructions.append(Cmp(src=Imm(256), dst=r_cap_32))
+        `byte_value` is whatever operand already holds the byte to
+        append -- typically an Imm (a literal ASCII byte, e.g. the
+        '[' opening a collection, or a decimal digit already reduced
+        to a compile-time or runtime-computed Imm) or an 8-bit
+        register alias (via as_byte_register) if the byte was computed
+        into a register first. Written via MovB -- the first place
+        this compiler has ever needed a genuine single-byte memory
+        write, as opposed to a 4-byte int/bool or an 8-byte pointer.
+
+        Unlike gen_append_call_into, this never touches a Memory
+        destination at all: r_ptr/r_len/r_cap are expected to stay
+        live in registers across many further appends while a single
+        value's own representation is being built up (see the
+        recursive stringify machinery this exists for), not written
+        back out after every single byte -- that would be needless
+        memory traffic for something that might get appended to
+        hundreds of times while building one struct's own printed
+        form. Callers that DO need the current triple durably
+        persisted (spanning a call into another function, for
+        instance) are responsible for spilling it themselves."""
+        def copy_one_byte(dst_addr: Register, src_addr: Register) -> List[Instruction]:
+            scratch = as_byte_register(Register('eax'))
+            return [
+                MovB(src=Memory(src_addr.name, 0), dst=scratch),
+                MovB(src=scratch, dst=Memory(dst_addr.name, 0)),
+            ]
+
+        def write_byte_at(target_addr: Register) -> List[Instruction]:
+            return [MovB(src=byte_value, dst=Memory(target_addr.name, 0))]
+
+        return self._gen_grow_and_append_one_into(
+            r_ptr, r_len, r_len_32, r_cap, r_cap_32,
+            element_width=1,
+            copy_one_element=copy_one_byte,
+            write_new_value_at=write_byte_at,
+        )
+
+    def gen_buffer_append_bytes_into(
+        self,
+        r_ptr: Register, r_len: Register, r_len_32: Register,
+        r_cap: Register, r_cap_32: Register,
+        source_addr: Register, count: Operand,
+    ) -> List[Instruction]:
+        """Appends `count` bytes in one bulk operation, copied from
+        source_addr -- the print machinery's own multi-byte append
+        (a whole literal fragment like '[', a run of decimal digits
+        just converted, another already-built piece), as opposed to
+        gen_buffer_append_byte_into's single-character one. This is a
+        genuinely DIFFERENT growth calculation, not just a loop calling
+        the single-byte version count times: that method's own growth
+        formula is only correct because it's derived under the
+        assumption reallocation happens exactly when len == cap, one
+        element at a time (see gen_append_call_into's own docstring)
+        -- appending a 40-byte chunk when only, say, 4 bytes of spare
+        capacity remain needs `needed` (len + count) to enter the
+        decision directly, which the single-element formula's own
+        already-simplified arithmetic has no way to do.
+
+        GROWTH: needed = len + count. If needed <= cap, there's
+        already enough spare room -- no reallocation at all, just copy
+        directly into the existing backing array at ptr + len. Only
+        when needed > cap does this reallocate, to new_cap = max(needed,
+        cap*2 if cap < 256 else cap + cap//4) -- the FULL, general
+        formula gen_append_call_into's own docstring describes and
+        then simplifies away (since ITS OWN needed is always exactly
+        cap+1, small enough that doubling always already exceeds it).
+        Here needed can be arbitrarily larger than a single doubling
+        would produce, so the max has to be computed for real, not
+        assumed away -- and this also means the single-element
+        formula's own explicit cap==0 floor of 1 isn't needed here
+        either: when cap is 0, the doubled-or-quartered side of the
+        max is just 0, and max(needed, 0) already correctly resolves
+        to needed on its own, since needed (len + count, with count
+        always at least 1 for any real call) is always positive.
+
+        Both the reallocate path's own copy-existing-bytes step and
+        the final copy-the-new-bytes-in step move `len` (or `count`)
+        bytes one at a time via MovB, in a genuine runtime loop --
+        there's no bulk memory-move instruction in this file's own
+        Instruction vocabulary yet (a real `rep movsb`, or SSE-based
+        copy, would be the natural next step if this ever needs to be
+        fast; correctness came first here, matching this compiler's
+        existing posture everywhere else).
+
+        Internally fixed scratch, distinct from gen_grow_and_append_
+        one_into's own set so this can be called independently:
+        %rax/%eax, %rcx/%ecx, %rdx/%edx, %rdi, %r10, %r11, %r14, %r15
+        (the latter two hold protected copies of source_addr/count --
+        see the comment where they're introduced below). Callers must
+        choose r_ptr/r_len/r_cap, and whatever register source_addr
+        itself lives in, to avoid all of these, exactly like
+        gen_buffer_append_byte_into's own callers already must."""
+        instructions = []
+        no_grow_label = self.new_label("bulk_append_no_grow")
+        copy_new_label = self.new_label("bulk_append_copy_new")
+
+        # Move source_addr (always a register in practice) -- and
+        # count, if it's a register rather than a compile-time Imm --
+        # into callee-saved registers (%r14/%r15) BEFORE any of the
+        # growth/malloc logic below runs. The reallocate path calls
+        # malloc internally, which -- like any real, ABI-conforming
+        # function -- is free to clobber whatever CALLER-saved
+        # register the caller happened to pass in for these (e.g.
+        # %r8/%r9, as _gen_stringify_bulk_append's own callers do),
+        # corrupting them by the time the copy-new loop below needs
+        # them afterward. This exact class of bug already has one
+        # instance fixed below for new_cap (%ecx -> r_cap_32) -- the
+        # same protection was missing here, and manifested identically:
+        # correct on the no-grow path (no malloc call to clobber
+        # anything), silently wrong -- reading and copying garbage as
+        # the new bytes' own source -- on the reallocate path
+        # specifically, and only there, which is exactly why it first
+        # surfaced as heap corruption several appends downstream
+        # rather than as an obviously-wrong value at the call site
+        # itself. An Imm count needs no such protection: it's baked
+        # directly into the instructions that use it, never stored in
+        # a register malloc could touch.
+        instructions.append(MovQ(src=source_addr, dst=Register('r14')))
+        source_addr = Register('r14')
+        if not isinstance(count, Imm):
+            instructions.append(Mov(src=count, dst=Register('r15d')))
+            count = Register('r15d')
+
+        # needed = len + count, in %eax.
+        if isinstance(count, Imm):
+            instructions.append(Mov(src=Imm(count.value), dst=Register('eax')))
+        else:
+            instructions.append(Mov(src=count, dst=Register('eax')))
+        instructions.append(Add(src=r_len_32, dst=Register('eax')))
+
+        instructions.append(Cmp(src=r_cap_32, dst=Register('eax')))
+        instructions.append(Jle(no_grow_label))
+
+        # REALLOCATE: new_cap = max(needed, doubled-or-quartered(cap)).
+        # %eax already holds `needed`; %ecx becomes the doubled-or-
+        # quartered candidate, then the larger of the two wins.
+        quarter_label = self.new_label("bulk_append_quarter")
+        candidate_done_label = self.new_label("bulk_append_candidate_done")
+        instructions.append(Mov(src=r_cap_32, dst=Register('ecx')))
+        instructions.append(Cmp(src=Imm(256), dst=Register('ecx')))
         instructions.append(Jae(quarter_label))
-        instructions.append(IMul(src=Imm(2), dst=r_cap_32))
-        instructions.append(Jmp(growth_done_label))
-        instructions.append(Label(zero_label))
-        instructions.append(Mov(src=Imm(1), dst=r_cap_32))
-        instructions.append(Jmp(growth_done_label))
+        instructions.append(IMul(src=Imm(2), dst=Register('ecx')))
+        instructions.append(Jmp(candidate_done_label))
         instructions.append(Label(quarter_label))
-        instructions.append(Mov(src=r_cap_32, dst=Register('eax')))
+        instructions.append(Mov(src=r_cap_32, dst=Register('edx')))
         instructions.append(Mov(src=Imm(2), dst=Register('ecx')))
-        instructions.append(ShiftRightArithmetic(dst=r_cap_32))
-        instructions.append(Add(src=Register('eax'), dst=r_cap_32))
-        instructions.append(Label(growth_done_label))
-        # r_cap_32 (and, via the zero-extension a 32-bit write always
-        # gives its own 64-bit register, r_cap itself) now holds
-        # new_cap.
+        # Shift the CANDIDATE (starting from cap, held in %edx) right
+        # by 2, then add cap back -- ShiftRightArithmetic's own fixed
+        # %cl-sourced count means %ecx has to hold the shift amount
+        # (2) here, not the candidate itself, unlike the plain-doubling
+        # branch just above where %ecx directly holds the result.
+        instructions.append(ShiftRightArithmetic(dst=Register('edx')))
+        instructions.append(Mov(src=r_cap_32, dst=Register('ecx')))
+        instructions.append(Add(src=Register('edx'), dst=Register('ecx')))
+        instructions.append(Label(candidate_done_label))
+        # %eax = needed, %ecx = candidate. new_cap = max of the two,
+        # left in %ecx (needed's own value in %eax is still required
+        # below, for how many NEW bytes to copy in, so %eax itself is
+        # never overwritten by this comparison).
+        instructions.append(Cmp(src=Register('ecx'), dst=Register('eax')))
+        max_done_label = self.new_label("bulk_append_max_done")
+        instructions.append(Jle(max_done_label))
+        instructions.append(Mov(src=Register('eax'), dst=Register('ecx')))
+        instructions.append(Label(max_done_label))
+
+        # new_cap (in %ecx, caller-saved) MUST move into r_cap_32
+        # (callee-saved) before calling malloc, not after: malloc, like
+        # any real ABI-conforming function, is free to clobber %ecx
+        # during its own execution, and is only OBLIGATED to preserve
+        # callee-saved registers -- exactly the guarantee gen_append_
+        # call_into's own %rbx/%r12/%r13 already rely on. Keeping the
+        # computed value in %ecx across the call and reading it back
+        # afterward (an earlier version of this method did exactly
+        # that) is a real, silent bug: %ecx isn't guaranteed to still
+        # hold what was put there once malloc returns, and glibc's own
+        # malloc does in practice clobber it -- found only by directly
+        # checking the resulting cap against a hand-worked-out
+        # expected value, since the visible SYMPTOM (a buffer sized
+        # smaller than what was actually written into it) doesn't
+        # reliably crash for a small overrun like this one.
+        instructions.append(Mov(src=Register('ecx'), dst=r_cap_32))
 
         instructions.append(Mov(src=r_cap_32, dst=Register('edi')))
-        instructions.append(IMul(src=Imm(element_width), dst=Register('edi')))
         instructions.append(CallInstr('malloc'))
-        r_new_ptr = Register('r14')
+        r_new_ptr = Register('r10')
         instructions.append(MovQ(src=Register('rax'), dst=r_new_ptr))
 
-        # Copy the existing len elements from the OLD array (r_ptr)
-        # into the NEW one (r_new_ptr), element_width bytes each -- a
-        # genuine RUNTIME loop, since len is a runtime value here,
-        # unlike every other array copy in this file (gen_array_copy's
-        # own flat-copy loop), which always moves a compile-time-known
-        # total width. Each iteration reuses gen_array_copy anyway, for
-        # exactly ONE element's worth of data (type_byte_width(element_
-        # type) bytes, dispatching on leaf_type(element_type) for the
-        # per-chunk width) -- that method's own logic already
-        # generalizes correctly to a single, arbitrary-type value, not
-        # just a whole array, so no separate "copy one value" helper
-        # was needed just for this loop body.
-        loop_start_label = self.new_label("append_copy_loop")
-        loop_done_label = self.new_label("append_copy_done")
-        i_32 = Register('r9d')
-        instructions.append(Mov(src=Imm(0), dst=i_32))
-        instructions.append(Label(loop_start_label))
-        instructions.append(Cmp(src=r_len_32, dst=i_32))
-        instructions.append(Jae(loop_done_label))
-        instructions.append(Mov(src=i_32, dst=Register('r11d')))
-        instructions.append(IMul(src=Imm(element_width), dst=Register('r11d')))
-        instructions.append(MovQ(src=r_ptr, dst=Register('r10')))
-        instructions.append(AddQ(src=Register('r11'), dst=Register('r10')))
-        instructions.append(MovQ(src=r_new_ptr, dst=Register('r8')))
-        instructions.append(AddQ(src=Register('r11'), dst=Register('r8')))
-        instructions.extend(self.gen_array_copy(Memory('r8', 0), Memory('r10', 0), element_type))
-        instructions.append(Add(src=Imm(1), dst=i_32))
-        instructions.append(Jmp(loop_start_label))
-        instructions.append(Label(loop_done_label))
+        # Copy the existing len bytes from the OLD array into the NEW
+        # one, one byte at a time -- a genuine runtime loop, since len
+        # is a runtime value.
+        copy_old_loop = self.new_label("bulk_append_copy_old_loop")
+        copy_old_done = self.new_label("bulk_append_copy_old_done")
+        i_reg = Register('edx')
+        i_reg_64 = Register('rdx')  # same physical register, 64-bit view for AddQ's own address arithmetic below
+        instructions.append(Mov(src=Imm(0), dst=i_reg))
+        instructions.append(Label(copy_old_loop))
+        instructions.append(Cmp(src=r_len_32, dst=i_reg))
+        instructions.append(Jae(copy_old_done))
+        # %eax/%ecx are both already free by this point in the
+        # reallocate path -- needed's own value in %eax was last
+        # needed to compute new_cap, already consumed into %ecx and
+        # then malloc'd (whose OWN return value, briefly also in
+        # %eax, has already been copied out into r_new_ptr) -- so
+        # nothing here needs preserving across a single byte move,
+        # unlike the two Push/Pop pairs an earlier draft of this loop
+        # had, which protected against nothing actually still live.
+        old_byte = as_byte_register(Register('eax'))
+        instructions.append(MovQ(src=r_ptr, dst=Register('r11')))
+        instructions.append(AddQ(src=i_reg_64, dst=Register('r11')))
+        instructions.append(MovB(src=Memory('r11', 0), dst=old_byte))
+        instructions.append(MovQ(src=r_new_ptr, dst=Register('r11')))
+        instructions.append(AddQ(src=i_reg_64, dst=Register('r11')))
+        instructions.append(MovB(src=old_byte, dst=Memory('r11', 0)))
+        instructions.append(Add(src=Imm(1), dst=i_reg))
+        instructions.append(Jmp(copy_old_loop))
+        instructions.append(Label(copy_old_done))
 
-        # Write the new element at new_ptr + len*element_width -- the
-        # one slot the copy loop above deliberately left untouched.
-        target_addr2 = Register('r10')
-        instructions.append(MovQ(src=r_new_ptr, dst=target_addr2))
-        instructions.append(Mov(src=r_len_32, dst=Register('r11d')))
-        instructions.append(IMul(src=Imm(element_width), dst=Register('r11d')))
-        instructions.append(AddQ(src=Register('r11'), dst=target_addr2))
-        instructions.extend(self._gen_write_value_at_address_into(value_arg, element_type, target_addr2))
+        instructions.append(MovQ(src=r_new_ptr, dst=r_ptr))
+        # r_cap_32 already holds new_cap -- written BEFORE the malloc
+        # call above, precisely so it survives that call correctly
+        # (see this method's own comment there); nothing further to do
+        # with %ecx here, which may no longer even hold that value.
+        instructions.append(Jmp(copy_new_label))
 
-        instructions.append(Add(src=Imm(1), dst=r_len_32))
-        if protect_dst:
-            instructions.append(Pop(Register(dst_mem.base)))
-        instructions.append(MovQ(src=r_new_ptr, dst=Memory(dst_mem.base, dst_mem.offset)))
-        instructions.append(MovQ(src=r_len, dst=Memory(dst_mem.base, dst_mem.offset + 8)))
-        instructions.append(MovQ(src=r_cap, dst=Memory(dst_mem.base, dst_mem.offset + 16)))
+        # NO-GROW: needed <= cap, existing backing array already has
+        # enough spare room.
+        instructions.append(Label(no_grow_label))
 
-        instructions.append(Label(end_label))
+        # COPY-NEW: copy `count` bytes from source_addr into ptr+len,
+        # one byte at a time, then len += count. By this point r_ptr
+        # is already correct either way (untouched on the no-grow
+        # path, repointed to the fresh block on the reallocate path).
+        instructions.append(Label(copy_new_label))
+        if isinstance(count, Imm):
+            count_reg = Register('ecx')
+            instructions.append(Mov(src=Imm(count.value), dst=count_reg))
+        else:
+            count_reg = Register('ecx')
+            instructions.append(Mov(src=count, dst=count_reg))
+        copy_new_loop = self.new_label("bulk_append_copy_new_loop")
+        copy_new_done = self.new_label("bulk_append_copy_new_done")
+        j_reg = Register('edx')
+        j_reg_64 = Register('rdx')  # same physical register, 64-bit view for AddQ's own address arithmetic below
+        instructions.append(Mov(src=Imm(0), dst=j_reg))
+        instructions.append(Label(copy_new_loop))
+        instructions.append(Cmp(src=count_reg, dst=j_reg))
+        instructions.append(Jae(copy_new_done))
+        new_byte = as_byte_register(Register('eax'))
+        instructions.append(MovQ(src=source_addr, dst=Register('r11')))
+        instructions.append(AddQ(src=j_reg_64, dst=Register('r11')))
+        instructions.append(MovB(src=Memory('r11', 0), dst=new_byte))
+        instructions.append(MovQ(src=r_ptr, dst=Register('r11')))
+        instructions.append(AddQ(src=r_len, dst=Register('r11')))
+        instructions.append(AddQ(src=j_reg_64, dst=Register('r11')))
+        instructions.append(MovB(src=new_byte, dst=Memory('r11', 0)))
+        instructions.append(Add(src=Imm(1), dst=j_reg))
+        instructions.append(Jmp(copy_new_loop))
+        instructions.append(Label(copy_new_done))
+
+        instructions.append(Add(src=count_reg, dst=r_len_32))
         return instructions
+
+    def gen_int_to_decimal_into(self, value: Operand, scratch_offset: int, scratch_size: int) -> List[Instruction]:
+        """Converts a 32-bit signed int into its own decimal ASCII
+        representation, written into a caller-provided scratch buffer
+        at a fixed %rbp-relative offset (Memory('rbp', scratch_offset)
+        .. Memory('rbp', scratch_offset + scratch_size - 1) --
+        scratch_size must be at least 11, enough for any 32-bit
+        value's digits plus a leading '-'; 16 gives comfortable
+        margin) -- the print machinery's own first real numeric-to-
+        text conversion, needed because everything now funnels through
+        one buffer-building mechanism rather than reaching for printf's
+        own '%d' formatting the way every int print used to (see the
+        module docstring's PRINTING section for the full story of why
+        that shortcut no longer applies).
+
+        Builds digits into the scratch buffer from the END backward
+        (least-significant digit first, naturally, since that's the
+        order repeated division by 10 produces them in) rather than
+        forward-then-reversed -- one pass, no separate reversal step.
+
+        Handles the INT_MIN edge case correctly without ever widening
+        to 64 bits: negating INT_MIN in ordinary 32-bit two's
+        complement leaves its bit pattern completely unchanged (there's
+        no positive counterpart to negate to, so the negation
+        "overflows" right back to the same bits) -- but that SAME bit
+        pattern, reinterpreted as UNSIGNED rather than signed, is
+        exactly INT_MIN's own correct magnitude (2147483648), a value
+        that doesn't fit in a signed 32-bit int at all but fits an
+        unsigned one perfectly. So after peeling off the sign (checked
+        BEFORE any negation happens, via the same Cmp-against-0 used
+        for the zero/positive/negative three-way split below) and
+        negating, the digit-extraction loop divides that magnitude
+        with Div (see its own docstring), not IDiv -- treating it as
+        unsigned throughout is what makes the INT_MIN case correct
+        with no special-casing beyond the ordinary negate-and-loop
+        every other negative value already needs.
+
+        On return: %r8 holds the address of the first character
+        (which may be partway into the scratch buffer, not
+        necessarily its start, since digits are written backward from
+        the end), and %r9d holds the character count, including a
+        leading '-' if the value was negative -- ready to hand
+        directly to gen_buffer_append_bytes_into as (source_addr,
+        count). Fixed internal scratch beyond %r8/%r9d: %eax (the
+        value being divided, then the quotient), %edx (the remainder),
+        %ecx (holds the constant 10), %r10 (the write-position
+        pointer, decremented as each digit is written, and the running
+        flag for whether a '-' still needs writing). Callers must
+        avoid all of these while this runs."""
+        instructions = []
+        zero_label = self.new_label("itoa_zero")
+        positive_label = self.new_label("itoa_positive")
+        digits_label = self.new_label("itoa_digits")
+        loop_label = self.new_label("itoa_loop")
+        skip_sign_label = self.new_label("itoa_skip_sign")
+        done_label = self.new_label("itoa_done")
+
+        is_negative = Register('r9d')  # 0 or 1, set below; read again after the digit loop
+        write_pos = Register('r10')
+
+        instructions.append(Mov(src=value, dst=Register('eax')))
+        instructions.append(Cmp(src=Imm(0), dst=Register('eax')))
+        instructions.append(Je(zero_label))
+        instructions.append(Jg(positive_label))
+
+        # negative: record it, then negate to get the magnitude --
+        # correct even for INT_MIN, per this method's own docstring.
+        instructions.append(Mov(src=Imm(1), dst=is_negative))
+        instructions.append(Neg(Register('eax')))
+        instructions.append(Jmp(digits_label))
+
+        instructions.append(Label(positive_label))
+        instructions.append(Mov(src=Imm(0), dst=is_negative))
+
+        instructions.append(Label(digits_label))
+        # %eax now holds a non-negative magnitude either way. write_pos
+        # starts one past the buffer's own last byte, since the loop
+        # always decrements BEFORE writing.
+        instructions.append(LeaQFrame(offset=scratch_offset + scratch_size, dst=write_pos))
+        instructions.append(Mov(src=Imm(10), dst=Register('ecx')))
+        instructions.append(Label(loop_label))
+        instructions.append(Mov(src=Imm(0), dst=Register('edx')))  # zero-extend: this is an UNSIGNED divide
+        instructions.append(Div(Register('ecx')))
+        instructions.append(Add(src=Imm(ord('0')), dst=Register('edx')))
+        instructions.append(SubQ(src=Imm(1), dst=write_pos))
+        instructions.append(MovB(src=as_byte_register(Register('edx')), dst=Memory(write_pos.name, 0)))
+        instructions.append(Cmp(src=Imm(0), dst=Register('eax')))
+        instructions.append(Jne(loop_label))
+
+        instructions.append(Cmp(src=Imm(0), dst=is_negative))
+        instructions.append(Je(skip_sign_label))
+        instructions.append(SubQ(src=Imm(1), dst=write_pos))
+        instructions.append(MovB(src=Imm(ord('-')), dst=Memory(write_pos.name, 0)))
+        instructions.append(Label(skip_sign_label))
+        instructions.append(Jmp(done_label))
+
+        instructions.append(Label(zero_label))
+        instructions.append(LeaQFrame(offset=scratch_offset + scratch_size - 1, dst=write_pos))
+        instructions.append(MovB(src=Imm(ord('0')), dst=Memory(write_pos.name, 0)))
+
+        instructions.append(Label(done_label))
+        # count = (one-past-the-end address) - (final write_pos), a
+        # 64-bit address subtraction whose result is always small
+        # enough that %r9d (the low 32 bits, automatically correct via
+        # ordinary x86-64 zero-extension) already holds it directly.
+        instructions.append(LeaQFrame(offset=scratch_offset + scratch_size, dst=Register('r9')))
+        instructions.append(SubQ(src=write_pos, dst=Register('r9')))
+        instructions.append(MovQ(src=write_pos, dst=Register('r8')))
+        return instructions
+
+    def _get_or_build_type_descriptor(self, t: Type, in_progress: Dict[Type, str]) -> str:
+        """Returns the label of t's own runtime type descriptor,
+        building and registering it into self.type_descriptors if it
+        hasn't already been built WITHIN THIS ONE CALL (in_progress,
+        keyed on t itself -- Type is frozen, giving it correct
+        structural/nominal equality and hashing for free, so it's
+        already a safe, correct dict key with no extra work).
+
+        `in_progress` is deliberately scoped to a single top-level
+        call into this method (one fresh, empty dict per print() call
+        site that needs a descriptor tree at all -- see gen_print_
+        call_into), NOT a whole-program cache: two separate print()
+        calls on the same struct type each build their OWN, separately
+        allocated, complete descriptor tree from scratch, mirroring
+        gen_string_literal_into's own explicit "no cross-occurrence
+        deduplication, accept the waste, keep this simple" choice (see
+        its own docstring) for the identical reason.
+
+        Reuse WITHIN one call, though, is not optional -- it's the
+        only way a self-referential struct (`struct Node: int value;
+        []Node children`, a real, legal pattern once slice-typed
+        fields were supported -- see the STRUCTS section) can even be
+        represented as a finite amount of static data at all: without
+        it, building Node's own descriptor would need Node's own
+        descriptor, forever. Reserving this type's own label BEFORE
+        recursing into anything it contains (fields, element types) is
+        what breaks that cycle -- a nested reference back to the same
+        type finds its own label already in in_progress and reuses it
+        directly, rather than trying to build it a second time.
+
+        Every non-leaf kind (ARRAY, SLICE, STRUCT) carries its own
+        "type name" (e.g. "[3]int", "[]int", or a struct's own
+        declared name like "Point") as a second field, right after the
+        KIND tag -- a plain string literal, computed once here at
+        build time via str(t) for ARRAY/SLICE or t.struct_name for
+        STRUCT, registered exactly like a struct field's own name is
+        just below. hornet_stringify prints this name immediately
+        before that kind's own opening bracket/brace at EVERY level it
+        appears, not just the outermost one a print() call names
+        directly -- so a struct field that's itself an array, or an
+        array element that's itself a struct, shows its own type too,
+        e.g. `(row: [3]int[1, 2, 3])` or `[Point(x: 1, y: 2), Point(x:
+        3, y: 4)]`. INT/BOOL/STR carry no name field at all (there's
+        nothing useful to prefix a bare int or string with), so this
+        is a genuine per-kind layout difference reflected directly in
+        each branch below, not a uniform field every descriptor has.
+        """
+        if t in in_progress:
+            return in_progress[t]
+        label = self.new_label("typedesc")
+        in_progress[t] = label
+
+        if t.kind == TypeKind.INT:
+            self.type_descriptors.append((label, [_TYPEDESC_INT]))
+        elif t.kind == TypeKind.BOOL:
+            self.type_descriptors.append((label, [_TYPEDESC_BOOL]))
+        elif t.kind == TypeKind.STR:
+            self.type_descriptors.append((label, [_TYPEDESC_STR]))
+        elif t.kind == TypeKind.ARRAY:
+            name_label = self.new_label("typedesc_name")
+            self.string_literals.append((name_label, str(t)))
+            elem_label = self._get_or_build_type_descriptor(t.element_type, in_progress)
+            elem_width = type_byte_width(t.element_type, self.struct_registry)
+            self.type_descriptors.append((label, [_TYPEDESC_ARRAY, name_label, elem_label, t.size, elem_width]))
+        elif t.kind == TypeKind.SLICE:
+            name_label = self.new_label("typedesc_name")
+            self.string_literals.append((name_label, str(t)))
+            elem_label = self._get_or_build_type_descriptor(t.element_type, in_progress)
+            elem_width = type_byte_width(t.element_type, self.struct_registry)
+            self.type_descriptors.append((label, [_TYPEDESC_SLICE, name_label, elem_label, elem_width]))
+        elif t.kind == TypeKind.STRUCT:
+            name_label = self.new_label("typedesc_name")
+            self.string_literals.append((name_label, str(t)))
+            struct_info = self.struct_registry[t.struct_name]
+            field_fields: List = []
+            field_count = 0
+            for field_name, field_type in struct_info.fields.items():
+                field_name_label = self.new_label("typedesc_fname")
+                self.string_literals.append((field_name_label, field_name))
+                field_type_label = self._get_or_build_type_descriptor(field_type, in_progress)
+                field_offset = self._field_offset(t.struct_name, field_name)
+                field_fields.extend([field_name_label, field_type_label, field_offset])
+                field_count += 1
+            self.type_descriptors.append((label, [_TYPEDESC_STRUCT, name_label, field_count] + field_fields))
+        else:
+            raise CodegenError(f"No type descriptor rule for: {t}")
+
+        return label
+
+
+    def _get_true_str_label(self) -> str:
+        if self._true_str_label is None:
+            self._true_str_label = self.new_label("true_str")
+            self.string_literals.append((self._true_str_label, "true"))
+        return self._true_str_label
+
+    def _get_false_str_label(self) -> str:
+        if self._false_str_label is None:
+            self._false_str_label = self.new_label("false_str")
+            self.string_literals.append((self._false_str_label, "false"))
+        return self._false_str_label
+
+    def _get_comma_space_label(self) -> str:
+        if self._comma_space_label is None:
+            self._comma_space_label = self.new_label("comma_space_str")
+            self.string_literals.append((self._comma_space_label, ", "))
+        return self._comma_space_label
+
+    def _get_colon_space_label(self) -> str:
+        if self._colon_space_label is None:
+            self._colon_space_label = self.new_label("colon_space_str")
+            self.string_literals.append((self._colon_space_label, ": "))
+        return self._colon_space_label
+
+    def _gen_stringify_bulk_append(self, source_addr: Register, count: Operand) -> List[Instruction]:
+        """Loads the print buffer's own {ptr, len, cap} triple from
+        _STRINGIFY_BUF_STATE_ADDR, bulk-appends `count` bytes from
+        `source_addr` via gen_buffer_append_bytes_into, then writes the
+        resulting triple back out -- the load-append-store sequence
+        every single multi-byte append inside hornet_stringify's own
+        body needs (a whole string's own content, converted decimal
+        digits, a two-byte separator like ", " or ": "), factored out
+        once, rather than re-derived by hand at each of the many call
+        sites that need it, exactly the kind of duplication that's
+        cheap to get subtly wrong the third or fourth time it's
+        transcribed rather than reused. Only ever valid to call from
+        within hornet_stringify's own body -- it hardcodes that
+        function's fixed frame layout (_STRINGIFY_BUF_STATE_ADDR).
+
+        `source_addr` and `count` must not be %rbx/%r12/%r13/%r11
+        (clobbered loading/storing the buffer state itself here) or any
+        of gen_buffer_append_bytes_into's own internal scratch (%rax/
+        %rcx/%rdx/%rdi/%r10/%r11 -- see its own docstring). %r8/%r9 are
+        always safe against both, which is exactly why gen_int_to_
+        decimal_into's own contract (and this function's own BOOL case)
+        both deliberately leave their (address, count) result there."""
+        instructions = []
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_BUF_STATE_ADDR), dst=Register('r11')))
+        instructions.append(MovQ(src=Memory('r11', 0), dst=Register('rbx')))
+        instructions.append(MovQ(src=Memory('r11', 8), dst=Register('r12')))
+        instructions.append(MovQ(src=Memory('r11', 16), dst=Register('r13')))
+        instructions.extend(self.gen_buffer_append_bytes_into(
+            Register('rbx'), Register('r12'), Register('r12d'),
+            Register('r13'), Register('r13d'),
+            source_addr, count,
+        ))
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_BUF_STATE_ADDR), dst=Register('r11')))
+        instructions.append(MovQ(src=Register('rbx'), dst=Memory('r11', 0)))
+        instructions.append(MovQ(src=Register('r12'), dst=Memory('r11', 8)))
+        instructions.append(MovQ(src=Register('r13'), dst=Memory('r11', 16)))
+        return instructions
+
+    def _gen_stringify_byte_append(self, byte_value: Operand) -> List[Instruction]:
+        """The single-byte counterpart to _gen_stringify_bulk_append,
+        via gen_buffer_append_byte_into -- used for a bracket, paren,
+        or quote mark. Same fixed-frame and register-safety
+        constraints as its own sibling; see its docstring."""
+        instructions = []
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_BUF_STATE_ADDR), dst=Register('r11')))
+        instructions.append(MovQ(src=Memory('r11', 0), dst=Register('rbx')))
+        instructions.append(MovQ(src=Memory('r11', 8), dst=Register('r12')))
+        instructions.append(MovQ(src=Memory('r11', 16), dst=Register('r13')))
+        instructions.extend(self.gen_buffer_append_byte_into(
+            Register('rbx'), Register('r12'), Register('r12d'),
+            Register('r13'), Register('r13d'),
+            byte_value,
+        ))
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_BUF_STATE_ADDR), dst=Register('r11')))
+        instructions.append(MovQ(src=Register('rbx'), dst=Memory('r11', 0)))
+        instructions.append(MovQ(src=Register('r12'), dst=Memory('r11', 8)))
+        instructions.append(MovQ(src=Register('r13'), dst=Memory('r11', 16)))
+        return instructions
+
+    def _gen_stringify_append_c_string_at(self, name_addr_offset: int) -> List[Instruction]:
+        """strlen()s the null-terminated string whose own address has
+        already been stored at Memory('rbp', name_addr_offset), then
+        bulk-appends exactly that many bytes onto the buffer -- shared
+        by every place hornet_stringify prints a compile-time-known
+        NAME (a type's own name, e.g. "[3]int" or a struct's own
+        declared name, or a struct field's own name) rather than a
+        runtime VALUE: none of these carry their own length anywhere
+        in a type descriptor's own static data (unlike the fixed
+        2-byte ", "/": " separators, which use a plain Imm(2) instead
+        of this), so strlen is what supplies it.
+
+        Reads the address from `name_addr_offset` (Memory, not a
+        register) both before AND after the intervening `call
+        strlen`, since a real function call is free to clobber any
+        caller-saved register but never touches this function's own
+        stack frame -- the same "spill across a call, never trust a
+        register to survive one" discipline established throughout
+        this file (see e.g. gen_buffer_append_bytes_into's own
+        docstring for the bug this exact pattern was written to
+        avoid)."""
+        instructions = []
+        instructions.append(MovQ(src=Memory('rbp', name_addr_offset), dst=Register('rdi')))
+        instructions.append(CallInstr('strlen'))
+        instructions.append(MovQ(src=Memory('rbp', name_addr_offset), dst=Register('r8')))
+        instructions.append(Mov(src=Register('eax'), dst=Register('r9d')))
+        instructions.extend(self._gen_stringify_bulk_append(Register('r8'), Register('r9d')))
+        return instructions
+
+    def _gen_stringify_collection_loop_body(self, base_addr_slot: int) -> List[Instruction]:
+        """Shared by the ARRAY and SLICE dispatch cases in build_
+        stringify_function: given _STRINGIFY_COLLECTION_LENGTH/_
+        STRINGIFY_ELEM_WIDTH/_STRINGIFY_ELEM_TYPE_DESC already
+        populated by the caller, and `base_addr_slot` naming whichever
+        local slot holds the address of ELEMENT 0 (ARRAY's own
+        _STRINGIFY_VALUE_ADDR directly, since an array's own bytes ARE
+        its own storage; SLICE's own _STRINGIFY_SLICE_BASE_PTR, the
+        backing pointer already unwrapped one level of indirection
+        away from value_addr's own runtime descriptor) -- emits the
+        loop that produces `[elem, elem, ...]`'s own INSIDE (the
+        caller appends the brackets themselves, before and after
+        calling this): a ", " separator before every element but the
+        first, then a recursive call into hornet_stringify itself for
+        each element's own value, with quote_strings hardcoded to 1 --
+        an array/slice element is, by definition, never the outermost
+        value of an entire print() call.
+
+        Element addresses are computed via the identical 32-bit-
+        multiply-then-zero-extend idiom gen_index_address_into already
+        establishes for ordinary array/slice indexing (see its own
+        docstring's note on exactly this) -- safe here for the
+        identical reason: an element count or index this language
+        could ever actually construct is always far too small to make
+        a 32-bit multiply's own implicit zero-extension incorrect."""
+        instructions = []
+        loop_start = self.new_label("stringify_collection_loop")
+        loop_done = self.new_label("stringify_collection_loop_done")
+        skip_sep = self.new_label("stringify_collection_skip_sep")
+
+        instructions.append(MovQ(src=Imm(0), dst=Memory('rbp', _STRINGIFY_LOOP_INDEX)))
+        instructions.append(Label(loop_start))
+        instructions.append(Mov(src=Memory('rbp', _STRINGIFY_LOOP_INDEX), dst=Register('eax')))
+        instructions.append(Mov(src=Memory('rbp', _STRINGIFY_COLLECTION_LENGTH), dst=Register('ecx')))
+        instructions.append(Cmp(src=Register('ecx'), dst=Register('eax')))
+        instructions.append(Jae(loop_done))
+
+        instructions.append(Cmp(src=Imm(0), dst=Memory('rbp', _STRINGIFY_LOOP_INDEX)))
+        instructions.append(Je(skip_sep))
+        instructions.append(LeaQ(label=self._get_comma_space_label(), dst=Register('r8')))
+        instructions.append(Mov(src=Imm(2), dst=Register('r9d')))
+        instructions.extend(self._gen_stringify_bulk_append(Register('r8'), Register('r9d')))
+        instructions.append(Label(skip_sep))
+
+        instructions.append(Mov(src=Memory('rbp', _STRINGIFY_LOOP_INDEX), dst=Register('eax')))
+        instructions.append(Mov(src=Memory('rbp', _STRINGIFY_ELEM_WIDTH), dst=Register('ecx')))
+        instructions.append(IMul(src=Register('ecx'), dst=Register('eax')))
+        instructions.append(MovQ(src=Memory('rbp', base_addr_slot), dst=Register('r10')))
+        instructions.append(AddQ(src=Register('rax'), dst=Register('r10')))
+        instructions.append(MovQ(src=Register('r10'), dst=Memory('rbp', _STRINGIFY_ELEM_ADDR)))
+
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_ELEM_ADDR), dst=Register('rdi')))
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_ELEM_TYPE_DESC), dst=Register('rsi')))
+        instructions.append(Mov(src=Imm(1), dst=Register('edx')))
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_BUF_STATE_ADDR), dst=Register('rcx')))
+        instructions.append(CallInstr('hornet_stringify'))
+
+        instructions.append(Mov(src=Memory('rbp', _STRINGIFY_LOOP_INDEX), dst=Register('eax')))
+        instructions.append(Add(src=Imm(1), dst=Register('eax')))
+        instructions.append(Mov(src=Register('eax'), dst=Memory('rbp', _STRINGIFY_LOOP_INDEX)))
+        instructions.append(Jmp(loop_start))
+        instructions.append(Label(loop_done))
+        return instructions
+
+    def build_stringify_function(self) -> AsmFunction:
+        """Builds `hornet_stringify`, the print machinery's own hand-
+        built runtime function -- built ONCE per program (not derived
+        from any Hornet AST Function at all, and not tied to any one
+        print() call site), added directly to AsmProgram.functions
+        alongside every ordinary Hornet-compiled function, and called
+        via a completely ordinary `call hornet_stringify` from gen_
+        print_call_into. This is the first hand-built function in this
+        compiler that needs GENUINE, unbounded recursion (calling
+        itself, via a real `call`, once per array/slice element or
+        struct field) rather than instructions inlined at each call
+        site -- the only way a self-referential struct (`struct Node:
+        int value; []Node children`) can ever be printed at all, since
+        the recursion depth needed depends on a VALUE's own runtime
+        shape (how deep the tree actually is), which no amount of
+        compile-time code generation could ever unroll for -- see the
+        module docstring's PRINTING section for the full argument.
+
+        SIGNATURE (an ordinary SysV integer-argument call, exactly as
+        if this were declared `void hornet_stringify(void* value_addr,
+        void* type_desc, long quote_strings, void* buf_state_addr)`):
+          %rdi = value_addr     -- address of the value being printed
+          %rsi = type_desc      -- pointer to its own type descriptor
+          %rdx = quote_strings  -- 0 or 1; whether a STR value here
+                                    should be wrapped in single quotes
+                                    (never true for the OUTERMOST call
+                                    from gen_print_call_into, always
+                                    true for every recursive call this
+                                    function makes to itself -- see the
+                                    module docstring's own note on
+                                    quoting a str inside a collection)
+          %rcx = buf_state_addr -- pointer to a 24-byte {ptr, len, cap}
+                                    block, OWNED by gen_print_call_into
+                                    (not this function), read from and
+                                    written back to on every append,
+                                    and by every recursive call this
+                                    function makes to itself, so growth
+                                    or reallocation anywhere in a deeply
+                                    nested value is visible everywhere
+                                    else building the SAME print's own
+                                    output
+
+        Every incoming argument is spilled into its own fixed local
+        slot immediately on entry (see the _STRINGIFY_* offset
+        constants just above) and reloaded from there whenever needed,
+        rather than kept live in a register across this function's own
+        recursive calls to itself or its calls to malloc (via the
+        buffer-append primitives) -- registers don't survive a nested
+        call the way a value in a fixed stack slot does; see those
+        constants' own shared docstring for why this discipline is
+        non-negotiable here specifically.
+
+        Dispatches on type_desc's own first field (the kind tag) via
+        an ordinary chain of comparisons -- there are only six kinds,
+        so a jump table would be premature machinery for no real
+        benefit here. The kind tag is stored as a full .quad but
+        compared via its own 32-bit view (e.g. %r10d): every kind
+        value is small and non-negative, so the upper 32 bits are
+        always zero, and Cmp is fixed at 32-bit (`cmpl`) -- matching
+        it rather than introducing a new 64-bit compare instruction
+        just for this.
+
+        THIS METHOD IS BUILT INCREMENTALLY, one kind at a time, each
+        verified independently before the next is added -- see the
+        surrounding commit history/conversation for exactly which
+        kinds are implemented as of any given point; an unimplemented
+        kind's own dispatch target does not yet exist, and building
+        this function while any dispatch case is missing is expected
+        to be a WORK-IN-PROGRESS state, not a finished one.
+        """
+        instructions: List[Instruction] = []
+        instructions.append(Push(Register('rbp')))
+        instructions.append(MovQ(src=Register('rsp'), dst=Register('rbp')))
+        instructions.append(SubQ(src=Imm(_STRINGIFY_FRAME_SIZE), dst=Register('rsp')))
+        instructions.append(MovQ(src=Register('rdi'), dst=Memory('rbp', _STRINGIFY_VALUE_ADDR)))
+        instructions.append(MovQ(src=Register('rsi'), dst=Memory('rbp', _STRINGIFY_TYPE_DESC)))
+        instructions.append(MovQ(src=Register('rdx'), dst=Memory('rbp', _STRINGIFY_QUOTE_STRINGS)))
+        instructions.append(MovQ(src=Register('rcx'), dst=Memory('rbp', _STRINGIFY_BUF_STATE_ADDR)))
+
+        int_label = self.new_label("stringify_int")
+        bool_label = self.new_label("stringify_bool")
+        str_label = self.new_label("stringify_str")
+        array_label = self.new_label("stringify_array")
+        slice_label = self.new_label("stringify_slice")
+        struct_label = self.new_label("stringify_struct")
+        done_label = self.new_label("stringify_done")
+
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_TYPE_DESC), dst=Register('r10')))
+        instructions.append(MovQ(src=Memory('r10', 0), dst=Register('r10')))
+        instructions.append(Cmp(src=Imm(_TYPEDESC_INT), dst=Register('r10d')))
+        instructions.append(Je(int_label))
+        instructions.append(Cmp(src=Imm(_TYPEDESC_BOOL), dst=Register('r10d')))
+        instructions.append(Je(bool_label))
+        instructions.append(Cmp(src=Imm(_TYPEDESC_STR), dst=Register('r10d')))
+        instructions.append(Je(str_label))
+        instructions.append(Cmp(src=Imm(_TYPEDESC_ARRAY), dst=Register('r10d')))
+        instructions.append(Je(array_label))
+        instructions.append(Cmp(src=Imm(_TYPEDESC_SLICE), dst=Register('r10d')))
+        instructions.append(Je(slice_label))
+        instructions.append(Cmp(src=Imm(_TYPEDESC_STRUCT), dst=Register('r10d')))
+        instructions.append(Je(struct_label))
+        instructions.append(Jmp(done_label))  # unreachable for any type this compiler ever hands here
+
+        # -- INT ----------------------------------------------------------
+        instructions.append(Label(int_label))
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_VALUE_ADDR), dst=Register('r10')))
+        instructions.append(Mov(src=Memory('r10', 0), dst=Register('eax')))
+        instructions.extend(self.gen_int_to_decimal_into(
+            Register('eax'), _STRINGIFY_ITOA_SCRATCH, 16,
+        ))
+        # %r8 = digits start address, %r9d = digit count (gen_int_to_
+        # decimal_into's own contract) -- both survive untouched into
+        # _gen_stringify_bulk_append, which never uses %r8/%r9 (see its
+        # own docstring for exactly why that's guaranteed, not assumed).
+        instructions.extend(self._gen_stringify_bulk_append(Register('r8'), Register('r9d')))
+        instructions.append(Jmp(done_label))
+
+        # -- BOOL ---------------------------------------------------------
+        instructions.append(Label(bool_label))
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_VALUE_ADDR), dst=Register('r10')))
+        instructions.append(Mov(src=Memory('r10', 0), dst=Register('eax')))
+        bool_false_label = self.new_label("stringify_bool_false")
+        bool_append_label = self.new_label("stringify_bool_append")
+        instructions.append(Cmp(src=Imm(0), dst=Register('eax')))
+        instructions.append(Je(bool_false_label))
+        instructions.append(LeaQ(label=self._get_true_str_label(), dst=Register('r8')))
+        instructions.append(Mov(src=Imm(4), dst=Register('r9d')))
+        instructions.append(Jmp(bool_append_label))
+        instructions.append(Label(bool_false_label))
+        instructions.append(LeaQ(label=self._get_false_str_label(), dst=Register('r8')))
+        instructions.append(Mov(src=Imm(5), dst=Register('r9d')))
+        instructions.append(Label(bool_append_label))
+        instructions.extend(self._gen_stringify_bulk_append(Register('r8'), Register('r9d')))
+        instructions.append(Jmp(done_label))
+
+        # -- STR ------------------------------------------------------------
+        # A str VALUE is itself a pointer (see the module docstring's
+        # STRINGS section) -- so, unlike INT/BOOL, value_addr here holds
+        # the address of a POINTER, and that pointer itself (once
+        # dereferenced) is what needs stringifying, not value_addr's own
+        # bytes directly. quote_strings decides whether it's wrapped in
+        # single quotes (nested inside a collection or struct) or left
+        # bare (the outermost value of an entire print() call) -- see
+        # the module docstring's own note on this being a real,
+        # deliberate, CONTEXT-dependent distinction, not an oversight.
+        instructions.append(Label(str_label))
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_VALUE_ADDR), dst=Register('r10')))
+        instructions.append(MovQ(src=Memory('r10', 0), dst=Register('r10')))
+        instructions.append(MovQ(src=Register('r10'), dst=Memory('rbp', _STRINGIFY_STR_PTR_SCRATCH)))
+        instructions.append(MovQ(src=Register('r10'), dst=Register('rdi')))
+        instructions.append(CallInstr('strlen'))
+        instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', _STRINGIFY_STR_LEN_SCRATCH)))
+
+        str_unquoted_label = self.new_label("stringify_str_unquoted")
+        instructions.append(Cmp(src=Imm(0), dst=Memory('rbp', _STRINGIFY_QUOTE_STRINGS)))
+        instructions.append(Je(str_unquoted_label))
+
+        instructions.extend(self._gen_stringify_byte_append(Imm(ord("'"))))
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_STR_PTR_SCRATCH), dst=Register('r8')))
+        instructions.append(Mov(src=Memory('rbp', _STRINGIFY_STR_LEN_SCRATCH), dst=Register('r9d')))
+        instructions.extend(self._gen_stringify_bulk_append(Register('r8'), Register('r9d')))
+        instructions.extend(self._gen_stringify_byte_append(Imm(ord("'"))))
+        instructions.append(Jmp(done_label))
+
+        instructions.append(Label(str_unquoted_label))
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_STR_PTR_SCRATCH), dst=Register('r8')))
+        instructions.append(Mov(src=Memory('rbp', _STRINGIFY_STR_LEN_SCRATCH), dst=Register('r9d')))
+        instructions.extend(self._gen_stringify_bulk_append(Register('r8'), Register('r9d')))
+        instructions.append(Jmp(done_label))
+
+        # -- ARRAY ----------------------------------------------------------
+        # value_addr already points DIRECTLY at the array's own inline
+        # data (element 0 immediately at value_addr, element 1 at
+        # value_addr+elem_width, ...) -- unlike SLICE below, there's no
+        # extra indirection to unwrap, since an array's own bytes ARE
+        # its own storage, matching how ordinary array indexing already
+        # works everywhere else in this compiler. count comes straight
+        # from the type descriptor (a compile-time-known array size,
+        # just stored as ordinary runtime data here like everything
+        # else in a descriptor).
+        #
+        # The type's own name (e.g. "[3]int", read fresh from the type
+        # descriptor's own second field) is printed first, before the
+        # opening bracket -- at EVERY level this ever runs, nested or
+        # not, not just when this is the outermost value a print() call
+        # names directly, so an array field inside a struct, or an
+        # array-of-arrays' own inner row, shows its own type too.
+        instructions.append(Label(array_label))
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_TYPE_DESC), dst=Register('r10')))
+        instructions.append(MovQ(src=Memory('r10', 8), dst=Register('rax')))
+        instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', _STRINGIFY_FIELD_NAME_ADDR)))
+        instructions.extend(self._gen_stringify_append_c_string_at(_STRINGIFY_FIELD_NAME_ADDR))
+        instructions.extend(self._gen_stringify_byte_append(Imm(ord('['))))
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_TYPE_DESC), dst=Register('r10')))
+        instructions.append(MovQ(src=Memory('r10', 16), dst=Register('rax')))
+        instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', _STRINGIFY_ELEM_TYPE_DESC)))
+        instructions.append(MovQ(src=Memory('r10', 24), dst=Register('rax')))
+        instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', _STRINGIFY_COLLECTION_LENGTH)))
+        instructions.append(MovQ(src=Memory('r10', 32), dst=Register('rax')))
+        instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', _STRINGIFY_ELEM_WIDTH)))
+        instructions.extend(self._gen_stringify_collection_loop_body(
+            base_addr_slot=_STRINGIFY_VALUE_ADDR,
+        ))
+        instructions.extend(self._gen_stringify_byte_append(Imm(ord(']'))))
+        instructions.append(Jmp(done_label))
+
+        # -- SLICE ------------------------------------------------------
+        # Unlike ARRAY, value_addr here points at a runtime {ptr, len,
+        # cap} DESCRIPTOR, not at the backing data directly -- a slice
+        # is an alias, and value_addr is the address of the slice
+        # VARIABLE's own three fields, one level of indirection away
+        # from wherever its own backing array actually lives (see the
+        # module docstring's STRINGS -- no, SLICES section for the full
+        # {ptr,len,cap} design). So the base address for element
+        # addressing has to be READ out of that descriptor first
+        # (_STRINGIFY_SLICE_BASE_PTR), and the length comes from the
+        # descriptor's own runtime len field, not from the type
+        # descriptor at all (a slice's length is a runtime property of
+        # the VALUE, never part of its own static type) -- but the
+        # slice's own NAME (e.g. "[]int") still comes from the type
+        # descriptor, same as ARRAY just above, and for the identical
+        # reason: printed at every level this runs, not just once.
+        instructions.append(Label(slice_label))
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_TYPE_DESC), dst=Register('r10')))
+        instructions.append(MovQ(src=Memory('r10', 8), dst=Register('rax')))
+        instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', _STRINGIFY_FIELD_NAME_ADDR)))
+        instructions.extend(self._gen_stringify_append_c_string_at(_STRINGIFY_FIELD_NAME_ADDR))
+        instructions.extend(self._gen_stringify_byte_append(Imm(ord('['))))
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_TYPE_DESC), dst=Register('r10')))
+        instructions.append(MovQ(src=Memory('r10', 16), dst=Register('rax')))
+        instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', _STRINGIFY_ELEM_TYPE_DESC)))
+        instructions.append(MovQ(src=Memory('r10', 24), dst=Register('rax')))
+        instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', _STRINGIFY_ELEM_WIDTH)))
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_VALUE_ADDR), dst=Register('r10')))
+        instructions.append(MovQ(src=Memory('r10', 0), dst=Register('rax')))
+        instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', _STRINGIFY_SLICE_BASE_PTR)))
+        instructions.append(MovQ(src=Memory('r10', 8), dst=Register('rax')))
+        instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', _STRINGIFY_COLLECTION_LENGTH)))
+        instructions.extend(self._gen_stringify_collection_loop_body(
+            base_addr_slot=_STRINGIFY_SLICE_BASE_PTR,
+        ))
+        instructions.extend(self._gen_stringify_byte_append(Imm(ord(']'))))
+        instructions.append(Jmp(done_label))
+
+        # -- STRUCT -----------------------------------------------------
+        # Format: `Point(x: 1, y: 2)` -- see the module docstring's own
+        # note on why parentheses, not the square brackets array/slice
+        # already use (matching the eventual struct-literal syntax,
+        # not just a printing-only convention invented in isolation).
+        # STRUCT's own descriptor layout (see _get_or_build_type_
+        # descriptor): [kind, name, field_count, then field_count
+        # triples of (field_name_str_ptr, field_type_desc_ptr,
+        # field_byte_offset), 24 bytes per triple] -- so field i's own
+        # triple sits at type_desc + 24 + i*24, read fresh out of that
+        # STATIC data on every loop iteration (there's no reason to
+        # cache it across iterations the way collection length/element
+        # width are cached once for ARRAY/SLICE, since each iteration
+        # needs a DIFFERENT triple anyway).
+        #
+        # The struct's own name (its declared name, e.g. "Point") is
+        # printed first, before the opening paren -- at EVERY level
+        # this ever runs, nested or not, so a struct field that's
+        # itself a struct shows its own name too, not just the
+        # outermost value a print() call names directly.
+        instructions.append(Label(struct_label))
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_TYPE_DESC), dst=Register('r10')))
+        instructions.append(MovQ(src=Memory('r10', 8), dst=Register('rax')))
+        instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', _STRINGIFY_FIELD_NAME_ADDR)))
+        instructions.extend(self._gen_stringify_append_c_string_at(_STRINGIFY_FIELD_NAME_ADDR))
+        instructions.extend(self._gen_stringify_byte_append(Imm(ord('('))))
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_TYPE_DESC), dst=Register('r10')))
+        instructions.append(MovQ(src=Memory('r10', 16), dst=Register('rax')))
+        instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', _STRINGIFY_FIELD_COUNT)))
+
+        struct_loop_start = self.new_label("stringify_struct_loop")
+        struct_loop_done = self.new_label("stringify_struct_loop_done")
+        struct_skip_sep = self.new_label("stringify_struct_skip_sep")
+
+        instructions.append(MovQ(src=Imm(0), dst=Memory('rbp', _STRINGIFY_LOOP_INDEX)))
+        instructions.append(Label(struct_loop_start))
+        instructions.append(Mov(src=Memory('rbp', _STRINGIFY_LOOP_INDEX), dst=Register('eax')))
+        instructions.append(Mov(src=Memory('rbp', _STRINGIFY_FIELD_COUNT), dst=Register('ecx')))
+        instructions.append(Cmp(src=Register('ecx'), dst=Register('eax')))
+        instructions.append(Jae(struct_loop_done))
+
+        instructions.append(Cmp(src=Imm(0), dst=Memory('rbp', _STRINGIFY_LOOP_INDEX)))
+        instructions.append(Je(struct_skip_sep))
+        instructions.append(LeaQ(label=self._get_comma_space_label(), dst=Register('r8')))
+        instructions.append(Mov(src=Imm(2), dst=Register('r9d')))
+        instructions.extend(self._gen_stringify_bulk_append(Register('r8'), Register('r9d')))
+        instructions.append(Label(struct_skip_sep))
+
+        # field entry address = type_desc + 24 + loop_index*24
+        instructions.append(Mov(src=Memory('rbp', _STRINGIFY_LOOP_INDEX), dst=Register('eax')))
+        instructions.append(IMul(src=Imm(24), dst=Register('eax')))
+        instructions.append(Add(src=Imm(24), dst=Register('eax')))
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_TYPE_DESC), dst=Register('r10')))
+        instructions.append(AddQ(src=Register('rax'), dst=Register('r10')))
+        instructions.append(MovQ(src=Memory('r10', 0), dst=Register('rax')))
+        instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', _STRINGIFY_FIELD_NAME_ADDR)))
+        instructions.append(MovQ(src=Memory('r10', 8), dst=Register('rax')))
+        instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', _STRINGIFY_FIELD_TYPE_DESC)))
+        instructions.append(MovQ(src=Memory('r10', 16), dst=Register('rax')))
+        instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', _STRINGIFY_FIELD_OFFSET)))
+
+        # append the field's own name -- length via strlen, exactly
+        # like the type-name appends above do, and via the same
+        # shared helper; field names are statically known but kept as
+        # ordinary null-terminated string literals rather than also
+        # carrying a separate, redundant length field in the
+        # descriptor, so this is one of the places a name costs one
+        # extra runtime call to print.
+        instructions.extend(self._gen_stringify_append_c_string_at(_STRINGIFY_FIELD_NAME_ADDR))
+
+        instructions.append(LeaQ(label=self._get_colon_space_label(), dst=Register('r8')))
+        instructions.append(Mov(src=Imm(2), dst=Register('r9d')))
+        instructions.extend(self._gen_stringify_bulk_append(Register('r8'), Register('r9d')))
+
+        # field value address = value_addr + field_offset; ELEM_ADDR is
+        # reused here (not a dedicated FIELD_VALUE_ADDR slot) since it
+        # means exactly the same thing ARRAY/SLICE already use it for
+        # -- "the address of a nested value about to be recursed into"
+        # -- and STRUCT never runs concurrently with either of them
+        # within one call.
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_VALUE_ADDR), dst=Register('r10')))
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_FIELD_OFFSET), dst=Register('rax')))
+        instructions.append(AddQ(src=Register('rax'), dst=Register('r10')))
+        instructions.append(MovQ(src=Register('r10'), dst=Memory('rbp', _STRINGIFY_ELEM_ADDR)))
+
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_ELEM_ADDR), dst=Register('rdi')))
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_FIELD_TYPE_DESC), dst=Register('rsi')))
+        instructions.append(Mov(src=Imm(1), dst=Register('edx')))
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_BUF_STATE_ADDR), dst=Register('rcx')))
+        instructions.append(CallInstr('hornet_stringify'))
+
+        instructions.append(Mov(src=Memory('rbp', _STRINGIFY_LOOP_INDEX), dst=Register('eax')))
+        instructions.append(Add(src=Imm(1), dst=Register('eax')))
+        instructions.append(Mov(src=Register('eax'), dst=Memory('rbp', _STRINGIFY_LOOP_INDEX)))
+        instructions.append(Jmp(struct_loop_start))
+        instructions.append(Label(struct_loop_done))
+
+        instructions.extend(self._gen_stringify_byte_append(Imm(ord(')'))))
+        instructions.append(Jmp(done_label))
+
+        instructions.append(Label(done_label))
+        instructions.append(Leave())
+        instructions.append(Ret())
+        return AsmFunction(name='hornet_stringify', instructions=instructions)
 
     def gen_array_copy(self, dst_mem: Memory, src_mem: Memory, array_type: Type) -> List[Instruction]:
         """Copies array_type's worth of data from src_mem to dst_mem --
@@ -6430,110 +6754,195 @@ class CodeGenerator:
 
     def gen_print_call_into(self, expr: Call, dst: Operand) -> List[Instruction]:
         """`print(x)`: dispatches on x's *compile-time* type -- known
-        exactly, since Hornet is statically typed.
+        exactly, since Hornet is statically typed -- but, unlike the
+        old printf-piece-by-piece version this replaces, every type
+        (including struct, not previously supported at all) now goes
+        through exactly the same, uniform pipeline:
 
-          str:  puts(x)                    -- puts adds its own newline
-          int:  printf("%d\\n", x)         -- needs real formatting
-          bool: puts(x ? "true" : "false") -- a runtime branch (the
-                exact same cmp/je/jmp/label shape gen_if already uses)
-                picks which string literal's address to pass, then
-                falls through to the same puts call as the str case
-          array/slice: `TYPE[elem, elem, ...]\\n` -- the type prefix
-                (str(arg_type), e.g. "[3]int" or "[]int") printed once,
-                then gen_indexable_base_into's own address+length,
-                handed to _gen_print_collection for the recursive,
-                piece-by-piece body -- see the module docstring's
-                PRINTING ARRAYS AND SLICES section for the full design.
-                Restricted to a Variable or Index argument, matching
-                gen_array_arg_address_into's own restriction elsewhere:
-                a bare ArrayLiteral, Slice, or array/slice-returning
-                Call has no address of its own to print through --
-                assign it to a named variable first.
+          1. Allocate a small (16-byte) growable buffer and set up its
+             own {ptr, len, cap} state -- see the module docstring's
+             PRINTING section for the buffer-append machinery this
+             reuses.
+          2. Compute value_addr: the address of x's own value.
+          3. Look up (or lazily build) x's own compile-time type's
+             runtime descriptor (see _get_or_build_type_descriptor).
+          4. Call hornet_stringify(value_addr, type_desc,
+             quote_strings=0, &buf_state) -- the single, recursive
+             function that knows how to turn ANY value, of any type,
+             into bytes appended onto that buffer. quote_strings=0
+             here specifically because x is the OUTERMOST value of
+             this print() call: a bare str argument prints unquoted
+             ("hello", not 'hello'), matching how puts(x) used to
+             behave -- only a str reached by recursing INTO a
+             collection or struct (quote_strings=1, hardcoded at every
+             such call site inside hornet_stringify itself) gets
+             quoted, to stay unambiguous next to its own neighbors.
+          5. Append a trailing newline.
+          6. write() the buffer's own content to stdout, then free() it.
+
+        Step 1 deliberately runs BEFORE step 2: malloc, like any real
+        function, is free to clobber any caller-saved register, so
+        computing value_addr first and trying to keep it alive across
+        this malloc call would repeat the exact class of bug already
+        found and fixed in gen_buffer_append_bytes_into (see its own
+        docstring) -- computing it AFTER instead means nothing here
+        ever needs to survive a call in a register at all.
+
+        value_addr itself, depending on x's own type:
+          - A bare Variable of ANY type: that variable's own existing
+            storage, addressed directly (LeaQFrame, or a movq load for
+            a heap-allocated array/struct -- see gen_array_address_into/
+            gen_struct_address_into) -- no copy ever made.
+          - A non-Variable int/bool/str expression (`print(a + 1)`):
+            evaluated into a small, shared scratch slot (_print_
+            scalar_temp_offset, reserved unconditionally per function
+            alongside the other print-related temps -- see gen_
+            function), then that slot's own address is used. Safe as a
+            SHARED slot for the same reason _unnamed_slice_temp_offset
+            already is: one print() call's own argument is fully
+            consumed (copied into value_addr's own use, then handed to
+            hornet_stringify) before another print() call, or anything
+            else, could reuse this same slot.
+          - A non-Variable array/slice/struct expression: NOT supported
+            -- these can be arbitrarily large, so unlike the scalar
+            case there's no fixed-size shared slot that could safely
+            fit an arbitrary one. Restricted to a Variable, Field, or
+            Index (an already-addressable, existing piece of storage)
+            instead, matching this file's established restriction on
+            other unnamed-expression bases (e.g. gen_struct_address_
+            into's own note on a struct-returning Call as a field
+            base). Assign it to a named variable first.
 
         Every path still ends with `movl $0, %eax`, a harmless leftover
-        from before print had anywhere real to return to (it used to be
-        Type.INT, "returning" a clean, predictable 0 -- see semantic.py's
-        check_print_call). print is Type.VOID now, so nothing reads
-        %eax after this call anymore, the same as any other void call's
-        leftover register value -- but leaving this in costs nothing
-        and avoids restructuring dst handling here just because the
-        value it computes is no longer semantically meaningful.
-
-        No register-preservation concerns beyond the ones already
-        established: puts/printf are libc functions, and libc is
-        already a fully ABI-compliant citizen (that's the entire point
-        of the ABI), so calling them from inside a Hornet function's
-        body is exactly as safe as calling another Hornet function --
-        both rely on the callee-saved registers being honored by
-        whatever gets called, which is now true either way (see
-        gen_function's prologue).
+        from before print had anywhere real to return to -- print is
+        Type.VOID, so nothing reads %eax after this call anymore, but
+        leaving this in costs nothing and avoids restructuring dst
+        handling here just because the value it computes is no longer
+        semantically meaningful.
         """
         if dst != Register('eax'):
             raise CodegenError(f"Call codegen requires dst == %eax, got: {dst!r}")
 
+        self._print_used = True
         arg = expr.args[0]
         arg_type = self._type_of(arg)
+        buf_state_offset = self._print_buf_state_temp_offset
 
-        if arg_type.kind in (TypeKind.ARRAY, TypeKind.SLICE):
-            if not isinstance(arg, (Variable, Index)):
+        instructions: List[Instruction] = []
+
+        # Step 1: allocate the initial buffer and set up buf_state --
+        # see this method's own docstring for why this runs FIRST.
+        instructions.append(Mov(src=Imm(16), dst=Register('edi')))
+        instructions.append(CallInstr('malloc'))
+        instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', buf_state_offset)))
+        instructions.append(MovQ(src=Imm(0), dst=Memory('rbp', buf_state_offset + 8)))
+        instructions.append(MovQ(src=Imm(16), dst=Memory('rbp', buf_state_offset + 16)))
+
+        # Step 2: compute value_addr into %r10 (caller-saved, chosen
+        # deliberately -- it's consumed immediately below, into %rdi
+        # for the hornet_stringify call, never needing to survive any
+        # call of its own, so it doesn't need to be one of this file's
+        # established callee-saved scratch registers).
+        value_addr_reg = Register('r10')
+        if arg_type.kind == TypeKind.STRUCT:
+            if not isinstance(arg, (Variable, Field, Index)):
                 raise CodegenError(
-                    f"print's argument must be a variable or an "
-                    f"indexing expression when it's array- or slice-"
-                    f"typed, not {type(arg).__name__} -- assign it to "
-                    f"a variable first"
+                    "print's argument must be a variable, field access, "
+                    "or indexing expression when it's struct-typed -- "
+                    "assign it to a variable first"
                 )
-            instructions, length_operand, _ = self.gen_indexable_base_into(
-                arg, Register('rbx'), Register('r12'), Register('r13')
-            )
-            instructions.extend(self._gen_print_static(str(arg_type)))
-            instructions.extend(self._gen_print_collection(length_operand, arg_type))
-            instructions.extend(self._gen_print_static("\n"))
-            instructions.append(Mov(src=Imm(0), dst=dst))
-            return instructions
+            instructions.extend(self.gen_struct_address_into(arg, value_addr_reg))
+        elif arg_type.kind == TypeKind.ARRAY:
+            if not isinstance(arg, (Variable, Field, Index)):
+                raise CodegenError(
+                    "print's argument must be a variable, field access, "
+                    "or indexing expression when it's array-typed -- "
+                    "assign it to a variable first"
+                )
+            instructions.extend(self.gen_array_address_into(arg, value_addr_reg))
+        elif arg_type.kind == TypeKind.SLICE:
+            if isinstance(arg, Variable):
+                instructions.append(LeaQFrame(offset=self._local_offset(arg.name), dst=value_addr_reg))
+            elif isinstance(arg, Field):
+                instructions.extend(self.gen_field_address_into(arg, value_addr_reg))
+            elif isinstance(arg, Index):
+                instructions.extend(self.gen_index_address_into(arg, value_addr_reg))
+            else:
+                raise CodegenError(
+                    "print's argument must be a variable, field access, "
+                    "or indexing expression when it's slice-typed -- "
+                    "assign it to a variable first"
+                )
+        elif isinstance(arg, Variable):
+            instructions.append(LeaQFrame(offset=self._local_offset(arg.name), dst=value_addr_reg))
+        else:
+            # int/bool/str, not a bare Variable -- materialize into the
+            # shared scalar scratch slot (always used at its own full
+            # 8-byte width, regardless of the value's own actual width,
+            # so the SAME slot serves int/bool -- 4 bytes -- and str --
+            # 8, a pointer -- uniformly), then take that slot's address.
+            scratch_offset = self._print_scalar_temp_offset
+            instructions.extend(self.gen_expr_into(arg, Register('eax')))
+            if arg_type == Type.STR:
+                instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', scratch_offset)))
+            else:
+                instructions.append(Mov(src=Register('eax'), dst=Memory('rbp', scratch_offset)))
+            instructions.append(LeaQFrame(offset=scratch_offset, dst=value_addr_reg))
 
-        if arg_type == Type.STR:
-            instructions = self.gen_expr_into(arg, dst)
-            instructions.append(MovQ(src=as_qword_register(dst), dst=Register('rdi')))
-            instructions.append(CallInstr('puts'))
-            instructions.append(Mov(src=Imm(0), dst=dst))
-            return instructions
+        # Step 3: look up (or lazily build) x's own type descriptor --
+        # a pure compile-time/bookkeeping operation (see _get_or_build_
+        # type_descriptor's own docstring), so its placement here,
+        # after value_addr's own computation, is not itself subject to
+        # any register-survival concern -- it emits no instructions of
+        # its own at all, just returns a label name.
+        desc_label = self._get_or_build_type_descriptor(arg_type, {})
 
-        if arg_type == Type.INT:
-            fmt_label = self._get_int_format_label()
-            instructions = self.gen_expr_into(arg, dst)
-            instructions.append(Mov(src=dst, dst=Register('esi')))       # esi = value (2nd printf arg)
-            instructions.append(LeaQ(label=fmt_label, dst=Register('rdi')))  # rdi = &"%d\n" (1st arg)
-            # AL must be 0 before calling a variadic function per the
-            # SysV ABI (it tells the callee how many vector/xmm
-            # registers were used for float varargs -- always 0 here,
-            # since nothing in this language is ever passed as a float).
-            # A plain `movl $0, %eax` both clears AL and is a completely
-            # safe clobber of %eax at this point, since the value we
-            # care about was already copied into %esi just above.
-            instructions.append(Mov(src=Imm(0), dst=dst))
-            instructions.append(CallInstr('printf'))
-            instructions.append(Mov(src=Imm(0), dst=dst))
-            return instructions
+        # Step 4: call hornet_stringify(value_addr, type_desc,
+        # quote_strings=0, &buf_state).
+        instructions.append(MovQ(src=value_addr_reg, dst=Register('rdi')))
+        instructions.append(LeaQ(label=desc_label, dst=Register('rsi')))
+        instructions.append(Mov(src=Imm(0), dst=Register('edx')))
+        instructions.append(LeaQFrame(offset=buf_state_offset, dst=Register('rcx')))
+        instructions.append(CallInstr('hornet_stringify'))
 
-        if arg_type == Type.BOOL:
-            true_label = self._get_true_str_label()
-            false_label = self._get_false_str_label()
-            false_branch_label = self.new_label("print_bool_false")
-            end_label = self.new_label("print_bool_end")
+        # Step 5: append a trailing newline -- load buf_state fresh
+        # (hornet_stringify's own recursive calls may have grown and
+        # relocated it any number of times by now), append, write back.
+        instructions.append(MovQ(src=Memory('rbp', buf_state_offset), dst=Register('rbx')))
+        instructions.append(Mov(src=Memory('rbp', buf_state_offset + 8), dst=Register('r12d')))
+        instructions.append(Mov(src=Memory('rbp', buf_state_offset + 16), dst=Register('r13d')))
+        instructions.extend(self.gen_buffer_append_byte_into(
+            Register('rbx'), Register('r12'), Register('r12d'),
+            Register('r13'), Register('r13d'), Imm(10),  # '\n'
+        ))
+        instructions.append(MovQ(src=Register('rbx'), dst=Memory('rbp', buf_state_offset)))
+        instructions.append(Mov(src=Register('r12d'), dst=Memory('rbp', buf_state_offset + 8)))
+        instructions.append(Mov(src=Register('r13d'), dst=Memory('rbp', buf_state_offset + 16)))
 
-            instructions = self.gen_expr_into(arg, dst)
-            instructions.append(Cmp(src=Imm(0), dst=dst))
-            instructions.append(Je(false_branch_label))
-            instructions.append(LeaQ(label=true_label, dst=Register('rdi')))
-            instructions.append(Jmp(end_label))
-            instructions.append(Label(false_branch_label))
-            instructions.append(LeaQ(label=false_label, dst=Register('rdi')))
-            instructions.append(Label(end_label))
-            instructions.append(CallInstr('puts'))
-            instructions.append(Mov(src=Imm(0), dst=dst))
-            return instructions
+        # Step 6: write(1, buf.ptr, buf.len) to stdout -- an explicit
+        # length, not a null-terminated C string, so write() (not
+        # puts/printf) is the right primitive: the buffer's own
+        # content can itself legitimately contain embedded NUL bytes
+        # transitively (e.g. a str field inside a printed struct that
+        # happens to hold one), which would truncate a puts() call
+        # early but doesn't affect write(), since it's told exactly
+        # how many bytes to send regardless of their content.
+        instructions.append(MovQ(src=Memory('rbp', buf_state_offset), dst=Register('rsi')))
+        instructions.append(Mov(src=Memory('rbp', buf_state_offset + 8), dst=Register('edx')))
+        instructions.append(Mov(src=Imm(1), dst=Register('edi')))
+        instructions.append(CallInstr('write'))
 
-        raise CodegenError(f"'print' has no codegen rule for type: {arg_type}")
+        # Step 7: free the buffer -- this print() call's own, exactly
+        # once, regardless of how many times hornet_stringify itself
+        # relocated it in between; buf_state's own ptr field always
+        # holds whichever block is CURRENTLY live by the time we get
+        # here, which is exactly the one (and only) block genuinely
+        # owned by this call that needs freeing.
+        instructions.append(MovQ(src=Memory('rbp', buf_state_offset), dst=Register('rdi')))
+        instructions.append(CallInstr('free'))
+
+        instructions.append(Mov(src=Imm(0), dst=dst))
+        return instructions
 
     def gen_len_call_into(self, expr: Call, dst: Operand) -> List[Instruction]:
         """`len(x)`: reuses gen_indexable_base_into directly -- the
@@ -6580,242 +6989,6 @@ class CodeGenerator:
             instructions.append(Mov(src=Register('r12d'), dst=dst))
         else:
             instructions.append(Mov(src=length_operand, dst=dst))
-        return instructions
-
-    def _get_int_format_label(self) -> str:
-        if self._int_format_label is None:
-            self._int_format_label = self.new_label("fmt_int")
-            self.string_literals.append((self._int_format_label, "%d\n"))
-        return self._int_format_label
-
-    def _get_true_str_label(self) -> str:
-        if self._true_str_label is None:
-            self._true_str_label = self.new_label("true_str")
-            self.string_literals.append((self._true_str_label, "true"))
-        return self._true_str_label
-
-    def _get_false_str_label(self) -> str:
-        if self._false_str_label is None:
-            self._false_str_label = self.new_label("false_str")
-            self.string_literals.append((self._false_str_label, "false"))
-        return self._false_str_label
-
-    # -- printing arrays and slices ----------------------------------------
-    # See the module docstring's PRINTING ARRAYS AND SLICES section for
-    # the full design. Format: `TYPE[elem, elem, ...]` -- e.g.
-    # `[3]int[1, 2, 3]` or `[]int[1, 2, 3]` -- the type prefix appearing
-    # exactly once, at the outermost level, never repeated for a nested
-    # row. Built as a sequence of direct printf calls, one piece at a
-    # time (the type prefix, each bracket, each separator, each
-    # element), rather than materializing one big string via malloc and
-    # printing it in one shot -- which would need a new int-to-string
-    # conversion step this language has no other reason to have; every
-    # existing int print already goes straight to printf's own %d
-    # formatting, never through an intermediate string buffer.
-
-    def _get_static_string_label(self, text: str) -> str:
-        """Lazily creates and caches (for the whole compilation, like
-        print's own %d-format/true/false labels above) a label for
-        this exact string, deduped by content -- e.g. every
-        "[3]int"-typed print call anywhere in the program shares one
-        cached label rather than emitting a fresh string literal per
-        call site, the same "small dedicated cache" policy those
-        labels already use, just generalized to arbitrary content
-        instead of three fixed strings."""
-        if text not in self._static_string_labels:
-            label = self.new_label("str_lit")
-            self._static_string_labels[text] = label
-            self.string_literals.append((label, text))
-        return self._static_string_labels[text]
-
-    def _gen_print_static(self, text: str) -> List[Instruction]:
-        """Prints a compile-time-known string with NO trailing newline
-        (unlike puts, which always appends one) -- used for every
-        punctuation/prefix piece of array/slice printing (the type
-        prefix, brackets, separators, and the single final newline
-        gen_print_call_into appends once at the very end), each of
-        which needs to NOT have its own newline so the whole
-        collection prints as one line.
-
-        Passes `text` directly as printf's own format string, rather
-        than going through a separate "%s" argument -- safe because
-        every string this is ever called with is either a hardcoded
-        punctuation piece or a type's own str() (see
-        semantic.Type.__str__), neither of which can ever contain a
-        literal '%' character."""
-        label = self._get_static_string_label(text)
-        return [
-            LeaQ(label=label, dst=Register('rdi')),
-            Mov(src=Imm(0), dst=Register('eax')),
-            CallInstr('printf'),
-        ]
-
-    def _gen_print_quoted_str(self, value_reg: Register) -> List[Instruction]:
-        """Prints a str VALUE (already in value_reg, a 64-bit pointer)
-        wrapped in single quotes, via printf("'%s'", value) -- used
-        for str elements WITHIN an array/slice being printed.
-        Distinct from print's own top-level str handling (unquoted,
-        via puts): quoting only applies inside a collection, matching
-        how most languages format a string differently in a
-        collection/repr context than when printed bare."""
-        fmt_label = self._get_static_string_label("'%s'")
-        return [
-            MovQ(src=value_reg, dst=Register('rsi')),
-            LeaQ(label=fmt_label, dst=Register('rdi')),
-            Mov(src=Imm(0), dst=Register('eax')),
-            CallInstr('printf'),
-        ]
-
-    def _gen_print_int_value(self, value_reg: Register) -> List[Instruction]:
-        """Prints an int VALUE (already in a 32-bit register) via
-        printf("%d", value), with NO trailing newline -- used for int
-        elements within an array/slice. Distinct from print's own
-        top-level int handling (_get_int_format_label's "%d\\n"),
-        which does include one."""
-        fmt_label = self._get_static_string_label("%d")
-        return [
-            Mov(src=value_reg, dst=Register('esi')),
-            LeaQ(label=fmt_label, dst=Register('rdi')),
-            Mov(src=Imm(0), dst=Register('eax')),
-            CallInstr('printf'),
-        ]
-
-    def _gen_print_bool_value(self, value_reg: Register) -> List[Instruction]:
-        """Prints a bool VALUE (already in a 32-bit register, 0 or 1)
-        as "true"/"false", with NO trailing newline -- reuses the same
-        cached true/false string labels print's own top-level bool
-        handling already caches (they were never stored WITH a
-        newline in the first place -- puts is what adds one there,
-        not the string itself), just calling printf directly on
-        whichever one applies instead of going through puts."""
-        true_label = self._get_true_str_label()
-        false_label = self._get_false_str_label()
-        false_branch = self.new_label("print_elem_bool_false")
-        end_label = self.new_label("print_elem_bool_end")
-        return [
-            Cmp(src=Imm(0), dst=value_reg),
-            Je(false_branch),
-            LeaQ(label=true_label, dst=Register('rdi')),
-            Jmp(end_label),
-            Label(false_branch),
-            LeaQ(label=false_label, dst=Register('rdi')),
-            Label(end_label),
-            Mov(src=Imm(0), dst=Register('eax')),
-            CallInstr('printf'),
-        ]
-
-    def _gen_print_collection(self, length_operand: Union[Imm, Register], collection_type: Type) -> List[Instruction]:
-        """Prints `[elem, elem, ...]` for a collection (array- or
-        slice-typed) whose base ADDRESS the caller has already placed
-        in %rbx, and whose LENGTH is `length_operand` -- an Imm for a
-        compile-time-known array length, or Register('r12')
-        (populated by the caller with a runtime value) for a slice's
-        own length. No leading type prefix, no trailing newline -- see
-        gen_print_call_into for those, which only ever happen once, at
-        the very outermost level.
-
-        Uses a genuine runtime loop, even when length_operand is a
-        compile-time Imm (an array base) -- rather than unrolling at
-        compile time, one uniform code path handles both an array's
-        and a slice's own length identically, the same "however it's
-        represented" uniformity gen_indexable_base_into's own other
-        callers already rely on.
-
-        %rbx (the address), %r12 (the length, when it's a runtime
-        value), and %r13 (the loop counter) all have to survive across
-        every printf/puts call this loop makes -- at least one per
-        element -- so all three are CALLEE-SAVED registers, which a
-        well-behaved libc call is obligated to preserve, rather than
-        the caller-saved scratch (rax, rcx, rdx, ...) most of this
-        file's transient computations already use. A nested array
-        element (this method's own recursive case, for a multi-
-        dimensional array's rows) needs all three protected on the
-        stack across the RECURSIVE call specifically, since that call
-        reuses these same three physical registers for its own,
-        independent address/length/counter -- exactly the same push-
-        before-recursing discipline used everywhere else in this file
-        a value needs to survive evaluating something else, just
-        applied to a whole recursive call instead of a single sub-
-        expression.
-        """
-        element_type = collection_type.element_type
-        element_stride = type_byte_width(element_type, self.struct_registry)
-        is_runtime_length = isinstance(length_operand, Register)
-
-        ADDR = Register('rbx')
-        LEN = Register('r12')
-        COUNTER = Register('r13')
-
-        instructions = self._gen_print_static("[")
-        instructions.append(Mov(src=Imm(0), dst=Register('r13d')))
-
-        loop_start = self.new_label("print_loop_start")
-        loop_end = self.new_label("print_loop_end")
-        skip_sep = self.new_label("print_skip_sep")
-
-        instructions.append(Label(loop_start))
-        length_op_32 = Register('r12d') if is_runtime_length else length_operand
-        instructions.append(Cmp(src=length_op_32, dst=Register('r13d')))
-        instructions.append(Jae(loop_end))
-
-        instructions.append(Cmp(src=Imm(0), dst=Register('r13d')))
-        instructions.append(Je(skip_sep))
-        instructions.extend(self._gen_print_static(", "))
-        instructions.append(Label(skip_sep))
-
-        # element address = ADDR + COUNTER * element_stride, into %rax.
-        # A plain 32-bit imul is safe: COUNTER is always small and
-        # non-negative (it's this loop's own counter), and a 32-bit
-        # write zero-extends into the full 64-bit rax.
-        instructions.append(Mov(src=Register('r13d'), dst=Register('eax')))
-        instructions.append(IMul(src=Imm(element_stride), dst=Register('eax')))
-        instructions.append(AddQ(src=ADDR, dst=Register('rax')))
-        # %rax now holds the element's own address.
-
-        if element_type.kind == TypeKind.ARRAY:
-            instructions.append(Push(ADDR))
-            if is_runtime_length:
-                instructions.append(Push(LEN))
-            instructions.append(Push(COUNTER))
-            instructions.append(MovQ(src=Register('rax'), dst=ADDR))
-            instructions.extend(self._gen_print_collection(Imm(element_type.size), element_type))
-            instructions.append(Pop(COUNTER))
-            if is_runtime_length:
-                instructions.append(Pop(LEN))
-            instructions.append(Pop(ADDR))
-        elif element_type.kind == TypeKind.SLICE:
-            # Not reachable via any currently-constructible program
-            # (an array or slice of slices can't be initialized --
-            # see gen_array_copy's own rejection), but handled
-            # correctly anyway rather than left to do something
-            # arbitrary: reads the nested slice's own descriptor
-            # (ptr at +0, len at +8) from the element address just
-            # computed, exactly like the top-level slice case does.
-            instructions.append(Push(ADDR))
-            if is_runtime_length:
-                instructions.append(Push(LEN))
-            instructions.append(Push(COUNTER))
-            instructions.append(MovQ(src=Memory('rax', 8), dst=LEN))
-            instructions.append(MovQ(src=Memory('rax', 0), dst=ADDR))
-            instructions.extend(self._gen_print_collection(LEN, element_type))
-            instructions.append(Pop(COUNTER))
-            if is_runtime_length:
-                instructions.append(Pop(LEN))
-            instructions.append(Pop(ADDR))
-        elif element_type == Type.STR:
-            instructions.append(MovQ(src=Memory('rax', 0), dst=Register('rax')))
-            instructions.extend(self._gen_print_quoted_str(Register('rax')))
-        elif element_type == Type.BOOL:
-            instructions.append(Mov(src=Memory('rax', 0), dst=Register('eax')))
-            instructions.extend(self._gen_print_bool_value(Register('eax')))
-        else:  # INT
-            instructions.append(Mov(src=Memory('rax', 0), dst=Register('esi')))
-            instructions.extend(self._gen_print_int_value(Register('esi')))
-
-        instructions.append(Add(src=Imm(1), dst=Register('r13d')))
-        instructions.append(Jmp(loop_start))
-        instructions.append(Label(loop_end))
-        instructions.extend(self._gen_print_static("]"))
         return instructions
 
     def gen_string_literal_into(self, expr: StringLiteral, dst: Operand) -> List[Instruction]:
@@ -7118,7 +7291,7 @@ class Emitter:
         for fn in program.functions:
             lines.extend(self.emit_function(fn))
             lines.append("")  # blank line between functions
-        if program.string_literals:
+        if program.string_literals or program.type_descriptors:
             # Plain `.data` rather than a stricter read-only section
             # (like ELF's `.rodata` or Mach-O's `__TEXT,__cstring`) on
             # purpose -- `.data` is the one directive that assembles
@@ -7131,6 +7304,21 @@ class Emitter:
             for label, content in program.string_literals:
                 lines.append(f"{label}:")
                 lines.append(f'    .asciz "{_escape_for_asciz(content)}"')
+            for label, fields in program.type_descriptors:
+                # Each field is either a plain int (a kind tag, a
+                # count, a byte offset -- emitted as a literal .quad)
+                # or a label name string (a pointer to another type
+                # descriptor, or to a string literal holding a field's
+                # own name -- emitted as .quad <label>, an ordinary
+                # assembler/linker relocation that resolves correctly
+                # regardless of whether that label appears earlier or
+                # LATER in this same .data block, which is exactly
+                # what makes a self-referential struct's own
+                # descriptor -- pointing at its own, not-yet-fully-
+                # emitted label -- work at all).
+                lines.append(f"{label}:")
+                for f in fields:
+                    lines.append(f"    .quad {f}")
             lines.append("")
         if self.platform == 'linux':
             lines.append('.section .note.GNU-stack,"",@progbits')

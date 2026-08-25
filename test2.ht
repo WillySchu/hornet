@@ -1,14 +1,9 @@
 def int main():
-    [5]int arr = [1, 2, 3, 4, 5]
-    print(arr)
-    []int sl = sliceints(arr)
-    print(arr)
-    'sl = append(sl, 6)'
+    Node node
+    node.value = 5
+    print(node)
     return 0
 
 
-def []int sliceints([5]int arr):
-    print(arr)
-    arr[0] = 10
-    print(arr)
-    return arr[:]
+struct Node:
+    int value

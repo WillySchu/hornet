@@ -296,23 +296,19 @@ read at a call site.
 
 A NOTE ON TestPrintArraysAndSlices
 -----------------------------------------------------------------
-`print` on an array or slice formats as `TYPE[elem, elem, ...]` --
-e.g. `[3]int[1, 2, 3]` or `[]int[1, 2, 3]` -- built as a sequence of
-direct printf calls, one piece at a time, rather than materializing
-one big string via malloc first (see codegen.py's PRINTING ARRAYS AND
-SLICES section for why: doing that would need a new int-to-string
-conversion step this language has no other reason to have).
-
-test_nested_2d_array_prefix_appears_once_not_per_row is the test that
-actually proves the headline formatting decision holds, not just the
-one-dimensional case the original design examples showed: the type
-prefix appears exactly once, at the outermost level -- a [2][3]int
-prints as `[2][3]int[[1, 2, 3], [4, 5, 6]]`, with no "[3]int" repeated
-on each inner row. test_str_elements_are_quoted is the other
-deliberate asymmetry worth calling out: a str element inside a
-collection is quoted (`'alice'`) even though a bare str argument to
-print still prints unquoted -- two different, both intentional,
-conventions.
+`print` on an array or slice formats as `[elem, elem, ...]` -- no
+type-name prefix at all (an earlier version of this printed e.g.
+`[3]int[1, 2, 3]`; see codegen.py's PRINTING section for why that was
+dropped when struct printing was added: hornet_stringify, the single,
+recursive runtime function that now backs every type's own print
+output -- including structs, which never had a type-name prefix to
+begin with -- works entirely from a runtime kind tag, never a
+source-level type name string, so keeping arrays/slices consistent
+with structs meant losing their own prefix too). test_str_elements_
+are_quoted is the one deliberate asymmetry worth calling out: a str
+element inside a collection is quoted (`'alice'`) even though a bare
+str argument to print still prints unquoted -- two different, both
+intentional, conventions.
 
 Since an array's length is known at compile time but a slice's is
 only known at runtime, printing uses ONE uniform runtime loop for
@@ -326,6 +322,7 @@ argument_not_supported and its Slice-expression counterpart are the
 same deliberate restriction gen_array_arg_address_into already
 imposes on array-typed call arguments, applied here for the same
 reason: neither has an address of its own to print through.
+
 
 A NOTE ON TestNone
 -----------------------
@@ -2623,13 +2620,18 @@ class TestPrint:
             "21\n42\n",
         )
 
-    def test_print_repeated_int_calls_reuse_cached_format_string(self):
+    def test_print_repeated_calls_in_sequence_share_state_correctly(self):
         """Not observable from stdout content alone, but this exercises
-        the lazy-cached %d format-string label (see codegen.py's
-        _get_int_format_label) across multiple print(int) calls in the
-        same program -- if the caching logic were broken (e.g. reusing
-        a stale label across functions), this would show up as garbled
-        or missing output rather than a clean failure."""
+        several things this design shares across print() calls without
+        letting them interfere with each other: hornet_stringify itself
+        (built once per program, not once per call site -- see
+        CodeGenerator.generate's own _print_used check), and the small
+        set of scratch slots each print() call reuses in turn (_print_
+        scalar_temp_offset, _print_buf_state_temp_offset -- see gen_
+        print_call_into's own docstring) -- if any of this were broken
+        (e.g. a stale buffer pointer left over from a previous call),
+        this would show up as garbled or missing output rather than a
+        clean failure."""
         assert_stdout(
             "    print(1)\n"
             "    print(22)\n"
@@ -2637,6 +2639,7 @@ class TestPrint:
             "    return 0",
             "1\n22\n333\n",
         )
+
 
 
 # ---------------------------------------------------------------------------
@@ -5477,32 +5480,32 @@ class TestIndexingUnnamedSlices:
 
 # ---------------------------------------------------------------------------
 # Printing arrays and slices: `TYPE[elem, elem, ...]` -- e.g.
-# `[3]int[1, 2, 3]` or `[]int[1, 2, 3]` -- the type prefix (matching
+# `[3]int[1, 2, 3]` or `[]int[1, 2, 3]` -- the type name (matching
 # semantic.Type.__str__ exactly, so no new formatting logic was needed
-# for it) appearing exactly once, at the outermost level, never
-# repeated for a nested row. A str element is quoted inside a
-# collection (`'alice'`) even though a bare str argument to print
-# still prints unquoted -- the two behave differently on purpose, not
-# by oversight.
+# for it) printed at EVERY level this appears, not just the outermost
+# one a print() call names directly: a nested row of a [2][3]int shows
+# its own "[3]int" name too (`[2][3]int[[3]int[1, 2, 3], [3]int[4, 5,
+# 6]]`), rather than suppressing it just because it's nested -- see
+# codegen.py's PRINTING section, and _get_or_build_type_descriptor's
+# own docstring, for the runtime mechanism (a name field baked into
+# every ARRAY/SLICE/STRUCT type descriptor, read and printed by
+# hornet_stringify itself on every recursive call, not something any
+# one print() call site special-cases for its own outermost argument
+# only). A str element is quoted inside a collection (`'alice'`) even
+# though a bare str argument to print still prints unquoted -- the two
+# behave differently on purpose, not by oversight.
 #
-# test_nested_2d_array_prefix_appears_once_not_per_row is the test
+# test_nested_2d_array_prints_its_own_name_at_every_level is the test
 # that actually proves the headline formatting decision holds, not
-# just the one-dimensional case both of the original examples showed:
-# a [2][3]int prints as `[2][3]int[[1, 2, 3], [4, 5, 6]]`, not with
-# "[3]int" repeated on each inner row.
+# just the one-dimensional case both of the original examples showed.
 #
-# Built as a sequence of direct printf calls -- one piece at a time
-# (the type prefix, each bracket, each separator, each element) --
-# rather than materializing one big string via malloc and printing it
-# in one shot, which would have needed a new int-to-string conversion
-# step this language has no other reason to have (see codegen.py's
-# PRINTING ARRAYS AND SLICES section). Since an array's length is
-# known at compile time but a slice's is only known at runtime, this
-# uses ONE uniform runtime loop for both rather than unrolling arrays
-# separately -- test_printing_a_slice_of_a_slice exercises the harder,
-# runtime-length path directly, and
-# test_multiple_prints_each_get_exactly_one_newline confirms the loop
-# never leaks an extra or missing newline across separate print calls.
+# Since an array's length is known at compile time but a slice's is
+# only known at runtime, printing uses ONE uniform runtime loop for
+# both rather than unrolling arrays separately -- test_printing_a_
+# slice_of_a_slice exercises the harder, runtime-length path directly,
+# and test_multiple_prints_each_get_exactly_one_newline confirms the
+# loop never leaks an extra or missing newline across separate print
+# calls.
 # ---------------------------------------------------------------------------
 
 class TestPrintArraysAndSlices:
@@ -5525,15 +5528,17 @@ class TestPrintArraysAndSlices:
             "[]int[2, 3, 4]\n",
         )
 
-    def test_nested_2d_array_prefix_appears_once_not_per_row(self):
+    def test_nested_2d_array_prints_its_own_name_at_every_level(self):
         """The test that actually proves the headline formatting
-        decision: the type prefix appears exactly once, at the
-        outermost level -- NOT repeated as "[3]int" on each inner row."""
+        decision: EVERY level prints its own type name, not just the
+        outermost one -- a [2][3]int is a `[2][3]int` of `[3]int`
+        rows, and both names show, nested exactly as deep as the
+        value itself is."""
         assert_stdout(
             "    [2][3]int matrix = [[1, 2, 3], [4, 5, 6]]\n"
             "    print(matrix)\n"
             "    return 0",
-            "[2][3]int[[1, 2, 3], [4, 5, 6]]\n",
+            "[2][3]int[[3]int[1, 2, 3], [3]int[4, 5, 6]]\n",
         )
 
     def test_str_elements_are_quoted(self):
@@ -5558,8 +5563,8 @@ class TestPrintArraysAndSlices:
     def test_empty_slice_prints_with_no_trailing_comma(self):
         """`arr[5:5]` is a valid, empty-slice-producing expression
         (see TestSliceBoundsChecking's own positive control) -- this
-        confirms printing one produces `[]` cleanly, not a trailing
-        comma or an error."""
+        confirms printing one produces `[]int[]` cleanly, not a
+        trailing comma or an error."""
         assert_stdout(
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
             "    []int s = arr[5:5]\n"
@@ -5574,7 +5579,7 @@ class TestPrintArraysAndSlices:
             "    [][3]int rows = matrix[0:2]\n"
             "    print(rows)\n"
             "    return 0",
-            "[][3]int[[1, 2, 3], [4, 5, 6]]\n",
+            "[][3]int[[3]int[1, 2, 3], [3]int[4, 5, 6]]\n",
         )
 
     def test_printing_a_slice_of_a_slice(self):
@@ -5599,7 +5604,9 @@ class TestPrintArraysAndSlices:
             "    print(b)\n"
             "    return 0",
             "[2]int[1, 2]\n[2]int[3, 4]\n",
+
         )
+
 
     def test_array_literal_as_direct_print_argument_not_supported(self):
         """A real, deliberate gap, matching the same restriction
@@ -5974,14 +5981,15 @@ class TestNestedSlices:
         )
 
     def test_printing_array_of_slices(self):
-        """The outer type prefix appears once; inner slice elements
-        don't repeat their own `[]int` prefix -- matching the same
-        convention an ordinary array-of-arrays already follows."""
+        """Every level shows its own type name -- an array of slices
+        prints the outer array's own name, then each inner slice
+        element shows ITS OWN name too, not suppressed just because
+        it's nested."""
         assert_stdout(
             "    [2][]int rows = [2][]int[[1, 2], [3, 4]]\n"
             "    print(rows)\n"
             "    return 0",
-            "[2][]int[[1, 2], [3, 4]]\n",
+            "[2][]int[[]int[1, 2], []int[3, 4]]\n",
         )
 
 
@@ -8040,3 +8048,307 @@ class TestStructs:
         )
         with pytest.raises(ParseError, match="Compound assignment"):
             _parse(source)
+
+
+# ---------------------------------------------------------------------------
+# Printing structs: `Point(x: 1, y: 2)` -- the struct's own declared name,
+# then field name, ": ", then the field's own value, comma-separated,
+# wrapped in parentheses. The name is printed at EVERY level a struct
+# value appears, not just the outermost one a print() call names directly
+# -- a struct field that's itself a struct, or an array/slice element
+# that's a struct, shows its own name too, exactly like a nested array or
+# slice shows its own "[3]int"/"[]int" name at every level (see
+# TestPrintArraysAndSlices's own module-level note) -- both driven by the
+# identical mechanism: every ARRAY/SLICE/STRUCT type descriptor carries
+# its own name as a field, read and printed by hornet_stringify itself on
+# every recursive call (see codegen.py's PRINTING section and _get_or_
+# build_type_descriptor's own docstring), not something any one print()
+# call site special-cases for its own outermost argument only.
+#
+# The recursive cases here (a struct field that's itself a struct, an array
+# or slice of structs, and -- the design's own reason for existing at all --
+# a genuinely SELF-referential struct, like a tree node holding a slice of
+# its own type, see TestStructs's own test_self_referential_struct_via_
+# slice_field for the non-printing version of this same shape) are the
+# actual point of this class: printing any of these correctly requires
+# hornet_stringify to call itself, an arbitrary number of times, at
+# runtime -- something no compile-time-unrolled printing scheme could ever
+# do for a value whose depth isn't known until the program runs.
+# test_self_referential_struct_tree is the test that most directly proves
+# this: a Node holding a slice of Node -- the type descriptor build itself
+# has to handle its own self-reference (see codegen.py's _get_or_build_
+# type_descriptor), and the runtime recursion has no fixed depth limit at
+# all, unlike this test's own necessarily-finite tree.
+# ---------------------------------------------------------------------------
+
+class TestPrintStructs:
+    pytestmark = GCC_SKIP
+
+    def test_basic_struct(self):
+        assert_program_stdout(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    Point p\n"
+            "    p.x = 1\n"
+            "    p.y = 2\n"
+            "    print(p)\n"
+            "    return 0\n",
+            "Point(x: 1, y: 2)\n",
+        )
+
+    def test_single_field_struct(self):
+        assert_program_stdout(
+            "struct Wrapper:\n"
+            "    int value\n"
+            "\n"
+            "def int main():\n"
+            "    Wrapper w\n"
+            "    w.value = 42\n"
+            "    print(w)\n"
+            "    return 0\n",
+            "Wrapper(value: 42)\n",
+        )
+
+    def test_struct_with_bool_field(self):
+        assert_program_stdout(
+            "struct Flag:\n"
+            "    bool on\n"
+            "\n"
+            "def int main():\n"
+            "    Flag f\n"
+            "    f.on = true\n"
+            "    print(f)\n"
+            "    return 0\n",
+            "Flag(on: true)\n",
+        )
+
+    def test_struct_with_str_field_is_quoted(self):
+        """A str field is quoted inside a struct's own print output,
+        exactly like a str element inside an array or slice -- the
+        same "quoted only when nested" convention TestPrintArraysAndSlices'
+        own test_str_elements_are_quoted already established."""
+        assert_program_stdout(
+            "struct Person:\n"
+            "    str name\n"
+            "    int age\n"
+            "\n"
+            "def int main():\n"
+            "    Person p\n"
+            "    p.name = 'alice'\n"
+            "    p.age = 30\n"
+            "    print(p)\n"
+            "    return 0\n",
+            "Person(name: 'alice', age: 30)\n",
+        )
+
+    def test_nested_struct(self):
+        """A struct field that's itself struct-typed -- the first,
+        simplest genuinely recursive case: hornet_stringify calls
+        itself once, for the nested Inner value."""
+        assert_program_stdout(
+            "struct Inner:\n"
+            "    int v\n"
+            "\n"
+            "struct Outer:\n"
+            "    Inner inner\n"
+            "\n"
+            "def int main():\n"
+            "    Outer o\n"
+            "    o.inner.v = 99\n"
+            "    print(o)\n"
+            "    return 0\n",
+            "Outer(inner: Inner(v: 99))\n",
+        )
+
+    def test_struct_with_array_field(self):
+        assert_program_stdout(
+            "struct Row:\n"
+            "    [3]int values\n"
+            "\n"
+            "def int main():\n"
+            "    Row r\n"
+            "    r.values = [1, 2, 3]\n"
+            "    print(r)\n"
+            "    return 0\n",
+            "Row(values: [3]int[1, 2, 3])\n",
+        )
+
+    def test_struct_with_slice_field(self):
+        assert_program_stdout(
+            "struct Row:\n"
+            "    []int values\n"
+            "\n"
+            "def int main():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    Row r\n"
+            "    r.values = arr[0:3]\n"
+            "    print(r)\n"
+            "    return 0\n",
+            "Row(values: []int[1, 2, 3])\n",
+        )
+
+    def test_struct_with_empty_slice_field(self):
+        assert_program_stdout(
+            "struct Row:\n"
+            "    []int values\n"
+            "\n"
+            "def int main():\n"
+            "    Row r\n"
+            "    r.values = none\n"
+            "    print(r)\n"
+            "    return 0\n",
+            "Row(values: []int[])\n",
+        )
+
+    def test_array_of_structs(self):
+        assert_program_stdout(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Point pts\n"
+            "    pts[0].x = 1\n"
+            "    pts[0].y = 2\n"
+            "    pts[1].x = 3\n"
+            "    pts[1].y = 4\n"
+            "    print(pts)\n"
+            "    return 0\n",
+            "[2]Point[Point(x: 1, y: 2), Point(x: 3, y: 4)]\n",
+        )
+
+    def test_slice_of_structs(self):
+        assert_program_stdout(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Point arr\n"
+            "    arr[0].x = 1\n"
+            "    arr[0].y = 2\n"
+            "    arr[1].x = 3\n"
+            "    arr[1].y = 4\n"
+            "    []Point s = arr[0:2]\n"
+            "    print(s)\n"
+            "    return 0\n",
+            "[]Point[Point(x: 1, y: 2), Point(x: 3, y: 4)]\n",
+        )
+
+    def test_struct_field_access_as_print_argument(self):
+        """print's own Field-access support (not just a bare
+        Variable) for a struct-typed argument -- `print(container.p)`."""
+        assert_program_stdout(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "struct Container:\n"
+            "    Point p\n"
+            "\n"
+            "def int main():\n"
+            "    Container c\n"
+            "    c.p.x = 5\n"
+            "    c.p.y = 6\n"
+            "    print(c.p)\n"
+            "    return 0\n",
+            "Point(x: 5, y: 6)\n",
+        )
+
+    def test_struct_array_index_as_print_argument(self):
+        """print's own Index support for a struct-typed argument --
+        `print(pts[0])` -- an array/slice ELEMENT, not the whole
+        container."""
+        assert_program_stdout(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Point pts\n"
+            "    pts[0].x = 7\n"
+            "    pts[0].y = 8\n"
+            "    print(pts[0])\n"
+            "    return 0\n",
+            "Point(x: 7, y: 8)\n",
+        )
+
+    def test_self_referential_struct_tree(self):
+        """The design's own reason for existing: a struct holding a
+        slice of ITS OWN type -- Node's own type descriptor is
+        genuinely self-referential (see codegen.py's _get_or_build_
+        type_descriptor, which has to reserve its own label before
+        recursing into its own children's shared element descriptor,
+        precisely to make this not infinite-loop at compile time), and
+        printing one recurses through hornet_stringify an arbitrary
+        number of times at runtime -- three levels deep here (root ->
+        two children -> each child's own empty children slice), with
+        no compile-time-fixed depth anywhere in the codegen that makes
+        this work."""
+        assert_program_stdout(
+            "struct Node:\n"
+            "    int value\n"
+            "    []Node children\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Node kids\n"
+            "    kids[0].value = 2\n"
+            "    kids[0].children = none\n"
+            "    kids[1].value = 3\n"
+            "    kids[1].children = none\n"
+            "    Node root\n"
+            "    root.value = 1\n"
+            "    root.children = kids[0:2]\n"
+            "    print(root)\n"
+            "    return 0\n",
+            "Node(value: 1, children: []Node[Node(value: 2, children: []Node[]), Node(value: 3, children: []Node[])])\n",
+        )
+
+    def test_multiple_struct_prints_each_get_exactly_one_newline(self):
+        assert_program_stdout(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    Point a\n"
+            "    a.x = 1\n"
+            "    a.y = 2\n"
+            "    Point b\n"
+            "    b.x = 3\n"
+            "    b.y = 4\n"
+            "    print(a)\n"
+            "    print(b)\n"
+            "    return 0\n",
+            "Point(x: 1, y: 2)\nPoint(x: 3, y: 4)\n",
+        )
+
+    def test_struct_returning_call_as_direct_print_argument_not_supported(self):
+        """A real, deliberate gap matching the same restriction array/
+        slice printing already has (see TestPrintArraysAndSlices):
+        print's struct-typed argument must be a Variable, Field, or
+        Index -- an expression with no address of its own to print
+        through (here, a struct-returning function call) is rejected
+        rather than silently copied into a throwaway scratch slot."""
+        source = (
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def Point makePoint():\n"
+            "    Point p\n"
+            "    p.x = 1\n"
+            "    p.y = 2\n"
+            "    return p\n"
+            "\n"
+            "def int main():\n"
+            "    print(makePoint())\n"
+            "    return 0\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        with pytest.raises(CodegenError, match="assign it to a variable first"):
+            generate_asm(ast, platform=ASM_PLATFORM)

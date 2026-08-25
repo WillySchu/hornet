@@ -17,8 +17,6 @@ Updates:
 - Better pretty print for AST.
 - Struct literal syntax.
 - `==` for structs.
-- Fix print for collections to build str buffer and call print once.
-- Print for structs.
 - Add source location for error messages from semantic analysis.
 - `fuction` type.
 - Methods.
