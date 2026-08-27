@@ -646,13 +646,15 @@ import signal
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
 from codegen.codegen import CodegenError, generate_asm
 from lexer import lex
-from parser import Parser, ParseError
+from parser import Break, Constant, Node, Parser, ParseError
 from semantic import SemanticError, analyze
 
 
@@ -8352,3 +8354,162 @@ class TestPrintStructs:
         analyze(ast)
         with pytest.raises(CodegenError, match="assign it to a variable first"):
             generate_asm(ast, platform=ASM_PLATFORM)
+
+
+# ---------------------------------------------------------------------------
+# AST pretty-printing: Node.pretty(), used only for ad hoc inspection/
+# debugging (nothing in codegen.py or semantic.py calls it) -- so this
+# class exists purely to lock in the FORMAT itself, not to catch a
+# regression that would otherwise silently break compilation.
+#
+# Rewritten from 29 individual, hand-written pretty() methods (one per
+# Node subclass, each inventing its own "->"-arrow/bracket/"; "-join
+# layout) into ONE generic mechanism on the Node base class, driven by
+# dataclasses.fields() introspection -- inspired by astpretty
+# (https://github.com/asottile/astpretty), which pretty-prints stdlib
+# Python ASTs via the same "one line if it fits, an indented tree if it
+# doesn't" rule, rather than ast.dump's single unbroken line regardless
+# of size. test_new_node_subclass_needs_no_pretty_method_of_its_own is
+# the test that most directly proves the actual point of doing this
+# generically at all: a node type that has never existed before, with
+# no pretty() of its own, is still rendered correctly, which was NEVER
+# true of the old, one-method-per-subclass scheme.
+#
+# test_operator_symbol_is_quoted_not_bare guards a real bug caught
+# while building this: an operator's bare symbol glued directly onto
+# its own `op=` prefix with no delimiter is genuinely ambiguous for a
+# multi-character operator (`op===` for `==`, easy to misread as a
+# typo or a different operator entirely) -- fixed by quoting it like
+# any other string-valued field (`op='=='`).
+# ---------------------------------------------------------------------------
+
+class TestASTPrettyPrinting:
+    def test_leaf_node_renders_compactly(self):
+        assert Constant(value=1).pretty() == "Constant(value=1)"
+
+    def test_zero_field_node_renders_with_no_arguments(self):
+        """Break/Continue have no fields of their own left to show
+        once resolved_type is excluded -- these render as a bare
+        `Break()`, not the old scheme's bare `"Break"` with no
+        parentheses at all, for consistency with every other node
+        (including astpretty's own convention for a zero-field AST
+        node, e.g. `Load()`)."""
+        assert Break().pretty() == "Break()"
+
+    def test_short_binary_expression_stays_on_one_line(self):
+        ast = _parse("def int main():\n    return a + b\n")
+        return_stmt = ast.functions[0].body[0]
+        assert return_stmt.pretty() == (
+            "Return(value=Binary(op='+', left=Variable(name='a'), right=Variable(name='b')))"
+        )
+
+    def test_operator_symbol_is_quoted_not_bare(self):
+        """Specifically a multi-character operator, `==` -- see this
+        class's own module-level note for the real bug this guards."""
+        ast = _parse("def int main():\n    return a == b\n")
+        return_stmt = ast.functions[0].body[0]
+        assert return_stmt.pretty() == (
+            "Return(value=Binary(op='==', left=Variable(name='a'), right=Variable(name='b')))"
+        )
+
+    def test_nested_expression_expands_into_an_indented_tree(self):
+        """The test that actually proves the headline formatting
+        decision: once a node's own one-line rendering would be too
+        wide, it falls back to one indented `field=value` per line --
+        recursively, so a sub-expression that's ITSELF still short
+        enough (`Binary(op='<', left=Variable(name='x'),
+        right=Variable(name='y'))`) stays on its own single line even
+        though the overall condition, and one level of it above that,
+        both need to expand."""
+        ast = _parse(
+            "def int main():\n"
+            "    if x < y and (y * 2 + 1) > x:\n"
+            "        return 1\n"
+            "    return 0\n"
+        )
+        if_stmt = ast.functions[0].body[0]
+        assert if_stmt.pretty() == (
+            "If(\n"
+            "    condition=Binary(\n"
+            "        op='and',\n"
+            "        left=Binary(op='<', left=Variable(name='x'), right=Variable(name='y')),\n"
+            "        right=Binary(\n"
+            "            op='>',\n"
+            "            left=Binary(\n"
+            "                op='+',\n"
+            "                left=Binary(op='*', left=Variable(name='y'), right=Constant(value=2)),\n"
+            "                right=Constant(value=1),\n"
+            "            ),\n"
+            "            right=Variable(name='x'),\n"
+            "        ),\n"
+            "    ),\n"
+            "    then_body=[Return(value=Constant(value=1))],\n"
+            "    else_body=None,\n"
+            ")"
+        )
+
+    def test_empty_list_renders_as_bare_brackets(self):
+        """An empty list ALWAYS renders as a bare `[]`, regardless of
+        context -- never expanded onto its own multi-line block just
+        because the enclosing node itself needed to expand (Function
+        itself doesn't fit on one line here, but params=[] still
+        does)."""
+        ast = _parse("def int empty():\n    return 0\n")
+        fn = ast.functions[0]
+        assert "params=[]" in fn.pretty()
+
+    def test_resolved_type_is_never_shown(self):
+        """resolved_type is excluded from every node's own rendering,
+        before OR after semantic analysis has actually set it -- see
+        Node.pretty's own docstring for why: it's pure noise on every
+        leaf before analysis (always None), and redundant with just
+        reading it directly off the node after."""
+        ast = _parse("def int main():\n    return 1 + 2\n")
+        analyze(ast)
+        return_stmt = ast.functions[0].body[0]
+        assert return_stmt.value.resolved_type is not None  # analysis really did run
+        assert "resolved_type" not in return_stmt.pretty()
+
+    def test_self_referential_struct_field_type_renders_correctly(self):
+        """`struct Node: []Node children` -- SliceTypeExpr's own
+        element_type is just the plain string 'Node' at the AST level
+        (struct fields are named by string, not an actual cyclic
+        object reference -- see StructField's own docstring), so this
+        is a perfectly ordinary, non-recursive value for the generic
+        mechanism to render, with no special-casing needed despite the
+        struct's own self-reference."""
+        ast = _parse(
+            "struct Node:\n"
+            "    int value\n"
+            "    []Node children\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n"
+        )
+        struct_def = ast.structs[0]
+        assert struct_def.pretty() == (
+            "StructDef(\n"
+            "    name='Node',\n"
+            "    fields=[\n"
+            "        StructField(name='value', field_type='int'),\n"
+            "        StructField(name='children', field_type=SliceTypeExpr(element_type='Node')),\n"
+            "    ],\n"
+            ")"
+        )
+
+    def test_new_node_subclass_needs_no_pretty_method_of_its_own(self):
+        """The actual point of doing this generically at all: a node
+        type that has never existed in parser.py before, and defines
+        no pretty() of its own, is still rendered correctly -- unlike
+        the old scheme, where a brand new Node subclass with no
+        pretty() override would hit Node's own `raise
+        NotImplementedError` instead."""
+        @dataclass
+        class _FakeFutureNode(Node):
+            label: str
+            payload: Optional[Node] = None
+
+        node = _FakeFutureNode(label='widget', payload=_FakeFutureNode(label='inner'))
+        assert node.pretty() == (
+            "_FakeFutureNode(label='widget', payload=_FakeFutureNode(label='inner', payload=None))"
+        )

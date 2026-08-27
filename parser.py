@@ -183,7 +183,7 @@ unary operator, chainable the same way `~`/`-` are (`not not flag`).
 """
 
 import argparse
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import auto, Enum
 from typing import Any, List, Optional, Union
 
@@ -255,11 +255,148 @@ class BinaryOp(Enum):
         }[self]
 
 
+_PRETTY_MAX_WIDTH = 88  # a compact-but-not-cramped line budget, matching
+                         # black's own default -- not chosen to match any
+                         # property of Hornet source itself, just a
+                         # reasonable width for a human to scan
+_PRETTY_INDENT = "    "  # four spaces per nesting level
+
+
+def _pretty_scalar(value: Any) -> str:
+    """Renders a single non-Node, non-list field value. UnaryOp/
+    BinaryOp render as their own readable .symbol() (`+`, `not`, ...)
+    rather than a raw `BinaryOp.ADD`-style enum repr -- the one place
+    this whole mechanism still special-cases a specific type, since an
+    operator's own symbol is genuinely more scannable here than its
+    enum member name, and there are only these two enums to ever reach
+    this function at all (every other field is a plain str/int/float/
+    bool/None, or a Node/list, both handled elsewhere). Still passed
+    through repr() same as everything else, though, not returned bare
+    -- an unquoted symbol glued directly onto its own `op=` prefix
+    with no delimiter is genuinely ambiguous for a multi-character
+    operator (`op===` for `==`, easy to misread as a typo or a
+    different operator entirely); quoting it like any other string
+    value (`op='=='`) removes that ambiguity the same way quoting
+    already does for every other string-valued field."""
+    if isinstance(value, (UnaryOp, BinaryOp)):
+        value = value.symbol()
+    return repr(value)
+
+
+def _pretty_value(value: Any, indent: int) -> str:
+    """Renders any field value -- a Node, a list, or a scalar -- at
+    nesting depth `indent`. Returned text's own FIRST line never has
+    leading whitespace of its own (every caller is about to place it
+    right after a `name=` prefix, or as a bare list entry, which
+    already provides whatever comes before it on that line); every
+    line AFTER the first, if there are any, is already indented
+    exactly `indent` levels deep -- so a caller embedding a multi-line
+    child never has to re-indent it itself, only decide where its own
+    first line goes."""
+    if isinstance(value, Node):
+        return _pretty_node(value, indent)
+    if isinstance(value, list):
+        return _pretty_list(value, indent)
+    return _pretty_scalar(value)
+
+
+def _pretty_list(items: list, indent: int) -> str:
+    """Renders a list field -- Function.body, Call.args, and so on.
+    Empty is always the bare `[]`, regardless of context. A non-empty
+    list tries one line first (`[Constant(value=1), Constant(value=2)]`)
+    the same way _pretty_node does, falling back to one indented item
+    per line, each with its own trailing comma, only if that doesn't
+    fit within _PRETTY_MAX_WIDTH -- so a short param list or a small
+    handful of simple statements stays compact, while a real function
+    body reliably unfolds into a scannable, one-statement-per-line
+    block."""
+    if not items:
+        return "[]"
+    rendered = [_pretty_value(item, indent + 1) for item in items]
+    if not any('\n' in r for r in rendered):
+        candidate = f"[{', '.join(rendered)}]"
+        if indent * len(_PRETTY_INDENT) + len(candidate) <= _PRETTY_MAX_WIDTH:
+            return candidate
+    inner = ",\n".join(f"{_PRETTY_INDENT * (indent + 1)}{r}" for r in rendered)
+    return f"[\n{inner},\n{_PRETTY_INDENT * indent}]"
+
+
+def _pretty_node(node: 'Node', indent: int) -> str:
+    """Renders one Node as `ClassName(field=value, field=value, ...)`,
+    driven entirely by dataclasses.fields(node) -- this works
+    identically for every Node subclass with no per-type code at all,
+    since a dataclass's own fields() are introspectable generically
+    regardless of which specific subclass an instance is. `resolved_
+    type` is skipped everywhere it appears (see Node.pretty's own
+    docstring for why). A node with no fields left to show (Break,
+    Continue, or any node whose only field was resolved_type) renders
+    as a bare `ClassName()`.
+
+    Tries the whole node on one line first, exactly like _pretty_list
+    does, falling back to one indented `field=value` line per field --
+    each value recursively rendered the SAME way, so a field whose own
+    value is short still collapses to one line for itself even when
+    the enclosing node as a whole didn't fit -- only when it doesn't
+    fit within _PRETTY_MAX_WIDTH. This one rule, applied uniformly and
+    recursively, is the entire mechanism: a small, simple node (a bare
+    Constant, a Variable) always renders compactly regardless of how
+    deep it's nested, while a large, genuinely nested structure (a
+    chain of Binary operations, a Function with a real body) naturally
+    unfolds into an indented tree, with no per-node-type layout
+    decisions anywhere in this file."""
+    class_name = type(node).__name__
+    field_names = [f.name for f in fields(node) if f.name != 'resolved_type']
+    if not field_names:
+        return f"{class_name}()"
+
+    rendered = {name: _pretty_value(getattr(node, name), indent + 1) for name in field_names}
+    if not any('\n' in r for r in rendered.values()):
+        candidate = f"{class_name}({', '.join(f'{n}={rendered[n]}' for n in field_names)})"
+        if indent * len(_PRETTY_INDENT) + len(candidate) <= _PRETTY_MAX_WIDTH:
+            return candidate
+
+    inner = ",\n".join(f"{_PRETTY_INDENT * (indent + 1)}{n}={rendered[n]}" for n in field_names)
+    return f"{class_name}(\n{inner},\n{_PRETTY_INDENT * indent})"
+
+
 class Node:
-    """Base class for all AST nodes."""
+    """Base class for all AST nodes.
+
+    pretty() is implemented ONCE, here, generically -- via dataclasses.
+    fields() introspection (see _pretty_node/_pretty_list/_pretty_value
+    above), rather than as 29 individual hand-written methods, one per
+    subclass, the way this used to work. Every node renders as
+    `ClassName(field=value, field=value, ...)`, with Node-valued and
+    list-valued fields recursing through that exact same machinery,
+    falling back from a single compact line to an indented, one-
+    field-per-line block whenever a node (or a list of them) doesn't
+    fit comfortably within one line -- inspired by astpretty
+    (https://github.com/asottile/astpretty), which pretty-prints
+    stdlib Python ASTs via this identical "one line if it fits, an
+    indented tree if it doesn't" rule, rather than ast.dump's own
+    single unbroken line for an entire tree regardless of size.
+
+    A newly added Node subclass needs no pretty() of its own at all to
+    be correctly, consistently rendered -- a real advantage over the
+    old scheme once this AST had grown past a couple dozen node types:
+    each one's own bespoke method (a mix of "->"-arrows, ad hoc
+    brackets, and "; "-joins, hand-picked per node to keep a single
+    line readable) had become exactly the kind of thing that gets
+    harder to visually parse as the underlying structures do, and
+    harder still to keep looking consistent across every node as more
+    are added.
+
+    `resolved_type` is deliberately never shown: it's None on every
+    node before semantic analysis runs, so printing `resolved_type=
+    None` on every single leaf would be pure noise for the most common
+    use of this (inspecting a freshly parsed tree); once semantic
+    analysis has run, it holds a real semantic.Type, which anything
+    that specifically needs it can already read directly off the node
+    rather than needing it spelled out in a debug print.
+    """
 
     def pretty(self) -> str:
-        raise NotImplementedError
+        return _pretty_node(self, indent=0)
 
 
 @dataclass
@@ -269,9 +406,6 @@ class Constant(Node):
     # time -- see this field's fuller explanation on StringLiteral
     # below, which was the first node to need it documented in detail.
     resolved_type: Optional[Any] = None
-
-    def pretty(self) -> str:
-        return f"Constant(value: {self.value})"
 
 
 @dataclass
@@ -283,9 +417,6 @@ class BoolLiteral(Node):
     be unambiguous."""
     value: bool
     resolved_type: Optional[Any] = None
-
-    def pretty(self) -> str:
-        return f"BoolLiteral(value: {'true' if self.value else 'false'})"
 
 
 @dataclass
@@ -332,9 +463,6 @@ class NoneLiteral(Node):
     every other purpose."""
     resolved_type: Optional[Any] = None
 
-    def pretty(self) -> str:
-        return "NoneLiteral"
-
 
 @dataclass
 class StringLiteral(Node):
@@ -363,18 +491,12 @@ class StringLiteral(Node):
     # restriction that Any works around.
     resolved_type: Optional[Any] = None
 
-    def pretty(self) -> str:
-        return f"StringLiteral(value: {self.value!r})"
-
 
 @dataclass
 class Variable(Node):
     """A reference to a local variable, e.g. the `a` in `a + 1`."""
     name: str
     resolved_type: Optional[Any] = None
-
-    def pretty(self) -> str:
-        return f"Variable(name: {self.name})"
 
 
 @dataclass
@@ -430,11 +552,6 @@ class ArrayLiteral(Node):
     type_expr: Optional['ArrayTypeExpr'] = None
     resolved_type: Optional[Any] = None
 
-    def pretty(self) -> str:
-        elems_str = ', '.join(e.pretty() for e in self.elements)
-        prefix = "" if self.type_expr is None else self.type_expr.pretty() + " "
-        return f"{prefix}ArrayLiteral -> [{elems_str}]"
-
 
 @dataclass
 class Index(Node):
@@ -457,9 +574,6 @@ class Index(Node):
     array: Node
     index: Node
     resolved_type: Optional[Any] = None
-
-    def pretty(self) -> str:
-        return f"Index -> [{self.array.pretty()}, {self.index.pretty()}]"
 
 
 @dataclass
@@ -511,11 +625,6 @@ class Slice(Node):
     high: Optional[Node] = None
     resolved_type: Optional[Any] = None
 
-    def pretty(self) -> str:
-        low_str = self.low.pretty() if self.low is not None else ''
-        high_str = self.high.pretty() if self.high is not None else ''
-        return f"Slice -> [{self.array.pretty()}, {low_str}:{high_str}]"
-
 
 @dataclass
 class Call(Node):
@@ -529,19 +638,12 @@ class Call(Node):
     args: List[Node] = field(default_factory=list)
     resolved_type: Optional[Any] = None
 
-    def pretty(self) -> str:
-        args_str = ', '.join(a.pretty() for a in self.args)
-        return f"Call(name: {self.name}) -> [{args_str}]"
-
 
 @dataclass
 class Unary(Node):
     op: UnaryOp
     operand: Node
     resolved_type: Optional[Any] = None
-
-    def pretty(self) -> str:
-        return f"Unary(op: {self.op.symbol()}) -> {self.operand.pretty()}"
 
 
 @dataclass
@@ -550,14 +652,6 @@ class Binary(Node):
     left: Node
     right: Node
     resolved_type: Optional[Any] = None
-
-    def pretty(self) -> str:
-        # Binary has two children, so the linear "A -> B" chain style
-        # used elsewhere (Return, Unary, Function) doesn't quite fit --
-        # this bracketed form keeps it a single readable line while still
-        # showing the tree shape, e.g. for `(1 + 2) * 3`:
-        #   Binary(op: *) -> [Binary(op: +) -> [Constant(value: 1), Constant(value: 2)], Constant(value: 3)]
-        return f"Binary(op: {self.op.symbol()}) -> [{self.left.pretty()}, {self.right.pretty()}]"
 
 
 @dataclass
@@ -571,9 +665,6 @@ class Return(Node):
     "no declared type" -- both ends of the same absence, checked the
     same way (`is None`) wherever either is consumed."""
     value: Optional[Node] = None
-
-    def pretty(self) -> str:
-        return "Return" if self.value is None else f"Return -> {self.value.pretty()}"
 
 
 @dataclass
@@ -603,10 +694,6 @@ class ArrayTypeExpr(Node):
     size: int
     element_type: Union[str, 'ArrayTypeExpr', 'SliceTypeExpr']
 
-    def pretty(self) -> str:
-        et = self.element_type if isinstance(self.element_type, str) else self.element_type.pretty()
-        return f"[{self.size}]{et}"
-
 
 @dataclass
 class SliceTypeExpr(Node):
@@ -633,10 +720,6 @@ class SliceTypeExpr(Node):
     """
     element_type: Union[str, ArrayTypeExpr, 'SliceTypeExpr']
 
-    def pretty(self) -> str:
-        et = self.element_type if isinstance(self.element_type, str) else self.element_type.pretty()
-        return f"[]{et}"
-
 
 @dataclass
 class VarDecl(Node):
@@ -648,20 +731,12 @@ class VarDecl(Node):
     var_type: Union[str, ArrayTypeExpr, SliceTypeExpr]
     init: Optional[Node] = None
 
-    def pretty(self) -> str:
-        vt = self.var_type if isinstance(self.var_type, str) else self.var_type.pretty()
-        head = f"VarDecl(name: {self.name}, type: {vt})"
-        return head if self.init is None else f"{head} -> {self.init.pretty()}"
-
 
 @dataclass
 class Assign(Node):
     """`a = <value>`, assigning to an already-declared variable."""
     name: str
     value: Node
-
-    def pretty(self) -> str:
-        return f"Assign(name: {self.name}) -> {self.value.pretty()}"
 
 
 @dataclass
@@ -687,9 +762,6 @@ class IndexAssign(Node):
     index: Node
     value: Node
 
-    def pretty(self) -> str:
-        return f"IndexAssign(index: {self.index.pretty()}) -> [{self.array.pretty()}, {self.value.pretty()}]"
-
 
 @dataclass
 class Field(Node):
@@ -705,9 +777,6 @@ class Field(Node):
     base: Node
     name: str
     resolved_type: Optional[Any] = None
-
-    def pretty(self) -> str:
-        return f"Field -> [{self.base.pretty()}, {self.name}]"
 
 
 @dataclass
@@ -731,9 +800,6 @@ class FieldAssign(Node):
     name: str
     value: Node
 
-    def pretty(self) -> str:
-        return f"FieldAssign(name: {self.name}) -> [{self.base.pretty()}, {self.value.pretty()}]"
-
 
 @dataclass
 class StructField(Node):
@@ -745,9 +811,6 @@ class StructField(Node):
     an uninitialized local variable already does."""
     name: str
     field_type: Union[str, 'ArrayTypeExpr', 'SliceTypeExpr']
-
-    def pretty(self) -> str:
-        return f"StructField(name: {self.name}, type: {self.field_type})"
 
 
 @dataclass
@@ -762,10 +825,6 @@ class StructDef(Node):
     name: str
     fields: List[StructField] = field(default_factory=list)
 
-    def pretty(self) -> str:
-        fields_str = '; '.join(f.pretty() for f in self.fields)
-        return f"StructDef(name: {self.name}) -> {fields_str}"
-
 
 @dataclass
 class ExprStmt(Node):
@@ -774,9 +833,6 @@ class ExprStmt(Node):
     this is also how a future function-call-as-statement would look) and
     then discarded."""
     expr: Node
-
-    def pretty(self) -> str:
-        return f"ExprStmt -> {self.expr.pretty()}"
 
 
 @dataclass
@@ -797,14 +853,6 @@ class If(Node):
     then_body: List[Node]
     else_body: Optional[List[Node]] = None
 
-    def pretty(self) -> str:
-        then_str = '; '.join(stmt.pretty() for stmt in self.then_body)
-        head = f"If({self.condition.pretty()}) -> [{then_str}]"
-        if self.else_body is None:
-            return head
-        else_str = '; '.join(stmt.pretty() for stmt in self.else_body)
-        return f"{head} else -> [{else_str}]"
-
 
 @dataclass
 class While(Node):
@@ -814,10 +862,6 @@ class While(Node):
     condition: Node
     body: List[Node]
 
-    def pretty(self) -> str:
-        body_str = '; '.join(stmt.pretty() for stmt in self.body)
-        return f"While({self.condition.pretty()}) -> [{body_str}]"
-
 
 @dataclass
 class Break(Node):
@@ -825,18 +869,12 @@ class Break(Node):
     Only valid inside a while body; semantic.py rejects one that isn't
     (see its loop_depth tracking)."""
 
-    def pretty(self) -> str:
-        return "Break"
-
 
 @dataclass
 class Continue(Node):
     """`continue` -- skips the rest of the current iteration of the
     *innermost* enclosing loop and jumps straight to re-checking its
     condition. Same "only valid inside a while" rule as Break."""
-
-    def pretty(self) -> str:
-        return "Continue"
 
 
 @dataclass
@@ -851,10 +889,6 @@ class Param(Node):
     like VarDecl.var_type (see their own docstrings)."""
     name: str
     type: Union[str, ArrayTypeExpr, SliceTypeExpr]
-
-    def pretty(self) -> str:
-        t = self.type if isinstance(self.type, str) else self.type.pretty()
-        return f"Param(name: {self.name}, type: {t})"
 
 
 @dataclass
@@ -877,30 +911,11 @@ class Function(Node):
     params: List[Param] = field(default_factory=list)
     body: List[Node] = field(default_factory=list)
 
-    def pretty(self) -> str:
-        # Statements are joined with "; " rather than the "->" used
-        # everywhere else, specifically so statement boundaries stay
-        # visually distinct from the "->" each statement already uses
-        # internally for its own children (e.g. VarDecl's initializer).
-        # With a single Return per function this was never ambiguous;
-        # with multiple statements it would be.
-        params_str = ', '.join(p.pretty() for p in self.params)
-        body_str = '; '.join(stmt.pretty() for stmt in self.body)
-        rt = "(none)" if self.return_type is None else (
-            self.return_type if isinstance(self.return_type, str) else self.return_type.pretty()
-        )
-        return f"Function(name: {self.name}, return_type: {rt}, params: [{params_str}]) -> {body_str}"
-
 
 @dataclass
 class Program(Node):
     functions: List[Function] = field(default_factory=list)
     structs: List[StructDef] = field(default_factory=list)
-
-    def pretty(self) -> str:
-        struct_lines = [f"Program -> {sd.pretty()}" for sd in self.structs]
-        fn_lines = [f"Program -> {fn.pretty()}" for fn in self.functions]
-        return '\n'.join(struct_lines + fn_lines)
 
     def __repr__(self) -> str:
         return self.pretty()

@@ -14,7 +14,6 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- Better pretty print for AST.
 - Struct literal syntax.
 - `==` for structs.
 - Add source location for error messages from semantic analysis.
