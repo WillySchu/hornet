@@ -482,22 +482,136 @@ def test_escape_analyzer_whole_value_node_of_empty():
     assert analyzer.whole_value_node_of('var1') is None
 
 
-def test_escape_analyzer_whole_value_node_of_param():
-    source = """
-def int helper(int x):
-    return x + 1
-"""
-    ast = parse_and_analyze(source)
-    print(ast)
+def test_escape_analyzer_whole_value_node_of_param_not_slice():
     fn = parser.Function(name='main', params=[parser.Param(name='x', type='int')], return_type=None)
     analyzer = ea.EscapeAnalyzer(fn, [semantic.Type(kind=semantic.TypeKind.INT)], {})
-    # TODO(will): Is this right? This thing exists, it just isn't a slice.
     assert analyzer.whole_value_node_of('x') is None
 
 
-def test_escape_analyzer_indexed_slot_of():
-    # TODO(will): Finish.
-    ...
+def test_escape_analyzer_whole_value_node_of_param_slice():
+    fn = parser.Function(
+        name='main',
+        params=[parser.Param(name='x', type=parser.SliceTypeExpr(element_type='int'))],
+        return_type=None,
+    )
+    analyzer = ea.EscapeAnalyzer(fn, [semantic.Type(kind=semantic.TypeKind.SLICE)], {})
+    # TODO(will): ids aren't deterministic, but would love a better way of testing this.
+    assert analyzer.whole_value_node_of('x') is not None
+
+
+def test_escape_analyzer_whole_value_node_of_variable_no_slice():
+    fn = parser.Function(
+        name='main',
+        params=[],
+        body=[
+            parser.VarDecl(
+                name='x',
+                var_type='int',
+                init=parser.Constant(value=1),
+            ),
+            parser.Return()
+        ],
+        return_type=None,
+    )
+    analyzer = ea.EscapeAnalyzer(fn, [], {})
+    assert analyzer.whole_value_node_of('x') is None
+    analyzer.walk_statements([fn])
+    assert analyzer.whole_value_node_of('x') is None
+
+
+def test_escape_analyzer_whole_value_node_of_variable_slice():
+    fn = parser.Function(
+        name='main',
+        params=[],
+        body=[
+            parser.VarDecl(
+                name='sl',
+                var_type=parser.SliceTypeExpr(element_type='int'),
+                init=parser.ArrayLiteral(
+                    elements=[
+                        parser.Constant(value=1),
+                        parser.Constant(value=2),
+                        parser.Constant(value=3),
+                    ],
+                ),
+            ),
+            parser.Return(),
+        ],
+        return_type=None,
+    )
+    analyzer = ea.EscapeAnalyzer(fn, [], {})
+    assert analyzer.whole_value_node_of('sl') is None
+    analyzer.walk_statements(fn.body)
+    assert analyzer.whole_value_node_of('sl') is not None
+
+
+def test_escape_analyzer_whole_value_node_of_variable_struct_no_slice():
+    fn = parser.Function(
+        name='main',
+        params=[],
+        body=[
+            parser.VarDecl(
+                name='a',
+                var_type='A',
+            ),
+            parser.FieldAssign(base=parser.Variable('a'), name='x', value=parser.Constant(value=1)),
+            parser.FieldAssign(base=parser.Variable('a'), name='y', value=parser.StringLiteral(value='asdf')),
+            parser.Return(),
+        ],
+        return_type=None,
+    )
+    structs = {'A': semantic.StructInfo(
+        name='A',
+        fields={
+            'x': semantic.Type(kind=semantic.TypeKind.INT),
+            'y': semantic.Type(kind=semantic.TypeKind.STR),
+        },
+    )}
+    analyzer = ea.EscapeAnalyzer(fn, [], structs)
+    analyzer.walk_statements(fn.body)
+    assert analyzer.whole_value_node_of('a') is None
+
+
+def test_escape_analyzer_whole_value_node_of_variable_struct_slice():
+    source = """
+struct A:
+    int x
+    str y
+    []int sl
+
+def helper():
+    A a
+    a.x = 1
+    a.y = 'asdf'
+    return
+"""
+    ast = parse_and_analyze(source)
+    print(ast)
+    fn = parser.Function(
+        name='main',
+        params=[],
+        body=[
+            parser.VarDecl(
+                name='a',
+                var_type='A',
+            ),
+            parser.FieldAssign(base=parser.Variable('a'), name='x', value=parser.Constant(value=1)),
+            parser.FieldAssign(base=parser.Variable('a'), name='y', value=parser.StringLiteral(value='asdf')),
+            parser.Return(),
+        ],
+        return_type=None,
+    )
+    structs = {'A': semantic.StructInfo(
+        name='A',
+        fields={
+            'x': semantic.Type(kind=semantic.TypeKind.INT),
+            'y': semantic.Type(kind=semantic.TypeKind.STR),
+            'sl': semantic.Type(kind=semantic.TypeKind.SLICE),
+        },
+    )}
+    analyzer = ea.EscapeAnalyzer(fn, [], structs)
+    analyzer.walk_statements(fn.body)
+    assert analyzer.whole_value_node_of('a') == -1
 
 
 def test_escape_analyzer_field_slot_of():

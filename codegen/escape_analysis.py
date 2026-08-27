@@ -280,10 +280,10 @@ class EscapeAnalyzer:
         return self.whole_value_node_of(root_name)
 
     def whole_value_node_of(self, name: str) -> Optional[int]:
-        # TODO(will): This description isn't quite right, this seems to only do anything if we have a slice.
-        """Resolves `name` to the node id this analysis's graph uses to track
-        everything relevant about the value it holds. Returns None if `name`
-        doesn't resolve to anything this analysis tracks."""
+        """Resolves `name` to the node id associated with the name if the node
+        is a slice or contains a slice. Returns None if `name` doesn't resolve
+        to anything or resolves to a non slice or aggregate type that does not
+        contain a slice."""
         decl_id = self.resolve(name)
         if decl_id is None:
             return None
