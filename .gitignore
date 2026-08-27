@@ -8,5 +8,7 @@ __pycache__
 *.swp
 *.swo
 
+.idea
+
 .coverage
 htmlcov
