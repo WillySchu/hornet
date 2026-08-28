@@ -167,41 +167,14 @@ class EscapeAnalyzer:
         return self.aggregate_slot_ids[key]
 
     def indexed_slot_of(self, base_expr: Node) -> Optional[int]:
-        # TODO(will): Fix this docstring.
-        """Recognizes `base_expr` as something that, indexed ONE more
-        time, produces a slice -- `rows` in `rows[i]` (where rows is
-        an array/slice of slices), `matrix[i]` in `matrix[i][j]`
-        (where indexing matrix[i] one more time reaches a slice, even
-        though matrix[i] ITSELF is still an array), `s1[0:3]` in
-        `s1[0:3][0:2]`, any mix of Index/Slice at any depth -- and
-        resolves it to whatever ROOT Variable underlies the whole
-        chain (see root_variable_name), returning that root's own
+        """Recognizes `base_expr` as something that, indexed ONE more time,
+        produces a slice. Then resolves it to whatever ROOT Variable underlies
+        the whole chain (see root_variable_name), returning that root's own
         shared indexed-elements slot id (see slot_node_id).
 
-        The guard here is deliberately checking base_expr's own
-        IMMEDIATE element_type (does indexing base_expr ONE more time
-        yield a slice), NOT whole_value_node_of's own, separate
-        _contains_slice check (does the aggregate contain a slice at
-        ANY depth) -- these are answering two different questions, and
-        conflating them is a real bug this function used to have: for
-        `rows[0][0]` where rows: [1][]int, the OUTER Index's own base
-        is `rows[0]` (itself slice-typed), and indexing that ONE more
-        time yields an INT, not a slice -- reading a plain int value
-        OUT of a slice has nothing to do with rows' own role as a
-        slice-holding aggregate at all, and must NOT resolve to rows'
-        own slot just because rows, considered as a whole, happens to
-        contain a slice somewhere. Checking base_expr's own element_
-        type directly (rather than recursing arbitrarily deep the way
-        _contains_slice does) is exactly precise enough for this,
-        specifically because base_expr's own resolved_type already
-        reflects however many prior levels of indexing produced it --
-        there's never a need to look any further than one level ahead
-        from here.
-
-        Returns None if base_expr's own type isn't an array or slice
-        at all, if indexing it one more time wouldn't yield a slice,
-        or if the chain doesn't resolve to a bare Variable at its root
-        (a Call, an ArrayLiteral, ...)."""
+        Returns None if base_expr's own type isn't an array or slice at all, if
+        indexing it one more time wouldn't yield a slice, or if the chain
+        doesn't resolve to a bare Variable at its root."""
         base_type = base_expr.resolved_type
         if base_type is None or base_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE):
             return None
@@ -215,15 +188,15 @@ class EscapeAnalyzer:
 
     def field_slot_of(self, field_expr: Field) -> Optional[int]:
         # TODO(will): Fix this docstring
-        """Recognizes field_expr (`p.values`, `p.inner.values`, ...)
-        as a struct field access that reads or writes a value needing
-        this analysis's own tracking -- the field itself is slice-
-        typed, or is an aggregate (array or struct) that itself
-        contains a slice at some depth (see _contains_slice) -- and
-        resolves it to whatever ROOT Variable underlies the whole
-        access chain (see root_variable_name, which unwraps Field,
-        Index, and Slice together, in any mix), returning that root's
-        own shared aggregate-elements slot id (see slot_node_id) --
+        """Recognizes field_expr as a struct field access that reads or writes a
+        value needing this analysis's own tracking. This means:
+            1. The field itself is slice-typed, or is an aggregate (array or
+               struct) that itself contains a slice at some depth (see
+               _contains_slice).
+            2. It resolves to whatever ROOT Variable underlies the whole access
+               chain (see root_variable_name, which unwraps Field, Index, and
+               Slice together, in any mix).
+        It returns that root's own shared aggregate-elements slot id (see slot_node_id) --
         the SAME slot indexed_slot_of gives an array/slice-of-slices
         declaration, and whole_value_node_of gives a struct considered
         as a whole. Deliberately ONE combined slot per root
@@ -247,16 +220,6 @@ class EscapeAnalyzer:
         declaration reaches escape when it needs to), just coarser
         than necessary in the specific case of two logically-
         independent slice fields on the same struct.
-
-        Mirrors indexed_slot_of's own "one more level" guard exactly,
-        one kind of access over: checking field_expr's OWN resolved
-        field type directly (not a recursive walk of the root struct's
-        EVERY field) is what keeps this precise for the identical
-        reason indexed_slot_of needs to be -- `p.x` (a plain int
-        field) must NOT resolve to p's own combined slot just because
-        p, considered as a whole, happens to have some OTHER slice-
-        typed field; only a field access that itself touches slice-
-        shaped storage does.
 
         Returns None if field_expr's base isn't struct-typed, that
         struct is unknown, or field_expr.name isn't a real field of it

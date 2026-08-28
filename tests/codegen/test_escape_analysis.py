@@ -1,8 +1,12 @@
 """Tests for escape_analysis.py"""
+
 import ast
 import tempfile
 from pathlib import Path
-    
+from unittest import mock
+
+from _pytest import monkeypatch
+
 import parser
 import semantic
 import codegen.escape_analysis as ea
@@ -612,6 +616,71 @@ def helper():
     analyzer = ea.EscapeAnalyzer(fn, [], structs)
     analyzer.walk_statements(fn.body)
     assert analyzer.whole_value_node_of('a') == -1
+
+
+def test_escape_analyzer_indexed_slot_of_no_base_type():
+    fn = parser.Function(name='main', return_type=None)
+    node = parser.Constant(value=1)
+    analyzer = ea.EscapeAnalyzer(fn, [], {})
+    assert analyzer.indexed_slot_of(node) is None
+
+
+def test_escape_analyzer_indexed_slot_of_base_type_not_array_or_slice():
+    fn = parser.Function(name='main', return_type=None)
+    node = parser.Constant(value=1, resolved_type=semantic.Type(kind=semantic.TypeKind.INT))
+    analyzer = ea.EscapeAnalyzer(fn, [], {})
+    assert analyzer.indexed_slot_of(node) is None
+
+
+def test_escape_analyzer_indexed_slot_of_no_element_type():
+    fn = parser.Function(name='main', return_type=None)
+    node = parser.ArrayLiteral(resolved_type=semantic.Type(kind=semantic.TypeKind.ARRAY))
+    analyzer = ea.EscapeAnalyzer(fn, [], {})
+    assert analyzer.indexed_slot_of(node) is None
+
+
+def test_escape_analyzer_indexed_slot_of_element_type_not_slice():
+    fn = parser.Function(name='main', return_type=None)
+    node = parser.ArrayLiteral(
+        resolved_type=semantic.Type(
+            kind=semantic.TypeKind.ARRAY,
+            element_type=semantic.Type(kind=semantic.TypeKind.INT),
+        ),
+    )
+    analyzer = ea.EscapeAnalyzer(fn, [], {})
+    assert analyzer.indexed_slot_of(node) is None
+
+
+def test_escape_analyzer_indexed_slot_of_no_root_variable():
+    fn = parser.Function(name='main', return_type=None)
+    node = parser.ArrayLiteral(
+        resolved_type=semantic.Type(
+            kind=semantic.TypeKind.ARRAY,
+            element_type=semantic.Type(
+                kind=semantic.TypeKind.SLICE,
+            ),
+        ),
+    )
+    analyzer = ea.EscapeAnalyzer(fn, [], {})
+    assert analyzer.indexed_slot_of(node) is None
+
+
+def test_escape_analyzer_indexed_slot():
+    fn = parser.Function(name='main', return_type=None)
+    node = parser.Slice(
+        array=parser.Slice(
+            array=parser.Field(base=parser.Variable(name='sl'), name='x')
+        ),
+        resolved_type=semantic.Type(
+            kind=semantic.TypeKind.SLICE,
+            element_type=semantic.Type(kind=semantic.TypeKind.SLICE),
+        ),
+    )
+    analyzer = ea.EscapeAnalyzer(fn, [], {})
+    analyzer.whole_value_node_of = mock.MagicMock()
+    analyzer.whole_value_node_of.return_value = -1
+    assert analyzer.indexed_slot_of(node) == -1
+    analyzer.whole_value_node_of.assert_called_with('sl')
 
 
 def test_escape_analyzer_field_slot_of():
