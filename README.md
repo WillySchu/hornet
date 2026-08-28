@@ -15,6 +15,10 @@ Binary Ops:
 
 Updates:
 - Struct literal syntax.
+- Struct literals as function arguments.
+- Struct literals as return values.
+- Struct literals nested in other literals.
+- Named field construction for struct literals.
 - `==` for structs.
 - Add source location for error messages from semantic analysis.
 - `fuction` type.

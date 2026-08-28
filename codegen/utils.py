@@ -1,9 +1,9 @@
-"""TODO fold this in somewhere"""
+"""Utility functions for codegen."""
 
 from semantic import Type, TypeKind, StructInfo
 
 
-def type_byte_width(t: Type, structs: Dict[str, StructInfo]) -> int:
+def type_byte_width(t: Type, structs: dict[str, StructInfo]) -> int:
     """Total bytes needed to store a value of type `t`: 4 for int/bool,
     8 for str (a pointer), 24 for a slice (its own fixed-size
     descriptor -- {ptr, len, cap}, 8 bytes each, in that order,
