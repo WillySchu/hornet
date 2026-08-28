@@ -5,18 +5,10 @@ from semantic import Type, TypeKind, StructInfo
 
 def type_byte_width(t: Type, structs: dict[str, StructInfo]) -> int:
     """Total bytes needed to store a value of type `t`: 4 for int/bool,
-    8 for str (a pointer), 24 for a slice (its own fixed-size
-    descriptor -- {ptr, len, cap}, 8 bytes each, in that order,
-    matching Go's own slice header layout -- see the SLICES section --
-    regardless of what it's a slice OF: two slices of different
-    element types are still both 24 bytes, unlike two arrays of
-    different element types or sizes), recursively `size *
-    type_byte_width(element_type)` for an array -- its full, flattened
-    stack footprint, matching how it's laid out contiguously in
-    row-major order regardless of how many dimensions it has (see the
-    ARRAYS section) -- and, for a struct, the SUM of type_byte_width
+    8 for str (a pointer), 24 for a slice (ptr, len, cap), recursively `size *
+    type_byte_width(element_type)` for an array, and, for a struct, the SUM of type_byte_width
     over each of its own fields' types, in declaration order (see the
-    STRUCTS section) -- exactly the same "flatten it and add up the
+    STRUCTS section). This is the same "flatten it and add up the
     pieces" idea the array case already uses, just over a
     heterogeneous field list instead of N copies of one element type.
     `structs` is this program's own struct registry (see StructInfo in
@@ -51,12 +43,24 @@ def leaf_type(t: Type) -> Type:
     Stops at a SLICE the same way it already stops at STR -- neither
     is unwrapped further, since both are copied as one fixed-size
     unit (a pointer, or a {pointer, length} pair) rather than
-    recursed into element by element. An array whose ELEMENTS are
-    themselves slices (`[3][]int`) is a real gap this leaves --
-    gen_array_copy's own flat-copy loop only knows how to move 4 or 8
-    bytes at a time, not a slice descriptor's 16 -- see its own
-    docstring for the explicit, deliberate rejection this leads to,
-    rather than a silent miscompile."""
+    recursed into element by element."""
     while t.kind == TypeKind.ARRAY:
         t = t.element_type
     return t
+
+
+def escape_for_asciz(s: str) -> str:
+    """Escapes `s` (an already-unescaped Hornet string value -- see
+    parser.py's _unescape_string_literal) for embedding in a GAS
+    `.asciz "..."` directive. Backslash has to be escaped *first*, or
+    the escapes added for the other characters would themselves get
+    re-escaped; double-quote needs escaping since that's the
+    directive's own delimiter; the rest are the common control
+    characters getting their standard short escape so the emitted
+    assembly stays readable text rather than raw control bytes."""
+    s = s.replace('\\', '\\\\')
+    s = s.replace('"', '\\"')
+    s = s.replace('\n', '\\n')
+    s = s.replace('\t', '\\t')
+    s = s.replace('\r', '\\r')
+    return s

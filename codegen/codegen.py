@@ -1601,7 +1601,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple, Union
 
 from codegen.escape_analysis import analyze_array_escapes, is_heap_allocated
-from codegen.utils import leaf_type, type_byte_width
+from codegen.utils import escape_for_asciz, leaf_type, type_byte_width
 from lexer import lex
 from parser import (
     ArrayLiteral,
@@ -7245,22 +7245,6 @@ class CodeGenerator:
 # Assembly AST -> text
 # ---------------------------------------------------------------------------
 
-def _escape_for_asciz(s: str) -> str:
-    """Escapes `s` (an already-unescaped Hornet string value -- see
-    parser.py's _unescape_string_literal) for embedding in a GAS
-    `.asciz "..."` directive. Backslash has to be escaped *first*, or
-    the escapes added for the other characters would themselves get
-    re-escaped; double-quote needs escaping since that's the
-    directive's own delimiter; the rest are the common control
-    characters getting their standard short escape so the emitted
-    assembly stays readable text rather than raw control bytes."""
-    s = s.replace('\\', '\\\\')
-    s = s.replace('"', '\\"')
-    s = s.replace('\n', '\\n')
-    s = s.replace('\t', '\\t')
-    s = s.replace('\r', '\\r')
-    return s
-
 
 class Emitter:
     """Renders an AsmProgram as textual x64 AT&T-syntax assembly.
@@ -7303,7 +7287,7 @@ class Emitter:
             lines.append(".data")
             for label, content in program.string_literals:
                 lines.append(f"{label}:")
-                lines.append(f'    .asciz "{_escape_for_asciz(content)}"')
+                lines.append(f'    .asciz "{escape_for_asciz(content)}"')
             for label, fields in program.type_descriptors:
                 # Each field is either a plain int (a kind tag, a
                 # count, a byte offset -- emitted as a literal .quad)
