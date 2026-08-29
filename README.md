@@ -14,7 +14,6 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- Struct literals as function arguments.
 - Struct literals as return values.
 - Struct literals as field assigne values.
 - Struct literals as index assigne values.
@@ -37,7 +36,6 @@ Updates:
 - Free memory `malloc`ed by string concatenation.
 - Bounds Check Elimination.
 - Stack based params to get around parameter limit.
-- Pass array literals to function calls.
 - Explore per frame vs per array heap promotion.
 - Array equality.
 - Slice equality?

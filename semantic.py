@@ -1539,17 +1539,22 @@ class SemanticAnalyzer:
         _types_compatible check with no recursive construction
         involved.)
 
-        Only ever reached from analyze_var_decl/analyze_assign, which
-        each check for this exact shape (isinstance(expr, Call) and
-        expr.name in self.structs) BEFORE calling
-        _check_value_flowing_into at all -- every other place a Call
-        can appear (a function-call argument, a return value, an
+        Only ever reached from analyze_var_decl/analyze_assign (for a
+        VarDecl initializer or an Assign value) and check_call's own
+        argument-checking loop (for a direct function-call argument,
+        `foo(A(1, 2))`) -- each of those three checks for this exact
+        shape (isinstance(expr, Call) and expr.name in self.structs)
+        BEFORE calling _check_value_flowing_into/check_expr at all.
+        Every OTHER place a Call can appear (a return value, an
         IndexAssign/FieldAssign value, a bare statement, or nested
-        inside another expression) still funnels through check_expr's
+        inside another expression -- including as an argument to
+        ANOTHER struct literal, per this method's own argument-
+        checking loop just above) still funnels through check_expr's
         ordinary dispatch into check_call instead, which rejects a
         struct-name Call there. That's the entire mechanism that keeps
-        struct literals scoped to exactly VarDecl/Assign, deliberately
-        narrower than where an ordinary function call is allowed.
+        struct literals scoped to exactly these three positions,
+        deliberately narrower than where an ordinary function call is
+        allowed to appear.
 
         Annotates expr.resolved_type directly (mirroring _check_value_
         flowing_into's own array-literal-into-slice special case, for
@@ -1581,12 +1586,12 @@ class SemanticAnalyzer:
         if expr.name in self.structs:
             raise SemanticError(
                 f"'{expr.name}(...)' is a struct literal, which is only "
-                f"allowed as a variable's initializer or a plain "
-                f"assignment's value -- not as a function-call argument, "
-                f"a return value, an IndexAssign/FieldAssign value, "
-                f"nested inside another expression, or a bare statement; "
-                f"assign it to a variable first if you need it in one of "
-                f"those positions"
+                f"allowed as a variable's initializer, a plain "
+                f"assignment's value, or a direct function-call "
+                f"argument -- not as a return value, an IndexAssign/"
+                f"FieldAssign value, nested inside another expression, "
+                f"or a bare statement; assign it to a variable first if "
+                f"you need it in one of those positions"
             )
         if expr.name == 'print':
             return self.check_print_call(expr)
@@ -1604,7 +1609,21 @@ class SemanticAnalyzer:
                 f"argument(s), got {len(expr.args)}"
             )
         for i, (arg, expected_type) in enumerate(zip(expr.args, param_types), start=1):
-            actual_type = self.check_expr(arg)
+            # A struct literal used directly as an argument (`foo(A(1,
+            # 2))`) is checked via its own dedicated method -- exactly
+            # like analyze_var_decl/analyze_assign already do for a
+            # VarDecl initializer/Assign value -- rather than the
+            # plain check_expr every other argument gets. See check_
+            # struct_literal's own docstring for why every OTHER
+            # position a Call can appear in (including as an argument
+            # to ANOTHER struct literal -- check_struct_literal's own
+            # argument loop uses plain check_expr, not this one) still
+            # funnels through the ordinary check_expr -> check_call
+            # dispatch above, which rejects a struct-name Call there.
+            if isinstance(arg, Call) and arg.name in self.structs:
+                actual_type = self.check_struct_literal(arg)
+            else:
+                actual_type = self.check_expr(arg)
             if not self._types_compatible(actual_type, expected_type):
                 raise SemanticError(
                     f"Argument {i} to '{expr.name}' should be "

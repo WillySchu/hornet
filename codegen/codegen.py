@@ -1627,7 +1627,7 @@ that now backs every type's own print output, struct included.)
 
 import argparse
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 from codegen.errors import CodegenError
 from codegen.escape_analysis import analyze_array_escapes, is_heap_allocated
@@ -2524,6 +2524,7 @@ class CodeGenerator:
         # across functions, and offsets are relative to *this*
         # function's own %rbp.
         self._var_offsets = {}
+        self._argument_temp_offsets = {}  # id(ArrayLiteral or Call) -> its permanent slot; see _collect_argument_temps
         self._next_offset = 0
         # No declared return type (fn.return_type is None -- see
         # Function's own docstring in parser.py) means Type.VOID, the
@@ -2637,6 +2638,20 @@ class CodeGenerator:
 
         self._collect_params(fn.params)
         self._collect_locals(fn.body)
+        # A THIRD pre-pass, alongside the two above: finds every array-
+        # or struct-typed function-call argument that has no address
+        # of its own -- an ArrayLiteral, a struct literal, or an
+        # ordinary array/struct-returning Call used directly as an
+        # argument (`foo([1,2,3])`, `foo(A(1,2))`, `foo(bar())`) --
+        # anywhere in this function's body, however deeply nested
+        # inside other expressions, and reserves each one its own
+        # permanent stack slot up front, sized to fit. See _collect_
+        # argument_temps's own docstring for why this can't reuse the
+        # single-shared-slot trick _unnamed_slice_temp_offset above
+        # relies on, and gen_array_arg_address_into/_gen_call_
+        # arguments_into's own STRUCT branch for where these slots
+        # actually get read back out.
+        self._collect_argument_temps(fn.body)
         self.scopes = [{}]
 
         # A slice parameter needs THREE consecutive argument-register
@@ -2882,6 +2897,179 @@ class CodeGenerator:
                     self._collect_locals(stmt.else_body)
             elif isinstance(stmt, While):
                 self._collect_locals(stmt.body)
+
+    def _collect_argument_temps(self, statements: List[Node]) -> None:
+        """Recursively walks `statements` -- including into every If's
+        then_body/else_body and every While's body, exactly like
+        _collect_locals above -- looking for a function-call argument
+        that is array- or struct-typed but has no address of its own:
+        an ArrayLiteral, a struct literal, or an ordinary array- or
+        struct-returning Call used DIRECTLY as an argument (`foo([1,
+        2,3])`, `foo(A(1,2))`, `foo(bar())`) -- as opposed to a
+        Variable, Index, or Field, each of which already has a real
+        address via gen_array_address_into/gen_struct_address_into and
+        so never needs one of these.
+
+        WHY THIS CAN'T REUSE THE SHARED-SLOT TRICK
+        -------------------------------------------------
+        _unnamed_slice_temp_offset above gets away with ONE shared,
+        per-function scratch slot reused for every unnamed slice,
+        because a slice's own 24-byte descriptor is written into it and
+        then immediately drained into registers -- by the time
+        anything else could reuse the slot, nothing still needs to
+        read from it (see gen_indexable_base_into's own docstring for
+        the full argument). An array or struct argument is different
+        in kind: it's passed BY ADDRESS, and that address has to keep
+        pointing at valid data right up until the moment the actual
+        `call` instruction executes, since the callee only reads
+        through it after control transfer, inside its own prologue.
+        That rules out a single shared slot the same way slices use
+        one: a single call can have MORE THAN ONE such argument at
+        once (`foo([1,2], [3,4])`, or `foo(A(1,2), B(3,4))`), and both
+        need to be alive simultaneously, all the way through the call
+        -- a shared slot would let the second one's write clobber the
+        first's before `call` ever runs. So each occurrence needs its
+        OWN, genuinely distinct backing storage, discovered ahead of
+        time (this pass) the same way every named local already is.
+
+        SIZE THRESHOLD, MATCHING EVERY OTHER ARRAY/STRUCT VALUE
+        -------------------------------------------------------------
+        Not every occurrence found here actually gets a stack slot:
+        _reserve_argument_temp applies the exact same is_heap_
+        allocated size check every named local/parameter already goes
+        through. A small literal or returning-call's result gets a
+        real, permanent slot, reserved here and read back out by
+        _gen_materialize_argument_temp_into. A large one gets NO slot
+        at all -- it's heap-allocated fresh at the point of the call
+        instead (same method), which needs no space reserved in this
+        function's own frame, unlike a large NAMED local's heap
+        pointer (which still needs 8 bytes to remember the pointer for
+        as long as the variable stays in scope): an argument-temp's
+        pointer is read exactly once, by the callee's own entry-time
+        copy, and never again afterward, so there's nothing here that
+        needs to survive past the `call` itself.
+
+        WHY THIS WALKS EXPRESSIONS, NOT JUST STATEMENTS
+        -------------------------------------------------------
+        Unlike _collect_locals, which only ever needs to look at
+        statement-level constructs (a VarDecl can't hide inside an
+        expression), a literal-or-returning-call-as-argument can be
+        buried arbitrarily deep inside another expression entirely
+        unrelated to the call itself -- `int x = foo(1) + bar([1, 2,
+        3])`, or `[foo([1, 2, 3]), 5, 6]` (an array literal whose own
+        element happens to be a call that itself takes one) -- so this
+        needs a real, general expression walk (_collect_argument_
+        temps_in_expr) rather than only inspecting a statement's own
+        top-level shape."""
+        for stmt in statements:
+            if isinstance(stmt, VarDecl):
+                if stmt.init is not None:
+                    self._collect_argument_temps_in_expr(stmt.init)
+            elif isinstance(stmt, Assign):
+                self._collect_argument_temps_in_expr(stmt.value)
+            elif isinstance(stmt, IndexAssign):
+                self._collect_argument_temps_in_expr(stmt.array)
+                self._collect_argument_temps_in_expr(stmt.index)
+                self._collect_argument_temps_in_expr(stmt.value)
+            elif isinstance(stmt, FieldAssign):
+                self._collect_argument_temps_in_expr(stmt.base)
+                self._collect_argument_temps_in_expr(stmt.value)
+            elif isinstance(stmt, Return):
+                if stmt.value is not None:
+                    self._collect_argument_temps_in_expr(stmt.value)
+            elif isinstance(stmt, If):
+                self._collect_argument_temps_in_expr(stmt.condition)
+                self._collect_argument_temps(stmt.then_body)
+                if stmt.else_body is not None:
+                    self._collect_argument_temps(stmt.else_body)
+            elif isinstance(stmt, While):
+                self._collect_argument_temps_in_expr(stmt.condition)
+                self._collect_argument_temps(stmt.body)
+            elif isinstance(stmt, ExprStmt):
+                self._collect_argument_temps_in_expr(stmt.expr)
+            # Break/Continue carry no expressions at all.
+
+    def _collect_argument_temps_in_expr(self, expr: Optional[Node]) -> None:
+        """The general expression-tree walk _collect_argument_temps
+        needs but _collect_locals never did -- recurses into every
+        expression node that can contain another expression (Binary,
+        Unary, Index, Field, Slice, ArrayLiteral's own elements, and a
+        Call's own arguments), with a leaf case for everything else
+        (Constant/BoolLiteral/StringLiteral/NoneLiteral/Variable, none
+        of which can contain a nested Call at all).
+
+        The actual DECISION -- does this specific Call argument need
+        its own reserved slot -- is made only at a Call node: after
+        recursing into each of ITS OWN arguments first (so a call
+        nested inside another call's argument, `foo(bar([1,2,3]))`, is
+        discovered on the way back up, innermost first, though nothing
+        about reservation order actually depends on that), any
+        argument that's array- or struct-typed and isn't a Variable,
+        Index, or Field gets handed to _reserve_argument_temp. A
+        Variable/Index/Field argument is skipped entirely here -- it
+        already has a real address of its own (see gen_array_address_
+        into/gen_struct_address_into), so it was never a candidate for
+        one of these slots in the first place."""
+        if expr is None:
+            return
+        if isinstance(expr, Call):
+            for arg in expr.args:
+                self._collect_argument_temps_in_expr(arg)
+                arg_type = type_of(arg)
+                if arg_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and not isinstance(arg, (Variable, Index, Field)):
+                    self._reserve_argument_temp(arg, arg_type)
+        elif isinstance(expr, Binary):
+            self._collect_argument_temps_in_expr(expr.left)
+            self._collect_argument_temps_in_expr(expr.right)
+        elif isinstance(expr, Unary):
+            self._collect_argument_temps_in_expr(expr.operand)
+        elif isinstance(expr, Index):
+            self._collect_argument_temps_in_expr(expr.array)
+            self._collect_argument_temps_in_expr(expr.index)
+        elif isinstance(expr, Field):
+            self._collect_argument_temps_in_expr(expr.base)
+        elif isinstance(expr, Slice):
+            self._collect_argument_temps_in_expr(expr.array)
+            self._collect_argument_temps_in_expr(expr.low)
+            self._collect_argument_temps_in_expr(expr.high)
+        elif isinstance(expr, ArrayLiteral):
+            for element in expr.elements:
+                self._collect_argument_temps_in_expr(element)
+        # Constant/BoolLiteral/StringLiteral/NoneLiteral/Variable: leaves,
+        # nothing further to recurse into.
+
+    def _reserve_argument_temp(self, expr: Node, t: Type) -> None:
+        """Reserves a permanent stack slot for `expr` -- an ArrayLiteral,
+        a struct literal, or an ordinary array/struct-returning Call
+        used directly as a function-call argument -- keyed by id(expr)
+        exactly like _var_offsets keys a VarDecl/Param, just for a
+        synthetic, unnamed "declaration" that corresponds to no actual
+        source-level variable.
+
+        Skips reservation entirely when `t` is over the same is_heap_
+        allocated size threshold every named local/parameter already
+        uses: a large value gets heap-allocated fresh at the point of
+        the call instead (see _gen_materialize_argument_temp_into),
+        needing no space in this function's own frame at all -- unlike
+        a large NAMED local, whose heap pointer still needs a permanent
+        8-byte slot to survive for as long as the variable stays in
+        scope, an argument-temp's pointer is read exactly once, by the
+        callee's own entry-time copy, and never again -- there's
+        nothing here that needs to outlive the call itself.
+
+        Deliberately not routed through _is_heap_allocated (which also
+        consults self._escaping_array_ids, keyed by a VarDecl/Param's
+        own id): an argument-temp is never a candidate for escape-
+        driven promotion at all -- it's never sliced by the caller (it
+        flows into the callee as a whole value, copied on entry, per
+        the module docstring's ARRAYS/STRUCTS sections), so only the
+        plain size check ever applies to it, via is_heap_allocated
+        directly."""
+        if is_heap_allocated(t, self.struct_registry):
+            return
+        width = type_byte_width(t, self.struct_registry)
+        self._next_offset -= width
+        self._argument_temp_offsets[id(expr)] = self._next_offset
 
     def _frame_size(self) -> int:
         # Total bytes used by locals and parameters, rounded up to a
@@ -5202,16 +5390,68 @@ class CodeGenerator:
             return [LeaQFrame(offset=mem.offset, dst=dst)]
         return [MovQ(src=Register(mem.base), dst=dst)]
 
+    def _gen_materialize_argument_temp_into(self, expr: Node, t: Type, dst: Register) -> List[Instruction]:
+        """Materializes an array- or struct-typed function-call
+        argument that has no address of its own -- an ArrayLiteral, a
+        struct literal, or an ordinary array/struct-returning Call --
+        into real, addressable storage, and leaves that address in
+        `dst` (a 64-bit register). This is the piece a Variable/Index/
+        Field argument never needs at all (gen_array_address_into/
+        gen_struct_address_into already have a real address for any of
+        those); see _collect_argument_temps's own docstring for why
+        this can't reuse a single shared scratch slot the way an
+        unnamed slice does, and why the stack-vs-heap decision below
+        mirrors is_heap_allocated's own size threshold.
+
+        Producing the actual VALUE needs no new mechanism at all: gen_
+        array_value_into and gen_struct_value_into already handle
+        EVERY one of these shapes (an ArrayLiteral or a struct literal,
+        via their own Call-name-is-a-struct dispatch; an ordinary
+        returning Call, via gen_array_call_into/gen_struct_call_into)
+        written into an arbitrary Memory destination -- the exact same
+        methods gen_var_decl/gen_assign/gen_return already call. All
+        that's genuinely new here is deciding WHERE to write the
+        result and then taking ITS address, which is what the two
+        branches below do:
+
+          - SMALL (t is within the same is_heap_allocated size
+            threshold every named local/parameter already uses):
+            _collect_argument_temps already reserved this exact expr
+            (keyed by id(expr)) its own permanent stack slot -- write
+            directly into it, then LeaQFrame its address.
+          - LARGE: no slot was reserved for it at all (see _reserve_
+            argument_temp) -- malloc a fresh block sized to fit
+            instead (_gen_malloc_array, despite its name already used
+            generically for structs too -- see gen_var_decl's own heap
+            case), write into it the exact same way, and use the
+            resulting pointer directly. Never freed, matching this
+            compiler's existing memory model, and never stashed
+            anywhere durable either: the callee's own entry-time copy
+            (see gen_function's parameter loop) is the only thing that
+            ever reads through this pointer, so unlike a named heap-
+            allocated local, nothing here needs to survive past the
+            call itself.
+        """
+        gen_value_into = self.gen_struct_value_into if t.kind == TypeKind.STRUCT else self.gen_array_value_into
+        if is_heap_allocated(t, self.struct_registry):
+            instructions = self._gen_malloc_array(t)  # leaves the fresh pointer in %rax
+            instructions.extend(gen_value_into(expr, Memory('rax', 0), t))
+            if dst.name != 'rax':
+                instructions.append(MovQ(src=Register('rax'), dst=dst))
+            return instructions
+        offset = self._argument_temp_offsets[id(expr)]
+        instructions = gen_value_into(expr, Memory('rbp', offset), t)
+        instructions.append(LeaQFrame(offset=offset, dst=dst))
+        return instructions
+
     def gen_array_arg_address_into(self, expr: Node, dst: Register) -> List[Instruction]:
         """Computes the address to pass for an array-typed function-call
-        argument, into the 64-bit register `dst`. Only a Variable or an
-        Index yielding a sub-array is supported -- both already have a
-        real, existing address (see gen_array_address_into) -- an
-        ArrayLiteral or a call returning an array used DIRECTLY as an
-        argument (e.g. `foo([1,2,3])` or `foo(bar())`) has no home of
-        its own to point at, and isn't supported: assign it to a named
-        variable first (`[3]int t = [1,2,3]; foo(t)`), which already
-        works today.
+        argument, into the 64-bit register `dst`. A Variable or an
+        Index yielding a sub-array already has a real, existing address
+        (see gen_array_address_into); an ArrayLiteral or a call
+        returning an array used DIRECTLY as an argument (`foo([1,2,3])`
+        or `foo(bar())`) has no home of its own, so it's materialized
+        first -- see _gen_materialize_argument_temp_into.
 
         The callee copies from this address into its own local slot on
         entry (see gen_function's parameter loop) -- so what's passed
@@ -5223,10 +5463,12 @@ class CodeGenerator:
         module docstring's ARRAYS section)."""
         if isinstance(expr, (Variable, Index)):
             return self.gen_array_address_into(expr, dst)
+        if isinstance(expr, (ArrayLiteral, Call)):
+            return self._gen_materialize_argument_temp_into(expr, type_of(expr), dst)
         raise CodegenError(
-            f"Array-typed call arguments must be a variable or an "
-            f"indexing expression, not {type(expr).__name__} -- assign "
-            f"it to a variable first"
+            f"Array-typed call arguments must be a variable, an "
+            f"indexing expression, an array literal, or a call, not "
+            f"{type(expr).__name__}"
         )
 
     def _total_arg_slots(self, args: List[Node]) -> int:
@@ -5331,16 +5573,21 @@ class CodeGenerator:
             elif arg_type.kind == TypeKind.STRUCT:
                 # Same convention as an array argument just above --
                 # pass the address, let the callee copy from it on
-                # entry (see gen_function's parameter loop) -- via
-                # gen_struct_address_into directly rather than gen_
+                # entry (see gen_function's parameter loop). A
+                # Variable/Field/Index already has a real address (via
+                # gen_struct_address_into directly, rather than gen_
                 # array_arg_address_into, since a struct argument can
-                # also be a Field (`foo(s.inner)`), which that method
-                # doesn't handle at all; it already rejects a struct-
-                # returning Call the same way gen_array_arg_address_
-                # into rejects an array-returning one, for the
-                # identical reason (assign it to a named variable
-                # first).
-                instructions.extend(self.gen_struct_address_into(arg, Register('rax')))
+                # also be a Field -- `foo(s.inner)` -- which that
+                # method doesn't handle at all); anything else -- a
+                # struct literal, or an ordinary struct-returning Call
+                # -- has none, so it's materialized first (see _gen_
+                # materialize_argument_temp_into), the exact same
+                # mechanism the ARRAY branch above now uses for the
+                # identical shape of problem.
+                if isinstance(arg, (Variable, Field, Index)):
+                    instructions.extend(self.gen_struct_address_into(arg, Register('rax')))
+                else:
+                    instructions.extend(self._gen_materialize_argument_temp_into(arg, arg_type, Register('rax')))
                 instructions.append(Push(Register('rax')))
                 arg_slot_counts.append(1)
             else:

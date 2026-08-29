@@ -1,2 +1,17 @@
+struct A:
+    int x
+    str y
+
+
+def print_a(A a):
+    print(a)
+
+
+def print_arr([5]int ints):
+    print(ints)
+
+
 def main():
     print('Hello, playground')
+    print_a(A(1, 'hello'))
+    print_arr([1, 2, 3, 4, 5])

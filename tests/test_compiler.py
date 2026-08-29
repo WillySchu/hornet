@@ -3433,23 +3433,21 @@ class TestArrays:
         with pytest.raises(CodegenError, match="needs 7 argument register"):
             generate_asm(ast, platform=ASM_PLATFORM)
 
-    def test_array_literal_as_direct_call_argument_not_supported(self):
-        """A real, deliberate gap, not silent mishandling: an
-        ArrayLiteral (or a call returning an array) has no address of
-        its own to pass as an argument -- see
-        gen_array_arg_address_into's own docstring for the workaround
-        (assign it to a named variable first, which already works)."""
-        source = (
+    def test_array_literal_as_direct_call_argument(self):
+        """Used to be a real, deliberate gap (an ArrayLiteral has no
+        address of its own to pass as an argument) -- now materialized
+        into its own dedicated stack slot first (see codegen.py's
+        _collect_argument_temps/_gen_materialize_argument_temp_into)
+        rather than requiring the caller to assign it to a named
+        variable first."""
+        assert_program_exit_code(
             "def int sum3([3]int arr):\n"
             "    return arr[0] + arr[1] + arr[2]\n"
             "\n"
             "def int main():\n"
-            "    return sum3([1, 2, 3])\n"
+            "    return sum3([1, 2, 3])\n",
+            6,
         )
-        ast = _parse(source)
-        analyze(ast)  # semantically fine -- the gap is codegen-level only
-        with pytest.raises(CodegenError, match="assign it to a variable first"):
-            generate_asm(ast, platform=ASM_PLATFORM)
 
 
 # ---------------------------------------------------------------------------
@@ -3587,23 +3585,20 @@ class TestTypedArrayLiterals:
             match="Cannot initialize",
         )
 
-    def test_typed_literal_as_call_argument_still_not_supported(self):
-        """Same pre-existing restriction untyped array values already
-        have (see test_array_literal_as_direct_call_argument_not_
-        supported in TestArrays) -- applies identically here, since
-        it's about the expression being an ArrayLiteral at all, not
-        about whether it happens to be typed."""
-        source = (
+    def test_typed_literal_as_call_argument(self):
+        """Same lifted restriction untyped array values just got (see
+        test_array_literal_as_direct_call_argument in TestArrays) --
+        applies identically here, since it's about the expression
+        being an ArrayLiteral at all, not about whether it happens to
+        be typed."""
+        assert_program_exit_code(
             "def int sum3([3]int arr):\n"
             "    return arr[0] + arr[1] + arr[2]\n"
             "\n"
             "def int main():\n"
-            "    return sum3([3]int[1, 2, 3])\n"
+            "    return sum3([3]int[1, 2, 3])\n",
+            6,
         )
-        ast = _parse(source)
-        analyze(ast)
-        with pytest.raises(CodegenError, match="assign it to a variable first"):
-            generate_asm(ast, platform=ASM_PLATFORM)
 
     def test_non_literal_array_element_in_bare_statement_not_supported(self):
         """A real, deliberate gap: an element that's itself a non-
@@ -8202,7 +8197,17 @@ class TestStructLiterals:
         Exactly one `call malloc`: fa/fb are each individually under
         the stack limit and stay stack-allocated, so the one malloc
         call present is attributable to Big's own declaration, not to
-        either array argument."""
+        either array argument.
+
+        Matched via regex with an optional leading underscore, not a
+        literal "call    malloc" substring: Emitter prefixes external
+        symbols with a leading underscore on macOS (Mach-O convention
+        -- see its own symbol() method), so the actual instruction text
+        is `call    _malloc` there, not `call    malloc`. A plain
+        substring check would silently read as 0 matches on macOS
+        instead of failing loudly, which is exactly what happened here
+        before this fix -- caught by a person actually running this on
+        macOS, not by this sandbox, which only has Linux available."""
         source = (
             "struct Big:\n"
             "    [2100]int a\n"
@@ -8255,10 +8260,11 @@ class TestStructLiterals:
         )
 
     def test_resulting_struct_can_be_passed_to_a_function(self):
-        """The literal itself can't be passed directly (see test_
-        struct_literal_as_function_argument_is_rejected below), but
-        the ordinary struct VALUE it produces, once assigned to a
-        variable, is passed exactly like any other struct."""
+        """The ordinary struct VALUE a literal produces, once assigned
+        to a variable, is passed exactly like any other struct. The
+        literal itself can ALSO be passed directly now -- see test_
+        struct_literal_as_direct_function_argument below -- but this
+        variable-first form remains just as valid."""
         assert_program_exit_code(
             "struct Point:\n"
             "    int x\n"
@@ -8297,8 +8303,15 @@ class TestStructLiterals:
             match="should be int",
         )
 
-    def test_struct_literal_as_function_argument_is_rejected(self):
-        assert_program_semantic_error(
+    def test_struct_literal_as_direct_function_argument(self):
+        """Used to be rejected at the semantic layer entirely (a
+        struct literal was only ever valid as a VarDecl initializer or
+        an Assign value); check_call's own argument-checking loop now
+        recognizes this exact shape too, mirroring analyze_var_decl/
+        analyze_assign, and codegen materializes the literal into its
+        own dedicated stack slot before taking its address (see
+        codegen.py's _collect_argument_temps)."""
+        assert_program_exit_code(
             "struct Point:\n"
             "    int x\n"
             "    int y\n"
@@ -8308,7 +8321,7 @@ class TestStructLiterals:
             "\n"
             "def int main():\n"
             "    return sumPoint(Point(3, 4))\n",
-            match="only allowed as a variable's initializer",
+            7,
         )
 
     def test_struct_literal_as_return_value_is_rejected(self):
@@ -8413,6 +8426,306 @@ class TestStructLiterals:
             "    print(p)\n"
             "    return 0\n",
             "Point(x: 3, y: 4)\n",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Materializing an array/struct literal, or an ordinary array/struct-
+# returning call, when it's used directly as a function-call argument
+# (`foo([1,2,3])`, `foo(A(1,2))`, `foo(bar())`) rather than being assigned
+# to a named variable first. None of these have an address of their own
+# the way a Variable/Index/Field does, so each gets its own dedicated
+# stack slot -- discovered ahead of time by a real recursive expression
+# walk (codegen.py's _collect_argument_temps/_collect_argument_temps_in_
+# expr), not a single shared scratch slot the way an unnamed slice gets
+# (see gen_indexable_base_into's own docstring for why that trick doesn't
+# transfer here): unlike a slice descriptor, an array/struct argument is
+# passed BY ADDRESS, and that address has to stay valid right up until the
+# `call` itself executes -- including when a single call has MORE THAN ONE
+# such argument alive at once, which a shared slot could not have handled
+# correctly. test_two_array_literals_alive_in_the_same_call and test_two_
+# struct_literals_alive_in_the_same_call are the tests that most directly
+# prove this: each argument needs its own genuinely distinct backing
+# storage, not a slot reused after the first is "drained".
+#
+# The size threshold mirrors is_heap_allocated exactly: a small literal or
+# returning-call's result gets a real, permanent stack slot; a large one
+# is heap-allocated fresh at the call site instead, with no space
+# reserved in the caller's own frame at all -- proven at the asm level
+# below (a malloc count, and confirming the caller's own frame doesn't
+# balloon by the literal's own size), not just by a correct exit code
+# (which, as established earlier with structs, doesn't by itself
+# distinguish a genuinely heap-allocated result from a stack-allocated one
+# that happened to still work).
+# ---------------------------------------------------------------------------
+
+class TestArgumentMaterialization:
+    pytestmark = GCC_SKIP
+
+    def test_array_literal_as_argument(self):
+        assert_program_exit_code(
+            "def int sum3([3]int arr):\n"
+            "    return arr[0] + arr[1] + arr[2]\n"
+            "\n"
+            "def int main():\n"
+            "    return sum3([1, 2, 3])\n",
+            6,
+        )
+
+    def test_struct_literal_as_argument(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int sumPoint(Point p):\n"
+            "    return p.x + p.y\n"
+            "\n"
+            "def int main():\n"
+            "    return sumPoint(Point(3, 4))\n",
+            7,
+        )
+
+    def test_array_returning_call_as_argument(self):
+        """`foo(bar())`, where bar returns an array -- has no address
+        of its own the same way a literal doesn't, and is materialized
+        the identical way (gen_array_value_into already knows how to
+        write an ordinary returning Call's result into any Memory
+        destination, via gen_array_call_into -- nothing new needed
+        there, only somewhere real to put it)."""
+        assert_program_exit_code(
+            "def [3]int makeArr():\n"
+            "    return [7, 8, 9]\n"
+            "\n"
+            "def int sum3([3]int arr):\n"
+            "    return arr[0] + arr[1] + arr[2]\n"
+            "\n"
+            "def int main():\n"
+            "    return sum3(makeArr())\n",
+            24,
+        )
+
+    def test_struct_returning_call_as_argument(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def Point makePoint():\n"
+            "    Point p\n"
+            "    p.x = 3\n"
+            "    p.y = 4\n"
+            "    return p\n"
+            "\n"
+            "def int sumPoint(Point p):\n"
+            "    return p.x + p.y\n"
+            "\n"
+            "def int main():\n"
+            "    return sumPoint(makePoint())\n",
+            7,
+        )
+
+    def test_two_array_literals_alive_in_the_same_call(self):
+        """THE test proving a single shared scratch slot (the trick
+        _unnamed_slice_temp_offset gets away with for slices) would
+        have been wrong here: both literals' own bytes have to remain
+        valid simultaneously, all the way through the `call` -- a
+        shared slot would let the second one's write clobber the
+        first's before the call ever runs."""
+        assert_program_exit_code(
+            "def int addPairs([2]int a, [2]int b):\n"
+            "    return a[0] + a[1] + b[0] + b[1]\n"
+            "\n"
+            "def int main():\n"
+            "    return addPairs([1, 2], [3, 4])\n",
+            10,
+        )
+
+    def test_two_struct_literals_alive_in_the_same_call(self):
+        """The struct counterpart to the test just above."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int addPoints(Point a, Point b):\n"
+            "    return a.x + a.y + b.x + b.y\n"
+            "\n"
+            "def int main():\n"
+            "    return addPoints(Point(1, 2), Point(3, 4))\n",
+            10,
+        )
+
+    def test_mixed_array_and_struct_literal_in_the_same_call(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int mix([2]int a, Point p):\n"
+            "    return a[0] + a[1] + p.x + p.y\n"
+            "\n"
+            "def int main():\n"
+            "    return mix([1, 2], Point(3, 4))\n",
+            10,
+        )
+
+    def test_literal_argument_nested_inside_another_call(self):
+        """`addOne(sum3([1, 2, 3]))` -- the array literal is an
+        argument to the INNER call, buried inside what's itself an
+        argument to the outer one. Exercises _collect_argument_temps_
+        in_expr's own Call-args recursion, not just its top-level
+        statement-level entry points."""
+        assert_program_exit_code(
+            "def int sum3([3]int arr):\n"
+            "    return arr[0] + arr[1] + arr[2]\n"
+            "\n"
+            "def int addOne(int x):\n"
+            "    return x + 1\n"
+            "\n"
+            "def int main():\n"
+            "    return addOne(sum3([1, 2, 3]))\n",
+            7,
+        )
+
+    def test_literal_argument_nested_inside_an_array_literal_element(self):
+        """`[sum3([1, 2, 3]), 4]` -- the inner call's own array-literal
+        argument is buried inside an ELEMENT of a completely different
+        array literal, not inside another call at all. Exercises
+        _collect_argument_temps_in_expr's own ArrayLiteral-element
+        recursion specifically."""
+        assert_program_exit_code(
+            "def int sum3([3]int arr):\n"
+            "    return arr[0] + arr[1] + arr[2]\n"
+            "\n"
+            "def int main():\n"
+            "    [2]int results = [sum3([1, 2, 3]), 4]\n"
+            "    return results[0] + results[1]\n",
+            10,
+        )
+
+    def test_large_array_literal_argument_is_heap_allocated(self):
+        """Exit-code correctness alone wouldn't distinguish a genuinely
+        heap-allocated result from a stack-allocated one that happened
+        to still work -- see test_large_array_literal_argument_
+        actually_uses_malloc just below for the actual proof."""
+        elements = ", ".join(str(i % 7) for i in range(5000))
+        assert_program_exit_code(
+            "def int sumFirstTwo([5000]int arr):\n"
+            "    return arr[0] + arr[1]\n"
+            "\n"
+            "def int main():\n"
+            f"    return sumFirstTwo([{elements}])\n",
+            1,  # 0 % 7 + 1 % 7 = 0 + 1
+        )
+
+    def test_large_array_literal_argument_actually_uses_malloc(self):
+        """The asm-level confirmation behind the test just above.
+        Also confirms the CALLER's own frame doesn't balloon by the
+        literal's own ~20000-byte size -- _reserve_argument_temp
+        skipped reserving a slot for it entirely, exactly like it
+        would for a named local of the same size."""
+        elements = ", ".join(str(i % 7) for i in range(5000))
+        source = (
+            "def int sumFirstTwo([5000]int arr):\n"
+            "    return arr[0] + arr[1]\n"
+            "\n"
+            "def int main():\n"
+            f"    return sumFirstTwo([{elements}])\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        assert len(re.findall(r"call\s+_?malloc\b", asm)) >= 1
+
+        main_frame_size = None
+        in_main = False
+        for line in asm.splitlines():
+            if re.match(r"^_?main:$", line.strip()):
+                in_main = True
+                continue
+            if in_main and "subq" in line and "%rsp" in line:
+                main_frame_size = int(line.split("$")[1].split(",")[0])
+                break
+        assert main_frame_size is not None
+        assert main_frame_size < 1024, (
+            f"main's own frame is {main_frame_size} bytes -- expected a "
+            f"small, fixed baseline, not one that grew with the "
+            f"argument literal's own ~20000-byte size"
+        )
+
+    def test_large_struct_literal_argument_is_heap_allocated(self):
+        assert_program_exit_code(
+            "struct Big:\n"
+            "    [5000]int data\n"
+            "    int tag\n"
+            "\n"
+            "def int useBig(Big b):\n"
+            "    return b.tag\n"
+            "\n"
+            "def int main():\n"
+            "    [5000]int filler\n"
+            "    return useBig(Big(filler, 42))\n",
+            42,
+        )
+
+    def test_large_struct_literal_argument_actually_uses_malloc(self):
+        """The asm-level confirmation behind the test just above."""
+        source = (
+            "struct Big:\n"
+            "    [5000]int data\n"
+            "    int tag\n"
+            "\n"
+            "def int useBig(Big b):\n"
+            "    return b.tag\n"
+            "\n"
+            "def int main():\n"
+            "    [5000]int filler\n"
+            "    return useBig(Big(filler, 42))\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        assert len(re.findall(r"call\s+_?malloc\b", asm)) >= 1
+
+    def test_small_literal_argument_does_not_use_malloc(self):
+        """Negative control for both malloc tests above: a small
+        literal argument, well under the stack limit, should produce
+        no malloc call at all -- confirming the malloc presence there
+        actually tracks the size threshold rather than appearing
+        incidentally."""
+        source = (
+            "def int sum3([3]int arr):\n"
+            "    return arr[0] + arr[1] + arr[2]\n"
+            "\n"
+            "def int main():\n"
+            "    return sum3([1, 2, 3])\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        assert "malloc" not in asm
+
+    def test_nested_struct_literal_as_argument_is_still_rejected(self):
+        """The outer struct literal is now fine as a direct argument,
+        but its own NESTED struct literal argument still isn't --
+        check_struct_literal's own argument-checking loop uses plain
+        check_expr, unaffected by check_call's new argument-loop
+        detection one level up."""
+        assert_program_semantic_error(
+            "struct Inner:\n"
+            "    int v\n"
+            "\n"
+            "struct Outer:\n"
+            "    Inner i\n"
+            "    int b\n"
+            "\n"
+            "def int useOuter(Outer o):\n"
+            "    return o.i.v + o.b\n"
+            "\n"
+            "def int main():\n"
+            "    return useOuter(Outer(Inner(1), 2))\n",
+            match="only allowed as a variable's initializer",
         )
 
 
