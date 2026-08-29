@@ -1,5 +1,6 @@
 """Utility functions for codegen."""
-
+from codegen.errors import CodegenError
+from parser import Node
 from semantic import Type, TypeKind, StructInfo
 
 
@@ -64,3 +65,24 @@ def escape_for_asciz(s: str) -> str:
     s = s.replace('\t', '\\t')
     s = s.replace('\r', '\\r')
     return s
+
+
+def type_of(expr: Node) -> Type:
+    """Reads the type semantic.py already resolved and annotated onto this
+    exact node (expr.resolved_type -- see semantic.py's check_expr) rather
+    than re-deriving it independently.
+
+    Raises a clear, defensive CodegenError (matching _local_offset's own
+    posture) rather than a bare AttributeError if resolved_type is somehow
+    None. The one legitimate way that happens is codegen being invoked on an
+    AST that skipped semantic analysis entirely.
+
+    Returns a full semantic.Type object. Callers can compare against
+    Type.INT/Type.BOOL/Type.STR directly, or inspect
+    .kind/.element_type/.size for an array."""
+    if expr.resolved_type is None:
+        raise CodegenError(
+            f"{expr!r} has no resolved type -- semantic.analyze() "
+            f"must run before codegen (see compile_to_asm)"
+        )
+    return expr.resolved_type

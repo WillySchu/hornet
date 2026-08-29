@@ -381,7 +381,7 @@ compile_to_asm/generate_asm split). This file doesn't need its own copy
 of function signatures at all, including return types -- a Call
 expression's type (int/bool/str) needed for e.g. deciding whether
 `foo() + bar()` means arithmetic or concatenation is read directly via
-_type_of from what semantic.py already resolved, not re-looked-up here.
+type_of from what semantic.py already resolved, not re-looked-up here.
 
 FUNCTIONS WITH NO DECLARED RETURN TYPE
 -------------------------------------------
@@ -1627,10 +1627,11 @@ that now backs every type's own print output, struct included.)
 
 import argparse
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import Dict, List, Tuple, Union
 
+from codegen.errors import CodegenError
 from codegen.escape_analysis import analyze_array_escapes, is_heap_allocated
-from codegen.utils import escape_for_asciz, leaf_type, type_byte_width
+from codegen.utils import escape_for_asciz, leaf_type, type_byte_width, type_of
 from lexer import lex
 from parser import (
     ArrayLiteral,
@@ -2421,11 +2422,6 @@ _STRINGIFY_FRAME_SIZE = 144  # already a multiple of 16; see build_stringify_fun
 # AST -> Assembly AST
 # ---------------------------------------------------------------------------
 
-class CodegenError(Exception):
-    """Raised when the code generator encounters an AST node it doesn't
-    know how to translate yet."""
-
-
 class CodeGenerator:
     """Walks the source AST (Program/Function/Return/Constant/...) and
     produces an equivalent AsmProgram."""
@@ -2506,7 +2502,7 @@ class CodeGenerator:
         # is stamped on by semantic.analyze() (see SemanticAnalyzer.
         # analyze's own struct-collection pass), not a field the
         # dataclass itself declares -- an AST that skipped analyze()
-        # entirely simply won't have it at all. Matching _type_of's own
+        # entirely simply won't have it at all. Matching type_of's own
         # "has no resolved type" defensive check one level up: fail
         # with a clear, actionable CodegenError right here, at the
         # very first thing generate() does, rather than a bare
@@ -2928,18 +2924,18 @@ class CodeGenerator:
         looked up right alongside it (see gen_expr_into's Variable case,
         and gen_array_address_into) -- both come from the same
         (offset, Type, decl_id) tuple in the same scope-stack entry,
-        which codegen has to maintain regardless of _type_of's
+        which codegen has to maintain regardless of type_of's
         existence, since resolved_type has no way to encode *which*
         stack slot a name refers to. This is deliberately not replaced
-        by _type_of below, even though it would give the same answer
-        for a Variable node -- see _type_of's own docstring for why the
+        by type_of, even though it would give the same answer
+        for a Variable node -- see type_of's own docstring for why the
         two coexist rather than one replacing the other.
 
         Returns a real semantic.Type (via type_from_name, called once
         up front in _bind_local/_bind_param, not re-derived here) --
         not the raw parser-level string/ArrayTypeExpr -- so callers can
         uniformly inspect .kind/.element_type/.size exactly like they
-        already can on whatever _type_of returns."""
+        already can on whatever type_of returns."""
         for scope in reversed(self.scopes):
             if name in scope:
                 return scope[name][1]
@@ -2986,49 +2982,6 @@ class CodeGenerator:
         directly, or self._local_decl_id(name) wherever only a
         Variable's own name is available at that point."""
         return is_heap_allocated(t, self.struct_registry) or decl_id in self._escaping_array_ids
-
-    def _type_of(self, expr: Node) -> Type:
-        """Reads the type semantic.py already resolved and annotated
-        onto this exact node (expr.resolved_type -- see semantic.py's
-        check_expr) rather than re-deriving it independently.
-
-        This replaces what used to be a separate _infer_type method
-        here that re-implemented, in miniature, the same "which type
-        does this operator/call produce" logic semantic.py's
-        check_binary/check_call already fully implement -- a second,
-        parallel copy of that logic that could (and twice actually did)
-        silently drift out of sync with the real one: adding `print`
-        needed a Call case added here too, and adding the six new
-        int-only operators (%, &, |, ^, <<, >>) needed them added to
-        this method's own int-producing branch, separately from adding
-        them to semantic.py's _INT_ONLY_BINARY_OPS. Neither addition
-        was structurally required by anything -- both were just easy to
-        forget, and both were only caught by manual testing rather than
-        anything that would have failed loudly on its own. Reading the
-        annotation instead removes the second copy entirely: there's no
-        per-operator or per-node-type branch here left to forget
-        updating, since whatever semantic.py already decided is just
-        read directly, whatever it happens to be.
-
-        Still raises a clear, defensive CodegenError (matching
-        _local_offset's own posture) rather than a bare AttributeError
-        if resolved_type is somehow None -- the one legitimate way that
-        happens is codegen being invoked on an AST that skipped
-        semantic analysis entirely (see compile_to_asm, which always
-        runs analyze() first for exactly this reason).
-
-        Returns a full semantic.Type object (not a string -- that
-        changed when array types were added, since a bare name can't
-        represent an element type and size). Callers can compare
-        against Type.INT/Type.BOOL/Type.STR directly, or inspect
-        .kind/.element_type/.size for an array.
-        """
-        if expr.resolved_type is None:
-            raise CodegenError(
-                f"{expr!r} has no resolved type -- semantic.analyze() "
-                f"must run before codegen (see compile_to_asm)"
-            )
-        return expr.resolved_type
 
     # -- arrays -----------------------------------------------------------
     # See the module docstring's ARRAYS section for the full design.
@@ -3081,7 +3034,7 @@ class CodeGenerator:
         OTHER sliced array already gets, unconditionally, for exactly
         the same reason.
         """
-        array_type = self._type_of(expr)
+        array_type = type_of(expr)
         width = max(1, type_byte_width(array_type, self.struct_registry))
         instructions = [
             Mov(src=Imm(width), dst=Register('edi')),
@@ -3180,7 +3133,7 @@ class CodeGenerator:
         array- nor slice-typed) falls through to the final
         CodegenError below.
         """
-        base_type = self._type_of(expr)
+        base_type = type_of(expr)
         if base_type.kind == TypeKind.ARRAY:
             if isinstance(expr, ArrayLiteral):
                 instructions = self.gen_array_literal_heap_alloc_into(expr)
@@ -3327,7 +3280,7 @@ class CodeGenerator:
         top -- skipped entirely when it's zero (the field is first in
         its own struct's declaration order), since `addq $0, dst`
         would be correct but pointlessly wasteful."""
-        base_type = self._type_of(expr.base)
+        base_type = type_of(expr.base)
         if base_type.kind != TypeKind.STRUCT:
             raise CodegenError(
                 f"Cannot access field '{expr.name}' on a value of "
@@ -3416,7 +3369,7 @@ class CodeGenerator:
         final address is only ever written into `dst` as the very last
         step.
         """
-        array_type = self._type_of(expr.array)
+        array_type = type_of(expr.array)
         element_stride = type_byte_width(array_type.element_type, self.struct_registry)
 
         # len_reg only matters for a slice base (a runtime length);
@@ -3543,7 +3496,7 @@ class CodeGenerator:
         if protect_dst:
             instructions.append(Push(Register(dst_mem.base)))
 
-        base_type = self._type_of(expr.array)
+        base_type = type_of(expr.array)
         element_stride = type_byte_width(base_type.element_type, self.struct_registry)
 
         addr_reg = Register('rbx')
@@ -3695,7 +3648,6 @@ class CodeGenerator:
             MovQ(src=Imm(0), dst=Memory(dst_mem.base, dst_mem.offset + 8)),
             MovQ(src=Imm(0), dst=Memory(dst_mem.base, dst_mem.offset + 16)),
         ]
-
 
     def gen_slice_value_into(self, expr: Node, dst_mem: Memory) -> List[Instruction]:
         """Stores a slice-typed expression's VALUE (its {ptr, len,
@@ -4092,7 +4044,7 @@ class CodeGenerator:
         needs it.
         """
         slice_arg, value_arg = expr.args
-        slice_type = self._type_of(slice_arg)
+        slice_type = type_of(slice_arg)
         element_type = slice_type.element_type
         element_width = type_byte_width(element_type, self.struct_registry)
 
@@ -4622,7 +4574,6 @@ class CodeGenerator:
             raise CodegenError(f"No type descriptor rule for: {t}")
 
         return label
-
 
     def _get_true_str_label(self) -> str:
         if self._true_str_label is None:
@@ -5291,7 +5242,7 @@ class CodeGenerator:
         the only nilable type that exists. Shared by every call-
         codegen entry point's own "too many arguments" check."""
         return sum(
-            3 if self._type_of(a).kind == TypeKind.SLICE or isinstance(a, NoneLiteral) else 1
+            3 if type_of(a).kind == TypeKind.SLICE or isinstance(a, NoneLiteral) else 1
             for a in args
         )
 
@@ -5366,7 +5317,7 @@ class CodeGenerator:
         instructions: List[Instruction] = []
         arg_slot_counts = []
         for arg in args:
-            arg_type = self._type_of(arg)
+            arg_type = type_of(arg)
             if arg_type.kind == TypeKind.SLICE or isinstance(arg, NoneLiteral):
                 instructions.extend(self.gen_slice_arg_into(arg, Register('rax'), Register('rdx'), Register('rcx')))
                 instructions.append(Push(Register('rax')))
@@ -5992,7 +5943,7 @@ class CodeGenerator:
             instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
             instructions.append(MovQ(src=Imm(len(stmt.value.elements)), dst=Memory('rbp', offset + 8)))
             return instructions
-        value_type = self._type_of(stmt.value)
+        value_type = type_of(stmt.value)
         if value_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and self._is_heap_allocated(self._local_decl_id(stmt.name), value_type):
             # Reuses the EXISTING allocation from this variable's own
             # declaration -- a fixed-size array's (or struct's own)
@@ -6025,14 +5976,13 @@ class CodeGenerator:
         directly rather than needing its own, separate push/pop
         dance the way the scalar path below still does.
 
-        Deliberately NOT stmt.value's own resolved type (self._type_of
-        (stmt.value)), the way this used to be computed: an UNTYPED
-        array literal flowing into a SLICE-typed element (`rows[0] =
-        [9, 9, 9]`) has its own resolved type set to the ARRAY it
-        actually builds (see semantic.py's _check_value_flowing_into),
-        not the slice it's being treated as -- so dispatching on the
-        VALUE's own type would miss this case entirely and fall
-        through to the scalar path below, the same bug-class already
+        Deliberately NOT stmt.value's own resolved type (type_of(stmt.value)),
+        the way this used to be computed: an UNTYPED array literal flowing into
+        a SLICE-typed element (`rows[0] = [9, 9, 9]`) has its own resolved type
+        set to the ARRAY it actually builds (see semantic.py's
+        _check_value_flowing_into), not the slice it's being treated as -- so
+        dispatching on the VALUE's own type would miss this case entirely and
+        fall through to the scalar path below, the same bug-class already
         fixed in gen_var_decl/gen_assign (see their own docstrings)
         and analyze_index_assign, just at a third call site.
 
@@ -6043,7 +5993,7 @@ class CodeGenerator:
         `matrix[i]` to appear as an ordinary Assign target, which
         parser.py doesn't produce (see IndexAssign's own docstring).
         """
-        base_type = self._type_of(stmt.array)
+        base_type = type_of(stmt.array)
         element_type = base_type.element_type
         addr_reg = Register('rax')
         instructions = self.gen_index_address_into(Index(array=stmt.array, index=stmt.index), addr_reg)
@@ -6139,7 +6089,7 @@ class CodeGenerator:
         struct_and_field, just returning a Type instead of raising on
         an invalid access (already validated by the time codegen ever
         runs -- see compile_to_asm)."""
-        base_type = self._type_of(base_expr)
+        base_type = type_of(base_expr)
         return self.struct_registry[base_type.struct_name].fields[field_name]
 
     def _gen_store(self, offset: int, value_expr: Node) -> List[Instruction]:
@@ -6158,7 +6108,7 @@ class CodeGenerator:
         oblivious to str (or arrays, slices, or structs) entirely;
         only this one call site needs to ask "which width, or which
         entirely different mechanism, am I storing"."""
-        value_type = self._type_of(value_expr)
+        value_type = type_of(value_expr)
         if value_type.kind == TypeKind.ARRAY:
             return self.gen_array_value_into(value_expr, Memory('rbp', offset), value_type)
         if value_type.kind == TypeKind.SLICE:
@@ -6237,7 +6187,7 @@ class CodeGenerator:
         # just passes that SAME address one level deeper via gen_
         # array_call_into/gen_slice_call_into, with no intermediate
         # copy ever materialized.
-        value_type = self._type_of(stmt.value)
+        value_type = type_of(stmt.value)
         if value_type.kind == TypeKind.ARRAY:
             ptr_reg = Register('rax')
             instructions = [MovQ(src=Memory('rbp', self._hidden_return_ptr_offset), dst=ptr_reg)]
@@ -6451,7 +6401,7 @@ class CodeGenerator:
             if isinstance(element, ArrayLiteral):
                 instructions.extend(self.gen_array_literal_side_effects_only(element))
                 continue
-            element_type = self._type_of(element)
+            element_type = type_of(element)
             if element_type.kind in (TypeKind.ARRAY, TypeKind.SLICE):
                 raise CodegenError(
                     f"A bare array-literal statement can't have a "
@@ -6561,7 +6511,7 @@ class CodeGenerator:
                 return [MovQ(src=Memory('rbp', offset), dst=as_qword_register(dst))]
             return [Mov(src=Memory('rbp', offset), dst=dst)]
         if isinstance(expr, Index):
-            element_type = self._type_of(expr)
+            element_type = type_of(expr)
             if element_type.kind == TypeKind.ARRAY:
                 # Reading a sub-array (e.g. `matrix[i]` alone, not yet
                 # fully indexed down to a scalar) has the same "doesn't
@@ -6594,7 +6544,7 @@ class CodeGenerator:
                 instructions.append(Mov(src=Memory(addr_reg.name, 0), dst=dst))
             return instructions
         if isinstance(expr, Field):
-            field_type = self._type_of(expr)
+            field_type = type_of(expr)
             if field_type.kind == TypeKind.ARRAY:
                 raise CodegenError(
                     "Cannot read an array-typed field via gen_expr_into "
@@ -6622,7 +6572,7 @@ class CodeGenerator:
                 instructions.append(Mov(src=Memory(addr_reg.name, 0), dst=dst))
             return instructions
         if isinstance(expr, Call):
-            if self._type_of(expr).kind == TypeKind.ARRAY:
+            if type_of(expr).kind == TypeKind.ARRAY:
                 # Never reachable in correct codegen -- see ArrayLiteral
                 # and the Index sub-array case just above for the same
                 # reasoning. An array-returning call's result is only
@@ -6635,7 +6585,7 @@ class CodeGenerator:
                     f"via gen_expr_into -- arrays don't fit in a single "
                     f"register; use gen_array_value_into instead"
                 )
-            if self._type_of(expr).kind == TypeKind.SLICE:
+            if type_of(expr).kind == TypeKind.SLICE:
                 # Same reasoning, for the same underlying cause: a
                 # slice-returning call now writes its result through
                 # the hidden-pointer convention too (see gen_slice_
@@ -6649,7 +6599,7 @@ class CodeGenerator:
                     f"fit in a single register; use gen_slice_call_into "
                     f"instead"
                 )
-            if self._type_of(expr).kind == TypeKind.STRUCT:
+            if type_of(expr).kind == TypeKind.STRUCT:
                 # Same reasoning again, for a struct-returning call --
                 # only ever reached via gen_struct_value_into's own
                 # Call case or gen_return's own forwarding case.
@@ -6677,9 +6627,9 @@ class CodeGenerator:
             # see the module docstring's STRINGS section) -- everything
             # else, and ADD/==/!= between two ints or bools, goes
             # through the original gen_binary_into completely unchanged.
-            if expr.op == BinaryOp.ADD and self._type_of(expr.left) == Type.STR:
+            if expr.op == BinaryOp.ADD and type_of(expr.left) == Type.STR:
                 return self.gen_string_concat_into(expr, dst)
-            if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL) and self._type_of(expr.left) == Type.STR:
+            if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL) and type_of(expr.left) == Type.STR:
                 return self.gen_string_compare_into(expr, dst)
             return self.gen_binary_into(expr, dst)
         raise CodegenError(f"No codegen rule for expression: {expr!r}")
@@ -6728,7 +6678,7 @@ class CodeGenerator:
         # -- so this doesn't need to re-derive or defensively check
         # which side is which beyond that.
         if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
-            if self._type_of(expr.left).kind == TypeKind.SLICE or self._type_of(expr.right).kind == TypeKind.SLICE:
+            if type_of(expr.left).kind == TypeKind.SLICE or type_of(expr.right).kind == TypeKind.SLICE:
                 return self.gen_slice_none_comparison_into(expr, dst)
 
         scratch = Register('ecx')  # holds the right-hand value while combining
@@ -6771,7 +6721,7 @@ class CodeGenerator:
         in principle, miss a real, non-null pointer whose low 32 bits
         happen to be zero.
         """
-        slice_expr = expr.left if self._type_of(expr.left).kind == TypeKind.SLICE else expr.right
+        slice_expr = expr.left if type_of(expr.left).kind == TypeKind.SLICE else expr.right
         addr_reg = Register('rbx')
         len_reg = Register('r12')  # unused here; gen_indexable_base_into always computes it
         cap_reg = Register('r13')  # unused here too
@@ -6934,7 +6884,7 @@ class CodeGenerator:
 
         self._print_used = True
         arg = expr.args[0]
-        arg_type = self._type_of(arg)
+        arg_type = type_of(arg)
         buf_state_offset = self._print_buf_state_temp_offset
 
         instructions: List[Instruction] = []

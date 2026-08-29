@@ -1,9 +1,13 @@
 """Tests for type_byte_width.py, likely to be merged into another file."""
 
+import re
+
 import pytest
 
+import parser
 import semantic
-from codegen.utils import escape_for_asciz, leaf_type, type_byte_width
+from codegen.errors import CodegenError
+from codegen.utils import escape_for_asciz, leaf_type, type_byte_width, type_of
 
 
 def test_type_byte_width_int():
@@ -258,3 +262,35 @@ def test_escape_for_asciz():
 
     for tc in tcs:
         assert tc['expected'] == escape_for_asciz(tc['in']), tc['name']
+
+
+def test_type_of_no_type():
+    node = parser.Constant(value=1)
+
+    with pytest.raises(
+            CodegenError,
+            match=re.escape('Constant(value=1, resolved_type=None) has no resolved type -- semantic.analyze() must run'
+                            ' before codegen (see compile_to_asm)')
+    ):
+        type_of(node)
+
+
+def test_type_of_int():
+    node = parser.Constant(value=1, resolved_type=semantic.Type(kind=semantic.TypeKind.INT))
+
+    assert semantic.Type(kind=semantic.TypeKind.INT) == type_of(node)
+
+
+def test_type_of_array():
+    array_type = semantic.Type(
+        kind=semantic.TypeKind.ARRAY,
+        element_type=semantic.Type(
+            kind=semantic.TypeKind.SLICE,
+            element_type=semantic.Type(kind=semantic.TypeKind.INT),
+        ),
+        size=5,
+    )
+    node = parser.ArrayLiteral(
+        resolved_type=array_type
+    )
+    assert array_type == type_of(node)
