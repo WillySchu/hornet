@@ -5931,47 +5931,76 @@ class CodeGenerator:
         raise CodegenError(f"No codegen rule for an array-typed value: {expr!r}")
 
     def gen_struct_literal_into(self, expr: Call, dst_mem: Memory, struct_type: Type) -> List[Instruction]:
-        """Writes a struct literal's arguments directly into dst_mem's
-        own fields, one per field, in the struct's declaration order --
-        already validated as positional and exhaustive by semantic.py's
-        own check_struct_literal, so this never needs to guard against
-        a missing or extra argument itself. Mirrors gen_array_literal_
-        into's own per-element writing, one level over: each argument
-        is routed to whichever value-producing method its OWN field's
-        declared type needs -- gen_array_value_into/gen_slice_value_
-        into/gen_struct_value_into for a composite field (each of which
-        already protects an arbitrary destination base internally, so
-        this can just hand them dst_mem's own field offset directly),
-        or a plain gen_expr_into for a scalar (int/bool/str) field,
-        with dst_mem's own base protected on the stack across that one
-        call exactly like gen_array_literal_into's own scalar-element
-        case already does -- and for the identical reason: gen_expr_
-        into always computes into %eax/%rax, which would otherwise
-        silently clobber a destination address held in a general-
-        purpose register (e.g. a struct literal written directly
-        through a hidden return pointer, or as an array-of-structs
-        element) before it's ever used.
+        """Writes a struct literal's own fields directly into dst_mem,
+        one at a time -- already validated by semantic.py's own check_
+        struct_literal/_check_named_struct_literal, so this never
+        needs to guard against a missing, extra, unknown, or duplicate
+        field itself. Mirrors gen_array_literal_into's own per-element
+        writing, one level over: each field's value is routed to
+        whichever value-producing method its OWN declared type needs
+        -- gen_array_value_into/gen_slice_value_into/gen_struct_value_
+        into for a composite field (each of which already protects an
+        arbitrary destination base internally, so this can just hand
+        them dst_mem's own field offset directly), or a plain gen_
+        expr_into for a scalar (int/bool/str) field, with dst_mem's
+        own base protected on the stack across that one call exactly
+        like gen_array_literal_into's own scalar-element case already
+        does -- and for the identical reason: gen_expr_into always
+        computes into %eax/%rax, which would otherwise silently
+        clobber a destination address held in a general-purpose
+        register (e.g. a struct literal written directly through a
+        hidden return pointer, or as an array-of-structs element)
+        before it's ever used.
 
-        A slice-typed field's argument can be `none` -- checked here
-        via isinstance, not the field's own resolved type (which for a
+        A slice-typed field's value can be `none` -- checked here via
+        isinstance, not the field's own resolved type (which for a
         NoneLiteral is always Type.NONE, never equal to the field's
         declared SLICE type) -- exactly the same none-flowing-into-a-
         slice-typed-slot short-circuit gen_var_decl/gen_assign/gen_
         field_assign each already need of their own, for the identical
         reason (see gen_none_into's own docstring).
 
-        A struct-typed field's argument is itself just an ordinary
-        struct-typed expression (a Variable, a Field, another struct
-        literal is NOT reachable here at all -- semantic.py's own
-        check_call already rejects a nested struct literal before
-        codegen ever runs, so this never needs to special-case it),
-        recursing through gen_struct_value_into the same way any other
-        nested struct value would."""
+        A struct-typed field's value can itself be a NESTED struct
+        literal (`Outer(inner=Inner(1), b=2)`, or the positional
+        `Outer(Inner(1), 2)`) -- recursing through gen_struct_value_
+        into exactly like any other struct-typed value, which already
+        detects a Call-is-a-struct-name and dispatches back into this
+        same method one level deeper; no special-casing needed here
+        for that, since it's just an ordinary struct-typed expression
+        as far as this method is concerned.
+
+        NAMED construction (expr.kwargs populated instead of
+        expr.args -- see Call's own docstring in parser.py) is
+        normalized into the exact same (field_name, value_expr,
+        field_type) shape the positional form already iterates, via a
+        dict lookup by name instead of a zip-by-position -- everything
+        below this point runs identically either way, with no
+        per-field code duplicated between the two forms. PARTIAL
+        construction (a named literal omitting a field entirely) needs
+        no special handling at all here either: an omitted field
+        simply never appears in `entries`, so no instructions are ever
+        emitted for its own offset -- its storage is left exactly as
+        uninitialized as dst_mem's own memory already was before this
+        method ran (garbage, on the stack; whatever malloc happened to
+        return, on the heap), matching every other place this language
+        already treats uninitialized memory as real UB rather than
+        implicitly zero."""
         struct_info = self.struct_registry[struct_type.struct_name]
-        field_items = list(struct_info.fields.items())
+        if expr.kwargs is not None:
+            field_types = struct_info.fields
+            entries = [
+                (field_name, value_expr, field_types[field_name])
+                for field_name, value_expr in expr.kwargs
+            ]
+        else:
+            field_items = list(struct_info.fields.items())
+            entries = [
+                (field_name, arg_expr, field_type)
+                for arg_expr, (field_name, field_type) in zip(expr.args, field_items)
+            ]
         protect_dst = dst_mem.base != 'rbp'
         instructions = []
-        for arg_expr, (field_name, field_type) in zip(expr.args, field_items):
+        for field_name, arg_expr, field_type in entries:
             field_offset = self._field_offset(struct_type.struct_name, field_name)
             field_mem = Memory(dst_mem.base, dst_mem.offset + field_offset)
             if field_type.kind == TypeKind.ARRAY:

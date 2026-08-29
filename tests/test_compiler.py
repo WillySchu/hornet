@@ -9176,6 +9176,327 @@ class TestArgumentMaterialization:
 
 
 # ---------------------------------------------------------------------------
+# NAMED-field struct construction: `A(x=1, y='a')`, as an alternative to
+# positional construction, and -- unlike positional, which stays exhaustive
+# -- allowed to be PARTIAL (`A(x=1)`, omitting a field entirely). This is a
+# genuinely new parser capability, not just a semantic/codegen extension the
+# way every other struct-literal position so far has been: `Call` gained a
+# new, separate `kwargs` field (mutually exclusive with `args` by
+# construction -- see its own docstring in parser.py), and parse_call
+# enforces "no mixing positional and named arguments in one call" as a hard
+# grammar rule, the same way Python treats its own identical restriction as
+# a SyntaxError rather than something deferred to runtime.
+#
+# Scoped to struct literals only, not a general named-arguments-for-any-
+# function feature: an ordinary function call written with named arguments
+# parses into the exact same shape a named struct literal does (the parser
+# has no way to tell them apart, not knowing what `name` refers to at all),
+# and is explicitly rejected by check_call once it resolves to an ordinary
+# function rather than a struct.
+#
+# Partial construction leaves an omitted field's own storage genuinely
+# uninitialized -- no implicit zero value, matching this language's existing
+# treatment of uninitialized memory everywhere else -- so gen_struct_
+# literal_into needed no new "fill in the gaps" logic at all: an omitted
+# field simply never appears in the (field_name, value_expr, field_type)
+# list it iterates, so no instructions are ever emitted for its offset.
+# Every other test here checks only the field(s) actually supplied, never a
+# deliberately-omitted one's own content, since that content is genuine UB
+# by design, not something a correct implementation is expected to produce
+# any particular value for.
+# ---------------------------------------------------------------------------
+
+class TestNamedStructLiterals:
+    pytestmark = GCC_SKIP
+
+    def test_named_construction_both_fields(self):
+        assert_program_exit_code(
+            "struct A:\n"
+            "    int x\n"
+            "    str y\n"
+            "\n"
+            "def int main():\n"
+            "    A a = A(x=1, y='hi')\n"
+            "    if a.y == 'hi':\n"
+            "        return a.x\n"
+            "    return -1\n",
+            1,
+        )
+
+    def test_named_fields_out_of_declaration_order(self):
+        assert_program_exit_code(
+            "struct A:\n"
+            "    int x\n"
+            "    str y\n"
+            "\n"
+            "def int main():\n"
+            "    A a = A(y='hi', x=7)\n"
+            "    return a.x\n",
+            7,
+        )
+
+    def test_partial_construction_first_field_only(self):
+        assert_program_exit_code(
+            "struct A:\n"
+            "    int x\n"
+            "    str y\n"
+            "\n"
+            "def int main():\n"
+            "    A a = A(x=42)\n"
+            "    return a.x\n",
+            42,
+        )
+
+    def test_partial_construction_second_field_only(self):
+        assert_program_exit_code(
+            "struct A:\n"
+            "    int x\n"
+            "    str y\n"
+            "\n"
+            "def int main():\n"
+            "    A a = A(y='hello')\n"
+            "    if a.y == 'hello':\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_nested_named_struct_literal(self):
+        assert_program_exit_code(
+            "struct Inner:\n"
+            "    int v\n"
+            "struct Outer:\n"
+            "    Inner i\n"
+            "    int b\n"
+            "\n"
+            "def int main():\n"
+            "    Outer o = Outer(i=Inner(v=9), b=2)\n"
+            "    return o.i.v + o.b\n",
+            11,
+        )
+
+    def test_named_construction_as_function_argument(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int sumPoint(Point p):\n"
+            "    return p.x + p.y\n"
+            "\n"
+            "def int main():\n"
+            "    return sumPoint(Point(x=3, y=4))\n",
+            7,
+        )
+
+    def test_named_construction_as_return_value(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def Point makePoint():\n"
+            "    return Point(x=3, y=4)\n"
+            "\n"
+            "def int main():\n"
+            "    Point p = makePoint()\n"
+            "    return p.x + p.y\n",
+            7,
+        )
+
+    def test_named_construction_as_index_assign_value(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Point pts\n"
+            "    pts[0] = Point(x=1, y=2)\n"
+            "    pts[1] = Point(y=4, x=3)\n"
+            "    return pts[0].x + pts[1].y\n",
+            5,
+        )
+
+    def test_named_construction_as_field_assign_value(self):
+        assert_program_exit_code(
+            "struct Inner:\n"
+            "    int v\n"
+            "struct Outer:\n"
+            "    Inner i\n"
+            "\n"
+            "def int main():\n"
+            "    Outer o\n"
+            "    o.i = Inner(v=8)\n"
+            "    return o.i.v\n",
+            8,
+        )
+
+    def test_named_construction_as_array_literal_element(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Point pts = [Point(x=1, y=2), Point(x=3, y=4)]\n"
+            "    return pts[0].x + pts[1].y\n",
+            5,
+        )
+
+    def test_named_construction_with_array_typed_field(self):
+        assert_program_exit_code(
+            "struct Row:\n"
+            "    [3]int values\n"
+            "\n"
+            "def int main():\n"
+            "    Row r = Row(values=[5, 6, 7])\n"
+            "    return r.values[0] + r.values[1] + r.values[2]\n",
+            18,
+        )
+
+    def test_named_construction_with_slice_typed_field(self):
+        assert_program_exit_code(
+            "struct Holder:\n"
+            "    []int xs\n"
+            "\n"
+            "def int main():\n"
+            "    Holder h = Holder(xs=[]int[1, 2, 3])\n"
+            "    return h.xs[0] + h.xs[1] + h.xs[2]\n",
+            6,
+        )
+
+    def test_large_named_struct_literal(self):
+        """No new heap-allocation decision here either, for the same
+        reason IndexAssign/FieldAssign didn't need one: `Big` is
+        heap-promoted by the same, pre-existing is_heap_allocated size
+        check any large struct already gets, regardless of whether
+        it's populated positionally, by name, or field-by-field."""
+        assert_program_exit_code(
+            "struct Big:\n"
+            "    [5000]int data\n"
+            "    int tag\n"
+            "\n"
+            "def int main():\n"
+            "    [5000]int filler\n"
+            "    Big b = Big(data=filler, tag=99)\n"
+            "    return b.tag\n",
+            99,
+        )
+
+    def test_unknown_field_name_is_rejected(self):
+        assert_program_semantic_error(
+            "struct A:\n"
+            "    int x\n"
+            "    str y\n"
+            "\n"
+            "def int main():\n"
+            "    A a = A(z=1)\n"
+            "    return 0\n",
+            match="has no field 'z'",
+        )
+
+    def test_duplicate_field_name_is_rejected(self):
+        assert_program_semantic_error(
+            "struct A:\n"
+            "    int x\n"
+            "    str y\n"
+            "\n"
+            "def int main():\n"
+            "    A a = A(x=1, x=2)\n"
+            "    return 0\n",
+            match="specified more than once",
+        )
+
+    def test_wrong_type_for_named_field_is_rejected(self):
+        assert_program_semantic_error(
+            "struct A:\n"
+            "    int x\n"
+            "    str y\n"
+            "\n"
+            "def int main():\n"
+            "    A a = A(x='wrong')\n"
+            "    return 0\n",
+            match="should be int",
+        )
+
+    def test_named_arguments_rejected_for_ordinary_function(self):
+        """Named construction is scoped to struct literals only --
+        `foo(x=1)` parses into the exact same shape a named struct
+        literal does, and is explicitly rejected once check_call
+        resolves `foo` to an ordinary function."""
+        assert_program_semantic_error(
+            "def int foo(int x):\n"
+            "    return x\n"
+            "\n"
+            "def int main():\n"
+            "    return foo(x=1)\n",
+            match="only supported for struct literals",
+        )
+
+    def test_named_arguments_rejected_for_print(self):
+        assert_program_semantic_error(
+            "struct Point:\n"
+            "    int x\n"
+            "\n"
+            "def int main():\n"
+            "    print(x=1)\n"
+            "    return 0\n",
+            match="only supported for struct literals",
+        )
+
+    def test_positional_then_named_is_a_parse_error(self):
+        """Mixing is rejected as a hard GRAMMAR rule, not a semantic
+        one -- a ParseError, not a SemanticError -- since it's a pure
+        syntax-shape question the parser can answer without knowing
+        whether `A` even names a struct."""
+        source = (
+            "struct A:\n"
+            "    int x\n"
+            "    str y\n"
+            "\n"
+            "def int main():\n"
+            "    A a = A(1, y='a')\n"
+            "    return 0\n"
+        )
+        with pytest.raises(ParseError, match="Cannot mix positional and named"):
+            _parse(source)
+
+    def test_named_then_positional_is_a_parse_error(self):
+        source = (
+            "struct A:\n"
+            "    int x\n"
+            "    str y\n"
+            "\n"
+            "def int main():\n"
+            "    A a = A(x=1, 'a')\n"
+            "    return 0\n"
+        )
+        with pytest.raises(ParseError, match="Cannot mix positional and named"):
+            _parse(source)
+
+    def test_double_equals_in_argument_is_not_mistaken_for_named(self):
+        """`A(x == 1)` -- a single, ordinary POSITIONAL argument that
+        happens to be a boolean equality expression -- must not be
+        mistaken for a named argument. '==' (EQUAL) and '=' (ASSIGN)
+        are distinct tokens from the lexer, so this is unambiguous by
+        construction, not something parse_call has to specifically
+        guard against."""
+        assert_program_exit_code(
+            "struct A:\n"
+            "    bool x\n"
+            "\n"
+            "def int main():\n"
+            "    int x = 1\n"
+            "    A a = A(x == 1)\n"
+            "    if a.x:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Array/slice literals with struct-typed elements (`[p1, p2]`, `[Point(1,2),
 # Point(3,4)]`, `[N]Point[...]`, `[]Point[...]`). This was a real, pre-
 # existing gap in gen_array_literal_into (no STRUCT-typed element case at

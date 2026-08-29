@@ -185,7 +185,7 @@ unary operator, chainable the same way `~`/`-` are (`not not flag`).
 import argparse
 from dataclasses import dataclass, field, fields
 from enum import auto, Enum
-from typing import Any, List, Optional, Union
+from typing import Any, List, Optional, Tuple, Union
 
 from lexer import Token, TokenType, lex
 
@@ -633,9 +633,55 @@ class Call(Node):
     alone on its own line already parses as an expr_stmt wrapping this
     (see ExprStmt), exactly the same way any other expression can be a
     bare statement -- a call just happens to be one whose value people
-    often want to discard."""
+    often want to discard.
+
+    Also `Name(x=1, y='a')` -- NAMED-field construction for a struct
+    literal (`kwargs` populated, `args` left empty), as an alternative
+    to positional construction (`args` populated, `kwargs` left None
+    -- the ORIGINAL, unchanged representation every ordinary function
+    call and every positional struct literal still uses). The two are
+    mutually exclusive by construction, never both populated on the
+    same node: parse_call enforces "no mixing positional and named
+    arguments in one call" as a hard GRAMMAR rule (a ParseError,
+    raised immediately at the offending argument), not a semantic one
+    -- matching Python's own identical restriction being a SyntaxError
+    rather than something deferred to runtime. This is a pure syntax-
+    shape question, independent of what `name` actually refers to
+    (unlike almost everything else about a Call, which the parser
+    deliberately leaves to semantic.py to resolve -- see check_call's
+    own struct-vs-function dispatch): whether an argument list mixes
+    `expr` and `name=expr` entries is visible from the tokens alone,
+    with no need to know if `name` names a struct, a function, or
+    nothing declared at all.
+
+    kwargs is a List[Tuple[str, Node]], not a Dict[str, Node], and
+    deliberately preserves the ORDER each field was written in --
+    duplicate names (`A(x=1, x=2)`) are consequently NOT rejected here
+    either, for the identical reason mixing isn't checked here: the
+    parser has no symbol table and doesn't know `x` is meant to name a
+    real, unique struct field at all, only that it's an identifier
+    followed by '='. Both duplicate-name and unknown-field-name
+    rejection are semantic.py's job (see check_struct_literal), the
+    same "parser accepts the shape, semantic.py validates the
+    meaning" split this file already uses for the struct/function
+    name itself.
+
+    NAMED construction is deliberately scoped to struct literals only,
+    not a general "call functions with named arguments" feature -- an
+    ordinary function call written with named arguments (`foo(x=1)`)
+    parses into exactly the same shape (kwargs populated) as a named
+    struct literal does, syntactically indistinguishable at parse
+    time, and is rejected by check_call once it resolves `foo` to an
+    ordinary function rather than a struct (see its own docstring).
+    Partial construction (omitting a field entirely) leaves that
+    field's own storage genuinely uninitialized, matching every other
+    place this language already treats uninitialized memory as real,
+    unwritten UB rather than implicitly zero -- not, for now, filled
+    with a zero value the way Go's own struct literals would; that's
+    an intentionally separate, larger piece of follow-up work."""
     name: str
     args: List[Node] = field(default_factory=list)
+    kwargs: Optional[List[Tuple[str, Node]]] = None
     resolved_type: Optional[Any] = None
 
 
@@ -1796,15 +1842,59 @@ class Parser:
         return ArrayLiteral(elements=elements, type_expr=type_expr)
 
     def parse_call(self) -> Call:
+        """`name(arg1, arg2, ...)` or `name(f1=v1, f2=v2, ...)` -- see
+        Call's own docstring for the full design; this just needs to
+        tell the two argument-list SHAPES apart and refuse to mix them,
+        with no idea yet (and no need to know) whether `name` ends up
+        being a struct or a function.
+
+        Disambiguated per-argument with exactly one token of lookahead
+        past the argument's own start: IDENTIFIER immediately followed
+        by ASSIGN ('=', never EQUAL '==' -- the lexer already tokenizes
+        those as two different token types, so there's no risk of
+        `A(x==1)` -- an ordinary positional argument that happens to
+        be a boolean expression -- being mistaken for a named one)
+        means `name=value`; anything else is parsed as an ordinary
+        positional expression. `start_tok` is captured before parsing
+        either shape purely so a mixing error, if one turns out to be
+        needed, points at the argument that actually broke the
+        pattern, not wherever the token stream happens to be after
+        parsing its value."""
         name_tok = self.expect(TokenType.IDENTIFIER)
         self.expect(TokenType.OPEN_PAREN, "Expected '(' to start a call's argument list")
-        args = []
+        args: List[Node] = []
+        kwargs: Optional[List[Tuple[str, Node]]] = None
         if not self.check(TokenType.CLOSE_PAREN):
-            args.append(self.parse_expression())
-            while self.match(TokenType.COMMA):
-                args.append(self.parse_expression())
+            while True:
+                start_tok = self.current()
+                if self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.ASSIGN:
+                    field_name = self.advance().val
+                    self.advance()  # consume '='
+                    value = self.parse_expression()
+                    if args:
+                        raise ParseError(
+                            f"Cannot mix positional and named arguments in "
+                            f"a call -- '{field_name}=...' follows a "
+                            f"positional argument at line {start_tok.line}, "
+                            f"column {start_tok.col}"
+                        )
+                    if kwargs is None:
+                        kwargs = []
+                    kwargs.append((field_name, value))
+                else:
+                    value = self.parse_expression()
+                    if kwargs is not None:
+                        raise ParseError(
+                            f"Cannot mix positional and named arguments in "
+                            f"a call -- a positional argument follows a "
+                            f"named one at line {start_tok.line}, column "
+                            f"{start_tok.col}"
+                        )
+                    args.append(value)
+                if not self.match(TokenType.COMMA):
+                    break
         self.expect(TokenType.CLOSE_PAREN, "Expected ')' to close a call's argument list")
-        return Call(name=name_tok.val, args=args)
+        return Call(name=name_tok.val, args=args, kwargs=kwargs)
 
 
 # ---------------------------------------------------------------------------

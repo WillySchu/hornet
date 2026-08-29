@@ -1647,9 +1647,24 @@ class SemanticAnalyzer:
         flowing_into's own array-literal-into-slice special case, for
         the identical reason: this bypasses check_expr's generic
         dispatch -- and its own annotation step -- entirely, so
-        nothing else would perform it)."""
+        nothing else would perform it).
+
+        NAMED construction (`A(x=1, y='a')`, expr.kwargs populated
+        instead of expr.args -- see Call's own docstring in parser.py
+        for the full design and why the two are mutually exclusive by
+        construction) is delegated to _check_named_struct_literal
+        below, which also supports PARTIAL construction (`A(x=1)`,
+        omitting a field entirely) -- deliberately not given an
+        implicit zero value; an omitted field's own storage stays
+        genuinely uninitialized, matching every other place this
+        language already treats uninitialized memory as real UB
+        rather than implicitly zero. Positional construction stays
+        exhaustive (this method's own existing behavior, unchanged);
+        only the named form can be partial."""
         struct_info = self.structs[expr.name]
         field_items = list(struct_info.fields.items())
+        if expr.kwargs is not None:
+            return self._check_named_struct_literal(expr, struct_info, field_items)
         if len(expr.args) != len(field_items):
             field_names = ', '.join(name for name, _ in field_items)
             raise SemanticError(
@@ -1669,6 +1684,59 @@ class SemanticAnalyzer:
         expr.resolved_type = result
         return result
 
+    def _check_named_struct_literal(self, expr: Call, struct_info: StructInfo, field_items: list) -> Type:
+        """`A(x=1, y='a')`, or a PARTIAL `A(x=1)` -- named-field
+        construction, reached from check_struct_literal whenever
+        expr.kwargs is populated instead of expr.args. Unlike the
+        positional form, this is deliberately NOT required to be
+        exhaustive: any field not mentioned is simply never written by
+        codegen (see gen_struct_literal_into), left exactly as
+        uninitialized as an ordinary `A a` VarDecl with no initializer
+        at all would leave every one of its fields.
+
+        Each named field is checked against real membership (a name
+        that isn't one of the struct's own fields is rejected, with
+        the valid names listed) and against being specified more than
+        once (`A(x=1, x=2)`) -- both genuine semantic questions the
+        parser has no way to answer itself, since it doesn't know
+        `expr.name` refers to a struct with these specific fields at
+        all (see Call's own docstring in parser.py). Order of
+        appearance in kwargs is preserved from parsing but doesn't
+        matter for validation here -- unlike the positional form,
+        where order IS the only thing that maps an argument to a
+        field, a named field's own identity comes entirely from its
+        name.
+
+        Each value is checked via _check_expr_allowing_struct_literal,
+        exactly like the positional form's own arguments -- a nested
+        struct literal as a named field's own value (`Outer(inner=
+        Inner(1), b=2)`) recurses the identical way."""
+        field_types = struct_info.fields
+        valid_names = ', '.join(name for name, _ in field_items)
+        seen = set()
+        for field_name, value in expr.kwargs:
+            if field_name not in field_types:
+                raise SemanticError(
+                    f"Struct literal for '{expr.name}' has no field "
+                    f"'{field_name}' -- valid fields are: {valid_names}"
+                )
+            if field_name in seen:
+                raise SemanticError(
+                    f"Field '{field_name}' specified more than once in "
+                    f"struct literal for '{expr.name}'"
+                )
+            seen.add(field_name)
+            value_type = self._check_expr_allowing_struct_literal(value)
+            expected_type = field_types[field_name]
+            if not self._types_compatible(value_type, expected_type):
+                raise SemanticError(
+                    f"Field '{field_name}' of struct literal '{expr.name}' "
+                    f"should be {expected_type}, got {value_type}"
+                )
+        result = Type(TypeKind.STRUCT, struct_name=expr.name)
+        expr.resolved_type = result
+        return result
+
     def check_call(self, expr: Call) -> Type:
         if expr.name in self.structs:
             raise SemanticError(
@@ -1682,6 +1750,23 @@ class SemanticAnalyzer:
                 f"Binary operand, a Field-access base, ...); assign it "
                 f"to a variable first if you need it in one of those "
                 f"positions"
+            )
+        if expr.kwargs is not None:
+            # Named arguments (`foo(x=1)`) parse into exactly the same
+            # shape a named struct literal does -- the parser can't
+            # tell them apart at all (see Call's own docstring in
+            # parser.py) -- so this is the one place that distinction
+            # actually gets made, once `expr.name` is known NOT to be
+            # a struct (the check just above already handles the case
+            # where it is). Named construction is deliberately scoped
+            # to struct literals only, not a general calling
+            # convention, so an ordinary function -- or print/len/
+            # append, all handled below -- never accepts this shape at
+            # all, regardless of whether the names given would even
+            # line up with real parameters.
+            raise SemanticError(
+                f"'{expr.name}(...)' uses named arguments, which are "
+                f"only supported for struct literals, not function calls"
             )
         if expr.name == 'print':
             return self.check_print_call(expr)

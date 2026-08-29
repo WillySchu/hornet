@@ -15,13 +15,13 @@ Binary Ops:
 
 Updates:
 - Struct literals as bare statement.
-- Named field construction for struct literals.
 - Disallow untyped array literals from anything except assignment to a typed variable / parameter / return.
 - `==` for structs.
 - Add source location for error messages from semantic analysis.
 - `fuction` type.
 - Methods.
 - Reconsider heap allocated literal arrays for `gen_indexable_base_into` (apparently `len([1, 2, 3])` and `[1, 2, 3][0]` work?)
+- Implicit zero value initialization for uninitialized variables / fields.
 - `assert`
 - `in` keyword.
 - Pass function calls to print.
