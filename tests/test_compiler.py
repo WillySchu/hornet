@@ -641,6 +641,7 @@ not just unused -- and NOT is spelled with the `not` keyword instead
 this rename and is completely unaffected; it's a separate two-character
 token that never depended on BANG existing.
 """
+import re
 import shutil
 import signal
 import subprocess
@@ -3848,7 +3849,7 @@ class TestHeapAllocatedArrays:
         the array's size. This just confirms that still holds once the
         array involved happens to be heap-allocated."""
         assert_program_exit_code(
-            "def [10000]int make([O):\n"
+            "def [10000]int make():\n"
             "    [10000]int r\n"
             "    r[0] = 42\n"
             "    r[9999] = 84\n"
@@ -8217,7 +8218,7 @@ class TestStructLiterals:
         ast = _parse(source)
         analyze(ast)
         asm = generate_asm(ast, platform=ASM_PLATFORM)
-        assert asm.count("call    malloc") == 1
+        assert len(re.findall(r"call\s+_?malloc\b", asm)) == 1
 
     def test_small_struct_literal_does_not_use_malloc(self):
         """Negative control for the test just above: a struct literal
