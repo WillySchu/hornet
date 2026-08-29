@@ -8682,8 +8682,15 @@ class TestStructLiterals:
             match="should be int",
         )
 
-    def test_struct_literal_as_field_assign_value_is_rejected(self):
-        assert_program_semantic_error(
+    def test_struct_literal_as_field_assign_value(self):
+        """Used to be rejected at the semantic layer; analyze_field_
+        assign now recognizes this exact shape too, via the same _check_
+        value_flowing_into_allowing_struct_literal helper analyze_
+        var_decl/analyze_assign already use. Needed no codegen changes
+        at all: gen_field_assign's own STRUCT branch already calls
+        gen_struct_value_into, which already dispatches a struct-
+        literal Call correctly."""
+        assert_program_exit_code(
             "struct Inner:\n"
             "    int v\n"
             "\n"
@@ -8694,20 +8701,122 @@ class TestStructLiterals:
             "    Inner inner = Inner(1)\n"
             "    Outer o = Outer(inner)\n"
             "    o.i = Inner(2)\n"
-            "    return 0\n",
-            match="only allowed as a variable's initializer",
+            "    return o.i.v\n",
+            2,
         )
 
-    def test_struct_literal_as_index_assign_value_is_rejected(self):
-        assert_program_semantic_error(
+    def test_struct_literal_as_index_assign_value(self):
+        """Used to be rejected at the semantic layer; analyze_index_
+        assign now recognizes this exact shape too, via the same
+        shared helper. Needed no codegen changes at all: gen_index_
+        assign's own STRUCT branch already calls gen_struct_value_
+        into, which already dispatches a struct-literal Call
+        correctly."""
+        assert_program_exit_code(
             "struct Point:\n"
             "    int x\n"
             "\n"
             "def int main():\n"
             "    [3]Point pts\n"
             "    pts[0] = Point(1)\n"
-            "    return 0\n",
-            match="only allowed as a variable's initializer",
+            "    pts[1] = Point(2)\n"
+            "    return pts[0].x + pts[1].x\n",
+            3,
+        )
+
+    def test_nested_struct_literal_as_index_assign_value(self):
+        assert_program_exit_code(
+            "struct Inner:\n"
+            "    int v\n"
+            "struct Outer:\n"
+            "    Inner i\n"
+            "    int b\n"
+            "\n"
+            "def int main():\n"
+            "    [1]Outer os\n"
+            "    os[0] = Outer(Inner(9), 2)\n"
+            "    return os[0].i.v + os[0].b\n",
+            11,
+        )
+
+    def test_nested_struct_literal_as_field_assign_value(self):
+        assert_program_exit_code(
+            "struct Inner:\n"
+            "    int v\n"
+            "struct Mid:\n"
+            "    Inner i\n"
+            "struct Outer:\n"
+            "    Mid m\n"
+            "\n"
+            "def int main():\n"
+            "    Outer o\n"
+            "    o.m = Mid(Inner(7))\n"
+            "    return o.m.i.v\n",
+            7,
+        )
+
+    def test_struct_literal_with_slice_field_as_index_assign_value(self):
+        assert_program_exit_code(
+            "struct Holder:\n"
+            "    []int xs\n"
+            "\n"
+            "def int main():\n"
+            "    [1]Holder hs\n"
+            "    hs[0] = Holder([]int[1, 2, 3])\n"
+            "    return hs[0].xs[0] + hs[0].xs[1] + hs[0].xs[2]\n",
+            6,
+        )
+
+    def test_struct_literal_with_slice_field_as_field_assign_value(self):
+        assert_program_exit_code(
+            "struct Holder:\n"
+            "    []int xs\n"
+            "struct Wrapper:\n"
+            "    Holder h\n"
+            "\n"
+            "def int main():\n"
+            "    Wrapper w\n"
+            "    w.h = Holder([]int[10, 20])\n"
+            "    return w.h.xs[0] + w.h.xs[1]\n",
+            30,
+        )
+
+    def test_large_struct_literal_as_index_assign_value(self):
+        """No NEW heap-allocation decision is introduced by this fix
+        specifically -- `bigs` (an array of one large Big struct) is
+        heap-promoted by the same, pre-existing is_heap_allocated size
+        check any array of large structs already gets, entirely
+        independent of whether it's populated via a struct literal or
+        field-by-field -- so this is purely an execution-correctness
+        check, not a new malloc-count proof the way argument
+        materialization needed one."""
+        assert_program_exit_code(
+            "struct Big:\n"
+            "    [5000]int data\n"
+            "    int tag\n"
+            "\n"
+            "def int main():\n"
+            "    [1]Big bigs\n"
+            "    [5000]int filler\n"
+            "    bigs[0] = Big(filler, 88)\n"
+            "    return bigs[0].tag\n",
+            88,
+        )
+
+    def test_large_struct_literal_as_field_assign_value(self):
+        assert_program_exit_code(
+            "struct Big:\n"
+            "    [5000]int data\n"
+            "    int tag\n"
+            "struct Wrapper:\n"
+            "    Big b\n"
+            "\n"
+            "def int main():\n"
+            "    Wrapper w\n"
+            "    [5000]int filler\n"
+            "    w.b = Big(filler, 99)\n"
+            "    return w.b.tag\n",
+            99,
         )
 
     def test_struct_literal_as_bare_statement_is_rejected(self):

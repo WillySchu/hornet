@@ -14,8 +14,6 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- Struct literals as field assigne values.
-- Struct literals as index assigne values.
 - Struct literals as bare statement.
 - Named field construction for struct literals.
 - Disallow untyped array literals from anything except assignment to a typed variable / parameter / return.

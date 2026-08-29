@@ -16,10 +16,6 @@ def print_sl([]A as):
 
 
 def main():
-    print('Hello, playground')
-    print_a(A(1, 'hello'))
-    print_arr([1, 2, 3, 4, 5])
-
-    []A as = [A(1, 'a'), A(2, 'b')]
-
-    print_sl([]A[A(1, 'a')])
+    print(len([1, 2, 3]))
+    print([1, 2, 3][0])
+    print(A(1, 'a').x)

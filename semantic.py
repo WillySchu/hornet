@@ -1141,21 +1141,29 @@ class SemanticAnalyzer:
     def analyze_index_assign(self, stmt: IndexAssign) -> None:
         """`array[index] = value`. value flows into the indexed
         element's own type the same way any other value flows into an
-        already-typed slot -- via _check_value_flowing_into, not a
-        plain check_expr -- so an untyped array literal assigned
-        directly into a SLICE-typed element (`rows[0] = [9, 9, 9]`,
-        one element of an array OF slices) gets the same recursive
-        slice-construction treatment analyze_var_decl/analyze_assign
-        already give a VarDecl/Assign's own value (see that method's
-        own docstring). Found as the same bug-class in a third
-        location, not a hypothetical extension: `rows[0] =
+        already-typed slot -- via _check_value_flowing_into_allowing_
+        struct_literal, not a plain check_expr -- so an untyped array
+        literal assigned directly into a SLICE-typed element (`rows[0]
+        = [9, 9, 9]`, one element of an array OF slices) gets the same
+        recursive slice-construction treatment analyze_var_decl/
+        analyze_assign already give a VarDecl/Assign's own value (see
+        that method's own docstring), and a struct literal assigned
+        directly into a STRUCT-typed element (`pts[0] = Point(1, 2)`)
+        is recognized the same way every other now-allowed position
+        already is. Needed no codegen changes at all for either: gen_
+        index_assign's own SLICE and STRUCT branches already call
+        gen_slice_value_into/gen_struct_value_into, both of which
+        already handle every shape this can now produce.
+
+        Found the untyped-array-literal case as the same bug-class in
+        a third location, not a hypothetical extension: `rows[0] =
         someNamedSlice` and the explicitly-typed `rows[0] =
         []int[9, 9, 9]` both already worked (their own values already
         carry a real SLICE type by the time they reach here), which is
         exactly what masked this gap until the untyped form specifically
         was tried."""
         element_type = self._check_indexable_and_index(stmt.array, stmt.index)
-        value_type = self._check_value_flowing_into(stmt.value, element_type)
+        value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, element_type)
         if not self._types_compatible(value_type, element_type):
             raise SemanticError(
                 f"Cannot assign a value of type {value_type} to an array "
@@ -1165,17 +1173,22 @@ class SemanticAnalyzer:
     def analyze_field_assign(self, stmt: FieldAssign) -> None:
         """`base.name = value` -- mirrors analyze_index_assign exactly,
         one level over: value flows into the field's own declared type
-        via _check_value_flowing_into, not a plain check_expr, so an
-        untyped array literal (or slice literal) assigned directly
-        into a slice-typed field gets the same recursive slice-
-        construction treatment every other already-typed slot (a
-        VarDecl, an Assign, an IndexAssign's own element) already
-        gives one -- written the general way from the start, exactly
+        via _check_value_flowing_into_allowing_struct_literal, not a
+        plain check_expr, so an untyped array literal (or slice
+        literal) assigned directly into a slice-typed field gets the
+        same recursive slice-construction treatment every other
+        already-typed slot (a VarDecl, an Assign, an IndexAssign's own
+        element) already gives one, and a struct literal assigned
+        directly into a struct-typed field (`o.i = Inner(9)`) is
+        recognized the same way every other now-allowed position
+        already is -- written the general way from the start, exactly
         like analyze_index_assign's own already was, rather than only
         handling the field types a given phase happened to support at
-        the time."""
+        the time. Needed no codegen changes at all for the struct case:
+        gen_field_assign's own STRUCT branch already calls gen_struct_
+        value_into, which already handles a struct-literal Call."""
         field_type = self._check_struct_and_field(stmt.base, stmt.name)
-        value_type = self._check_value_flowing_into(stmt.value, field_type)
+        value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, field_type)
         if not self._types_compatible(value_type, field_type):
             raise SemanticError(
                 f"Cannot assign a value of type {value_type} to field "
@@ -1597,9 +1610,11 @@ class SemanticAnalyzer:
         array- or slice-typed field is a smaller, related gap left for
         now, unrelated to struct literals as such.)
 
-        Only ever reached from analyze_var_decl/analyze_assign (via
+        Only ever reached from analyze_var_decl/analyze_assign/
+        analyze_index_assign/analyze_field_assign (all four via
         _check_value_flowing_into_allowing_struct_literal, for a
-        VarDecl initializer or an Assign value), check_call's own
+        VarDecl initializer, an Assign value, an IndexAssign's own
+        element, or a FieldAssign's own field), check_call's own
         argument-checking loop (a direct function-call argument,
         `foo(A(1, 2))`), analyze_return (a direct return value,
         `return A(1, 2)`), check_array_literal (an array literal's own
@@ -1615,14 +1630,18 @@ class SemanticAnalyzer:
         structs) BEFORE calling _check_value_flowing_into/check_expr
         at all -- via one of the two small shared helpers just above
         analyze_var_decl, not duplicated inline at each site anymore.
-        Every OTHER place a Call can appear (an IndexAssign/FieldAssign
-        value, a bare statement, or most other kinds of expressions --
-        a Binary operand, a Field-access base, ...) still funnels
-        through check_expr's ordinary dispatch into check_call instead,
-        which rejects a struct-name Call there. That's the entire
-        mechanism that keeps struct literals scoped to exactly these
-        positions, deliberately narrower than where an ordinary
-        function call is allowed to appear.
+        Every OTHER place a Call can appear (a bare statement, or most
+        other kinds of expressions -- a Binary operand, a Field-access
+        base, ...) still funnels through check_expr's ordinary
+        dispatch into check_call instead, which rejects a struct-name
+        Call there. That's the entire mechanism that keeps struct
+        literals scoped to exactly these positions, deliberately
+        narrower than where an ordinary function call is allowed to
+        appear. Both IndexAssign and FieldAssign needed no codegen
+        changes at all once semantic.py allowed this: gen_index_
+        assign/gen_field_assign already call gen_slice_value_into/
+        gen_struct_value_into for their own SLICE/STRUCT branches, both
+        of which already handled every shape this can now produce.
 
         Annotates expr.resolved_type directly (mirroring _check_value_
         flowing_into's own array-literal-into-slice special case, for
@@ -1656,9 +1675,10 @@ class SemanticAnalyzer:
                 f"'{expr.name}(...)' is a struct literal, which is only "
                 f"allowed as a variable's initializer, a plain "
                 f"assignment's value, a direct function-call argument, "
-                f"a direct return value, or an array literal's own "
-                f"element -- not as an IndexAssign/FieldAssign value, a "
-                f"bare statement, or most other kinds of expressions (a "
+                f"a direct return value, an array literal's own "
+                f"element, an IndexAssign's own element, or a "
+                f"FieldAssign's own field -- not as a bare statement, "
+                f"or most other kinds of expressions (a "
                 f"Binary operand, a Field-access base, ...); assign it "
                 f"to a variable first if you need it in one of those "
                 f"positions"
