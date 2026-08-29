@@ -5080,6 +5080,58 @@ class TestAppend:
             3,
         )
 
+    def test_append_a_named_struct_value(self):
+        """A struct-typed value appended to a slice of structs -- the
+        value argument itself is an ordinary struct-typed Variable
+        here, which already worked before the array-of-structs fix
+        (append's own codegen was never restricted to scalar element
+        types); test_append_a_struct_literal below is the newly-fixed
+        counterpart, where the value argument is a struct literal
+        directly."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    Point p1\n"
+            "    p1.x = 1\n"
+            "    p1.y = 2\n"
+            "    Point p2\n"
+            "    p2.x = 3\n"
+            "    p2.y = 4\n"
+            "    []Point s = none\n"
+            "    s = append(s, p1)\n"
+            "    s = append(s, p2)\n"
+            "    return s[0].x + s[1].y\n",
+            5,
+        )
+
+    def test_append_a_struct_literal(self):
+        """Used to be rejected at the semantic layer: check_append_
+        call's own value-argument check called _check_value_flowing_
+        into directly, which doesn't recognize a struct literal --
+        found while validating the broader array/slice-of-structs
+        work, fixed by routing through _check_value_flowing_into_
+        allowing_struct_literal instead, the same helper every other
+        newly-allowed position now shares. Needed no codegen changes
+        at all: _gen_write_value_at_address_into's own STRUCT branch
+        (added for the array-of-structs literal fix) already hands
+        off to gen_struct_value_into, which already dispatches a
+        struct-literal Call correctly."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    []Point s = none\n"
+            "    s = append(s, Point(1, 2))\n"
+            "    s = append(s, Point(3, 4))\n"
+            "    return s[0].x + s[1].y\n",
+            5,
+        )
+
 
 class TestSliceParametersAndReturns:
     pytestmark = GCC_SKIP
@@ -8917,6 +8969,312 @@ class TestArgumentMaterialization:
             "def int main():\n"
             "    return useOuter(Outer(Inner(9), 2))\n",
             11,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Array/slice literals with struct-typed elements (`[p1, p2]`, `[Point(1,2),
+# Point(3,4)]`, `[N]Point[...]`, `[]Point[...]`). This was a real, pre-
+# existing gap in gen_array_literal_into (no STRUCT-typed element case at
+# all -- it fell through to gen_expr_into, which flatly rejects any
+# struct-typed read) that failed even for the simplest case, an array of
+# ordinary struct VARIABLES, with no literal construction involved. Every
+# OTHER operation on an array of structs -- declaring one, indexing into it
+# and reading/writing a field of one element, whole-array copy via plain
+# assignment, passing one as a parameter, returning one -- already worked
+# before this fix, since each routes through gen_array_copy (already
+# generic over leaf width) or gen_index_assign/gen_field_address_into
+# (which already had their own STRUCT cases); literal construction
+# specifically was the one gap. _gen_write_value_at_address_into (append's
+# own counterpart to gen_array_literal_into) had the identical gap, fixed
+# the same way.
+#
+# Closing this surfaced two more, smaller gaps in the immediate
+# neighborhood, both fixed alongside it: struct literals weren't allowed as
+# an array literal's own element at the semantic layer either (a sixth
+# position added to check_struct_literal's own allow-list, alongside
+# VarDecl/Assign/call-argument/return-value/nested-struct-literal-argument
+# -- see check_array_literal's own docstring), and a fully-typed array or
+# slice literal with a STRUCT element type (`[2]Point[...]`) never parsed
+# at all: _looks_like_typed_literal's own lookahead only recognized
+# int/bool/str/'[' as a type-starting token after the size bracket, never
+# an IDENTIFIER (a struct name) -- written before struct literals existed
+# to give one anything to disambiguate against. test_append_a_struct_
+# literal in TestAppend closes a third, related gap found the same way:
+# check_append_call's own value-argument check didn't recognize a struct
+# literal either.
+# ---------------------------------------------------------------------------
+
+class TestArraysOfStructs:
+    pytestmark = GCC_SKIP
+
+    def test_array_literal_of_struct_variables(self):
+        """The core gap: this failed even with no literal construction
+        involved at all -- two ordinary, already-declared struct
+        variables used as an array literal's own elements."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    Point p1\n"
+            "    p1.x = 1\n"
+            "    p1.y = 2\n"
+            "    Point p2\n"
+            "    p2.x = 3\n"
+            "    p2.y = 4\n"
+            "    [2]Point arr = [p1, p2]\n"
+            "    return arr[0].x + arr[1].y\n",
+            5,
+        )
+
+    def test_array_literal_of_struct_literals(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Point pts = [Point(1, 2), Point(3, 4)]\n"
+            "    return pts[0].x + pts[1].y\n",
+            5,
+        )
+
+    def test_fully_typed_array_literal_of_struct_literals(self):
+        """`[2]Point[Point(1,2), Point(3,4)]` -- exercises the parser
+        fix (_looks_like_typed_literal now recognizes an IDENTIFIER,
+        not just int/bool/str/'[', as starting a typed literal's own
+        element type) alongside the codegen fix."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Point pts = [2]Point[Point(1, 2), Point(3, 4)]\n"
+            "    return pts[0].x + pts[1].y\n",
+            5,
+        )
+
+    def test_slice_typed_literal_of_struct_literals(self):
+        """The slice counterpart -- `[]Point[...]` -- to the fully-
+        typed array literal just above; the same parser lookahead fix
+        covers both shapes (see _looks_like_typed_literal's own two
+        checks, one per shape)."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    []Point pts = []Point[Point(1, 2), Point(3, 4)]\n"
+            "    return pts[0].x + pts[1].y\n",
+            5,
+        )
+
+    def test_nested_typed_array_of_struct_literals(self):
+        """`[1][2]Point[[2]Point[...]]` -- an array of arrays of
+        structs, built via nested fully-typed literals. No special-
+        casing needed beyond the base STRUCT-element fix: gen_array_
+        literal_into's own ARRAY-typed-element branch already recurses
+        through gen_array_value_into regardless of what the innermost
+        leaf type turns out to be."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    [1][2]Point grid = [1][2]Point[[2]Point[Point(1,2), Point(3,4)]]\n"
+            "    return grid[0][0].x + grid[0][1].y\n",
+            5,
+        )
+
+    def test_mixed_element_kinds_in_one_array_literal(self):
+        """A struct literal, an ordinary struct variable, and a
+        struct-returning call, all as elements of the SAME array
+        literal -- each is a genuinely different expression shape
+        gen_struct_value_into has to dispatch on internally."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def Point makePoint():\n"
+            "    Point p\n"
+            "    p.x = 10\n"
+            "    p.y = 20\n"
+            "    return p\n"
+            "\n"
+            "def int main():\n"
+            "    Point p2\n"
+            "    p2.x = 5\n"
+            "    p2.y = 6\n"
+            "    [3]Point pts = [Point(1, 2), p2, makePoint()]\n"
+            "    return pts[0].x + pts[1].y + pts[2].x\n",
+            17,
+        )
+
+    def test_indexed_struct_element_in_array_literal(self):
+        """`[base[0], base[1]]` -- each element is itself an Index
+        expression reading a struct out of a DIFFERENT array."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Point base = [Point(1, 2), Point(3, 4)]\n"
+            "    [2]Point copy = [base[0], base[1]]\n"
+            "    return copy[0].x + copy[1].y\n",
+            5,
+        )
+
+    def test_struct_field_that_is_an_array_of_structs_built_via_nested_literal(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "struct Pair:\n"
+            "    [2]Point pts\n"
+            "\n"
+            "def int main():\n"
+            "    Pair pr = Pair([Point(1, 2), Point(3, 4)])\n"
+            "    return pr.pts[0].x + pr.pts[1].y\n",
+            5,
+        )
+
+    def test_value_semantics_mutating_a_copy_does_not_affect_the_original(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Point a = [Point(1, 2), Point(3, 4)]\n"
+            "    [2]Point b = a\n"
+            "    b[0].x = 100\n"
+            "    return a[0].x + b[0].x\n",
+            101,
+        )
+
+    def test_large_array_of_structs_literal_is_heap_allocated(self):
+        """Exit-code correctness alone wouldn't distinguish a
+        genuinely heap-allocated result from a stack-allocated one
+        that happened to still work -- see test_large_array_of_
+        structs_literal_actually_uses_malloc just below for the
+        actual proof. 2500 Points at 8 bytes each is 20000 bytes,
+        over the 16384-byte stack threshold."""
+        elements = ", ".join(f"Point({i}, {i})" for i in range(2500))
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            f"    [2500]Point pts = [{elements}]\n"
+            "    return pts[2499].x % 256\n",
+            2499 % 256,
+        )
+
+    def test_large_array_of_structs_literal_actually_uses_malloc(self):
+        """The asm-level confirmation behind the test just above."""
+        elements = ", ".join(f"Point({i}, {i})" for i in range(2500))
+        source = (
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            f"    [2500]Point pts = [{elements}]\n"
+            "    return pts[2499].x % 256\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        assert len(re.findall(r"call\s+_?malloc\b", asm)) >= 1
+
+    def test_small_array_of_structs_literal_does_not_use_malloc(self):
+        """Negative control: a small array-of-structs literal, well
+        under the stack limit, should produce no malloc call at all."""
+        source = (
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Point pts = [Point(1, 2), Point(3, 4)]\n"
+            "    return pts[0].x + pts[1].y\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        assert "malloc" not in asm
+
+    def test_mismatched_struct_types_in_array_literal_is_rejected(self):
+        assert_program_semantic_error(
+            "struct Point:\n"
+            "    int x\n"
+            "struct Other:\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    Point p = Point(1)\n"
+            "    Other o = Other(2)\n"
+            "    [2]Point pts = [p, o]\n"
+            "    return 0\n",
+            match="must all be",
+        )
+
+    def test_struct_and_scalar_mixed_in_untyped_array_literal_is_rejected(self):
+        assert_program_semantic_error(
+            "struct Point:\n"
+            "    int x\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Point pts = [Point(1), 5]\n"
+            "    return 0\n",
+            match="must all be the same type",
+        )
+
+    def test_bare_typed_struct_array_literal_statement_side_effect_is_still_rejected(self):
+        """A bare, unused array-literal STATEMENT (no assignment at
+        all) with struct-typed elements is a deliberate, separate
+        scope boundary from ordinary construction -- gen_array_
+        literal_side_effects_only never materializes a real array at
+        all for a bare statement, and a struct-typed element there
+        (literal or not) has no side-effect-only meaning worth
+        preserving, so it's explicitly rejected rather than silently
+        mishandled -- matching the identical, pre-existing treatment
+        ARRAY- and SLICE-typed elements already get in this same
+        position."""
+        source = (
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Point[Point(1, 2), Point(3, 4)]\n"
+            "    return 0\n"
+        )
+        ast = _parse(source)
+        analyze(ast)  # type-checks fine -- the rejection is codegen-level only
+        with pytest.raises(CodegenError, match="assign the literal to a variable first"):
+            generate_asm(ast, platform=ASM_PLATFORM)
+
+    def test_single_element_array_literal_still_parses_as_untyped(self):
+        """Negative control for the parser fix: `[5]` alone (a single-
+        element, untyped array literal) must still parse as one, not
+        be swept up by _looks_like_typed_literal's newly-added
+        IDENTIFIER check -- there's no IDENTIFIER immediately after
+        this `]` at all, so this was never actually at risk, but it's
+        cheap to lock in explicitly given how central that method is."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    [1]int a = [5]\n"
+            "    return a[0]\n",
+            5,
         )
 
 

@@ -1683,12 +1683,14 @@ class Parser:
 
     def _looks_like_typed_literal(self) -> bool:
         """True if the CURRENT position starts a fully-typed array or
-        slice literal (`[3]int[1, 2, 3]` or `[]int[1, 2, 3]`) rather
-        than a plain, untyped array literal (`[1, 2, 3]`) or a single-
-        element one (`[5]`) -- both of which also start with
-        OPEN_BRACKET, and, for a size-1 case like `[5]`, even start
-        with the identical OPEN_BRACKET NUMBER CLOSE_BRACKET prefix an
-        array type's own size bracket does.
+        slice literal (`[3]int[1, 2, 3]`, `[]int[1, 2, 3]`, or -- since
+        struct literals started giving struct names their own literal
+        syntax to disambiguate against -- `[3]Point[Point(1,2), ...]`,
+        `[]Point[...]`) rather than a plain, untyped array literal
+        (`[1, 2, 3]`) or a single-element one (`[5]`) -- both of which
+        also start with OPEN_BRACKET, and, for a size-1 case like
+        `[5]`, even start with the identical OPEN_BRACKET NUMBER
+        CLOSE_BRACKET prefix an array type's own size bracket does.
 
         Resolved with BOUNDED lookahead alone -- three or four tokens
         depending on which shape it turns out to be, no backtracking
@@ -1698,26 +1700,44 @@ class Parser:
         that are genuinely unambiguous: an array type's own size
         bracket is `[` NUMBER `]` immediately followed by a type-
         starting token, and a slice type's own (empty) bracket pair is
-        `[` `]` immediately followed by one -- a type keyword, or
-        another `[` for a nested array/slice element type
-        (`[2][2]int[...]`, `[][]int[...]`). Neither an untyped
-        literal's closing `]` (array) nor a bare `[]` (which, on its
-        own, parses as a valid but always semantically-rejected empty
-        array literal -- see check_array_literal) is ever immediately
-        followed by one of those in any valid program (nothing can
-        validly follow a complete expression that way), so checking
-        for either specific shape is enough to always tell them apart
-        from their own untyped counterparts, including the array
-        side's size-1 edge case: `[5]` alone has nothing of that shape
-        following its `]`, so it's correctly left to parse as a
-        single-element array literal instead.
-        """
+        `[` `]` immediately followed by one -- a type keyword, an
+        IDENTIFIER (a struct name -- see parse_type's own identical
+        acceptance of one there), or another `[` for a nested
+        array/slice element type (`[2][2]int[...]`, `[][]int[...]`,
+        `[2][2]Point[...]`). Neither an untyped literal's closing `]`
+        (array) nor a bare `[]` (which, on its own, parses as a valid
+        but always semantically-rejected empty array literal -- see
+        check_array_literal) is ever immediately followed by one of
+        those in any valid program (nothing can validly follow a
+        complete expression that way), so checking for either specific
+        shape is enough to always tell them apart from their own
+        untyped counterparts, including the array side's size-1 edge
+        case: `[5]` alone has nothing of that shape following its `]`,
+        so it's correctly left to parse as a single-element array
+        literal instead.
+
+        IDENTIFIER was added to both lookahead checks only once struct
+        literals existed at all -- before that, a struct name here
+        could only ever have meant an ordinary VarDecl's own type
+        (`Point p`, no literal following it possible), so there was
+        nothing for this method to disambiguate in that case and no
+        reason to check for it. A BARE, fully-typed literal STATEMENT
+        with a struct element type (`[3]Point[Point(1,2), ...]` alone,
+        no assignment) never actually needed this fix at all: parse_
+        statement's own OPEN_BRACKET branch commits to parse_type()
+        directly before this method is ever consulted (see its own
+        comment on why that's safe), and parse_type already accepted
+        an IDENTIFIER as an element type from the very beginning -- the
+        gap this fixes is specifically for a typed struct literal used
+        as an EXPRESSION (a VarDecl initializer, an Assign value, a
+        function argument, ...), which reaches this method via
+        parse_primary instead."""
         if not self.check(TokenType.OPEN_BRACKET):
             return False
         if self.peek(1).type == TokenType.CLOSE_BRACKET:
-            return self.peek(2).type in (TokenType.INT, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET)
+            return self.peek(2).type in (TokenType.INT, TokenType.BOOL, TokenType.STR, TokenType.IDENTIFIER, TokenType.OPEN_BRACKET)
         if self.peek(1).type == TokenType.NUMBER and self.peek(2).type == TokenType.CLOSE_BRACKET:
-            return self.peek(3).type in (TokenType.INT, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET)
+            return self.peek(3).type in (TokenType.INT, TokenType.BOOL, TokenType.STR, TokenType.IDENTIFIER, TokenType.OPEN_BRACKET)
         return False
 
     def _parse_bracketed_literal(self, parsed_type: Union[str, 'ArrayTypeExpr', 'SliceTypeExpr']) -> Node:

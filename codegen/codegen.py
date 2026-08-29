@@ -4004,17 +4004,21 @@ class CodeGenerator:
         reuse and reallocate paths, both of which need to write the
         newly-appended element at a computed (not fixed-offset)
         address, with the element's own type possibly being scalar,
-        array, or slice.
+        array, slice, or struct.
 
-        For an ARRAY or SLICE element type, this just hands addr_reg
-        straight to gen_array_value_into/gen_slice_value_into as an
-        ordinary Memory destination -- both already protect an
-        arbitrary base internally (see their own docstrings), so
-        there's nothing extra to do here. For a scalar (int/bool/str),
-        addr_reg is protected manually, matching gen_array_literal_
-        into's own scalar-element pattern exactly: push addr_reg,
-        compute the value (which could itself involve a function call
-        that clobbers addr_reg, if value_expr is arbitrarily complex),
+        For an ARRAY, SLICE, or STRUCT element type, this just hands
+        addr_reg straight to gen_array_value_into/gen_slice_value_
+        into/gen_struct_value_into as an ordinary Memory destination --
+        all three already protect an arbitrary base internally (see
+        their own docstrings), so there's nothing extra to do here;
+        mirrors gen_array_literal_into's own identical three-way
+        dispatch for a literal's per-element writing, one level over
+        (append's own newly-appended element, rather than a literal's
+        directly-written one). For a scalar (int/bool/str), addr_reg
+        is protected manually, matching gen_array_literal_into's own
+        scalar-element pattern exactly: push addr_reg, compute the
+        value (which could itself involve a function call that
+        clobbers addr_reg, if value_expr is arbitrarily complex),
         stash the computed value in %r8/%r8d (a register distinct from
         addr_reg in every actual call site), pop addr_reg back, then
         write from %r8/%r8d -- never straight from %eax/%rax, which
@@ -4023,6 +4027,8 @@ class CodeGenerator:
             return self.gen_slice_value_into(value_expr, Memory(addr_reg.name, 0))
         if element_type.kind == TypeKind.ARRAY:
             return self.gen_array_value_into(value_expr, Memory(addr_reg.name, 0), element_type)
+        if element_type.kind == TypeKind.STRUCT:
+            return self.gen_struct_value_into(value_expr, Memory(addr_reg.name, 0), element_type)
         instructions = [Push(addr_reg)]
         instructions.extend(self.gen_expr_into(value_expr, Register('eax')))
         if element_type == Type.STR:
@@ -5712,14 +5718,41 @@ class CodeGenerator:
         constant), except when the element type is ITSELF an array (a
         multi-dimensional literal's "elements" are themselves
         ArrayLiterals, handled by recursing through gen_array_value_into,
-        which dispatches straight back here) or a SLICE (an array whose
+        which dispatches straight back here), a SLICE (an array whose
         elements are slices -- `[N][]int` -- e.g. the synthesized outer
         literal a slice-of-slices literal always is, `[][]int[[1, 2],
         [3, 4]]` -- handled by gen_slice_value_into, exactly like any
         other slice-producing expression; each element there might be
         an untyped ArrayLiteral needing a fresh backing allocation of
         its own, a named slice Variable, another Slice expression, or
-        anything else that method already covers).
+        anything else that method already covers), or a STRUCT (an
+        array of structs, `[N]Point` -- handled by gen_struct_value_
+        into, which already covers every shape a struct-typed element
+        can take: an ordinary Variable/Field/Index, a struct-returning
+        Call, or -- as of the same fix that added struct literals as
+        array elements at the semantic layer -- a struct literal
+        directly, `[Point(1,2), Point(3,4)]`, via that method's own
+        Call-is-a-struct-name dispatch).
+
+        This STRUCT case used to not exist at all: an array-of-structs
+        literal (or a struct-typed element written through _gen_write_
+        value_at_address_into, append's own counterpart to this method
+        -- see its own identical fix) would fall through to the
+        scalar path below, whose gen_expr_into call flatly rejects any
+        struct-typed read regardless of what expression produced it --
+        this failed even for the simplest possible case, `[p1, p2]`
+        with p1/p2 ordinary, already-declared struct variables, with
+        no literal construction involved at all. Every OTHER operation
+        on an array of structs (declaring one, indexing into it and
+        reading/writing a FIELD of one element via Index-then-Field,
+        whole-array copy via plain assignment, passing one as a
+        parameter, returning one) already worked before this fix,
+        since each of those routes through gen_array_copy (which
+        already handles ANY leaf width as a flat byte copy -- struct
+        included, see its own docstring) or gen_index_assign/gen_
+        field_address_into (which already had their own STRUCT cases)
+        rather than through this method's own per-element construction
+        path -- literal construction specifically was the one gap.
 
         dst_mem's own base register is protected on the stack across
         each element's value computation whenever it isn't 'rbp' --
@@ -5733,13 +5766,15 @@ class CodeGenerator:
         exactly the kind of register gen_expr_into's own value
         computation, which always targets %eax/%rax, can and did
         clobber -- silently overwriting the destination address before
-        a single element was ever actually written through it. The
-        SLICE case needs no protection of its own here, unlike the
-        scalar case just below: gen_slice_value_into already protects
-        dst_mem.base internally across whatever real work producing a
-        slice value takes (see its own docstring), so by the time it
+        a single element was ever actually written through it. Neither
+        the SLICE nor the STRUCT case needs protection of its own
+        here, unlike the scalar case just below: gen_slice_value_into/
+        gen_struct_value_into both already protect dst_mem.base
+        internally across whatever real work producing their own value
+        takes (see their own docstrings), so by the time either
         returns, dst_mem.base is guaranteed correct again -- this loop
-        can just call it directly and move on to the next element."""
+        can just call either directly and move on to the next
+        element."""
         element_type = array_type.element_type
         element_width = type_byte_width(element_type, self.struct_registry)
         protect_dst = dst_mem.base != 'rbp'
@@ -5751,6 +5786,9 @@ class CodeGenerator:
                 continue
             if element_type.kind == TypeKind.SLICE:
                 instructions.extend(self.gen_slice_value_into(elem_expr, elem_mem))
+                continue
+            if element_type.kind == TypeKind.STRUCT:
+                instructions.extend(self.gen_struct_value_into(elem_expr, elem_mem, element_type))
                 continue
             if protect_dst:
                 instructions.append(Push(Register(dst_mem.base)))
@@ -6633,15 +6671,21 @@ class CodeGenerator:
         Recurses for a nested ArrayLiteral element (a multi-dimensional
         literal used bare), the same way check_array_literal's own
         type-checking already does. An element that's ITSELF some
-        other, non-literal array- or slice-typed expression (a
-        Variable, an indexed sub-array, or an array-returning Call
-        used as an element) is a real, deliberately out-of-scope gap:
-        reading a bare array-typed Variable has no side effect worth
-        preserving, but an array-returning Call might, and correctly
-        distinguishing the two -- or materializing either one just to
-        discard it -- isn't implemented here. Raises a clear error
-        rather than silently skipping (which could drop a real side
-        effect) or guessing.
+        other, non-literal array-, slice-, or struct-typed expression
+        (a Variable, an indexed sub-array, an array/struct-returning
+        Call, ...) is a real, deliberately out-of-scope gap: reading a
+        bare array-typed Variable has no side effect worth preserving,
+        but an array-returning Call might, and correctly distinguishing
+        the two -- or materializing either one just to discard it --
+        isn't implemented here. Raises a clear error rather than
+        silently skipping (which could drop a real side effect) or
+        guessing. (A struct-typed element specifically would already
+        raise via gen_expr_into's own defensive rejection even without
+        being listed here explicitly, since this method falls through
+        to it for anything not caught above -- STRUCT is included in
+        the tuple below anyway, for the same clearer, statement-
+        specific message every other composite kind gets here, rather
+        than relying on gen_expr_into's own more generic one.)
         """
         instructions = []
         for element in expr.elements:
@@ -6649,7 +6693,7 @@ class CodeGenerator:
                 instructions.extend(self.gen_array_literal_side_effects_only(element))
                 continue
             element_type = type_of(element)
-            if element_type.kind in (TypeKind.ARRAY, TypeKind.SLICE):
+            if element_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
                 raise CodegenError(
                     f"A bare array-literal statement can't have a "
                     f"{type(element).__name__} element of type "
