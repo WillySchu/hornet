@@ -5358,23 +5358,117 @@ class TestSliceParametersAndReturns:
             16,
         )
 
-    def test_slice_argument_must_be_a_variable_or_none(self):
-        """The same restriction slice bases have everywhere else in
-        this codebase (indexing, print, re-slicing): a bare Slice
-        expression has no pre-existing descriptor to read at a call
-        site -- assign it to a named variable first."""
-        source = (
-            "def int f([]int s):\n"
-            "    return s[0]\n"
+    def test_reslice_as_call_argument(self):
+        """Used to be rejected at the codegen layer: a bare Slice
+        expression (a re-slice) has no pre-existing descriptor of its
+        own to read at a call site -- now materialized into the same
+        shared, per-function scratch slot gen_indexable_base_into's
+        own analogous cases already use (_unnamed_slice_temp_offset),
+        via gen_slice_value_into, then read back out -- see gen_slice_
+        arg_into's own docstring for why sharing that one slot is safe
+        here, for a different reason than it is there (a slice
+        argument is passed BY VALUE, drained into registers and pushed
+        immediately, not by address that has to survive until the
+        call itself)."""
+        assert_program_exit_code(
+            "def int sum3([]int s):\n"
+            "    return s[0] + s[1] + s[2]\n"
             "\n"
             "def int main():\n"
             "    [3]int arr = [1, 2, 3]\n"
-            "    return f(arr[0:3])\n"
+            "    return sum3(arr[0:3])\n",
+            6,
         )
-        ast = _parse(source)
-        analyze(ast)
-        with pytest.raises(CodegenError, match="assign it to a variable first"):
-            generate_asm(ast, platform=ASM_PLATFORM)
+
+    def test_slice_returning_call_as_argument(self):
+        assert_program_exit_code(
+            "def []int makeSlice():\n"
+            "    return []int[7, 8, 9]\n"
+            "\n"
+            "def int sum3([]int s):\n"
+            "    return s[0] + s[1] + s[2]\n"
+            "\n"
+            "def int main():\n"
+            "    return sum3(makeSlice())\n",
+            24,
+        )
+
+    def test_two_unnamed_slices_alive_in_the_same_call(self):
+        """Both arguments need their own descriptor read out of the
+        SAME shared scratch slot in turn -- proving that sharing it is
+        actually safe, not just safe by luck because only one call
+        ever used it at a time before."""
+        assert_program_exit_code(
+            "def int addPairs([]int a, []int b):\n"
+            "    return a[0] + a[1] + b[0] + b[1]\n"
+            "\n"
+            "def int main():\n"
+            "    return addPairs([]int[1, 2], []int[3, 4])\n",
+            10,
+        )
+
+    def test_nested_unnamed_slice_materialization(self):
+        """`sum3(identity([]int[1, 2, 3]))` -- the OUTER call's own
+        argument is itself a slice-returning call whose OWN argument is
+        ANOTHER unnamed slice. This is the scenario that actually
+        exercises the "strictly nested, fully drained before reuse"
+        safety argument gen_slice_arg_into's own docstring makes for
+        the shared scratch slot: the inner literal's own materialization
+        has to complete and be pushed onto the real stack before
+        `call identity` ever runs, since identity's own hidden return
+        pointer (pointing at that SAME slot) only gets written through
+        once identity's own `return` executes, strictly after."""
+        assert_program_exit_code(
+            "def []int identity([]int s):\n"
+            "    return s\n"
+            "\n"
+            "def int sum3([]int s):\n"
+            "    return s[0] + s[1] + s[2]\n"
+            "\n"
+            "def int main():\n"
+            "    return sum3(identity([]int[1, 2, 3]))\n",
+            6,
+        )
+
+    def test_slice_typed_field_as_argument(self):
+        assert_program_exit_code(
+            "struct Holder:\n"
+            "    []int xs\n"
+            "\n"
+            "def int sum3([]int s):\n"
+            "    return s[0] + s[1] + s[2]\n"
+            "\n"
+            "def int main():\n"
+            "    Holder h = Holder([]int[1, 2, 3])\n"
+            "    return sum3(h.xs)\n",
+            6,
+        )
+
+    def test_slice_typed_index_as_argument(self):
+        """`rows[0]` -- one element of an array OF slices, used
+        directly as an argument."""
+        assert_program_exit_code(
+            "def int sum2([]int s):\n"
+            "    return s[0] + s[1]\n"
+            "\n"
+            "def int main():\n"
+            "    [2][]int rows = [[]int[1, 2], []int[3, 4]]\n"
+            "    return sum2(rows[0]) + sum2(rows[1])\n",
+            10,
+        )
+
+    def test_append_result_as_argument(self):
+        """append's own result, a Call, goes through the identical new
+        fallback path as any other unnamed slice-producing expression."""
+        assert_program_exit_code(
+            "def int sum3([]int s):\n"
+            "    return s[0] + s[1] + s[2]\n"
+            "\n"
+            "def int main():\n"
+            "    []int base = []int[1, 2]\n"
+            "    return sum3(append(base, 3))\n",
+            6,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -5911,21 +6005,21 @@ class TestSliceLiterals:
             "    return 0"
         )
 
-    def test_slice_literal_as_call_argument_still_restricted(self):
-        """The same pre-existing "must be a named variable" restriction
-        every other unnamed slice base has (indexing, print, re-
-        slicing, ordinary call arguments) applies identically here."""
-        source = (
+    def test_slice_literal_as_call_argument(self):
+        """Used to be rejected at the codegen layer, the same
+        restriction a bare re-slice expression had -- see gen_slice_
+        arg_into's own docstring for the fix (the exact same shared-
+        scratch-slot materialization, since a slice literal is just
+        another slice-typed expression with no address of its own to
+        read a descriptor from directly)."""
+        assert_program_exit_code(
             "def int f([]int s):\n"
             "    return s[0]\n"
             "\n"
             "def int main():\n"
-            "    return f([]int[1, 2, 3])\n"
+            "    return f([]int[1, 2, 3])\n",
+            1,
         )
-        ast = _parse(source)
-        analyze(ast)
-        with pytest.raises(CodegenError, match="assign it to a variable first"):
-            generate_asm(ast, platform=ASM_PLATFORM)
 
 
 # ---------------------------------------------------------------------------

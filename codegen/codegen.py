@@ -5496,14 +5496,47 @@ class CodeGenerator:
 
     def gen_slice_arg_into(self, expr: Node, ptr_dst: Register, len_dst: Register, cap_dst: Register) -> List[Instruction]:
         """Computes a slice-typed call ARGUMENT's own ptr/len/cap
-        directly into ptr_dst/len_dst/cap_dst. Restricted to a
-        Variable (a named slice) or NoneLiteral (`none`) -- the same
-        restriction slice bases have everywhere else in this file (see
-        gen_indexable_base_into's own docstring): a bare Slice
-        expression (`foo(arr[1:3])`) has no pre-existing descriptor to
-        read, and would need the same temporary-materialization
-        mechanism this codebase has consistently deferred elsewhere --
-        assign it to a named variable first."""
+        directly into ptr_dst/len_dst/cap_dst. A Variable (a named
+        slice) or NoneLiteral (`none`) already has its own descriptor
+        sitting somewhere real (a local slot, or nowhere at all --
+        `none` is just three immediate zeros); anything else -- a
+        slice literal or re-slice (`foo([]int[1,2,3])`, `foo(arr[1:
+        3])`), an ordinary slice-returning Call (`foo(makeSlice())`),
+        or a slice-typed Field/Index (`foo(s.values)`, `foo(rows[0])`)
+        -- has no pre-existing descriptor of its own to read, and is
+        materialized first via gen_slice_value_into (which already
+        handles every one of these shapes) into the SAME shared, per-
+        function scratch slot gen_indexable_base_into's own analogous
+        cases already use (_unnamed_slice_temp_offset), then read
+        straight back out of it.
+
+        Reusing that ONE shared slot here -- rather than needing its
+        own per-occurrence storage the way an array/struct-typed
+        argument does (see _collect_argument_temps's own docstring for
+        why THOSE need one) -- is safe for a genuinely different
+        reason than gen_indexable_base_into's own "fully drained
+        before anything else can reuse it" argument: a slice argument
+        is passed BY VALUE -- three register values, immediately
+        pushed onto the real stack right after this method returns
+        (see _gen_call_arguments_into) -- not by address the way an
+        array/struct argument is, so nothing about the call itself
+        ever needs this scratch slot's own contents to still be valid
+        afterward; only the pushed register VALUES do, and those
+        already live on the real stack by then. That's also what makes
+        two slice-typed arguments to the SAME call safe with only one
+        shared slot (`foo([]int[1,2], []int[3,4])`): _gen_call_
+        arguments_into evaluates arguments strictly one at a time, so
+        the first argument's own descriptor is fully read out of the
+        slot and pushed onto the stack before the second argument's
+        own materialization ever touches the slot again -- and the
+        identical strictly-nested reasoning covers a slice-returning
+        call whose OWN argument is itself another unnamed slice
+        (`foo(makeOuter(makeInner()))`): makeInner()'s own result is
+        fully drained out of the slot and pushed as makeOuter's own
+        argument, and `call makeOuter` -- the only thing that will
+        eventually write THIS level's own result into the slot, via
+        whatever hidden pointer it receives -- doesn't even execute
+        until after that inner materialization has already completed."""
         if isinstance(expr, NoneLiteral):
             return [
                 MovQ(src=Imm(0), dst=ptr_dst),
@@ -5517,11 +5550,12 @@ class CodeGenerator:
                 MovQ(src=Memory('rbp', offset + 8), dst=len_dst),
                 MovQ(src=Memory('rbp', offset + 16), dst=cap_dst),
             ]
-        raise CodegenError(
-            f"A slice-typed call argument must be a variable or "
-            f"'none', not {type(expr).__name__} -- assign it to a "
-            f"variable first"
-        )
+        temp = self._unnamed_slice_temp_offset
+        instructions = self.gen_slice_value_into(expr, Memory('rbp', temp))
+        instructions.append(MovQ(src=Memory('rbp', temp), dst=ptr_dst))
+        instructions.append(MovQ(src=Memory('rbp', temp + 8), dst=len_dst))
+        instructions.append(MovQ(src=Memory('rbp', temp + 16), dst=cap_dst))
+        return instructions
 
     def _gen_call_arguments_into(self, args: List[Node], reg_shift: int = 0) -> List[Instruction]:
         """Shared by gen_call_into, gen_array_call_into, and

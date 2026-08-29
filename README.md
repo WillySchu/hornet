@@ -14,11 +14,11 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- Pass slice literals to functions.
 - Struct literals as field assigne values.
 - Struct literals as index assigne values.
 - Struct literals as bare statement.
 - Named field construction for struct literals.
+- Disallow untyped array literals from anything except assignment to a typed variable / parameter / return.
 - `==` for structs.
 - Add source location for error messages from semantic analysis.
 - `fuction` type.
