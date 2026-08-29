@@ -14,7 +14,6 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- Struct literals as return values.
 - Struct literals as field assigne values.
 - Struct literals as index assigne values.
 - Struct literals as bare statement.

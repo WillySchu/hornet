@@ -1229,7 +1229,21 @@ class SemanticAnalyzer:
         type-checking that value, not before, so a genuine error
         inside the value expression itself is still reported rather
         than masked by the "this function can't return a value at
-        all" rejection."""
+        all" rejection.
+
+        A struct literal returned directly (`return A(1, 2)`) is
+        checked via its own dedicated method, exactly like analyze_
+        var_decl/analyze_assign/check_call's own argument loop already
+        do -- see check_struct_literal's own docstring for the full
+        list of positions this now covers. An array literal returned
+        directly (`return [1, 2, 3]`) needs no equivalent special-
+        casing at all: array literals were never restricted to begin
+        with, so the plain check_expr below already handles one
+        correctly -- this asymmetry (struct literals needing explicit
+        detection, array literals not) is purely a consequence of
+        struct literals being the ONLY literal kind check_call rejects
+        outside a short, explicit allow-list; nothing here treats the
+        two kinds of returned value differently on purpose."""
         if stmt.value is None:
             if return_type != Type.VOID:
                 raise SemanticError(
@@ -1237,7 +1251,10 @@ class SemanticAnalyzer:
                     f"this bare 'return' returns nothing"
                 )
             return
-        value_type = self.check_expr(stmt.value)
+        if isinstance(stmt.value, Call) and stmt.value.name in self.structs:
+            value_type = self.check_struct_literal(stmt.value)
+        else:
+            value_type = self.check_expr(stmt.value)
         if return_type == Type.VOID:
             raise SemanticError(
                 f"Function has no declared return type and cannot "
@@ -1539,22 +1556,22 @@ class SemanticAnalyzer:
         _types_compatible check with no recursive construction
         involved.)
 
-        Only ever reached from analyze_var_decl/analyze_assign (for a
-        VarDecl initializer or an Assign value) and check_call's own
-        argument-checking loop (for a direct function-call argument,
-        `foo(A(1, 2))`) -- each of those three checks for this exact
+        Only ever reached from analyze_var_decl/analyze_assign (a
+        VarDecl initializer or an Assign value), check_call's own
+        argument-checking loop (a direct function-call argument,
+        `foo(A(1, 2))`), and analyze_return (a direct return value,
+        `return A(1, 2)`) -- each of those four checks for this exact
         shape (isinstance(expr, Call) and expr.name in self.structs)
         BEFORE calling _check_value_flowing_into/check_expr at all.
-        Every OTHER place a Call can appear (a return value, an
-        IndexAssign/FieldAssign value, a bare statement, or nested
-        inside another expression -- including as an argument to
-        ANOTHER struct literal, per this method's own argument-
-        checking loop just above) still funnels through check_expr's
-        ordinary dispatch into check_call instead, which rejects a
-        struct-name Call there. That's the entire mechanism that keeps
-        struct literals scoped to exactly these three positions,
-        deliberately narrower than where an ordinary function call is
-        allowed to appear.
+        Every OTHER place a Call can appear (an IndexAssign/FieldAssign
+        value, a bare statement, or nested inside another expression --
+        including as an argument to ANOTHER struct literal, per this
+        method's own argument-checking loop just above) still funnels
+        through check_expr's ordinary dispatch into check_call instead,
+        which rejects a struct-name Call there. That's the entire
+        mechanism that keeps struct literals scoped to exactly these
+        four positions, deliberately narrower than where an ordinary
+        function call is allowed to appear.
 
         Annotates expr.resolved_type directly (mirroring _check_value_
         flowing_into's own array-literal-into-slice special case, for
@@ -1587,8 +1604,8 @@ class SemanticAnalyzer:
             raise SemanticError(
                 f"'{expr.name}(...)' is a struct literal, which is only "
                 f"allowed as a variable's initializer, a plain "
-                f"assignment's value, or a direct function-call "
-                f"argument -- not as a return value, an IndexAssign/"
+                f"assignment's value, a direct function-call argument, "
+                f"or a direct return value -- not as an IndexAssign/"
                 f"FieldAssign value, nested inside another expression, "
                 f"or a bare statement; assign it to a variable first if "
                 f"you need it in one of those positions"

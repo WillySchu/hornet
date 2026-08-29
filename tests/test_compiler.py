@@ -8324,8 +8324,20 @@ class TestStructLiterals:
             7,
         )
 
-    def test_struct_literal_as_return_value_is_rejected(self):
-        assert_program_semantic_error(
+    def test_struct_literal_as_direct_return_value(self):
+        """Used to be rejected at the semantic layer entirely; analyze_
+        return now recognizes this exact shape too, mirroring analyze_
+        var_decl/analyze_assign/check_call's own argument loop. Needed
+        NO codegen changes at all: gen_return's own STRUCT branch
+        already routes through gen_struct_value_into via the hidden-
+        return-pointer convention, and that method already dispatches
+        a struct-literal Call correctly (gen_struct_literal_into) --
+        the exact same machinery a plain array literal already used in
+        this position with no restriction of its own (see
+        test_forwarding_a_struct_returning_call and TestArrays for the
+        array-returning-literal case, which never needed a semantic.py
+        change to begin with)."""
+        assert_program_exit_code(
             "struct Point:\n"
             "    int x\n"
             "    int y\n"
@@ -8334,8 +8346,104 @@ class TestStructLiterals:
             "    return Point(3, 4)\n"
             "\n"
             "def int main():\n"
+            "    Point p = makePoint()\n"
+            "    return p.x + p.y\n",
+            7,
+        )
+
+    def test_large_struct_literal_as_direct_return_value(self):
+        """Unlike a struct literal used as a function-call ARGUMENT
+        (which needed genuine new machinery -- _collect_argument_temps
+        -- to give it somewhere to live), a returned struct literal
+        needs no new storage question at all, regardless of size: the
+        CALLER already provides a real destination address via the
+        hidden-return-pointer convention (see gen_function's own
+        parameter handling), so this is exactly as simple for a large,
+        heap-promoted struct as for a small one."""
+        assert_program_exit_code(
+            "struct Big:\n"
+            "    [5000]int data\n"
+            "    int tag\n"
+            "\n"
+            "def Big makeBig():\n"
+            "    [5000]int filler\n"
+            "    return Big(filler, 77)\n"
+            "\n"
+            "def int main():\n"
+            "    Big b = makeBig()\n"
+            "    return b.tag\n",
+            77,
+        )
+
+    def test_struct_literal_return_value_with_a_slice_typed_field(self):
+        assert_program_exit_code(
+            "struct Holder:\n"
+            "    []int xs\n"
+            "\n"
+            "def Holder makeHolder():\n"
+            "    [3]int arr = [10, 20, 30]\n"
+            "    return Holder(arr[:])\n"
+            "\n"
+            "def int main():\n"
+            "    Holder h = makeHolder()\n"
+            "    return h.xs[0] + h.xs[1] + h.xs[2]\n",
+            60,
+        )
+
+    def test_nested_struct_literal_as_return_value_is_still_rejected(self):
+        """The outer struct literal is now fine as a direct return
+        value, but its own NESTED struct literal argument still isn't
+        -- check_struct_literal's own argument-checking loop uses
+        plain check_expr, unaffected by analyze_return's new detection
+        one level up (mirroring test_nested_struct_literal_as_
+        argument_is_still_rejected in TestArgumentMaterialization)."""
+        assert_program_semantic_error(
+            "struct Inner:\n"
+            "    int v\n"
+            "struct Outer:\n"
+            "    Inner i\n"
+            "    int b\n"
+            "\n"
+            "def Outer makeOuter():\n"
+            "    return Outer(Inner(1), 2)\n"
+            "\n"
+            "def int main():\n"
             "    return 0\n",
             match="only allowed as a variable's initializer",
+        )
+
+    def test_struct_literal_returned_from_a_function_with_no_declared_return_type_is_rejected(self):
+        assert_program_semantic_error(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def noReturnType():\n"
+            "    return Point(1, 2)\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="no declared return type",
+        )
+
+    def test_wrong_struct_type_as_return_value_is_rejected(self):
+        """The returned literal's own type (from ITS name, `B`) still
+        has to match the function's declared return type (`A`) --
+        analyze_return's new detection computes a real Type via check_
+        struct_literal, which _types_compatible then checks exactly
+        like any other returned value's type."""
+        assert_program_semantic_error(
+            "struct A:\n"
+            "    int x\n"
+            "struct B:\n"
+            "    int y\n"
+            "\n"
+            "def A makeA():\n"
+            "    return B(1)\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="declared to return",
         )
 
     def test_nested_struct_literal_is_rejected(self):
@@ -8641,6 +8749,14 @@ class TestArgumentMaterialization:
         main_frame_size = None
         in_main = False
         for line in asm.splitlines():
+            # `_?main:` -- Emitter prefixes every function label with a
+            # leading underscore on macOS (Mach-O convention -- see
+            # its own symbol() method), so the actual label text is
+            # `_main:` there, not `main:`. A plain "startswith('main:')"
+            # check would never match on macOS -- caught the same way
+            # the malloc check just above already had to be, by a
+            # person actually running this on macOS, not by the Linux-
+            # only sandbox this was originally written and tested in.
             if re.match(r"^_?main:$", line.strip()):
                 in_main = True
                 continue
