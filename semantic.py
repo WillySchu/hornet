@@ -1540,37 +1540,46 @@ class SemanticAnalyzer:
         for explicit over implicit (e.g. no int-to-bool coercion
         anywhere else either).
 
-        Each argument is checked with a plain check_expr, NOT the
+        Each argument is checked with a plain check_expr -- NOT the
         recursive _check_value_flowing_into treatment a VarDecl/
-        Assign's own top-level value gets. This is deliberate, and is
-        what keeps a NESTED struct literal out of scope for this first
-        cut: `Outer(Inner(1, 2), 3)` recurses into check_expr for the
-        `Inner(1, 2)` argument, which dispatches to check_call, which
-        rejects any struct-name Call outright (see its own guard) --
-        the same rejection an ordinary function argument or return
-        value would get. Build the inner struct in its own variable
-        first. (An untyped array literal argument flowing into an
-        array- or slice-typed field is a smaller, related gap left
-        the same way for now -- `none` flowing into a slice-typed
-        field still works fine here, since that's an ordinary
-        _types_compatible check with no recursive construction
-        involved.)
+        Assign's own top-level value gets -- UNLESS the argument is
+        itself a struct literal (a Call whose own name is a struct,
+        not a function), in which case it recurses into THIS SAME
+        method instead, exactly mirroring every other call site that
+        detects this shape. That's what makes arbitrarily deep nesting
+        (`A(B(C(1), 2), 3)`) work with no depth limit and no extra
+        bookkeeping: each level's own argument-checking loop is just
+        this method again, one recursion per level, terminating
+        naturally once every argument bottoms out at an ordinary,
+        non-struct-literal expression. (An untyped array literal
+        argument flowing into an array- or slice-typed field is a
+        smaller, related gap left the same way for now -- `none`
+        flowing into a slice-typed field still works fine here, since
+        that's an ordinary _types_compatible check with no recursive
+        construction involved. A struct-typed array LITERAL element,
+        by contrast -- `[Point(1,2), Point(3,4)]` -- is blocked by a
+        separate, more foundational limitation than anything in this
+        method: gen_array_literal_into has no STRUCT-typed element
+        case at all yet, so a struct-typed array element fails even
+        for an ordinary struct VARIABLE, with no literal involved.)
 
         Only ever reached from analyze_var_decl/analyze_assign (a
         VarDecl initializer or an Assign value), check_call's own
         argument-checking loop (a direct function-call argument,
-        `foo(A(1, 2))`), and analyze_return (a direct return value,
-        `return A(1, 2)`) -- each of those four checks for this exact
-        shape (isinstance(expr, Call) and expr.name in self.structs)
-        BEFORE calling _check_value_flowing_into/check_expr at all.
-        Every OTHER place a Call can appear (an IndexAssign/FieldAssign
-        value, a bare statement, or nested inside another expression --
-        including as an argument to ANOTHER struct literal, per this
-        method's own argument-checking loop just above) still funnels
-        through check_expr's ordinary dispatch into check_call instead,
-        which rejects a struct-name Call there. That's the entire
-        mechanism that keeps struct literals scoped to exactly these
-        four positions, deliberately narrower than where an ordinary
+        `foo(A(1, 2))`), analyze_return (a direct return value,
+        `return A(1, 2)`), and -- as of the paragraph above -- its OWN
+        argument-checking loop (a struct literal nested as an argument
+        to another struct literal, `A(B(1, 2), 3)`) -- each of those
+        five checks for this exact shape (isinstance(expr, Call) and
+        expr.name in self.structs) BEFORE calling _check_value_
+        flowing_into/check_expr at all. Every OTHER place a Call can
+        appear (an IndexAssign/FieldAssign value, a bare statement, or
+        nested inside some OTHER kind of expression entirely -- a
+        Binary operand, an array literal's own element, ...) still
+        funnels through check_expr's ordinary dispatch into check_call
+        instead, which rejects a struct-name Call there. That's the
+        entire mechanism that keeps struct literals scoped to exactly
+        these positions, deliberately narrower than where an ordinary
         function call is allowed to appear.
 
         Annotates expr.resolved_type directly (mirroring _check_value_
@@ -1588,7 +1597,10 @@ class SemanticAnalyzer:
                 f"declaration order: {field_names}), got {len(expr.args)}"
             )
         for i, (arg, (field_name, field_type)) in enumerate(zip(expr.args, field_items), start=1):
-            arg_type = self.check_expr(arg)
+            if isinstance(arg, Call) and arg.name in self.structs:
+                arg_type = self.check_struct_literal(arg)
+            else:
+                arg_type = self.check_expr(arg)
             if not self._types_compatible(arg_type, field_type):
                 raise SemanticError(
                     f"Argument {i} to struct literal '{expr.name}' "
@@ -1631,12 +1643,14 @@ class SemanticAnalyzer:
             # like analyze_var_decl/analyze_assign already do for a
             # VarDecl initializer/Assign value -- rather than the
             # plain check_expr every other argument gets. See check_
-            # struct_literal's own docstring for why every OTHER
-            # position a Call can appear in (including as an argument
-            # to ANOTHER struct literal -- check_struct_literal's own
-            # argument loop uses plain check_expr, not this one) still
-            # funnels through the ordinary check_expr -> check_call
-            # dispatch above, which rejects a struct-name Call there.
+            # struct_literal's own docstring for the full, current
+            # list of positions a struct literal is allowed to appear
+            # in directly (which now includes as an argument to
+            # ANOTHER struct literal, via that method's own,
+            # identical detection in its own argument loop) and for
+            # why every position NOT on that list still funnels
+            # through the ordinary check_expr -> check_call dispatch
+            # above, which rejects a struct-name Call there.
             if isinstance(arg, Call) and arg.name in self.structs:
                 actual_type = self.check_struct_literal(arg)
             else:

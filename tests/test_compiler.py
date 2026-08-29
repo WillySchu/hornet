@@ -8390,14 +8390,13 @@ class TestStructLiterals:
             60,
         )
 
-    def test_nested_struct_literal_as_return_value_is_still_rejected(self):
-        """The outer struct literal is now fine as a direct return
-        value, but its own NESTED struct literal argument still isn't
-        -- check_struct_literal's own argument-checking loop uses
-        plain check_expr, unaffected by analyze_return's new detection
-        one level up (mirroring test_nested_struct_literal_as_
-        argument_is_still_rejected in TestArgumentMaterialization)."""
-        assert_program_semantic_error(
+    def test_nested_struct_literal_as_return_value(self):
+        """A nested struct literal (`Outer(Inner(1), 2)`) as a direct
+        return value -- both layers now allowed: the outer one via
+        analyze_return's own detection, the inner one via check_
+        struct_literal's own, identical detection in its argument
+        loop, recursing into itself."""
+        assert_program_exit_code(
             "struct Inner:\n"
             "    int v\n"
             "struct Outer:\n"
@@ -8405,11 +8404,12 @@ class TestStructLiterals:
             "    int b\n"
             "\n"
             "def Outer makeOuter():\n"
-            "    return Outer(Inner(1), 2)\n"
+            "    return Outer(Inner(9), 2)\n"
             "\n"
             "def int main():\n"
-            "    return 0\n",
-            match="only allowed as a variable's initializer",
+            "    Outer o = makeOuter()\n"
+            "    return o.i.v + o.b\n",
+            11,
         )
 
     def test_struct_literal_returned_from_a_function_with_no_declared_return_type_is_rejected(self):
@@ -8446,8 +8446,14 @@ class TestStructLiterals:
             match="declared to return",
         )
 
-    def test_nested_struct_literal_is_rejected(self):
-        assert_program_semantic_error(
+    def test_nested_struct_literal_via_var_decl(self):
+        """A nested struct literal (`Outer(Inner(1), 2)`) as a
+        VarDecl's own initializer -- the original, first-established
+        position, now also supporting nesting: the outer literal via
+        analyze_var_decl's own existing detection, the inner one via
+        check_struct_literal's own, identical detection in its
+        argument loop."""
+        assert_program_exit_code(
             "struct Inner:\n"
             "    int v\n"
             "\n"
@@ -8456,9 +8462,78 @@ class TestStructLiterals:
             "    int b\n"
             "\n"
             "def int main():\n"
+            "    Outer o = Outer(Inner(9), 2)\n"
+            "    return o.i.v + o.b\n",
+            11,
+        )
+
+    def test_nested_struct_literal_via_assign(self):
+        """The Assign counterpart -- nesting isn't specific to a
+        VarDecl's own initializer."""
+        assert_program_exit_code(
+            "struct Inner:\n"
+            "    int v\n"
+            "struct Outer:\n"
+            "    Inner i\n"
+            "    int b\n"
+            "\n"
+            "def int main():\n"
             "    Outer o = Outer(Inner(1), 2)\n"
+            "    o = Outer(Inner(9), 8)\n"
+            "    return o.i.v + o.b\n",
+            17,
+        )
+
+    def test_three_levels_of_nested_struct_literals(self):
+        """No depth limit: each level's own argument-checking loop
+        (check_struct_literal's own, in semantic.py) is just this same
+        method again, so nesting works to any depth check_expr itself
+        could recurse to."""
+        assert_program_exit_code(
+            "struct C:\n"
+            "    int v\n"
+            "struct B:\n"
+            "    C c\n"
+            "    int w\n"
+            "struct A:\n"
+            "    B b\n"
+            "    int u\n"
+            "\n"
+            "def int main():\n"
+            "    A a = A(B(C(1), 2), 3)\n"
+            "    return a.b.c.v + a.b.w + a.u\n",
+            6,
+        )
+
+    def test_nested_struct_literal_with_an_array_typed_field(self):
+        assert_program_exit_code(
+            "struct Row:\n"
+            "    [2]int values\n"
+            "struct Grid:\n"
+            "    Row r\n"
+            "    int tag\n"
+            "\n"
+            "def int main():\n"
+            "    Grid g = Grid(Row([5, 6]), 9)\n"
+            "    return g.r.values[0] + g.r.values[1] + g.tag\n",
+            20,
+        )
+
+    def test_type_error_inside_a_nested_struct_literal_is_still_reported(self):
+        """A genuine type error inside the INNER literal's own
+        argument is reported normally, not masked by anything about
+        the outer literal or the recursion itself."""
+        assert_program_semantic_error(
+            "struct Inner:\n"
+            "    int v\n"
+            "struct Outer:\n"
+            "    Inner i\n"
+            "    int b\n"
+            "\n"
+            "def int main():\n"
+            "    Outer o = Outer(Inner('nope'), 2)\n"
             "    return 0\n",
-            match="only allowed as a variable's initializer",
+            match="should be int",
         )
 
     def test_struct_literal_as_field_assign_value_is_rejected(self):
@@ -8822,13 +8897,13 @@ class TestArgumentMaterialization:
         asm = generate_asm(ast, platform=ASM_PLATFORM)
         assert "malloc" not in asm
 
-    def test_nested_struct_literal_as_argument_is_still_rejected(self):
-        """The outer struct literal is now fine as a direct argument,
-        but its own NESTED struct literal argument still isn't --
-        check_struct_literal's own argument-checking loop uses plain
-        check_expr, unaffected by check_call's new argument-loop
-        detection one level up."""
-        assert_program_semantic_error(
+    def test_nested_struct_literal_as_argument(self):
+        """A nested struct literal (`Outer(Inner(1), 2)`) as a direct
+        function-call argument -- both layers now allowed: the outer
+        one via check_call's own argument-loop detection, the inner
+        one via check_struct_literal's own, identical detection in its
+        own argument loop, recursing into itself."""
+        assert_program_exit_code(
             "struct Inner:\n"
             "    int v\n"
             "\n"
@@ -8840,8 +8915,8 @@ class TestArgumentMaterialization:
             "    return o.i.v + o.b\n"
             "\n"
             "def int main():\n"
-            "    return useOuter(Outer(Inner(1), 2))\n",
-            match="only allowed as a variable's initializer",
+            "    return useOuter(Outer(Inner(9), 2))\n",
+            11,
         )
 
 
