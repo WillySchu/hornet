@@ -25,6 +25,7 @@ Updates:
 - Add source location for error messages from semantic analysis.
 - `fuction` type.
 - Methods.
+- Reconsider heap allocated literal arrays for `gen_indexable_base_into` (apparently `len([1, 2, 3])` and `[1, 2, 3][0]` work?)
 - `assert`
 - `in` keyword.
 - Pass function calls to print.
