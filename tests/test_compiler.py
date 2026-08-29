@@ -3848,7 +3848,7 @@ class TestHeapAllocatedArrays:
         the array's size. This just confirms that still holds once the
         array involved happens to be heap-allocated."""
         assert_program_exit_code(
-            "def [10000]int make():\n"
+            "def [10000]int make([O):\n"
             "    [10000]int r\n"
             "    r[0] = 42\n"
             "    r[9999] = 84\n"
@@ -8050,6 +8050,369 @@ class TestStructs:
         )
         with pytest.raises(ParseError, match="Compound assignment"):
             _parse(source)
+
+
+class TestStructLiterals:
+    """`Name(arg1, arg2, ...)` -- e.g. `Point p = Point(3, 4)` -- built
+    entirely on top of the ordinary Call node (no parser changes at
+    all; see codegen.py's own STRUCT LITERALS section), disambiguated
+    from a function call purely by struct-registry membership.
+    Positional, exhaustive, and deliberately scoped to exactly two
+    positions (a VarDecl initializer or a plain Assign value) -- the
+    execution-based tests below prove the VALUE this produces is
+    correct; the semantic-error tests prove every other position is
+    still rejected, matching an ordinary field-by-field construction's
+    own equivalent restriction there."""
+
+    pytestmark = GCC_SKIP
+
+    def test_basic_construction_via_var_decl(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    Point p = Point(3, 4)\n"
+            "    return p.x + p.y\n",
+            7,
+        )
+
+    def test_construction_via_plain_assign(self):
+        """The other of the two positions this is valid in -- an
+        ALREADY-declared variable reassigned wholesale via a struct
+        literal, not just a VarDecl's own initializer."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    Point p = Point(1, 1)\n"
+            "    p = Point(3, 4)\n"
+            "    return p.x + p.y\n",
+            7,
+        )
+
+    def test_str_field(self):
+        assert_program_exit_code(
+            "struct Person:\n"
+            "    int age\n"
+            "    str name\n"
+            "\n"
+            "def int main():\n"
+            "    Person p = Person(5, 'hi')\n"
+            "    if p.name == 'hi':\n"
+            "        return p.age\n"
+            "    return -1\n",
+            5,
+        )
+
+    def test_array_typed_field(self):
+        assert_program_exit_code(
+            "struct Row:\n"
+            "    [3]int values\n"
+            "\n"
+            "def int main():\n"
+            "    Row r = Row([1, 2, 3])\n"
+            "    return r.values[0] + r.values[1] + r.values[2]\n",
+            6,
+        )
+
+    def test_slice_typed_field_with_none(self):
+        assert_program_exit_code(
+            "struct Holder:\n"
+            "    []int xs\n"
+            "\n"
+            "def int main():\n"
+            "    Holder h = Holder(none)\n"
+            "    if h.xs == none:\n"
+            "        return 42\n"
+            "    return -1\n",
+            42,
+        )
+
+    def test_slice_typed_field_with_a_real_slice(self):
+        assert_program_exit_code(
+            "struct Holder:\n"
+            "    []int xs\n"
+            "\n"
+            "def int main():\n"
+            "    [3]int arr = [10, 20, 30]\n"
+            "    Holder h = Holder(arr[:])\n"
+            "    return h.xs[0] + h.xs[1] + h.xs[2]\n",
+            60,
+        )
+
+    def test_struct_typed_field_via_a_named_variable(self):
+        """A struct-typed field's own argument can be an ordinary
+        struct-typed expression (here, a Variable) -- just not ANOTHER
+        struct literal directly (see test_nested_struct_literal_is_
+        rejected below)."""
+        assert_program_exit_code(
+            "struct Inner:\n"
+            "    int v\n"
+            "\n"
+            "struct Outer:\n"
+            "    Inner i\n"
+            "    int b\n"
+            "\n"
+            "def int main():\n"
+            "    Inner inner = Inner(9)\n"
+            "    Outer o = Outer(inner, 2)\n"
+            "    return o.i.v + o.b\n",
+            11,
+        )
+
+    def test_large_struct_literal_is_heap_allocated(self):
+        """A struct literal whose own struct type is over
+        _STACK_ARRAY_LIMIT_BYTES gets the identical heap-promotion
+        treatment gen_var_decl already gives any other large struct
+        (see is_heap_allocated) -- gen_struct_literal_into writes
+        through the malloc'd pointer (Memory('rax', 0)) instead of a
+        fixed %rbp-relative slot.
+
+        `fa`/`fb` are each individually well under the stack limit (so
+        neither triggers its OWN heap promotion as a local variable) --
+        only Big's combined width does -- which is what isolates the
+        malloc call this induces to Big's own declaration specifically
+        rather than to either array argument. Exit-code correctness
+        alone doesn't distinguish a genuinely heap-allocated result
+        from a stack-allocated one that happened to still work, so see
+        the asm-level test just below for the actual proof -- mirroring
+        TestStructs's own test_large_struct_is_heap_allocated / test_
+        large_struct_actually_uses_malloc pairing."""
+        assert_program_exit_code(
+            "struct Big:\n"
+            "    [2100]int a\n"
+            "    [2100]int b\n"
+            "    int tag\n"
+            "\n"
+            "def int main():\n"
+            "    [2100]int fa\n"
+            "    [2100]int fb\n"
+            "    Big big = Big(fa, fb, 99)\n"
+            "    return big.tag\n",
+            99,
+        )
+
+    def test_large_struct_literal_actually_uses_malloc(self):
+        """The asm-level confirmation behind the test just above.
+        Exactly one `call malloc`: fa/fb are each individually under
+        the stack limit and stay stack-allocated, so the one malloc
+        call present is attributable to Big's own declaration, not to
+        either array argument."""
+        source = (
+            "struct Big:\n"
+            "    [2100]int a\n"
+            "    [2100]int b\n"
+            "    int tag\n"
+            "\n"
+            "def int main():\n"
+            "    [2100]int fa\n"
+            "    [2100]int fb\n"
+            "    Big big = Big(fa, fb, 99)\n"
+            "    return big.tag\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        assert asm.count("call    malloc") == 1
+
+    def test_small_struct_literal_does_not_use_malloc(self):
+        """Negative control for the test just above: a struct literal
+        well under the stack limit should produce no malloc call at
+        all -- confirming the malloc count there actually tracks the
+        size threshold, rather than 'malloc' simply appearing in the
+        output incidentally (e.g. from unrelated program setup)."""
+        source = (
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    Point p = Point(3, 4)\n"
+            "    return p.x + p.y\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        assert "malloc" not in asm
+
+    def test_value_semantics_mutating_a_copy_does_not_affect_the_original(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    Point p = Point(3, 4)\n"
+            "    Point q = p\n"
+            "    q.x = 100\n"
+            "    return p.x + q.x\n",
+            103,
+        )
+
+    def test_resulting_struct_can_be_passed_to_a_function(self):
+        """The literal itself can't be passed directly (see test_
+        struct_literal_as_function_argument_is_rejected below), but
+        the ordinary struct VALUE it produces, once assigned to a
+        variable, is passed exactly like any other struct."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int sumPoint(Point p):\n"
+            "    return p.x + p.y\n"
+            "\n"
+            "def int main():\n"
+            "    Point p = Point(3, 4)\n"
+            "    return sumPoint(p)\n",
+            7,
+        )
+
+    def test_wrong_argument_count_is_rejected(self):
+        assert_program_semantic_error(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    Point p = Point(3)\n"
+            "    return 0\n",
+            match="expects 2 argument",
+        )
+
+    def test_wrong_argument_type_is_rejected(self):
+        assert_program_semantic_error(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    Point p = Point('nope', 4)\n"
+            "    return 0\n",
+            match="should be int",
+        )
+
+    def test_struct_literal_as_function_argument_is_rejected(self):
+        assert_program_semantic_error(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int sumPoint(Point p):\n"
+            "    return p.x + p.y\n"
+            "\n"
+            "def int main():\n"
+            "    return sumPoint(Point(3, 4))\n",
+            match="only allowed as a variable's initializer",
+        )
+
+    def test_struct_literal_as_return_value_is_rejected(self):
+        assert_program_semantic_error(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def Point makePoint():\n"
+            "    return Point(3, 4)\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="only allowed as a variable's initializer",
+        )
+
+    def test_nested_struct_literal_is_rejected(self):
+        assert_program_semantic_error(
+            "struct Inner:\n"
+            "    int v\n"
+            "\n"
+            "struct Outer:\n"
+            "    Inner i\n"
+            "    int b\n"
+            "\n"
+            "def int main():\n"
+            "    Outer o = Outer(Inner(1), 2)\n"
+            "    return 0\n",
+            match="only allowed as a variable's initializer",
+        )
+
+    def test_struct_literal_as_field_assign_value_is_rejected(self):
+        assert_program_semantic_error(
+            "struct Inner:\n"
+            "    int v\n"
+            "\n"
+            "struct Outer:\n"
+            "    Inner i\n"
+            "\n"
+            "def int main():\n"
+            "    Inner inner = Inner(1)\n"
+            "    Outer o = Outer(inner)\n"
+            "    o.i = Inner(2)\n"
+            "    return 0\n",
+            match="only allowed as a variable's initializer",
+        )
+
+    def test_struct_literal_as_index_assign_value_is_rejected(self):
+        assert_program_semantic_error(
+            "struct Point:\n"
+            "    int x\n"
+            "\n"
+            "def int main():\n"
+            "    [3]Point pts\n"
+            "    pts[0] = Point(1)\n"
+            "    return 0\n",
+            match="only allowed as a variable's initializer",
+        )
+
+    def test_struct_literal_as_bare_statement_is_rejected(self):
+        assert_program_semantic_error(
+            "struct Point:\n"
+            "    int x\n"
+            "\n"
+            "def int main():\n"
+            "    Point(1)\n"
+            "    return 0\n",
+            match="only allowed as a variable's initializer",
+        )
+
+    def test_struct_and_function_name_collision_is_rejected(self):
+        assert_program_semantic_error(
+            "struct Point:\n"
+            "    int x\n"
+            "\n"
+            "def int Point():\n"
+            "    return 0\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="collides with a struct",
+        )
+
+    def test_struct_named_after_a_builtin_is_rejected(self):
+        assert_program_semantic_error(
+            "struct print:\n"
+            "    int x\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="builtin",
+        )
+
+    def test_print_a_struct_built_via_literal(self):
+        assert_program_stdout(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    Point p = Point(3, 4)\n"
+            "    print(p)\n"
+            "    return 0\n",
+            "Point(x: 3, y: 4)\n",
+        )
 
 
 # ---------------------------------------------------------------------------

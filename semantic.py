@@ -783,6 +783,14 @@ class SemanticAnalyzer:
                     f"'{fn.name}' is a builtin and can't be redefined as "
                     f"a function"
                 )
+            if fn.name in self.structs:
+                raise SemanticError(
+                    f"Function '{fn.name}' collides with a struct of the "
+                    f"same name -- struct and function names share one "
+                    f"namespace and can never be the same, since "
+                    f"'{fn.name}(...)' would otherwise be ambiguous "
+                    f"between a call and a struct literal"
+                )
             if fn.name in self.functions:
                 raise SemanticError(f"Function '{fn.name}' is already declared")
             param_types = [type_from_name(p.type, self.structs) for p in fn.params]
@@ -834,6 +842,11 @@ class SemanticAnalyzer:
         """
         registry: Dict[str, StructInfo] = {}
         for sd in struct_defs:
+            if sd.name in _BUILTIN_FUNCTION_NAMES:
+                raise SemanticError(
+                    f"'{sd.name}' is a builtin and can't be used as a "
+                    f"struct name"
+                )
             if sd.name in registry:
                 raise SemanticError(f"Struct '{sd.name}' is already declared")
             registry[sd.name] = None
@@ -1061,7 +1074,20 @@ class SemanticAnalyzer:
             # Checked before `stmt.name` is added to scope below, so a
             # self-referential initializer (`int a = a`) correctly fails
             # as "undeclared variable" rather than reading itself.
-            init_type = self._check_value_flowing_into(stmt.init, declared_type)
+            #
+            # A struct literal (`A a = A(6, 'hello')`) is checked via
+            # its own dedicated method, not _check_value_flowing_into --
+            # see check_struct_literal's own docstring for why this is
+            # one of only two places (here and analyze_assign) that
+            # look for this shape at all, and why every other call site
+            # a Call could appear at (a function argument, a return
+            # value, an IndexAssign/FieldAssign value, nested inside
+            # another expression, or a bare statement) is deliberately
+            # NOT given the same treatment.
+            if isinstance(stmt.init, Call) and stmt.init.name in self.structs:
+                init_type = self.check_struct_literal(stmt.init)
+            else:
+                init_type = self._check_value_flowing_into(stmt.init, declared_type)
             if not self._types_compatible(init_type, declared_type):
                 raise SemanticError(
                     f"Cannot initialize '{stmt.name}' (declared {declared_type}) "
@@ -1071,7 +1097,13 @@ class SemanticAnalyzer:
 
     def analyze_assign(self, stmt: Assign) -> None:
         declared_type = self._lookup(stmt.name)  # may resolve to an enclosing scope
-        value_type = self._check_value_flowing_into(stmt.value, declared_type)
+        # See analyze_var_decl's own identical check just above for why
+        # a struct literal needs this separate, narrower detection
+        # rather than going through _check_value_flowing_into.
+        if isinstance(stmt.value, Call) and stmt.value.name in self.structs:
+            value_type = self.check_struct_literal(stmt.value)
+        else:
+            value_type = self._check_value_flowing_into(stmt.value, declared_type)
         if not self._types_compatible(value_type, declared_type):
             raise SemanticError(
                 f"Cannot assign a value of type {value_type} to '{stmt.name}' "
@@ -1472,7 +1504,90 @@ class SemanticAnalyzer:
             )
         return struct_info.fields[field_name]
 
+    def check_struct_literal(self, expr: Call) -> Type:
+        """`Name(arg1, arg2, ...)` -- a struct literal, e.g. `A a =
+        A(6, 'hello')` for `struct A: int x; str y`. Disambiguated from
+        an ordinary function call purely by registry membership --
+        `Name` is a struct, not a function -- with no dedicated parser
+        syntax at all: `A(6, 'hello')` already parses as an ordinary
+        Call node (see parser.py), exactly like any other call. This is
+        never ambiguous: analyze()'s own struct/function collision
+        check guarantees a name can never be both a struct and a
+        function, so a Call's own name membership in self.structs vs.
+        self.functions is a clean, mutually-exclusive dispatch.
+
+        Positional and exhaustive: exactly one argument per field, in
+        the struct's own declaration order -- no named arguments, no
+        partial construction with an implicit zero value for an
+        omitted field, matching this language's existing preference
+        for explicit over implicit (e.g. no int-to-bool coercion
+        anywhere else either).
+
+        Each argument is checked with a plain check_expr, NOT the
+        recursive _check_value_flowing_into treatment a VarDecl/
+        Assign's own top-level value gets. This is deliberate, and is
+        what keeps a NESTED struct literal out of scope for this first
+        cut: `Outer(Inner(1, 2), 3)` recurses into check_expr for the
+        `Inner(1, 2)` argument, which dispatches to check_call, which
+        rejects any struct-name Call outright (see its own guard) --
+        the same rejection an ordinary function argument or return
+        value would get. Build the inner struct in its own variable
+        first. (An untyped array literal argument flowing into an
+        array- or slice-typed field is a smaller, related gap left
+        the same way for now -- `none` flowing into a slice-typed
+        field still works fine here, since that's an ordinary
+        _types_compatible check with no recursive construction
+        involved.)
+
+        Only ever reached from analyze_var_decl/analyze_assign, which
+        each check for this exact shape (isinstance(expr, Call) and
+        expr.name in self.structs) BEFORE calling
+        _check_value_flowing_into at all -- every other place a Call
+        can appear (a function-call argument, a return value, an
+        IndexAssign/FieldAssign value, a bare statement, or nested
+        inside another expression) still funnels through check_expr's
+        ordinary dispatch into check_call instead, which rejects a
+        struct-name Call there. That's the entire mechanism that keeps
+        struct literals scoped to exactly VarDecl/Assign, deliberately
+        narrower than where an ordinary function call is allowed.
+
+        Annotates expr.resolved_type directly (mirroring _check_value_
+        flowing_into's own array-literal-into-slice special case, for
+        the identical reason: this bypasses check_expr's generic
+        dispatch -- and its own annotation step -- entirely, so
+        nothing else would perform it)."""
+        struct_info = self.structs[expr.name]
+        field_items = list(struct_info.fields.items())
+        if len(expr.args) != len(field_items):
+            field_names = ', '.join(name for name, _ in field_items)
+            raise SemanticError(
+                f"Struct literal for '{expr.name}' expects "
+                f"{len(field_items)} argument(s) (one per field, in "
+                f"declaration order: {field_names}), got {len(expr.args)}"
+            )
+        for i, (arg, (field_name, field_type)) in enumerate(zip(expr.args, field_items), start=1):
+            arg_type = self.check_expr(arg)
+            if not self._types_compatible(arg_type, field_type):
+                raise SemanticError(
+                    f"Argument {i} to struct literal '{expr.name}' "
+                    f"(field '{field_name}') should be {field_type}, "
+                    f"got {arg_type}"
+                )
+        result = Type(TypeKind.STRUCT, struct_name=expr.name)
+        expr.resolved_type = result
+        return result
+
     def check_call(self, expr: Call) -> Type:
+        if expr.name in self.structs:
+            raise SemanticError(
+                f"'{expr.name}(...)' is a struct literal, which is only "
+                f"allowed as a variable's initializer or a plain "
+                f"assignment's value -- not as a function-call argument, "
+                f"a return value, an IndexAssign/FieldAssign value, "
+                f"nested inside another expression, or a bare statement; "
+                f"assign it to a variable first if you need it in one of "
+                f"those positions"
+            )
         if expr.name == 'print':
             return self.check_print_call(expr)
         if expr.name == 'len':

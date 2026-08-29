@@ -1569,19 +1569,48 @@ typed fields existed at all, so it was never exercised until now;
 fixed the same way the other two call sites already handle it, via
 gen_none_into.
 
-WHAT'S DELIBERATELY NOT SUPPORTED YET, each a real, explicit scope
-boundary rather than a silently discovered gap:
-  - A STRUCT LITERAL (`Point{x: 1, y: 2}` or similar). Every struct
-    value in this phase is built field-by-field, through an ordinary
-    VarDecl (implicitly zero-valued) followed by individual FieldAssign
-    statements -- there's no single-expression way to construct a
-    fully-populated struct value yet. Deferred by explicit choice, not
-    because it's hard: the concrete syntax was an open design question
-    (a brace-delimited composite literal needs new lexer tokens that
-    don't exist yet; a positional, call-like form risks colliding with
-    ordinary function-call parsing, since this compiler's parser has no
-    symbol table to disambiguate "MyStruct(...)" from an ordinary call
-    at parse time) left for its own follow-up once actually needed.
+STRUCT LITERALS
+----------------
+`Name(arg1, arg2, ...)` -- e.g. `Point p = Point(3, 4)` for `struct
+Point: int x; int y`. Resolved the positional, call-like way this
+section used to flag as an open design question, not the brace-
+delimited alternative: `Point(3, 4)` needed no new lexer tokens or
+parser syntax at all, since it already parses as an ordinary Call node
+(see parser.py) -- the ambiguity with an ordinary function call is
+resolved entirely at the semantic layer instead, by registry
+membership (see semantic.py's own check_struct_literal/check_call
+split), which is exactly why this compiler's own lack of a parse-time
+symbol table -- the original objection to this syntax -- never actually
+mattered: nothing here needs to disambiguate "MyStruct(...)" from an
+ordinary call until semantic analysis, by which point the struct
+registry already exists. semantic.py's own analyze() guarantees a
+struct name and a function name can never collide, so that dispatch is
+never genuinely ambiguous.
+
+Positional and exhaustive: exactly one argument per field, in
+declaration order -- no named arguments, no partial construction with
+an implicit zero value for an omitted field. Deliberately scoped
+narrower than an ordinary function call is allowed to appear: valid
+only as a VarDecl's own initializer or a plain Assign's own value, not
+as a function argument, a return value, an IndexAssign/FieldAssign
+value, nested inside another expression (including as an argument to
+ANOTHER struct literal -- `Outer(Inner(1, 2), 3)` is rejected; build
+the inner value in its own variable first), or a bare statement --
+enforced entirely in semantic.py (see check_struct_literal's own
+docstring for the exact mechanism), so by the time an AST reaches this
+file, a struct-literal Call can only ever appear in one of those two
+positions. gen_struct_value_into checks for this shape first (Call
+where expr.name names a struct, not a function) and routes it to gen_
+struct_literal_into, which writes each argument directly into its own
+field's offset -- the same per-field, address-plus-offset writing
+gen_array_literal_into already established for an array literal's own
+elements, one level over, dispatching to gen_array_value_into/gen_
+slice_value_into/gen_struct_value_into for a composite field (each of
+which already protects an arbitrary destination base internally) or a
+plain gen_expr_into-then-store for a scalar one, protected the same
+way gen_array_literal_into's own scalar case already is.
+
+Still out of scope, unrelated to the syntax question above:
   - `==` ON STRUCTS. Two structs' equality isn't checked or generated
     at all yet -- deferred rather than building field-by-field
     structural comparison for a phase that doesn't need it yet.
@@ -3478,7 +3507,7 @@ class CodeGenerator:
         capacity from the new starting point, rather than simply
         matching the newly-computed len (high - low) the way it used
         to before cap-aware re-slicing existed -- see the module
-        docstring's APPEND BUILTIN section for why this and `append[O`
+        docstring's APPEND BUILTIN section for why this and `append`
         itself landed together rather than as two separate,
         sequential pieces of work: with every other slice-producing
         site setting cap equal to len, there was no way to observe or
@@ -5631,11 +5660,95 @@ class CodeGenerator:
             return self.gen_array_call_into(dst_mem, expr, array_type)
         raise CodegenError(f"No codegen rule for an array-typed value: {expr!r}")
 
+    def gen_struct_literal_into(self, expr: Call, dst_mem: Memory, struct_type: Type) -> List[Instruction]:
+        """Writes a struct literal's arguments directly into dst_mem's
+        own fields, one per field, in the struct's declaration order --
+        already validated as positional and exhaustive by semantic.py's
+        own check_struct_literal, so this never needs to guard against
+        a missing or extra argument itself. Mirrors gen_array_literal_
+        into's own per-element writing, one level over: each argument
+        is routed to whichever value-producing method its OWN field's
+        declared type needs -- gen_array_value_into/gen_slice_value_
+        into/gen_struct_value_into for a composite field (each of which
+        already protects an arbitrary destination base internally, so
+        this can just hand them dst_mem's own field offset directly),
+        or a plain gen_expr_into for a scalar (int/bool/str) field,
+        with dst_mem's own base protected on the stack across that one
+        call exactly like gen_array_literal_into's own scalar-element
+        case already does -- and for the identical reason: gen_expr_
+        into always computes into %eax/%rax, which would otherwise
+        silently clobber a destination address held in a general-
+        purpose register (e.g. a struct literal written directly
+        through a hidden return pointer, or as an array-of-structs
+        element) before it's ever used.
+
+        A slice-typed field's argument can be `none` -- checked here
+        via isinstance, not the field's own resolved type (which for a
+        NoneLiteral is always Type.NONE, never equal to the field's
+        declared SLICE type) -- exactly the same none-flowing-into-a-
+        slice-typed-slot short-circuit gen_var_decl/gen_assign/gen_
+        field_assign each already need of their own, for the identical
+        reason (see gen_none_into's own docstring).
+
+        A struct-typed field's argument is itself just an ordinary
+        struct-typed expression (a Variable, a Field, another struct
+        literal is NOT reachable here at all -- semantic.py's own
+        check_call already rejects a nested struct literal before
+        codegen ever runs, so this never needs to special-case it),
+        recursing through gen_struct_value_into the same way any other
+        nested struct value would."""
+        struct_info = self.struct_registry[struct_type.struct_name]
+        field_items = list(struct_info.fields.items())
+        protect_dst = dst_mem.base != 'rbp'
+        instructions = []
+        for arg_expr, (field_name, field_type) in zip(expr.args, field_items):
+            field_offset = self._field_offset(struct_type.struct_name, field_name)
+            field_mem = Memory(dst_mem.base, dst_mem.offset + field_offset)
+            if field_type.kind == TypeKind.ARRAY:
+                instructions.extend(self.gen_array_value_into(arg_expr, field_mem, field_type))
+                continue
+            if field_type.kind == TypeKind.SLICE:
+                if isinstance(arg_expr, NoneLiteral):
+                    instructions.extend(self.gen_none_into(field_mem, field_type))
+                else:
+                    instructions.extend(self.gen_slice_value_into(arg_expr, field_mem))
+                continue
+            if field_type.kind == TypeKind.STRUCT:
+                instructions.extend(self.gen_struct_value_into(arg_expr, field_mem, field_type))
+                continue
+            if protect_dst:
+                instructions.append(Push(Register(dst_mem.base)))
+            instructions.extend(self.gen_expr_into(arg_expr, Register('eax')))
+            if field_type == Type.STR:
+                if protect_dst:
+                    instructions.append(MovQ(src=Register('rax'), dst=Register('r8')))
+                    instructions.append(Pop(Register(dst_mem.base)))
+                    instructions.append(MovQ(src=Register('r8'), dst=field_mem))
+                else:
+                    instructions.append(MovQ(src=Register('rax'), dst=field_mem))
+            else:
+                if protect_dst:
+                    instructions.append(Mov(src=Register('eax'), dst=Register('r8d')))
+                    instructions.append(Pop(Register(dst_mem.base)))
+                    instructions.append(Mov(src=Register('r8d'), dst=field_mem))
+                else:
+                    instructions.append(Mov(src=Register('eax'), dst=field_mem))
+        return instructions
+
     def gen_struct_value_into(self, expr: Node, dst_mem: Memory, struct_type: Type) -> List[Instruction]:
         """Stores a struct-typed expression's VALUE into dst_mem,
         matching struct_type's own shape -- the struct counterpart to
         gen_array_value_into just above, one level over, dispatched on
         what kind of expression is producing the value:
+          - Call, where expr.name names a STRUCT (a struct literal,
+            `A a = A(6, 'hello')`): each argument written directly into
+            its own field -- see gen_struct_literal_into. Checked FIRST
+            and separately from the ordinary Call case below, via
+            struct_registry membership, exactly mirroring semantic.py's
+            own check_struct_literal/check_call split -- the two are
+            never ambiguous, since a name can never be both a struct
+            and a function (see semantic.py's own collision check in
+            analyze()).
           - Variable: a copy from wherever the source's data actually
             lives (via gen_array_copy, which already handles ANY
             value's own flat byte copy correctly -- struct included,
@@ -5652,15 +5765,11 @@ class CodeGenerator:
           - Index (a struct-typed array element, e.g. `Point p =
             rows[i]`): mirrors the array case's own Index handling
             exactly, via gen_index_address_into.
-          - Call (a function returning a struct): calls through the
-            hidden-output-pointer convention, writing directly into
-            dst_mem -- see gen_struct_call_into.
-
-        No ArrayLiteral-equivalent case exists here at all: a struct
-        literal isn't supported yet as of this phase (field-by-field
-        assignment only -- see the module's own note on why), so
-        there's nothing analogous to construct in place the way an
-        untyped array/slice literal can be."""
+          - Call, otherwise (an ordinary function returning a struct):
+            calls through the hidden-output-pointer convention, writing
+            directly into dst_mem -- see gen_struct_call_into."""
+        if isinstance(expr, Call) and expr.name in self.struct_registry:
+            return self.gen_struct_literal_into(expr, dst_mem, struct_type)
         if isinstance(expr, Variable):
             src_offset = self._local_offset(expr.name)
             src_type = self._local_type(expr.name)

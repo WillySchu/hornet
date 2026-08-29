@@ -14,9 +14,11 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- Struct literal syntax.
 - Struct literals as function arguments.
 - Struct literals as return values.
+- Struct literals as field assigne values.
+- Struct literals as index assigne values.
+- Struct literals as bare statement.
 - Struct literals nested in other literals.
 - Named field construction for struct literals.
 - `==` for structs.
