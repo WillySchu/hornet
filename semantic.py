@@ -1967,24 +1967,38 @@ class SemanticAnalyzer:
             return Type.BOOL
         raise SemanticError(f"No semantic rule for unary operator: {expr.op}")
 
-    def _array_leaf_type(self, t: Type) -> Type:
-        """Recursively unwraps a (possibly multi-dimensional) array
-        type down to its innermost, non-array element type -- e.g.
-        for [2][3]int, the leaf type is int. Mirrors codegen.utils.
-        leaf_type exactly, kept as a small, separate copy here rather
-        than an import: semantic.py is never allowed to depend on
-        codegen (the dependency only ever runs the other way --
-        codegen imports from semantic, never the reverse), and this
-        one small, purely structural recursion over Type isn't worth
-        inverting that for. Used only by check_binary's own array-
-        equality check, to reject comparing arrays whose elements
-        bottom out at a STRUCT or SLICE -- neither has '==' defined
-        for it at all yet, so an array of either has no way to be
-        compared element-by-element either, regardless of how deeply
-        nested the array itself is."""
-        while t.kind == TypeKind.ARRAY:
-            t = t.element_type
-        return t
+    def _is_comparable_type(self, t: Type) -> bool:
+        """Whether '==' is defined for a value of type `t` at all --
+        true for int/bool/str; recursively true for an ARRAY whose own
+        element type is itself comparable (any nesting depth: this
+        method IS the recursion, unwrapping one ARRAY level per call,
+        so it doubles as what used to be a separate leaf-type
+        extraction); recursively true for a STRUCT whose OWN fields
+        (at any nesting depth, including through further nested
+        structs) are ALL comparable; always false for a SLICE, since
+        slice equality beyond `s == none` isn't defined at all yet
+        (see check_binary's own note on why).
+
+        Used by check_binary's own ARRAY-vs-ARRAY and STRUCT-vs-STRUCT
+        branches alike -- the same one method serves both, since an
+        array's own comparability already depends on this exact
+        question applied to its element type, and (as of struct
+        equality existing) that element type can now legitimately be
+        a struct, which needs the identical recursive check. This is
+        also what makes an array of comparable structs -- e.g. [3]
+        Point, where Point has no slice-typed field anywhere -- work
+        correctly with no extra plumbing: check_binary's own ARRAY
+        branch calls this on the WHOLE array type, which unwraps down
+        to the STRUCT case, which recurses into Point's own fields,
+        exactly like it would for a bare Point-vs-Point comparison."""
+        if t.kind == TypeKind.ARRAY:
+            return self._is_comparable_type(t.element_type)
+        if t.kind == TypeKind.STRUCT:
+            struct_info = self.structs[t.struct_name]
+            return all(self._is_comparable_type(field_type) for field_type in struct_info.fields.values())
+        if t.kind == TypeKind.SLICE:
+            return False
+        return True  # INT, BOOL, STR
 
     def check_binary(self, expr: Binary) -> Type:
         left_type = self.check_expr(expr.left)
@@ -2018,7 +2032,7 @@ class SemanticAnalyzer:
 
         if op in _EQUALITY_OPS:
             # A slice compared to `none` (in EITHER order) is one of
-            # two exceptions to the array/slice/void/none rejection
+            # three exceptions to the slice/void/none rejection
             # further below -- `s == none` / `none == s`, checking
             # whether a slice is the nil/zero-value slice (see
             # NoneLiteral's own docstring in parser.py). Checked
@@ -2038,25 +2052,14 @@ class SemanticAnalyzer:
             # dataclass equality already checks both at once, the
             # same way it already does for any other type comparison
             # in this file, so there's no need to separately compare
-            # .size and .element_type by hand), AND the array's own
-            # LEAF type (see _array_leaf_type) is something codegen
-            # actually knows how to compare -- int, bool, or str.
-            #
-            # A STRUCT or SLICE leaf is rejected with its own, more
-            # specific error rather than falling through to the
-            # generic array/slice rejection below: neither has '=='
-            # defined for it at ALL yet (see this same block's own
-            # note on why slice equality beyond none is still an open
-            # question, and codegen.py's own STRUCTS section for why
-            # struct equality is deferred too), so an array of either
-            # has no well-defined way to be compared element-by-
-            # element regardless of how deeply nested the array
-            # itself is -- this is a real, principled boundary, not
-            # an arbitrary restriction: closing it just means
-            # building struct/slice equality first, then this already-
-            # general array-equality mechanism (any leaf type, any
-            # nesting depth) would cover them for free, with no
-            # changes needed here at all beyond removing this check.
+            # .size and .element_type by hand), AND the array is
+            # actually comparable (see _is_comparable_type) -- which,
+            # now that struct equality exists too, includes an array
+            # of comparable STRUCTS, not just int/bool/str: closing
+            # that gap needed no changes here beyond generalizing what
+            # "comparable" means, since this branch already applied
+            # the check to the whole array type rather than assuming
+            # a fixed set of leaf kinds.
             if left_type.kind == TypeKind.ARRAY and right_type.kind == TypeKind.ARRAY:
                 if left_type != right_type:
                     raise SemanticError(
@@ -2064,32 +2067,65 @@ class SemanticAnalyzer:
                         f"'{op.symbol()}' -- arrays must have the same "
                         f"length and element type"
                     )
-                leaf = self._array_leaf_type(left_type)
-                if leaf.kind in (TypeKind.STRUCT, TypeKind.SLICE):
+                if not self._is_comparable_type(left_type):
                     raise SemanticError(
                         f"'{op.symbol()}' does not support {left_type} "
                         f"operands -- array equality isn't defined yet "
-                        f"when the elements are structs or slices "
-                        f"(neither has its own '==' defined)"
+                        f"when the elements are (or contain) a slice, "
+                        f"which has no '==' defined for it yet"
                     )
                 return Type.BOOL
 
-            # Every OTHER array or slice comparison is rejected
-            # outright by this point -- an array compared to a non-
-            # array (already excluded from the ARRAY-vs-ARRAY branch
-            # above, since that branch requires BOTH sides to be
-            # ARRAY-kind), or a bare slice compared to another slice
+            # STRUCT vs STRUCT is the third exception: valid exactly
+            # when both sides are the exact same struct type (Type's
+            # own structural equality already checks the struct_name
+            # field, so two DIFFERENT structs -- or a struct compared
+            # to anything else -- both correctly fail this) AND every
+            # one of that struct's own fields, at any nesting depth
+            # (through further nested structs, or through an array
+            # field), is itself comparable -- see _is_comparable_type.
+            # A struct with a slice-typed field anywhere (directly, or
+            # buried inside a nested struct or array field) has no
+            # well-defined way to be compared field-by-field, for the
+            # identical reason an array of slices doesn't just above.
+            if left_type.kind == TypeKind.STRUCT and right_type.kind == TypeKind.STRUCT:
+                if left_type != right_type:
+                    raise SemanticError(
+                        f"Cannot compare {left_type} to {right_type} with "
+                        f"'{op.symbol()}' -- structs must be the exact "
+                        f"same type"
+                    )
+                if not self._is_comparable_type(left_type):
+                    raise SemanticError(
+                        f"'{op.symbol()}' does not support {left_type} "
+                        f"operands -- struct equality isn't defined yet "
+                        f"when a field (directly, or nested inside "
+                        f"another struct or an array field) is a slice, "
+                        f"which has no '==' defined for it yet"
+                    )
+                return Type.BOOL
+
+            # Every OTHER slice comparison is rejected outright by
+            # this point -- a bare slice compared to another slice
             # (`s1 == s2`, as opposed to the none-comparison already
-            # handled above) -- codegen.py has no slice-vs-slice
-            # comparison logic at all (unlike array, which now has a
-            # real, element-wise one just above for a leaf type it
-            # knows how to compare). Slice equality in particular
-            # isn't even well-defined yet on its own terms: would
-            # `s1 == s2` compare elements (now that array equality
-            # exists, a real, buildable extension), or the underlying
-            # pointer/length/cap triple the way Go's own `==`
-            # restriction on slices hints at? A real, well-defined
-            # feature to consider later, just not implemented yet.
+            # handled above): codegen.py has no slice-vs-slice
+            # comparison logic at all (unlike array and struct, which
+            # now each have a real, element/field-wise one just
+            # above, for operands they know how to compare). Slice
+            # equality in particular isn't even well-defined yet on
+            # its own terms: would `s1 == s2` compare elements (now
+            # that array equality exists, a real, buildable
+            # extension), or the underlying pointer/length/cap triple
+            # the way Go's own `==` restriction on slices hints at? A
+            # real, well-defined feature to consider later, just not
+            # implemented yet. ARRAY and STRUCT no longer need to be
+            # listed here at all: a same-type-but-incomparable array
+            # or struct is already rejected by its own dedicated
+            # branch above, and a genuinely MISMATCHED pair involving
+            # either (an array vs an int, a struct vs a slice, two
+            # DIFFERENT structs, ...) is already caught by the
+            # ordinary "both sides must be the same type" check just
+            # below, with no need for this tuple to special-case them.
             #
             # VOID is rejected for a completely different reason: it's
             # not a missing FEATURE, it's structurally nonsensical --
@@ -2116,13 +2152,10 @@ class SemanticAnalyzer:
             # target type to check none against -- equality has no
             # such fixed target on either side, so this needed its own
             # explicit exception rather than reusing that helper as-is.
-            if left_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE) or right_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE):
+            if left_type.kind in (TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE) or right_type.kind in (TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE):
                 raise SemanticError(
-                    f"'{op.symbol()}' does not support array, slice, void, "
-                    f"or none operands, except comparing a slice to none, "
-                    f"or comparing two arrays of the same length and "
-                    f"element type (where the element type isn't itself a "
-                    f"struct or slice)"
+                    f"'{op.symbol()}' does not support slice, void, or "
+                    f"none operands, except comparing a slice to none"
                 )
             if left_type != right_type:
                 raise SemanticError(

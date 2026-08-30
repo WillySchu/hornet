@@ -16,7 +16,6 @@ Binary Ops:
 Updates:
 - Struct literals as bare statement.
 - Disallow untyped array literals from anything except assignment to a typed variable / parameter / return.
-- `==` for structs.
 - Add source location for error messages from semantic analysis.
 - `fuction` type.
 - Methods.

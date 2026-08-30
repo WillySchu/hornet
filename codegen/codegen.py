@@ -7032,21 +7032,24 @@ class CodeGenerator:
         # -- so this doesn't need to re-derive or defensively check
         # which side is which beyond that.
         #
-        # ARRAY equality is dispatched the same way, for the same root
-        # reason: an array's own value is its own multi-byte (or
-        # multi-element) footprint, which -- like a slice's descriptor
-        # -- doesn't fit through a single register the way an
-        # int/bool/str value does. semantic.py's own check_binary
-        # already guarantees, by the time this is reached, that BOTH
-        # sides are the exact same array type, with a leaf type this
-        # file actually knows how to compare (int, bool, or str) --
-        # see gen_array_equality_into's own docstring for how that
-        # dispatches internally.
+        # ARRAY and STRUCT equality are dispatched the same way, for
+        # the same root reason: neither one's own value fits through a
+        # single register the way an int/bool/str value does.
+        # semantic.py's own check_binary already guarantees, by the
+        # time this is reached, that both sides are the exact same
+        # array or struct type, and that the type is actually
+        # comparable (see _is_comparable_type) -- no slice anywhere
+        # inside it, directly or nested through a struct field or an
+        # array element -- see gen_array_equality_into/gen_struct_
+        # equality_into's own docstrings for how each dispatches
+        # internally.
         if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
             if type_of(expr.left).kind == TypeKind.SLICE or type_of(expr.right).kind == TypeKind.SLICE:
                 return self.gen_slice_none_comparison_into(expr, dst)
             if type_of(expr.left).kind == TypeKind.ARRAY:
                 return self.gen_array_equality_into(expr, dst)
+            if type_of(expr.left).kind == TypeKind.STRUCT:
+                return self.gen_struct_equality_into(expr, dst)
 
         scratch = Register('ecx')  # holds the right-hand value while combining
         instructions = self.gen_expr_into(expr.left, dst)   # dst = left
@@ -7060,8 +7063,10 @@ class CodeGenerator:
     def gen_array_equality_into(self, expr: Binary, dst: Register) -> List[Instruction]:
         """`left == right` / `left != right`, both the exact same
         array type (already guaranteed by semantic.py's own check_
-        binary, including that the array's own LEAF type -- see
-        leaf_type -- is int, bool, or str, never a struct or slice,
+        binary, including that the array is actually comparable --
+        see _is_comparable_type -- meaning its own LEAF type -- see
+        leaf_type -- is int, bool, str, or a comparable struct; never
+        a slice, or a struct with a slice buried in it somewhere,
         neither of which has '==' defined for it at all yet).
 
         `left`/`right` must each already have a real address (a
@@ -7072,7 +7077,7 @@ class CodeGenerator:
         restriction on unnamed array values elsewhere (e.g. gen_array_
         arg_address_into before argument materialization existed).
 
-        Dispatches on the array's own leaf type into one of two
+        Dispatches on the array's own leaf type into one of three
         genuinely different comparison strategies, each factored into
         its own small loop helper:
 
@@ -7095,12 +7100,20 @@ class CodeGenerator:
             method's own concatenation-freeing logic: array elements
             are always fixed, already-allocated storage, never a
             fresh concatenation result of their own.
+          - struct leaf: _gen_array_struct_equality_loop. Neither of
+            the two loops above applies: a struct's own fields can be
+            a MIX of types, so there's no single flat-byte-or-strcmp
+            strategy that covers a whole struct-typed element the way
+            there is for a uniformly-int/bool or uniformly-str one --
+            this reuses _gen_struct_fields_equality_at_addresses (the
+            same field-by-field comparison gen_struct_equality_into's
+            own bare struct-vs-struct case uses) once per element.
 
-        Both loops jump to a shared `mismatch_label` the moment any
-        element differs (or, for the flat-byte path, any 4-byte chunk
-        differs); falling all the way through either loop means every
-        element matched. From there, the final result is just two
-        immediate moves -- 1/0 for EQUAL, or 0/1 for NOT_EQUAL,
+        All three loops jump to a shared `mismatch_label` the moment
+        any element differs (or, for the flat-byte path, any 4-byte
+        chunk differs); falling all the way through any of them means
+        every element matched. From there, the final result is just
+        two immediate moves -- 1/0 for EQUAL, or 0/1 for NOT_EQUAL,
         whichever bytes-matched actually means for this specific
         operator -- exactly the same "compute the boolean the long
         way, then pick the right immediate for this operator" shape
@@ -7122,6 +7135,11 @@ class CodeGenerator:
         if leaf == Type.STR:
             instructions.extend(self._gen_array_str_equality_loop(
                 left_addr, right_addr, total_width // 8, mismatch_label
+            ))
+        elif leaf.kind == TypeKind.STRUCT:
+            struct_width = type_byte_width(leaf, self.struct_registry)
+            instructions.extend(self._gen_array_struct_equality_loop(
+                left_addr, right_addr, leaf.struct_name, total_width // struct_width, mismatch_label
             ))
         else:
             instructions.extend(self._gen_array_flat_byte_equality_loop(
@@ -7226,6 +7244,247 @@ class CodeGenerator:
         instructions.append(Add(src=Imm(1), dst=index_32))
         instructions.append(Jmp(loop_start))
         instructions.append(Label(loop_done))
+        return instructions
+
+    def _gen_array_struct_equality_loop(self, left_addr: Register, right_addr: Register, struct_name: str, element_count: int, mismatch_label: str) -> List[Instruction]:
+        """The struct-leaf counterpart to the two array-equality loops
+        above: unlike int/bool (one flat byte comparison) or str (one
+        strcmp per element), a struct element's own fields can be a
+        MIX of types, so each element is compared via _gen_struct_
+        fields_equality_at_addresses -- the same field-by-field
+        machinery gen_struct_equality_into's own bare struct-vs-struct
+        case uses -- rather than a single uniform per-element
+        operation.
+
+        Uses the identical CALLEE-saved register discipline _gen_
+        array_str_equality_loop already established, for the same
+        reason (a struct element being compared might itself contain
+        a str field, which needs a real strcmp CALL somewhere inside
+        _gen_struct_fields_equality_at_addresses).
+
+        Beyond that, this loop's own left_base/right_base/index
+        (%rbx/%r12/%r13) need one MORE layer of protection that
+        neither sibling loop does: _gen_struct_fields_equality_at_
+        addresses can itself recurse back into ONE of these same
+        three array-equality loops, for a struct field that's itself
+        an array (including, recursively, another array of structs --
+        e.g. comparing `[M]Outer` where Outer has a `[N]Inner rows`
+        field, and Inner is itself a comparable struct). Any such
+        nested loop reuses the EXACT SAME fixed register names this
+        one does (%rbx/%r12/%r13/%r14, since there's no way to
+        allocate a fresh, distinct set per nesting depth at codegen
+        time) -- so without explicitly saving THIS loop's own
+        %rbx/%r12/%r13 across the per-element comparison call, a
+        struct field found to need one of those nested loops would
+        silently corrupt this OUTER loop's own base addresses and
+        index. Protecting them via an ordinary push/pop pair around
+        that one call is what makes this correct at ANY nesting depth,
+        by the same induction _gen_struct_fields_equality_at_
+        addresses's own per-field protection already relies on: at
+        every level, whatever's ABOUT to run might reuse these
+        registers for its own purposes, so whatever's ALREADY relying
+        on them saves its own values first and restores them
+        afterward, regardless of what happened in between. (%r14,
+        the per-iteration byte offset, needs no such protection: it's
+        always freshly recomputed at the START of each iteration,
+        before being used to compute this iteration's own element
+        addresses, and never read again afterward.)"""
+        struct_width = type_byte_width(Type(TypeKind.STRUCT, struct_name=struct_name), self.struct_registry)
+        left_base = Register('rbx')
+        right_base = Register('r12')
+        index_32 = Register('r13d')
+        index_64 = Register('r13')
+        offset_32 = Register('r14d')
+        offset_64 = Register('r14')
+
+        loop_start = self.new_label("array_eq_struct_loop")
+        loop_done = self.new_label("array_eq_struct_done")
+
+        instructions = [
+            MovQ(src=left_addr, dst=left_base),
+            MovQ(src=right_addr, dst=right_base),
+            Mov(src=Imm(0), dst=index_32),
+            Label(loop_start),
+            Cmp(src=Imm(element_count), dst=index_32),
+            Jae(loop_done),
+        ]
+        instructions.append(Mov(src=index_32, dst=offset_32))
+        instructions.append(IMul(src=Imm(struct_width), dst=offset_32))
+        left_elem_addr = Register('r8')
+        right_elem_addr = Register('r9')
+        instructions.append(MovQ(src=left_base, dst=left_elem_addr))
+        instructions.append(AddQ(src=offset_64, dst=left_elem_addr))
+        instructions.append(MovQ(src=right_base, dst=right_elem_addr))
+        instructions.append(AddQ(src=offset_64, dst=right_elem_addr))
+
+        instructions.append(Push(left_base))
+        instructions.append(Push(right_base))
+        instructions.append(Push(index_64))
+        instructions.extend(self._gen_struct_fields_equality_at_addresses(
+            struct_name, left_elem_addr, right_elem_addr, mismatch_label
+        ))
+        instructions.append(Pop(index_64))
+        instructions.append(Pop(right_base))
+        instructions.append(Pop(left_base))
+
+        instructions.append(Add(src=Imm(1), dst=index_32))
+        instructions.append(Jmp(loop_start))
+        instructions.append(Label(loop_done))
+        return instructions
+
+    def _flatten_struct_fields(self, struct_name: str, base_offset: int = 0):
+        """Recursively walks struct_name's own fields (and, for any
+        field that's itself a STRUCT, that struct's own fields, and so
+        on, arbitrarily deep), yielding (leaf_field_type, absolute_
+        byte_offset_from_the_OUTERMOST_struct's_own_base) pairs in
+        declaration order -- entirely at compile time, in Python, with
+        no runtime recursion or register-protection complexity
+        involved at all: a nested struct's own fields are just as
+        directly addressable via a single constant offset from the
+        outermost struct's base as any of its own top-level fields
+        are (Memory operands already support an arbitrary base
+        register plus a constant offset natively), so flattening this
+        way up front is what lets _gen_struct_fields_equality_at_
+        addresses emit one simple, linear sequence of field
+        comparisons -- no genuine runtime recursion needed to walk a
+        struct's own nested shape, only to walk an ARRAY-typed field's
+        own runtime-many elements (see _gen_array_struct_equality_
+        loop), which is a fundamentally different kind of "how many"
+        (a compile-time-fixed number of fields vs. a size that can be
+        arbitrarily large) that this method deliberately doesn't try
+        to handle the same way."""
+        struct_info = self.struct_registry[struct_name]
+        for field_name, field_type in struct_info.fields.items():
+            field_offset = base_offset + self._field_offset(struct_name, field_name)
+            if field_type.kind == TypeKind.STRUCT:
+                yield from self._flatten_struct_fields(field_type.struct_name, field_offset)
+            else:
+                yield (field_type, field_offset)
+
+    def _gen_struct_fields_equality_at_addresses(self, struct_name: str, left_base: Register, right_base: Register, mismatch_label: str) -> List[Instruction]:
+        """Compares every one of struct_name's own fields -- including
+        those of any nested struct field, at any depth, via _flatten_
+        struct_fields's own compile-time flattening -- jumping to
+        mismatch_label the moment any one differs. Shared by gen_
+        struct_equality_into's own bare struct-vs-struct comparison
+        and _gen_array_struct_equality_loop's own per-element one;
+        this method itself has no idea (and doesn't need to know)
+        which of the two contexts it's being called from, only that
+        `left_base`/`right_base` are two registers currently holding
+        real addresses of two same-typed struct_name values.
+
+        left_base/right_base are protected on the real stack across
+        EVERY field's own comparison, unconditionally, not just the
+        ones that happen to need it -- computing that field's own
+        address into a FRESH scratch register first (or, for a
+        scalar field, simply reading it via Memory(base, offset)
+        directly, needing no separate address register at all), so
+        that whatever "risky" comparison follows (a strcmp call for a
+        str field, or one of the three array-equality loop helpers for
+        an array field -- each of which has its OWN internal register
+        usage that could otherwise collide with this method's own base
+        registers) is completely free to use any register it wants,
+        including left_base/right_base's own, without ever needing to
+        know or care what this method is doing with them. This is the
+        same "protect on the stack, then let the next thing use
+        whatever registers it wants" discipline used throughout this
+        file, just applied uniformly to every field rather than only
+        the ones proven to need it -- correct regardless of how many
+        fields there are, at the cost of a few unconditional push/pop
+        pairs even for the cheap int/bool case, exactly the kind of
+        "simple over maximally efficient" trade this file already
+        makes in plenty of other places (e.g. gen_binary_into's own
+        single-register stack-spill scheme)."""
+        instructions = []
+        for field_type, offset in self._flatten_struct_fields(struct_name):
+            if field_type.kind == TypeKind.ARRAY:
+                leaf = leaf_type(field_type)
+                total_width = type_byte_width(field_type, self.struct_registry)
+                instructions.append(Push(left_base))
+                instructions.append(Push(right_base))
+                left_field_addr = Register('r14')
+                right_field_addr = Register('r15')
+                instructions.append(MovQ(src=left_base, dst=left_field_addr))
+                if offset:
+                    instructions.append(AddQ(src=Imm(offset), dst=left_field_addr))
+                instructions.append(MovQ(src=right_base, dst=right_field_addr))
+                if offset:
+                    instructions.append(AddQ(src=Imm(offset), dst=right_field_addr))
+                if leaf == Type.STR:
+                    instructions.extend(self._gen_array_str_equality_loop(
+                        left_field_addr, right_field_addr, total_width // 8, mismatch_label
+                    ))
+                elif leaf.kind == TypeKind.STRUCT:
+                    struct_width = type_byte_width(leaf, self.struct_registry)
+                    instructions.extend(self._gen_array_struct_equality_loop(
+                        left_field_addr, right_field_addr, leaf.struct_name, total_width // struct_width, mismatch_label
+                    ))
+                else:
+                    instructions.extend(self._gen_array_flat_byte_equality_loop(
+                        left_field_addr, right_field_addr, total_width, mismatch_label
+                    ))
+                instructions.append(Pop(right_base))
+                instructions.append(Pop(left_base))
+            elif field_type == Type.STR:
+                instructions.append(Push(left_base))
+                instructions.append(Push(right_base))
+                instructions.append(MovQ(src=Memory(left_base.name, offset), dst=Register('rdi')))
+                instructions.append(MovQ(src=Memory(right_base.name, offset), dst=Register('rsi')))
+                instructions.append(CallInstr('strcmp'))
+                instructions.append(Cmp(src=Imm(0), dst=Register('eax')))
+                instructions.append(Jne(mismatch_label))
+                instructions.append(Pop(right_base))
+                instructions.append(Pop(left_base))
+            else:
+                # int or bool -- a plain 4-byte compare, no call
+                # involved, so no protection needed at all.
+                instructions.append(Mov(src=Memory(left_base.name, offset), dst=Register('eax')))
+                instructions.append(Cmp(src=Memory(right_base.name, offset), dst=Register('eax')))
+                instructions.append(Jne(mismatch_label))
+        return instructions
+
+    def gen_struct_equality_into(self, expr: Binary, dst: Register) -> List[Instruction]:
+        """`left == right` / `left != right`, both the exact same
+        struct type (already guaranteed by semantic.py's own check_
+        binary, including that every one of the struct's own fields --
+        at any nesting depth, through further nested structs or array
+        fields -- is itself comparable: int, bool, str, a comparable
+        array, or another comparable struct; never a slice, which has
+        no '==' defined for it at all yet).
+
+        `left`/`right` must each already have a real address (a
+        Variable, Field, or Index -- whatever gen_struct_address_into
+        already accepts); a struct literal or a struct-returning call
+        used directly as an equality operand isn't supported, matching
+        this file's established "assign it to a variable first"
+        restriction on unnamed struct/array values elsewhere.
+
+        The actual field-by-field comparison is _gen_struct_fields_
+        equality_at_addresses's job -- this method just computes the
+        two base addresses, protects the first across evaluating the
+        second (the same push-before-evaluating-the-other-side pattern
+        used throughout this file), and wraps the result in the same
+        shared mismatch/done label shape gen_array_equality_into's own
+        docstring already explains."""
+        struct_type = type_of(expr.left)
+        left_base = Register('r10')
+        right_base = Register('r11')
+        instructions = self.gen_struct_address_into(expr.left, left_base)
+        instructions.append(Push(left_base))
+        instructions.extend(self.gen_struct_address_into(expr.right, right_base))
+        instructions.append(Pop(left_base))
+
+        mismatch_label = self.new_label("struct_eq_mismatch")
+        done_label = self.new_label("struct_eq_done")
+        instructions.extend(self._gen_struct_fields_equality_at_addresses(
+            struct_type.struct_name, left_base, right_base, mismatch_label
+        ))
+
+        instructions.append(Mov(src=Imm(1 if expr.op == BinaryOp.EQUAL else 0), dst=dst))
+        instructions.append(Jmp(done_label))
+        instructions.append(Label(mismatch_label))
+        instructions.append(Mov(src=Imm(0 if expr.op == BinaryOp.EQUAL else 1), dst=dst))
+        instructions.append(Label(done_label))
         return instructions
 
     def gen_slice_none_comparison_into(self, expr: Binary, dst: Register) -> List[Instruction]:

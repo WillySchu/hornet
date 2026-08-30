@@ -2402,7 +2402,7 @@ class TestFunctionsWithNoDeclaredReturnType:
             "    return log(1) == log(2)\n"
         )
         ast = _parse(source)
-        with pytest.raises(SemanticError, match="does not support array, slice, void, or none operands"):
+        with pytest.raises(SemanticError, match="does not support slice, void, or none operands"):
             analyze(ast)
 
 
@@ -3657,6 +3657,375 @@ class TestArrayEquality:
             "        return 1\n"
             "    return 0",
             1,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Struct equality: `s1 == s2` / `s1 != s2`, valid exactly when both sides are
+# the exact same struct type AND every one of that struct's own fields --
+# including through nested structs and array fields, at any depth -- is
+# itself comparable (see semantic.py's own _is_comparable_type, shared with
+# array equality's identical requirement). A struct with a slice-typed field
+# anywhere is rejected, since slice equality doesn't exist yet -- see
+# TestSemanticErrors.
+#
+# Unlike array equality, a struct's own fields can be a MIX of types, so
+# there's no single flat-byte-or-strcmp strategy that covers a whole struct:
+# codegen.py's _gen_struct_fields_equality_at_addresses flattens a struct's
+# fields (recursing through nested structs at COMPILE TIME, in Python, via
+# _flatten_struct_fields -- no runtime recursion needed to walk a struct's
+# own fixed shape) into one linear sequence of per-field comparisons, each
+# dispatched by that field's own type: a plain 4-byte compare for int/bool,
+# a strcmp call for str, or one of array equality's own three loop helpers
+# for an array field.
+#
+# test_array_of_structs_with_array_of_str_field and test_doubly_nested_*
+# are the tests that actually matter most here, not just thorough coverage:
+# they're what caught a real register-collision bug during development --
+# _gen_struct_fields_equality_at_addresses initially used %r8/%r9 as scratch
+# for computing an array field's own address, which collided with %r8/%r9
+# being used INTERNALLY by _gen_array_flat_byte_equality_loop for a
+# completely different purpose (the loop's own per-iteration word address),
+# corrupting the base address on the SECOND iteration of a flat-byte
+# comparison reached through a struct field. The simplest possible case
+# (test_array_field_equal, a struct with a plain [3]int field) already
+# failed outright once actually run, which is exactly why every method in
+# this file that hands addresses to another piece of code needs its OWN
+# register choices checked against what the callee uses internally, not
+# just reasoned about in the abstract.
+# ---------------------------------------------------------------------------
+
+class TestStructEquality:
+    pytestmark = GCC_SKIP
+
+    def test_equal_structs(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    Point a = Point(1, 2)\n"
+            "    Point b = Point(1, 2)\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_unequal_structs(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    Point a = Point(1, 2)\n"
+            "    Point b = Point(1, 3)\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            0,
+        )
+
+    def test_not_equal_operator(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    Point a = Point(1, 2)\n"
+            "    Point b = Point(1, 3)\n"
+            "    if a != b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_mismatch_in_first_field_is_detected(self):
+        """A mismatch in the very FIRST field -- proves comparison
+        doesn't just check the last field or skip early ones."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    Point a = Point(1, 2)\n"
+            "    Point b = Point(9, 2)\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            0,
+        )
+
+    def test_bool_field(self):
+        assert_program_exit_code(
+            "struct Flag:\n"
+            "    bool on\n"
+            "\n"
+            "def int main():\n"
+            "    Flag a = Flag(true)\n"
+            "    Flag b = Flag(true)\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_str_field_equal_different_pointers(self):
+        """Both sides' str fields are built so they're guaranteed to
+        be DIFFERENT pointers with identical content, proving this is
+        a real strcmp-backed comparison -- the same reasoning
+        TestArrayEquality's own identical test already established."""
+        assert_program_exit_code(
+            "struct Person:\n"
+            "    int age\n"
+            "    str name\n"
+            "\n"
+            "def int main():\n"
+            "    str prefix = 'Al'\n"
+            "    Person a = Person(30, 'Alice')\n"
+            "    Person b = Person(30, prefix + 'ice')\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_str_field_not_equal(self):
+        assert_program_exit_code(
+            "struct Person:\n"
+            "    int age\n"
+            "    str name\n"
+            "\n"
+            "def int main():\n"
+            "    Person a = Person(30, 'Alice')\n"
+            "    Person b = Person(30, 'Bob')\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            0,
+        )
+
+    def test_nested_struct_field_equal(self):
+        assert_program_exit_code(
+            "struct Inner:\n"
+            "    int v\n"
+            "struct Outer:\n"
+            "    Inner i\n"
+            "    int b\n"
+            "\n"
+            "def int main():\n"
+            "    Outer a = Outer(Inner(1), 2)\n"
+            "    Outer b = Outer(Inner(1), 2)\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_nested_struct_field_mismatch(self):
+        """The mismatch is buried inside the NESTED struct's own
+        field, not a top-level one -- proves _flatten_struct_fields
+        actually descends into nested structs rather than treating
+        them as opaque/always-equal."""
+        assert_program_exit_code(
+            "struct Inner:\n"
+            "    int v\n"
+            "struct Outer:\n"
+            "    Inner i\n"
+            "    int b\n"
+            "\n"
+            "def int main():\n"
+            "    Outer a = Outer(Inner(1), 2)\n"
+            "    Outer b = Outer(Inner(9), 2)\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            0,
+        )
+
+    def test_array_field_equal(self):
+        """The specific case that caught the %r8/%r9 register-
+        collision bug during development -- see this class's own
+        module-level comment."""
+        assert_program_exit_code(
+            "struct Row:\n"
+            "    [3]int values\n"
+            "\n"
+            "def int main():\n"
+            "    Row a = Row([1, 2, 3])\n"
+            "    Row b = Row([1, 2, 3])\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_array_field_not_equal(self):
+        assert_program_exit_code(
+            "struct Row:\n"
+            "    [3]int values\n"
+            "\n"
+            "def int main():\n"
+            "    Row a = Row([1, 2, 3])\n"
+            "    Row b = Row([1, 2, 4])\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            0,
+        )
+
+    def test_array_of_str_field_equal_different_pointers(self):
+        assert_program_exit_code(
+            "struct Words:\n"
+            "    [2]str ws\n"
+            "\n"
+            "def int main():\n"
+            "    str prefix = 'wor'\n"
+            "    Words a = Words(['hello', 'world'])\n"
+            "    Words b = Words(['hello', prefix + 'ld'])\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_array_of_comparable_structs(self):
+        """An array whose leaf is a comparable struct -- see semantic.
+        py's own _is_comparable_type, which now recurses into a
+        struct's own fields the same way it already recurses through
+        nested arrays."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Point a = [Point(1, 2), Point(3, 4)]\n"
+            "    [2]Point b = [Point(1, 2), Point(3, 4)]\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_array_of_comparable_structs_not_equal(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Point a = [Point(1, 2), Point(3, 4)]\n"
+            "    [2]Point b = [Point(1, 2), Point(3, 5)]\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            0,
+        )
+
+    def test_array_of_structs_with_array_of_str_field(self):
+        """THE test that caught the register-collision bug most
+        directly: an array of structs, where the struct's own field is
+        ITSELF an array of str -- exercises _gen_array_struct_
+        equality_loop calling into _gen_struct_fields_equality_at_
+        addresses, which in turn calls _gen_array_str_equality_loop,
+        all sharing a small, fixed set of register names across three
+        levels."""
+        assert_program_exit_code(
+            "struct Bag:\n"
+            "    [2]str items\n"
+            "\n"
+            "def int main():\n"
+            "    str prefix = 'ap'\n"
+            "    [2]Bag a = [Bag(['apple', 'banana']), Bag(['cherry', 'date'])]\n"
+            "    [2]Bag b = [Bag([prefix + 'ple', 'banana']), Bag(['cherry', 'date'])]\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_array_of_structs_with_array_of_str_field_mismatch_in_second_element(self):
+        """The mismatch is in the SECOND array-of-structs element,
+        not the first -- proves the outer loop's own index/base
+        registers correctly survive the first element's (potentially
+        register-clobbering) comparison and correctly advance to
+        compare the second."""
+        assert_program_exit_code(
+            "struct Bag:\n"
+            "    [2]str items\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Bag a = [Bag(['apple', 'banana']), Bag(['cherry', 'date'])]\n"
+            "    [2]Bag b = [Bag(['apple', 'banana']), Bag(['cherry', 'WRONG'])]\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            0,
+        )
+
+    def test_doubly_nested_struct_with_array_of_structs_with_str_field(self):
+        """A struct containing an ARRAY OF STRUCTS, where that inner
+        struct has its OWN str field -- one level deeper than the
+        test above, exercising the exact recursive chain gen_struct_
+        equality_into's own module comment describes: _gen_struct_
+        fields_equality_at_addresses (for Container) dispatches to
+        _gen_array_struct_equality_loop (for its [2]Item field), which
+        calls BACK into _gen_struct_fields_equality_at_addresses (for
+        each Item), which then does an ordinary strcmp for Item's own
+        str field."""
+        assert_program_exit_code(
+            "struct Item:\n"
+            "    str name\n"
+            "    int qty\n"
+            "struct Container:\n"
+            "    [2]Item items\n"
+            "    int tag\n"
+            "\n"
+            "def int main():\n"
+            "    str prefix = 'wid'\n"
+            "    Container a = Container([Item('widget', 5), Item('gadget', 3)], 99)\n"
+            "    Container b = Container([Item(prefix + 'get', 5), Item('gadget', 3)], 99)\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_doubly_nested_mismatch(self):
+        assert_program_exit_code(
+            "struct Item:\n"
+            "    str name\n"
+            "    int qty\n"
+            "struct Container:\n"
+            "    [2]Item items\n"
+            "    int tag\n"
+            "\n"
+            "def int main():\n"
+            "    Container a = Container([Item('widget', 5), Item('gadget', 3)], 99)\n"
+            "    Container b = Container([Item('widget', 5), Item('gadget', 4)], 99)\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            0,
+        )
+
+    def test_comparison_does_not_mutate_either_operand(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    Point a = Point(1, 2)\n"
+            "    Point b = Point(1, 2)\n"
+            "    bool eq = a == b\n"
+            "    return a.x + a.y + b.x + b.y\n",
+            6,
         )
 
 
@@ -4966,7 +5335,7 @@ class TestCapAwareSlicing:
 
     def test_omitted_high_still_defaults_to_len_not_cap(self):
         """`arr[3:]` still means "from 3 to the current end" -- the
-        default for an O[OMITTED high bound is unaffected by cap-aware
+        default for an OMITTED high bound is unaffected by cap-aware
         slicing; only the upper limit an EXPLICIT high is allowed to
         reach changed."""
         assert_exit_code(
@@ -6589,14 +6958,14 @@ class TestNone:
         exception (see check_binary's own comment)."""
         assert_semantic_error(
             "    return none == none",
-            match="does not support array, slice, void, or none operands",
+            match="does not support slice, void, or none operands",
             return_type="bool",
         )
 
     def test_comparing_int_to_none_is_rejected(self):
         assert_semantic_error(
             "    return 5 == none",
-            match="does not support array, slice, void, or none operands",
+            match="does not support slice, void, or none operands",
             return_type="bool",
         )
 
@@ -7327,22 +7696,25 @@ class TestSemanticErrors:
             return_type="bool",
         )
 
-    def test_array_of_structs_equality_comparison_is_rejected(self):
-        """Same shape, but the leaf type is a STRUCT -- rejected with
-        its own, more specific error than the generic array/slice/
-        void/none one, since struct equality itself doesn't exist yet
-        at all (see check_binary's own note on why this is a real,
-        principled boundary rather than an arbitrary one)."""
+    def test_array_of_incomparable_structs_equality_comparison_is_rejected(self):
+        """Same shape, but the leaf type is a STRUCT with a slice-
+        typed field of its own -- rejected with its own, more
+        specific error than the generic slice/void/none one, since
+        THAT struct isn't comparable (see check_binary's own note on
+        why this is a real, principled boundary rather than an
+        arbitrary one). An array of a COMPARABLE struct (no slice
+        field anywhere) is fine now -- see TestStructEquality's own
+        test_array_of_comparable_structs."""
         assert_program_semantic_error(
-            "struct Point:\n"
-            "    int x\n"
+            "struct Holder:\n"
+            "    []int xs\n"
             "\n"
             "def bool main():\n"
-            "    [2]Point a\n"
-            "    [2]Point b\n"
+            "    [2]Holder a\n"
+            "    [2]Holder b\n"
             "    return a == b\n",
             match="array equality isn't defined yet when the elements "
-                  "are structs or slices",
+                  "are \\(or contain\\) a slice",
         )
 
     def test_array_of_slices_equality_comparison_is_rejected(self):
@@ -7351,7 +7723,7 @@ class TestSemanticErrors:
             "    [2][]int b\n"
             "    return a == b",
             match="array equality isn't defined yet when the elements "
-                  "are structs or slices",
+                  "are \\(or contain\\) a slice",
             return_type="bool",
         )
 
