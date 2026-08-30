@@ -1740,20 +1740,18 @@ class SemanticAnalyzer:
         for the full design and why the two are mutually exclusive by
         construction) is delegated to _check_named_struct_literal
         below, which also supports PARTIAL construction (`A(x=1)`,
-        omitting a field entirely) -- deliberately not given an
-        implicit zero value (yet): an omitted field's own storage
-        stays genuinely uninitialized. This is now a deliberate,
-        temporary inconsistency rather than matching a codebase-wide
-        rule -- codegen.py's own _gen_zero_value_into gives a `T x`
-        VarDecl with NO initializer at all a real implicit zero value
-        (0 for int/bool, none's own shape for slice, and recursively
-        for array/struct), but a PARTIAL named literal's own omitted
-        field was intentionally left as a separate follow-up rather
-        than being updated at the same time -- the natural next step
-        once this decision is revisited, not something this comment
-        should claim is already true. Positional construction stays
-        exhaustive (this method's own existing behavior, unchanged);
-        only the named form can be partial."""
+        omitting a field entirely) -- given its own type's implicit
+        zero value now, via the exact same _gen_zero_value_into a `T
+        x` VarDecl with no initializer at all already uses (see gen_
+        struct_literal_into's own docstring in codegen.py for the
+        actual generation, and the register-safety fix it needed
+        alongside this). This closes what used to be a deliberate,
+        temporary inconsistency: partial construction was left
+        genuinely uninitialized when implicit zero-init first shipped,
+        specifically so it could be revisited once that feature
+        existed to reuse -- this is that revisit. Positional
+        construction stays exhaustive (this method's own existing
+        behavior, unchanged); only the named form can be partial."""
         struct_info = self.structs[expr.name]
         field_items = list(struct_info.fields.items())
         if expr.kwargs is not None:
@@ -1782,10 +1780,10 @@ class SemanticAnalyzer:
         construction, reached from check_struct_literal whenever
         expr.kwargs is populated instead of expr.args. Unlike the
         positional form, this is deliberately NOT required to be
-        exhaustive: any field not mentioned is simply never written by
-        codegen (see gen_struct_literal_into), left exactly as
-        uninitialized as an ordinary `A a` VarDecl with no initializer
-        at all would leave every one of its fields.
+        exhaustive: any field not mentioned gets that field's own
+        implicit zero value (see gen_struct_literal_into), exactly the
+        same value an ordinary `A a` VarDecl with no initializer at
+        all would give every one of its fields.
 
         Each named field is checked against real membership (a name
         that isn't one of the struct's own fields is rejected, with

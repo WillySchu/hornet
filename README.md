@@ -14,12 +14,13 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- Add zero value initialization for named tuple declarations.
 - Add `byte` type.
 - Casting.
 - `type` type.
+- Type aliases.
 ` typeof`
 - `fuction` type.
+- User defined types built off other types.
 - Change slice's zero type to an empty slice rather than `none`.
 - Struct literals as bare statement.
 - Unnamed struct field access.

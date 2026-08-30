@@ -6356,7 +6356,7 @@ class TestSliceParametersAndReturns:
         via gen_slice_value_into, then read back out -- see gen_slice_
         arg_into's own docstring for why sharing that one slot is safe
         here, for a different reason than it is there (a slice
-        argument is passed BY VALUE, drained into registers and pushed
+        argument is passed BY VALUE, drained into registers and pushe[Od
         immediately, not by address that has to survive until the
         call itself)."""
         assert_program_exit_code(
@@ -10651,6 +10651,227 @@ class TestNamedStructLiterals:
 
 
 # ---------------------------------------------------------------------------
+# Partial named construction now zero-fills an omitted field, reusing the
+# same _gen_zero_value_into a `T x` VarDecl with no initializer at all
+# already uses -- closing the deliberate, temporary inconsistency left open
+# when implicit zero-init first shipped (see TestImplicitZeroValue's own
+# module comment).
+#
+# Implementing this surfaced a THIRD, previously-undiscovered, genuinely
+# pre-existing bug in gen_struct_literal_into itself, distinct from the
+# offset-dropping one TestStructLiteralArrayFieldAddressRegression already
+# covers: dst_mem's own base was only ever protected (push/pop) around a
+# SCALAR field's own write, never around an array/slice/struct field's own
+# -- fine as long as nothing after such a field needed dst_mem.base to
+# still be valid, but an array- or struct-returning CALL populating one
+# field is a real function call, and real function calls are free to
+# clobber dst_mem.base's own physical register as an ordinary caller-saved
+# side effect. test_array_field_via_returning_call_followed_by_sibling_
+# field is the test that actually caught this -- verified directly (the
+# sibling field silently read back as 0 instead of its real value) rather
+# than merely reasoned about, matching how the address-offset bug was
+# found. Both this and the zero-fill feature needed the identical fix:
+# push/pop dst_mem.base around EVERY field's own write, not just the
+# scalar case.
+# ---------------------------------------------------------------------------
+
+class TestNamedStructLiteralZeroFill:
+    pytestmark = GCC_SKIP
+
+    def test_omitted_int_field(self):
+        assert_program_exit_code(
+            "struct A:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    A a = A(x=5)\n"
+            "    return a.x + a.y\n",
+            5,
+        )
+
+    def test_omitted_bool_field(self):
+        assert_program_exit_code(
+            "struct A:\n"
+            "    int x\n"
+            "    bool flag\n"
+            "\n"
+            "def int main():\n"
+            "    A a = A(x=1)\n"
+            "    if a.flag:\n"
+            "        return 1\n"
+            "    return 0\n",
+            0,
+        )
+
+    def test_omitted_str_field(self):
+        """The omitted field is a real, valid (empty) string, not a
+        null pointer -- proven by concatenating onto it, not just by
+        not crashing when it's printed."""
+        assert_program_stdout(
+            "struct Person:\n"
+            "    int age\n"
+            "    str name\n"
+            "\n"
+            "def int main():\n"
+            "    Person p = Person(age=30)\n"
+            "    print(p.name + 'x')\n"
+            "    return 0\n",
+            "x\n",
+        )
+
+    def test_omitted_slice_field(self):
+        assert_program_exit_code(
+            "struct Holder:\n"
+            "    int tag\n"
+            "    []int xs\n"
+            "\n"
+            "def int main():\n"
+            "    Holder h = Holder(tag=1)\n"
+            "    return len(h.xs)\n",
+            0,
+        )
+
+    def test_omitted_array_field(self):
+        assert_program_exit_code(
+            "struct Row:\n"
+            "    int tag\n"
+            "    [3]int values\n"
+            "\n"
+            "def int main():\n"
+            "    Row r = Row(tag=1)\n"
+            "    return r.values[0] + r.values[1] + r.values[2]\n",
+            0,
+        )
+
+    def test_omitted_struct_field(self):
+        assert_program_exit_code(
+            "struct Inner:\n"
+            "    int v\n"
+            "struct Outer:\n"
+            "    int tag\n"
+            "    Inner inner\n"
+            "\n"
+            "def int main():\n"
+            "    Outer o = Outer(tag=1)\n"
+            "    return o.inner.v\n",
+            0,
+        )
+
+    def test_multiple_omitted_fields_interspersed_with_provided_ones(self):
+        assert_program_exit_code(
+            "struct Five:\n"
+            "    int a\n"
+            "    int b\n"
+            "    int c\n"
+            "    int d\n"
+            "    int e\n"
+            "\n"
+            "def int main():\n"
+            "    Five f = Five(a=1, c=3, e=5)\n"
+            "    return f.a + f.b + f.c + f.d + f.e\n",
+            9,
+        )
+
+    def test_omitted_array_field_followed_by_a_provided_scalar_field(self):
+        """Proves the array field's own zero-fill doesn't corrupt a
+        LATER, explicitly-provided sibling field's own address -- the
+        same push/pop protection this feature needed for
+        gen_struct_literal_into's own dst_mem.base, now exercised with
+        the omitted field coming FIRST."""
+        assert_program_exit_code(
+            "struct Triple:\n"
+            "    [5000]int mid\n"
+            "    int c\n"
+            "\n"
+            "def int main():\n"
+            "    Triple t = Triple(c=7)\n"
+            "    return t.mid[2500] + t.c\n",
+            7,
+        )
+
+    def test_array_field_via_returning_call_followed_by_sibling_field(self):
+        """A genuinely pre-existing, previously-undiscovered bug: an
+        array-returning-call field (an ordinary, fully-PROVIDED value,
+        nothing to do with zero-fill at all) followed by ANY sibling
+        field, on a heap-allocated struct, used to silently corrupt
+        that sibling field's own write -- the call clobbers dst_mem's
+        own base register as an ordinary side effect, and nothing
+        restored it before the next field assumed it was still valid.
+        See this class's own module comment for the fix."""
+        assert_program_exit_code(
+            "def [5000]int makeArr():\n"
+            "    [5000]int a\n"
+            "    a[0] = 7\n"
+            "    return a\n"
+            "\n"
+            "struct Triple:\n"
+            "    int a\n"
+            "    [5000]int mid\n"
+            "    int c\n"
+            "\n"
+            "def int main():\n"
+            "    Triple t = Triple(1, makeArr(), 2)\n"
+            "    return t.a + t.mid[0] + t.c\n",
+            10,
+        )
+
+    def test_nested_named_literal_with_omitted_inner_field(self):
+        assert_program_exit_code(
+            "struct Inner:\n"
+            "    int a\n"
+            "    int b\n"
+            "struct Outer:\n"
+            "    Inner inner\n"
+            "    int tag\n"
+            "\n"
+            "def int main():\n"
+            "    Outer o = Outer(inner=Inner(a=1), tag=2)\n"
+            "    return o.inner.a + o.inner.b + o.tag\n",
+            3,
+        )
+
+    def test_all_but_one_field_omitted(self):
+        """The most omitted a NAMED literal can validly be: at least
+        one `name=value` pair has to be written for the parser to
+        recognize named syntax at all (see Call's own docstring in
+        parser.py) -- `Point()` with zero arguments is indistinguishable
+        from positional-with-zero-args, and hits the ordinary exhaustive
+        'expects N arguments, got 0' error instead, not this feature at
+        all. Verified directly rather than assumed."""
+        assert_program_exit_code(
+            "struct Triple:\n"
+            "    int a\n"
+            "    int b\n"
+            "    int c\n"
+            "\n"
+            "def int main():\n"
+            "    Triple t = Triple(b=5)\n"
+            "    return t.a + t.b + t.c\n",
+            5,
+        )
+
+    def test_three_consecutive_omitted_composite_fields(self):
+        """An array, a struct, and a slice field, all three omitted
+        and adjacent -- exercises protect_dst across three consecutive
+        zero-fills in a row, each of a genuinely different kind."""
+        assert_program_exit_code(
+            "struct Inner:\n"
+            "    int v\n"
+            "struct Big:\n"
+            "    [5000]int arr\n"
+            "    Inner inner\n"
+            "    []int sl\n"
+            "    int tag\n"
+            "\n"
+            "def int main():\n"
+            "    Big b = Big(tag=42)\n"
+            "    return b.arr[100] + b.inner.v + len(b.sl) + b.tag\n",
+            42,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Array/slice literals with struct-typed elements (`[p1, p2]`, `[Point(1,2),
 # Point(3,4)]`, `[N]Point[...]`, `[]Point[...]`). This was a real, pre-
 # existing gap in gen_array_literal_into (no STRUCT-typed element case at
@@ -11121,13 +11342,14 @@ class TestImplicitZeroValue:
             14,
         )
 
-    def test_partial_named_struct_literal_is_unaffected(self):
-        """A deliberately separate, still-open decision (see the
-        struct-literal work's own docstring): omitting a field in a
-        NAMED struct literal still leaves that field genuinely
-        uninitialized, not zero-filled -- implicit zero-init applies
-        only to a VarDecl with NO initializer at all, not to a partial
-        one written explicitly."""
+    def test_partial_named_struct_literal_now_zero_fills(self):
+        """The deliberate, temporary inconsistency this test used to
+        document is now closed: an omitted field in a named struct
+        literal gets its own implicit zero value too, the same as a
+        `T x` VarDecl with no initializer at all -- see gen_struct_
+        literal_into's own docstring in codegen.py for the actual
+        mechanism, and TestNamedStructLiterals for the fuller test
+        coverage of this specifically."""
         assert_program_exit_code(
             "struct A:\n"
             "    int x\n"
@@ -11135,7 +11357,7 @@ class TestImplicitZeroValue:
             "\n"
             "def int main():\n"
             "    A a = A(x=5)\n"
-            "    return a.x\n",
+            "    return a.x + a.y\n",
             5,
         )
 

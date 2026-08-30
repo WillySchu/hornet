@@ -5396,18 +5396,36 @@ class CodeGenerator:
         writing, one level over: each field's value is routed to
         whichever value-producing method its OWN declared type needs
         -- gen_array_value_into/gen_slice_value_into/gen_struct_value_
-        into for a composite field (each of which already protects an
-        arbitrary destination base internally, so this can just hand
-        them dst_mem's own field offset directly), or a plain gen_
-        expr_into for a scalar (int/bool/str) field, with dst_mem's
-        own base protected on the stack across that one call exactly
-        like gen_array_literal_into's own scalar-element case already
-        does -- and for the identical reason: gen_expr_into always
-        computes into %eax/%rax, which would otherwise silently
-        clobber a destination address held in a general-purpose
-        register (e.g. a struct literal written directly through a
-        hidden return pointer, or as an array-of-structs element)
-        before it's ever used.
+        into for a composite field, or a plain gen_expr_into for a
+        scalar (int/bool/str) field.
+
+        dst_mem's own base is protected via push/pop around EVERY
+        field's own write, when it isn't 'rbp' -- not just the scalar
+        case, and not just the ones that happen to need it. This used
+        to be scoped to the scalar case only, on the reasoning that
+        gen_array_value_into/gen_slice_value_into/gen_struct_value_
+        into "already protect an arbitrary destination base
+        internally" -- true for THEIR OWN write, but not for what
+        happens to dst_mem.base's own physical register as a SIDE
+        EFFECT of writing that one field, which the NEXT field then
+        silently inherits. A composite field's own value can involve a
+        real function call (an array-, slice-, or struct-returning
+        Call) that clobbers dst_mem.base's own register as an ordinary
+        caller-saved side effect of that call -- verified directly: a
+        struct literal with an array-returning-call field FOLLOWED BY
+        any other field, on a heap-allocated destination, silently
+        corrupted that later field's own write (it computed the
+        field's address from whatever garbage the call left behind,
+        not the struct's real base) before this fix. Push-before-the-
+        field's-own-write, pop-after fixes it the same way the scalar
+        case's own push/compute/restore/write ordering already
+        avoided the identical hazard for a scalar-typed value's own
+        call: the call's own clobbering only matters for whether
+        dst_mem.base survives for the NEXT field, not for whether
+        THIS field's own write is correct (composite fields write
+        through a hidden pointer computed and pushed onto the real
+        stack BEFORE the call runs, so the call clobbering registers
+        afterward never affects a write that already happened).
 
         A slice-typed field's value can be `none` -- checked here via
         isinstance, not the field's own resolved type (which for a
@@ -5428,31 +5446,33 @@ class CodeGenerator:
 
         NAMED construction (expr.kwargs populated instead of
         expr.args -- see Call's own docstring in parser.py) is
-        normalized into the exact same (field_name, value_expr,
-        field_type) shape the positional form already iterates, via a
-        dict lookup by name instead of a zip-by-position -- everything
-        below this point runs identically either way, with no
-        per-field code duplicated between the two forms. PARTIAL
-        construction (a named literal omitting a field entirely) needs
-        no special handling at all here either: an omitted field
-        simply never appears in `entries`, so no instructions are ever
-        emitted for its own offset -- its storage is left exactly as
-        it was in dst_mem before this method ran (garbage, on the
-        stack; whatever malloc happened to return, on the heap). This
-        is now a deliberate, temporary inconsistency with _gen_zero_
-        value_into's own implicit zero-init for a `T x` VarDecl with
-        NO initializer at all, not a claim that every uninitialized-
-        memory case in this language still works the same way -- a
-        partial named literal's own omitted field was intentionally
-        left as a separate follow-up rather than updated alongside
-        that feature (see check_struct_literal's own docstring in
-        semantic.py for the fuller note)."""
+        normalized into the same (field_name, value_expr, field_type)
+        shape the positional form already iterates, via a dict lookup
+        by name instead of a zip-by-position -- but unlike the
+        positional form (always exhaustive), this walks EVERY one of
+        the struct's own fields, in declaration order, not just the
+        ones expr.kwargs actually provided: an omitted field's own
+        `value_expr` comes back as None from that lookup, which the
+        per-field loop recognizes as its own distinct case (see just
+        below) rather than being silently absent from the loop
+        entirely the way it used to be.
+
+        PARTIAL construction (a named literal omitting a field
+        entirely, `arg_expr is None` in the loop below) now gets that
+        field's own implicit zero value -- the exact same _gen_zero_
+        value_into a `T x` VarDecl with no initializer at all already
+        uses -- rather than being skipped and left as whatever dst_mem
+        already held. This closes the deliberate, temporary
+        inconsistency this docstring used to describe: partial
+        construction was left as a separate follow-up when zero-init
+        first shipped specifically so it could be revisited once that
+        feature existed to reuse, and this is that follow-up."""
         struct_info = self.struct_registry[struct_type.struct_name]
         if expr.kwargs is not None:
-            field_types = struct_info.fields
+            provided = dict(expr.kwargs)
             entries = [
-                (field_name, value_expr, field_types[field_name])
-                for field_name, value_expr in expr.kwargs
+                (field_name, provided.get(field_name), field_type)
+                for field_name, field_type in struct_info.fields.items()
             ]
         else:
             field_items = list(struct_info.fields.items())
@@ -5465,17 +5485,42 @@ class CodeGenerator:
         for field_name, arg_expr, field_type in entries:
             field_offset = self._field_offset(struct_type.struct_name, field_name)
             field_mem = Memory(dst_mem.base, dst_mem.offset + field_offset)
+            if arg_expr is None:
+                # An OMITTED field in a NAMED, partial literal (only
+                # possible when expr.kwargs is not None -- positional
+                # construction is exhaustive, so arg_expr is never
+                # None there) -- gets its own type's implicit zero
+                # value, via the exact same _gen_zero_value_into a `T
+                # x` VarDecl with no initializer at all already uses.
+                if protect_dst:
+                    instructions.append(Push(Register(dst_mem.base)))
+                instructions.extend(self._gen_zero_value_into(field_type, field_mem))
+                if protect_dst:
+                    instructions.append(Pop(Register(dst_mem.base)))
+                continue
             if field_type.kind == TypeKind.ARRAY:
+                if protect_dst:
+                    instructions.append(Push(Register(dst_mem.base)))
                 instructions.extend(self.gen_array_value_into(arg_expr, field_mem, field_type))
+                if protect_dst:
+                    instructions.append(Pop(Register(dst_mem.base)))
                 continue
             if field_type.kind == TypeKind.SLICE:
+                if protect_dst:
+                    instructions.append(Push(Register(dst_mem.base)))
                 if isinstance(arg_expr, NoneLiteral):
                     instructions.extend(self.gen_none_into(field_mem, field_type))
                 else:
                     instructions.extend(self.gen_slice_value_into(arg_expr, field_mem))
+                if protect_dst:
+                    instructions.append(Pop(Register(dst_mem.base)))
                 continue
             if field_type.kind == TypeKind.STRUCT:
+                if protect_dst:
+                    instructions.append(Push(Register(dst_mem.base)))
                 instructions.extend(self.gen_struct_value_into(arg_expr, field_mem, field_type))
+                if protect_dst:
+                    instructions.append(Pop(Register(dst_mem.base)))
                 continue
             if protect_dst:
                 instructions.append(Push(Register(dst_mem.base)))
