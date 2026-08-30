@@ -14,35 +14,37 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
+- Implicit zero value initialization for uninitialized variables / fields.
+- Add `byte` type.
+- Casting.
+- `type` type.
+` typeof`
+- `fuction` type.
+- Change slice's zero type to an empty slice rather than `none`.
 - Struct literals as bare statement.
 - Unnamed struct field access.
 - Disallow untyped array literals from anything except assignment to a typed variable / parameter / return.
 - Add source location for error messages from semantic analysis.
-- `fuction` type.
 - Reconsider heap allocated literal arrays for `gen_indexable_base_into` (apparently `len([1, 2, 3])` and `[1, 2, 3][0]` work?)
-- Change slice's zero type to an empty slice rather than `none`.
-- Implicit zero value initialization for uninitialized variables / fields.
 - `assert`
 - `in` keyword.
 - `cap` builtin?
 - Compound index assign.
 - Ternary.
 - For loops.
-- Add `byte` type.
-- Fix strings to basically be byte slices.
 - Dicts.
 - Slice / index an array return directly on function calls.
 - Stack based params to get around parameter limit.
 - Explore per frame vs per array heap promotion.
 - Slice equality?
 - Escape analysis for arrays and slices.
-- `type` Type?
 - Dedpulicate emitted type descriptors when we call print()
 - Variadic functions.
 - Make `append` variadic.
 - Spread operator.
 - `is` keyword.
 - FFI
+- Fix strings to basically be byte slices.
 - Sum types / pattern matching.
 - Register virtualization
 - int64

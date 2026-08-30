@@ -4791,18 +4791,44 @@ class CodeGenerator:
         """Computes the ADDRESS a Memory operand refers to, into `dst`
         (a 64-bit register). Memory('rbp', offset) needs a real leaq --
         the address is offset-from-frame-pointer, not stored anywhere
-        as a value in its own right; Memory(some_reg, 0) already IS an
-        address, sitting directly in some_reg (see gen_array_copy's own
-        docstring for how that shape arises elsewhere in this file), so
-        this just copies it. Used specifically for passing a Memory
+        as a value in its own right; Memory(some_reg, offset) already
+        HAS its address sitting directly in some_reg, with `offset`
+        (if non-zero) added on top via a single AddQ -- see gen_array_
+        copy's own docstring for how the some_reg shape arises
+        elsewhere in this file. Used specifically for passing a Memory
         destination on as a POINTER argument -- the hidden output
-        pointer for an array-returning call (gen_array_call_into) or an
-        array-typed argument's own address (gen_array_arg_address_into)
-        -- everywhere else, a Memory operand is read from or written to
-        directly rather than having its own address taken."""
+        pointer for an array-returning call (gen_array_call_into) or a
+        struct-returning one (gen_struct_call_into, which is really
+        gen_array_call_into under a different name -- see its own
+        docstring) -- everywhere else, a Memory operand is read from
+        or written to directly rather than having its own address
+        taken.
+
+        The offset(some_reg) case used to assume offset was always 0
+        whenever base wasn't 'rbp' -- true at the time, since nothing
+        computed a destination this way for anything but the WHOLE of
+        a Memory destination, offset already folded in or genuinely
+        zero. That stopped being true once a struct literal's own
+        array-typed FIELD could be populated directly by an array-
+        returning call (`Big(1, makeArr())`, where `data` -- an array
+        field -- sits at some non-zero offset on a heap-allocated
+        Big): gen_struct_literal_into's own field_mem for that field
+        is Memory('rax', 4), say, and the OLD version of this method
+        silently discarded that +4, handing makeArr() the STRUCT's own
+        base address as its hidden return pointer instead of the
+        field's -- a real, silent miscompile (verified directly: it
+        corrupted the PRECEDING field along with the start of the
+        array itself), not a hypothetical one. Adding the AddQ here is
+        safe for every EXISTING caller too: each one already only ever
+        passed offset=0 for a non-'rbp' base, so this is a pure
+        generalization, not a behavior change for anything already
+        working."""
         if mem.base == 'rbp':
             return [LeaQFrame(offset=mem.offset, dst=dst)]
-        return [MovQ(src=Register(mem.base), dst=dst)]
+        instructions = [MovQ(src=Register(mem.base), dst=dst)]
+        if mem.offset:
+            instructions.append(AddQ(src=Imm(mem.offset), dst=dst))
+        return instructions
 
     def _gen_materialize_argument_temp_into(self, expr: Node, t: Type, dst: Register) -> List[Instruction]:
         """Materializes an array- or struct-typed expression that has

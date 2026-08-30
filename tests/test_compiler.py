@@ -10683,6 +10683,96 @@ class TestNamedStructLiterals:
 # literal either.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Regression: _gen_address_of_memory_into's own hidden-return-pointer
+# computation used to silently assume a non-'rbp' Memory base always carried
+# a zero offset -- true at every call site that existed when it was written,
+# since nothing had ever needed a struct FIELD's own address (as opposed to
+# the whole of some destination) passed on as a hidden output pointer. That
+# stopped being true once a struct literal's array-typed field could be
+# populated directly by an array-returning call: for a heap-allocated struct
+# whose array field isn't the FIRST one, gen_struct_literal_into's own
+# field_mem for that field is Memory('rax', <non-zero offset>), and the old
+# code silently discarded the offset, handing the returning call the WHOLE
+# STRUCT's own base address instead of the field's -- corrupting whatever
+# preceded that field along with the start of the array itself, with no
+# error raised at all. Fixed by having _gen_address_of_memory_into add the
+# offset via an ordinary AddQ when it's non-zero, which is a pure
+# generalization: every existing caller already only ever passed offset=0
+# for a non-'rbp' base, so nothing already working changes.
+# ---------------------------------------------------------------------------
+
+class TestStructLiteralArrayFieldAddressRegression:
+    pytestmark = GCC_SKIP
+
+    def test_array_returning_call_into_a_non_first_struct_field(self):
+        """The exact shape that surfaced the bug: `data` sits at a
+        non-zero offset (after `tag`), and Big is large enough to be
+        heap-allocated -- both conditions were necessary to reach the
+        buggy path at all."""
+        assert_program_exit_code(
+            "def [5000]int makeArr():\n"
+            "    [5000]int a\n"
+            "    a[4999] = 77\n"
+            "    return a\n"
+            "\n"
+            "struct Big:\n"
+            "    int tag\n"
+            "    [5000]int data\n"
+            "\n"
+            "def int main():\n"
+            "    Big b = Big(1, makeArr())\n"
+            "    return b.data[4999] % 256\n",
+            77,
+        )
+
+    def test_preceding_field_is_not_corrupted(self):
+        """The bug didn't just misplace the array -- it also
+        overwrote whatever came before it (here, `tag`) with the
+        start of the array-returning call's own result."""
+        assert_program_exit_code(
+            "def [5000]int makeArr():\n"
+            "    [5000]int a\n"
+            "    a[4999] = 77\n"
+            "    return a\n"
+            "\n"
+            "struct Big:\n"
+            "    int tag\n"
+            "    [5000]int data\n"
+            "\n"
+            "def int main():\n"
+            "    Big b = Big(1, makeArr())\n"
+            "    return b.tag\n",
+            1,
+        )
+
+    def test_struct_returning_call_into_a_non_first_struct_field(self):
+        """The identical bug shape one level over: a struct-typed
+        field (not an array-typed one) at a non-zero offset, populated
+        by a struct-returning call -- gen_struct_call_into is really
+        gen_array_call_into under a different name, so it shares the
+        exact same _gen_address_of_memory_into call and was fixed by
+        the same change."""
+        assert_program_exit_code(
+            "struct Inner:\n"
+            "    [5000]int data\n"
+            "\n"
+            "def Inner makeInner():\n"
+            "    [5000]int a\n"
+            "    a[4999] = 42\n"
+            "    return Inner(a)\n"
+            "\n"
+            "struct Outer:\n"
+            "    int tag\n"
+            "    Inner inner\n"
+            "\n"
+            "def int main():\n"
+            "    Outer o = Outer(9, makeInner())\n"
+            "    return o.tag + o.inner.data[4999]\n",
+            51,
+        )
+
+
 class TestArraysOfStructs:
     pytestmark = GCC_SKIP
 
