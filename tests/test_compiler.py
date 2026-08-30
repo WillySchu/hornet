@@ -4029,6 +4029,448 @@ class TestStructEquality:
         )
 
 
+# ---------------------------------------------------------------------------
+# Methods: `def [type] name(receiver, param2, ...):` declared inside a struct
+# body, called via `receiver.name(args)`. Entirely syntactic sugar, lowered
+# away before codegen.py ever runs: semantic.py's _collect_methods
+# synthesizes an ordinary, mangled-name Function (StructName.methodName --
+# '.' can never appear inside a single Hornet IDENTIFIER token, so this is
+# collision-free by construction, not by an explicit check) with the
+# receiver as an ordinary first Param, and appends it directly to
+# Program.functions. A method CALL parses into an ordinary Call node with a
+# new `receiver` field set (not a separate AST node type -- see Call's own
+# docstring in parser.py for why introducing one would have meant auditing
+# every isinstance(expr, Call) check across this codebase); check_call's own
+# _check_method_call resolves it and REWRITES the node in place -- receiver
+# prepended as the real first argument, name replaced with the mangled one
+# -- so codegen.py needed ZERO changes for this feature at all.
+#
+# test_receiver_via_struct_returning_call is worth calling out specifically:
+# once the receiver is rewritten into an ordinary first argument, it flows
+# through the exact same argument-materialization machinery (_collect_
+# argument_temps / _gen_materialize_argument_temp_into) already built for
+# struct-literal and struct-returning-call ARGUMENTS -- meaning a struct-
+# returning call works directly as a method receiver with no extra code,
+# even though a struct LITERAL receiver is still rejected (for an unrelated
+# reason: it's simply not one of the positions struct literals are allowed
+# to appear in at all, an existing restriction with nothing method-specific
+# about it).
+# ---------------------------------------------------------------------------
+
+class TestMethods:
+    pytestmark = GCC_SKIP
+
+    def test_basic_method_call(self):
+        assert_program_exit_code(
+            "struct A:\n"
+            "    int a\n"
+            "    def int add_b(s, int b):\n"
+            "        return s.a + b\n"
+            "\n"
+            "def int main():\n"
+            "    A a = A(a=1)\n"
+            "    return a.add_b(5)\n",
+            6,
+        )
+
+    def test_method_with_no_declared_return_type_as_a_bare_statement(self):
+        """A method can have no declared return type, exactly like an
+        ordinary function -- called as a bare statement (its own
+        result, if any, discarded) rather than used as a value."""
+        assert_program_stdout(
+            "struct A:\n"
+            "    int a\n"
+            "    def add_b(s, int b):\n"
+            "        print(s.a + b)\n"
+            "\n"
+            "def int main():\n"
+            "    A a = A(a=1)\n"
+            "    a.add_b(5)\n"
+            "    return 0\n",
+            "6\n",
+        )
+
+    def test_value_semantics_receiver_is_not_mutated(self):
+        """The receiver is copied on entry, exactly like an ordinary
+        struct-typed parameter -- there are no pointers yet, so a
+        method mutating its own receiver never affects the caller's
+        own value."""
+        assert_program_exit_code(
+            "struct Counter:\n"
+            "    int n\n"
+            "    def mutate(s):\n"
+            "        s.n = 999\n"
+            "\n"
+            "def int main():\n"
+            "    Counter c = Counter(n=1)\n"
+            "    c.mutate()\n"
+            "    return c.n\n",
+            1,
+        )
+
+    def test_method_returning_a_struct(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "    def Point doubled(s):\n"
+            "        return Point(s.x * 2, s.y * 2)\n"
+            "\n"
+            "def int main():\n"
+            "    Point p = Point(3, 4)\n"
+            "    Point d = p.doubled()\n"
+            "    return d.x + d.y\n",
+            14,
+        )
+
+    def test_method_returning_a_slice(self):
+        assert_program_exit_code(
+            "struct Row:\n"
+            "    [3]int values\n"
+            "    def []int asSlice(s):\n"
+            "        return s.values[:]\n"
+            "\n"
+            "def int main():\n"
+            "    Row r = Row([1, 2, 3])\n"
+            "    []int sl = r.asSlice()\n"
+            "    return sl[0] + sl[1] + sl[2]\n",
+            6,
+        )
+
+    def test_method_with_array_field_and_array_param(self):
+        assert_program_exit_code(
+            "struct Row:\n"
+            "    [3]int values\n"
+            "    def int sumPlus(s, [3]int other):\n"
+            "        return s.values[0] + s.values[1] + s.values[2] + other[0] + other[1] + other[2]\n"
+            "\n"
+            "def int main():\n"
+            "    Row r = Row([1, 2, 3])\n"
+            "    return r.sumPlus([10, 20, 30])\n",
+            66,
+        )
+
+    def test_method_calling_another_method_on_the_same_struct(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "    def int getX(s):\n"
+            "        return s.x\n"
+            "    def int sum(s):\n"
+            "        return s.getX() + s.y\n"
+            "\n"
+            "def int main():\n"
+            "    Point p = Point(3, 4)\n"
+            "    return p.sum()\n",
+            7,
+        )
+
+    def test_method_and_free_function_sharing_a_name(self):
+        """Methods live in their own registry, keyed by (struct,
+        method) and resolved by receiver type, not by a bare name
+        lookup -- so a method and a free function can share a name
+        with zero conflict, unlike struct and function names, which
+        DO share one namespace (see analyze()'s own collision check)."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    def int getX(s):\n"
+            "        return s.x\n"
+            "\n"
+            "def int getX(int v):\n"
+            "    return v + 100\n"
+            "\n"
+            "def int main():\n"
+            "    Point p = Point(5)\n"
+            "    return p.getX() + getX(1)\n",
+            106,
+        )
+
+    def test_two_different_structs_with_same_named_methods(self):
+        assert_program_exit_code(
+            "struct A:\n"
+            "    int v\n"
+            "    def int getV(s):\n"
+            "        return s.v\n"
+            "struct B:\n"
+            "    int v\n"
+            "    def int getV(s):\n"
+            "        return s.v * 10\n"
+            "\n"
+            "def int main():\n"
+            "    A a = A(3)\n"
+            "    B b = B(3)\n"
+            "    return a.getV() + b.getV()\n",
+            33,
+        )
+
+    def test_method_name_matching_a_field_name(self):
+        """`w.x()` (call) and `w.x` (field read) are unambiguous
+        purely from whether '(' follows -- no restriction needed to
+        keep a method and a field of the same name apart."""
+        assert_program_exit_code(
+            "struct Weird:\n"
+            "    int x\n"
+            "    def int x(s):\n"
+            "        return 42\n"
+            "\n"
+            "def int main():\n"
+            "    Weird w = Weird(1)\n"
+            "    return w.x() + w.x\n",
+            43,
+        )
+
+    def test_receiver_via_a_field_access_chain(self):
+        assert_program_exit_code(
+            "struct Inner:\n"
+            "    int v\n"
+            "    def int doubled(s):\n"
+            "        return s.v * 2\n"
+            "struct Outer:\n"
+            "    Inner i\n"
+            "\n"
+            "def int main():\n"
+            "    Outer o = Outer(Inner(5))\n"
+            "    return o.i.doubled()\n",
+            10,
+        )
+
+    def test_method_call_as_a_function_argument(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    def int getX(s):\n"
+            "        return s.x\n"
+            "\n"
+            "def int addOne(int v):\n"
+            "    return v + 1\n"
+            "\n"
+            "def int main():\n"
+            "    Point p = Point(9)\n"
+            "    return addOne(p.getX())\n",
+            10,
+        )
+
+    def test_method_call_as_an_array_literal_element(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    def int getX(s):\n"
+            "        return s.x\n"
+            "\n"
+            "def int main():\n"
+            "    Point p1 = Point(1)\n"
+            "    Point p2 = Point(2)\n"
+            "    [2]int xs = [p1.getX(), p2.getX()]\n"
+            "    return xs[0] + xs[1]\n",
+            3,
+        )
+
+    def test_method_call_as_index_assign_value(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    def int getX(s):\n"
+            "        return s.x\n"
+            "\n"
+            "def int main():\n"
+            "    Point p = Point(7)\n"
+            "    [1]int arr\n"
+            "    arr[0] = p.getX()\n"
+            "    return arr[0]\n",
+            7,
+        )
+
+    def test_method_call_as_field_assign_value(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    def int getX(s):\n"
+            "        return s.x\n"
+            "struct Holder:\n"
+            "    int v\n"
+            "\n"
+            "def int main():\n"
+            "    Point p = Point(8)\n"
+            "    Holder h\n"
+            "    h.v = p.getX()\n"
+            "    return h.v\n",
+            8,
+        )
+
+    def test_chained_method_calls(self):
+        """`o.getInner().doubled()` -- the receiver of the SECOND
+        method call is itself the result of the first."""
+        assert_program_exit_code(
+            "struct Inner:\n"
+            "    int v\n"
+            "    def int doubled(s):\n"
+            "        return s.v * 2\n"
+            "struct Outer:\n"
+            "    Inner i\n"
+            "    def Inner getInner(s):\n"
+            "        return s.i\n"
+            "\n"
+            "def int main():\n"
+            "    Outer o = Outer(Inner(7))\n"
+            "    return o.getInner().doubled()\n",
+            14,
+        )
+
+    def test_receiver_via_struct_returning_call(self):
+        """A struct-RETURNING call works directly as a method receiver
+        -- not restricted to a Variable/Field/Index the way it might
+        seem it should be -- because the receiver, once rewritten into
+        an ordinary first argument, is materialized by the exact same
+        machinery already built for struct-returning calls used as
+        ordinary function arguments. See this class's own module
+        comment for why a struct LITERAL receiver is different (still
+        rejected, but for an unrelated, pre-existing reason)."""
+        assert_program_exit_code(
+            "struct A:\n"
+            "    int v\n"
+            "    def int foo(s):\n"
+            "        return s.v\n"
+            "\n"
+            "def A makeA():\n"
+            "    return A(9)\n"
+            "\n"
+            "def int main():\n"
+            "    return makeA().foo()\n",
+            9,
+        )
+
+    def test_struct_literal_as_receiver_is_rejected(self):
+        """Not a method-specific restriction: a struct literal used
+        directly as a method call's own receiver simply isn't one of
+        the positions struct literals are allowed to appear in at all
+        (see check_struct_literal's own docstring for the full list),
+        so this is rejected by the existing position-restriction
+        system with no new code needed for methods specifically."""
+        assert_program_semantic_error(
+            "struct A:\n"
+            "    int v\n"
+            "    def int foo(s):\n"
+            "        return s.v\n"
+            "\n"
+            "def int main():\n"
+            "    return A(1).foo()\n",
+            match="only allowed as a variable's initializer",
+        )
+
+    def test_duplicate_method_name_on_the_same_struct_is_rejected(self):
+        assert_program_semantic_error(
+            "struct A:\n"
+            "    int v\n"
+            "    def int foo(s):\n"
+            "        return 1\n"
+            "    def int foo(s):\n"
+            "        return 2\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="already declared on struct",
+        )
+
+    def test_undefined_method_is_rejected(self):
+        assert_program_semantic_error(
+            "struct A:\n"
+            "    int v\n"
+            "\n"
+            "def int main():\n"
+            "    A a = A(1)\n"
+            "    return a.bar()\n",
+            match="has no method 'bar'",
+        )
+
+    def test_method_call_on_a_non_struct_value_is_rejected(self):
+        assert_program_semantic_error(
+            "def int main():\n"
+            "    int x = 5\n"
+            "    return x.foo()\n",
+            match="methods are only defined on structs",
+        )
+
+    def test_wrong_argument_count_is_rejected(self):
+        assert_program_semantic_error(
+            "struct A:\n"
+            "    int v\n"
+            "    def int foo(s, int b):\n"
+            "        return b\n"
+            "\n"
+            "def int main():\n"
+            "    A a = A(1)\n"
+            "    return a.foo()\n",
+            match="expects 1 argument",
+        )
+
+    def test_wrong_argument_type_is_rejected(self):
+        assert_program_semantic_error(
+            "struct A:\n"
+            "    int v\n"
+            "    def int foo(s, int b):\n"
+            "        return b\n"
+            "\n"
+            "def int main():\n"
+            "    A a = A(1)\n"
+            "    return a.foo('nope')\n",
+            match="should be int",
+        )
+
+    def test_struct_literal_as_method_argument(self):
+        """A struct literal works as a method's own argument, exactly
+        like it does for an ordinary function call -- _check_method_
+        call's own argument loop uses _check_expr_allowing_struct_
+        literal, the same helper every other allowed position uses."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "struct Line:\n"
+            "    int id\n"
+            "    def int sumWith(s, Point p):\n"
+            "        return p.x + p.y + s.id\n"
+            "\n"
+            "def int main():\n"
+            "    Line l = Line(1)\n"
+            "    return l.sumWith(Point(2, 3))\n",
+            6,
+        )
+
+    def test_receiver_counts_toward_the_six_argument_register_limit(self):
+        """The receiver occupies one of the same 6 argument-register
+        slots an ordinary parameter would -- a method with 6 explicit
+        parameters (7 slots total, including the receiver) hits the
+        exact same limit a 7-parameter free function already would."""
+        source = (
+            "struct A:\n"
+            "    int v\n"
+            "    def int sum6(s, int a, int b, int c, int d, int e, int f):\n"
+            "        return a + b + c + d + e + f\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        with pytest.raises(CodegenError, match="needs 7 argument register"):
+            generate_asm(ast, platform=ASM_PLATFORM)
+
+    def test_five_explicit_params_plus_receiver_fits_exactly(self):
+        assert_program_exit_code(
+            "struct A:\n"
+            "    int v\n"
+            "    def int sum5(s, int a, int b, int c, int d, int e):\n"
+            "        return a + b + c + d + e\n"
+            "\n"
+            "def int main():\n"
+            "    A x = A(1)\n"
+            "    return x.sum5(1, 2, 3, 4, 5)\n",
+            15,
+        )
+
+
 class TestTypedArrayLiterals:
     pytestmark = GCC_SKIP
 
@@ -10820,6 +11262,7 @@ class TestASTPrettyPrinting:
             "        StructField(name='value', field_type='int'),\n"
             "        StructField(name='children', field_type=SliceTypeExpr(element_type='Node')),\n"
             "    ],\n"
+            "    methods=[],\n"
             ")"
         )
 

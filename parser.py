@@ -678,11 +678,41 @@ class Call(Node):
     place this language already treats uninitialized memory as real,
     unwritten UB rather than implicitly zero -- not, for now, filled
     with a zero value the way Go's own struct literals would; that's
-    an intentionally separate, larger piece of follow-up work."""
+    an intentionally separate, larger piece of follow-up work.
+
+    Also `receiver.name(args)` -- a METHOD call (`receiver` populated;
+    None for every other shape above). Parsed by parse_postfix, not
+    parse_call: the receiver is whatever expression already preceded
+    the '.', built by the SAME postfix loop that already builds a
+    Field chain, so `a.b.method(1)` (a method call at the end of a
+    longer field-access chain) already falls out with no special
+    casing needed beyond "does '(' follow the name". Arguments are
+    always positional here -- see parse_postfix's own note on why
+    named arguments don't extend to method calls (at least not yet).
+
+    Only alive as a distinct shape for the DURATION of semantic
+    analysis: check_call's own _check_method_call resolves the
+    receiver's type, looks up the matching method, and then REWRITES
+    this exact node in place -- prepending the receiver into args as
+    an ordinary first argument, replacing `name` with a mangled,
+    guaranteed-collision-free symbol name, and setting receiver back
+    to None -- so that by the time codegen.py (or any of the many
+    isinstance(expr, Call) checks throughout this file) ever sees it,
+    a method call is completely indistinguishable from an ordinary
+    call to that mangled function. This in-place rewrite is exactly
+    the same "mutate the node semantic.py already holds a reference
+    to" pattern check_expr's own resolved_type annotation already
+    uses, just touching two more fields -- deliberately NOT a new,
+    separate AST node type kept alive all the way through codegen,
+    which would otherwise mean auditing every existing isinstance(
+    expr, Call) check across this codebase (there are many: array/
+    struct/slice value production, argument materialization, print,
+    append, ...) to also recognize it."""
     name: str
     args: List[Node] = field(default_factory=list)
     kwargs: Optional[List[Tuple[str, Node]]] = None
     resolved_type: Optional[Any] = None
+    receiver: Optional[Node] = None
 
 
 @dataclass
@@ -860,16 +890,67 @@ class StructField(Node):
 
 
 @dataclass
+class MethodDef(Node):
+    """A method declared inside a struct body: `def [type] name(receiver,
+    param2, ...):` -- syntactically an ordinary `def`, except its FIRST
+    parameter (the receiver) is written as a bare, untyped identifier
+    rather than `type name` -- the enclosing struct's own name is what
+    implicitly gives it its type, the same way `self`/`this` in other
+    languages doesn't need its own type written out. Every parameter
+    AFTER the receiver uses ordinary Param syntax, and return_type
+    follows Function's own identical rule (None means no declared
+    return type at all, not a void keyword).
+
+    Never reaches semantic.py as its own concept for long: analyze()'s
+    own struct-method-collection pass (_collect_methods) immediately
+    synthesizes an ordinary Function from each MethodDef -- the
+    receiver becomes an ordinary first Param, typed as the enclosing
+    struct -- and appends it directly to Program.functions, with a
+    mangled name (StructName.methodName, using '.', a character that
+    can never appear inside a single Hornet IDENTIFIER token -- see
+    the lexer's own IDENTIFIER regex, r'[a-zA-Z_]\\w*' -- so a mangled
+    name can never collide with anything a user could actually write,
+    with no explicit collision check needed anywhere) to avoid
+    colliding with an unrelated method of the same name on a different
+    struct, or with an ordinary free function of the same name. From
+    that point on, every later pass (signature collection, body-
+    checking) and all of codegen.py treat it as an entirely ordinary
+    function; neither ever needs to know MethodDef existed at all."""
+    receiver_name: str
+    name: str
+    return_type: Optional[Union[str, ArrayTypeExpr, SliceTypeExpr]]
+    params: List['Param'] = field(default_factory=list)
+    body: List[Node] = field(default_factory=list)
+
+
+@dataclass
 class StructDef(Node):
-    """`struct Name: <field>+` -- declares a new, NOMINAL type (see
-    semantic.py's own struct-registry pass for what nominal typing
+    """`struct Name: <field-or-method>+` -- declares a new, NOMINAL type
+    (see semantic.py's own struct-registry pass for what nominal typing
     means here and why it falls out naturally from how Type's own
     equality already works). Field order is preserved exactly as
     written, since it determines both codegen's own memory layout
     (fields are laid out at sequential byte offsets in declaration
-    order, with no reordering) and print's own field-printing order."""
+    order, with no reordering) and print's own field-printing order.
+
+    Fields and methods can be freely interleaved -- parse_struct_def's
+    own body loop just checks, line by line, whether the next token is
+    `def` (a method) or a type (a field), with no ordering requirement
+    between the two kinds. This isn't a deliberately permissive design
+    choice so much as the natural one: unlike a field, a method never
+    participates in the struct's own memory layout at all (it's fully
+    lowered away into an ordinary top-level function before codegen
+    ever runs -- see MethodDef's own docstring), so there's no layout
+    reason to require methods to come after every field, and enforcing
+    an ordering restriction anyway would need its own extra state and
+    its own error message for no actual benefit. At least one FIELD is
+    still required (see parse_struct_def's own check) -- a struct with
+    zero fields isn't supported at all yet -- but methods are entirely
+    optional, and a struct with none at all is exactly what every
+    struct looked like before this feature existed."""
     name: str
     fields: List[StructField] = field(default_factory=list)
+    methods: List[MethodDef] = field(default_factory=list)
 
 
 @dataclass
@@ -1198,16 +1279,22 @@ class Parser:
         return Program(functions=functions, structs=structs)
 
     def parse_struct_def(self) -> StructDef:
-        """`struct Name: <field>+` -- a top-level declaration, parsed
-        the same general way a function is: header line, then an
+        """`struct Name: <field-or-method>+` -- a top-level declaration,
+        parsed the same general way a function is: header line, then an
         indented block, with the lexer's own INDENT/DEDENT tokens (see
         lexer.py's tokenize()) already doing the real work of finding
         where the body starts and ends, regardless of what's actually
-        being indented. Each field line is just `type name` -- no
+        being indented. Each FIELD line is just `type name` -- no
         initializer, no assignment -- so this reuses parse_type()
         directly rather than parse_var_decl (which exists specifically
         to also handle an optional `= value` a struct field can't
-        have)."""
+        have). Each METHOD line starts with `def`, unambiguously --
+        disambiguated from a field with a single token of lookahead,
+        since a field's own type can never start with the `def`
+        keyword -- and is delegated to parse_method_def entirely; see
+        StructDef's own docstring for why fields and methods can freely
+        interleave rather than needing methods to come after every
+        field."""
         self.expect(TokenType.STRUCT, "Expected 'struct'")
         name_tok = self.expect(TokenType.IDENTIFIER, "Expected a struct name")
         self.expect(TokenType.COLON, "Expected ':' to start the struct body")
@@ -1216,42 +1303,57 @@ class Parser:
         self.expect(TokenType.INDENT, "Expected an indented struct body")
         self.skip_newlines()
         fields: List[StructField] = []
+        methods: List[MethodDef] = []
         while not self.check(TokenType.DEDENT) and not self.at_end():
-            field_type = self.parse_type()
-            field_name_tok = self.expect(TokenType.IDENTIFIER, "Expected a field name")
-            self.expect(TokenType.NEWLINE, "Expected a newline after a field declaration")
-            fields.append(StructField(name=field_name_tok.val, field_type=field_type))
+            if self.check(TokenType.DEF):
+                methods.append(self.parse_method_def())
+            else:
+                field_type = self.parse_type()
+                field_name_tok = self.expect(TokenType.IDENTIFIER, "Expected a field name")
+                self.expect(TokenType.NEWLINE, "Expected a newline after a field declaration")
+                fields.append(StructField(name=field_name_tok.val, field_type=field_type))
             self.skip_newlines()
         self.expect(TokenType.DEDENT, "Expected a dedent to end the struct body")
         if not fields:
             raise ParseError(
                 f"Expected at least one field in struct '{name_tok.val}'"
             )
-        return StructDef(name=name_tok.val, fields=fields)
+        return StructDef(name=name_tok.val, fields=fields, methods=methods)
+
+    def _check_starts_with_return_type(self) -> bool:
+        """True if the CURRENT position starts an optional return type
+        before a def's own name -- shared by parse_function and parse_
+        method_def, since both need the identical one-or-two-token
+        lookahead to tell `def Point make(...)` (a struct-typed return,
+        an IDENTIFIER immediately followed by ANOTHER identifier) apart
+        from `def make(...)` (no declared return type at all -- a
+        single IDENTIFIER, the def's own name, with no return type
+        before it).
+
+        A type keyword or '[' starts a return type unambiguously with
+        just one token of lookahead -- a function or method name can
+        never itself be one of those, since they're reserved. A
+        struct-typed return is the one case that genuinely needs a
+        SECOND token of lookahead rather than just the first:
+        IDENTIFIER alone is ambiguous between "this names a struct
+        return type" and "this is the def's own name", resolved by
+        peeking one token further -- a SECOND identifier immediately
+        after can only mean the first one was a type name, since a
+        function or method's own name is always immediately followed
+        by '(', never another identifier. Exactly the same two-vs-one-
+        IDENTIFIER disambiguation parse_statement's own struct-typed-
+        VarDecl check already needs, for the identical underlying
+        reason (struct names are ordinary identifiers, not reserved
+        keywords, so there's no way to tell "this identifier is a
+        type" from "this identifier is something else" with only one
+        token of lookahead)."""
+        return self.check(TokenType.INT, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET) or (
+            self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.IDENTIFIER
+        )
 
     def parse_function(self) -> Function:
         self.expect(TokenType.DEF, "Expected 'def' to start a function definition")
-        # A type keyword or '[' starts a return type unambiguously --
-        # a function name can never itself be one of those, since
-        # they're reserved. A struct-typed return (`def Point make():`)
-        # is the one case that genuinely needs a SECOND token of
-        # lookahead rather than just the first: IDENTIFIER alone is
-        # ambiguous between "this is a return type name" (`Point` in
-        # `def Point make():`) and "this is the function's own name,
-        # with no declared return type at all" (`make` in
-        # `def make():`) -- exactly the same two-vs-one-IDENTIFIER
-        # disambiguation parse_statement's own struct-typed-VarDecl
-        # check already needs, for the identical underlying reason
-        # (struct names are ordinary identifiers, not reserved
-        # keywords, so there's no way to tell "this identifier is a
-        # type" from "this identifier is something else" with only one
-        # token of lookahead).
-        if self.check(TokenType.INT, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET) or (
-            self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.IDENTIFIER
-        ):
-            return_type = self.parse_type()
-        else:
-            return_type = None
+        return_type = self.parse_type() if self._check_starts_with_return_type() else None
         name_tok = self.expect(TokenType.IDENTIFIER, "Expected a function name")
         self.expect(TokenType.OPEN_PAREN, "Expected '(' after function name")
         params = self.parse_params()
@@ -1261,6 +1363,34 @@ class Parser:
 
         body = self.parse_block()
         return Function(name=name_tok.val, return_type=return_type, params=params, body=body)
+
+    def parse_method_def(self) -> MethodDef:
+        """`def [type] name(receiver, param2, ...):` -- mirrors parse_
+        function closely (same optional-return-type lookahead, same
+        body parsing), except the FIRST entry in the parameter list is
+        always the receiver, written as a bare, untyped IDENTIFIER with
+        no type-disambiguation logic needed at all: unlike an ordinary
+        Param, there's no ambiguity to resolve here -- the very next
+        token after '(' is unconditionally the receiver's own name,
+        since a method is required to have exactly one (see MethodDef's
+        own docstring for why: no pointers yet means no reference
+        receiver, and no receiver-less "static" methods are supported
+        in this first cut either). Every parameter AFTER the receiver
+        is ordinary Param syntax, reusing parse_param directly."""
+        self.expect(TokenType.DEF, "Expected 'def' to start a method definition")
+        return_type = self.parse_type() if self._check_starts_with_return_type() else None
+        name_tok = self.expect(TokenType.IDENTIFIER, "Expected a method name")
+        self.expect(TokenType.OPEN_PAREN, "Expected '(' after method name")
+        receiver_tok = self.expect(TokenType.IDENTIFIER, "Expected a receiver name as a method's first parameter")
+        params: List[Param] = []
+        while self.match(TokenType.COMMA):
+            params.append(self.parse_param())
+        self.expect(TokenType.CLOSE_PAREN, "Expected ')' after parameter list")
+        self.expect(TokenType.COLON, "Expected ':' to start the method body")
+        self.expect(TokenType.NEWLINE, "Expected a newline after ':'")
+
+        body = self.parse_block()
+        return MethodDef(receiver_name=receiver_tok.val, name=name_tok.val, return_type=return_type, params=params, body=body)
 
     def parse_params(self) -> List[Param]:
         """Parses a comma-separated parameter list -- zero or more
@@ -1625,39 +1755,71 @@ class Parser:
         return self.parse_postfix()
 
     def parse_postfix(self) -> Node:
-        """Wraps a primary expression with zero or more `[...]` or
-        `.name` suffixes -- `[...]` is either an index (`matrix[i][j]`,
-        parsed here as `parse_primary` producing the `matrix` Variable,
-        then this loop wrapping it in two nested Index nodes, one per
-        bracket pair -- see Index's own docstring for why that nesting,
-        rather than a single Index carrying a list of indices, is the
-        right shape) or a slice (`arr[low:high]`, see
-        _parse_index_or_slice for how the two are told apart within one
-        `[...]` pair); `.name` is a field access (`s.f`, wrapped in a
-        Field node the same nesting way -- see Field's own docstring).
-        All three shapes chain together freely, in any order -- `a.b[0]`,
-        `arr[0].f`, `s[1:3][0]`, `a.b.c[0].d` -- falling out of this one
-        loop with no special-casing for which suffix comes first or how
-        many of each follow, exactly like chained indexing alone
-        already did before Field existed.
+        """Wraps a primary expression with zero or more `[...]`,
+        `.name`, or `.name(...)` suffixes -- `[...]` is either an index
+        (`matrix[i][j]`, parsed here as `parse_primary` producing the
+        `matrix` Variable, then this loop wrapping it in two nested
+        Index nodes, one per bracket pair -- see Index's own docstring
+        for why that nesting, rather than a single Index carrying a
+        list of indices, is the right shape) or a slice (`arr[low:
+        high]`, see _parse_index_or_slice for how the two are told
+        apart within one `[...]` pair); `.name` alone is a field access
+        (`s.f`, wrapped in a Field node the same nesting way -- see
+        Field's own docstring), while `.name(...)` -- the SAME `.name`
+        immediately followed by '(' -- is a METHOD CALL instead,
+        wrapped in an ordinary Call node with `receiver` set to
+        whatever expression preceded the '.' (see Call's own docstring
+        for why this reuses Call rather than introducing a whole new
+        node type). All four shapes chain together freely, in any
+        order -- `a.b[0]`, `arr[0].f`, `s[1:3][0]`, `a.b.c[0].d`,
+        `a.b.method(1)[0]` -- falling out of this one loop with no
+        special-casing for which suffix comes first or how many of
+        each follow, exactly like chained indexing alone already did
+        before Field (and now method calls) existed.
 
         Sits between parse_unary and parse_primary specifically so
-        indexing/slicing/field-access all bind TIGHTER than a prefix
-        unary operator: `-arr[0]` has to mean `-(arr[0])`, not `(-arr)[0]`
-        (which wouldn't even type-check, since unary '-' requires an int
-        operand, not an array) -- and it does, here, since parse_unary's
-        own base case (no unary operator present) calls straight into
-        this method rather than parse_primary directly.
+        indexing/slicing/field-access/method-calls all bind TIGHTER
+        than a prefix unary operator: `-arr[0]` has to mean `-(arr[0])`,
+        not `(-arr)[0]` (which wouldn't even type-check, since unary
+        '-' requires an int operand, not an array) -- and it does,
+        here, since parse_unary's own base case (no unary operator
+        present) calls straight into this method rather than
+        parse_primary directly.
         """
         expr = self.parse_primary()
         while self.check(TokenType.OPEN_BRACKET, TokenType.DOT):
             if self.match(TokenType.DOT):
                 name_tok = self.expect(TokenType.IDENTIFIER, "Expected a field name after '.'")
-                expr = Field(base=expr, name=name_tok.val)
+                if self.match(TokenType.OPEN_PAREN):
+                    args = self.parse_positional_call_args()
+                    self.expect(TokenType.CLOSE_PAREN, "Expected ')' after method call arguments")
+                    expr = Call(name=name_tok.val, args=args, receiver=expr)
+                else:
+                    expr = Field(base=expr, name=name_tok.val)
             else:
                 self.advance()
                 expr = self.parse_index_or_slice(expr)
         return expr
+
+    def parse_positional_call_args(self) -> List[Node]:
+        """Parses a plain, comma-separated, purely positional argument
+        list for a method call -- unlike parse_call's own argument-
+        list parsing, this has no named-argument (`name=value`)
+        support at all: that was built specifically for struct
+        literals (see Call's own docstring for why it's scoped that
+        way), and method calls -- which desugar into an ordinary call
+        to a mangled function, see semantic.py's own _check_method_
+        call -- don't currently extend that support to their own
+        arguments. A natural, separately-scoped follow-up if it's ever
+        wanted, matching how named construction itself started narrow
+        (struct literals only) and grew position by position."""
+        args: List[Node] = []
+        if self.check(TokenType.CLOSE_PAREN):
+            return args
+        args.append(self.parse_expression())
+        while self.match(TokenType.COMMA):
+            args.append(self.parse_expression())
+        return args
 
     def parse_index_or_slice(self, array_expr: Node) -> Node:
         """Parses the CONTENT of one `[...]` pair, immediately following

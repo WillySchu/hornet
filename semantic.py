@@ -399,7 +399,7 @@ fairly contained follow-up if these messages need to get more precise.
 import argparse
 from dataclasses import dataclass
 from enum import auto, Enum
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set, Tuple
 
 from lexer import lex
 from parser import (
@@ -420,6 +420,7 @@ from parser import (
     If,
     Index,
     IndexAssign,
+    MethodDef,
     Node,
     NoneLiteral,
     Param,
@@ -757,6 +758,7 @@ class SemanticAnalyzer:
         self.loop_depth = 0  # how many enclosing `while` loops we're currently inside
         self.functions: Dict[str, tuple] = {}  # name -> (List[Type] param types, Type return type)
         self.structs: Dict[str, StructInfo] = {}  # name -> resolved fields; see _collect_structs
+        self.methods: Dict[Tuple[str, str], Tuple[List[Type], Type, str]] = {}  # (struct, method) -> (param types, return type, mangled name); see _collect_methods
 
     def analyze(self, program: Program) -> None:
         # First pass, ahead of even function signatures: collect every
@@ -769,13 +771,35 @@ class SemanticAnalyzer:
         self.structs = self._collect_structs(program.structs)
         program.struct_registry = self.structs  # stashed for codegen.py's own use
 
+        # 1.5th pass: collect every struct's own methods, immediately
+        # lowering each one into an ordinary, mangled-name Function and
+        # appending it directly to program.functions -- see _collect_
+        # methods's own docstring for the full design. This has to run
+        # AFTER struct fields are fully resolved (a method's own
+        # receiver, and any other parameter or return type, might be
+        # a struct type that needs to already be real) but BEFORE the
+        # ordinary function-signature pass just below, since that pass
+        # (and the body-checking pass after it) need to see the
+        # synthesized functions already sitting in program.functions,
+        # not bolted on separately -- from this point on, a method is
+        # indistinguishable from a function that happened to be
+        # written directly at the top level.
+        self.methods = self._collect_methods(program)
+
         # Second pass: collect every function's signature before
         # checking any function's body. This is what makes call order
         # not matter -- a function can call one defined later in the
         # file, or call itself recursively -- since by the time
         # analyze_function ever looks anything up in self.functions,
         # every signature is already there. See the module docstring's
-        # FUNCTIONS section.
+        # FUNCTIONS section. This pass also, harmlessly, registers each
+        # synthesized method-function's own mangled name here too --
+        # never actually looked up through self.functions (a method
+        # call resolves through self.methods instead, by receiver type
+        # and method name, not by name lookup), but a mangled name can
+        # never collide with anything in this dict anyway (see
+        # MethodDef's own docstring for why), so there's nothing to
+        # guard against by skipping them here.
         self.functions = {}
         for fn in program.functions:
             if fn.name in _BUILTIN_FUNCTION_NAMES:
@@ -797,9 +821,71 @@ class SemanticAnalyzer:
             return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.structs)
             self.functions[fn.name] = (param_types, return_type)
 
-        # Third pass: now check each function's own body.
+        # Third pass: now check each function's own body -- including
+        # every synthesized method-function's, via the exact same
+        # analyze_function this pass already calls for everything
+        # else: a method's receiver is just its own first Param by
+        # this point, so nothing here needs to know it started out as
+        # a receiver at all.
         for fn in program.functions:
             self.analyze_function(fn)
+
+    def _collect_methods(self, program: Program) -> Dict[Tuple[str, str], Tuple[List[Type], Type, str]]:
+        """For every struct's own methods, in declaration order: reject
+        a duplicate method name on that SAME struct (two DIFFERENT
+        structs having a same-named method is completely fine -- see
+        below), then synthesize an ordinary Function node -- the
+        receiver becomes an ordinary first Param, typed as the
+        enclosing struct, with the method's own declared params
+        following it -- and append that Function directly onto
+        program.functions, mutating the list in place the same way
+        analyze() already stashes program.struct_registry directly
+        onto `program` for codegen.py's own later use.
+
+        The synthesized function's own name is `StructName.methodName`
+        -- '.' is not a character _construction_ that can appear
+        inside a single Hornet IDENTIFIER token (see the lexer's own
+        regex, r'[a-zA-Z_]\\w*'), so this mangled name can NEVER
+        collide with anything a user could actually write: not an
+        ordinary free function (whatever a user names it, it can't
+        contain '.'), not a method of the same name on a DIFFERENT
+        struct (the struct name itself is part of the mangled name),
+        and not a builtin. This is a structural guarantee, not
+        something enforced by an explicit collision check anywhere --
+        exactly the same "make the bad case impossible to construct in
+        the first place" principle behind, say, gen_indexable_base_
+        into's own scratch-slot reuse being safe by construction rather
+        than by a runtime check.
+
+        Returns a lookup dict keyed by (struct_name, method_name),
+        giving check_call's own _check_method_call everything it needs
+        to resolve a call and rewrite it: the method's own parameter
+        types (NOT including the receiver -- a method call's own
+        argument list, as written, never includes it either), its
+        return type, and the mangled name to rewrite the call site's
+        own `name` field to."""
+        methods: Dict[Tuple[str, str], Tuple[List[Type], Type, str]] = {}
+        for sd in program.structs:
+            seen_names: Set[str] = set()
+            for md in sd.methods:
+                if md.name in seen_names:
+                    raise SemanticError(
+                        f"Method '{md.name}' is already declared on "
+                        f"struct '{sd.name}'"
+                    )
+                seen_names.add(md.name)
+                mangled_name = f"{sd.name}.{md.name}"
+                param_types = [type_from_name(p.type, self.structs) for p in md.params]
+                return_type = Type.VOID if md.return_type is None else type_from_name(md.return_type, self.structs)
+                methods[(sd.name, md.name)] = (param_types, return_type, mangled_name)
+                receiver_param = Param(name=md.receiver_name, type=sd.name)
+                program.functions.append(Function(
+                    name=mangled_name,
+                    return_type=md.return_type,
+                    params=[receiver_param] + md.params,
+                    body=md.body,
+                ))
+        return methods
 
     def _collect_structs(self, struct_defs: List[StructDef]) -> Dict[str, StructInfo]:
         """Builds this program's own struct registry (see StructInfo)
@@ -1737,7 +1823,85 @@ class SemanticAnalyzer:
         expr.resolved_type = result
         return result
 
+    def _check_method_call(self, expr: Call) -> Type:
+        """`receiver.name(args)` -- resolves and validates a method
+        call, then REWRITES `expr` in place into an ordinary call to
+        the matching mangled function (see Call's own docstring in
+        parser.py for why this in-place rewrite, rather than a
+        separate node type kept alive through codegen, is the design).
+
+        The receiver's own type is checked via plain check_expr, not
+        _check_expr_allowing_struct_literal -- a struct literal or a
+        struct-returning call used directly as a receiver
+        (`Point(1,2).add_b(5)`, `makePoint().add_b(5)`) is deliberately
+        NOT given any special treatment here. The former is already
+        rejected by check_call's own struct-literal guard the moment
+        check_expr recurses into it (a struct literal still isn't
+        allowed as a method-call receiver, since that's not one of its
+        own allowed positions); the latter type-checks fine here (an
+        ordinary struct-returning call is unrestricted almost
+        everywhere), but is then rejected by codegen's own gen_struct_
+        address_into once it tries to compute an address for something
+        with none -- the exact same "assign it to a variable first"
+        restriction print's own struct/array arguments and several
+        other unnamed-struct positions already have, gotten here for
+        free by simply not special-casing the receiver at all, rather
+        than needing its own dedicated check.
+
+        Argument checking mirrors check_call's own ordinary-function
+        loop: exact count, each checked via _check_expr_allowing_
+        struct_literal (so a struct literal works as a method
+        argument, exactly like it does for an ordinary function call),
+        against the method's own declared parameter types -- the
+        receiver is never counted here, since it's never written in
+        the call's own argument list to begin with."""
+        receiver_type = self.check_expr(expr.receiver)
+        if receiver_type.kind != TypeKind.STRUCT:
+            raise SemanticError(
+                f"Cannot call method '{expr.name}' on a value of type "
+                f"{receiver_type} -- methods are only defined on structs"
+            )
+        key = (receiver_type.struct_name, expr.name)
+        if key not in self.methods:
+            raise SemanticError(
+                f"Struct '{receiver_type.struct_name}' has no method "
+                f"'{expr.name}'"
+            )
+        param_types, return_type, mangled_name = self.methods[key]
+        if len(expr.args) != len(param_types):
+            raise SemanticError(
+                f"Method '{expr.name}' on '{receiver_type.struct_name}' "
+                f"expects {len(param_types)} argument(s), got "
+                f"{len(expr.args)}"
+            )
+        for i, (arg, expected_type) in enumerate(zip(expr.args, param_types), start=1):
+            actual_type = self._check_expr_allowing_struct_literal(arg)
+            if not self._types_compatible(actual_type, expected_type):
+                raise SemanticError(
+                    f"Argument {i} to method '{expr.name}' on "
+                    f"'{receiver_type.struct_name}' should be "
+                    f"{expected_type}, got {actual_type}"
+                )
+        expr.args = [expr.receiver] + expr.args
+        expr.name = mangled_name
+        expr.receiver = None
+        expr.resolved_type = return_type
+        return return_type
+
     def check_call(self, expr: Call) -> Type:
+        if expr.receiver is not None:
+            # `receiver.name(args)` -- a method call, checked and
+            # rewritten by _check_method_call entirely -- see its own
+            # docstring. Checked FIRST, before anything else in this
+            # method: expr.name here is a METHOD name (e.g. 'add_b'),
+            # which could coincidentally match a struct name or a
+            # builtin in self.structs/_BUILTIN_FUNCTION_NAMES purely by
+            # coincidence (a method and a struct, or a method and a
+            # builtin, share no namespace at all, so this is completely
+            # legal) -- letting expr.receiver's presence take priority
+            # is what avoids a false-positive match against either of
+            # those checks below.
+            return self._check_method_call(expr)
         if expr.name in self.structs:
             raise SemanticError(
                 f"'{expr.name}(...)' is a struct literal, which is only "
