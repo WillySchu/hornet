@@ -15,6 +15,7 @@ Binary Ops:
 
 Updates:
 - Struct literals as bare statement.
+- Unnamed struct field access.
 - Disallow untyped array literals from anything except assignment to a typed variable / parameter / return.
 - Add source location for error messages from semantic analysis.
 - `fuction` type.
@@ -27,6 +28,7 @@ Updates:
 - Compound index assign.
 - Ternary.
 - For loops.
+- Dicts.
 - Slice / index an array return directly on function calls.
 - Free memory `malloc`ed by string concatenation.
 - Bounds Check Elimination.
@@ -41,5 +43,11 @@ Updates:
 - Spread operator.
 - GC...
 - `is` keyword.
-- Pointers?
 - FFI
+- Sum types / pattern matching.
+- Register virtualization
+- int64
+- float
+- Pointers
+- Multithreading
+- Optimization / mid level IR
