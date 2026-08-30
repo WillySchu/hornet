@@ -1843,6 +1843,7 @@ class CodeGenerator:
         self._false_str_label = None
         self._comma_space_label = None  # ", " -- the print machinery's own element/field separator
         self._colon_space_label = None  # ": " -- between a struct field's own name and its value
+        self._empty_str_label = None  # "" -- str's own zero value; see _get_empty_str_label
         # Set the first time gen_print_call_into actually runs; checked
         # in generate() to decide whether hornet_stringify itself needs
         # to be added to the program's own function list at all --
@@ -4201,6 +4202,22 @@ class CodeGenerator:
             self.string_literals.append((self._colon_space_label, ": "))
         return self._colon_space_label
 
+    def _get_empty_str_label(self) -> str:
+        """A shared, static, empty ("") string constant -- str's own
+        zero value (see _gen_zero_value_into). Deliberately NOT a null
+        pointer: every string operation this file generates (print,
+        concatenation, gen_string_compare_into's own strcmp call)
+        dereferences a str value with no null check at all, so a
+        zero-initialized str field or variable has to point at a real,
+        valid (if empty) C string -- pointing at nothing would segfault
+        the instant anything touched it, the first time any Hornet
+        program actually exercised implicit zero-initialization for a
+        str."""
+        if self._empty_str_label is None:
+            self._empty_str_label = self.new_label("empty_str")
+            self.string_literals.append((self._empty_str_label, ""))
+        return self._empty_str_label
+
     def _gen_stringify_bulk_append(self, source_addr: Register, count: Operand) -> List[Instruction]:
         """Loads the print buffer's own {ptr, len, cap} triple from
         _STRINGIFY_BUF_STATE_ADDR, bulk-appends `count` bytes from
@@ -5420,11 +5437,16 @@ class CodeGenerator:
         no special handling at all here either: an omitted field
         simply never appears in `entries`, so no instructions are ever
         emitted for its own offset -- its storage is left exactly as
-        uninitialized as dst_mem's own memory already was before this
-        method ran (garbage, on the stack; whatever malloc happened to
-        return, on the heap), matching every other place this language
-        already treats uninitialized memory as real UB rather than
-        implicitly zero."""
+        it was in dst_mem before this method ran (garbage, on the
+        stack; whatever malloc happened to return, on the heap). This
+        is now a deliberate, temporary inconsistency with _gen_zero_
+        value_into's own implicit zero-init for a `T x` VarDecl with
+        NO initializer at all, not a claim that every uninitialized-
+        memory case in this language still works the same way -- a
+        partial named literal's own omitted field was intentionally
+        left as a separate follow-up rather than updated alongside
+        that feature (see check_struct_literal's own docstring in
+        semantic.py for the fuller note)."""
         struct_info = self.struct_registry[struct_type.struct_name]
         if expr.kwargs is not None:
             field_types = struct_info.fields
@@ -5648,12 +5670,16 @@ class CodeGenerator:
         # _collect_locals already reserved this VarDecl's slot (that's
         # what sizes the frame); _bind_local just needs to make its name
         # resolvable in the current scope, and return where to store the
-        # initializer, if there is one. `int a` with no initializer
-        # leaves the slot's contents genuinely uninitialized, matching
-        # C: reading it before assigning is undefined behavior, not
-        # implicitly zero -- and the same holds for a heap-allocated
-        # array's own malloc'd memory below: allocated, but left
-        # unwritten, if there's no initializer to write through it.
+        # initializer, if there is one. `int a` with no initializer now
+        # gets its type's own implicit zero value (see _gen_zero_value_
+        # into) -- 0 for int/bool, the shared empty-string constant for
+        # str, none's own {0,0,0} for slice, and recursively for array/
+        # struct -- rather than the genuinely uninitialized memory this
+        # used to leave behind. The same holds for a heap-allocated
+        # array or struct's own malloc'd memory below: allocated, and
+        # now always written through (either the real initializer, if
+        # there is one, or its type's own zero value if there isn't),
+        # never left as raw malloc garbage.
         offset = self._bind_local(stmt)
         var_type = self._local_type(stmt.name)
         if self._is_heap_allocated(id(stmt), var_type):
@@ -5675,9 +5701,11 @@ class CodeGenerator:
                     instructions.extend(self.gen_struct_value_into(stmt.init, Memory('rax', 0), var_type))
                 else:
                     instructions.extend(self.gen_array_value_into(stmt.init, Memory('rax', 0), var_type))
+            else:
+                instructions.extend(self._gen_zero_value_into(var_type, Memory('rax', 0)))
             return instructions
         if stmt.init is None:
-            return []
+            return self._gen_zero_value_into(var_type, Memory('rbp', offset))
         if isinstance(stmt.init, NoneLiteral):
             # none's own resolved type (Type.NONE) never equals
             # var_type -- semantic.py's _types_compatible is what lets
@@ -6800,6 +6828,246 @@ class CodeGenerator:
                 yield from self._flatten_struct_fields(field_type.struct_name, field_offset)
             else:
                 yield (field_type, field_offset)
+
+    def _gen_zero_value_into(self, t: Type, dst_mem: Memory) -> List[Instruction]:
+        """Writes t's own implicit zero value into dst_mem -- what a
+        `T x` VarDecl with no initializer now gets, instead of the
+        genuinely uninitialized memory it used to leave behind (see
+        gen_var_decl's own note on the earlier, now-superseded
+        behavior). Dispatches by kind:
+          - int/bool: an ordinary 0.
+          - str: the address of a single shared, static empty-string
+            constant (_get_empty_str_label) -- NEVER a null pointer;
+            see that method's own docstring for why a null zero value
+            would be an active hazard, not just an unusual choice.
+          - slice: none's own {ptr: 0, len: 0, cap: 0} descriptor,
+            reusing gen_none_into exactly as-is -- this needed no new
+            code at all, since a zero-value slice and a none-valued
+            one are, by design, the identical representation.
+          - array: delegated to _gen_zero_array_into, which further
+            dispatches on the array's own LEAF type -- see its own
+            docstring for why int/bool/slice, str, and struct leaves
+            each need a genuinely different strategy.
+          - struct: every one of the struct's own fields, flattened
+            via _flatten_struct_fields exactly the way struct equality
+            already flattens them for comparison -- recursing back
+            into THIS method for each field's own (never struct-kind,
+            since flattening already unwrapped any nested struct away)
+            type.
+
+        dst_mem.base is protected via push/pop across EVERY field's own
+        zero-fill, when it isn't 'rbp' (rbp itself is never at risk --
+        nothing in this file ever treats it as scratch, so pushing and
+        popping it would be actively wrong, not merely unnecessary; see
+        gen_struct_literal_into's own identical `!= 'rbp'` guard for
+        the same reasoning applied to a different write). Needed
+        because the array case below computes a fresh address by
+        calling _gen_address_of_memory_into with dst_mem.base itself as
+        the destination register in some call shapes -- which, unlike
+        every scalar/slice write here, can OVERWRITE dst_mem.base's own
+        physical register in place. Without protecting it, a struct
+        with an array-typed field followed by ANY other field would
+        silently compute that later field's own address from garbage
+        (whatever the array zero-loop happened to leave behind) instead
+        of the struct's real base -- the exact register-collision
+        failure mode _gen_struct_fields_equality_at_addresses's own
+        docstring already documents at length for the identical reason,
+        one construct over. Applied unconditionally, even for the
+        scalar/slice cases that don't strictly need it, matching that
+        same method's own "protect everything, don't try to be clever
+        about which fields actually need it" posture."""
+        if t.kind == TypeKind.STRUCT:
+            protect_dst = dst_mem.base != 'rbp'
+            instructions = []
+            for field_type, offset in self._flatten_struct_fields(t.struct_name):
+                field_mem = Memory(dst_mem.base, dst_mem.offset + offset)
+                if protect_dst:
+                    instructions.append(Push(Register(dst_mem.base)))
+                instructions.extend(self._gen_zero_value_into(field_type, field_mem))
+                if protect_dst:
+                    instructions.append(Pop(Register(dst_mem.base)))
+            return instructions
+        if t.kind == TypeKind.ARRAY:
+            return self._gen_zero_array_into(t, dst_mem)
+        if t.kind == TypeKind.SLICE:
+            return self.gen_none_into(dst_mem, t)
+        if t == Type.STR:
+            # Whichever of rax/rcx isn't dst_mem's own base -- a single
+            # scratch register is all this needs, computed and consumed
+            # in the same two instructions, with nothing relying on it
+            # afterward.
+            scratch = Register('rax') if dst_mem.base != 'rax' else Register('rcx')
+            return [
+                LeaQ(label=self._get_empty_str_label(), dst=scratch),
+                MovQ(src=scratch, dst=dst_mem),
+            ]
+        return [Mov(src=Imm(0), dst=dst_mem)]  # int or bool
+
+    def _gen_zero_array_into(self, array_type: Type, dst_mem: Memory) -> List[Instruction]:
+        """Zeroes a whole array -- dispatching on the array's own LEAF
+        type (see leaf_type) into one of three genuinely different
+        strategies, mirroring array equality's own identical three-way
+        split (_gen_array_flat_byte_equality_loop/_gen_array_str_
+        equality_loop/_gen_array_struct_equality_loop) for the same
+        underlying reason: a leaf's own zero-value representation
+        determines whether the whole array can be zeroed as one flat
+        run of raw bytes, or needs a real per-element write.
+
+          - int, bool, OR SLICE leaf: _gen_array_flat_zero_loop. All
+            three types' own zero value is ALL RAW ZERO BYTES with no
+            pointer or other special representation (a slice's own
+            none-shaped {0, 0, 0} descriptor -- see gen_none_into -- IS
+            24 zero bytes, nothing more), so the WHOLE array, however
+            many elements and however deeply nested, is zeroed as one
+            flat run -- the same "treat a nested array as one
+            contiguous block" trick gen_array_copy/array equality's own
+            flat-byte loop already rely on. Array equality couldn't
+            offer slice this same treatment (a slice-typed array
+            element isn't COMPARABLE at all yet, so it never reached
+            that dispatch), but zeroing has no such restriction: there
+            being nothing to compare, only a zero value to write, is
+            exactly what makes slice fit here for free.
+          - str leaf: _gen_array_str_zero_loop -- a str's own zero
+            value is a POINTER (see _gen_zero_value_into's own STR
+            case), so each element needs that same address written
+            individually, not raw zero bytes.
+          - struct leaf: _gen_array_struct_zero_loop -- a struct's own
+            fields can be a MIX of types, so there's no single flat-
+            bytes-or-repeated-pointer strategy that covers a whole
+            struct-typed element; each one is zeroed via a recursive
+            call back into _gen_zero_value_into itself."""
+        leaf = leaf_type(array_type)
+        total_width = type_byte_width(array_type, self.struct_registry)
+        if leaf == Type.STR:
+            return self._gen_array_str_zero_loop(dst_mem, total_width // 8)
+        if leaf.kind == TypeKind.STRUCT:
+            struct_width = type_byte_width(leaf, self.struct_registry)
+            return self._gen_array_struct_zero_loop(dst_mem, leaf.struct_name, total_width // struct_width)
+        return self._gen_array_flat_zero_loop(dst_mem, total_width)  # int, bool, or slice leaf
+
+    def _gen_array_flat_zero_loop(self, dst_mem: Memory, total_width: int) -> List[Instruction]:
+        """Zeroes `total_width` bytes at dst_mem, 4 bytes at a time --
+        see _gen_zero_array_into's own docstring for why this is
+        correct for an int, bool, or slice leaf at any nesting depth.
+        No calls happen anywhere in this loop, so every register here
+        is ordinary caller-saved scratch, freely reusable by whatever
+        runs after this method returns -- the same posture _gen_array_
+        flat_byte_equality_loop's own identical loop shape already
+        takes, for the identical reason.
+
+        Computes dst_mem's own starting address into a FIXED register
+        (%r10) via _gen_address_of_memory_into, rather than assuming
+        dst_mem.base itself remains valid to keep reading from
+        directly -- correct even when dst_mem.base happens to BE %r10
+        already (that method's own self-copy-then-add shape handles
+        that case safely), but this method never relies on dst_mem's
+        own base surviving its own execution either way; any caller
+        that needs dst_mem.base to still be valid AFTERWARD (see _gen_
+        zero_value_into's own struct case) is responsible for
+        protecting it externally, via push/pop, before calling this."""
+        base_reg = Register('r10')
+        instructions = self._gen_address_of_memory_into(dst_mem, base_reg)
+        index_32 = Register('ecx')
+        index_64 = Register('rcx')
+        write_addr = Register('r11')
+        loop_start = self.new_label("array_zero_flat_loop")
+        loop_done = self.new_label("array_zero_flat_done")
+        instructions.append(Mov(src=Imm(0), dst=index_32))
+        instructions.append(Label(loop_start))
+        instructions.append(Cmp(src=Imm(total_width), dst=index_32))
+        instructions.append(Jae(loop_done))
+        instructions.append(MovQ(src=base_reg, dst=write_addr))
+        instructions.append(AddQ(src=index_64, dst=write_addr))
+        instructions.append(Mov(src=Imm(0), dst=Memory(write_addr.name, 0)))
+        instructions.append(Add(src=Imm(4), dst=index_32))
+        instructions.append(Jmp(loop_start))
+        instructions.append(Label(loop_done))
+        return instructions
+
+    def _gen_array_str_zero_loop(self, dst_mem: Memory, element_count: int) -> List[Instruction]:
+        """The str-leaf counterpart to _gen_array_flat_zero_loop just
+        above: computes the shared empty-string address ONCE, then
+        writes that same 8-byte value into each of `element_count`
+        consecutive element slots. No calls happen here either (LeaQ
+        computes a RIP-relative address, it doesn't call anything), so
+        -- like the flat-zero loop -- every register is ordinary
+        caller-saved scratch, with nothing here relying on it surviving
+        past this method's own return."""
+        base_reg = Register('r10')
+        instructions = self._gen_address_of_memory_into(dst_mem, base_reg)
+        empty_str_reg = Register('r11')
+        instructions.append(LeaQ(label=self._get_empty_str_label(), dst=empty_str_reg))
+        total_width = element_count * 8
+        offset_32 = Register('ecx')
+        offset_64 = Register('rcx')
+        write_addr = Register('r8')
+        loop_start = self.new_label("array_zero_str_loop")
+        loop_done = self.new_label("array_zero_str_done")
+        instructions.append(Mov(src=Imm(0), dst=offset_32))
+        instructions.append(Label(loop_start))
+        instructions.append(Cmp(src=Imm(total_width), dst=offset_32))
+        instructions.append(Jae(loop_done))
+        instructions.append(MovQ(src=base_reg, dst=write_addr))
+        instructions.append(AddQ(src=offset_64, dst=write_addr))
+        instructions.append(MovQ(src=empty_str_reg, dst=Memory(write_addr.name, 0)))
+        instructions.append(Add(src=Imm(8), dst=offset_32))
+        instructions.append(Jmp(loop_start))
+        instructions.append(Label(loop_done))
+        return instructions
+
+    def _gen_array_struct_zero_loop(self, dst_mem: Memory, struct_name: str, element_count: int) -> List[Instruction]:
+        """The struct-leaf counterpart to the two loops above: each
+        element is zeroed via a recursive call back into _gen_zero_
+        value_into, since a struct's own fields can be a mix of types
+        with no single flat-bytes-or-repeated-value strategy.
+
+        Unlike its two siblings, this loop's own base address (%r12)
+        and index (%r13) DO need protecting across that recursive
+        call: the struct being zeroed could itself have an array-typed
+        field, which would dispatch back into one of THESE SAME THREE
+        loops (reusing the identical fixed register names, since
+        there's no way to hand out a fresh, distinct set per nesting
+        depth at codegen time) -- silently corrupting this outer
+        loop's own %r12/%r13 if they weren't saved first. Protected
+        via an ordinary push/pop pair around the one recursive call,
+        exactly like _gen_array_struct_equality_loop's own identical
+        situation (see its own docstring for the fuller explanation of
+        why this is correct at any nesting depth, by induction: every
+        level protects only what IT locally needs to survive, trusting
+        nothing else about what runs in between). %r14 (the per-
+        iteration byte offset) needs no such protection, for the same
+        reason it doesn't there either: always freshly recomputed at
+        the start of an iteration, never read again after computing
+        this iteration's own element address."""
+        struct_width = type_byte_width(Type(TypeKind.STRUCT, struct_name=struct_name), self.struct_registry)
+        base_reg = Register('r12')
+        instructions = self._gen_address_of_memory_into(dst_mem, base_reg)
+        index_32 = Register('r13d')
+        index_64 = Register('r13')
+        offset_32 = Register('r14d')
+        offset_64 = Register('r14')
+        elem_addr = Register('r10')
+        loop_start = self.new_label("array_zero_struct_loop")
+        loop_done = self.new_label("array_zero_struct_done")
+        instructions.append(Mov(src=Imm(0), dst=index_32))
+        instructions.append(Label(loop_start))
+        instructions.append(Cmp(src=Imm(element_count), dst=index_32))
+        instructions.append(Jae(loop_done))
+        instructions.append(Mov(src=index_32, dst=offset_32))
+        instructions.append(IMul(src=Imm(struct_width), dst=offset_32))
+        instructions.append(MovQ(src=base_reg, dst=elem_addr))
+        instructions.append(AddQ(src=offset_64, dst=elem_addr))
+        instructions.append(Push(base_reg))
+        instructions.append(Push(index_64))
+        instructions.extend(self._gen_zero_value_into(
+            Type(TypeKind.STRUCT, struct_name=struct_name), Memory(elem_addr.name, 0)
+        ))
+        instructions.append(Pop(index_64))
+        instructions.append(Pop(base_reg))
+        instructions.append(Add(src=Imm(1), dst=index_32))
+        instructions.append(Jmp(loop_start))
+        instructions.append(Label(loop_done))
+        return instructions
 
     def _gen_struct_fields_equality_at_addresses(self, struct_name: str, left_base: Register, right_base: Register, mismatch_label: str) -> List[Instruction]:
         """Compares every one of struct_name's own fields -- including

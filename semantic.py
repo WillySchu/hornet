@@ -1741,10 +1741,17 @@ class SemanticAnalyzer:
         construction) is delegated to _check_named_struct_literal
         below, which also supports PARTIAL construction (`A(x=1)`,
         omitting a field entirely) -- deliberately not given an
-        implicit zero value; an omitted field's own storage stays
-        genuinely uninitialized, matching every other place this
-        language already treats uninitialized memory as real UB
-        rather than implicitly zero. Positional construction stays
+        implicit zero value (yet): an omitted field's own storage
+        stays genuinely uninitialized. This is now a deliberate,
+        temporary inconsistency rather than matching a codebase-wide
+        rule -- codegen.py's own _gen_zero_value_into gives a `T x`
+        VarDecl with NO initializer at all a real implicit zero value
+        (0 for int/bool, none's own shape for slice, and recursively
+        for array/struct), but a PARTIAL named literal's own omitted
+        field was intentionally left as a separate follow-up rather
+        than being updated at the same time -- the natural next step
+        once this decision is revisited, not something this comment
+        should claim is already true. Positional construction stays
         exhaustive (this method's own existing behavior, unchanged);
         only the named form can be partial."""
         struct_info = self.structs[expr.name]

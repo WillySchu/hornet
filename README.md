@@ -14,7 +14,7 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- Implicit zero value initialization for uninitialized variables / fields.
+- Add zero value initialization for named tuple declarations.
 - Add `byte` type.
 - Casting.
 - `type` type.

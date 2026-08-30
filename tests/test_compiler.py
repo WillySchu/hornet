@@ -10773,6 +10773,373 @@ class TestStructLiteralArrayFieldAddressRegression:
         )
 
 
+# ---------------------------------------------------------------------------
+# Implicit zero-value initialization: `int a` with no initializer at all now
+# gets that type's own implicit zero value -- 0 for int/bool, a shared empty-
+# string constant for str (NEVER a null pointer -- every string operation
+# dereferences one with no null check, so a null zero value would segfault
+# the instant anything touched it), none's own {ptr:0, len:0, cap:0}
+# descriptor for slice (the two are, by design, the identical
+# representation), and recursively for array/struct -- rather than the
+# genuinely uninitialized memory this used to leave behind. Function
+# parameters are unaffected: they always receive a real, caller-provided
+# value, so there's no "uninitialized parameter" case to begin with.
+#
+# codegen.py's own _gen_zero_value_into/_gen_zero_array_into mirror array
+# equality's own leaf-type dispatch almost exactly (flat-bytes for int/bool/
+# slice, a dedicated loop for str, a recursive one for struct), for the
+# identical underlying reason. test_heap_allocated_struct_with_non_first_
+# array_field and test_array_of_structs_with_array_field are the two tests
+# that matter most here, not just thorough coverage: they're the exact
+# register-collision shapes that caused real bugs during the analogous
+# struct/array equality work (a later sibling field's own address computed
+# from a base register an array's own zero-loop had silently clobbered, and
+# an outer array-of-structs loop's own index/base colliding with an inner
+# nested loop reusing the same fixed register names) -- both are protected
+# via the identical push/pop-around-the-risky-operation discipline already
+# established and proven there, and both are verified directly here rather
+# than merely reasoned about.
+# ---------------------------------------------------------------------------
+
+class TestImplicitZeroValue:
+    pytestmark = GCC_SKIP
+
+    def test_int_zero_value(self):
+        assert_exit_code("    int a\n    return a", 0)
+
+    def test_bool_zero_value(self):
+        assert_exit_code(
+            "    bool b\n"
+            "    if b:\n"
+            "        return 1\n"
+            "    return 0",
+            0,
+        )
+
+    def test_str_zero_value_prints_as_empty(self):
+        assert_stdout("    str s\n    print(s)\n    return 0", "\n")
+
+    def test_str_zero_value_is_a_real_string_not_a_null_pointer(self):
+        """Concatenating onto a zero-valued str works -- proving it's
+        a valid pointer to a real (if empty) C string, not null. A
+        null zero value would segfault the instant anything touched
+        it, which is exactly why _get_empty_str_label exists."""
+        assert_stdout(
+            "    str s\n"
+            "    str t = s + 'hi'\n"
+            "    print(t)\n"
+            "    return 0",
+            "hi\n",
+        )
+
+    def test_str_zero_value_equals_empty_string_literal(self):
+        assert_exit_code(
+            "    str s\n"
+            "    if s == '':\n"
+            "        return 1\n"
+            "    return 0",
+            1,
+        )
+
+    def test_slice_zero_value_prints_as_empty_with_zero_length(self):
+        assert_exit_code(
+            "    []int s\n"
+            "    print(s)\n"
+            "    return len(s)",
+            0,
+        )
+        assert_stdout("    []int s\n    print(s)\n    return 0", "[]int[]\n")
+
+    def test_slice_zero_value_equals_none(self):
+        """By design, a zero-valued slice and a none-valued one are
+        the identical representation -- see gen_none_into, reused
+        as-is for the slice case rather than needing its own logic."""
+        assert_exit_code(
+            "    []int s\n"
+            "    if s == none:\n"
+            "        return 1\n"
+            "    return 0",
+            1,
+        )
+
+    def test_append_to_a_zero_valued_slice(self):
+        """The first append to a zero-valued slice always reallocates
+        (len == cap == 0), so it never reads or writes through
+        whatever the zero value's own pointer happens to be -- safe
+        regardless of what that pointer points at."""
+        assert_exit_code(
+            "    []int s\n"
+            "    s = append(s, 42)\n"
+            "    return s[0]",
+            42,
+        )
+
+    def test_array_zero_value(self):
+        assert_exit_code(
+            "    [3]int arr\n"
+            "    return arr[0] + arr[1] + arr[2]",
+            0,
+        )
+
+    def test_large_heap_allocated_array_zero_value(self):
+        assert_exit_code(
+            "    [10000]int arr\n"
+            "    int sum = 0\n"
+            "    int i = 0\n"
+            "    while i < 10000:\n"
+            "        sum = sum + arr[i]\n"
+            "        i = i + 1\n"
+            "    return sum",
+            0,
+        )
+
+    def test_array_of_str_zero_value(self):
+        assert_stdout(
+            "    [2]str names\n"
+            "    print(names[0])\n"
+            "    print(names[1])\n"
+            "    return 0",
+            "\n\n",
+        )
+
+    def test_array_of_slice_zero_value(self):
+        assert_exit_code(
+            "    [2][]int lists\n"
+            "    return len(lists[0]) + len(lists[1])",
+            0,
+        )
+
+    def test_struct_with_scalar_fields_zero_value(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    Point p\n"
+            "    return p.x + p.y\n",
+            0,
+        )
+
+    def test_struct_with_str_field_zero_value(self):
+        assert_program_stdout(
+            "struct Person:\n"
+            "    str name\n"
+            "    int age\n"
+            "\n"
+            "def int main():\n"
+            "    Person p\n"
+            "    print(p.name)\n"
+            "    return 0\n",
+            "\n",
+        )
+
+    def test_struct_with_slice_field_zero_value(self):
+        assert_program_stdout(
+            "struct Holder:\n"
+            "    []int xs\n"
+            "\n"
+            "def int main():\n"
+            "    Holder h\n"
+            "    print(h.xs)\n"
+            "    return 0\n",
+            "[]int[]\n",
+        )
+
+    def test_nested_struct_field_zero_value(self):
+        assert_program_exit_code(
+            "struct Inner:\n"
+            "    int v\n"
+            "struct Outer:\n"
+            "    Inner i\n"
+            "    int b\n"
+            "\n"
+            "def int main():\n"
+            "    Outer o\n"
+            "    return o.i.v + o.b\n",
+            0,
+        )
+
+    def test_heap_allocated_struct_with_non_first_array_field(self):
+        """`data` sits at a non-zero offset (after `tag`), and Big is
+        large enough to be heap-allocated -- the exact shape that
+        would corrupt `tag`'s own address if the array field's own
+        zero-loop weren't protecting the struct's own base register
+        across sibling fields (see this class's own module comment)."""
+        assert_program_exit_code(
+            "struct Big:\n"
+            "    int tag\n"
+            "    [5000]int data\n"
+            "\n"
+            "def int main():\n"
+            "    Big b\n"
+            "    return b.tag + b.data[4999]\n",
+            0,
+        )
+
+    def test_scalar_array_scalar_sibling_fields_survive_zero_init_stack(self):
+        """A scalar field AFTER an array field, on a small (STACK-
+        allocated) struct -- proves the array field's own zero-fill
+        doesn't corrupt a LATER sibling field's own address, even
+        though this specific case (base == 'rbp') needs no protection
+        at all (see _gen_zero_value_into's own docstring for why)."""
+        assert_program_exit_code(
+            "struct Triple:\n"
+            "    int a\n"
+            "    [3]int mid\n"
+            "    int c\n"
+            "\n"
+            "def int main():\n"
+            "    Triple t\n"
+            "    t.a = 1\n"
+            "    t.c = 2\n"
+            "    return t.a + t.mid[1] + t.c\n",
+            3,
+        )
+
+    def test_scalar_array_scalar_sibling_fields_survive_zero_init_heap(self):
+        """The identical shape, but large enough to force heap
+        allocation -- here the struct's own base IS an ordinary
+        register (not 'rbp'), so this is the case that actually
+        exercises the push/pop protection directly."""
+        assert_program_exit_code(
+            "struct Triple:\n"
+            "    int a\n"
+            "    [5000]int mid\n"
+            "    int c\n"
+            "\n"
+            "def int main():\n"
+            "    Triple t\n"
+            "    t.a = 1\n"
+            "    t.c = 2\n"
+            "    return t.a + t.mid[2500] + t.c\n",
+            3,
+        )
+
+    def test_array_of_structs_zero_value(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    [3]Point pts\n"
+            "    return pts[0].x + pts[1].y + pts[2].x\n",
+            0,
+        )
+
+    def test_array_of_structs_with_str_field(self):
+        assert_program_stdout(
+            "struct Person:\n"
+            "    str name\n"
+            "    int age\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Person people\n"
+            "    print(people[0].name)\n"
+            "    print(people[1].name)\n"
+            "    return 0\n",
+            "\n\n",
+        )
+
+    def test_array_of_structs_with_array_field(self):
+        """The exact register-collision shape that caused a real bug
+        during the analogous struct/array equality work: an outer
+        array-of-structs zero-loop (%r12/%r13/%r14) recursing into a
+        per-element struct zero-fill, which itself dispatches to
+        ANOTHER array zero-loop (reusing the same fixed register
+        names, since there's no way to hand out a distinct set per
+        nesting depth at codegen time) for the struct's own array
+        field. Protected by the identical push/pop discipline already
+        proven for that earlier bug -- verified directly here, not
+        just reasoned about."""
+        assert_program_exit_code(
+            "struct Bag:\n"
+            "    [10]int items\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Bag bags\n"
+            "    bags[0].items[5] = 99\n"
+            "    return bags[0].items[5] + bags[1].items[5] + bags[1].items[0]\n",
+            99,
+        )
+
+    def test_doubly_nested_zero_value(self):
+        """A struct containing an array-of-structs field, where THAT
+        struct has its own str field -- one level deeper than the
+        test above."""
+        assert_program_stdout(
+            "struct Item:\n"
+            "    str name\n"
+            "    int qty\n"
+            "struct Container:\n"
+            "    int tag\n"
+            "    [2]Item items\n"
+            "\n"
+            "def int main():\n"
+            "    Container c\n"
+            "    print(c.items[0].name)\n"
+            "    return 0\n",
+            "\n",
+        )
+
+    def test_function_parameters_are_never_implicitly_zeroed(self):
+        """A parameter always receives the caller's real, explicitly-
+        passed value -- there's no 'uninitialized parameter' case for
+        zero-init to apply to at all."""
+        assert_program_exit_code(
+            "def int identity(int x):\n"
+            "    return x\n"
+            "\n"
+            "def int main():\n"
+            "    return identity(7)\n",
+            7,
+        )
+
+    def test_explicit_array_initializer_on_heap_allocated_var_still_works(self):
+        """Regression check on gen_var_decl's own heap-allocated
+        branch: adding the zero-fill 'else' clause must not disturb
+        the existing 'write the real initializer' path."""
+        elements = ", ".join(str(1 if i in (0, 1, 2, 4999) else 0) for i in range(5000))
+        assert_exit_code(
+            f"    [5000]int arr = [{elements}]\n"
+            f"    return arr[0] + arr[1] + arr[2] + arr[4999]",
+            4,
+        )
+
+    def test_explicit_struct_initializer_on_heap_allocated_var_still_works(self):
+        assert_program_exit_code(
+            "struct Big:\n"
+            "    int tag\n"
+            "    [5000]int data\n"
+            "\n"
+            "def int main():\n"
+            "    [5000]int filler\n"
+            "    filler[0] = 5\n"
+            "    Big b = Big(9, filler)\n"
+            "    return b.tag + b.data[0]\n",
+            14,
+        )
+
+    def test_partial_named_struct_literal_is_unaffected(self):
+        """A deliberately separate, still-open decision (see the
+        struct-literal work's own docstring): omitting a field in a
+        NAMED struct literal still leaves that field genuinely
+        uninitialized, not zero-filled -- implicit zero-init applies
+        only to a VarDecl with NO initializer at all, not to a partial
+        one written explicitly."""
+        assert_program_exit_code(
+            "struct A:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    A a = A(x=5)\n"
+            "    return a.x\n",
+            5,
+        )
+
+
 class TestArraysOfStructs:
     pytestmark = GCC_SKIP
 
