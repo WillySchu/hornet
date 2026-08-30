@@ -9,6 +9,11 @@ import semantic
 from codegen.errors import CodegenError
 from codegen.utils import escape_for_asciz, leaf_type, type_byte_width, type_of
 
+# TODO(will): Test as_byte_register
+
+
+# TODO(will): Test as_qword_register
+
 
 def test_type_byte_width_int():
     t = semantic.Type(kind=semantic.TypeKind.INT)
