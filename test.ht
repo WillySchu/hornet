@@ -1,21 +1,9 @@
-struct A:
-    int x
-    str y
-
-
-def print_a(A a):
-    print(a)
-
-
-def print_arr([5]int ints):
-    print(ints)
-
-
-def print_sl([]A as):
-    print(as)
+def str hello():
+    return 'hello'
 
 
 def main():
-    print(len([1, 2, 3]))
-    print([1, 2, 3][0])
-    print(A(1, 'a').x)
+    [3]int a = [1,2,3]
+    [3]int b = [1,2,3]
+    print(hello())
+    print(a == b)

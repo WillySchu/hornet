@@ -7031,9 +7031,22 @@ class CodeGenerator:
         # (`s1 == s2`), or none compared to none, is rejected earlier
         # -- so this doesn't need to re-derive or defensively check
         # which side is which beyond that.
+        #
+        # ARRAY equality is dispatched the same way, for the same root
+        # reason: an array's own value is its own multi-byte (or
+        # multi-element) footprint, which -- like a slice's descriptor
+        # -- doesn't fit through a single register the way an
+        # int/bool/str value does. semantic.py's own check_binary
+        # already guarantees, by the time this is reached, that BOTH
+        # sides are the exact same array type, with a leaf type this
+        # file actually knows how to compare (int, bool, or str) --
+        # see gen_array_equality_into's own docstring for how that
+        # dispatches internally.
         if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
             if type_of(expr.left).kind == TypeKind.SLICE or type_of(expr.right).kind == TypeKind.SLICE:
                 return self.gen_slice_none_comparison_into(expr, dst)
+            if type_of(expr.left).kind == TypeKind.ARRAY:
+                return self.gen_array_equality_into(expr, dst)
 
         scratch = Register('ecx')  # holds the right-hand value while combining
         instructions = self.gen_expr_into(expr.left, dst)   # dst = left
@@ -7042,6 +7055,177 @@ class CodeGenerator:
         instructions.append(Mov(src=dst, dst=scratch))       # scratch = right
         instructions.append(Pop(as_qword_register(dst)))     # dst = left (restored)
         instructions.extend(self.gen_binary_op(expr.op, src=scratch, dst=dst))
+        return instructions
+
+    def gen_array_equality_into(self, expr: Binary, dst: Register) -> List[Instruction]:
+        """`left == right` / `left != right`, both the exact same
+        array type (already guaranteed by semantic.py's own check_
+        binary, including that the array's own LEAF type -- see
+        leaf_type -- is int, bool, or str, never a struct or slice,
+        neither of which has '==' defined for it at all yet).
+
+        `left`/`right` must each already have a real address (a
+        Variable, Index, or Field -- whatever gen_array_address_into
+        already accepts); an array literal or an array-returning call
+        used directly as an equality operand isn't supported, matching
+        this file's established "assign it to a variable first"
+        restriction on unnamed array values elsewhere (e.g. gen_array_
+        arg_address_into before argument materialization existed).
+
+        Dispatches on the array's own leaf type into one of two
+        genuinely different comparison strategies, each factored into
+        its own small loop helper:
+
+          - int/bool leaf: _gen_array_flat_byte_equality_loop. Neither
+            type is a pointer, so the WHOLE array -- however many
+            elements, however deeply nested (`[2][3]int` is just one
+            contiguous 24-byte block) -- can be compared as one flat
+            run of bytes, exactly the same "treat a nested array as
+            one flat block" trick gen_array_copy already relies on for
+            copying (via leaf_type/type_byte_width), just applied to
+            comparison instead of copying.
+          - str leaf: _gen_array_str_equality_loop. A str element IS a
+            pointer (see the module docstring's STRINGS section), so
+            raw byte-for-byte equality of the pointers themselves
+            would be wrong -- two equal strings can easily live at two
+            different addresses. This calls strcmp on each
+            corresponding pair of elements instead, exactly like
+            gen_string_compare_into's own ordinary str == str
+            comparison does for a single pair, just without that
+            method's own concatenation-freeing logic: array elements
+            are always fixed, already-allocated storage, never a
+            fresh concatenation result of their own.
+
+        Both loops jump to a shared `mismatch_label` the moment any
+        element differs (or, for the flat-byte path, any 4-byte chunk
+        differs); falling all the way through either loop means every
+        element matched. From there, the final result is just two
+        immediate moves -- 1/0 for EQUAL, or 0/1 for NOT_EQUAL,
+        whichever bytes-matched actually means for this specific
+        operator -- exactly the same "compute the boolean the long
+        way, then pick the right immediate for this operator" shape
+        gen_short_circuit already uses for AND/OR, one level over."""
+        array_type = type_of(expr.left)
+        leaf = leaf_type(array_type)
+        total_width = type_byte_width(array_type, self.struct_registry)
+
+        left_addr = Register('r10')
+        right_addr = Register('r11')
+        instructions = self.gen_array_address_into(expr.left, left_addr)
+        instructions.append(Push(left_addr))
+        instructions.extend(self.gen_array_address_into(expr.right, right_addr))
+        instructions.append(Pop(left_addr))
+
+        mismatch_label = self.new_label("array_eq_mismatch")
+        done_label = self.new_label("array_eq_done")
+
+        if leaf == Type.STR:
+            instructions.extend(self._gen_array_str_equality_loop(
+                left_addr, right_addr, total_width // 8, mismatch_label
+            ))
+        else:
+            instructions.extend(self._gen_array_flat_byte_equality_loop(
+                left_addr, right_addr, total_width, mismatch_label
+            ))
+
+        # Fell all the way through: every element matched.
+        instructions.append(Mov(src=Imm(1 if expr.op == BinaryOp.EQUAL else 0), dst=dst))
+        instructions.append(Jmp(done_label))
+        instructions.append(Label(mismatch_label))
+        instructions.append(Mov(src=Imm(0 if expr.op == BinaryOp.EQUAL else 1), dst=dst))
+        instructions.append(Label(done_label))
+        return instructions
+
+    def _gen_array_flat_byte_equality_loop(self, left_addr: Register, right_addr: Register, total_width: int, mismatch_label: str) -> List[Instruction]:
+        """Compares `total_width` bytes at left_addr/right_addr, 4
+        bytes at a time -- int/bool are always 4-byte values, and
+        type_byte_width guarantees total_width is always a multiple of
+        4 for an int/bool-leaved array, however deeply nested --
+        jumping to mismatch_label the moment any 4-byte chunk differs,
+        or simply falling through once every chunk has matched. No
+        calls happen anywhere in this loop, so nothing here needs a
+        callee-saved register the way the str-leaf loop below does;
+        every register used is ordinary caller-saved scratch, freely
+        reusable by whatever runs after this method returns."""
+        index_32 = Register('ecx')
+        index_64 = Register('rcx')
+        loop_start = self.new_label("array_eq_flat_loop")
+        loop_done = self.new_label("array_eq_flat_done")
+        left_word_addr = Register('r8')
+        right_word_addr = Register('r9')
+        return [
+            Mov(src=Imm(0), dst=index_32),
+            Label(loop_start),
+            Cmp(src=Imm(total_width), dst=index_32),
+            Jae(loop_done),
+            MovQ(src=left_addr, dst=left_word_addr),
+            AddQ(src=index_64, dst=left_word_addr),
+            MovQ(src=right_addr, dst=right_word_addr),
+            AddQ(src=index_64, dst=right_word_addr),
+            Mov(src=Memory(left_word_addr.name, 0), dst=Register('eax')),
+            Cmp(src=Memory(right_word_addr.name, 0), dst=Register('eax')),
+            Jne(mismatch_label),
+            Add(src=Imm(4), dst=index_32),
+            Jmp(loop_start),
+            Label(loop_done),
+        ]
+
+    def _gen_array_str_equality_loop(self, left_addr: Register, right_addr: Register, element_count: int, mismatch_label: str) -> List[Instruction]:
+        """The str-leaf counterpart to _gen_array_flat_byte_equality_
+        loop just above: each of the array's `element_count` str
+        elements is a POINTER, so this calls strcmp on each
+        corresponding pair rather than comparing raw pointer bytes.
+
+        strcmp is a real external call, free to clobber any CALLER-
+        saved register -- so unlike the flat-byte loop, the two base
+        addresses and the loop index all have to live in CALLEE-saved
+        registers (%rbx/%r12/%r13) to survive it, the exact same
+        discipline gen_append_call_into's own malloc-crossing
+        registers already follow, for the identical reason: every
+        function's own prologue/epilogue already saves and restores
+        these four unconditionally (see _CALLEE_SAVED_SCRATCH_
+        REGISTERS), so using them as scratch across a call, in ANY
+        function, is always safe."""
+        left_base = Register('rbx')
+        right_base = Register('r12')
+        index_32 = Register('r13d')
+        index_64 = Register('r13')
+        offset_32 = Register('r14d')
+        offset_64 = Register('r14')
+
+        loop_start = self.new_label("array_eq_str_loop")
+        loop_done = self.new_label("array_eq_str_done")
+
+        instructions = [
+            MovQ(src=left_addr, dst=left_base),
+            MovQ(src=right_addr, dst=right_base),
+            Mov(src=Imm(0), dst=index_32),
+            Label(loop_start),
+            Cmp(src=Imm(element_count), dst=index_32),
+            Jae(loop_done),
+        ]
+        # byte offset = index * 8 (each str element is one 8-byte
+        # pointer) -- computed fresh each iteration, before the call,
+        # so it never needs to survive one itself.
+        instructions.append(Mov(src=index_32, dst=offset_32))
+        instructions.append(IMul(src=Imm(8), dst=offset_32))
+        left_elem_addr = Register('r8')
+        right_elem_addr = Register('r9')
+        instructions.append(MovQ(src=left_base, dst=left_elem_addr))
+        instructions.append(AddQ(src=offset_64, dst=left_elem_addr))
+        instructions.append(MovQ(src=right_base, dst=right_elem_addr))
+        instructions.append(AddQ(src=offset_64, dst=right_elem_addr))
+        # Load the actual string POINTERS stored at these element
+        # addresses -- straight into the argument registers strcmp
+        # itself expects, since nothing else needs them first.
+        instructions.append(MovQ(src=Memory(left_elem_addr.name, 0), dst=Register('rdi')))
+        instructions.append(MovQ(src=Memory(right_elem_addr.name, 0), dst=Register('rsi')))
+        instructions.append(CallInstr('strcmp'))
+        instructions.append(Cmp(src=Imm(0), dst=Register('eax')))
+        instructions.append(Jne(mismatch_label))
+        instructions.append(Add(src=Imm(1), dst=index_32))
+        instructions.append(Jmp(loop_start))
+        instructions.append(Label(loop_done))
         return instructions
 
     def gen_slice_none_comparison_into(self, expr: Binary, dst: Register) -> List[Instruction]:

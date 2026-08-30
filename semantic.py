@@ -1967,6 +1967,25 @@ class SemanticAnalyzer:
             return Type.BOOL
         raise SemanticError(f"No semantic rule for unary operator: {expr.op}")
 
+    def _array_leaf_type(self, t: Type) -> Type:
+        """Recursively unwraps a (possibly multi-dimensional) array
+        type down to its innermost, non-array element type -- e.g.
+        for [2][3]int, the leaf type is int. Mirrors codegen.utils.
+        leaf_type exactly, kept as a small, separate copy here rather
+        than an import: semantic.py is never allowed to depend on
+        codegen (the dependency only ever runs the other way --
+        codegen imports from semantic, never the reverse), and this
+        one small, purely structural recursion over Type isn't worth
+        inverting that for. Used only by check_binary's own array-
+        equality check, to reject comparing arrays whose elements
+        bottom out at a STRUCT or SLICE -- neither has '==' defined
+        for it at all yet, so an array of either has no way to be
+        compared element-by-element either, regardless of how deeply
+        nested the array itself is."""
+        while t.kind == TypeKind.ARRAY:
+            t = t.element_type
+        return t
+
     def check_binary(self, expr: Binary) -> Type:
         left_type = self.check_expr(expr.left)
         right_type = self.check_expr(expr.right)
@@ -1998,14 +2017,14 @@ class SemanticAnalyzer:
             return Type.BOOL
 
         if op in _EQUALITY_OPS:
-            # A slice compared to `none` (in EITHER order) is the one
-            # exception to the array/slice/void/none rejection just
-            # below -- `s == none` / `none == s`, checking whether a
-            # slice is the nil/zero-value slice (see NoneLiteral's own
-            # docstring in parser.py). Checked first, before the
-            # general rejection, since it's the one case that's
-            # actually meaningful and allowed to proceed rather than
-            # be rejected by it.
+            # A slice compared to `none` (in EITHER order) is one of
+            # two exceptions to the array/slice/void/none rejection
+            # further below -- `s == none` / `none == s`, checking
+            # whether a slice is the nil/zero-value slice (see
+            # NoneLiteral's own docstring in parser.py). Checked
+            # first, before the general rejection, since it's a case
+            # that's actually meaningful and allowed to proceed rather
+            # than be rejected by it.
             none_vs_slice = (
                 (left_type == Type.NONE and right_type.kind == TypeKind.SLICE) or
                 (right_type == Type.NONE and left_type.kind == TypeKind.SLICE)
@@ -2013,18 +2032,64 @@ class SemanticAnalyzer:
             if none_vs_slice:
                 return Type.BOOL
 
-            # Array and slice operands are rejected outright, even when
-            # both sides are the exact same type -- codegen.py has no
-            # element-wise array-comparison logic (unlike str, which
-            # gets a real strcmp-backed comparison), so without this
-            # check a same-shaped comparison would type-check fine
-            # here and then hit an unhandled case in codegen. Slice
-            # equality in particular isn't even well-defined yet
-            # without array equality existing first (would `s1 == s2`
-            # compare elements, or the underlying pointer/length pair
-            # the way Go's own `==` restriction on slices hints at?) --
-            # both are real, well-defined features to consider later,
-            # just not implemented yet.
+            # ARRAY vs ARRAY is the second exception: valid exactly
+            # when both sides are the SAME array type outright (same
+            # length AND same element type -- Type's own structural
+            # dataclass equality already checks both at once, the
+            # same way it already does for any other type comparison
+            # in this file, so there's no need to separately compare
+            # .size and .element_type by hand), AND the array's own
+            # LEAF type (see _array_leaf_type) is something codegen
+            # actually knows how to compare -- int, bool, or str.
+            #
+            # A STRUCT or SLICE leaf is rejected with its own, more
+            # specific error rather than falling through to the
+            # generic array/slice rejection below: neither has '=='
+            # defined for it at ALL yet (see this same block's own
+            # note on why slice equality beyond none is still an open
+            # question, and codegen.py's own STRUCTS section for why
+            # struct equality is deferred too), so an array of either
+            # has no well-defined way to be compared element-by-
+            # element regardless of how deeply nested the array
+            # itself is -- this is a real, principled boundary, not
+            # an arbitrary restriction: closing it just means
+            # building struct/slice equality first, then this already-
+            # general array-equality mechanism (any leaf type, any
+            # nesting depth) would cover them for free, with no
+            # changes needed here at all beyond removing this check.
+            if left_type.kind == TypeKind.ARRAY and right_type.kind == TypeKind.ARRAY:
+                if left_type != right_type:
+                    raise SemanticError(
+                        f"Cannot compare {left_type} to {right_type} with "
+                        f"'{op.symbol()}' -- arrays must have the same "
+                        f"length and element type"
+                    )
+                leaf = self._array_leaf_type(left_type)
+                if leaf.kind in (TypeKind.STRUCT, TypeKind.SLICE):
+                    raise SemanticError(
+                        f"'{op.symbol()}' does not support {left_type} "
+                        f"operands -- array equality isn't defined yet "
+                        f"when the elements are structs or slices "
+                        f"(neither has its own '==' defined)"
+                    )
+                return Type.BOOL
+
+            # Every OTHER array or slice comparison is rejected
+            # outright by this point -- an array compared to a non-
+            # array (already excluded from the ARRAY-vs-ARRAY branch
+            # above, since that branch requires BOTH sides to be
+            # ARRAY-kind), or a bare slice compared to another slice
+            # (`s1 == s2`, as opposed to the none-comparison already
+            # handled above) -- codegen.py has no slice-vs-slice
+            # comparison logic at all (unlike array, which now has a
+            # real, element-wise one just above for a leaf type it
+            # knows how to compare). Slice equality in particular
+            # isn't even well-defined yet on its own terms: would
+            # `s1 == s2` compare elements (now that array equality
+            # exists, a real, buildable extension), or the underlying
+            # pointer/length/cap triple the way Go's own `==`
+            # restriction on slices hints at? A real, well-defined
+            # feature to consider later, just not implemented yet.
             #
             # VOID is rejected for a completely different reason: it's
             # not a missing FEATURE, it's structurally nonsensical --
@@ -2054,7 +2119,10 @@ class SemanticAnalyzer:
             if left_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE) or right_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE):
                 raise SemanticError(
                     f"'{op.symbol()}' does not support array, slice, void, "
-                    f"or none operands, except comparing a slice to none"
+                    f"or none operands, except comparing a slice to none, "
+                    f"or comparing two arrays of the same length and "
+                    f"element type (where the element type isn't itself a "
+                    f"struct or slice)"
                 )
             if left_type != right_type:
                 raise SemanticError(

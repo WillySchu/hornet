@@ -24,7 +24,6 @@ Updates:
 - Implicit zero value initialization for uninitialized variables / fields.
 - `assert`
 - `in` keyword.
-- Pass function calls to print.
 - `cap` builtin?
 - Compound index assign.
 - Ternary.
@@ -34,7 +33,6 @@ Updates:
 - Bounds Check Elimination.
 - Stack based params to get around parameter limit.
 - Explore per frame vs per array heap promotion.
-- Array equality.
 - Slice equality?
 - Escape analysis for arrays and slices.
 - `type` Type?

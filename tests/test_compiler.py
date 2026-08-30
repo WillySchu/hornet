@@ -3482,6 +3482,184 @@ class TestArrays:
 # expression statement already does.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Array equality: `arr1 == arr2` / `arr1 != arr2`, valid exactly when both
+# sides are the SAME array type (same length AND same element type -- Type's
+# own structural dataclass equality already checks both at once) AND the
+# array's own LEAF type (see leaf_type) is int, bool, or str -- never a
+# struct or slice, since neither has '==' defined for it at all yet (see
+# check_binary's own docstring for why that's a real, principled boundary,
+# not an arbitrary one: closing it later just means building struct/slice
+# equality first, and this already-general mechanism would cover arrays of
+# either for free).
+#
+# Two genuinely different codegen strategies, dispatched on leaf type:
+#   - int/bool: a flat, byte-for-byte comparison loop -- neither type is a
+#     pointer, so the WHOLE array, however deeply nested, is just one
+#     contiguous block of bytes (the same trick gen_array_copy already uses
+#     for copying, via leaf_type/type_byte_width, applied to comparison
+#     instead). test_nested_int_arrays_* is what actually exercises the
+#     "nested arrays are just one flat block" part of this, not merely a
+#     single-dimension array.
+#   - str: a per-element strcmp loop, since a str element is a POINTER --
+#     raw byte equality of the pointers would be wrong, since two equal
+#     strings can live at different addresses. test_str_arrays_equal_
+#     different_pointers is the test that actually proves this: both sides'
+#     corresponding elements are built via concatenation, so they're
+#     guaranteed to be different pointers with identical content -- a test
+#     using only string literals could pass even with a (wrong) raw-pointer
+#     comparison, purely by coincidence of literal deduplication.
+# ---------------------------------------------------------------------------
+
+class TestArrayEquality:
+    pytestmark = GCC_SKIP
+
+    def test_equal_int_arrays(self):
+        assert_exit_code(
+            "    [3]int a = [1, 2, 3]\n"
+            "    [3]int b = [1, 2, 3]\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0",
+            1,
+        )
+
+    def test_unequal_int_arrays(self):
+        assert_exit_code(
+            "    [3]int a = [1, 2, 3]\n"
+            "    [3]int b = [1, 2, 4]\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0",
+            0,
+        )
+
+    def test_not_equal_operator(self):
+        assert_exit_code(
+            "    [3]int a = [1, 2, 3]\n"
+            "    [3]int b = [1, 2, 4]\n"
+            "    if a != b:\n"
+            "        return 1\n"
+            "    return 0",
+            1,
+        )
+
+    def test_equal_bool_arrays(self):
+        assert_exit_code(
+            "    [2]bool a = [true, false]\n"
+            "    [2]bool b = [true, false]\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0",
+            1,
+        )
+
+    def test_nested_int_arrays_equal(self):
+        """Exercises the flat-byte loop's own core claim: a [2][3]int
+        is compared as one contiguous 24-byte block, not element by
+        element with per-row logic."""
+        assert_exit_code(
+            "    [2][3]int a = [[1, 2, 3], [4, 5, 6]]\n"
+            "    [2][3]int b = [[1, 2, 3], [4, 5, 6]]\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0",
+            1,
+        )
+
+    def test_nested_int_arrays_differ_in_last_element(self):
+        """A mismatch in the very LAST element of a nested array --
+        proves the flat-byte loop actually walks every byte rather
+        than stopping early or only checking the first row."""
+        assert_exit_code(
+            "    [2][3]int a = [[1, 2, 3], [4, 5, 6]]\n"
+            "    [2][3]int b = [[1, 2, 3], [4, 5, 7]]\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0",
+            0,
+        )
+
+    def test_str_arrays_equal_different_pointers(self):
+        """Both sides' elements are built via concatenation, so
+        they're guaranteed to be DIFFERENT pointers with identical
+        content -- proving this is a real strcmp-backed comparison,
+        not a raw (and wrong) pointer comparison that could only pass
+        by coincidence with plain string literals."""
+        assert_exit_code(
+            "    str prefix = 'hel'\n"
+            "    [2]str a = ['hello', 'world']\n"
+            "    [2]str b = [prefix + 'lo', 'wor' + 'ld']\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0",
+            1,
+        )
+
+    def test_str_arrays_not_equal(self):
+        assert_exit_code(
+            "    [2]str a = ['hello', 'world']\n"
+            "    [2]str b = ['hello', 'there']\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0",
+            0,
+        )
+
+    def test_single_element_arrays(self):
+        assert_exit_code(
+            "    [1]int a = [5]\n"
+            "    [1]int b = [5]\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0",
+            1,
+        )
+
+    def test_subarray_comparison_via_index(self):
+        """`m[0] == m[1]` -- each operand is itself an Index expression
+        yielding a sub-array, not a bare Variable; gen_array_address_
+        into already handles this via gen_index_address_into."""
+        assert_exit_code(
+            "    [2][3]int m = [[1, 2, 3], [1, 2, 3]]\n"
+            "    if m[0] == m[1]:\n"
+            "        return 1\n"
+            "    return 0",
+            1,
+        )
+
+    def test_array_field_comparison(self):
+        assert_program_exit_code(
+            "struct Row:\n"
+            "    [3]int values\n"
+            "\n"
+            "def int main():\n"
+            "    Row r1 = Row([1, 2, 3])\n"
+            "    Row r2 = Row([1, 2, 3])\n"
+            "    if r1.values == r2.values:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_large_array_comparison(self):
+        """Correctness at a scale where a bug that only manifested
+        past the first few bytes or elements would actually show up."""
+        assert_exit_code(
+            "    [2000]int a\n"
+            "    [2000]int b\n"
+            "    int i = 0\n"
+            "    while i < 2000:\n"
+            "        a[i] = i\n"
+            "        b[i] = i\n"
+            "        i = i + 1\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0",
+            1,
+        )
+
+
 class TestTypedArrayLiterals:
     pytestmark = GCC_SKIP
 
@@ -4788,7 +4966,7 @@ class TestCapAwareSlicing:
 
     def test_omitted_high_still_defaults_to_len_not_cap(self):
         """`arr[3:]` still means "from 3 to the current end" -- the
-        default for an OMITTED high bound is unaffected by cap-aware
+        default for an O[OMITTED high bound is unaffected by cap-aware
         slicing; only the upper limit an EXPLICIT high is allowed to
         reach changed."""
         assert_exit_code(
@@ -7136,18 +7314,44 @@ class TestSemanticErrors:
             match="Cannot assign a value of type bool to an array element of type int",
         )
 
-    def test_array_equality_comparison_is_rejected(self):
-        """Not yet implemented, not a real type error -- explicitly
-        excluded (see check_binary's equality handling) since
-        codegen.py has no element-wise array-comparison logic, unlike
-        str's real strcmp-backed one. Rejected even when both arrays
-        are the exact same type, to avoid type-checking fine and then
-        hitting an unhandled case in codegen."""
+    def test_mismatched_array_equality_comparison_is_rejected(self):
+        """Different length, or different element type -- either one
+        is enough to reject: array equality (see TestArrayEquality)
+        requires the two sides to be the exact SAME array type, not
+        merely "both arrays"."""
         assert_semantic_error(
             "    [3]int a = [1, 2, 3]\n"
-            "    [3]int b = [1, 2, 3]\n"
+            "    [4]int b = [1, 2, 3, 4]\n"
             "    return a == b",
-            match="does not support array, slice, void, or none operands",
+            match="arrays must have the same length and element type",
+            return_type="bool",
+        )
+
+    def test_array_of_structs_equality_comparison_is_rejected(self):
+        """Same shape, but the leaf type is a STRUCT -- rejected with
+        its own, more specific error than the generic array/slice/
+        void/none one, since struct equality itself doesn't exist yet
+        at all (see check_binary's own note on why this is a real,
+        principled boundary rather than an arbitrary one)."""
+        assert_program_semantic_error(
+            "struct Point:\n"
+            "    int x\n"
+            "\n"
+            "def bool main():\n"
+            "    [2]Point a\n"
+            "    [2]Point b\n"
+            "    return a == b\n",
+            match="array equality isn't defined yet when the elements "
+                  "are structs or slices",
+        )
+
+    def test_array_of_slices_equality_comparison_is_rejected(self):
+        assert_semantic_error(
+            "    [2][]int a\n"
+            "    [2][]int b\n"
+            "    return a == b",
+            match="array equality isn't defined yet when the elements "
+                  "are structs or slices",
             return_type="bool",
         )
 
