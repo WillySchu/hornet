@@ -12,6 +12,6 @@ def main():
     []int s = [1, 2, 3]
     print(hello())
     print(a == b)
-    #print([]int[1, 2, 3])
-    #print(ret_sl())
+    print([]int[1, 2, 3])
+    print(ret_sl())
     print(s)

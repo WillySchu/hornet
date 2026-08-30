@@ -7087,14 +7087,26 @@ class CodeGenerator:
             for an expression like this one long before print's own
             codegen knew how to use it. This method just needed to
             stop rejecting the case and start reading it back out.
-          - A non-Variable SLICE or STRUCT expression: still NOT
-            supported -- deliberately narrower scope than the array
-            case just above, matching what was actually asked for
-            (see this method's own note on gen_struct_address_into's
-            established restriction elsewhere for the struct case).
-            Restricted to a Variable, Field, or Index (an already-
-            addressable, existing piece of storage) instead. Assign it
-            to a named variable first.
+          - A SLICE expression that isn't a Variable/Index/Field (a
+            Slice re-slice or slice literal, or a slice-returning
+            Call, e.g. `print([]int[1, 2, 3])` or `print(makeSlice())`):
+            materialized via gen_slice_value_into into the SAME shared
+            _unnamed_slice_temp_offset scratch slot gen_indexable_
+            base_into's own analogous cases already use -- unlike the
+            array case just above, this needs no new storage-
+            reservation pass at all, since a slice's own descriptor is
+            always exactly 24 bytes regardless of what it points to,
+            so the existing, unconditionally-reserved shared slot
+            already fits it, the same way it already fits every other
+            unnamed slice this file materializes.
+          - A non-Variable STRUCT expression: still NOT supported --
+            deliberately narrower scope than the array and slice cases
+            above, matching what was actually asked for (see this
+            method's own note on gen_struct_address_into's established
+            restriction elsewhere for the struct case). Restricted to
+            a Variable, Field, or Index (an already-addressable,
+            existing piece of storage) instead. Assign it to a named
+            variable first.
 
         Every path still ends with `movl $0, %eax`, a harmless leftover
         from before print had anywhere real to return to -- print is
@@ -7148,11 +7160,25 @@ class CodeGenerator:
             elif isinstance(arg, Index):
                 instructions.extend(self.gen_index_address_into(arg, value_addr_reg))
             else:
-                raise CodegenError(
-                    "print's argument must be a variable, field access, "
-                    "or indexing expression when it's slice-typed -- "
-                    "assign it to a variable first"
-                )
+                # A Slice expression (a re-slice or a slice literal) or
+                # an ordinary slice-returning Call -- neither has an
+                # existing descriptor to take the address of directly,
+                # so materialize one into the SAME shared, per-function
+                # scratch slot gen_indexable_base_into's own analogous
+                # cases already use (_unnamed_slice_temp_offset), via
+                # gen_slice_value_into (which already handles every
+                # shape a slice-typed expression can take), then take
+                # that slot's own address. Unlike the ARRAY case just
+                # above, this needs no new storage-reservation pass at
+                # all: _unnamed_slice_temp_offset is already reserved
+                # unconditionally for every function, since a slice's
+                # own descriptor is always exactly 24 bytes regardless
+                # of what it points to -- there's no "how big could
+                # this possibly be" question the way an array's
+                # unbounded literal size raises.
+                temp_offset = self._unnamed_slice_temp_offset
+                instructions.extend(self.gen_slice_value_into(arg, Memory('rbp', temp_offset)))
+                instructions.append(LeaQFrame(offset=temp_offset, dst=value_addr_reg))
         elif isinstance(arg, Variable):
             instructions.append(LeaQFrame(offset=self._local_offset(arg.name), dst=value_addr_reg))
         else:

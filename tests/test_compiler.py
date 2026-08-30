@@ -6805,42 +6805,104 @@ class TestPrintArraysAndSlices:
             "[2]int[1, 2]\n[3]int[3, 4, 5]\n",
         )
 
-    def test_slice_expression_as_direct_print_argument_not_supported(self):
-        source = (
-            "def int main():\n"
+    def test_slice_literal_as_direct_print_argument(self):
+        """Used to be a real, deliberate gap, matching the same
+        restriction print's array-typed argument used to have before
+        the previous fix: a bare Slice expression (a re-slice or a
+        slice literal) has no existing descriptor of its own to print
+        through. Now materialized via gen_slice_value_into into the
+        same shared _unnamed_slice_temp_offset scratch slot gen_
+        indexable_base_into's own analogous cases already use -- see
+        gen_print_call_into's own docstring."""
+        assert_stdout(
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
             "    print(arr[1:3])\n"
-            "    return 0\n"
+            "    return 0",
+            "[]int[2, 3]\n",
         )
-        ast = _parse(source)
-        analyze(ast)
-        with pytest.raises(CodegenError, match="assign it to a variable first"):
-            generate_asm(ast, platform=ASM_PLATFORM)
 
-    def test_struct_returning_call_as_direct_print_argument_still_not_supported(self):
-        """Deliberately narrower scope than the array case above --
-        only arrays were asked for. A struct-returning call (or a
-        struct literal, though that's separately rejected even
-        earlier, at the semantic layer -- struct literals were never
-        allowed as print's own argument at all) still hits the
-        existing, unchanged struct-typed restriction in gen_print_
-        call_into."""
-        source = (
+    def test_typed_slice_literal_as_direct_print_argument(self):
+        assert_stdout(
+            "    print([]int[1, 2, 3])\n"
+            "    return 0",
+            "[]int[1, 2, 3]\n",
+        )
+
+    def test_slice_returning_call_as_direct_print_argument(self):
+        assert_program_stdout(
+            "def []int makeSlice():\n"
+            "    return []int[7, 8, 9]\n"
+            "\n"
+            "def int main():\n"
+            "    print(makeSlice())\n"
+            "    return 0\n",
+            "[]int[7, 8, 9]\n",
+        )
+
+    def test_nested_unnamed_slice_as_direct_print_argument(self):
+        assert_stdout(
+            "    print([][]int[[]int[1, 2], []int[3, 4]])\n"
+            "    return 0",
+            "[][]int[[]int[1, 2], []int[3, 4]]\n",
+        )
+
+    def test_slice_of_structs_literal_as_direct_print_argument(self):
+        assert_program_stdout(
             "struct Point:\n"
             "    int x\n"
             "    int y\n"
             "\n"
-            "def Point makePoint():\n"
-            "    return Point(1, 2)\n"
+            "def int main():\n"
+            "    print([]Point[Point(1, 2), Point(3, 4)])\n"
+            "    return 0\n",
+            "[]Point[Point(x: 1, y: 2), Point(x: 3, y: 4)]\n",
+        )
+
+    def test_two_unnamed_slices_printed_in_sequence(self):
+        assert_stdout(
+            "    print([]int[1, 2])\n"
+            "    print([]int[3, 4, 5])\n"
+            "    return 0",
+            "[]int[1, 2]\n[]int[3, 4, 5]\n",
+        )
+
+    def test_mixed_unnamed_array_and_slice_prints(self):
+        assert_stdout(
+            "    print([1, 2])\n"
+            "    print([]int[3, 4])\n"
+            "    return 0",
+            "[2]int[1, 2]\n[]int[3, 4]\n",
+        )
+
+    def test_nested_unnamed_slice_materialization_in_print(self):
+        """`print(identity([]int[1, 2, 3]))` -- the print argument
+        itself is a slice-returning call whose OWN argument is another
+        unnamed slice, exercising the identical "strictly nested,
+        fully drained before reuse" safety argument already proven for
+        gen_slice_arg_into's own nested case, now with print as the
+        outermost consumer of the shared scratch slot instead of
+        another function call."""
+        assert_program_stdout(
+            "def []int identity([]int s):\n"
+            "    return s\n"
             "\n"
             "def int main():\n"
-            "    print(makePoint())\n"
-            "    return 0\n"
+            "    print(identity([]int[1, 2, 3]))\n"
+            "    return 0\n",
+            "[]int[1, 2, 3]\n",
         )
-        ast = _parse(source)
-        analyze(ast)
-        with pytest.raises(CodegenError, match="assign it to a variable first"):
-            generate_asm(ast, platform=ASM_PLATFORM)
+
+    def test_slice_of_a_slice_typed_field_as_direct_print_argument(self):
+        assert_program_stdout(
+            "struct Holder:\n"
+            "    []int xs\n"
+            "\n"
+            "def int main():\n"
+            "    Holder h = Holder([]int[10, 20, 30, 40])\n"
+            "    print(h.xs[1:3])\n"
+            "    return 0\n",
+            "[]int[20, 30]\n",
+        )
 
 
 # ---------------------------------------------------------------------------
