@@ -2,8 +2,16 @@ def str hello():
     return 'hello'
 
 
+def []int ret_sl():
+    return []int[1, 2, 3]
+
+
 def main():
     [3]int a = [1,2,3]
     [3]int b = [1,2,3]
+    []int s = [1, 2, 3]
     print(hello())
     print(a == b)
+    #print([]int[1, 2, 3])
+    #print(ret_sl())
+    print(s)

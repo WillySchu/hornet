@@ -6741,26 +6741,100 @@ class TestPrintArraysAndSlices:
         )
 
 
-    def test_array_literal_as_direct_print_argument_not_supported(self):
-        """A real, deliberate gap, matching the same restriction
-        gen_array_arg_address_into already imposes on array-typed call
-        arguments: a bare ArrayLiteral has no address of its own to
-        print through. Assign it to a named variable first."""
-        source = (
-            "def int main():\n"
+    def test_array_literal_as_direct_print_argument(self):
+        """Used to be a real, deliberate gap, matching the same
+        restriction gen_array_arg_address_into used to impose on
+        array-typed call arguments before argument materialization
+        existed: a bare ArrayLiteral has no address of its own to
+        print through. Now materialized via the exact same _gen_
+        materialize_argument_temp_into mechanism a literal used as an
+        ordinary function-call argument already uses -- see gen_
+        print_call_into's own docstring."""
+        assert_stdout(
             "    print([1, 2, 3])\n"
-            "    return 0\n"
+            "    return 0",
+            "[3]int[1, 2, 3]\n",
         )
-        ast = _parse(source)
-        analyze(ast)  # semantically fine -- the gap is codegen-level only
-        with pytest.raises(CodegenError, match="assign it to a variable first"):
-            generate_asm(ast, platform=ASM_PLATFORM)
+
+    def test_typed_array_literal_as_direct_print_argument(self):
+        assert_stdout(
+            "    print([3]int[1, 2, 3])\n"
+            "    return 0",
+            "[3]int[1, 2, 3]\n",
+        )
+
+    def test_array_returning_call_as_direct_print_argument(self):
+        assert_program_stdout(
+            "def [3]int makeArr():\n"
+            "    return [7, 8, 9]\n"
+            "\n"
+            "def int main():\n"
+            "    print(makeArr())\n"
+            "    return 0\n",
+            "[3]int[7, 8, 9]\n",
+        )
+
+    def test_nested_array_literal_as_direct_print_argument(self):
+        assert_stdout(
+            "    print([[1, 2], [3, 4]])\n"
+            "    return 0",
+            "[2][2]int[[2]int[1, 2], [2]int[3, 4]]\n",
+        )
+
+    def test_array_of_structs_literal_as_direct_print_argument(self):
+        assert_program_stdout(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    print([Point(1, 2), Point(3, 4)])\n"
+            "    return 0\n",
+            "[2]Point[Point(x: 1, y: 2), Point(x: 3, y: 4)]\n",
+        )
+
+    def test_two_unnamed_array_literals_printed_in_sequence(self):
+        """Each print() call's own materialized temp is fully consumed
+        before the next one runs -- proves this composes correctly
+        across multiple, independent print() calls in the same
+        function, not just a single isolated one."""
+        assert_stdout(
+            "    print([1, 2])\n"
+            "    print([3, 4, 5])\n"
+            "    return 0",
+            "[2]int[1, 2]\n[3]int[3, 4, 5]\n",
+        )
 
     def test_slice_expression_as_direct_print_argument_not_supported(self):
         source = (
             "def int main():\n"
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
             "    print(arr[1:3])\n"
+            "    return 0\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        with pytest.raises(CodegenError, match="assign it to a variable first"):
+            generate_asm(ast, platform=ASM_PLATFORM)
+
+    def test_struct_returning_call_as_direct_print_argument_still_not_supported(self):
+        """Deliberately narrower scope than the array case above --
+        only arrays were asked for. A struct-returning call (or a
+        struct literal, though that's separately rejected even
+        earlier, at the semantic layer -- struct literals were never
+        allowed as print's own argument at all) still hits the
+        existing, unchanged struct-typed restriction in gen_print_
+        call_into."""
+        source = (
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def Point makePoint():\n"
+            "    return Point(1, 2)\n"
+            "\n"
+            "def int main():\n"
+            "    print(makePoint())\n"
             "    return 0\n"
         )
         ast = _parse(source)

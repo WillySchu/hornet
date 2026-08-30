@@ -2300,6 +2300,24 @@ class CodeGenerator:
         address via gen_array_address_into/gen_struct_address_into and
         so never needs one of these.
 
+        Not just ORDINARY function-call arguments, despite the name:
+        _collect_argument_temps_in_expr's own walk finds a qualifying
+        argument inside ANY Call node, with no check on `expr.name` at
+        all -- print, len, and append are all ordinary Call nodes as
+        far as this pass is concerned, so an array-typed literal or
+        returning-call passed to print() already gets a slot reserved
+        here, unbeknownst to this pass itself, long before print's own
+        codegen (gen_print_call_into) actually learned to make use of
+        one. (len's and append's own array/struct-typed arguments, if
+        they're ever a literal or returning-call, ALSO get a slot
+        reserved here that neither currently reads back out --
+        harmless, just a few unused bytes of frame space, since
+        neither has a reason to use this mechanism: gen_indexable_
+        base_into already heap-allocates an ArrayLiteral base
+        unconditionally for len, and gen_array_value_into/gen_struct_
+        value_into already handle append's own value argument directly
+        without needing an address-yielding temp at all.)
+
         WHY THIS CAN'T REUSE THE SHARED-SLOT TRICK
         -------------------------------------------------
         _unnamed_slice_temp_offset above gets away with ONE shared,
@@ -4787,17 +4805,23 @@ class CodeGenerator:
         return [MovQ(src=Register(mem.base), dst=dst)]
 
     def _gen_materialize_argument_temp_into(self, expr: Node, t: Type, dst: Register) -> List[Instruction]:
-        """Materializes an array- or struct-typed function-call
-        argument that has no address of its own -- an ArrayLiteral, a
-        struct literal, or an ordinary array/struct-returning Call --
-        into real, addressable storage, and leaves that address in
-        `dst` (a 64-bit register). This is the piece a Variable/Index/
-        Field argument never needs at all (gen_array_address_into/
-        gen_struct_address_into already have a real address for any of
-        those); see _collect_argument_temps's own docstring for why
-        this can't reuse a single shared scratch slot the way an
-        unnamed slice does, and why the stack-vs-heap decision below
-        mirrors is_heap_allocated's own size threshold.
+        """Materializes an array- or struct-typed expression that has
+        no address of its own -- an ArrayLiteral, a struct literal, or
+        an ordinary array/struct-returning Call -- into real,
+        addressable storage, and leaves that address in `dst` (a
+        64-bit register). Despite its name, not exclusively for
+        function-call arguments: gen_print_call_into's own array-typed
+        argument reuses this exact method too (see its own docstring),
+        since _collect_argument_temps already reserves a slot for
+        print's own argument the same, uniform way it does for an
+        ordinary call's (see that method's own note on why it doesn't
+        distinguish between the two at all). This is the piece a
+        Variable/Index/Field argument never needs at all (gen_array_
+        address_into/gen_struct_address_into already have a real
+        address for any of those); see _collect_argument_temps's own
+        docstring for why this can't reuse a single shared scratch
+        slot the way an unnamed slice does, and why the stack-vs-heap
+        decision below mirrors is_heap_allocated's own size threshold.
 
         Producing the actual VALUE needs no new mechanism at all: gen_
         array_value_into and gen_struct_value_into already handle
@@ -7049,15 +7073,28 @@ class CodeGenerator:
             consumed (copied into value_addr's own use, then handed to
             hornet_stringify) before another print() call, or anything
             else, could reuse this same slot.
-          - A non-Variable array/slice/struct expression: NOT supported
-            -- these can be arbitrarily large, so unlike the scalar
-            case there's no fixed-size shared slot that could safely
-            fit an arbitrary one. Restricted to a Variable, Field, or
-            Index (an already-addressable, existing piece of storage)
-            instead, matching this file's established restriction on
-            other unnamed-expression bases (e.g. gen_struct_address_
-            into's own note on a struct-returning Call as a field
-            base). Assign it to a named variable first.
+          - An ARRAY expression that isn't a Variable/Index/Field (an
+            ArrayLiteral, or an array-returning Call, e.g. `print([3]
+            int[1, 2, 3])` or `print(makeArr())`): materialized via
+            _gen_materialize_argument_temp_into, the exact same
+            mechanism already built for an array literal or returning-
+            call used as an ordinary function-call argument. This
+            needed no new storage-reservation logic at all:
+            _collect_argument_temps_in_expr's own walk finds a
+            qualifying argument inside ANY Call node, regardless of
+            whether that call turns out to be print, len, append, or
+            an ordinary function -- it was already reserving a slot
+            for an expression like this one long before print's own
+            codegen knew how to use it. This method just needed to
+            stop rejecting the case and start reading it back out.
+          - A non-Variable SLICE or STRUCT expression: still NOT
+            supported -- deliberately narrower scope than the array
+            case just above, matching what was actually asked for
+            (see this method's own note on gen_struct_address_into's
+            established restriction elsewhere for the struct case).
+            Restricted to a Variable, Field, or Index (an already-
+            addressable, existing piece of storage) instead. Assign it
+            to a named variable first.
 
         Every path still ends with `movl $0, %eax`, a harmless leftover
         from before print had anywhere real to return to -- print is
@@ -7099,13 +7136,10 @@ class CodeGenerator:
                 )
             instructions.extend(self.gen_struct_address_into(arg, value_addr_reg))
         elif arg_type.kind == TypeKind.ARRAY:
-            if not isinstance(arg, (Variable, Field, Index)):
-                raise CodegenError(
-                    "print's argument must be a variable, field access, "
-                    "or indexing expression when it's array-typed -- "
-                    "assign it to a variable first"
-                )
-            instructions.extend(self.gen_array_address_into(arg, value_addr_reg))
+            if isinstance(arg, (Variable, Field, Index)):
+                instructions.extend(self.gen_array_address_into(arg, value_addr_reg))
+            else:
+                instructions.extend(self._gen_materialize_argument_temp_into(arg, arg_type, value_addr_reg))
         elif arg_type.kind == TypeKind.SLICE:
             if isinstance(arg, Variable):
                 instructions.append(LeaQFrame(offset=self._local_offset(arg.name), dst=value_addr_reg))
