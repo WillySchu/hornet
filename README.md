@@ -14,7 +14,6 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- Type aliases for structs.
 - Type aliases for arrays.
 - Type aliases for slices.
 - Add `byte` type.
@@ -22,6 +21,7 @@ Updates:
 - `type` type.
 ` typeof`
 - Require `type` keyword to declare new type for structs.
+- Consider enabling struct literal syntax for aliases.
 - `fuction` type.
 - User defined types built off other types.
 - Change slice's zero type to an empty slice rather than `none`.

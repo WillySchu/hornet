@@ -4494,13 +4494,26 @@ class TestMethods:
 # site found only by re-running the full suite after the first two files
 # were updated and seeing escape analysis's own tests still failing).
 #
-# Deliberately scoped narrower than parse_type() itself allows: an alias can
-# target int, bool, str, or another alias -- NOT an array or slice type
-# expression, and NOT a struct name (see _collect_type_aliases's own
-# docstring for exactly why the struct case specifically needs more than
-# just lifting a check to support later: aliases are resolved before struct
-# names even exist, precisely so a struct FIELD's own type can already be an
-# alias by the time struct collection runs).
+# Deliberately still scoped narrower than parse_type() itself allows: an
+# alias can target int, bool, str, a struct name, or another alias -- NOT an
+# array or slice type expression. Struct names were the harder half of this
+# feature to add, not because anything fundamentally prevented it, but
+# because of an ORDERING conflict this class's own tests exercise directly:
+# a struct FIELD's own type can already be an alias (needing aliases
+# resolved before struct fields are), while an alias can now target a
+# struct NAME (needing struct names to already exist before aliases
+# resolve). Solved by splitting what used to be one _collect_structs pass
+# into _reserve_struct_names (just names) and _resolve_struct_fields (the
+# rest), with alias resolution running in between the two -- see
+# _collect_type_aliases's own docstring for the full ordering.
+#
+# test_constructing_via_the_alias_name_is_not_supported documents a real,
+# narrower remaining gap: a struct-name alias is fully interchangeable with
+# the real struct name everywhere a type NAME is expected (a VarDecl, a
+# parameter, a field, ...), but NOT for construction -- `PointAlias(1)`
+# still fails, since struct-literal syntax is resolved by check_call's own
+# direct `expr.name in self.structs` membership check, which only ever
+# recognizes a struct's own real name, never an alias for it.
 # ---------------------------------------------------------------------------
 
 class TestTypeAliases:
@@ -4688,7 +4701,7 @@ class TestTypeAliases:
             "\n"
             "def int main():\n"
             "    return 0\n",
-            match="only int, bool, str, or another type alias",
+            match="only int, bool, str, a struct name, or another type alias",
         )
 
     def test_slice_target_is_rejected(self):
@@ -4697,7 +4710,7 @@ class TestTypeAliases:
             "\n"
             "def int main():\n"
             "    return 0\n",
-            match="only int, bool, str, or another type alias",
+            match="only int, bool, str, a struct name, or another type alias",
         )
 
     def test_unknown_target_is_rejected(self):
@@ -4706,14 +4719,67 @@ class TestTypeAliases:
             "\n"
             "def int main():\n"
             "    return 0\n",
-            match="isn't int, bool, str, or another type alias",
+            match="isn't int, bool, str, a struct name, or another type alias",
         )
 
-    def test_struct_target_is_rejected(self):
-        """Not yet supported (see this class's own module comment for
-        why): aliases resolve before struct names even exist, so a
-        struct-name target hits the identical 'unknown name' message
-        an actually-unknown identifier would."""
+    def test_alias_to_a_struct_name(self):
+        """Once lifted (see this class's own module comment for the
+        ordering problem this needed solving), a struct-name target
+        resolves to Type(STRUCT, struct_name=...) -- structurally
+        identical to what type_from_name would produce for the
+        struct's own name used directly, so the alias is interchangeable
+        with it everywhere a type name is expected."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "type PointAlias = Point\n"
+            "\n"
+            "def int main():\n"
+            "    PointAlias p = Point(3, 4)\n"
+            "    return p.x + p.y\n",
+            7,
+        )
+
+    def test_alias_of_alias_to_a_struct_name(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "\n"
+            "type A = Point\n"
+            "type B = A\n"
+            "\n"
+            "def int main():\n"
+            "    B p = Point(9)\n"
+            "    return p.x\n",
+            9,
+        )
+
+    def test_alias_to_a_struct_name_as_a_field_type(self):
+        assert_program_exit_code(
+            "struct Inner:\n"
+            "    int v\n"
+            "\n"
+            "type InnerAlias = Inner\n"
+            "\n"
+            "struct Outer:\n"
+            "    InnerAlias inner\n"
+            "\n"
+            "def int main():\n"
+            "    Outer o = Outer(Inner(5))\n"
+            "    return o.inner.v\n",
+            5,
+        )
+
+    def test_constructing_via_the_alias_name_is_not_supported(self):
+        """A struct-name alias is interchangeable with the real struct
+        name everywhere a type NAME is expected, but not for
+        CONSTRUCTION: struct-literal syntax is resolved by check_call's
+        own direct `expr.name in self.structs` membership check, which
+        an alias name never satisfies (self.structs is keyed only by a
+        struct's own real name) -- a separate, narrower gap from
+        general type-name interchangeability, not yet closed."""
         assert_program_semantic_error(
             "struct Point:\n"
             "    int x\n"
@@ -4721,8 +4787,9 @@ class TestTypeAliases:
             "type PointAlias = Point\n"
             "\n"
             "def int main():\n"
-            "    return 0\n",
-            match="isn't int, bool, str, or another type alias",
+            "    PointAlias p = PointAlias(1)\n"
+            "    return p.x\n",
+            match="undeclared",
         )
 
     def test_alias_colliding_with_a_struct_name_is_rejected(self):
@@ -4734,13 +4801,13 @@ class TestTypeAliases:
             "\n"
             "def int main():\n"
             "    return 0\n",
-            match="collides with a type alias",
+            match="collides with a struct",
         )
 
     def test_struct_declared_before_its_colliding_alias_is_still_rejected(self):
-        """Source order doesn't matter: aliases are collected in their
-        own, earlier pass regardless of where they're textually
-        written relative to the struct they collide with."""
+        """Source order doesn't matter: struct NAMES are reserved in
+        their own, earlier pass regardless of where a struct is
+        textually written relative to the alias that collides with it."""
         assert_program_semantic_error(
             "struct Point:\n"
             "    int x\n"
@@ -4749,7 +4816,7 @@ class TestTypeAliases:
             "\n"
             "def int main():\n"
             "    return 0\n",
-            match="collides with a type alias",
+            match="collides with a struct",
         )
 
     def test_alias_colliding_with_a_function_name_is_rejected(self):
