@@ -4471,6 +4471,306 @@ class TestMethods:
         )
 
 
+# ---------------------------------------------------------------------------
+# Type aliases: `type Name = TargetType` -- an ALIAS, not a Go-style newtype
+# (`type Name TargetType`, with no '=' -- deliberately not what this is, and
+# not currently supported). Once resolved, an alias is completely
+# indistinguishable from its own target everywhere -- resolved_type on any
+# node just holds the real, underlying Type, with no trace the name was ever
+# an alias at all (test_print_alias_typed_variable is the test that actually
+# proves this most directly: printing an alias-typed variable prints the
+# underlying value, not the alias's own name anywhere).
+#
+# The whole feature is cheap specifically because type_from_name is the ONE
+# function every other type-name resolution in this codebase already calls
+# (a VarDecl's own type, a Param, a struct field, a function's own return
+# type, an array/slice's own element type, recursively) -- adding an
+# `aliases` registry there, threaded through exactly like the existing
+# `structs` registry already is, gives every one of those call sites alias
+# support for free, with no changes needed at any of them beyond passing the
+# new registry through. This did, however, turn out to be a genuinely wide
+# (if shallow) mechanical change: type_from_name is called from semantic.py,
+# codegen.py, AND codegen/escape_analysis.py (a third, easy-to-miss call
+# site found only by re-running the full suite after the first two files
+# were updated and seeing escape analysis's own tests still failing).
+#
+# Deliberately scoped narrower than parse_type() itself allows: an alias can
+# target int, bool, str, or another alias -- NOT an array or slice type
+# expression, and NOT a struct name (see _collect_type_aliases's own
+# docstring for exactly why the struct case specifically needs more than
+# just lifting a check to support later: aliases are resolved before struct
+# names even exist, precisely so a struct FIELD's own type can already be an
+# alias by the time struct collection runs).
+# ---------------------------------------------------------------------------
+
+class TestTypeAliases:
+    pytestmark = GCC_SKIP
+
+    def test_alias_as_vardecl_type(self):
+        assert_program_exit_code(
+            "type MyInt = int\n"
+            "\n"
+            "def int main():\n"
+            "    MyInt x = 5\n"
+            "    return x\n",
+            5,
+        )
+
+    def test_alias_as_param_and_return_type(self):
+        assert_program_exit_code(
+            "type MyInt = int\n"
+            "\n"
+            "def MyInt double(MyInt x):\n"
+            "    return x * 2\n"
+            "\n"
+            "def int main():\n"
+            "    return double(21)\n",
+            42,
+        )
+
+    def test_alias_as_struct_field_type(self):
+        assert_program_exit_code(
+            "type MyInt = int\n"
+            "\n"
+            "struct Point:\n"
+            "    MyInt x\n"
+            "    MyInt y\n"
+            "\n"
+            "def int main():\n"
+            "    Point p = Point(3, 4)\n"
+            "    return p.x + p.y\n",
+            7,
+        )
+
+    def test_alias_of_alias(self):
+        assert_program_exit_code(
+            "type A = int\n"
+            "type B = A\n"
+            "\n"
+            "def int main():\n"
+            "    B x = 10\n"
+            "    return x\n",
+            10,
+        )
+
+    def test_forward_referenced_alias(self):
+        """`B` is declared before `A`, the alias it targets -- order
+        doesn't matter, mirroring how a struct field can already
+        reference a struct declared later in the file."""
+        assert_program_exit_code(
+            "type B = A\n"
+            "type A = int\n"
+            "\n"
+            "def int main():\n"
+            "    B x = 7\n"
+            "    return x\n",
+            7,
+        )
+
+    def test_alias_to_bool(self):
+        assert_program_exit_code(
+            "type Flag = bool\n"
+            "\n"
+            "def int main():\n"
+            "    Flag f = true\n"
+            "    if f:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_alias_to_str(self):
+        assert_program_exit_code(
+            "type Text = str\n"
+            "\n"
+            "def int main():\n"
+            "    Text t = 'hi'\n"
+            "    print(t)\n"
+            "    return 0\n",
+            0,
+        )
+
+    def test_alias_typed_vardecl_zero_init(self):
+        """An alias-typed VarDecl with no initializer still gets its
+        own (underlying) implicit zero value -- nothing about zero-
+        init needed to change at all, since resolved_type is already
+        the real, underlying Type by the time it's ever consulted."""
+        assert_program_exit_code(
+            "type MyInt = int\n"
+            "\n"
+            "def int main():\n"
+            "    MyInt x\n"
+            "    return x\n",
+            0,
+        )
+
+    def test_alias_as_array_element_type(self):
+        assert_program_exit_code(
+            "type MyInt = int\n"
+            "\n"
+            "def int main():\n"
+            "    [3]MyInt arr = [1, 2, 3]\n"
+            "    return arr[0] + arr[1] + arr[2]\n",
+            6,
+        )
+
+    def test_alias_as_slice_element_type(self):
+        assert_program_exit_code(
+            "type MyInt = int\n"
+            "\n"
+            "def int main():\n"
+            "    []MyInt s = []MyInt[1, 2, 3]\n"
+            "    return s[0] + s[1] + s[2]\n",
+            6,
+        )
+
+    def test_alias_in_method_signature(self):
+        assert_program_exit_code(
+            "type MyInt = int\n"
+            "\n"
+            "struct Adder:\n"
+            "    int base\n"
+            "    def MyInt addTo(s, MyInt x):\n"
+            "        return s.base + x\n"
+            "\n"
+            "def int main():\n"
+            "    Adder a = Adder(10)\n"
+            "    return a.addTo(5)\n",
+            15,
+        )
+
+    def test_print_alias_typed_variable(self):
+        """Proves an alias leaves no trace of its own name anywhere
+        past resolution: printing an alias-typed variable prints the
+        underlying int value, not 'MyInt' or anything alias-shaped."""
+        assert_program_stdout(
+            "type MyInt = int\n"
+            "\n"
+            "def int main():\n"
+            "    MyInt x = 42\n"
+            "    print(x)\n"
+            "    return 0\n",
+            "42\n",
+        )
+
+    def test_duplicate_alias_is_rejected(self):
+        assert_program_semantic_error(
+            "type A = int\n"
+            "type A = bool\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="already declared",
+        )
+
+    def test_direct_cycle_is_rejected(self):
+        assert_program_semantic_error(
+            "type A = A\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="cycle",
+        )
+
+    def test_indirect_cycle_is_rejected(self):
+        assert_program_semantic_error(
+            "type A = B\n"
+            "type B = A\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="cycle",
+        )
+
+    def test_array_target_is_rejected(self):
+        assert_program_semantic_error(
+            "type IntArray = [3]int\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="only int, bool, str, or another type alias",
+        )
+
+    def test_slice_target_is_rejected(self):
+        assert_program_semantic_error(
+            "type IntSlice = []int\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="only int, bool, str, or another type alias",
+        )
+
+    def test_unknown_target_is_rejected(self):
+        assert_program_semantic_error(
+            "type Foo = NotAThing\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="isn't int, bool, str, or another type alias",
+        )
+
+    def test_struct_target_is_rejected(self):
+        """Not yet supported (see this class's own module comment for
+        why): aliases resolve before struct names even exist, so a
+        struct-name target hits the identical 'unknown name' message
+        an actually-unknown identifier would."""
+        assert_program_semantic_error(
+            "struct Point:\n"
+            "    int x\n"
+            "\n"
+            "type PointAlias = Point\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="isn't int, bool, str, or another type alias",
+        )
+
+    def test_alias_colliding_with_a_struct_name_is_rejected(self):
+        assert_program_semantic_error(
+            "type Point = int\n"
+            "\n"
+            "struct Point:\n"
+            "    int x\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="collides with a type alias",
+        )
+
+    def test_struct_declared_before_its_colliding_alias_is_still_rejected(self):
+        """Source order doesn't matter: aliases are collected in their
+        own, earlier pass regardless of where they're textually
+        written relative to the struct they collide with."""
+        assert_program_semantic_error(
+            "struct Point:\n"
+            "    int x\n"
+            "\n"
+            "type Point = int\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="collides with a type alias",
+        )
+
+    def test_alias_colliding_with_a_function_name_is_rejected(self):
+        assert_program_semantic_error(
+            "type foo = int\n"
+            "\n"
+            "def int foo():\n"
+            "    return 0\n",
+            match="collides with a type alias",
+        )
+
+    def test_alias_named_after_a_builtin_is_rejected(self):
+        assert_program_semantic_error(
+            "type print = int\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="builtin",
+        )
+
+
 class TestTypedArrayLiterals:
     pytestmark = GCC_SKIP
 
@@ -6356,7 +6656,7 @@ class TestSliceParametersAndReturns:
         via gen_slice_value_into, then read back out -- see gen_slice_
         arg_into's own docstring for why sharing that one slot is safe
         here, for a different reason than it is there (a slice
-        argument is passed BY VALUE, drained into registers and pushe[Od
+        argument is passed BY VALUE, drained into registers and pushed
         immediately, not by address that has to survive until the
         call itself)."""
         assert_program_exit_code(

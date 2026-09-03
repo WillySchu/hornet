@@ -14,11 +14,14 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
+- Type aliases for structs.
+- Type aliases for arrays.
+- Type aliases for slices.
 - Add `byte` type.
 - Casting.
 - `type` type.
-- Type aliases.
 ` typeof`
+- Require `type` keyword to declare new type for structs.
 - `fuction` type.
 - User defined types built off other types.
 - Change slice's zero type to an empty slice rather than `none`.
@@ -51,6 +54,7 @@ Updates:
 - int64
 - float
 - Pointers
+- Imports.
 - Multithreading
 - Optimization / mid level IR
 - Bounds Check Elimination.

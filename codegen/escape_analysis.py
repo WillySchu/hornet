@@ -87,9 +87,10 @@ def root_variable_name(expr: Node) -> Optional[str]:
 
 
 class EscapeAnalyzer:
-    def __init__(self, fn: Function, param_types: list[Type], structs: dict[str, StructInfo]):
+    def __init__(self, fn: Function, param_types: list[Type], structs: dict[str, StructInfo], aliases: dict[str, Type]):
         self.fn = fn
         self.structs = structs
+        self.aliases = aliases
 
         self.array_decls: set[int] = set()
         self.slice_decls: set[int] = set()
@@ -409,7 +410,7 @@ class EscapeAnalyzer:
     def walk_statements(self, statements: list[Node]) -> None:
         for stmt in statements:
             if isinstance(stmt, VarDecl):
-                var_type = type_from_name(stmt.var_type, self.structs)
+                var_type = type_from_name(stmt.var_type, self.structs, self.aliases)
                 self.declare(stmt.name, id(stmt), var_type)
                 if stmt.init is not None:
                     target_node = self.whole_value_node_of(stmt.name)
@@ -489,7 +490,7 @@ class EscapeAnalyzer:
             # Break, Continue: nothing to do.
 
 
-def analyze_array_escapes(fn: Function, param_types: list[Type], structs: dict[str, StructInfo]) -> set[int]:
+def analyze_array_escapes(fn: Function, param_types: list[Type], structs: dict[str, StructInfo], aliases: dict[str, Type]) -> set[int]:
     """Returns the set of id()s -- of this function's own VarDecl or
     Param nodes -- for array-typed declarations that need to be heap-
     allocated because a slice backed by them might outlive this
@@ -708,5 +709,5 @@ def analyze_array_escapes(fn: Function, param_types: list[Type], structs: dict[s
          of array declarations that need to survive past this
          function's own return.
     """
-    analyzer = EscapeAnalyzer(fn, param_types, structs)
+    analyzer = EscapeAnalyzer(fn, param_types, structs, aliases)
     return analyzer.analyze()

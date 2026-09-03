@@ -1040,9 +1040,40 @@ class Function(Node):
 
 
 @dataclass
+class TypeAlias(Node):
+    """`type Name = TargetType` -- a top-level declaration introducing
+    `Name` as an alternate spelling for an existing type, interchangeable
+    with it everywhere (an ALIAS, not a Go-style newtype/"defined type"
+    -- `type Name TargetType`, with no '=', would be the newtype form;
+    deliberately not what this represents, and not currently supported
+    at all). `target_type` is parsed via the ordinary parse_type(), the
+    exact same grammar a VarDecl/Param/struct field's own type uses --
+    syntactically, an alias's target can be anything parse_type()
+    accepts, including an array or slice type expression or a struct
+    name; semantic.py's own _collect_type_aliases is what actually
+    narrows this down to int/bool/str or another alias for now (see its
+    own docstring for exactly why, and what would need to change to
+    lift that restriction later). This mirrors how struct field types
+    are parsed broadly and validated precisely elsewhere in this file
+    -- the parser accepts the general shape, semantic.py enforces the
+    specific rule.
+
+    Resolved once, centrally, by threading a new `aliases` registry
+    through type_from_name (the one function every OTHER type-name
+    resolution in this codebase -- VarDecl, Param, a struct field, a
+    function's own return type -- already calls) -- so every one of
+    those call sites gains alias support automatically, with no
+    changes needed at any of them beyond passing that registry through
+    like they already do for the struct registry."""
+    name: str
+    target_type: Union[str, ArrayTypeExpr, SliceTypeExpr]
+
+
+@dataclass
 class Program(Node):
     functions: List[Function] = field(default_factory=list)
     structs: List[StructDef] = field(default_factory=list)
+    type_aliases: List[TypeAlias] = field(default_factory=list)
 
     def __repr__(self) -> str:
         return self.pretty()
@@ -1269,14 +1300,35 @@ class Parser:
     def parse_program(self) -> Program:
         functions = []
         structs = []
+        type_aliases = []
         self.skip_newlines()
         while not self.at_end():
             if self.check(TokenType.STRUCT):
                 structs.append(self.parse_struct_def())
+            elif self.check(TokenType.TYPE):
+                type_aliases.append(self.parse_type_alias())
             else:
                 functions.append(self.parse_function())
             self.skip_newlines()
-        return Program(functions=functions, structs=structs)
+        return Program(functions=functions, structs=structs, type_aliases=type_aliases)
+
+    def parse_type_alias(self) -> TypeAlias:
+        """`type Name = TargetType` -- a single-line, top-level
+        declaration; no body, no indented block, unlike struct/function/
+        method definitions. `Name` is an ordinary IDENTIFIER (never one
+        of the reserved type keywords -- 'int'/'bool'/'str' are their
+        own token types, never tokenized as IDENTIFIER at all, so
+        `type int = ...` is rejected by the very next `expect` call,
+        not by a special check here). TargetType reuses parse_type()
+        directly -- see TypeAlias's own docstring for why the PARSER
+        accepts its full generality here even though semantic.py
+        currently narrows what's actually allowed."""
+        self.expect(TokenType.TYPE, "Expected 'type' to start a type alias")
+        name_tok = self.expect(TokenType.IDENTIFIER, "Expected a name for this type alias")
+        self.expect(TokenType.ASSIGN, "Expected '=' in a type alias declaration")
+        target_type = self.parse_type()
+        self.expect(TokenType.NEWLINE, "Expected a newline after a type alias declaration")
+        return TypeAlias(name=name_tok.val, target_type=target_type)
 
     def parse_struct_def(self) -> StructDef:
         """`struct Name: <field-or-method>+` -- a top-level declaration,

@@ -1833,6 +1833,14 @@ class CodeGenerator:
         # or "no such field" error rather than an AttributeError from
         # nowhere.
         self.struct_registry: Dict[str, StructInfo] = {}
+        # Set the same way, from Program.type_alias_registry (stashed
+        # there by semantic.analyze -- see SemanticAnalyzer.analyze's
+        # own type-alias-collection pass, which runs before struct
+        # collection even starts). Every entry is already a fully-
+        # resolved Type by this point -- type_from_name just does a
+        # single dict lookup with this, never a recursive re-resolution
+        # of an alias's own target.
+        self.type_alias_registry: Dict[str, Type] = {}
         # Lazily created, then cached and reused for the rest of this
         # compilation -- see gen_print_call_into and the module
         # docstring's BUILTINS section for why these specifically (and
@@ -1905,6 +1913,14 @@ class CodeGenerator:
                 "must run before codegen (see compile_to_asm)"
             )
         self.struct_registry = program.struct_registry
+        # Same defensive check, same reason, one registry over -- see
+        # this attribute's own docstring at its declaration.
+        if not hasattr(program, 'type_alias_registry'):
+            raise CodegenError(
+                "Program has no type alias registry -- semantic.analyze() "
+                "must run before codegen (see compile_to_asm)"
+            )
+        self.type_alias_registry = program.type_alias_registry
         functions = [self.gen_function(fn) for fn in program.functions]
         if self._print_used:
             functions.append(self.build_stringify_function())
@@ -1922,8 +1938,8 @@ class CodeGenerator:
         # same internal-only sentinel semantic.py's own analyze_function
         # already uses -- kept consistent here rather than reinventing
         # a second "no return type" representation in this file.
-        return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.struct_registry)
-        param_types = [type_from_name(p.type, self.struct_registry) for p in fn.params]
+        return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.struct_registry, self.type_alias_registry)
+        param_types = [type_from_name(p.type, self.struct_registry, self.type_alias_registry) for p in fn.params]
 
         # Which of THIS function's own array declarations need to be
         # heap-allocated because a slice backed by them might outlive
@@ -1934,7 +1950,7 @@ class CodeGenerator:
         # decide how much stack space each declaration's own slot
         # takes (8 bytes for a heap pointer vs. the array's own full
         # width) -- this has to exist before either of them run.
-        self._escaping_array_ids = analyze_array_escapes(fn, param_types, self.struct_registry)
+        self._escaping_array_ids = analyze_array_escapes(fn, param_types, self.struct_registry, self.type_alias_registry)
 
         # An array- OR slice-typed return needs a hidden pointer -- the
         # caller passes the address to write the result into, as an
@@ -2232,7 +2248,7 @@ class CodeGenerator:
         counting down from wherever it already is, agnostic to what it
         was decremented for so far."""
         for p in params:
-            p_type = type_from_name(p.type, self.struct_registry)
+            p_type = type_from_name(p.type, self.struct_registry, self.type_alias_registry)
             width = 8 if self._is_heap_allocated(id(p), p_type) else type_byte_width(p_type, self.struct_registry)
             self._next_offset -= width
             self._var_offsets[id(p)] = self._next_offset
@@ -2246,7 +2262,7 @@ class CodeGenerator:
         alongside the type and offset), in the current scope, pointing
         at the permanent offset _collect_params already assigned it."""
         offset = self._var_offsets[id(p)]
-        self.scopes[-1][p.name] = (offset, type_from_name(p.type, self.struct_registry), id(p))
+        self.scopes[-1][p.name] = (offset, type_from_name(p.type, self.struct_registry, self.type_alias_registry), id(p))
         return offset
 
     def _collect_locals(self, statements: List[Node]) -> None:
@@ -2278,7 +2294,7 @@ class CodeGenerator:
         end, regardless of how the space within it is subdivided."""
         for stmt in statements:
             if isinstance(stmt, VarDecl):
-                var_type = type_from_name(stmt.var_type, self.struct_registry)
+                var_type = type_from_name(stmt.var_type, self.struct_registry, self.type_alias_registry)
                 width = 8 if self._is_heap_allocated(id(stmt), var_type) else type_byte_width(var_type, self.struct_registry)
                 self._next_offset -= width
                 self._var_offsets[id(stmt)] = self._next_offset
@@ -2507,7 +2523,7 @@ class CodeGenerator:
         the permanent offset _collect_locals already assigned this
         exact VarDecl node, and returns that offset."""
         offset = self._var_offsets[id(stmt)]
-        self.scopes[-1][stmt.name] = (offset, type_from_name(stmt.var_type, self.struct_registry), id(stmt))
+        self.scopes[-1][stmt.name] = (offset, type_from_name(stmt.var_type, self.struct_registry, self.type_alias_registry), id(stmt))
         return offset
 
     def _local_offset(self, name: str) -> int:

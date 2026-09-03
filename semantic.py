@@ -432,6 +432,7 @@ from parser import (
     StringLiteral,
     StructDef,
     StructField,
+    TypeAlias,
     Unary,
     UnaryOp,
     VarDecl,
@@ -582,19 +583,19 @@ class StructInfo:
     fields: Dict[str, Type]
 
 
-def type_from_name(type_expr, structs: Dict[str, StructInfo]) -> Type:
+def type_from_name(type_expr, structs: Dict[str, StructInfo], aliases: Dict[str, Type]) -> Type:
     """Converts a parsed type expression (VarDecl.var_type /
     Function.return_type / Param.type / StructField.field_type,
     straight from parser.py) into a Type. `type_expr` is a plain str
-    for a scalar type OR a struct name (see below), an ArrayTypeExpr
-    for an array type, or a SliceTypeExpr for a slice type (see their
-    own docstrings in parser.py) -- handled here by recursing on
-    element_type, which is itself a plain str, another ArrayTypeExpr,
-    or another SliceTypeExpr, naturally bottoming out at a scalar or
-    struct name and handling arbitrarily-nested types (`[2][3]int`,
-    `[][]int`, `[][3]int`, `[]MyStruct`, ...) with no depth limit or
-    special-casing for "how many dimensions" or "which mix of array,
-    slice, and struct".
+    for a scalar type, a struct name, OR a type alias name (see below),
+    an ArrayTypeExpr for an array type, or a SliceTypeExpr for a slice
+    type (see their own docstrings in parser.py) -- handled here by
+    recursing on element_type, which is itself a plain str, another
+    ArrayTypeExpr, or another SliceTypeExpr, naturally bottoming out at
+    a scalar, struct, or alias name and handling arbitrarily-nested
+    types (`[2][3]int`, `[][]int`, `[][3]int`, `[]MyStruct`, ...) with
+    no depth limit or special-casing for "how many dimensions" or
+    "which mix of array, slice, and struct".
 
     `structs` is this program's own struct registry (see StructInfo),
     already fully built by the time this is ever called with a
@@ -609,22 +610,40 @@ def type_from_name(type_expr, structs: Dict[str, StructInfo]) -> Type:
     rather than silently misresolving any struct-typed declaration it
     happens to touch as "unknown type".
 
+    `aliases` is the identical idea, one registry over: every alias
+    name has ALREADY been resolved down to its own real, final Type by
+    the time this is ever called (see _collect_type_aliases, which
+    runs before struct collection even starts, since a struct field's
+    own type can itself be an alias) -- so resolving `type_expr` here
+    is a single dict lookup, never a recursive re-resolution of the
+    alias's own target. Also a REQUIRED parameter, for the identical
+    "fail loudly, not silently" reason `structs` already is; every
+    existing call site in this file and codegen.py was updated
+    alongside this one when aliases were added, which is the entire
+    point of resolving type names through this one function everywhere
+    -- every one of those call sites gained alias support for free,
+    with no changes needed beyond threading this registry through the
+    same way they already thread `structs` through.
+
     Only ever fails for a program that isn't syntactically valid in
     the first place, OR references a type name that isn't a declared
-    struct -- parse_type() already restricts a scalar type_expr to
-    'int'/'bool'/'str'/an identifier, and already validates an
-    ArrayTypeExpr's size is a positive whole number at parse time, so
-    the only genuinely user-facing failure here is an unrecognized
-    identifier; the dict lookups are otherwise a defensive check, not
-    a user-facing validation path in their own right."""
+    struct or alias -- parse_type() already restricts a scalar
+    type_expr to 'int'/'bool'/'str'/an identifier, and already
+    validates an ArrayTypeExpr's size is a positive whole number at
+    parse time, so the only genuinely user-facing failure here is an
+    unrecognized identifier; the dict lookups are otherwise a
+    defensive check, not a user-facing validation path in their own
+    right."""
     if isinstance(type_expr, ArrayTypeExpr):
-        element = type_from_name(type_expr.element_type, structs)
+        element = type_from_name(type_expr.element_type, structs, aliases)
         return Type(TypeKind.ARRAY, element_type=element, size=type_expr.size)
     if isinstance(type_expr, SliceTypeExpr):
-        element = type_from_name(type_expr.element_type, structs)
+        element = type_from_name(type_expr.element_type, structs, aliases)
         return Type(TypeKind.SLICE, element_type=element)
     if type_expr in _TYPE_NAMES:
         return _TYPE_NAMES[type_expr]
+    if type_expr in aliases:
+        return aliases[type_expr]
     if type_expr in structs:
         return Type(TypeKind.STRUCT, struct_name=type_expr)
     raise SemanticError(f"Unknown type '{type_expr}'")
@@ -759,19 +778,30 @@ class SemanticAnalyzer:
         self.functions: Dict[str, tuple] = {}  # name -> (List[Type] param types, Type return type)
         self.structs: Dict[str, StructInfo] = {}  # name -> resolved fields; see _collect_structs
         self.methods: Dict[Tuple[str, str], Tuple[List[Type], Type, str]] = {}  # (struct, method) -> (param types, return type, mangled name); see _collect_methods
+        self.type_aliases: Dict[str, Type] = {}  # name -> resolved target Type; see _collect_type_aliases
 
     def analyze(self, program: Program) -> None:
-        # First pass, ahead of even function signatures: collect every
-        # struct definition. Struct types can appear as a parameter or
-        # return type, so they have to already be fully resolved before
-        # function signatures are -- see _collect_structs's own
-        # docstring for why THIS pass itself needs two separate sub-
-        # passes internally (struct names first, then field types),
-        # the same forward-reference reasoning one level up.
+        # First pass, ahead of even struct collection: resolve every
+        # type alias. A struct field's own type can itself be an alias
+        # (once aliases can target more than int/bool/str -- see
+        # _collect_type_aliases's own docstring for exactly what's
+        # supported right now), so aliases have to already be fully
+        # resolved before _collect_structs ever calls type_from_name
+        # on a field's own type.
+        self.type_aliases = self._collect_type_aliases(program.type_aliases)
+        program.type_alias_registry = self.type_aliases  # stashed for codegen.py's own use, mirroring struct_registry
+
+        # Second pass: collect every struct definition. Struct types
+        # can appear as a parameter or return type, so they have to
+        # already be fully resolved before function signatures are --
+        # see _collect_structs's own docstring for why THIS pass
+        # itself needs two separate sub-passes internally (struct
+        # names first, then field types), the same forward-reference
+        # reasoning one level up.
         self.structs = self._collect_structs(program.structs)
         program.struct_registry = self.structs  # stashed for codegen.py's own use
 
-        # 1.5th pass: collect every struct's own methods, immediately
+        # 2.5th pass: collect every struct's own methods, immediately
         # lowering each one into an ordinary, mangled-name Function and
         # appending it directly to program.functions -- see _collect_
         # methods's own docstring for the full design. This has to run
@@ -786,7 +816,7 @@ class SemanticAnalyzer:
         # written directly at the top level.
         self.methods = self._collect_methods(program)
 
-        # Second pass: collect every function's signature before
+        # Third pass: collect every function's signature before
         # checking any function's body. This is what makes call order
         # not matter -- a function can call one defined later in the
         # file, or call itself recursively -- since by the time
@@ -815,10 +845,17 @@ class SemanticAnalyzer:
                     f"'{fn.name}(...)' would otherwise be ambiguous "
                     f"between a call and a struct literal"
                 )
+            if fn.name in self.type_aliases:
+                raise SemanticError(
+                    f"Function '{fn.name}' collides with a type alias "
+                    f"of the same name -- function and type-alias "
+                    f"names share one namespace and can never be the "
+                    f"same"
+                )
             if fn.name in self.functions:
                 raise SemanticError(f"Function '{fn.name}' is already declared")
-            param_types = [type_from_name(p.type, self.structs) for p in fn.params]
-            return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.structs)
+            param_types = [type_from_name(p.type, self.structs, self.type_aliases) for p in fn.params]
+            return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.structs, self.type_aliases)
             self.functions[fn.name] = (param_types, return_type)
 
         # Third pass: now check each function's own body -- including
@@ -875,8 +912,8 @@ class SemanticAnalyzer:
                     )
                 seen_names.add(md.name)
                 mangled_name = f"{sd.name}.{md.name}"
-                param_types = [type_from_name(p.type, self.structs) for p in md.params]
-                return_type = Type.VOID if md.return_type is None else type_from_name(md.return_type, self.structs)
+                param_types = [type_from_name(p.type, self.structs, self.type_aliases) for p in md.params]
+                return_type = Type.VOID if md.return_type is None else type_from_name(md.return_type, self.structs, self.type_aliases)
                 methods[(sd.name, md.name)] = (param_types, return_type, mangled_name)
                 receiver_param = Param(name=md.receiver_name, type=sd.name)
                 program.functions.append(Function(
@@ -886,6 +923,103 @@ class SemanticAnalyzer:
                     body=md.body,
                 ))
         return methods
+
+    def _collect_type_aliases(self, alias_defs: List[TypeAlias]) -> Dict[str, Type]:
+        """Builds this program's own alias registry: name -> the
+        alias's own, fully-resolved Type -- resolved ALL THE WAY DOWN
+        here, once, rather than left as "one more level of indirection"
+        for every later type_from_name call to re-chase. Runs before
+        struct collection even starts (see analyze()'s own comment on
+        why), so a struct field's own type can already be an alias by
+        the time _collect_structs resolves it.
+
+        Two passes, mirroring _collect_structs's own identical shape
+        one level down:
+        1. Reserve every alias's own NAME first (rejecting a duplicate
+           outright), before resolving any of their targets -- this is
+           what lets one alias reference another declared LATER in the
+           file (`type A = B` followed later by `type B = int`): by the
+           time pass 2 resolves A's own target, B's name is already a
+           recognized key, even with its own target not yet resolved.
+        2. Resolve each alias's own target via a small recursive
+           resolver with its own cycle guard (`type A = B; type B =
+           A;` has to be rejected, not infinitely recurse) -- the same
+           general shape _check_struct_contains uses for detecting a
+           cyclic struct, just over a flat name-to-name chain instead
+           of a field graph.
+
+        Deliberately scoped to int/bool/str or another alias as the
+        only valid targets right now -- NOT an array or slice type
+        expression, and NOT a struct name, even though parse_type()
+        (see TypeAlias's own docstring in parser.py) syntactically
+        accepts either. Struct names specifically can't be supported
+        without more work than just lifting a check here: this pass
+        runs BEFORE _collect_structs, so struct names don't exist yet
+        at the point an alias's own target would need to reference
+        one -- lifting that restriction later needs the two collection
+        passes reordered or interleaved, not just this check deleted.
+        Array/slice targets are a narrower, more arbitrary scope
+        decision (nothing here fundamentally prevents them), left
+        for a later, separately-scoped pass rather than guessed at now."""
+        # Pass 1: reserve names, rejecting a duplicate alias name
+        # outright, or one that collides with a builtin FUNCTION name
+        # (print/len/append) -- reachable, unlike a collision with a
+        # builtin TYPE keyword ('int'/'bool'/'str'), which never needs
+        # its own check: those are their own token types, never
+        # tokenized as an IDENTIFIER at all, so the parser could never
+        # produce a TypeAlias with one of those names in the first
+        # place.
+        seen: Dict[str, TypeAlias] = {}
+        for ad in alias_defs:
+            if ad.name in _BUILTIN_FUNCTION_NAMES:
+                raise SemanticError(
+                    f"'{ad.name}' is a builtin and can't be used as a "
+                    f"type alias name"
+                )
+            if ad.name in seen:
+                raise SemanticError(f"Type alias '{ad.name}' is already declared")
+            seen[ad.name] = ad
+
+        resolved: Dict[str, Type] = {}
+        resolving: Set[str] = set()
+
+        def resolve(name: str) -> Type:
+            if name in resolved:
+                return resolved[name]
+            if name in resolving:
+                raise SemanticError(
+                    f"Type alias '{name}' is defined in terms of "
+                    f"itself (a cycle)"
+                )
+            resolving.add(name)
+            target = seen[name].target_type
+            if isinstance(target, (ArrayTypeExpr, SliceTypeExpr)):
+                raise SemanticError(
+                    f"Type alias '{name}' targets an array or slice "
+                    f"type -- only int, bool, str, or another type "
+                    f"alias is supported as an alias target right now"
+                )
+            if target in _TYPE_NAMES:
+                result = _TYPE_NAMES[target]
+            elif target in seen:
+                result = resolve(target)
+            else:
+                raise SemanticError(
+                    f"Type alias '{name}' targets '{target}', which "
+                    f"isn't int, bool, str, or another type alias -- "
+                    f"those are the only targets supported right now "
+                    f"(not yet a struct name; and a genuinely unknown "
+                    f"name produces this identical message, since type "
+                    f"aliases are resolved before struct names even "
+                    f"exist)"
+                )
+            resolving.discard(name)
+            resolved[name] = result
+            return result
+
+        for ad in alias_defs:
+            resolve(ad.name)
+        return resolved
 
     def _collect_structs(self, struct_defs: List[StructDef]) -> Dict[str, StructInfo]:
         """Builds this program's own struct registry (see StructInfo)
@@ -933,6 +1067,12 @@ class SemanticAnalyzer:
                     f"'{sd.name}' is a builtin and can't be used as a "
                     f"struct name"
                 )
+            if sd.name in self.type_aliases:
+                raise SemanticError(
+                    f"Struct '{sd.name}' collides with a type alias of "
+                    f"the same name -- struct and type-alias names "
+                    f"share one namespace and can never be the same"
+                )
             if sd.name in registry:
                 raise SemanticError(f"Struct '{sd.name}' is already declared")
             registry[sd.name] = None
@@ -944,7 +1084,7 @@ class SemanticAnalyzer:
                     raise SemanticError(
                         f"Field '{f.name}' is already declared in struct '{sd.name}'"
                     )
-                fields[f.name] = type_from_name(f.field_type, registry)
+                fields[f.name] = type_from_name(f.field_type, registry, self.type_aliases)
             registry[sd.name] = StructInfo(name=sd.name, fields=fields)
 
         for sd in struct_defs:
@@ -1009,8 +1149,8 @@ class SemanticAnalyzer:
         # name checking for free (`def int f(int a, int a):` collides in
         # this same scope exactly like `int a` twice in a row would).
         for p in fn.params:
-            self._declare(p.name, type_from_name(p.type, self.structs))
-        return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.structs)
+            self._declare(p.name, type_from_name(p.type, self.structs, self.type_aliases))
+        return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.structs, self.type_aliases)
         for stmt in fn.body:
             self.analyze_statement(stmt, return_type)
         # Checked last, after every statement is individually known to
@@ -1202,7 +1342,7 @@ class SemanticAnalyzer:
         return self._check_value_flowing_into(expr, target_type)
 
     def analyze_var_decl(self, stmt: VarDecl) -> None:
-        declared_type = type_from_name(stmt.var_type, self.structs)
+        declared_type = type_from_name(stmt.var_type, self.structs, self.type_aliases)
         if stmt.init is not None:
             # Checked before `stmt.name` is added to scope below, so a
             # self-referential initializer (`int a = a`) correctly fails
@@ -1594,7 +1734,7 @@ class SemanticAnalyzer:
         involved -- see its own docstring for the actual fix.
         """
         if expr.type_expr is not None:
-            declared_type = type_from_name(expr.type_expr, self.structs)
+            declared_type = type_from_name(expr.type_expr, self.structs, self.type_aliases)
             if len(expr.elements) != declared_type.size:
                 raise SemanticError(
                     f"Array literal declares type {declared_type} (size "

@@ -77,6 +77,7 @@ class TokenType(Enum):
     CONTINUE = auto()
     NONE = auto()
     STRUCT = auto()
+    TYPE = auto()
 
     # Special
     NEWLINE = auto()
@@ -145,6 +146,7 @@ class Lexer():
             'continue': TokenType.CONTINUE,
             'none': TokenType.NONE,
             'struct': TokenType.STRUCT,
+            'type': TokenType.TYPE,
         }
 
         # Compile master regex pattern
