@@ -39,7 +39,7 @@ Updates:
 - Stack based params to get around parameter limit.
 - Explore per frame vs per array heap promotion.
 - Slice equality?
-- Escape analysis for arrays and slices.
+- Flow sensitive escape analysis.
 - Dedpulicate emitted type descriptors when we call print()
 - Variadic functions.
 - Make `append` variadic.
@@ -48,10 +48,12 @@ Updates:
 - FFI
 - Fix strings to basically be byte slices.
 - Sum types / pattern matching.
-- Register virtualization
+- int32
+- Change int to an alias.
 - int64
-- float
 - Pointers
+- Register virtualization
+- float
 - Imports.
 - Multithreading
 - Optimization / mid level IR
