@@ -1,11 +1,8 @@
 """Tests for escape_analysis.py"""
 
-import ast
 import tempfile
 from pathlib import Path
 from unittest import mock
-
-from _pytest import monkeypatch
 
 import parser
 import semantic
@@ -23,7 +20,7 @@ def parse_and_analyze(source: str) -> parser.Program:
         return ast
 
 
-def parse_expression(source: str) -> ast.Program:
+def parse_expression(source: str) -> parser.Node:
     with tempfile.TemporaryDirectory() as tmpdir:
         src_path = Path(tmpdir) / 'program.ht'
         src_path.write_text(source)
