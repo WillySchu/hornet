@@ -447,6 +447,8 @@ from parser import (
 
 class TypeKind(Enum):
     INT = auto()
+    INT8 = auto()
+    UINT8 = auto()
     BOOL = auto()
     STR = auto()
     ARRAY = auto()
@@ -527,6 +529,27 @@ class Type:
 # construction; it has nothing to say about adding attributes to the
 # Type CLASS object itself, which is all this is doing.
 Type.INT = Type(TypeKind.INT)
+# int8/uint8: this language's first types narrower than 4 bytes, and
+# uint8 its first UNSIGNED one -- see the module docstring's own note
+# (if one exists by the time this is read) or the design discussion
+# that preceded this for the full reasoning on why these needed no
+# new register class the way a future float type will. As of THIS
+# change, these are real, type-checked types (a literal flowing into
+# one is range-checked -- see _check_value_flowing_into's own INT8/
+# UINT8 case -- and arithmetic on them wraps at 8 bits, staying INT8/
+# UINT8 rather than promoting to INT the way C's own integer
+# promotion rules would) but codegen.py doesn't yet know they're
+# narrower than 4 bytes at all: type_byte_width's own fallthrough
+# already returns 4 for anything it doesn't explicitly recognize,
+# which is EXACTLY correct for this intermediate state -- an int8/
+# uint8 value is computed and wrapped correctly, just still stored in
+# a full 4-byte slot everywhere (a VarDecl, a struct field, an array
+# element) until a later pass makes storage genuinely 1 byte wide.
+# That's a real, deliberate, temporary inefficiency, not a bug: it
+# keeps this change testable and correct entirely at the type-system
+# level before touching every scalar read/write site in codegen.py.
+Type.INT8 = Type(TypeKind.INT8)
+Type.UINT8 = Type(TypeKind.UINT8)
 Type.BOOL = Type(TypeKind.BOOL)
 Type.STR = Type(TypeKind.STR)
 # A fourth singleton, kept deliberately OUT of _TYPE_NAMES below (and
@@ -559,6 +582,8 @@ Type.NONE = Type(TypeKind.NONE)
 
 _TYPE_NAMES = {
     'int': Type.INT,
+    'int8': Type.INT8,
+    'uint8': Type.UINT8,
     'bool': Type.BOOL,
     'str': Type.STR,
 }
@@ -764,6 +789,30 @@ _ORDERING_OPS = {BinaryOp.LESS_THAN, BinaryOp.GREATER_THAN,
                   BinaryOp.LESS_THAN_OR_EQUAL, BinaryOp.GREATER_THAN_OR_EQUAL}
 _EQUALITY_OPS = {BinaryOp.EQUAL, BinaryOp.NOT_EQUAL}
 _LOGICAL_OPS = {BinaryOp.AND, BinaryOp.OR}
+
+# Every type this language's arithmetic/ordering/unary operators
+# accept -- checked as a SET membership test (is this an integer type
+# at all) plus an exact-match test (are both operands the SAME one),
+# never a mix: int8 + uint8, or int8 + int, are both rejected exactly
+# like bool + int already is, matching this language's consistent
+# "explicit over implicit" stance. Kept as its own set, separate from
+# _NARROW_INT_RANGES just below (which is about int8/uint8's own
+# LITERAL range, a completely different question from which types an
+# operator accepts at all).
+_INTEGER_TYPES = {Type.INT, Type.INT8, Type.UINT8}
+
+# int8's own range is the ordinary two's-complement one; uint8's is
+# unsigned, starting at 0 -- both exactly 256 values wide, as any
+# 8-bit type's range has to be. Used only by _check_value_flowing_
+# into's own literal-range-checking case (see its docstring): this is
+# NOT the same thing as int8/uint8 arithmetic wrapping at runtime
+# (that's codegen's own job, still to come) -- this is a compile-time
+# check on a LITERAL's own written value, the only way to produce an
+# int8/uint8 value at all before casting exists.
+_NARROW_INT_RANGES = {
+    Type.INT8: (-128, 127),
+    Type.UINT8: (0, 255),
+}
 
 
 class SemanticAnalyzer:
@@ -1323,47 +1372,141 @@ class SemanticAnalyzer:
             return True
         return value_type == Type.NONE and target_type.kind == TypeKind.SLICE
 
+    def _as_folded_int_literal(self, expr: Node) -> Optional[int]:
+        """If `expr` is a compile-time integer literal -- a bare
+        Constant, or a Unary NEGATE wrapping one -- returns its own
+        folded integer value; None for anything else (a variable, a
+        call, an arithmetic expression, ...), which isn't eligible for
+        the int8/uint8 literal-range-checked coercion _check_value_
+        flowing_into's own new case uses this for.
+
+        Checking for Unary(NEGATE, Constant) specifically, not just a
+        bare Constant, matters more than it might look: `-100` parses
+        as exactly that shape (Unary wrapping a POSITIVE Constant),
+        never as a Constant already holding -100 -- the lexer's own
+        NUMBER rule has no minus sign in it at all (see its own regex),
+        so a negative literal is always a unary negation of a positive
+        one syntactically. Without this case, `int8 x = -100` -- a
+        completely ordinary, expected thing to write -- would silently
+        fail the range check by never being recognized as a literal in
+        the first place, not by correctly rejecting an out-of-range
+        value.
+
+        Deliberately doesn't fold anything deeper (`- -100`, `100 + 1`,
+        ...) -- this is specifically for the two shapes source code
+        actually produces for a signed or unsigned literal, not a
+        general constant-folding pass."""
+        if isinstance(expr, Constant):
+            return expr.value
+        if isinstance(expr, Unary) and expr.op == UnaryOp.NEGATE and isinstance(expr.operand, Constant):
+            return -expr.operand.value
+        return None
+
     def _check_value_flowing_into(self, expr: Node, target_type: Type) -> Type:
         """Type-checks `expr` as a value flowing into an already-typed
         slot (target_type), returning its own type for the caller's
         own _types_compatible check afterward -- almost always just
-        check_expr, with one exception: an UNTYPED array literal
-        (isinstance(expr, ArrayLiteral) and expr.type_expr is None)
-        flowing directly into a SLICE-typed target (`[]int s = [1, 2,
-        3]`) is checked against target_type's own element type
-        directly (via check_array_literal's own expected_element_type
-        parameter) rather than purely inferring a type from its
-        elements that would then need to separately match against
-        target_type -- this is what makes the untyped form behave
-        identically to the fully-typed `[]int s = []int[1, 2, 3]`,
-        just inferring the element count and checking element types
-        against the DECLARED element type instead of restating it.
+        check_expr, with two exceptions:
 
-        Returns target_type ITSELF in that one case (not the array
-        type check_array_literal actually computed for the literal's
-        own elements), so the caller's own _types_compatible check
-        against target_type trivially succeeds, the same way it would
-        for any other already-slice-typed value -- `[]int s = arr`
-        (an ordinary, NAMED array, not a literal) is deliberately NOT
-        given this same treatment: only this one, specific expression
-        SHAPE is special-cased, not "any array-typed value is
-        compatible with a slice target," so an actual array still has
-        to be explicitly sliced (`arr[:]`) to become one.
+        1. An UNTYPED array literal (isinstance(expr, ArrayLiteral) and
+           expr.type_expr is None) flowing directly into a SLICE- or
+           ARRAY-typed target (`[]int s = [1, 2, 3]`, `[3]int8 arr =
+           [1, 2, 3]`) is checked against target_type's own element
+           type directly (via check_array_literal's own expected_
+           element_type parameter) rather than purely inferring a type
+           from its elements that would then need to separately match
+           against target_type -- this is what makes the untyped form
+           behave identically to the fully-typed `[]int s = []int[1,
+           2, 3]`/`[3]int8 arr = [3]int8[1, 2, 3]`, just inferring the
+           element count (and, for a slice target, not needing one to
+           match at all) and checking element types against the
+           DECLARED element type instead of restating it.
 
-        Bypasses check_expr's own generic dispatch (and does its own
-        annotation, manually) for this one case, since check_expr has
-        no way to receive an expected type at all; every other kind of
-        value goes through check_expr completely unaffected. Shared by
-        analyze_var_decl and analyze_assign -- the two places a value
-        flows into an already-typed slot with a clear "this is the
-        expected type" side (unlike `==`/`!=`, which has no such
-        side -- see check_binary's own, separate none-vs-slice
-        handling for why that case can't reuse this)."""
-        if isinstance(expr, ArrayLiteral) and expr.type_expr is None and target_type.kind == TypeKind.SLICE:
+           The ARRAY case is what makes an untyped literal correctly
+           produce int8/uint8 elements at all: without it, each
+           element would be independently inferred via plain check_
+           expr (landing on ordinary Type.INT, from check_constant),
+           which would then simply fail to match an int8/uint8 target
+           element type -- `[3]int arr = [1, 2, 3]` only ever worked
+           by COINCIDENCE, since an untyped literal's own default
+           inferred element type (int) happens to already match that
+           particular target; the coincidence breaks for any element
+           type a bare literal wouldn't naturally land on by itself.
+
+           Returns target_type ITSELF for a SLICE target (not the
+           array type check_array_literal actually computed for the
+           literal's own elements), so the caller's own _types_
+           compatible check against target_type trivially succeeds,
+           the same way it would for any other already-slice-typed
+           value -- `[]int s = arr` (an ordinary, NAMED array, not a
+           literal) is deliberately NOT given this same treatment:
+           only this one, specific expression SHAPE is special-cased,
+           not "any array-typed value is compatible with a slice
+           target," so an actual array still has to be explicitly
+           sliced (`arr[:]`) to become one. Returns the literal's own
+           COMPUTED array type (size included) for an ARRAY target
+           instead, so a genuine size mismatch (`[3]int8 arr = [1,
+           2]`) still surfaces as an ordinary _types_compatible
+           failure at the call site, exactly as it always has for a
+           mismatched array size -- there's nothing here to trust the
+           literal's own element count against the target's size
+           itself; that comparison already happens for free via
+           ordinary Type equality once both sizes are visible to it.
+
+        2. A compile-time integer LITERAL (see _as_folded_int_literal
+           for exactly which two shapes count) flowing into an int8 or
+           uint8 target is checked against THAT type's own range
+           (_NARROW_INT_RANGES) rather than requiring an exact type
+           match -- this is, for now, the ONLY way to produce an int8/
+           uint8 value at all: there's no casting yet to convert an
+           ordinary int expression into one, and unlike a struct or
+           array literal, int8/uint8 have no syntax of their own to
+           construct a value directly. An arbitrary int-TYPED
+           EXPRESSION (a variable, a function call, an arithmetic
+           result) does NOT get this same treatment -- `int8 x =
+           someIntVariable` is a real type mismatch, same as it would
+           be for any other two distinct types, matching this
+           language's consistent "explicit over implicit" stance
+           (no implicit narrowing, the same way there's no implicit
+           int-to-bool coercion) -- only a LITERAL, whose exact value
+           is known right here at compile time, gets checked against
+           the target's own range instead of its declared type.
+
+           Annotates target_type onto expr directly (overwriting
+           whatever check_expr's own dispatch already set it to --
+           Type.INT, from check_constant, or check_unary's own pass-
+           through of that same Type.INT for the Unary-NEGATE case),
+           and returns target_type itself, so the caller's own _types_
+           compatible check trivially succeeds -- the exact same
+           "return target_type, not what was actually inferred" shape
+           case 1 above already uses, for the identical reason.
+
+        Both bypass check_expr's own generic dispatch (or override its
+        result after the fact) since check_expr has no way to receive
+        an expected type at all; every other kind of value goes through
+        check_expr completely unaffected. Shared by analyze_var_decl
+        and analyze_assign -- the two places a value flows into an
+        already-typed slot with a clear "this is the expected type"
+        side (unlike `==`/`!=`, which has no such side -- see check_
+        binary's own, separate none-vs-slice handling for why that
+        case can't reuse this)."""
+        if isinstance(expr, ArrayLiteral) and expr.type_expr is None and target_type.kind in (TypeKind.SLICE, TypeKind.ARRAY):
             array_type = self.check_array_literal(expr, expected_element_type=target_type.element_type)
             expr.resolved_type = array_type
-            return target_type
-        return self.check_expr(expr)
+            return target_type if target_type.kind == TypeKind.SLICE else array_type
+        value_type = self.check_expr(expr)
+        if value_type == Type.INT and target_type in _NARROW_INT_RANGES:
+            literal_value = self._as_folded_int_literal(expr)
+            if literal_value is not None:
+                lo, hi = _NARROW_INT_RANGES[target_type]
+                if not (lo <= literal_value <= hi):
+                    raise SemanticError(
+                        f"{literal_value} is out of range for "
+                        f"{target_type} ({lo} to {hi})"
+                    )
+                expr.resolved_type = target_type
+                return target_type
+        return value_type
 
     def _check_expr_allowing_struct_literal(self, expr: Node) -> Type:
         """check_expr, except a struct literal (isinstance(expr, Call)
@@ -1590,7 +1733,7 @@ class SemanticAnalyzer:
                     f"this bare 'return' returns nothing"
                 )
             return
-        value_type = self._check_expr_allowing_struct_literal(stmt.value)
+        value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, return_type)
         if return_type == Type.VOID:
             raise SemanticError(
                 f"Function has no declared return type and cannot "
@@ -1747,13 +1890,25 @@ class SemanticAnalyzer:
 
         expected_element_type, when supplied (and type_expr is still
         None): used for an UNTYPED literal flowing directly into an
-        already-slice-typed VarDecl/Assign value (`[]int s = [1, 2,
-        3]` -- see analyze_var_decl/analyze_assign's own callers,
+        already-typed VarDecl/Assign value, whether that declared type
+        is a SLICE (`[]int s = [1, 2, 3]`) or an ARRAY (`[3]int8 arr =
+        [1, 2, 3]`) -- see _check_value_flowing_into's own callers,
         which bypass check_expr's generic dispatch specifically to
         pass this through, since check_expr has no way to receive
-        context at all). Checked the exact same way the explicitly-
+        context at all. Checked the exact same way the explicitly-
         typed form is, just against a type supplied by the CALLER
-        instead of restated in the literal itself.
+        instead of restated in the literal itself. The ARRAY case
+        specifically is what makes an untyped literal correctly
+        produce int8/uint8 (or any other element type a bare literal
+        wouldn't naturally land on by itself) elements at all: without
+        routing through this, each element would be independently
+        inferred via plain check_expr instead (landing on ordinary
+        Type.INT for a numeric literal, via check_constant), which
+        would then simply fail to match a narrower declared element
+        type -- `[3]int arr = [1, 2, 3]` only ever worked without this
+        by COINCIDENCE, since an untyped literal's own default
+        inferred element type happens to already match that
+        particular target.
 
         Either typed path (an explicit type_expr, or a supplied
         expected_element_type) allows -- and correctly handles -- zero
@@ -1828,8 +1983,9 @@ class SemanticAnalyzer:
                 if not self._types_compatible(element_type, expected_element_type):
                     raise SemanticError(
                         f"Array literal's elements must all be "
-                        f"{expected_element_type} (to match the declared "
-                        f"slice type), but element {i} is {element_type}"
+                        f"{expected_element_type} (to match the "
+                        f"declared element type), but element {i} "
+                        f"is {element_type}"
                     )
             return Type(TypeKind.ARRAY, element_type=expected_element_type, size=len(expr.elements))
 
@@ -1975,7 +2131,7 @@ class SemanticAnalyzer:
                 f"declaration order: {field_names}), got {len(expr.args)}"
             )
         for i, (arg, (field_name, field_type)) in enumerate(zip(expr.args, field_items), start=1):
-            arg_type = self._check_expr_allowing_struct_literal(arg)
+            arg_type = self._check_value_flowing_into_allowing_struct_literal(arg, field_type)
             if not self._types_compatible(arg_type, field_type):
                 raise SemanticError(
                     f"Argument {i} to struct literal '{expr.name}' "
@@ -2028,7 +2184,7 @@ class SemanticAnalyzer:
                     f"struct literal for '{expr.name}'"
                 )
             seen.add(field_name)
-            value_type = self._check_expr_allowing_struct_literal(value)
+            value_type = self._check_value_flowing_into_allowing_struct_literal(value, field_types[field_name])
             expected_type = field_types[field_name]
             if not self._types_compatible(value_type, expected_type):
                 raise SemanticError(
@@ -2091,7 +2247,7 @@ class SemanticAnalyzer:
                 f"{len(expr.args)}"
             )
         for i, (arg, expected_type) in enumerate(zip(expr.args, param_types), start=1):
-            actual_type = self._check_expr_allowing_struct_literal(arg)
+            actual_type = self._check_value_flowing_into_allowing_struct_literal(arg, expected_type)
             if not self._types_compatible(actual_type, expected_type):
                 raise SemanticError(
                     f"Argument {i} to method '{expr.name}' on "
@@ -2165,16 +2321,26 @@ class SemanticAnalyzer:
             )
         for i, (arg, expected_type) in enumerate(zip(expr.args, param_types), start=1):
             # A struct literal used directly as an argument (`foo(A(1,
-            # 2))`) is checked via _check_expr_allowing_struct_literal,
-            # shared by every position that allows this shape with no
-            # already-typed slot to flow into -- see check_struct_
-            # literal's own docstring for the full, current list of
-            # positions a struct literal is allowed to appear in
-            # directly, and for why every position NOT on that list
-            # still funnels through the ordinary check_expr ->
-            # check_call dispatch above, which rejects a struct-name
-            # Call there.
-            actual_type = self._check_expr_allowing_struct_literal(arg)
+            # 2))`) is checked via _check_value_flowing_into_allowing_
+            # struct_literal, shared by every position that allows this
+            # shape AND has an already-typed slot to flow into -- see
+            # check_struct_literal's own docstring for the full,
+            # current list of positions a struct literal is allowed to
+            # appear in directly, and for why every position NOT on
+            # that list still funnels through the ordinary check_expr
+            # -> check_call dispatch above, which rejects a struct-name
+            # Call there. Using the value-flowing-into variant here
+            # (rather than the plain _check_expr_allowing_struct_
+            # literal every one of these call sites originally used)
+            # is what lets an untyped array literal argument flow into
+            # a slice-typed parameter (`foo([1, 2, 3])` where foo takes
+            # []int), and what lets an int8/uint8-typed parameter
+            # accept a range-checked literal argument directly
+            # (`foo(100)` where foo takes int8) -- both previously
+            # fell through to a plain type mismatch, since neither
+            # special case lived anywhere except _check_value_flowing_
+            # into itself, which nothing here was routed through yet.
+            actual_type = self._check_value_flowing_into_allowing_struct_literal(arg, expected_type)
             if not self._types_compatible(actual_type, expected_type):
                 raise SemanticError(
                     f"Argument {i} to '{expr.name}' should be "
@@ -2332,11 +2498,16 @@ class SemanticAnalyzer:
     def check_unary(self, expr: Unary) -> Type:
         operand_type = self.check_expr(expr.operand)
         if expr.op in (UnaryOp.NEGATE, UnaryOp.COMPLEMENT):
-            if operand_type != Type.INT:
+            if operand_type not in _INTEGER_TYPES:
                 raise SemanticError(
-                    f"'{expr.op.symbol()}' requires an int operand, got {operand_type}"
+                    f"'{expr.op.symbol()}' requires an int, int8, or "
+                    f"uint8 operand, got {operand_type}"
                 )
-            return Type.INT
+            # Stays the operand's own type -- -int8 is int8, not
+            # promoted to int -- exactly the same "narrow stays
+            # narrow" rule check_binary's own arithmetic operators
+            # follow, one operand instead of two.
+            return operand_type
         if expr.op == UnaryOp.NOT:
             if operand_type != Type.BOOL:
                 raise SemanticError(
@@ -2386,28 +2557,35 @@ class SemanticAnalyzer:
         op = expr.op
 
         if op == BinaryOp.ADD:
-            # Overloaded: int+int is arithmetic addition, str+str is
-            # concatenation. Anything else -- mixing the two, or trying
-            # to add a bool -- is a type error. This has to be checked
-            # explicitly here rather than via _require_type, since
-            # there's no single "the" expected type to require.
-            if left_type == Type.INT and right_type == Type.INT:
-                return Type.INT
+            # Overloaded: int-family+int-family (both the SAME one --
+            # int8+int8, uint8+uint8, int+int, never mixed) is
+            # arithmetic addition, str+str is concatenation. Anything
+            # else -- mixing two different integer types, mixing
+            # either with str, or trying to add a bool -- is a type
+            # error. This has to be checked explicitly here rather
+            # than via _require_same_integer_type, since there's a
+            # second, entirely different valid shape (str+str) that
+            # helper knows nothing about.
+            if left_type in _INTEGER_TYPES and left_type == right_type:
+                return left_type
             if left_type == Type.STR and right_type == Type.STR:
                 return Type.STR
             raise SemanticError(
-                f"'+' requires two int operands or two str operands, "
-                f"got {left_type} and {right_type}"
+                f"'+' requires two operands of the same integer type "
+                f"(int, int8, or uint8) or two str operands, got "
+                f"{left_type} and {right_type}"
             )
 
         if op in _INT_ONLY_BINARY_OPS:
-            self._require_type(left_type, Type.INT, op)
-            self._require_type(right_type, Type.INT, op)
-            return Type.INT
+            # Stays whichever integer type both operands already were
+            # -- int8 + int8 is int8, not promoted to int the way C's
+            # own integer-promotion rules would have it (see the
+            # module's own design notes for why this follows Rust's
+            # model instead).
+            return self._require_same_integer_type(left_type, right_type, op)
 
         if op in _ORDERING_OPS:
-            self._require_type(left_type, Type.INT, op)
-            self._require_type(right_type, Type.INT, op)
+            self._require_same_integer_type(left_type, right_type, op)
             return Type.BOOL
 
         if op in _EQUALITY_OPS:
@@ -2556,6 +2734,24 @@ class SemanticAnalyzer:
             raise SemanticError(
                 f"'{op.symbol()}' requires {expected} operands, got {actual}"
             )
+
+    def _require_same_integer_type(self, left_type: Type, right_type: Type, op) -> Type:
+        """Requires left_type and right_type to be the exact SAME
+        integer type (int, int8, or uint8 -- see _INTEGER_TYPES) --
+        never a mix, even between two different-but-both-integer
+        types (`int8 + uint8` is rejected exactly like `bool + int`
+        already is), matching this language's consistent "explicit
+        over implicit" stance. Returns that shared type, which becomes
+        the operator's own result type wherever this is called --
+        check_binary's own _INT_ONLY_BINARY_OPS and ordering-operator
+        cases both use this directly."""
+        if left_type not in _INTEGER_TYPES or left_type != right_type:
+            raise SemanticError(
+                f"'{op.symbol()}' requires two operands of the same "
+                f"integer type (int, int8, or uint8), got {left_type} "
+                f"and {right_type}"
+            )
+        return left_type
 
 
 # ---------------------------------------------------------------------------

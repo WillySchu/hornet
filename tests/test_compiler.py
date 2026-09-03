@@ -1314,7 +1314,7 @@ class TestCompoundAssignment:
             "    bool b = true\n"
             "    b += 1\n"
             "    return 0",
-            match="requires two int operands or two str operands",
+            match="requires two operands of the same integer type",
         )
 
     def test_compound_assignment_to_undeclared_variable_is_rejected(self):
@@ -2607,7 +2607,7 @@ class TestPrint:
         assert_semantic_error(
             "    int x = print(5) + 41\n"
             "    return x",
-            match="requires two int operands or two str operands, got void",
+            match="requires two operands of the same integer type .* or two str operands, got void",
         )
 
     def test_print_inside_a_user_defined_function(self):
@@ -4997,6 +4997,422 @@ class TestTypeAliases:
             "    return 0\n",
             match="builtin",
         )
+
+
+# ---------------------------------------------------------------------------
+# int8/uint8, step 1 of 3: the TYPE SYSTEM only -- lexer/parser keywords,
+# TypeKind/Type additions, literal range-checking, and arithmetic type-
+# checking rules (check_binary/check_unary). Deliberately NOT yet about
+# actual storage width or runtime wrapping behavior: codegen.py is
+# completely untouched by this step, and type_byte_width's own fallthrough
+# already returns 4 for int8/uint8 (an intermediate, deliberately
+# inefficient state -- see Type.INT8's own docstring) since nothing
+# explicitly recognizes them yet. That means a SIMPLE program with no
+# arithmetic (a literal assigned straight into an int8 variable, then read
+# back out unchanged) can genuinely compile and run correctly even at this
+# stage, but anything that needs int8/uint8 arithmetic to actually WRAP at
+# 8 bits does not yet -- these tests are deliberately semantic-layer-only
+# (type-checking passes or fails correctly), not full compile-and-run
+# assertions about runtime values, since that correctness doesn't exist
+# until storage becomes width-aware in a later step.
+#
+# int8/uint8's own literal-range-checking route (_check_value_flowing_into)
+# surfaced two real, pre-existing gaps unrelated to int8/uint8 itself, found
+# while making sure a struct-literal field could accept a range-checked
+# literal at all:
+#   1. check_struct_literal (both positional and named), _check_method_
+#      call, and check_call's own ordinary-function-argument loop all used
+#      _check_expr_allowing_struct_literal (no target type) instead of
+#      _check_value_flowing_into_allowing_struct_literal (which has both
+#      struct-literal detection AND a real target type) -- meaning an
+#      untyped array literal flowing into a slice-typed parameter or field
+#      never worked at any of those four call sites, not just for int8/
+#      uint8. analyze_return had the identical issue.
+#   2. _check_value_flowing_into's own untyped-array-literal special case
+#      only ever fired for a SLICE-kind target, never an ARRAY-kind one --
+#      so `[3]int arr = [1, 2, 3]` only ever worked by COINCIDENCE (an
+#      untyped literal's own default inferred element type, int, happens to
+#      already match that particular target), a coincidence that breaks for
+#      any element type a bare literal wouldn't naturally land on by
+#      itself, int8/uint8 included.
+# Both were genuine, findable bugs before int8/uint8 ever existed, not
+# something introduced by this feature -- see this class's own tests that
+# exercise them directly (test_int8_struct_field_positional and friends,
+# test_untyped_array_literal_into_slice_typed_struct_field).
+# ---------------------------------------------------------------------------
+
+class TestInt8Uint8TypeSystem:
+    def _check(self, src, expect_error=None):
+        """Runs semantic analysis only -- no codegen, no gcc -- since
+        this step's own scope is entirely about type-checking, not
+        runtime behavior. Returns nothing; raises on an unexpected
+        outcome via a plain assert, mirroring assert_semantic_error's
+        own posture but for full programs (multiple functions/structs)
+        rather than a single main() body."""
+        ast = _parse(src)
+        if expect_error is None:
+            analyze(ast)
+            return
+        try:
+            analyze(ast)
+        except SemanticError as e:
+            assert expect_error in str(e), f"expected error containing {expect_error!r}, got: {e}"
+            return
+        assert False, f"expected a SemanticError containing {expect_error!r}, got none"
+
+    def test_int8_literal_in_range_positive(self):
+        self._check("def int main():\n    int8 x = 100\n    return 0\n")
+
+    def test_int8_literal_in_range_negative(self):
+        self._check("def int main():\n    int8 x = -100\n    return 0\n")
+
+    def test_int8_literal_min_boundary(self):
+        self._check("def int main():\n    int8 x = -128\n    return 0\n")
+
+    def test_int8_literal_max_boundary(self):
+        self._check("def int main():\n    int8 x = 127\n    return 0\n")
+
+    def test_int8_literal_out_of_range_positive(self):
+        self._check(
+            "def int main():\n    int8 x = 128\n    return 0\n",
+            expect_error="out of range",
+        )
+
+    def test_int8_literal_out_of_range_negative(self):
+        self._check(
+            "def int main():\n    int8 x = -129\n    return 0\n",
+            expect_error="out of range",
+        )
+
+    def test_uint8_literal_in_range(self):
+        self._check("def int main():\n    uint8 x = 200\n    return 0\n")
+
+    def test_uint8_literal_max_boundary(self):
+        self._check("def int main():\n    uint8 x = 255\n    return 0\n")
+
+    def test_uint8_literal_negative_is_rejected(self):
+        """uint8's own range starts at 0 -- a negative literal is out
+        of range, not a separate kind of error."""
+        self._check(
+            "def int main():\n    uint8 x = -1\n    return 0\n",
+            expect_error="out of range",
+        )
+
+    def test_uint8_literal_out_of_range_positive(self):
+        self._check(
+            "def int main():\n    uint8 x = 256\n    return 0\n",
+            expect_error="out of range",
+        )
+
+    def test_int_variable_does_not_implicitly_narrow_into_int8(self):
+        """An arbitrary int-typed EXPRESSION (a variable here, not a
+        literal) never gets the range-checked-literal treatment --
+        this is a real type mismatch, matching this language's
+        consistent 'explicit over implicit' stance (no implicit
+        narrowing, the same way there's no implicit int-to-bool
+        coercion)."""
+        self._check(
+            "def int main():\n"
+            "    int y = 5\n"
+            "    int8 x = y\n"
+            "    return 0\n",
+            expect_error="Cannot initialize",
+        )
+
+    def test_int8_arithmetic_stays_int8(self):
+        """int8 + int8 is int8, not promoted to int the way C's own
+        integer-promotion rules would have it -- verified by requiring
+        the result to fit into an int8-typed slot."""
+        self._check(
+            "def int main():\n"
+            "    int8 a = 5\n"
+            "    int8 b = 3\n"
+            "    int8 c = a + b\n"
+            "    return 0\n"
+        )
+
+    def test_int8_arithmetic_result_rejected_by_a_wider_target(self):
+        """The flip side of the above: an int8 result can't flow into
+        an int-typed slot without an explicit cast (which doesn't
+        exist yet) -- proving the result type is genuinely int8, not
+        silently int underneath."""
+        self._check(
+            "def int main():\n"
+            "    int8 a = 5\n"
+            "    int8 b = 3\n"
+            "    int c = a + b\n"
+            "    return 0\n",
+            expect_error="Cannot initialize",
+        )
+
+    def test_uint8_arithmetic_stays_uint8(self):
+        self._check(
+            "def int main():\n"
+            "    uint8 a = 5\n"
+            "    uint8 b = 3\n"
+            "    uint8 c = a * b\n"
+            "    return 0\n"
+        )
+
+    def test_int8_and_uint8_arithmetic_mixing_is_rejected(self):
+        self._check(
+            "def int main():\n"
+            "    int8 a = 5\n"
+            "    uint8 b = 3\n"
+            "    int8 c = a + b\n"
+            "    return 0\n",
+            expect_error="requires two operands of the same integer type",
+        )
+
+    def test_int8_and_int_arithmetic_mixing_is_rejected(self):
+        self._check(
+            "def int main():\n"
+            "    int8 a = 5\n"
+            "    int b = 3\n"
+            "    int8 c = a + b\n"
+            "    return 0\n",
+            expect_error="requires two operands of the same integer type",
+        )
+
+    def test_unary_negate_stays_int8(self):
+        self._check(
+            "def int main():\n"
+            "    int8 a = 5\n"
+            "    int8 b = -a\n"
+            "    return 0\n"
+        )
+
+    def test_unary_complement_stays_uint8(self):
+        self._check(
+            "def int main():\n"
+            "    uint8 a = 5\n"
+            "    uint8 b = ~a\n"
+            "    return 0\n"
+        )
+
+    def test_not_still_rejects_int8(self):
+        """'not' requires bool specifically -- int8/uint8 don't get
+        folded into the arithmetic-type acceptance check_unary's own
+        NEGATE/COMPLEMENT branch now has; NOT is a completely separate
+        branch, unaffected by this feature at all."""
+        self._check(
+            "def int main():\n"
+            "    int8 a = 5\n"
+            "    bool b = not a\n"
+            "    return 0\n",
+            expect_error="requires a bool operand",
+        )
+
+    def test_int8_ordering_comparison(self):
+        self._check(
+            "def int main():\n"
+            "    int8 a = 5\n"
+            "    int8 b = 3\n"
+            "    bool result = a > b\n"
+            "    return 0\n"
+        )
+
+    def test_int8_uint8_ordering_mixing_is_rejected(self):
+        self._check(
+            "def int main():\n"
+            "    int8 a = 5\n"
+            "    uint8 b = 3\n"
+            "    bool result = a < b\n"
+            "    return 0\n",
+            expect_error="requires two operands of the same integer type",
+        )
+
+    def test_int8_equality(self):
+        self._check(
+            "def int main():\n"
+            "    int8 a = 5\n"
+            "    int8 b = 3\n"
+            "    bool result = a == b\n"
+            "    return 0\n"
+        )
+
+    def test_int8_uint8_equality_mixing_is_rejected(self):
+        self._check(
+            "def int main():\n"
+            "    int8 a = 5\n"
+            "    uint8 b = 3\n"
+            "    bool result = a == b\n"
+            "    return 0\n",
+            expect_error="both sides must be the same type",
+        )
+
+    def test_int8_as_function_parameter(self):
+        self._check(
+            "def int identity(int8 x):\n"
+            "    return 0\n"
+            "\n"
+            "def int main():\n"
+            "    return identity(100)\n"
+        )
+
+    def test_int8_function_argument_out_of_range(self):
+        self._check(
+            "def int identity(int8 x):\n"
+            "    return 0\n"
+            "\n"
+            "def int main():\n"
+            "    return identity(200)\n",
+            expect_error="out of range",
+        )
+
+    def test_int8_as_function_return_type(self):
+        self._check(
+            "def int8 makeIt():\n"
+            "    return 100\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n"
+        )
+
+    def test_int8_return_value_out_of_range(self):
+        self._check(
+            "def int8 makeIt():\n"
+            "    return 200\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            expect_error="out of range",
+        )
+
+    def test_int8_as_method_argument(self):
+        self._check(
+            "struct A:\n"
+            "    int v\n"
+            "    def int useIt(s, int8 x):\n"
+            "        return 0\n"
+            "\n"
+            "def int main():\n"
+            "    A a = A(1)\n"
+            "    return a.useIt(100)\n"
+        )
+
+    def test_int8_struct_field_positional(self):
+        """The gap this class's own module comment describes: a
+        struct literal's positional argument loop used to skip the
+        target-aware check entirely."""
+        self._check(
+            "struct S:\n"
+            "    int8 x\n"
+            "    uint8 y\n"
+            "\n"
+            "def int main():\n"
+            "    S s = S(1, 2)\n"
+            "    return 0\n"
+        )
+
+    def test_int8_struct_field_named(self):
+        self._check(
+            "struct S:\n"
+            "    int8 x\n"
+            "    uint8 y\n"
+            "\n"
+            "def int main():\n"
+            "    S s = S(x=1, y=2)\n"
+            "    return 0\n"
+        )
+
+    def test_int8_struct_field_positional_out_of_range(self):
+        self._check(
+            "struct S:\n"
+            "    int8 x\n"
+            "\n"
+            "def int main():\n"
+            "    S s = S(200)\n"
+            "    return 0\n",
+            expect_error="out of range",
+        )
+
+    def test_untyped_array_literal_into_int8_array_target(self):
+        """The other gap this class's own module comment describes:
+        an untyped array literal flowing into an ARRAY-kind target
+        used to only ever check each element via plain check_expr,
+        which correctly infers int8/uint8 elements now that the
+        expected_element_type branch covers array targets too, not
+        just slice ones."""
+        self._check(
+            "def int main():\n"
+            "    [3]int8 arr = [1, 2, 3]\n"
+            "    return 0\n"
+        )
+
+    def test_untyped_array_literal_element_out_of_range(self):
+        self._check(
+            "def int main():\n"
+            "    [3]int8 arr = [1, 200, 3]\n"
+            "    return 0\n",
+            expect_error="out of range",
+        )
+
+    def test_untyped_array_literal_size_mismatch_still_caught(self):
+        """Regression check on the fix above: routing an array-target
+        literal through check_array_literal's own expected_element_
+        type branch returns the literal's own COMPUTED size, not the
+        target's, so a genuine size mismatch still surfaces as an
+        ordinary type mismatch at the call site -- nothing here
+        trusts the literal's own element count against the target."""
+        self._check(
+            "def int main():\n"
+            "    [3]int8 arr = [1, 2]\n"
+            "    return 0\n",
+            expect_error="Cannot initialize",
+        )
+
+    def test_untyped_array_literal_into_slice_typed_struct_field(self):
+        """A genuinely pre-existing, unrelated bug found while fixing
+        the struct-literal gap above: an untyped array literal never
+        correctly flowed into a slice-typed struct field at all,
+        since check_struct_literal's own argument loop had no target-
+        type awareness whatsoever before this fix."""
+        self._check(
+            "struct Holder:\n"
+            "    []int xs\n"
+            "\n"
+            "def int main():\n"
+            "    Holder h = Holder([1, 2, 3])\n"
+            "    return 0\n"
+        )
+
+    def test_ragged_array_literal_still_rejected(self):
+        """Regression check: a genuinely ragged/heterogeneous literal
+        must still be rejected, not silently accepted now that array
+        targets route through the same expected_element_type branch
+        slice targets already used."""
+        self._check(
+            "def int main():\n"
+            "    [2][3]int8 matrix = [[1, 2, 3], [4, 5]]\n"
+            "    return 0\n",
+            expect_error="elements must all be",
+        )
+
+    def test_int8_alias(self):
+        self._check(
+            "type MyByte = int8\n"
+            "\n"
+            "def int main():\n"
+            "    MyByte x = 100\n"
+            "    return 0\n"
+        )
+
+    def test_int8_alias_out_of_range(self):
+        self._check(
+            "type MyByte = int8\n"
+            "\n"
+            "def int main():\n"
+            "    MyByte x = 200\n"
+            "    return 0\n",
+            expect_error="out of range",
+        )
+
+    def test_int8_array_element_type(self):
+        self._check("def int main():\n    [3]int8 arr\n    return 0\n")
+
+    def test_uint8_array_element_type(self):
+        self._check("def int main():\n    [3]uint8 arr\n    return 0\n")
 
 
 class TestTypedArrayLiterals:
@@ -8196,13 +8612,13 @@ class TestSemanticErrors:
     def test_negate_requires_int_not_bool(self):
         assert_semantic_error(
             "    return -true",
-            match="requires an int operand",
+            match="requires an int, int8, or uint8 operand",
         )
 
     def test_complement_requires_int_not_bool(self):
         assert_semantic_error(
             "    return ~true",
-            match="requires an int operand",
+            match="requires an int, int8, or uint8 operand",
         )
 
     def test_arithmetic_requires_int_operands(self):
@@ -8211,17 +8627,18 @@ class TestSemanticErrors:
         different, ADD-specific error message."""
         assert_semantic_error(
             "    return true - false",
-            match="requires int operands",
+            match="requires two operands of the same integer type",
         )
 
     def test_add_requires_two_int_or_two_str_operands(self):
         """'+' is overloaded (int+int is arithmetic, str+str is
         concatenation -- see semantic.py's check_binary), so it doesn't
-        go through the generic _require_type path the other arithmetic
-        operators use, and gets its own distinct error message."""
+        go through the generic _require_same_integer_type path the
+        other arithmetic operators use, and gets its own distinct
+        error message."""
         assert_semantic_error(
             "    return true + false",
-            match="requires two int operands or two str operands",
+            match="requires two operands of the same integer type",
         )
 
     def test_ordering_comparison_requires_int_operands(self):
@@ -8230,7 +8647,7 @@ class TestSemanticErrors:
         assert_semantic_error(
             "    return true < false",
             return_type="bool",
-            match="requires int operands",
+            match="requires two operands of the same integer type",
         )
 
     def test_chained_ordering_comparison_is_rejected(self):
@@ -8243,7 +8660,7 @@ class TestSemanticErrors:
         assert_semantic_error(
             "    return 1 < 2 < 3",
             return_type="bool",
-            match="requires int operands",
+            match="requires two operands of the same integer type",
         )
 
     def test_logical_and_requires_bool_operands(self):
@@ -8472,7 +8889,7 @@ class TestSemanticErrors:
             "    int b = 5\n"
             "    return a + b",
             return_type="str",
-            match="requires two int operands or two str operands",
+            match="requires two operands of the same integer type",
         )
 
     def test_subtract_rejects_str_operands(self):
@@ -8483,7 +8900,7 @@ class TestSemanticErrors:
             "    str b = 'world'\n"
             "    return a - b",
             return_type="str",
-            match="requires int operands",
+            match="requires two operands of the same integer type",
         )
 
     def test_ordering_comparison_rejects_str_operands(self):
@@ -8494,7 +8911,7 @@ class TestSemanticErrors:
             "    str b = 'world'\n"
             "    return a < b",
             return_type="bool",
-            match="requires int operands",
+            match="requires two operands of the same integer type",
         )
 
     def test_equality_rejects_str_compared_to_int(self):
@@ -8679,37 +9096,37 @@ class TestSemanticErrors:
     def test_modulo_requires_int_operands(self):
         assert_semantic_error(
             "    return true % 2",
-            match="requires int operands",
+            match="requires two operands of the same integer type",
         )
 
     def test_bitwise_and_requires_int_operands(self):
         assert_semantic_error(
             "    return true & false",
-            match="requires int operands",
+            match="requires two operands of the same integer type",
         )
 
     def test_bitwise_or_requires_int_operands(self):
         assert_semantic_error(
             "    return 'x' | 1",
-            match="requires int operands",
+            match="requires two operands of the same integer type",
         )
 
     def test_bitwise_xor_requires_int_operands(self):
         assert_semantic_error(
             "    return true ^ true",
-            match="requires int operands",
+            match="requires two operands of the same integer type",
         )
 
     def test_shift_left_requires_int_operands(self):
         assert_semantic_error(
             "    return 'x' << 1",
-            match="requires int operands",
+            match="requires two operands of the same integer type",
         )
 
     def test_shift_right_requires_int_operands(self):
         assert_semantic_error(
             "    return true >> 1",
-            match="requires int operands",
+            match="requires two operands of the same integer type",
         )
 
     def test_bitwise_and_equality_precedence_is_a_type_error(self):
@@ -8721,7 +9138,7 @@ class TestSemanticErrors:
         instead."""
         assert_semantic_error(
             "    return 1 & 2 == 2",
-            match="requires int operands",
+            match="requires two operands of the same integer type",
         )
 
     def test_bitwise_and_equality_with_explicit_parens_is_valid(self):
@@ -8746,18 +9163,22 @@ class TestSemanticErrors:
         special-cased "ragged" logic at all -- once Type is
         structurally comparable, the two rows are just genuinely
         different types ([3]int vs [2]int), caught by the exact same
-        check that rejects [3]int vs [3]bool."""
+        check that rejects [3]int vs [3]bool. Routed through check_
+        array_literal's own expected_element_type branch here (the
+        VarDecl's own declared type is [2][3]int, an ARRAY, not a
+        SLICE), so the message names the declared element type
+        directly rather than describing a generic type mismatch."""
         assert_semantic_error(
             "    [2][3]int matrix = [[1, 2, 3], [4, 5]]\n"
             "    return matrix[0][0]",
-            match="Array literal elements must all be the same type",
+            match="elements must all be .*to match the declared element type",
         )
 
     def test_heterogeneous_array_literal_is_rejected(self):
         assert_semantic_error(
             "    [3]int arr = [1, true, 3]\n"
             "    return arr[0]",
-            match="Array literal elements must all be the same type",
+            match="elements must all be .*to match the declared element type",
         )
 
     def test_non_int_array_index_is_rejected(self):
@@ -12120,7 +12541,7 @@ class TestArraysOfStructs:
             "def int main():\n"
             "    [2]Point pts = [Point(1), 5]\n"
             "    return 0\n",
-            match="must all be the same type",
+            match="elements must all be .*to match the declared element type",
         )
 
     def test_bare_typed_struct_array_literal_statement_side_effect_is_still_rejected(self):

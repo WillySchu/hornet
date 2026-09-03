@@ -1399,7 +1399,7 @@ class Parser:
         keywords, so there's no way to tell "this identifier is a
         type" from "this identifier is something else" with only one
         token of lookahead)."""
-        return self.check(TokenType.INT, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET) or (
+        return self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET) or (
             self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.IDENTIFIER
         )
 
@@ -1506,22 +1506,22 @@ class Parser:
             self.expect(TokenType.CLOSE_BRACKET, "Expected ']' after array size")
             element_type = self.parse_type()
             return ArrayTypeExpr(size=size, element_type=element_type)
-        if self.check(TokenType.INT, TokenType.BOOL, TokenType.STR):
+        if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.BOOL, TokenType.STR):
             return self.advance().val
         if self.check(TokenType.IDENTIFIER):
             # A struct type reference (`MyStruct`) -- the parser has no
             # symbol table and doesn't know or care whether this name
             # actually names a declared struct; it just accepts any
             # identifier here and hands the bare string on, exactly
-            # like it already does for 'int'/'bool'/'str' above.
-            # semantic.py's own struct-registry pass is what actually
-            # validates the name (see type_from_name).
+            # like it already does for 'int'/'int8'/'uint8'/'bool'/
+            # 'str' above. semantic.py's own struct-registry pass is
+            # what actually validates the name (see type_from_name).
             return self.advance().val
         tok = self.current()
         raise ParseError(
-            f"Expected a type ('int', 'bool', 'str', a struct name, "
-            f"'[size]type', or '[]type'), got {tok.type} ('{tok.val}') "
-            f"at line {tok.line}, column {tok.col}"
+            f"Expected a type ('int', 'int8', 'uint8', 'bool', 'str', "
+            f"a struct name, '[size]type', or '[]type'), got {tok.type} "
+            f"('{tok.val}') at line {tok.line}, column {tok.col}"
         )
 
     def parse_block(self) -> List[Node]:
@@ -1551,7 +1551,7 @@ class Parser:
         return statements
 
     def parse_statement(self) -> Node:
-        if self.check(TokenType.INT, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET):
+        if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET):
             # A type-starting token could mean EITHER a VarDecl
             # (`[3]int arr = ...`) or a bare, fully-typed array- or
             # slice-literal expression statement (`[3]int[1, 2, 3]`,
@@ -1995,9 +1995,9 @@ class Parser:
         if not self.check(TokenType.OPEN_BRACKET):
             return False
         if self.peek(1).type == TokenType.CLOSE_BRACKET:
-            return self.peek(2).type in (TokenType.INT, TokenType.BOOL, TokenType.STR, TokenType.IDENTIFIER, TokenType.OPEN_BRACKET)
+            return self.peek(2).type in (TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.BOOL, TokenType.STR, TokenType.IDENTIFIER, TokenType.OPEN_BRACKET)
         if self.peek(1).type == TokenType.NUMBER and self.peek(2).type == TokenType.CLOSE_BRACKET:
-            return self.peek(3).type in (TokenType.INT, TokenType.BOOL, TokenType.STR, TokenType.IDENTIFIER, TokenType.OPEN_BRACKET)
+            return self.peek(3).type in (TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.BOOL, TokenType.STR, TokenType.IDENTIFIER, TokenType.OPEN_BRACKET)
         return False
 
     def _parse_bracketed_literal(self, parsed_type: Union[str, 'ArrayTypeExpr', 'SliceTypeExpr']) -> Node:

@@ -60,6 +60,8 @@ class TokenType(Enum):
     # Keywords
     DEF = auto()
     INT = auto()
+    INT8 = auto()
+    UINT8 = auto()
     STR = auto()
     RETURN = auto()
     AND = auto()
@@ -129,6 +131,8 @@ class Lexer():
         self.keywords = {
             'def': TokenType.DEF,
             'int': TokenType.INT,
+            'int8': TokenType.INT8,
+            'uint8': TokenType.UINT8,
             'str': TokenType.STR,
             'return': TokenType.RETURN,
             'and': TokenType.AND,
