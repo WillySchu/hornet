@@ -14,8 +14,6 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- Type aliases for arrays.
-- Type aliases for slices.
 - Add `byte` type.
 - Casting.
 - `type` type.

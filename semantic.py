@@ -958,36 +958,63 @@ class SemanticAnalyzer:
            the time pass 2 resolves A's own target, B's name is
            already a recognized key, even with its own target not yet
            resolved.
-        2. Resolve each alias's own target via a small recursive
-           resolver with its own cycle guard (`type A = B; type B =
-           A;` has to be rejected, not infinitely recurse) -- the same
-           general shape _check_struct_contains uses for detecting a
-           cyclic struct, just over a flat name-to-name chain instead
-           of a field graph. A struct name resolves to Type(STRUCT,
-           struct_name=target) -- structurally identical to what
-           type_from_name itself would produce for that same name used
-           directly, so an alias targeting a struct is completely
-           interchangeable with the struct's own name everywhere a
-           TYPE NAME is expected (a VarDecl, a parameter, a return
-           type, another struct's own field, an array/slice element
-           type) with no further changes needed anywhere downstream --
-           every one of those already resolves through type_from_name.
-           The one place this does NOT extend to: struct LITERAL
-           construction (`PointAlias(1, 2)`) is resolved by check_
-           call's own direct `expr.name in self.structs` membership
-           check, which an alias name never satisfies (self.structs is
-           keyed by a struct's own real name only) -- constructing via
-           an alias name specifically isn't supported yet, a separate,
-           narrower gap from general type-name interchangeability.
+        2. Resolve each alias's own target via `resolve`, a small
+           memoized resolver with its own cycle guard keyed by ALIAS
+           NAME (`type A = B; type B = A;` has to be rejected, not
+           infinitely recurse) -- the same general shape _check_
+           struct_contains uses for detecting a cyclic struct, just
+           over a flat name-to-name chain instead of a field graph.
+           `resolve` itself only ever handles "what does this ALIAS
+           NAME'S OWN target resolve to" (memoization and cycle
+           detection); the actual "what type does this EXPRESSION
+           denote" recursion -- a bare name, or an Array/SliceTypeExpr
+           wrapping one, arbitrarily nested (`[2][3]int`, `[]MyInt`,
+           `[3]Point`, ...) -- is `resolve_target`'s own job, calling
+           BACK into `resolve` whenever it bottoms out at a bare name
+           that's itself another alias. This split mirrors type_from_
+           name's own array/slice recursion one level up, but can't
+           just reuse type_from_name directly: that function expects
+           its own `aliases` dict to already be fully resolved (a
+           single, non-recursive lookup), which isn't true yet while
+           THIS pass is still building it -- resolve_target's own
+           bare-name case has to be able to recurse into `resolve` for
+           an alias that hasn't been resolved yet yet, something type_
+           from_name has no way to do.
 
-        Deliberately still scoped to int/bool/str, a struct name, or
-        another alias as the only valid targets -- NOT an array or
-        slice type expression, even though parse_type() (see
-        TypeAlias's own docstring in parser.py) syntactically accepts
-        one. That's a narrower, more arbitrary scope decision (nothing
-        here fundamentally prevents it the way the struct-ordering
-        problem did), left for a later, separately-scoped pass rather
-        than guessed at now."""
+           An array or slice target's own element type can be int,
+           bool, str, a struct name, or another alias, at any nesting
+           depth -- resolving to Type(ARRAY, ...)/Type(SLICE, ...)
+           structurally identical to what type_from_name would produce
+           for that same expression written directly, so an alias
+           targeting an array or slice is completely interchangeable
+           with writing that array/slice type out directly, everywhere
+           a type name is expected, with no further changes needed
+           anywhere downstream -- every one of those already resolves
+           through type_from_name. A struct name target works the
+           identical way, one level simpler (see below).
+
+           A cycle can still occur even through array/slice wrapping
+           (`type A = []B; type B = []A;`) -- and is still correctly
+           rejected by the exact same `resolving` set, with no special
+           handling needed for the wrapping: resolve_target's own
+           recursion into resolve(target) for a bare alias name is
+           what actually re-enters `resolve`, regardless of how many
+           array/slice layers sit in between, so the cycle is detected
+           the same way a direct one is. This isn't a false positive
+           the way it might first look, either: unlike a struct field
+           (which can safely self-reference through a slice, since the
+           struct itself still has a finite, well-defined shape even
+           with one recursive field), an alias whose ENTIRE definition
+           is just "a slice/array of X" has no other structure to
+           bottom out at -- if X never resolves to a real, concrete
+           type, the alias itself never means anything at all, exactly
+           the same failure a direct `type A = A` already represents.
+           Struct literal construction (`PointAlias(1, 2)`) is the one
+           place struct-name interchangeability doesn't extend to:
+           resolved by check_call's own direct `expr.name in self.
+           structs` membership check, which an alias name never
+           satisfies (self.structs is keyed by a struct's own real
+           name only) -- a separate, narrower gap, not fixed here."""
         # Pass 1: reserve names, rejecting a duplicate alias name, one
         # that collides with a builtin FUNCTION name (print/len/
         # append), or one that collides with an already-reserved
@@ -1025,29 +1052,31 @@ class SemanticAnalyzer:
                     f"itself (a cycle)"
                 )
             resolving.add(name)
-            target = seen[name].target_type
-            if isinstance(target, (ArrayTypeExpr, SliceTypeExpr)):
-                raise SemanticError(
-                    f"Type alias '{name}' targets an array or slice "
-                    f"type -- only int, bool, str, a struct name, or "
-                    f"another type alias is supported as an alias "
-                    f"target right now"
-                )
-            if target in _TYPE_NAMES:
-                result = _TYPE_NAMES[target]
-            elif target in seen:
-                result = resolve(target)
-            elif target in structs:
-                result = Type(TypeKind.STRUCT, struct_name=target)
-            else:
-                raise SemanticError(
-                    f"Type alias '{name}' targets '{target}', which "
-                    f"isn't int, bool, str, a struct name, or another "
-                    f"type alias"
-                )
+            result = resolve_target(seen[name].target_type)
             resolving.discard(name)
             resolved[name] = result
             return result
+
+        def resolve_target(target) -> Type:
+            if isinstance(target, ArrayTypeExpr):
+                return Type(TypeKind.ARRAY, element_type=resolve_target(target.element_type), size=target.size)
+            if isinstance(target, SliceTypeExpr):
+                return Type(TypeKind.SLICE, element_type=resolve_target(target.element_type))
+            # target is a bare name from here on -- int/bool/str, an
+            # alias (possibly not yet resolved -- recurse into resolve
+            # itself, which is what makes forward references and cycle
+            # detection work), or a struct name.
+            if target in _TYPE_NAMES:
+                return _TYPE_NAMES[target]
+            if target in seen:
+                return resolve(target)
+            if target in structs:
+                return Type(TypeKind.STRUCT, struct_name=target)
+            raise SemanticError(
+                f"Unknown type '{target}' in a type alias's own target "
+                f"-- expected int, bool, str, a struct name, or "
+                f"another type alias"
+            )
 
         for ad in alias_defs:
             resolve(ad.name)

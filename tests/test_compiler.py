@@ -4494,18 +4494,35 @@ class TestMethods:
 # site found only by re-running the full suite after the first two files
 # were updated and seeing escape analysis's own tests still failing).
 #
-# Deliberately still scoped narrower than parse_type() itself allows: an
-# alias can target int, bool, str, a struct name, or another alias -- NOT an
-# array or slice type expression. Struct names were the harder half of this
-# feature to add, not because anything fundamentally prevented it, but
-# because of an ORDERING conflict this class's own tests exercise directly:
-# a struct FIELD's own type can already be an alias (needing aliases
-# resolved before struct fields are), while an alias can now target a
-# struct NAME (needing struct names to already exist before aliases
-# resolve). Solved by splitting what used to be one _collect_structs pass
-# into _reserve_struct_names (just names) and _resolve_struct_fields (the
-# rest), with alias resolution running in between the two -- see
-# _collect_type_aliases's own docstring for the full ordering.
+# An alias can now target int, bool, str, a struct name, an array or slice
+# type expression (at any nesting depth, with an element type that's itself
+# any of the above, including another alias), or another alias -- every
+# valid target parse_type() itself can produce. Struct names and array/
+# slice types needed two genuinely different kinds of care to add, not
+# equal effort for equal payoff:
+#
+# STRUCT NAMES needed an ORDERING fix, not new logic: a struct FIELD's own
+# type can already be an alias (needing aliases resolved before struct
+# fields are), while an alias can target a struct NAME (needing struct
+# names to already exist before aliases resolve). Solved by splitting what
+# used to be one _collect_structs pass into _reserve_struct_names (just
+# names) and _resolve_struct_fields (the rest), with alias resolution
+# running in between the two.
+#
+# ARRAY/SLICE TARGETS needed genuinely new recursive resolution logic,
+# since type_from_name itself couldn't be reused directly: it expects its
+# own `aliases` dict to already be fully resolved (a single, non-recursive
+# lookup), which isn't true yet while THIS pass is still building it. Split
+# into `resolve` (memoized, cycle-checked, keyed by ALIAS NAME) and
+# `resolve_target` (the actual "what type does this EXPRESSION denote"
+# recursion over bare names and Array/SliceTypeExpr wrapping, calling back
+# into `resolve` whenever it bottoms out at a bare name that's itself
+# another alias). test_array_alias_cycle_through_wrapping_is_rejected is
+# the test that actually proves the existing cycle guard extends correctly
+# to this new recursion with no changes needed: `type A = []B; type B =
+# []A;` is still caught, since resolve_target's own recursion into
+# resolve(target) for a bare alias name is what re-enters `resolve`,
+# regardless of how many array/slice layers sit in between.
 #
 # test_constructing_via_the_alias_name_is_not_supported documents a real,
 # narrower remaining gap: a struct-name alias is fully interchangeable with
@@ -4695,22 +4712,84 @@ class TestTypeAliases:
             match="cycle",
         )
 
-    def test_array_target_is_rejected(self):
-        assert_program_semantic_error(
+    def test_alias_to_an_array_type(self):
+        assert_program_exit_code(
             "type IntArray = [3]int\n"
             "\n"
             "def int main():\n"
-            "    return 0\n",
-            match="only int, bool, str, a struct name, or another type alias",
+            "    IntArray arr = [1, 2, 3]\n"
+            "    return arr[0] + arr[1] + arr[2]\n",
+            6,
         )
 
-    def test_slice_target_is_rejected(self):
-        assert_program_semantic_error(
+    def test_alias_to_a_slice_type(self):
+        assert_program_exit_code(
             "type IntSlice = []int\n"
             "\n"
             "def int main():\n"
+            "    IntSlice s = []int[1, 2, 3]\n"
+            "    return s[0] + s[1] + s[2]\n",
+            6,
+        )
+
+    def test_alias_to_a_multidimensional_array_type(self):
+        assert_program_exit_code(
+            "type Matrix = [2][3]int\n"
+            "\n"
+            "def int main():\n"
+            "    Matrix m = [[1, 2, 3], [4, 5, 6]]\n"
+            "    return m[0][0] + m[1][2]\n",
+            7,
+        )
+
+    def test_alias_to_an_array_of_a_struct_type(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "type Points = [2]Point\n"
+            "\n"
+            "def int main():\n"
+            "    Points pts = [Point(1, 2), Point(3, 4)]\n"
+            "    return pts[0].x + pts[1].y\n",
+            5,
+        )
+
+    def test_alias_to_a_slice_of_another_alias(self):
+        """The array/slice element type can itself be an alias, at
+        any nesting depth -- resolve_target's own bare-name case
+        recurses back into resolve for an alias that isn't resolved
+        yet, the same way a top-level alias-of-alias chain already
+        works."""
+        assert_program_exit_code(
+            "type MyInt = int\n"
+            "type MyIntSlice = []MyInt\n"
+            "\n"
+            "def int main():\n"
+            "    MyIntSlice s = []int[7, 8, 9]\n"
+            "    return s[0] + s[1] + s[2]\n",
+            24,
+        )
+
+    def test_array_alias_cycle_through_wrapping_is_rejected(self):
+        """`type A = []B; type B = []A;` -- genuinely meaningless, not
+        just a false positive: unlike a struct field (which can safely
+        self-reference through a slice, since the struct itself still
+        has a finite shape even with one recursive field), an alias
+        whose ENTIRE definition is just "a slice of X" has no other
+        structure to bottom out at -- if X never resolves to a real
+        type, the alias itself never means anything, the same failure
+        a direct `type A = A` already represents. Caught by the exact
+        same cycle guard, with no special-casing needed for the
+        wrapping in between."""
+        assert_program_semantic_error(
+            "type A = []B\n"
+            "type B = []A\n"
+            "\n"
+            "def int main():\n"
             "    return 0\n",
-            match="only int, bool, str, a struct name, or another type alias",
+            match="cycle",
         )
 
     def test_unknown_target_is_rejected(self):
@@ -4719,7 +4798,89 @@ class TestTypeAliases:
             "\n"
             "def int main():\n"
             "    return 0\n",
-            match="isn't int, bool, str, a struct name, or another type alias",
+            match="expected int, bool, str, a struct name, or another type alias",
+        )
+
+    def test_unknown_array_element_target_is_rejected(self):
+        assert_program_semantic_error(
+            "type Foo = [3]NotAThing\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="expected int, bool, str, a struct name, or another type alias",
+        )
+
+    def test_array_alias_as_param_and_return_type(self):
+        assert_program_exit_code(
+            "type IntArray = [3]int\n"
+            "\n"
+            "def int sum(IntArray arr):\n"
+            "    return arr[0] + arr[1] + arr[2]\n"
+            "\n"
+            "def int main():\n"
+            "    IntArray a = [1, 2, 3]\n"
+            "    return sum(a)\n",
+            6,
+        )
+
+    def test_array_alias_as_struct_field_type(self):
+        assert_program_exit_code(
+            "type IntArray = [3]int\n"
+            "\n"
+            "struct Row:\n"
+            "    IntArray values\n"
+            "\n"
+            "def int main():\n"
+            "    Row r = Row([1, 2, 3])\n"
+            "    return r.values[0] + r.values[1] + r.values[2]\n",
+            6,
+        )
+
+    def test_array_alias_zero_init(self):
+        assert_program_exit_code(
+            "type IntArray = [3]int\n"
+            "\n"
+            "def int main():\n"
+            "    IntArray arr\n"
+            "    return arr[0] + arr[1] + arr[2]\n",
+            0,
+        )
+
+    def test_array_alias_equality(self):
+        assert_program_exit_code(
+            "type IntArray = [3]int\n"
+            "\n"
+            "def int main():\n"
+            "    IntArray a = [1, 2, 3]\n"
+            "    IntArray b = [1, 2, 3]\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_large_array_alias_is_still_heap_allocated(self):
+        elements = ", ".join(str(1 if i == 4999 else 0) for i in range(5000))
+        assert_program_exit_code(
+            "type BigArray = [5000]int\n"
+            "\n"
+            f"def int main():\n"
+            f"    BigArray arr = [{elements}]\n"
+            f"    return arr[4999]\n",
+            1,
+        )
+
+    def test_print_array_alias_typed_variable(self):
+        """Same 'no trace of the alias name anywhere' proof as
+        test_print_alias_typed_variable, one type-kind over."""
+        assert_program_stdout(
+            "type IntArray = [3]int\n"
+            "\n"
+            "def int main():\n"
+            "    IntArray arr = [1, 2, 3]\n"
+            "    print(arr)\n"
+            "    return 0\n",
+            "[3]int[1, 2, 3]\n",
         )
 
     def test_alias_to_a_struct_name(self):
