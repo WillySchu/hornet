@@ -14,7 +14,6 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- Add `byte` type.
 - Casting.
 - `type` type.
 ` typeof`

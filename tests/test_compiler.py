@@ -6168,6 +6168,156 @@ class TestInt8Uint8Print:
         )
 
 
+# ---------------------------------------------------------------------------
+# byte -- a built-in ALIAS for uint8 (the exact same Type.UINT8 instance,
+# not a third, distinct TypeKind), matching Go's own convention that a byte
+# is unsigned. Implemented as a second keyword mapped to the SAME TokenType
+# as 'uint8' (see lexer.py's own keywords table) and a second _TYPE_NAMES
+# entry pointing at the identical Type object (see semantic.py) -- nothing
+# in codegen.py needed any change at all, since every uint8-aware path
+# (type_byte_width, the scalar read/write helpers, array equality/zero-
+# init, print) already dispatches on Type.UINT8 directly and has no way to
+# ever learn 'byte' exists as a separate concept.
+#
+# The deliberate consequence, exercised directly below rather than left
+# implicit: byte is completely interchangeable with uint8 with no cast
+# needed in either direction, and -- like a user-written type alias --
+# leaves NO TRACE of itself anywhere downstream: an error message or
+# print() output always says "uint8", even for a value declared with
+# `byte`. test_byte_and_int8_are_still_incompatible is the one test that
+# proves this alias is scoped correctly: byte/uint8 interchange freely
+# with EACH OTHER, but still can't mix with int8 (a different, merely
+# same-width type) or int (a different width entirely) without a cast --
+# no implicit narrowing or promotion was accidentally introduced for
+# EITHER of the two types this aliasing touches.
+# ---------------------------------------------------------------------------
+
+class TestByte:
+    pytestmark = GCC_SKIP
+
+    def test_byte_basic(self):
+        assert_program_exit_code(
+            "def byte main():\n    byte x = 200\n    return x\n",
+            200,
+        )
+
+    def test_byte_and_uint8_interchange_without_a_cast(self):
+        assert_program_exit_code(
+            "def byte main():\n"
+            "    byte x = 5\n"
+            "    uint8 y = x\n"
+            "    byte z = y\n"
+            "    return z\n",
+            5,
+        )
+
+    def test_byte_literal_out_of_range_error_says_uint8(self):
+        """The actual proof of 'leaves no trace of itself': the error
+        names uint8, the type byte actually IS under the hood, never
+        the word 'byte' the source code used."""
+        assert_program_semantic_error(
+            "def int main():\n    byte x = 300\n    return 0\n",
+            match="out of range for uint8",
+        )
+
+    def test_byte_and_int8_are_still_incompatible(self):
+        """Scoping check: byte is an alias for uint8 specifically, not
+        a general 'any 8-bit type' wildcard -- it still can't mix with
+        int8 (same width, different signedness) without a cast, the
+        identical restriction uint8 and int8 already have with each
+        other."""
+        assert_program_semantic_error(
+            "def int main():\n"
+            "    byte x = 5\n"
+            "    int8 y = 5\n"
+            "    byte z = x + y\n"
+            "    return 0\n",
+            match="requires two operands of the same integer type",
+        )
+
+    def test_byte_and_int_are_still_incompatible(self):
+        assert_program_semantic_error(
+            "def int main():\n"
+            "    byte x = 5\n"
+            "    int y = 5\n"
+            "    byte z = x + y\n"
+            "    return 0\n",
+            match="requires two operands of the same integer type",
+        )
+
+    def test_byte_arithmetic_wraps(self):
+        assert_program_exit_code(
+            "def byte main():\n"
+            "    byte a = 200\n"
+            "    byte b = 100\n"
+            "    byte c = a + b\n"
+            "    return c\n",
+            (200 + 100) % 256,
+        )
+
+    def test_print_byte_value(self):
+        assert_program_stdout(
+            "def int main():\n    byte x = 200\n    print(x)\n    return 0\n",
+            "200\n",
+        )
+
+    def test_print_byte_array_shows_uint8_type_name(self):
+        """Another direct proof of 'leaves no trace': the array's own
+        printed type name is "[3]uint8", never "[3]byte", even though
+        every element was declared with `byte`."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    [3]byte arr = [1, 2, 3]\n"
+            "    print(arr)\n"
+            "    return 0\n",
+            "[3]uint8[1, 2, 3]\n",
+        )
+
+    def test_byte_as_function_parameter_and_return(self):
+        assert_program_exit_code(
+            "def byte identity(byte x):\n"
+            "    return x\n"
+            "\n"
+            "def byte main():\n"
+            "    return identity(250)\n",
+            250,
+        )
+
+    def test_byte_struct_field(self):
+        assert_program_exit_code(
+            "struct S:\n"
+            "    byte v\n"
+            "\n"
+            "def byte main():\n"
+            "    S s = S(150)\n"
+            "    return s.v\n",
+            150,
+        )
+
+    def test_byte_array_storage_is_genuinely_dense(self):
+        """No direct way to assert memory layout from a test, but this
+        exercises the same array-of-narrow-elements machinery step 2
+        built for uint8 (address math, flat equality/zero loops,
+        gen_array_copy's own 1-byte tier) -- byte inherits all of it
+        for free by virtue of being the identical Type object, with
+        nothing here needing its own, separate verification."""
+        assert_program_exit_code(
+            "def byte main():\n"
+            "    [5]byte arr = [1, 2, 3, 4, 5]\n"
+            "    return arr[0] + arr[4]\n",
+            6,
+        )
+
+    def test_byte_is_a_reserved_keyword(self):
+        """Can't be used as an ordinary identifier, the same as any
+        other built-in type name -- 'int byte = 5' parses 'byte' as a
+        second type-starting token rather than a variable name, since
+        it lexes identically to 'uint8' (see lexer.py's own keywords
+        table)."""
+        with pytest.raises(ParseError, match="Expected a variable name"):
+            _parse("def int main():\n    int byte = 5\n    return byte\n")
+
+
 class TestTypedArrayLiterals:
     pytestmark = GCC_SKIP
 

@@ -723,6 +723,50 @@ class Unary(Node):
 
 
 @dataclass
+class Cast(Node):
+    """`TYPE(expr)` -- an explicit numeric cast, e.g. `int8(x)`,
+    `uint8(255)`, `int(someByteValue)`. Syntactically identical in
+    SHAPE to an ordinary function call (a name immediately followed by
+    a single parenthesized argument), but distinguished at PARSE time
+    rather than left to semantic.py the way Call's own struct-vs-
+    function ambiguity is: target_type here is always one of the five
+    built-in scalar type KEYWORDS (int, int8, uint8, bool, str -- see
+    parse_primary's own dispatch), a lexically distinct token kind
+    from IDENTIFIER -- so there's no genuine ambiguity with a struct
+    literal or an ordinary function call to disambiguate later the way
+    Call needs to: a struct name or a type ALIAS name is always an
+    IDENTIFIER token, never one of these five keywords, so neither can
+    ever produce a Cast node, no matter what it resolves to.
+
+    Deliberately scoped to a SINGLE argument, unlike Call's own list --
+    a cast only ever converts one value, so there's no positional/
+    named-argument shape to disambiguate here at all.
+
+    Only int/int8/uint8 are actually SUPPORTED on either side of a
+    cast right now (see semantic.py's check_cast) -- bool and str are
+    still accepted HERE, at the parse level, since the parser has no
+    reason to know which specific (source, target) pairs are valid;
+    that's semantic.py's job, matching this file's consistent "parser
+    accepts the shape, semantic.py validates the meaning" split seen
+    throughout (e.g. Call's own struct-vs-function resolution, or a
+    named argument's field name never being checked against a real
+    struct here either).
+
+    Casting to a STRUCT name or a type ALIAS name (`MyByte(x)`, where
+    `type MyByte = int8`) is NOT supported by this node at all -- such
+    an expression parses as an ordinary Call instead (see parse_
+    primary's own IDENTIFIER branch), which check_call has no cast-
+    aware case for, so it's rejected as an undeclared-function or a
+    struct-literal error, whichever check_call reaches first. A
+    separate, narrower gap, matching the identical, already-documented
+    one for constructing a struct via its own alias name (see
+    _collect_type_aliases's own docstring)."""
+    target_type: str
+    expr: Node
+    resolved_type: Optional[Any] = None
+
+
+@dataclass
 class Binary(Node):
     op: BinaryOp
     left: Node
@@ -1551,6 +1595,26 @@ class Parser:
         return statements
 
     def parse_statement(self) -> Node:
+        if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.BOOL, TokenType.STR) and self.peek(1).type == TokenType.OPEN_PAREN:
+            # A cast expression used as a bare statement (`int8(x)`,
+            # discarding its own result -- unusual, but not something
+            # to special-case rejecting just because it's unusual),
+            # not the start of a VarDecl -- looks IDENTICAL to the
+            # type-starting branch just below up to this exact point
+            # (both start with one of these five scalar keywords), but
+            # a scalar type keyword is never itself immediately
+            # followed by '(' in any valid VarDecl (that position
+            # always holds the variable's own NAME, an IDENTIFIER
+            # token, never an open paren) -- so this one token of
+            # lookahead unambiguously tells the two apart before ever
+            # committing to parse_type() below. See Cast's own
+            # docstring for why a struct name or a type alias name
+            # never has this same ambiguity to resolve at all: neither
+            # is ever one of these five keyword token types, so
+            # `MyStruct(...)`/`MyAlias(...)` was already, correctly,
+            # routed through parse_call's own IDENTIFIER branch, with
+            # nothing here needing to change for either.
+            return self.parse_expr_stmt_or_assign()
         if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET):
             # A type-starting token could mean EITHER a VarDecl
             # (`[3]int arr = ...`) or a bare, fully-typed array- or
@@ -1917,6 +1981,8 @@ class Parser:
         if self.check(TokenType.STRING):
             tok = self.advance()
             return StringLiteral(value=_unescape_string_literal(tok.val))
+        if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.BOOL, TokenType.STR) and self.peek(1).type == TokenType.OPEN_PAREN:
+            return self.parse_cast()
         if self._looks_like_typed_literal():
             parsed_type = self.parse_type()
             return self._parse_bracketed_literal(parsed_type)
@@ -2109,6 +2175,20 @@ class Parser:
                     break
         self.expect(TokenType.CLOSE_PAREN, "Expected ')' to close a call's argument list")
         return Call(name=name_tok.val, args=args, kwargs=kwargs)
+
+    def parse_cast(self) -> Cast:
+        """`TYPE(expr)` -- see Cast's own docstring for the full
+        design. The caller (parse_primary) has already confirmed the
+        current token is one of the five scalar type keywords AND the
+        next one is '(', so this just needs to consume both, parse the
+        single argument expression in between, and close it -- no
+        shape ambiguity left to resolve here at all, unlike parse_
+        call's own positional-vs-named dispatch."""
+        type_tok = self.advance()
+        self.expect(TokenType.OPEN_PAREN, "Expected '(' to start a cast's argument")
+        expr = self.parse_expression()
+        self.expect(TokenType.CLOSE_PAREN, "Expected ')' to close a cast's argument")
+        return Cast(target_type=type_tok.val, expr=expr)
 
 
 # ---------------------------------------------------------------------------

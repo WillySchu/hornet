@@ -584,6 +584,18 @@ _TYPE_NAMES = {
     'int': Type.INT,
     'int8': Type.INT8,
     'uint8': Type.UINT8,
+    # 'byte' is a built-in ALIAS for uint8 -- the exact same Type
+    # object, not a third TypeKind -- so a byte-typed value is
+    # completely interchangeable with a uint8-typed one everywhere,
+    # all the way down to codegen: type_byte_width, the scalar read/
+    # write helpers, array equality/zero-init, and print all dispatch
+    # on Type.UINT8 directly and never learn 'byte' exists as a
+    # concept at all. Like a user-written type alias, this means
+    # 'byte' leaves no trace of itself in an error message or print()
+    # output -- both will always say "uint8", even for a value
+    # declared with `byte` -- a deliberate consequence of aliasing to
+    # the identical Type instance, not an oversight.
+    'byte': Type.UINT8,
     'bool': Type.BOOL,
     'str': Type.STR,
 }

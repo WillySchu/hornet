@@ -133,6 +133,9 @@ class Lexer():
             'int': TokenType.INT,
             'int8': TokenType.INT8,
             'uint8': TokenType.UINT8,
+            # 'byte' is deliberately mapped to the SAME TokenType as
+            # 'uint8', not a new TokenType.BYTE.
+            'byte': TokenType.UINT8,
             'str': TokenType.STR,
             'return': TokenType.RETURN,
             'and': TokenType.AND,
