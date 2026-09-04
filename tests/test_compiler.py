@@ -4169,7 +4169,7 @@ class TestMethods:
     def test_method_and_free_function_sharing_a_name(self):
         """Methods live in their own registry, keyed by (struct,
         method) and resolved by receiver type, not by a bare name
-        lookup -- so a method and a free function can share a name
+        lookup -- so[O a method and a free function can share a name
         with zero conflict, unlike struct and function names, which
         DO share one namespace (see analyze()'s own collision check)."""
         assert_program_exit_code(
@@ -7314,21 +7314,316 @@ class TestInt64Storage:
             1,
         )
 
-    def test_print_int64_not_yet_supported(self):
-        """Explicitly documents the current, deliberate scope boundary
-        for this step: print's own type-descriptor machinery doesn't
-        recognize int64 yet (that's a later step's job, needing its
-        own parallel 64-bit decimal-conversion routine, since the
-        existing gen_int_to_decimal_into is written entirely in
-        32-bit instructions) -- this fails LOUDLY, with a clear
-        CodegenError, rather than silently misprinting or truncating,
-        which is the right failure mode for an intentionally-
-        incomplete feature."""
-        with pytest.raises(CodegenError, match="No type descriptor rule"):
-            source = "def int main():\n    int64 x = 5\n    print(x)\n    return 0\n"
-            ast = _parse(source)
-            analyze(ast)
-            generate_asm(ast, platform=ASM_PLATFORM)
+    def test_print_int64_now_supported(self):
+        """Superseded by the print step (see TestInt64Print below):
+        this used to document print's own deliberate scope boundary
+        for step 2 (a clear CodegenError, since the type-descriptor
+        machinery didn't recognize int64 yet, and gen_int_to_decimal_
+        into is written entirely in 32-bit instructions) -- now that a
+        parallel 64-bit conversion routine exists, this documents the
+        boundary having moved instead of just deleting the historical
+        marker outright."""
+        assert_program_stdout(
+            "def int main():\n    int64 x = 5\n    print(x)\n    return 0\n",
+            "5\n",
+        )
+
+
+# ---------------------------------------------------------------------------
+# int64, step 3 of 3 (print), completing the feature. Needed real, new work
+# unlike int8/uint8's own print step: gen_int_to_decimal_into is written
+# entirely in 32-bit instructions throughout (not just at the read), so it
+# can't be reused for int64 the way it was for int8/uint8 -- this needed a
+# genuinely separate gen_int64_to_decimal_into, a new DivQ instruction (the
+# int64 counterpart to Div, handling INT64_MIN's own magnitude the identical
+# way Div already handles INT_MIN's), and its own, separately-sized 32-byte
+# scratch buffer (int64's own max magnitude needs up to 20 characters plus a
+# sign, well past the 16-byte buffer int/int8/uint8 already share).
+#
+# This step surfaced SEVEN separate instances of the exact same bug, spread
+# across gen_function's own parameter-binding, gen_print_call_into's own
+# scratch-slot write, gen_array_literal_into, gen_struct_literal_into, gen_
+# index_assign, gen_field_assign, and append's own _gen_write_value_at_
+# address_into: a hardcoded 32-bit `Mov` shuttling a computed value into a
+# protecting register (`r8d`) before some other operation (a stack pop, a
+# further dispatch) could safely proceed -- correct for int/int8/uint8/bool
+# (never wider than 4 bytes to begin with) but silently discarding int64's
+# own high 32 bits every time. All seven are covered by a direct regression
+# test below, each exercising a LARGE value specifically (never a small one
+# that would pass by coincidence either way -- see TestInt64Storage's own
+# module comment for why that distinction matters).
+#
+# Two further, more specific bugs, both in the same "an outer node's
+# corrected type never propagated to where codegen actually reads it"
+# family: gen_expr_into's own Unary case read type_of(expr.operand) instead
+# of type_of(expr) to pick 32- vs 64-bit dispatch, silently using 32-bit Neg
+# for a widened literal like `int64 x = -5` (invisible for int8/uint8 only
+# because their own unary dispatch never branched on operand type at all
+# before int64 existed); and the literal-widening logic itself never
+# annotated the INNER Constant node when the literal was negative
+# (`-9000000000`), so gen_expr_into's own Constant case still took the
+# 32-bit-immediate path even after the first fix. Both are covered directly
+# below (test_negative_literal_widening_uses_negq,
+# test_large_negative_literal_widening).
+# ---------------------------------------------------------------------------
+
+class TestInt64Print:
+    pytestmark = GCC_SKIP
+
+    def test_print_positive_int64(self):
+        assert_program_stdout(
+            "def int main():\n    int64 x = 5\n    print(x)\n    return 0\n",
+            "5\n",
+        )
+
+    def test_print_negative_int64(self):
+        assert_program_stdout(
+            "def int main():\n    int64 x = -5\n    print(x)\n    return 0\n",
+            "-5\n",
+        )
+
+    def test_print_int64_beyond_32bit_range(self):
+        assert_program_stdout(
+            "def int main():\n    int64 x = 9000000000\n    print(x)\n    return 0\n",
+            "9000000000\n",
+        )
+
+    def test_print_negative_int64_beyond_32bit_range(self):
+        """The direct regression test for the literal-widening bug
+        that affected the INNER Constant node's own annotation (see
+        this class's own module comment): -9000000000 parses as
+        Unary(NEGATE, Constant(9000000000)), and the inner literal's
+        own value exceeds 32-bit range, so gen_expr_into's own
+        Constant case has to correctly take the 64-bit-immediate path
+        for it specifically, not just the outer negation."""
+        assert_program_stdout(
+            "def int main():\n    int64 x = -9000000000\n    print(x)\n    return 0\n",
+            "-9000000000\n",
+        )
+
+    def test_print_int64_max_boundary(self):
+        assert_program_stdout(
+            "def int main():\n    int64 x = 9223372036854775807\n    print(x)\n    return 0\n",
+            "9223372036854775807\n",
+        )
+
+    def test_print_int64_min_boundary(self):
+        """INT64_MIN specifically -- the one value whose negation
+        doesn't change its own bit pattern at all, needing DivQ
+        (unsigned) rather than IDivQ to correctly extract its own
+        magnitude, mirroring Div's identical role for INT_MIN one
+        register-width down."""
+        assert_program_stdout(
+            "def int main():\n    int64 x = -9223372036854775808\n    print(x)\n    return 0\n",
+            "-9223372036854775808\n",
+        )
+
+    def test_print_int64_zero(self):
+        assert_program_stdout(
+            "def int main():\n    int64 x = 0\n    print(x)\n    return 0\n",
+            "0\n",
+        )
+
+    def test_print_int64_non_variable_expression(self):
+        """Exercises gen_print_call_into's own scratch-slot path (not
+        a bare Variable) -- the direct regression test for that
+        specific fix, using a sum that exceeds 32-bit range."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    int64 a = 5000000000\n"
+            "    int64 b = 3000000000\n"
+            "    print(a + b)\n"
+            "    return 0\n",
+            "8000000000\n",
+        )
+
+    def test_print_int64_array_with_negative_and_large_elements(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    [3]int64 arr = [-5000000000, 0, 5000000000]\n"
+            "    print(arr)\n"
+            "    return 0\n",
+            "[3]int64[-5000000000, 0, 5000000000]\n",
+        )
+
+    def test_print_struct_with_int64_field(self):
+        assert_program_stdout(
+            "struct Big:\n"
+            "    int64 v\n"
+            "\n"
+            "def int main():\n"
+            "    Big b = Big(-9000000000)\n"
+            "    print(b)\n"
+            "    return 0\n",
+            "Big(v: -9000000000)\n",
+        )
+
+    def test_print_slice_of_int64(self):
+        """The actual bug that started this investigation: a slice of
+        int64 printed complete garbage for every element (a plain
+        [3]int64 ARRAY already printed correctly at this point,
+        isolating the bug to slice construction specifically -- see
+        test_slice_of_int64_read_without_print below for the even
+        more direct regression, with print removed from the picture
+        entirely)."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    []int64 s = []int64[1, -2, 5000000000]\n"
+            "    print(s)\n"
+            "    return 0\n",
+            "[]int64[1, -2, 5000000000]\n",
+        )
+
+    def test_print_array_of_structs_with_int64_field(self):
+        assert_program_stdout(
+            "struct Big:\n"
+            "    int64 v\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Big arr = [Big(-5000000000), Big(5000000000)]\n"
+            "    print(arr)\n"
+            "    return 0\n",
+            "[2]Big[Big(v: -5000000000), Big(v: 5000000000)]\n",
+        )
+
+
+class TestInt64RegressionsFoundDuringPrintStep:
+    """Bugs found while chasing test_print_slice_of_int64 down, all in
+    codegen.py (not print itself, in most cases) -- see TestInt64Print's
+    own module comment for the shared root cause. Kept as their own class
+    since most of these don't involve print at all, despite being found
+    because of it."""
+    pytestmark = GCC_SKIP
+
+    def test_slice_of_int64_read_without_print(self):
+        """The actual root cause, isolated: reading a slice-of-int64
+        element back via ordinary indexing (comparison, no print
+        anywhere) already failed before print was ever involved --
+        this is what proved the bug was in slice construction, not
+        stringification. See gen_array_literal_into's own protect_dst
+        branch, called via gen_array_literal_heap_alloc_into for a
+        slice literal's backing array."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    []int64 s = []int64[1, -2, 5000000000]\n"
+            "    int64 threshold = 4000000000\n"
+            "    if s[2] > threshold:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_slice_of_int64_negative_element_without_print(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    []int64 s = []int64[1, -2, 5000000000]\n"
+            "    int64 threshold = -1\n"
+            "    if s[1] < threshold:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_append_int64_large_value(self):
+        """Regression for _gen_write_value_at_address_into's own fix
+        -- this method never even routed through _gen_write_scalar_
+        from before, a latent (if not directly observed) bug for
+        int8/uint8 too, not just the int64 case this actually
+        surfaced it for."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    []int64 s = []int64[1, 2]\n"
+            "    s = append(s, 5000000000)\n"
+            "    int64 threshold = 4000000000\n"
+            "    if s[2] > threshold:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_index_assign_int64_large_value(self):
+        """Regression for gen_index_assign's own shuttle-copy fix."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    [3]int64 arr = [0, 0, 0]\n"
+            "    arr[1] = 5000000000\n"
+            "    int64 threshold = 4000000000\n"
+            "    if arr[1] > threshold:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_field_assign_int64_large_value(self):
+        """Regression for gen_field_assign's own shuttle-copy fix."""
+        assert_program_exit_code(
+            "struct S:\n"
+            "    int64 v\n"
+            "\n"
+            "def int main():\n"
+            "    S s = S(0)\n"
+            "    s.v = 5000000000\n"
+            "    int64 threshold = 4000000000\n"
+            "    if s.v > threshold:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_struct_literal_int64_field_large_value(self):
+        """Regression for gen_struct_literal_into's own shuttle-copy
+        fix, exercised via its protect_dst=True path specifically
+        (dst_mem.base is 'rax', not 'rbp') by constructing the struct
+        as part of an array literal element."""
+        assert_program_exit_code(
+            "struct Big:\n"
+            "    int64 v\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Big arr = [Big(1), Big(5000000000)]\n"
+            "    int64 threshold = 4000000000\n"
+            "    if arr[1].v > threshold:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_negative_literal_widening_uses_negq(self):
+        """Regression for gen_expr_into's own Unary-case fix: reading
+        type_of(expr.operand) instead of type_of(expr) silently chose
+        32-bit Neg over NegQ for a widened literal. A small value
+        alone wouldn't catch this (both would produce the same low 32
+        bits), so this checks the WIDENED result directly via
+        comparison against another int64 value, not just that it
+        compiles."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    int64 x = -5\n"
+            "    int64 threshold = -3\n"
+            "    if x < threshold:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_large_negative_literal_widening(self):
+        """Regression for the inner-Constant-annotation fix -- see
+        this class's own module comment. -9000000000 needs the OUTER
+        Unary's own corrected int64 dispatch (NegQ, from the fix just
+        above) AND the INNER Constant's own corrected annotation (so
+        gen_expr_into's Constant case emits a 64-bit MovQ-immediate
+        for 9000000000, which doesn't fit in a 32-bit one at all) --
+        both fixes are needed together for this specific case, so it
+        exercises them jointly rather than in isolation."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    int64 x = -9000000000\n"
+            "    int64 threshold = -8000000000\n"
+            "    if x < threshold:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
 
 
 class TestTypedArrayLiterals:

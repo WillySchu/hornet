@@ -1641,6 +1641,7 @@ from codegen.assembly_ast import (
     CmpQ,
     Cqto,
     Div,
+    DivQ,
     IDiv,
     IDivQ,
     Imm,
@@ -1776,6 +1777,7 @@ _TYPEDESC_SLICE = 4
 _TYPEDESC_STRUCT = 5
 _TYPEDESC_INT8 = 6
 _TYPEDESC_UINT8 = 7
+_TYPEDESC_INT64 = 8
 
 
 # Fixed %rbp-relative local-slot layout for the hand-built hornet_
@@ -1820,7 +1822,20 @@ _STRINGIFY_SLICE_BASE_PTR = -128    # a slice's own backing-array pointer, read 
                                      # indirection away, so this needs its own slot
 _STRINGIFY_FIELD_TYPE_DESC = -136
 _STRINGIFY_FIELD_OFFSET = -144
-_STRINGIFY_FRAME_SIZE = 144  # already a multiple of 16; see build_stringify_function's own alignment note
+_STRINGIFY_ITOA_SCRATCH_64 = -176   # 32 bytes: -176 .. -145 -- a SEPARATE,
+                                     # wider buffer for int64's own decimal
+                                     # conversion, not a resize of _STRINGIFY_
+                                     # ITOA_SCRATCH above: int64's own max
+                                     # magnitude (9223372036854775808) is 19
+                                     # digits, needing 20 characters with a
+                                     # leading '-', comfortably more than the
+                                     # 16-byte buffer int/int8/uint8 already
+                                     # share (max 11 characters, for a 32-bit
+                                     # value) -- kept as its own, separate
+                                     # slot rather than widening the shared
+                                     # one in place, so every existing offset
+                                     # below it stays untouched.
+_STRINGIFY_FRAME_SIZE = 176  # already a multiple of 16; see build_stringify_function's own alignment note
 
 
 # ---------------------------------------------------------------------------
@@ -1903,7 +1918,7 @@ class CodeGenerator:
 
     def new_label(self, prefix: str) -> str:
         """Returns a fresh, uniquely-numbered local label like
-        `.Land[O_short_0`. Needed because AND/OR/if codegen all emit real
+        `.Land_short_0`. Needed because AND/OR/if codegen all emit real
         jump targets, and a program can contain any number of them --
         each one needs a name the assembler won't collide with any
         other."""
@@ -3477,9 +3492,22 @@ class CodeGenerator:
             instructions.append(Pop(addr_reg))
             instructions.append(MovQ(src=Register('r8'), dst=Memory(addr_reg.name, 0)))
         else:
-            instructions.append(Mov(src=Register('eax'), dst=Register('r8d')))
+            # A full 64-bit shuttle for int64 -- an ordinary 32-bit Mov
+            # would discard its own high 32 bits before ever reaching
+            # the final write below. The final write itself goes
+            # through _gen_write_scalar_from (not a bare Mov, which
+            # this used to be) so int8/uint8 get their own correct,
+            # narrow, 1-byte write too -- a bare 4-byte Mov here was a
+            # latent, if not directly observed, bug for them as well:
+            # writing 4 bytes at a 1-byte element's own offset can
+            # write past a freshly-grown backing array's own allocated
+            # capacity, not just harmlessly into extra headroom.
+            if element_type == Type.INT64:
+                instructions.append(MovQ(src=Register('rax'), dst=Register('r8')))
+            else:
+                instructions.append(Mov(src=Register('eax'), dst=Register('r8d')))
             instructions.append(Pop(addr_reg))
-            instructions.append(Mov(src=Register('r8d'), dst=Memory(addr_reg.name, 0)))
+            instructions.extend(self._gen_write_scalar_from(Register('r8d'), element_type, Memory(addr_reg.name, 0)))
         return instructions
 
     def _gen_grow_and_append_one_into(
@@ -4121,6 +4149,100 @@ class CodeGenerator:
         instructions.append(MovQ(src=write_pos, dst=Register('r8')))
         return instructions
 
+    def gen_int64_to_decimal_into(self, value: Operand, scratch_offset: int, scratch_size: int) -> List[Instruction]:
+        """The int64 counterpart to gen_int_to_decimal_into just above
+        -- see its own docstring for the full algorithm this mirrors
+        exactly, one register width up, rather than repeating that
+        explanation here. `value` is expected to already be a 64-bit
+        operand (a Memory location or a Register already holding the
+        full 64-bit value -- e.g. Register('rax'), not Register('eax')
+        -- unlike the 32-bit version's own `value` parameter).
+
+        scratch_size must be at least 21: int64's own max magnitude
+        (9223372036854775808, INT64_MIN's own magnitude) is 19 digits,
+        needing 20 characters plus a leading '-'. The dedicated
+        _STRINGIFY_ITOA_SCRATCH_64 buffer (32 bytes, a SEPARATE slot
+        from the 32-bit version's own 16-byte one -- see its own
+        definition for why) gives comfortable margin, the same
+        "more than strictly needed" choice the 32-bit buffer already
+        makes.
+
+        Every instruction here operates on the 64-bit VIEW of the
+        exact same registers gen_int_to_decimal_into uses (%rax not
+        %eax, %rdx not %edx, %rcx not %ecx; %r10/%r8/%r9d are
+        unchanged, since %r10/%r8 already hold addresses -- always
+        64-bit regardless -- and %r9d, the digit count, never needs to
+        exceed a small two-digit number even for int64's own longest
+        possible string), via DivQ/NegQ/CmpQ/MovQ rather than
+        Div/Neg/Cmp/Mov -- correctly handling INT64_MIN the identical
+        way the 32-bit version handles INT_MIN (see Div's own
+        docstring, and DivQ's own): its negation leaves the bit
+        pattern unchanged, but that pattern, read as unsigned via
+        DivQ, correctly represents its own magnitude, a value that
+        doesn't fit in a signed int64 at all but fits an unsigned
+        64-bit divide perfectly.
+
+        On return: %r8 holds the address of the first character, %r9d
+        holds the character count -- the identical contract gen_int_
+        to_decimal_into's own docstring specifies, ready to hand
+        directly to gen_buffer_append_bytes_into the same way."""
+        instructions = []
+        zero_label = self.new_label("itoa64_zero")
+        positive_label = self.new_label("itoa64_positive")
+        digits_label = self.new_label("itoa64_digits")
+        loop_label = self.new_label("itoa64_loop")
+        skip_sign_label = self.new_label("itoa64_skip_sign")
+        done_label = self.new_label("itoa64_done")
+
+        is_negative = Register('r9d')  # 0 or 1, set below; read again after the digit loop
+        write_pos = Register('r10')
+
+        instructions.append(MovQ(src=value, dst=Register('rax')))
+        instructions.append(CmpQ(src=Imm(0), dst=Register('rax')))
+        instructions.append(Je(zero_label))
+        instructions.append(Jg(positive_label))
+
+        # negative: record it, then negate to get the magnitude --
+        # correct even for INT64_MIN, per this method's own docstring.
+        instructions.append(Mov(src=Imm(1), dst=is_negative))
+        instructions.append(NegQ(Register('rax')))
+        instructions.append(Jmp(digits_label))
+
+        instructions.append(Label(positive_label))
+        instructions.append(Mov(src=Imm(0), dst=is_negative))
+
+        instructions.append(Label(digits_label))
+        # %rax now holds a non-negative magnitude either way. write_pos
+        # starts one past the buffer's own last byte, since the loop
+        # always decrements BEFORE writing.
+        instructions.append(LeaQFrame(offset=scratch_offset + scratch_size, dst=write_pos))
+        instructions.append(MovQ(src=Imm(10), dst=Register('rcx')))
+        instructions.append(Label(loop_label))
+        instructions.append(MovQ(src=Imm(0), dst=Register('rdx')))  # zero-extend: this is an UNSIGNED divide
+        instructions.append(DivQ(Register('rcx')))
+        instructions.append(Add(src=Imm(ord('0')), dst=Register('edx')))  # the remainder is always a single digit (< 10), so this stays 32-bit
+        instructions.append(SubQ(src=Imm(1), dst=write_pos))
+        instructions.append(MovB(src=as_byte_register(Register('edx')), dst=Memory(write_pos.name, 0)))
+        instructions.append(CmpQ(src=Imm(0), dst=Register('rax')))
+        instructions.append(Jne(loop_label))
+
+        instructions.append(Cmp(src=Imm(0), dst=is_negative))
+        instructions.append(Je(skip_sign_label))
+        instructions.append(SubQ(src=Imm(1), dst=write_pos))
+        instructions.append(MovB(src=Imm(ord('-')), dst=Memory(write_pos.name, 0)))
+        instructions.append(Label(skip_sign_label))
+        instructions.append(Jmp(done_label))
+
+        instructions.append(Label(zero_label))
+        instructions.append(LeaQFrame(offset=scratch_offset + scratch_size - 1, dst=write_pos))
+        instructions.append(MovB(src=Imm(ord('0')), dst=Memory(write_pos.name, 0)))
+
+        instructions.append(Label(done_label))
+        instructions.append(LeaQFrame(offset=scratch_offset + scratch_size, dst=Register('r9')))
+        instructions.append(SubQ(src=write_pos, dst=Register('r9')))
+        instructions.append(MovQ(src=write_pos, dst=Register('r8')))
+        return instructions
+
     def _get_or_build_type_descriptor(self, t: Type, in_progress: Dict[Type, str]) -> str:
         """Returns the label of t's own runtime type descriptor,
         building and registering it into self.type_descriptors if it
@@ -4180,6 +4302,8 @@ class CodeGenerator:
             self.type_descriptors.append((label, [_TYPEDESC_INT8]))
         elif t == Type.UINT8:
             self.type_descriptors.append((label, [_TYPEDESC_UINT8]))
+        elif t == Type.INT64:
+            self.type_descriptors.append((label, [_TYPEDESC_INT64]))
         elif t.kind == TypeKind.BOOL:
             self.type_descriptors.append((label, [_TYPEDESC_BOOL]))
         elif t.kind == TypeKind.STR:
@@ -4460,9 +4584,10 @@ class CodeGenerator:
         non-negotiable here specifically.
 
         Dispatches on type_desc's own first field (the kind tag) via
-        an ordinary chain of comparisons -- eight kinds as of int8/
-        uint8 (originally six), still not enough to justify a jump
-        table over a plain comparison chain. The kind tag is stored as a full .quad but
+        an ordinary chain of comparisons -- nine kinds as of int64
+        (originally six, then eight with int8/uint8), still not enough
+        to justify a jump table over a plain comparison chain. The kind
+        tag is stored as a full .quad but
         compared via its own 32-bit view (e.g. %r10d): every kind
         value is small and non-negative, so the upper 32 bits are
         always zero, and Cmp is fixed at 32-bit (`cmpl`) -- matching
@@ -4489,6 +4614,7 @@ class CodeGenerator:
         int_label = self.new_label("stringify_int")
         int8_label = self.new_label("stringify_int8")
         uint8_label = self.new_label("stringify_uint8")
+        int64_label = self.new_label("stringify_int64")
         bool_label = self.new_label("stringify_bool")
         str_label = self.new_label("stringify_str")
         array_label = self.new_label("stringify_array")
@@ -4504,6 +4630,8 @@ class CodeGenerator:
         instructions.append(Je(int8_label))
         instructions.append(Cmp(src=Imm(_TYPEDESC_UINT8), dst=Register('r10d')))
         instructions.append(Je(uint8_label))
+        instructions.append(Cmp(src=Imm(_TYPEDESC_INT64), dst=Register('r10d')))
+        instructions.append(Je(int64_label))
         instructions.append(Cmp(src=Imm(_TYPEDESC_BOOL), dst=Register('r10d')))
         instructions.append(Je(bool_label))
         instructions.append(Cmp(src=Imm(_TYPEDESC_STR), dst=Register('r10d')))
@@ -4560,6 +4688,27 @@ class CodeGenerator:
         instructions.append(MovZX(src=Memory('r10', 0), dst=Register('eax')))
         instructions.extend(self.gen_int_to_decimal_into(
             Register('eax'), _STRINGIFY_ITOA_SCRATCH, 16,
+        ))
+        instructions.extend(self._gen_stringify_bulk_append(Register('r8'), Register('r9d')))
+        instructions.append(Jmp(done_label))
+
+        # -- INT64 ----------------------------------------------------------
+        # int64's own value_addr points at a genuinely 8-byte-wide value
+        # (see type_byte_width), needing a full-width MovQ read into
+        # %rax rather than INT's own 4-byte Mov into %eax, which would
+        # silently drop the value's own high 32 bits entirely -- unlike
+        # int8/uint8's own narrowing case, this can't reuse gen_int_to_
+        # decimal_into at all (that routine is written entirely in
+        # 32-bit instructions throughout, not just at the read), so this
+        # calls the dedicated gen_int64_to_decimal_into instead, into
+        # its own, separately-sized _STRINGIFY_ITOA_SCRATCH_64 buffer
+        # (see that constant's own docstring for why it's a separate
+        # slot, not a resize of the shared 16-byte one).
+        instructions.append(Label(int64_label))
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_VALUE_ADDR), dst=Register('r10')))
+        instructions.append(MovQ(src=Memory('r10', 0), dst=Register('rax')))
+        instructions.extend(self.gen_int64_to_decimal_into(
+            Register('rax'), _STRINGIFY_ITOA_SCRATCH_64, 32,
         ))
         instructions.extend(self._gen_stringify_bulk_append(Register('r8'), Register('r9d')))
         instructions.append(Jmp(done_label))
@@ -5400,7 +5549,17 @@ class CodeGenerator:
                     instructions.append(MovQ(src=Register('rax'), dst=elem_mem))
             else:
                 if protect_dst:
-                    instructions.append(Mov(src=Register('eax'), dst=Register('r8d')))
+                    if element_type == Type.INT64:
+                        # A full 64-bit shuttle -- an ordinary 32-bit
+                        # Mov here would discard int64's own high 32
+                        # bits before _gen_write_scalar_from ever gets
+                        # a chance to correctly write them, the exact
+                        # same bug already found and fixed in gen_
+                        # function's own parameter-binding logic and
+                        # gen_print_call_into's own scratch-slot write.
+                        instructions.append(MovQ(src=Register('rax'), dst=Register('r8')))
+                    else:
+                        instructions.append(Mov(src=Register('eax'), dst=Register('r8d')))
                     instructions.append(Pop(Register(dst_mem.base)))
                     instructions.extend(self._gen_write_scalar_from(Register('r8d'), element_type, elem_mem))
                 else:
@@ -5641,7 +5800,10 @@ class CodeGenerator:
                     instructions.append(MovQ(src=Register('rax'), dst=field_mem))
             else:
                 if protect_dst:
-                    instructions.append(Mov(src=Register('eax'), dst=Register('r8d')))
+                    if field_type == Type.INT64:
+                        instructions.append(MovQ(src=Register('rax'), dst=Register('r8')))
+                    else:
+                        instructions.append(Mov(src=Register('eax'), dst=Register('r8d')))
                     instructions.append(Pop(Register(dst_mem.base)))
                     instructions.extend(self._gen_write_scalar_from(Register('r8d'), field_type, field_mem))
                 else:
@@ -5978,7 +6140,10 @@ class CodeGenerator:
             instructions.append(MovQ(src=Register('r8'), dst=Memory('rax', 0)))
         else:
             instructions.extend(self.gen_expr_into(stmt.value, Register('eax')))
-            instructions.append(Mov(src=Register('eax'), dst=Register('r8d')))
+            if element_type == Type.INT64:
+                instructions.append(MovQ(src=Register('rax'), dst=Register('r8')))
+            else:
+                instructions.append(Mov(src=Register('eax'), dst=Register('r8d')))
             instructions.append(Pop(addr_reg))
             instructions.extend(self._gen_write_scalar_from(Register('r8d'), element_type, Memory('rax', 0)))
         return instructions
@@ -6044,7 +6209,10 @@ class CodeGenerator:
             instructions.append(MovQ(src=Register('r8'), dst=Memory('rax', 0)))
         else:
             instructions.extend(self.gen_expr_into(stmt.value, Register('eax')))
-            instructions.append(Mov(src=Register('eax'), dst=Register('r8d')))
+            if field_type == Type.INT64:
+                instructions.append(MovQ(src=Register('rax'), dst=Register('r8')))
+            else:
+                instructions.append(Mov(src=Register('eax'), dst=Register('r8d')))
             instructions.append(Pop(addr_reg))
             instructions.extend(self._gen_write_scalar_from(Register('r8d'), field_type, Memory('rax', 0)))
         return instructions
@@ -6775,8 +6943,26 @@ class CodeGenerator:
             # operator to whatever's now there. This is what makes chained
             # operators (`~-2`) work: the inner Unary's instructions run
             # first, then the outer operator's instructions run on top.
+            #
+            # operand_type reads type_of(expr) -- this OUTER node's own
+            # resolved_type -- not type_of(expr.operand). The two are
+            # ordinarily identical (check_unary's own rule is "stays the
+            # operand's own type"), EXCEPT for a widened literal: `int64
+            # x = -5` sets resolved_type to int64 on the OUTER Unary node
+            # (see _check_value_flowing_into's own case 3), but the INNER
+            # Constant(5) node's own resolved_type is still whatever
+            # check_expr's earlier, ordinary recursive pass already set
+            # it to (Type.INT) -- never updated, since the widening logic
+            # only ever touches the outermost node of a literal
+            # expression. Reading the inner one here was a real, found
+            # bug: it silently fed the wrong operand_type into gen_
+            # unary_op, using 32-bit Neg instead of NegQ for `-5` widened
+            # to int64 -- invisible for int8/uint8 only because THEIR
+            # own unary dispatch never branched on operand_type at all
+            # before int64 existed, so any operand_type value produced
+            # the identical, correct 32-bit instruction either way.
             instructions = self.gen_expr_into(expr.operand, dst)
-            instructions.extend(self.gen_unary_op(expr.op, dst, operand_type=type_of(expr.operand)))
+            instructions.extend(self.gen_unary_op(expr.op, dst, operand_type=type_of(expr)))
             return instructions
         if isinstance(expr, Binary):
             # ADD and the two equality operators are overloaded for str
@@ -7885,14 +8071,21 @@ class CodeGenerator:
         elif isinstance(arg, Variable):
             instructions.append(LeaQFrame(offset=self._local_offset(arg.name), dst=value_addr_reg))
         else:
-            # int/bool/str, not a bare Variable -- materialize into the
-            # shared scalar scratch slot (always used at its own full
-            # 8-byte width, regardless of the value's own actual width,
-            # so the SAME slot serves int/bool -- 4 bytes -- and str --
-            # 8, a pointer -- uniformly), then take that slot's address.
+            # int/int64/bool/str, not a bare Variable -- materialize
+            # into the shared scalar scratch slot (always used at its
+            # own full 8-byte width, regardless of the value's own
+            # actual width, so the SAME slot serves int/bool -- 4
+            # bytes -- and str/int64 -- 8 -- uniformly), then take that
+            # slot's address. int64 needs the SAME full 8-byte MovQ str
+            # already gets here -- an ordinary 4-byte Mov would discard
+            # its own high 32 bits entirely, leaving whatever stale
+            # value previously occupied this shared slot's own upper
+            # half, not merely a narrower-than-ideal but still-correct
+            # write the way it would be for int/bool (which are never
+            # wider than 4 bytes to begin with).
             scratch_offset = self._print_scalar_temp_offset
             instructions.extend(self.gen_expr_into(arg, Register('eax')))
-            if arg_type == Type.STR:
+            if arg_type == Type.STR or arg_type == Type.INT64:
                 instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', scratch_offset)))
             else:
                 instructions.append(Mov(src=Register('eax'), dst=Memory('rbp', scratch_offset)))

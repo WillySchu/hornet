@@ -1556,13 +1556,42 @@ class SemanticAnalyzer:
                         f"{literal_value} is out of range for "
                         f"{target_type} ({lo} to {hi})"
                     )
-                expr.resolved_type = target_type
+                self._annotate_literal_resolved_type(expr, target_type)
                 return target_type
         if value_type == Type.INT and target_type == Type.INT64:
             if self._as_folded_int_literal(expr) is not None:
-                expr.resolved_type = target_type
+                self._annotate_literal_resolved_type(expr, target_type)
                 return target_type
         return value_type
+
+    def _annotate_literal_resolved_type(self, expr: Node, target_type: Type) -> None:
+        """Sets expr.resolved_type = target_type -- and, if expr is a
+        Unary NEGATE wrapping a Constant (the `-100` shape; see _as_
+        folded_int_literal's own docstring for why that's the other
+        shape a literal can take besides a bare Constant), ALSO sets
+        the INNER Constant's own resolved_type to target_type.
+
+        This second part is necessary, not defensive: check_expr's own
+        earlier, ordinary recursive pass through expr already set the
+        inner Constant's own resolved_type to plain Type.INT (via
+        check_constant) before this method ever runs, and codegen.py's
+        own gen_expr_into reads a Constant node's OWN resolved_type
+        directly to decide how to emit it -- Type.INT64 needs a full,
+        64-bit MovQ-with-immediate (since the literal's own value can
+        exceed ordinary 32-bit range, e.g. `int64 x = -9000000000`),
+        while Type.INT8/UINT8/INT all stay an ordinary 32-bit Mov
+        (their own value always fits regardless of the DECLARED
+        target, so no width decision depends on it there). Leaving the
+        inner Constant's own annotation stale at plain Type.INT was a
+        real, found bug for the int64 case specifically: gen_expr_into
+        would still take the 32-bit path for the inner literal itself,
+        silently truncating a large value's own immediate before the
+        outer Unary's -- correctly dispatched via THIS method's own
+        target_type annotation on the OUTER node -- 64-bit negation
+        ever got a chance to run on the full, correct value."""
+        expr.resolved_type = target_type
+        if isinstance(expr, Unary) and expr.op == UnaryOp.NEGATE and isinstance(expr.operand, Constant):
+            expr.operand.resolved_type = target_type
 
     def _check_expr_allowing_struct_literal(self, expr: Node) -> Type:
         """check_expr, except a struct literal (isinstance(expr, Call)

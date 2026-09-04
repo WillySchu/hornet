@@ -383,6 +383,26 @@ class Div(Instruction):
 
 
 @dataclass
+class DivQ(Instruction):
+    """Divides the 128-bit %rdx:%rax pair by `operand` (UNSIGNED) --
+    the DivQ counterpart to Div (`divl`, 32-bit), needed for int64's
+    own decimal-conversion digit-extraction loop, for the IDENTICAL
+    INT64_MIN edge-case reason Div's own docstring explains one
+    register-width down: negating INT64_MIN leaves its bit pattern
+    unchanged, but that same pattern, read as unsigned via DivQ rather
+    than signed via IDivQ, correctly represents its own magnitude
+    (9223372036854775808), a value that doesn't fit in a signed int64
+    at all but fits an unsigned 64-bit divide perfectly. %rdx must be
+    explicitly zeroed first, never sign-extended via Cqto, for the
+    same reason Div's own docstring gives."""
+    operand: Operand
+    mnemonic = "divq"
+
+    def operands(self) -> list[str]:
+        return [self.operand.emit()]
+
+
+@dataclass
 class And(Instruction):
     """dst &= src (bitwise AND)."""
     src: Operand
