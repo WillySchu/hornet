@@ -1666,6 +1666,7 @@ from codegen.assembly_ast import (
     SubQ,
 )
 from codegen.calling_convention import CALLEE_SAVED_SCRATCH_REGISTERS, CallingConventionMixin
+from codegen.dispatch import DispatchMixin
 from codegen.emitter import Emitter
 from codegen.errors import CodegenError
 from codegen.escape_analysis import analyze_array_escapes, is_heap_allocated
@@ -1708,7 +1709,13 @@ from semantic import analyze, type_from_name, Type, TypeKind, StructInfo
 # ---------------------------------------------------------------------------
 
 class CodeGenerator(
-        ArraysSlicesMixin, CallingConventionMixin, ScalarsMixin, StatementsMixin, StringsMixin, StructsMixin):
+        ArraysSlicesMixin,
+        CallingConventionMixin,
+        DispatchMixin,
+        ScalarsMixin,
+        StatementsMixin,
+        StringsMixin,
+        StructsMixin):
     """Walks the source AST (Program/Function/Return/Constant/...) and
     produces an equivalent AsmProgram."""
 
@@ -2504,92 +2511,6 @@ class CodeGenerator(
     # gen_function's existing parameter loop, both of which raise a
     # clear CodegenError rather than silently mishandling one.
 
-    def gen_none_into(self, dst_mem: Memory, target_type: Type) -> List[Instruction]:
-        """Writes `none`'s own zero-value representation into dst_mem,
-        for whichever nilable type target_type actually is. Only
-        slices are nilable so far (see NoneLiteral's own docstring in
-        parser.py) -- a {ptr: 0, len: 0, cap: 0} descriptor, the same
-        shape Go's own nil slice has: a valid, safely-indexable-into-
-        nothing slice with no backing array, not a special, separately-
-        tracked null flag. Every existing slice operation (indexing,
-        printing, re-slicing) already handles a zero-length slice
-        correctly -- see TestSliceBoundsChecking's own positive
-        control for `arr[5:5]` -- so this is the ONLY new codegen a
-        none-valued slice needs on the producing side; comparing one
-        against `none` again (see gen_slice_none_comparison_into) is
-        the only other.
-
-        Called directly from gen_var_decl/gen_assign's own NoneLiteral
-        short-circuit, rather than being folded into
-        gen_slice_value_into's own dispatch -- unlike every OTHER kind
-        of slice-producing expression there (a Slice expression, a
-        Variable holding one), a NoneLiteral's own resolved type
-        (Type.NONE) never equals the slice type it's being stored
-        into, so the caller has to already know and pass the TARGET
-        type; gen_slice_value_into's whole existing dispatch, by
-        contrast, only ever needs the expression itself, since every
-        other case's own type already matches what needs to be stored.
-
-        Defensively re-checks target_type.kind here even though
-        semantic.py's own _types_compatible already guarantees `none`
-        was only ever allowed through for a slice target -- the same
-        "codegen doesn't blindly trust its input" posture
-        gen_array_copy's own array-of-slices handling already takes.
-        """
-        if target_type.kind != TypeKind.SLICE:
-            raise CodegenError(
-                f"'none' is only supported as a slice's zero value "
-                f"right now, not {target_type}"
-            )
-        return [
-            MovQ(src=Imm(0), dst=Memory(dst_mem.base, dst_mem.offset)),
-            MovQ(src=Imm(0), dst=Memory(dst_mem.base, dst_mem.offset + 8)),
-            MovQ(src=Imm(0), dst=Memory(dst_mem.base, dst_mem.offset + 16)),
-        ]
-
-    def _gen_address_of_memory_into(self, mem: Memory, dst: Register) -> List[Instruction]:
-        """Computes the ADDRESS a Memory operand refers to, into `dst`
-        (a 64-bit register). Memory('rbp', offset) needs a real leaq --
-        the address is offset-from-frame-pointer, not stored anywhere
-        as a value in its own right; Memory(some_reg, offset) already
-        HAS its address sitting directly in some_reg, with `offset`
-        (if non-zero) added on top via a single AddQ -- see gen_array_
-        copy's own docstring for how the some_reg shape arises
-        elsewhere in this file. Used specifically for passing a Memory
-        destination on as a POINTER argument -- the hidden output
-        pointer for an array-returning call (gen_array_call_into) or a
-        struct-returning one (gen_struct_call_into, which is really
-        gen_array_call_into under a different name -- see its own
-        docstring) -- everywhere else, a Memory operand is read from
-        or written to directly rather than having its own address
-        taken.
-
-        The offset(some_reg) case used to assume offset was always 0
-        whenever base wasn't 'rbp' -- true at the time, since nothing
-        computed a destination this way for anything but the WHOLE of
-        a Memory destination, offset already folded in or genuinely
-        zero. That stopped being true once a struct literal's own
-        array-typed FIELD could be populated directly by an array-
-        returning call (`Big(1, makeArr())`, where `data` -- an array
-        field -- sits at some non-zero offset on a heap-allocated
-        Big): gen_struct_literal_into's own field_mem for that field
-        is Memory('rax', 4), say, and the OLD version of this method
-        silently discarded that +4, handing makeArr() the STRUCT's own
-        base address as its hidden return pointer instead of the
-        field's -- a real, silent miscompile (verified directly: it
-        corrupted the PRECEDING field along with the start of the
-        array itself), not a hypothetical one. Adding the AddQ here is
-        safe for every EXISTING caller too: each one already only ever
-        passed offset=0 for a non-'rbp' base, so this is a pure
-        generalization, not a behavior change for anything already
-        working."""
-        if mem.base == 'rbp':
-            return [LeaQFrame(offset=mem.offset, dst=dst)]
-        instructions = [MovQ(src=Register(mem.base), dst=dst)]
-        if mem.offset:
-            instructions.append(AddQ(src=Imm(mem.offset), dst=dst))
-        return instructions
-
     def gen_array_call_into(self, dst_mem: Memory, expr: Call, array_type: Type) -> List[Instruction]:
         """Calls a function that returns an array, writing its result
         directly into dst_mem via the hidden-pointer convention: the
@@ -2634,40 +2555,6 @@ class CodeGenerator(
         instructions.append(CallInstr(expr.name))
         return instructions
 
-    def _gen_protecting_dst_across(self, dst_mem: Memory, inner: List[Instruction]) -> List[Instruction]:
-        """Wraps `inner` with a push/pop protecting dst_mem's own base
-        register across it, but only when that base isn't 'rbp' -- the
-        frame pointer, never clobbered by anything in this file, so
-        wrapping would just be wasted instructions. Used wherever code
-        that might use dst_mem.base as scratch internally (bounds-
-        checking, evaluating an arbitrary expression, computing another
-        address entirely) has to run before dst_mem is finally read
-        from or written to -- e.g. gen_array_value_into's Index case
-        below, where gen_array_address_into's own bounds-checking and
-        index arithmetic freely uses %rax/%rcx, which would otherwise
-        silently destroy a hidden return pointer received in %rax
-        before it was ever used. Found necessary by a real bug during
-        development (a segfault on `return matrix[i]` from a function
-        returning an array), not assumed defensively."""
-        if dst_mem.base == 'rbp':
-            return inner
-        return [Push(Register(dst_mem.base))] + inner + [Pop(Register(dst_mem.base))]
-
-    def _gen_malloc_array(self, array_type: Type) -> List[Instruction]:
-        """Calls malloc for array_type's own total footprint
-        (type_byte_width), a compile-time-known constant, leaving the
-        returned pointer in %rax (the ordinary SysV return-value
-        register, not chosen specially here). Used wherever a heap-
-        allocated array (see is_heap_allocated) needs its own, fresh
-        backing allocation: a VarDecl declaring one (gen_var_decl) or a
-        parameter receiving one (gen_function's own parameter loop,
-        which needs its own independent copy of the caller's data to
-        preserve value semantics across the call -- exactly like a
-        stack-allocated parameter already gets via gen_array_copy, just
-        backed by malloc'd memory instead of an inline slot)."""
-        size = type_byte_width(array_type, self.struct_registry)
-        return [Mov(src=Imm(size), dst=Register('edi')), CallInstr('malloc')]
-
     def _gen_epilogue(self) -> List[Instruction]:
         """The ordinary function epilogue: restore every callee-saved
         scratch register (in reverse of the prologue's own push
@@ -2686,53 +2573,6 @@ class CodeGenerator(
             instructions.append(Pop(Register(reg)))
         instructions.append(Leave())
         instructions.append(Ret())
-        return instructions
-
-    def gen_len_call_into(self, expr: Call, dst: Operand) -> List[Instruction]:
-        """`len(x)`: reuses gen_indexable_base_into directly -- the
-        exact same "address plus length, however each is represented"
-        abstraction indexing and slicing already share -- rather than
-        a narrower restriction of its own like print's Variable-or-
-        Index one (see gen_print_call_into's own docstring): whatever
-        gen_indexable_base_into currently accepts as a base (a
-        Variable, an Index, a Slice expression, a slice-returning
-        Call, or an ArrayLiteral) is automatically valid here too,
-        with nothing to keep in sync if that set ever grows.
-
-        x's own address is computed and then simply discarded -- len
-        only ever needs the LENGTH half of gen_indexable_base_into's
-        own return value -- but computing it is not wasted: x is still
-        fully evaluated regardless (any bounds-check or side effect
-        buried in it genuinely runs), matching how any other function
-        argument's evaluation works, whether or not the computed
-        address ends up used for anything afterward. This does mean
-        `len(arr[i])` still aborts if i is out of range, and
-        `len([]int[1, 2, 3])` still performs a real, if wasted, heap
-        allocation -- both deliberate, not something a narrower
-        special case tries to avoid (see the module docstring's LEN
-        BUILTIN section).
-
-        For an ARRAY base, length_operand comes back as an Imm (a
-        compile-time constant -- the array's own declared size, never
-        actually read out of x at runtime at all); for a SLICE base,
-        as the 64-bit len_dst register holding a runtime value read
-        out of the slice's own descriptor -- moved through its own
-        32-bit alias here, matching how every other reader of a
-        slice's length field already narrows it the same way, since
-        Hornet's int is always 32 bits even though the descriptor's
-        own len field is stored in a full 8-byte slot."""
-        if dst != Register('eax'):
-            raise CodegenError(f"Call codegen requires dst == %eax, got: {dst!r}")
-        arg = expr.args[0]
-        len_reg = Register('r12')
-        cap_reg = Register('r13')
-        instructions, length_operand, _ = self.gen_indexable_base_into(
-            arg, Register('rbx'), len_reg, cap_reg
-        )
-        if isinstance(length_operand, Register):
-            instructions.append(Mov(src=Register('r12d'), dst=dst))
-        else:
-            instructions.append(Mov(src=length_operand, dst=dst))
         return instructions
 
 

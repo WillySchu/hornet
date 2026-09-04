@@ -1,9 +1,24 @@
 """Structs. TODO"""
 
-from codegen.assembly_ast import Register, Instruction, MovQ, Memory, LeaQFrame, AddQ, Imm, Push, Pop, Mov, CallInstr, \
-    Cmp, Jne, Jmp, Label
+from codegen.assembly_ast import (
+    Register,
+    Instruction,
+    MovQ,
+    Memory,
+    LeaQFrame,
+    AddQ,
+    Imm,
+    Push,
+    Pop,
+    Mov,
+    CallInstr,
+    Cmp,
+    Jne,
+    Jmp,
+    Label,
+)
 from codegen.errors import CodegenError
-from codegen.utils import type_byte_width, type_of, leaf_type
+from codegen.utils import type_byte_width, type_of, leaf_type, gen_protecting_dst_across
 from parser import Node, Variable, Field, Index, Call, NoneLiteral, Binary, BinaryOp
 from semantic import TypeKind, Type
 
@@ -310,18 +325,18 @@ class StructsMixin:
             src_offset = self._local_offset(expr.name)
             src_type = self._local_type(expr.name)
             if self._is_heap_allocated(self._local_decl_id(expr.name), src_type):
-                load_ptr = self._gen_protecting_dst_across(
+                load_ptr = gen_protecting_dst_across(
                     dst_mem, [MovQ(src=Memory('rbp', src_offset), dst=Register('rbx'))]
                 )
                 return load_ptr + self.gen_array_copy(dst_mem, Memory('rbx', 0), struct_type)
             return self.gen_array_copy(dst_mem, Memory('rbp', src_offset), struct_type)
         if isinstance(expr, Field):
-            addr_instructions = self._gen_protecting_dst_across(
+            addr_instructions = gen_protecting_dst_across(
                 dst_mem, self.gen_field_address_into(expr, Register('rbx'))
             )
             return addr_instructions + self.gen_array_copy(dst_mem, Memory('rbx', 0), struct_type)
         if isinstance(expr, Index):
-            addr_instructions = self._gen_protecting_dst_across(
+            addr_instructions = gen_protecting_dst_across(
                 dst_mem, self.gen_index_address_into(expr, Register('rbx'))
             )
             return addr_instructions + self.gen_array_copy(dst_mem, Memory('rbx', 0), struct_type)

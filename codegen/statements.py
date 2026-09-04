@@ -1,10 +1,11 @@
 """TODO"""
 
-from codegen.assembly_ast import Instruction, MovQ, Register, Memory, Imm, Push, Pop, Mov, Cmp, Je, Jmp, Label, Operand
+from codegen.assembly_ast import Instruction, MovQ, Register, Memory, Imm, Push, Pop, Mov, Cmp, Je, Jmp, Label, \
+    LeaQ, MovB
 from codegen.errors import CodegenError
 from codegen.utils import type_of
 from parser import Node, VarDecl, Assign, IndexAssign, FieldAssign, Return, If, While, Break, Continue, ExprStmt, \
-    NoneLiteral, ArrayLiteral, Index, Slice, Binary
+    NoneLiteral, ArrayLiteral, Index, Slice
 from semantic import TypeKind, Type
 
 
@@ -532,45 +533,82 @@ class StatementsMixin:
             return self.gen_slice_into(stmt.expr, Memory('rbp', self._unnamed_slice_temp_offset))
         return self.gen_expr_into(stmt.expr, Register('eax'))
 
-    def gen_short_circuit(
-            self, expr: Binary,
-            dst: Operand, *,
-            short_circuit_jump: type,
-            short_circuit_value: int,
-            fallthrough_value: int,
-            label_prefix: str) -> list[Instruction]:
-        """Shared codegen for AND and OR -- they're mirror images of each
-        other: each evaluates its left side, tests it against 0, and
-        jumps straight past the right side entirely (never emitting the
-        instructions that would compute it as *executed* code) if that
-        test already decides the answer. Only if it doesn't -- left was
-        truthy for AND, falsy for OR -- does the right side actually get
-        evaluated, and *that* result decides the answer instead.
+    def _gen_zero_value_into(self, t: Type, dst_mem: Memory) -> list[Instruction]:
+        """Writes t's own implicit zero value into dst_mem -- what a
+        `T x` VarDecl with no initializer now gets, instead of the
+        genuinely uninitialized memory it used to leave behind (see
+        gen_var_decl's own note on the earlier, now-superseded
+        behavior). Dispatches by kind:
+          - int/bool/int8/uint8: an ordinary 0 -- a plain 4-byte write
+            for int/bool, a 1-byte one (MovB) for int8/uint8, matching
+            each type's own genuine storage width (see type_byte_
+            width).
+          - str: the address of a single shared, static empty-string
+            constant (_get_empty_str_label) -- NEVER a null pointer;
+            see that method's own docstring for why a null zero value
+            would be an active hazard, not just an unusual choice.
+          - slice: none's own {ptr: 0, len: 0, cap: 0} descriptor,
+            reusing gen_none_into exactly as-is -- this needed no new
+            code at all, since a zero-value slice and a none-valued
+            one are, by design, the identical representation.
+          - array: delegated to _gen_zero_array_into, which further
+            dispatches on the array's own LEAF type -- see its own
+            docstring for why int/bool/slice, str, and struct leaves
+            each need a genuinely different strategy.
+          - struct: every one of the struct's own fields, flattened
+            via _flatten_struct_fields exactly the way struct equality
+            already flattens them for comparison -- recursing back
+            into THIS method for each field's own (never struct-kind,
+            since flattening already unwrapped any nested struct away)
+            type.
 
-          AND: jump early (to `short_circuit_value=0`) when left == 0.
-          OR:  jump early (to `short_circuit_value=1`) when left != 0.
+        dst_mem.base is protected via push/pop across EVERY field's own
+        zero-fill, when it isn't 'rbp' (rbp itself is never at risk --
+        nothing in this file ever treats it as scratch, so pushing and
+        popping it would be actively wrong, not merely unnecessary; see
+        gen_struct_literal_into's own identical `!= 'rbp'` guard for
+        the same reasoning applied to a different write). Needed
+        because the array case below computes a fresh address by
+        calling _gen_address_of_memory_into with dst_mem.base itself as
+        the destination register in some call shapes -- which, unlike
+        every scalar/slice write here, can OVERWRITE dst_mem.base's own
+        physical register in place. Without protecting it, a struct
+        with an array-typed field followed by ANY other field would
+        silently compute that later field's own address from garbage
+        (whatever the array zero-loop happened to leave behind) instead
+        of the struct's real base -- the exact register-collision
+        failure mode _gen_struct_fields_equality_at_addresses's own
+        docstring already documents at length for the identical reason,
+        one construct over. Applied unconditionally, even for the
+        scalar/slice cases that don't strictly need it, matching that
+        same method's own "protect everything, don't try to be clever
+        about which fields actually need it" posture."""
+        if t.kind == TypeKind.STRUCT:
+            protect_dst = dst_mem.base != 'rbp'
+            instructions = []
+            for field_type, offset in self._flatten_struct_fields(t.struct_name):
+                field_mem = Memory(dst_mem.base, dst_mem.offset + offset)
+                if protect_dst:
+                    instructions.append(Push(Register(dst_mem.base)))
+                instructions.extend(self._gen_zero_value_into(field_type, field_mem))
+                if protect_dst:
+                    instructions.append(Pop(Register(dst_mem.base)))
+            return instructions
+        if t.kind == TypeKind.ARRAY:
+            return self._gen_zero_array_into(t, dst_mem)
+        if t.kind == TypeKind.SLICE:
+            return self.gen_none_into(dst_mem, t)
+        if t == Type.STR:
+            # Whichever of rax/rcx isn't dst_mem's own base -- a single
+            # scratch register is all this needs, computed and consumed
+            # in the same two instructions, with nothing relying on it
+            # afterward.
+            scratch = Register('rax') if dst_mem.base != 'rax' else Register('rcx')
+            return [
+                LeaQ(label=self._get_empty_str_label(), dst=scratch),
+                MovQ(src=scratch, dst=dst_mem),
+            ]
+        if t == Type.INT8 or t == Type.UINT8:
+            return [MovB(src=Imm(0), dst=dst_mem)]
+        return [Mov(src=Imm(0), dst=dst_mem)]  # int or bool
 
-        This is what makes `0 and (1 / 0)` return 0 instead of crashing:
-        the division is real code sitting in the binary, but control
-        flow jumps clean over it.
-        """
-        if not isinstance(dst, Register):
-            raise CodegenError(f"Binary codegen requires a register destination, got: {dst!r}")
-
-        short_label = self.new_label(f"{label_prefix}_short")
-        end_label = self.new_label(f"{label_prefix}_end")
-
-        instructions = self.gen_expr_into(expr.left, dst)
-        instructions.append(Cmp(src=Imm(0), dst=dst))
-        instructions.append(short_circuit_jump(short_label))
-
-        instructions.extend(self.gen_expr_into(expr.right, dst))
-        instructions.append(Cmp(src=Imm(0), dst=dst))
-        instructions.append(short_circuit_jump(short_label))
-
-        instructions.append(Mov(src=Imm(fallthrough_value), dst=dst))
-        instructions.append(Jmp(end_label))
-        instructions.append(Label(short_label))
-        instructions.append(Mov(src=Imm(short_circuit_value), dst=dst))
-        instructions.append(Label(end_label))
-        return instructions

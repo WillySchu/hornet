@@ -1,6 +1,6 @@
 """Utility functions for codegen."""
 
-from codegen.assembly_ast import Operand, Register
+from codegen.assembly_ast import Operand, Register, Memory, Instruction, Pop, Push
 from codegen.errors import CodegenError
 from parser import Node, BinaryOp
 from semantic import Type, TypeKind, StructInfo
@@ -189,3 +189,23 @@ def type_of(expr: Node) -> Type:
             f"must run before codegen (see compile_to_asm)"
         )
     return expr.resolved_type
+
+
+def gen_protecting_dst_across(dst_mem: Memory, inner: list[Instruction]) -> list[Instruction]:
+    """Wraps `inner` with a push/pop protecting dst_mem's own base
+    register across it, but only when that base isn't 'rbp' -- the
+    frame pointer, never clobbered by anything in this file, so
+    wrapping would just be wasted instructions. Used wherever code
+    that might use dst_mem.base as scratch internally (bounds-
+    checking, evaluating an arbitrary expression, computing another
+    address entirely) has to run before dst_mem is finally read
+    from or written to -- e.g. gen_array_value_into's Index case
+    below, where gen_array_address_into's own bounds-checking and
+    index arithmetic freely uses %rax/%rcx, which would otherwise
+    silently destroy a hidden return pointer received in %rax
+    before it was ever used. Found necessary by a real bug during
+    development (a segfault on `return matrix[i]` from a function
+    returning an array), not assumed defensively."""
+    if dst_mem.base == 'rbp':
+        return inner
+    return [Push(Register(dst_mem.base))] + inner + [Pop(Register(dst_mem.base))]
