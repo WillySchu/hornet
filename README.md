@@ -14,8 +14,15 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
+- StructsMixin
+- StringsMixin
+- CallingConventionMixin
+- StatementsMixin
+- ScalarsMixin
+- ArraysSlicesMixin
+- Consider a FrameMixin
 - `type` type.
-` typeof`
+- ` typeof`
 - Require `type` keyword to declare new type for structs.
 - Consider enabling struct literal syntax for aliases.
 - `fuction` type.
