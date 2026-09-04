@@ -6021,18 +6021,151 @@ class TestInt8Uint8Storage:
             2,
         )
 
-    def test_print_int8_not_yet_supported(self):
-        """Explicitly documents the current, deliberate scope boundary
-        for this step: print's own type-descriptor machinery doesn't
-        recognize int8/uint8 yet (that's step 3's job) -- this fails
-        LOUDLY, with a clear CodegenError, rather than silently
-        misprinting or corrupting anything, which is the right failure
-        mode for an intentionally-incomplete feature."""
-        with pytest.raises(CodegenError, match="No type descriptor rule"):
-            source = "def int main():\n    int8 x = 5\n    print(x)\n    return 0\n"
-            ast = _parse(source)
-            analyze(ast)
-            generate_asm(ast, platform=ASM_PLATFORM)
+    def test_print_int8_now_supported(self):
+        """Superseded by step 3 (see TestInt8Uint8Print below): this
+        used to document print's own deliberate scope boundary for
+        step 2 (a clear CodegenError, since the type-descriptor
+        machinery didn't recognize int8/uint8 yet) -- now that it
+        does, this documents the boundary having moved instead of
+        just deleting the historical marker outright."""
+        assert_program_stdout(
+            "def int main():\n    int8 x = 5\n    print(x)\n    return 0\n",
+            "5\n",
+        )
+
+
+# ---------------------------------------------------------------------------
+# int8/uint8, step 3 of 3: print support, completing the feature. Only two
+# things needed adding, both because value_addr's own bytes are already
+# genuinely narrow (see step 2's own storage work) and every OTHER piece of
+# the print pipeline (gen_print_call_into itself, the buffer-append
+# primitives, the recursive array/slice/struct traversal) is completely
+# type-generic already:
+#   1. _get_or_build_type_descriptor needed two new kind tags (_TYPEDESC_
+#      INT8/_TYPEDESC_UINT8) with no extra fields, mirroring INT/BOOL's own
+#      shape exactly -- there's nothing useful to prefix a bare narrow int
+#      with, the same reason INT/BOOL themselves carry no name field.
+#   2. build_stringify_function needed two new dispatch branches, each
+#      IDENTICAL to the existing INT branch except for the widening
+#      instruction used to read value_addr's own single byte -- MovSX
+#      (sign-extend) for int8, MovZX (zero-extend) for uint8, rather than
+#      an ordinary 4-byte Mov. Once correctly widened into %eax, the exact
+#      same gen_int_to_decimal_into/bulk-append sequence INT already uses
+#      produces the correct decimal string for either -- there is no
+#      separate "narrow int to decimal" algorithm anywhere, because a
+#      correctly widened 32-bit value's own decimal representation doesn't
+#      depend on how many bits it started out occupying in memory.
+#
+# gen_print_call_into ITSELF needed no changes at all -- confirmed, not
+# assumed: its existing "int/bool/str, not a bare Variable" branch already
+# widens correctly (via the ordinary gen_expr_into, fixed back in step 2)
+# and writes the full, widened 32-bit value into a dedicated, 8-byte-wide
+# scratch slot -- writing more bytes than the type descriptor will
+# ultimately ask to be read back is harmless there specifically, since nothing
+# else shares that slot and a narrower read simply ignores the extra bytes,
+# which are still correct low-order bytes of the same widened value either
+# way.
+# ---------------------------------------------------------------------------
+
+class TestInt8Uint8Print:
+    pytestmark = GCC_SKIP
+
+    def test_print_positive_int8(self):
+        assert_program_stdout(
+            "def int main():\n    int8 x = 5\n    print(x)\n    return 0\n",
+            "5\n",
+        )
+
+    def test_print_negative_int8(self):
+        assert_program_stdout(
+            "def int main():\n    int8 x = -5\n    print(x)\n    return 0\n",
+            "-5\n",
+        )
+
+    def test_print_int8_min_boundary(self):
+        assert_program_stdout(
+            "def int main():\n    int8 x = -128\n    print(x)\n    return 0\n",
+            "-128\n",
+        )
+
+    def test_print_int8_max_boundary(self):
+        assert_program_stdout(
+            "def int main():\n    int8 x = 127\n    print(x)\n    return 0\n",
+            "127\n",
+        )
+
+    def test_print_uint8_basic(self):
+        assert_program_stdout(
+            "def int main():\n    uint8 x = 200\n    print(x)\n    return 0\n",
+            "200\n",
+        )
+
+    def test_print_uint8_max_boundary(self):
+        """255, not -1 or anything sign-related -- the actual proof
+        MovZX (not MovSX) is used for uint8, since 255's own low byte
+        (0xFF) sign-extended would print as -1 instead."""
+        assert_program_stdout(
+            "def int main():\n    uint8 x = 255\n    print(x)\n    return 0\n",
+            "255\n",
+        )
+
+    def test_print_uint8_zero(self):
+        assert_program_stdout(
+            "def int main():\n    uint8 x = 0\n    print(x)\n    return 0\n",
+            "0\n",
+        )
+
+    def test_print_int8_non_variable_expression(self):
+        """Exercises gen_print_call_into's own "not a bare Variable"
+        scratch-slot path, not the direct-address-of-a-variable one."""
+        assert_program_stdout(
+            "def int8 main():\n"
+            "    int8 a = 5\n"
+            "    int8 b = 3\n"
+            "    print(a + b)\n"
+            "    return 0\n",
+            "8\n",
+        )
+
+    def test_print_int8_array(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    [3]int8 arr = [1, -2, 3]\n"
+            "    print(arr)\n"
+            "    return 0\n",
+            "[3]int8[1, -2, 3]\n",
+        )
+
+    def test_print_uint8_array(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    [3]uint8 arr = [1, 200, 3]\n"
+            "    print(arr)\n"
+            "    return 0\n",
+            "[3]uint8[1, 200, 3]\n",
+        )
+
+    def test_print_struct_with_int8_and_uint8_fields(self):
+        assert_program_stdout(
+            "struct Point:\n"
+            "    int8 x\n"
+            "    uint8 y\n"
+            "\n"
+            "def int main():\n"
+            "    Point p = Point(-5, 200)\n"
+            "    print(p)\n"
+            "    return 0\n",
+            "Point(x: -5, y: 200)\n",
+        )
+
+    def test_print_slice_of_int8(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    []int8 s = []int8[1, -2, 3]\n"
+            "    print(s)\n"
+            "    return 0\n",
+            "[]int8[1, -2, 3]\n",
+        )
 
 
 class TestTypedArrayLiterals:

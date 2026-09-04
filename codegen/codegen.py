@@ -1762,6 +1762,8 @@ _TYPEDESC_STR = 2
 _TYPEDESC_ARRAY = 3
 _TYPEDESC_SLICE = 4
 _TYPEDESC_STRUCT = 5
+_TYPEDESC_INT8 = 6
+_TYPEDESC_UINT8 = 7
 
 
 # Fixed %rbp-relative local-slot layout for the hand-built hornet_
@@ -4149,10 +4151,11 @@ class CodeGenerator:
         directly -- so a struct field that's itself an array, or an
         array element that's itself a struct, shows its own type too,
         e.g. `(row: [3]int[1, 2, 3])` or `[Point(x: 1, y: 2), Point(x:
-        3, y: 4)]`. INT/BOOL/STR carry no name field at all (there's
-        nothing useful to prefix a bare int or string with), so this
-        is a genuine per-kind layout difference reflected directly in
-        each branch below, not a uniform field every descriptor has.
+        3, y: 4)]`. INT/INT8/UINT8/BOOL/STR carry no name field at all
+        (there's nothing useful to prefix a bare int or string with),
+        so this is a genuine per-kind layout difference reflected
+        directly in each branch below, not a uniform field every
+        descriptor has.
         """
         if t in in_progress:
             return in_progress[t]
@@ -4161,6 +4164,10 @@ class CodeGenerator:
 
         if t.kind == TypeKind.INT:
             self.type_descriptors.append((label, [_TYPEDESC_INT]))
+        elif t == Type.INT8:
+            self.type_descriptors.append((label, [_TYPEDESC_INT8]))
+        elif t == Type.UINT8:
+            self.type_descriptors.append((label, [_TYPEDESC_UINT8]))
         elif t.kind == TypeKind.BOOL:
             self.type_descriptors.append((label, [_TYPEDESC_BOOL]))
         elif t.kind == TypeKind.STR:
@@ -4441,9 +4448,9 @@ class CodeGenerator:
         non-negotiable here specifically.
 
         Dispatches on type_desc's own first field (the kind tag) via
-        an ordinary chain of comparisons -- there are only six kinds,
-        so a jump table would be premature machinery for no real
-        benefit here. The kind tag is stored as a full .quad but
+        an ordinary chain of comparisons -- eight kinds as of int8/
+        uint8 (originally six), still not enough to justify a jump
+        table over a plain comparison chain. The kind tag is stored as a full .quad but
         compared via its own 32-bit view (e.g. %r10d): every kind
         value is small and non-negative, so the upper 32 bits are
         always zero, and Cmp is fixed at 32-bit (`cmpl`) -- matching
@@ -4468,6 +4475,8 @@ class CodeGenerator:
         instructions.append(MovQ(src=Register('rcx'), dst=Memory('rbp', _STRINGIFY_BUF_STATE_ADDR)))
 
         int_label = self.new_label("stringify_int")
+        int8_label = self.new_label("stringify_int8")
+        uint8_label = self.new_label("stringify_uint8")
         bool_label = self.new_label("stringify_bool")
         str_label = self.new_label("stringify_str")
         array_label = self.new_label("stringify_array")
@@ -4479,6 +4488,10 @@ class CodeGenerator:
         instructions.append(MovQ(src=Memory('r10', 0), dst=Register('r10')))
         instructions.append(Cmp(src=Imm(_TYPEDESC_INT), dst=Register('r10d')))
         instructions.append(Je(int_label))
+        instructions.append(Cmp(src=Imm(_TYPEDESC_INT8), dst=Register('r10d')))
+        instructions.append(Je(int8_label))
+        instructions.append(Cmp(src=Imm(_TYPEDESC_UINT8), dst=Register('r10d')))
+        instructions.append(Je(uint8_label))
         instructions.append(Cmp(src=Imm(_TYPEDESC_BOOL), dst=Register('r10d')))
         instructions.append(Je(bool_label))
         instructions.append(Cmp(src=Imm(_TYPEDESC_STR), dst=Register('r10d')))
@@ -4502,6 +4515,40 @@ class CodeGenerator:
         # decimal_into's own contract) -- both survive untouched into
         # _gen_stringify_bulk_append, which never uses %r8/%r9 (see its
         # own docstring for exactly why that's guaranteed, not assumed).
+        instructions.extend(self._gen_stringify_bulk_append(Register('r8'), Register('r9d')))
+        instructions.append(Jmp(done_label))
+
+        # -- INT8/UINT8 -----------------------------------------------------
+        # Identical to INT just above except for ONE instruction: value_
+        # addr points at a genuinely 1-byte-wide value (see type_byte_
+        # width), so reading it needs a WIDENING load -- MovSX (sign-
+        # extend) for int8, MovZX (zero-extend) for uint8 -- rather than
+        # INT's own ordinary 4-byte Mov, which would read three bytes of
+        # adjacent memory that were never part of this value at all, and
+        # for int8 specifically would also silently misinterpret a
+        # negative value as a large positive one. Once correctly widened
+        # into %eax, the exact same gen_int_to_decimal_into/bulk-append
+        # sequence INT already uses produces the correct decimal string
+        # for either -- there is no separate "narrow int to decimal"
+        # algorithm anywhere in this file, because there doesn't need to
+        # be one: a correctly sign- or zero-extended 32-bit value's own
+        # decimal representation is computed identically regardless of
+        # how many bits it started out occupying in memory.
+        instructions.append(Label(int8_label))
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_VALUE_ADDR), dst=Register('r10')))
+        instructions.append(MovSX(src=Memory('r10', 0), dst=Register('eax')))
+        instructions.extend(self.gen_int_to_decimal_into(
+            Register('eax'), _STRINGIFY_ITOA_SCRATCH, 16,
+        ))
+        instructions.extend(self._gen_stringify_bulk_append(Register('r8'), Register('r9d')))
+        instructions.append(Jmp(done_label))
+
+        instructions.append(Label(uint8_label))
+        instructions.append(MovQ(src=Memory('rbp', _STRINGIFY_VALUE_ADDR), dst=Register('r10')))
+        instructions.append(MovZX(src=Memory('r10', 0), dst=Register('eax')))
+        instructions.extend(self.gen_int_to_decimal_into(
+            Register('eax'), _STRINGIFY_ITOA_SCRATCH, 16,
+        ))
         instructions.extend(self._gen_stringify_bulk_append(Register('r8'), Register('r9d')))
         instructions.append(Jmp(done_label))
 

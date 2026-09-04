@@ -21,6 +21,7 @@ Updates:
 - Require `type` keyword to declare new type for structs.
 - Consider enabling struct literal syntax for aliases.
 - `fuction` type.
+- Add `byte` literal.
 - User defined types built off other types.
 - Change slice's zero type to an empty slice rather than `none`.
 - Struct literals as bare statement.
