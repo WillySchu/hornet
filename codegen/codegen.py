@@ -1640,8 +1640,6 @@ from codegen.assembly_ast import (
     Cmp,
     CmpQ,
     Cqto,
-    Div,
-    DivQ,
     IDiv,
     IDivQ,
     Imm,
@@ -1651,7 +1649,6 @@ from codegen.assembly_ast import (
     Ja,
     Jae,
     Je,
-    Jg,
     Jle,
     Jmp,
     Jne,
@@ -1687,13 +1684,14 @@ from codegen.assembly_ast import (
     Xor,
     XorQ,
 )
+from codegen.calling_convention import CALLEE_SAVED_SCRATCH_REGISTERS, CallingConventionMixin
 from codegen.emitter import Emitter
 from codegen.errors import CodegenError
 from codegen.escape_analysis import analyze_array_escapes, is_heap_allocated
-from codegen.strings import StringsMixin, _TYPEDESC_INT, _TYPEDESC_INT8, _TYPEDESC_UINT8, _TYPEDESC_INT64, \
-    _TYPEDESC_BOOL, _TYPEDESC_STR, _TYPEDESC_ARRAY, _TYPEDESC_SLICE, _TYPEDESC_STRUCT
+from codegen.strings import StringsMixin
 from codegen.structs import StructsMixin
-from codegen.utils import as_byte_register, as_qword_register, escape_for_asciz, leaf_type, type_byte_width, type_of
+from codegen.utils import as_byte_register, as_qword_register, leaf_type, type_byte_width, type_of, \
+    ARG_REGISTERS_64, COMPARISON_CONDITION_CODES
 from lexer import lex
 from parser import (
     ArrayLiteral,
@@ -1730,49 +1728,11 @@ from parser import (
 from semantic import analyze, type_from_name, Type, TypeKind, StructInfo
 
 
-# TODO(will): Remove once this is replaced with version in utils.py
-# BinaryOp -> the x86 condition-code suffix that implements it, given
-# that Cmp(src=right, dst=left) computes (left - right) and sets flags
-# accordingly. All six comparisons share one codegen path (see
-# gen_binary_op) that just plugs the relevant cc into SetCC.
-_COMPARISON_CONDITION_CODES = {
-    BinaryOp.EQUAL: 'e',
-    BinaryOp.NOT_EQUAL: 'ne',
-    BinaryOp.LESS_THAN: 'l',
-    BinaryOp.GREATER_THAN: 'g',
-    BinaryOp.LESS_THAN_OR_EQUAL: 'le',
-    BinaryOp.GREATER_THAN_OR_EQUAL: 'ge',
-}
-
-
-# SysV ABI integer/pointer argument registers, in order, 64-bit and
-# 32-bit forms. Only the first 6 arguments of a call are supported --
-# beyond that the ABI moves to stack-passed arguments, which this
-# compiler doesn't implement (see gen_call_into and gen_function's
-# param-count checks). The 32-bit names don't follow one consistent
-# pattern: rdi/rsi/rdx/rcx are "legacy" registers with their own
-# historical e-prefixed names, while r8/r9 are x86-64-only and use a
-# d-suffix instead -- hence two explicit parallel lists rather than a
-# derived/computed mapping.
-_ARG_REGISTERS_64 = ['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
-_ARG_REGISTERS_32 = ['edi', 'esi', 'edx', 'ecx', 'r8d', 'r9d']
-
-# Registers gen_string_concat_into/gen_string_compare_into use as
-# scratch (see STRINGS). Now that functions can call each other,
-# *every* function's prologue/epilogue saves and restores these
-# unconditionally -- see gen_function and gen_return -- regardless of
-# whether that particular function happens to use them, because the
-# callee-saved contract has to hold for any call, not just ones this
-# compiler happens to know use string operations. See the module
-# docstring's FUNCTIONS section for why this became necessary.
-_CALLEE_SAVED_SCRATCH_REGISTERS = ['rbx', 'r12', 'r13', 'r14']
-
-
 # ---------------------------------------------------------------------------
 # AST -> Assembly AST
 # ---------------------------------------------------------------------------
 
-class CodeGenerator(StringsMixin, StructsMixin):
+class CodeGenerator(CallingConventionMixin, StringsMixin, StructsMixin):
     """Walks the source AST (Program/Function/Return/Constant/...) and
     produces an equivalent AsmProgram."""
 
@@ -2050,7 +2010,7 @@ class CodeGenerator(StringsMixin, StructsMixin):
         # see _CALLEE_SAVED_SCRATCH_REGISTERS and the module docstring's
         # FUNCTIONS section for why this is now required rather than
         # optional once functions can call each other.
-        for reg in _CALLEE_SAVED_SCRATCH_REGISTERS:
+        for reg in CALLEE_SAVED_SCRATCH_REGISTERS:
             instructions.append(Push(Register(reg)))
 
         frame_size = self._frame_size()
@@ -2099,12 +2059,12 @@ class CodeGenerator(StringsMixin, StructsMixin):
         reg_index = arg_shift
         for i, p_type in enumerate(param_types):
             if p_type.kind == TypeKind.SLICE:
-                instructions.append(MovQ(src=Register(_ARG_REGISTERS_64[reg_index]), dst=Memory('rbp', param_temp_offsets[i])))
-                instructions.append(MovQ(src=Register(_ARG_REGISTERS_64[reg_index + 1]), dst=Memory('rbp', param_temp_offsets[i] + 8)))
-                instructions.append(MovQ(src=Register(_ARG_REGISTERS_64[reg_index + 2]), dst=Memory('rbp', param_temp_offsets[i] + 16)))
+                instructions.append(MovQ(src=Register(ARG_REGISTERS_64[reg_index]), dst=Memory('rbp', param_temp_offsets[i])))
+                instructions.append(MovQ(src=Register(ARG_REGISTERS_64[reg_index + 1]), dst=Memory('rbp', param_temp_offsets[i] + 8)))
+                instructions.append(MovQ(src=Register(ARG_REGISTERS_64[reg_index + 2]), dst=Memory('rbp', param_temp_offsets[i] + 16)))
                 reg_index += 3
             else:
-                instructions.append(MovQ(src=Register(_ARG_REGISTERS_64[reg_index]), dst=Memory('rbp', param_temp_offsets[i])))
+                instructions.append(MovQ(src=Register(ARG_REGISTERS_64[reg_index]), dst=Memory('rbp', param_temp_offsets[i])))
                 reg_index += 1
 
         for i, p in enumerate(fn.params):
@@ -4042,66 +4002,6 @@ class CodeGenerator(StringsMixin, StructsMixin):
             instructions.append(AddQ(src=Imm(mem.offset), dst=dst))
         return instructions
 
-    def _gen_materialize_argument_temp_into(self, expr: Node, t: Type, dst: Register) -> List[Instruction]:
-        """Materializes an array- or struct-typed expression that has
-        no address of its own -- an ArrayLiteral, a struct literal, or
-        an ordinary array/struct-returning Call -- into real,
-        addressable storage, and leaves that address in `dst` (a
-        64-bit register). Despite its name, not exclusively for
-        function-call arguments: gen_print_call_into's own array-typed
-        argument reuses this exact method too (see its own docstring),
-        since _collect_argument_temps already reserves a slot for
-        print's own argument the same, uniform way it does for an
-        ordinary call's (see that method's own note on why it doesn't
-        distinguish between the two at all). This is the piece a
-        Variable/Index/Field argument never needs at all (gen_array_
-        address_into/gen_struct_address_into already have a real
-        address for any of those); see _collect_argument_temps's own
-        docstring for why this can't reuse a single shared scratch
-        slot the way an unnamed slice does, and why the stack-vs-heap
-        decision below mirrors is_heap_allocated's own size threshold.
-
-        Producing the actual VALUE needs no new mechanism at all: gen_
-        array_value_into and gen_struct_value_into already handle
-        EVERY one of these shapes (an ArrayLiteral or a struct literal,
-        via their own Call-name-is-a-struct dispatch; an ordinary
-        returning Call, via gen_array_call_into/gen_struct_call_into)
-        written into an arbitrary Memory destination -- the exact same
-        methods gen_var_decl/gen_assign/gen_return already call. All
-        that's genuinely new here is deciding WHERE to write the
-        result and then taking ITS address, which is what the two
-        branches below do:
-
-          - SMALL (t is within the same is_heap_allocated size
-            threshold every named local/parameter already uses):
-            _collect_argument_temps already reserved this exact expr
-            (keyed by id(expr)) its own permanent stack slot -- write
-            directly into it, then LeaQFrame its address.
-          - LARGE: no slot was reserved for it at all (see _reserve_
-            argument_temp) -- malloc a fresh block sized to fit
-            instead (_gen_malloc_array, despite its name already used
-            generically for structs too -- see gen_var_decl's own heap
-            case), write into it the exact same way, and use the
-            resulting pointer directly. Never freed, matching this
-            compiler's existing memory model, and never stashed
-            anywhere durable either: the callee's own entry-time copy
-            (see gen_function's parameter loop) is the only thing that
-            ever reads through this pointer, so unlike a named heap-
-            allocated local, nothing here needs to survive past the
-            call itself.
-        """
-        gen_value_into = self.gen_struct_value_into if t.kind == TypeKind.STRUCT else self.gen_array_value_into
-        if is_heap_allocated(t, self.struct_registry):
-            instructions = self._gen_malloc_array(t)  # leaves the fresh pointer in %rax
-            instructions.extend(gen_value_into(expr, Memory('rax', 0), t))
-            if dst.name != 'rax':
-                instructions.append(MovQ(src=Register('rax'), dst=dst))
-            return instructions
-        offset = self._argument_temp_offsets[id(expr)]
-        instructions = gen_value_into(expr, Memory('rbp', offset), t)
-        instructions.append(LeaQFrame(offset=offset, dst=dst))
-        return instructions
-
     def gen_array_arg_address_into(self, expr: Node, dst: Register) -> List[Instruction]:
         """Computes the address to pass for an array-typed function-call
         argument, into the 64-bit register `dst`. A Variable or an
@@ -4127,23 +4027,6 @@ class CodeGenerator(StringsMixin, StructsMixin):
             f"Array-typed call arguments must be a variable, an "
             f"indexing expression, an array literal, or a call, not "
             f"{type(expr).__name__}"
-        )
-
-    def _total_arg_slots(self, args: List[Node]) -> int:
-        """How many argument registers `args` will collectively need
-        -- 3 for each slice-typed (or `none`) argument, 1 for
-        everything else. `none`'s own resolved type (Type.NONE) never
-        equals SLICE, so it's checked for separately here -- the same
-        "check isinstance(expr, NoneLiteral) directly rather than
-        relying on its own resolved type" pattern gen_var_decl/
-        gen_assign/gen_return already use, safe for the same reason:
-        semantic.py's _types_compatible already guarantees `none` is
-        only ever valid where a slice is expected, since slices are
-        the only nilable type that exists. Shared by every call-
-        codegen entry point's own "too many arguments" check."""
-        return sum(
-            3 if type_of(a).kind == TypeKind.SLICE or isinstance(a, NoneLiteral) else 1
-            for a in args
         )
 
     def gen_slice_arg_into(self, expr: Node, ptr_dst: Register, len_dst: Register, cap_dst: Register) -> List[Instruction]:
@@ -4207,95 +4090,6 @@ class CodeGenerator(StringsMixin, StructsMixin):
         instructions.append(MovQ(src=Memory('rbp', temp), dst=ptr_dst))
         instructions.append(MovQ(src=Memory('rbp', temp + 8), dst=len_dst))
         instructions.append(MovQ(src=Memory('rbp', temp + 16), dst=cap_dst))
-        return instructions
-
-    def _gen_call_arguments_into(self, args: List[Node], reg_shift: int = 0) -> List[Instruction]:
-        """Shared by gen_call_into, gen_array_call_into, and
-        gen_slice_call_into: evaluates every argument -- in order,
-        each via the ordinary gen_expr_into (a scalar), gen_array_arg_
-        address_into (an array), or gen_slice_arg_into (a slice or
-        none, which needs THREE consecutive register slots, not one)
-        -- immediately pushing each one's resulting value(s) onto the
-        stack before moving on to the next. Only *after* every
-        argument has been safely computed and stacked does this start
-        popping everything back off, in reverse, into the actual SysV
-        argument registers (see _ARG_REGISTERS_64).
-
-        This "compute and stack everything, then pop into place" order
-        is what avoids the same register-clobbering hazard that
-        motivated saving %rbx/%r12/%r13/%r14 across calls in the first
-        place (see the module docstring's FUNCTIONS section): if
-        argument 2 happens to be a nested call and argument 1's value
-        were sitting in a scratch register instead of safely on the
-        stack while argument 2 gets computed, argument 2's own use of
-        that same scratch register would corrupt argument 1.
-
-        `reg_shift` shifts every argument's own register slot later by
-        that many positions -- 1 for a call to a function that returns
-        an array or slice (whose hidden output pointer already
-        occupies the first slot, pushed/popped separately by gen_
-        array_call_into/gen_slice_call_into themselves, outside this
-        method entirely), 0 otherwise.
-
-        Because a slice argument needs three consecutive slots, the
-        mapping from argument index to register index isn't the
-        simple 1:1 one it used to be -- this tracks a running slot
-        count instead, matching exactly how a real C compiler would
-        place `struct{void*,long,long}` arguments among ordinary
-        scalar ones: pushed in the same left-to-right order as written
-        (a slice contributing its ptr, then its len, then its cap),
-        and popped in exact reverse, so each slot lands in its own
-        correct register regardless of whether it came from a whole
-        scalar argument or a third of a slice one.
-        """
-        instructions: List[Instruction] = []
-        arg_slot_counts = []
-        for arg in args:
-            arg_type = type_of(arg)
-            if arg_type.kind == TypeKind.SLICE or isinstance(arg, NoneLiteral):
-                instructions.extend(self.gen_slice_arg_into(arg, Register('rax'), Register('rdx'), Register('rcx')))
-                instructions.append(Push(Register('rax')))
-                instructions.append(Push(Register('rdx')))
-                instructions.append(Push(Register('rcx')))
-                arg_slot_counts.append(3)
-            elif arg_type.kind == TypeKind.ARRAY:
-                instructions.extend(self.gen_array_arg_address_into(arg, Register('rax')))
-                instructions.append(Push(Register('rax')))
-                arg_slot_counts.append(1)
-            elif arg_type.kind == TypeKind.STRUCT:
-                # Same convention as an array argument just above --
-                # pass the address, let the callee copy from it on
-                # entry (see gen_function's parameter loop). A
-                # Variable/Field/Index already has a real address (via
-                # gen_struct_address_into directly, rather than gen_
-                # array_arg_address_into, since a struct argument can
-                # also be a Field -- `foo(s.inner)` -- which that
-                # method doesn't handle at all); anything else -- a
-                # struct literal, or an ordinary struct-returning Call
-                # -- has none, so it's materialized first (see _gen_
-                # materialize_argument_temp_into), the exact same
-                # mechanism the ARRAY branch above now uses for the
-                # identical shape of problem.
-                if isinstance(arg, (Variable, Field, Index)):
-                    instructions.extend(self.gen_struct_address_into(arg, Register('rax')))
-                else:
-                    instructions.extend(self._gen_materialize_argument_temp_into(arg, arg_type, Register('rax')))
-                instructions.append(Push(Register('rax')))
-                arg_slot_counts.append(1)
-            else:
-                instructions.extend(self.gen_expr_into(arg, Register('eax')))
-                instructions.append(Push(Register('rax')))
-                arg_slot_counts.append(1)
-
-        slot = sum(arg_slot_counts) - 1 + reg_shift
-        for count in reversed(arg_slot_counts):
-            if count == 3:
-                instructions.append(Pop(Register(_ARG_REGISTERS_64[slot])))
-                instructions.append(Pop(Register(_ARG_REGISTERS_64[slot - 1])))
-                instructions.append(Pop(Register(_ARG_REGISTERS_64[slot - 2])))
-            else:
-                instructions.append(Pop(Register(_ARG_REGISTERS_64[slot])))
-            slot -= count
         return instructions
 
     def gen_array_call_into(self, dst_mem: Memory, expr: Call, array_type: Type) -> List[Instruction]:
@@ -4971,7 +4765,7 @@ class CodeGenerator(StringsMixin, StructsMixin):
         silently discarded (never actually restored into the
         registers) rather than popped."""
         instructions = []
-        for reg in reversed(_CALLEE_SAVED_SCRATCH_REGISTERS):
+        for reg in reversed(CALLEE_SAVED_SCRATCH_REGISTERS):
             instructions.append(Pop(Register(reg)))
         instructions.append(Leave())
         instructions.append(Ret())
@@ -6524,7 +6318,7 @@ class CodeGenerator(StringsMixin, StructsMixin):
         CmpQ instruction itself, rather than reusing a single dst64
         variable the way every arithmetic branch above it does."""
         is_64bit = operand_type == Type.INT64
-        if is_64bit and op not in _COMPARISON_CONDITION_CODES:
+        if is_64bit and op not in COMPARISON_CONDITION_CODES:
             src64 = as_qword_register(src)
             dst64 = as_qword_register(dst)
             if op == BinaryOp.ADD:
@@ -6605,7 +6399,7 @@ class CodeGenerator(StringsMixin, StructsMixin):
             return [ShiftLeft(dst=dst)]
         if op == BinaryOp.SHIFT_RIGHT:
             return [ShiftRightArithmetic(dst=dst)]
-        if op in _COMPARISON_CONDITION_CODES:
+        if op in COMPARISON_CONDITION_CODES:
             # Cmp(src=right, dst=left) computes (left - right) and sets
             # flags from that; SetCC turns the relevant flag combination
             # into a 0/1 byte; MovZX zero-extends that byte back out to
@@ -6622,7 +6416,7 @@ class CodeGenerator(StringsMixin, StructsMixin):
             cmp_instr = CmpQ(src=as_qword_register(src), dst=as_qword_register(dst)) if is_64bit else Cmp(src=src, dst=dst)
             return [
                 cmp_instr,
-                SetCC(cc=_COMPARISON_CONDITION_CODES[op], operand=byte_dst),
+                SetCC(cc=COMPARISON_CONDITION_CODES[op], operand=byte_dst),
                 MovZX(src=byte_dst, dst=dst),
             ]
         raise CodegenError(f"No codegen rule for binary operator: {op}")

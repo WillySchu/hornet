@@ -20,6 +20,19 @@ COMPARISON_CONDITION_CODES = {
 }
 
 
+# SysV ABI integer/pointer argument registers, in order, 64-bit and
+# 32-bit forms. Only the first 6 arguments of a call are supported --
+# beyond that the ABI moves to stack-passed arguments, which this
+# compiler doesn't implement (see gen_call_into and gen_function's
+# param-count checks). The 32-bit names don't follow one consistent
+# pattern: rdi/rsi/rdx/rcx are "legacy" registers with their own
+# historical e-prefixed names, while r8/r9 are x86-64-only and use a
+# d-suffix instead -- hence two explicit parallel lists rather than a
+# derived/computed mapping.
+ARG_REGISTERS_64 = ['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
+ARG_REGISTERS_32 = ['edi', 'esi', 'edx', 'ecx', 'r8d', 'r9d']
+
+
 # 32-bit register name -> its 8-bit low-byte alias (e.g. %eax -> %al).
 # `sete` (and friends) can only target an 8-bit operand, so codegen needs
 # to be able to get from "the register I'm working in" to "its byte
