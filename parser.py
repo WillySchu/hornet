@@ -729,21 +729,22 @@ class Cast(Node):
     SHAPE to an ordinary function call (a name immediately followed by
     a single parenthesized argument), but distinguished at PARSE time
     rather than left to semantic.py the way Call's own struct-vs-
-    function ambiguity is: target_type here is always one of the five
-    built-in scalar type KEYWORDS (int, int8, uint8, bool, str -- see
-    parse_primary's own dispatch), a lexically distinct token kind
-    from IDENTIFIER -- so there's no genuine ambiguity with a struct
-    literal or an ordinary function call to disambiguate later the way
-    Call needs to: a struct name or a type ALIAS name is always an
-    IDENTIFIER token, never one of these five keywords, so neither can
-    ever produce a Cast node, no matter what it resolves to.
+    function ambiguity is: target_type here is always one of the six
+    built-in scalar type KEYWORDS (int, int8, uint8, int64, bool, str
+    -- see parse_primary's own dispatch), a lexically distinct token
+    kind from IDENTIFIER -- so there's no genuine ambiguity with a
+    struct literal or an ordinary function call to disambiguate later
+    the way Call needs to: a struct name or a type ALIAS name is
+    always an IDENTIFIER token, never one of these six keywords, so
+    neither can ever produce a Cast node, no matter what it resolves
+    to.
 
     Deliberately scoped to a SINGLE argument, unlike Call's own list --
     a cast only ever converts one value, so there's no positional/
     named-argument shape to disambiguate here at all.
 
-    Only int/int8/uint8 are actually SUPPORTED on either side of a
-    cast right now (see semantic.py's check_cast) -- bool and str are
+    Only int/int8/uint8/int64 are actually SUPPORTED on either side of
+    a cast right now (see semantic.py's check_cast) -- bool and str are
     still accepted HERE, at the parse level, since the parser has no
     reason to know which specific (source, target) pairs are valid;
     that's semantic.py's job, matching this file's consistent "parser
@@ -1443,7 +1444,7 @@ class Parser:
         keywords, so there's no way to tell "this identifier is a
         type" from "this identifier is something else" with only one
         token of lookahead)."""
-        return self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET) or (
+        return self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET) or (
             self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.IDENTIFIER
         )
 
@@ -1550,22 +1551,24 @@ class Parser:
             self.expect(TokenType.CLOSE_BRACKET, "Expected ']' after array size")
             element_type = self.parse_type()
             return ArrayTypeExpr(size=size, element_type=element_type)
-        if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.BOOL, TokenType.STR):
+        if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR):
             return self.advance().val
         if self.check(TokenType.IDENTIFIER):
             # A struct type reference (`MyStruct`) -- the parser has no
             # symbol table and doesn't know or care whether this name
             # actually names a declared struct; it just accepts any
             # identifier here and hands the bare string on, exactly
-            # like it already does for 'int'/'int8'/'uint8'/'bool'/
-            # 'str' above. semantic.py's own struct-registry pass is
-            # what actually validates the name (see type_from_name).
+            # like it already does for 'int'/'int8'/'uint8'/'int64'/
+            # 'bool'/'str' above. semantic.py's own struct-registry
+            # pass is what actually validates the name (see type_from_
+            # name).
             return self.advance().val
         tok = self.current()
         raise ParseError(
-            f"Expected a type ('int', 'int8', 'uint8', 'bool', 'str', "
-            f"a struct name, '[size]type', or '[]type'), got {tok.type} "
-            f"('{tok.val}') at line {tok.line}, column {tok.col}"
+            f"Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', "
+            f"'str', a struct name, '[size]type', or '[]type'), got "
+            f"{tok.type} ('{tok.val}') at line {tok.line}, column "
+            f"{tok.col}"
         )
 
     def parse_block(self) -> List[Node]:
@@ -1595,13 +1598,13 @@ class Parser:
         return statements
 
     def parse_statement(self) -> Node:
-        if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.BOOL, TokenType.STR) and self.peek(1).type == TokenType.OPEN_PAREN:
+        if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR) and self.peek(1).type == TokenType.OPEN_PAREN:
             # A cast expression used as a bare statement (`int8(x)`,
             # discarding its own result -- unusual, but not something
             # to special-case rejecting just because it's unusual),
             # not the start of a VarDecl -- looks IDENTICAL to the
             # type-starting branch just below up to this exact point
-            # (both start with one of these five scalar keywords), but
+            # (both start with one of these six scalar keywords), but
             # a scalar type keyword is never itself immediately
             # followed by '(' in any valid VarDecl (that position
             # always holds the variable's own NAME, an IDENTIFIER
@@ -1610,12 +1613,12 @@ class Parser:
             # committing to parse_type() below. See Cast's own
             # docstring for why a struct name or a type alias name
             # never has this same ambiguity to resolve at all: neither
-            # is ever one of these five keyword token types, so
+            # is ever one of these six keyword token types, so
             # `MyStruct(...)`/`MyAlias(...)` was already, correctly,
             # routed through parse_call's own IDENTIFIER branch, with
             # nothing here needing to change for either.
             return self.parse_expr_stmt_or_assign()
-        if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET):
+        if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET):
             # A type-starting token could mean EITHER a VarDecl
             # (`[3]int arr = ...`) or a bare, fully-typed array- or
             # slice-literal expression statement (`[3]int[1, 2, 3]`,
@@ -1981,7 +1984,7 @@ class Parser:
         if self.check(TokenType.STRING):
             tok = self.advance()
             return StringLiteral(value=_unescape_string_literal(tok.val))
-        if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.BOOL, TokenType.STR) and self.peek(1).type == TokenType.OPEN_PAREN:
+        if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR) and self.peek(1).type == TokenType.OPEN_PAREN:
             return self.parse_cast()
         if self._looks_like_typed_literal():
             parsed_type = self.parse_type()
@@ -2061,9 +2064,9 @@ class Parser:
         if not self.check(TokenType.OPEN_BRACKET):
             return False
         if self.peek(1).type == TokenType.CLOSE_BRACKET:
-            return self.peek(2).type in (TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.BOOL, TokenType.STR, TokenType.IDENTIFIER, TokenType.OPEN_BRACKET)
+            return self.peek(2).type in (TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR, TokenType.IDENTIFIER, TokenType.OPEN_BRACKET)
         if self.peek(1).type == TokenType.NUMBER and self.peek(2).type == TokenType.CLOSE_BRACKET:
-            return self.peek(3).type in (TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.BOOL, TokenType.STR, TokenType.IDENTIFIER, TokenType.OPEN_BRACKET)
+            return self.peek(3).type in (TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR, TokenType.IDENTIFIER, TokenType.OPEN_BRACKET)
         return False
 
     def _parse_bracketed_literal(self, parsed_type: Union[str, 'ArrayTypeExpr', 'SliceTypeExpr']) -> Node:
@@ -2179,7 +2182,7 @@ class Parser:
     def parse_cast(self) -> Cast:
         """`TYPE(expr)` -- see Cast's own docstring for the full
         design. The caller (parse_primary) has already confirmed the
-        current token is one of the five scalar type keywords AND the
+        current token is one of the six scalar type keywords AND the
         next one is '(', so this just needs to consume both, parse the
         single argument expression in between, and close it -- no
         shape ambiguity left to resolve here at all, unlike parse_

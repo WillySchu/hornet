@@ -411,6 +411,7 @@ from parser import (
     BoolLiteral,
     Break,
     Call,
+    Cast,
     Constant,
     Continue,
     ExprStmt,
@@ -449,6 +450,7 @@ class TypeKind(Enum):
     INT = auto()
     INT8 = auto()
     UINT8 = auto()
+    INT64 = auto()
     BOOL = auto()
     STR = auto()
     ARRAY = auto()
@@ -550,9 +552,28 @@ Type.INT = Type(TypeKind.INT)
 # level before touching every scalar read/write site in codegen.py.
 Type.INT8 = Type(TypeKind.INT8)
 Type.UINT8 = Type(TypeKind.UINT8)
+# int64: this language's first type WIDER than 4 bytes, in the
+# opposite direction from int8/uint8's own narrowing. Unlike int8/
+# uint8, this is NOT free once storage is sorted: int64 arithmetic
+# genuinely needs its own 64-bit instructions throughout (add/sub/mul/
+# div/bitwise/shifts/compare), since ordinary 32-bit ones aren't wide
+# enough to hold every possible intermediate result the way they
+# already are for a NARROWER type -- see the design discussion that
+# preceded this change for the full accounting of what's genuinely new
+# work here (new 64-bit instruction classes, a parallel 64-bit print
+# conversion routine) versus what generalizes for free (type_byte_
+# width-driven address math). As of THIS change, codegen.py doesn't
+# yet know int64 needs 8-byte storage or 64-bit arithmetic at all --
+# type_byte_width's own fallthrough still returns 4 for anything it
+# doesn't explicitly recognize, the identical deliberate, temporary
+# intermediate state int8/uint8 went through first, in the opposite
+# direction.
+Type.INT64 = Type(TypeKind.INT64)
 Type.BOOL = Type(TypeKind.BOOL)
 Type.STR = Type(TypeKind.STR)
-# A fourth singleton, kept deliberately OUT of _TYPE_NAMES below (and
+# A "fourth" kind of singleton in spirit, if not in a literal count
+# anymore now that int8/uint8/int64 exist too -- kept deliberately OUT
+# of _TYPE_NAMES below (and
 # there's no lexer keyword for it either) -- Type.VOID can never be
 # reached by parsing a type expression from source, only ever
 # produced internally, as the "return type" of a function with no
@@ -596,6 +617,7 @@ _TYPE_NAMES = {
     # declared with `byte` -- a deliberate consequence of aliasing to
     # the identical Type instance, not an oversight.
     'byte': Type.UINT8,
+    'int64': Type.INT64,
     'bool': Type.BOOL,
     'str': Type.STR,
 }
@@ -805,13 +827,13 @@ _LOGICAL_OPS = {BinaryOp.AND, BinaryOp.OR}
 # Every type this language's arithmetic/ordering/unary operators
 # accept -- checked as a SET membership test (is this an integer type
 # at all) plus an exact-match test (are both operands the SAME one),
-# never a mix: int8 + uint8, or int8 + int, are both rejected exactly
-# like bool + int already is, matching this language's consistent
-# "explicit over implicit" stance. Kept as its own set, separate from
-# _NARROW_INT_RANGES just below (which is about int8/uint8's own
-# LITERAL range, a completely different question from which types an
-# operator accepts at all).
-_INTEGER_TYPES = {Type.INT, Type.INT8, Type.UINT8}
+# never a mix: int8 + uint8, int8 + int, or int64 + int, are all
+# rejected exactly like bool + int already is, matching this
+# language's consistent "explicit over implicit" stance. Kept as its
+# own set, separate from _NARROW_INT_RANGES just below (which is about
+# int8/uint8's own LITERAL range, a completely different question from
+# which types an operator accepts at all).
+_INTEGER_TYPES = {Type.INT, Type.INT8, Type.UINT8, Type.INT64}
 
 # int8's own range is the ordinary two's-complement one; uint8's is
 # unsigned, starting at 0 -- both exactly 256 values wide, as any
@@ -1493,15 +1515,33 @@ class SemanticAnalyzer:
            "return target_type, not what was actually inferred" shape
            case 1 above already uses, for the identical reason.
 
-        Both bypass check_expr's own generic dispatch (or override its
-        result after the fact) since check_expr has no way to receive
-        an expected type at all; every other kind of value goes through
-        check_expr completely unaffected. Shared by analyze_var_decl
-        and analyze_assign -- the two places a value flows into an
-        already-typed slot with a clear "this is the expected type"
-        side (unlike `==`/`!=`, which has no such side -- see check_
-        binary's own, separate none-vs-slice handling for why that
-        case can't reuse this)."""
+        3. The identical compile-time integer LITERAL shape flowing
+           into an int64 target (`int64 x = 5`) gets the SAME kind of
+           treatment as case 2, minus the range check -- there's
+           nothing to validate, since int64's own range is a strict
+           SUPERSET of int's, so any literal that could ever be
+           written as an ordinary int already fits. This is
+           DELIBERATELY still scoped to a LITERAL specifically, not
+           extended to an arbitrary int-typed EXPRESSION (`int64 x =
+           someIntVariable` is still a real type mismatch, needing an
+           explicit int64(...) cast) -- even though widening a
+           variable would be perfectly SAFE, unlike int8/uint8's own
+           narrowing case, this stays consistent with this language's
+           uniform "a literal is special because there'd otherwise be
+           no way to write this value at all; an arbitrary expression
+           always needs an explicit cast, regardless of which
+           direction the conversion goes" rule, rather than carving
+           out an extra exception for the safe direction specifically.
+
+        Cases 2 and 3 both bypass check_expr's own generic dispatch
+        (or override its result after the fact) since check_expr has
+        no way to receive an expected type at all; every other kind of
+        value goes through check_expr completely unaffected. Shared by
+        analyze_var_decl and analyze_assign -- the two places a value
+        flows into an already-typed slot with a clear "this is the
+        expected type" side (unlike `==`/`!=`, which has no such
+        side -- see check_binary's own, separate none-vs-slice
+        handling for why that case can't reuse this)."""
         if isinstance(expr, ArrayLiteral) and expr.type_expr is None and target_type.kind in (TypeKind.SLICE, TypeKind.ARRAY):
             array_type = self.check_array_literal(expr, expected_element_type=target_type.element_type)
             expr.resolved_type = array_type
@@ -1516,6 +1556,10 @@ class SemanticAnalyzer:
                         f"{literal_value} is out of range for "
                         f"{target_type} ({lo} to {hi})"
                     )
+                expr.resolved_type = target_type
+                return target_type
+        if value_type == Type.INT and target_type == Type.INT64:
+            if self._as_folded_int_literal(expr) is not None:
                 expr.resolved_type = target_type
                 return target_type
         return value_type
@@ -1863,6 +1907,8 @@ class SemanticAnalyzer:
             result = self.check_call(expr)
         elif isinstance(expr, Unary):
             result = self.check_unary(expr)
+        elif isinstance(expr, Cast):
+            result = self.check_cast(expr)
         elif isinstance(expr, Binary):
             result = self.check_binary(expr)
         else:
@@ -2512,8 +2558,8 @@ class SemanticAnalyzer:
         if expr.op in (UnaryOp.NEGATE, UnaryOp.COMPLEMENT):
             if operand_type not in _INTEGER_TYPES:
                 raise SemanticError(
-                    f"'{expr.op.symbol()}' requires an int, int8, or "
-                    f"uint8 operand, got {operand_type}"
+                    f"'{expr.op.symbol()}' requires an int, int8, "
+                    f"uint8, or int64 operand, got {operand_type}"
                 )
             # Stays the operand's own type -- -int8 is int8, not
             # promoted to int -- exactly the same "narrow stays
@@ -2529,6 +2575,59 @@ class SemanticAnalyzer:
                 )
             return Type.BOOL
         raise SemanticError(f"No semantic rule for unary operator: {expr.op}")
+
+    def check_cast(self, expr: Cast) -> Type:
+        """`TYPE(expr)` -- an explicit numeric cast (see Cast's own
+        docstring in parser.py for the full syntax design). Resolves
+        target_type via type_from_name, exactly like every other
+        type-name resolution in this file (a VarDecl's own type, a
+        param's, ...), even though expr.target_type is always one of
+        the five bare scalar keyword strings here -- reusing the same
+        choke point rather than a direct _TYPE_NAMES lookup costs
+        nothing and stays consistent with everywhere else a type name
+        gets resolved.
+
+        The source expression is checked via plain check_expr, NOT
+        the target-type-aware _check_value_flowing_into a VarDecl or
+        Assign uses -- a cast's whole POINT is converting an ALREADY-
+        typed value into another type, unlike VarDecl/Assign's own
+        literal-range-checking special case, which exists specifically
+        because a cast (this!) didn't exist yet as an alternative way
+        to produce an int8/uint8 value. Now that it does, a literal
+        argument still gets ordinary Type.INT treatment here, then
+        gets converted like any other int-typed expression -- `int8(
+        200)` truncates/wraps to -56 exactly like `int8(someIntVar)`
+        holding 200 would, with no compile-time range check either
+        way; range-checking only ever made sense for the "no other way
+        to produce this value" case _check_value_flowing_into's own
+        literal special case still covers.
+
+        Only int/int8/uint8 -- _INTEGER_TYPES -- are supported on
+        EITHER side right now. bool and str are still syntactically
+        valid targets (see Cast's own docstring on why the parser
+        doesn't reject them itself), but rejected here with a clear
+        message: this language already treats bool as non-numeric
+        everywhere else (no implicit int-to-bool coercion at all, see
+        check_unary's own NOT case just above), and str conversion is
+        a fundamentally different KIND of operation -- formatting
+        digits, or parsing them -- than a numeric cast (a bit-level
+        reinterpretation) ever does, so it's deliberately left as a
+        separate, later feature rather than folded into this one.
+
+        Unlike arithmetic (where int8 stays int8, never promoted to
+        int -- see check_binary/check_unary), a cast always produces
+        EXACTLY the type it names, regardless of the source type --
+        there's no operand-dependent result to derive here, since
+        converting to that exact type is the entire point."""
+        target_type = type_from_name(expr.target_type, self.structs, self.type_aliases)
+        source_type = self.check_expr(expr.expr)
+        if target_type not in _INTEGER_TYPES or source_type not in _INTEGER_TYPES:
+            raise SemanticError(
+                f"Cannot cast {source_type} to {target_type} -- casting "
+                f"is only supported between int, int8, uint8, and int64 "
+                f"right now"
+            )
+        return target_type
 
     def _is_comparable_type(self, t: Type) -> bool:
         """Whether '==' is defined for a value of type `t` at all --
@@ -2584,8 +2683,8 @@ class SemanticAnalyzer:
                 return Type.STR
             raise SemanticError(
                 f"'+' requires two operands of the same integer type "
-                f"(int, int8, or uint8) or two str operands, got "
-                f"{left_type} and {right_type}"
+                f"(int, int8, uint8, or int64) or two str operands, "
+                f"got {left_type} and {right_type}"
             )
 
         if op in _INT_ONLY_BINARY_OPS:
@@ -2749,19 +2848,19 @@ class SemanticAnalyzer:
 
     def _require_same_integer_type(self, left_type: Type, right_type: Type, op) -> Type:
         """Requires left_type and right_type to be the exact SAME
-        integer type (int, int8, or uint8 -- see _INTEGER_TYPES) --
-        never a mix, even between two different-but-both-integer
-        types (`int8 + uint8` is rejected exactly like `bool + int`
-        already is), matching this language's consistent "explicit
-        over implicit" stance. Returns that shared type, which becomes
-        the operator's own result type wherever this is called --
-        check_binary's own _INT_ONLY_BINARY_OPS and ordering-operator
-        cases both use this directly."""
+        integer type (int, int8, uint8, or int64 -- see _INTEGER_
+        TYPES) -- never a mix, even between two different-but-both-
+        integer types (`int8 + uint8` is rejected exactly like `bool +
+        int` already is), matching this language's consistent
+        "explicit over implicit" stance. Returns that shared type,
+        which becomes the operator's own result type wherever this is
+        called -- check_binary's own _INT_ONLY_BINARY_OPS and
+        ordering-operator cases both use this directly."""
         if left_type not in _INTEGER_TYPES or left_type != right_type:
             raise SemanticError(
                 f"'{op.symbol()}' requires two operands of the same "
-                f"integer type (int, int8, or uint8), got {left_type} "
-                f"and {right_type}"
+                f"integer type (int, int8, uint8, or int64), got "
+                f"{left_type} and {right_type}"
             )
         return left_type
 

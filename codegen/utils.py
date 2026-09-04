@@ -33,10 +33,21 @@ def as_byte_register(reg: Operand) -> Register:
 
 
 # 32-bit register name -> its 64-bit alias (e.g. %eax -> %rax). Needed
-# because Push/Pop can't operate on a 32-bit operand size in long mode.
+# because Push/Pop can't operate on a 32-bit operand size in long mode,
+# and because int64 now has real, genuinely 8-byte-wide storage (see
+# type_byte_width below) needing a full-width read/write from WHATEVER
+# register a given call site happens to have its computed value sitting
+# in -- %eax most of the time, but also %r8d (a value protected across a
+# stack push/pop, see gen_index_assign/gen_field_assign's own scalar
+# case) or others -- covers every one of the 16 general-purpose
+# registers up front for the identical reason _BYTE_REGISTER_ALIASES
+# just above does, rather than extended reactively one missing entry at
+# a time as int64's own write sites are discovered to need it.
 _QWORD_REGISTER_ALIASES = {
-    'eax': 'rax',
-    'ecx': 'rcx',
+    'eax': 'rax', 'ebx': 'rbx', 'ecx': 'rcx', 'edx': 'rdx',
+    'esi': 'rsi', 'edi': 'rdi', 'ebp': 'rbp', 'esp': 'rsp',
+    'r8d': 'r8', 'r9d': 'r9', 'r10d': 'r10', 'r11d': 'r11',
+    'r12d': 'r12', 'r13d': 'r13', 'r14d': 'r14', 'r15d': 'r15',
 }
 
 
@@ -74,9 +85,16 @@ def type_byte_width(t: Type, structs: dict[str, StructInfo]) -> int:
     address computed from this width (array indexing, struct field
     offsets) now genuinely points at a 1-byte slot, so reading or
     writing it 4 bytes at a time would touch memory that was never
-    part of this value at all."""
+    part of this value at all. int64 returning 8 is the identical
+    change in the opposite direction -- a genuinely wide, not merely
+    type-checked, 8-byte value -- for the identical underlying reason:
+    an address computed from THIS width needs a full 8-byte read/write
+    to actually reach every byte the value occupies, not just its low
+    4."""
     if t == Type.INT8 or t == Type.UINT8:
         return 1
+    if t == Type.INT64:
+        return 8
     if t.kind == TypeKind.ARRAY:
         return t.size * type_byte_width(t.element_type, structs)
     if t.kind == TypeKind.SLICE:

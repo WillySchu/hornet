@@ -14,7 +14,6 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- Casting.
 - `type` type.
 ` typeof`
 - Require `type` keyword to declare new type for structs.
@@ -50,7 +49,6 @@ Updates:
 - Sum types / pattern matching.
 - int32
 - Change int to an alias.
-- int64
 - Pointers
 - Register virtualization
 - float

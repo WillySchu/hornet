@@ -84,10 +84,37 @@ class Neg(Instruction):
 
 
 @dataclass
+class NegQ(Instruction):
+    """64-bit two's-complement arithmetic negation (`negq`), in place
+    -- the NegQ counterpart to Neg (`negl`, 32-bit), needed for int64's
+    own unary negate: -int64Value has to negate the FULL 64-bit value,
+    not just its own low 32 bits, the same reason every other int64
+    arithmetic operator needs its own dedicated 64-bit instruction
+    rather than reusing the 32-bit one."""
+    operand: Operand
+    mnemonic = "negq"
+
+    def operands(self) -> list[str]:
+        return [self.operand.emit()]
+
+
+@dataclass
 class Not(Instruction):
     """Bitwise complement, in place: dst = ~dst."""
     operand: Operand
     mnemonic = "notl"
+
+    def operands(self) -> list[str]:
+        return [self.operand.emit()]
+
+
+@dataclass
+class NotQ(Instruction):
+    """64-bit bitwise complement (`notq`), in place -- the NotQ
+    counterpart to Not (`notl`, 32-bit), needed for int64's own unary
+    complement for the identical reason NegQ is needed for negate."""
+    operand: Operand
+    mnemonic = "notq"
 
     def operands(self) -> list[str]:
         return [self.operand.emit()]
@@ -185,6 +212,32 @@ class MovSX(Instruction):
 
 
 @dataclass
+class MovSXD(Instruction):
+    """Sign-extends a 32-bit src into a 64-bit dst (`movslq`) -- needed
+    for WIDENING a cast into int64 (`int64(someInt8OrIntValue)`): the
+    source has already been correctly computed as an ordinary,
+    genuinely-32-bit-valid value by the time this runs (int/int8/uint8
+    are all read into a real, correct 32-bit register value one way or
+    another -- see _gen_read_scalar_into), so sign-extending it up to
+    64 bits is always correct regardless of which of the three it
+    originally was: a non-negative 32-bit value (however it got that
+    way, including uint8's own zero-extended read) has its own sign
+    bit already clear, so sign- and zero-extension would produce an
+    identical result for it anyway. Like MovSX/MovZX, src can be a
+    plain register OR Memory operand; this compiler always uses it
+    register-to-register (dst's own 32-bit view sign-extended into its
+    own 64-bit view), the same "re-widen dst's own value in place"
+    shape gen_cast_narrowing_into's own int8/uint8 branches already
+    use one register-width down."""
+    src: Operand
+    dst: Operand
+    mnemonic = "movslq"
+
+    def operands(self) -> list[str]:
+        return [self.src.emit(), self.dst.emit()]
+
+
+@dataclass
 class Add(Instruction):
     """dst += src."""
     src: Operand
@@ -232,12 +285,38 @@ class IMul(Instruction):
 
 
 @dataclass
+class IMulQ(Instruction):
+    """64-bit dst *= src (`imulq`, signed, two-operand form) -- the
+    IMulQ counterpart to IMul (`imull`, 32-bit), needed for int64
+    multiplication: two 64-bit operands can produce a result that
+    genuinely needs all 64 bits, unlike int8/uint8's own multiply,
+    which can stay entirely within ordinary 32-bit arithmetic before
+    truncating."""
+    src: Operand
+    dst: Operand
+    mnemonic = "imulq"
+
+    def operands(self) -> list[str]:
+        return [self.src.emit(), self.dst.emit()]
+
+
+@dataclass
 class Cdq(Instruction):
     """Sign-extends %eax across the %edx:%eax pair. Required immediately
     before IDiv, which always divides that 64-bit pair (not just %eax)
     by its operand -- without this, %edx could hold garbage and corrupt
     the division."""
     mnemonic = "cdq"
+
+
+@dataclass
+class Cqto(Instruction):
+    """Sign-extends %rax across the %rdx:%rax pair (`cqto`) -- the
+    64-bit counterpart to Cdq (`cdq`, sign-extending %eax across %edx:
+    %eax), required immediately before IDivQ for the identical reason:
+    IDivQ always divides the full 128-bit %rdx:%rax pair, not just
+    %rax, by its own operand."""
+    mnemonic = "cqto"
 
 
 @dataclass
@@ -254,6 +333,21 @@ class IDiv(Instruction):
     reading %edx afterward instead of %eax."""
     operand: Operand
     mnemonic = "idivl"
+
+    def operands(self) -> list[str]:
+        return [self.operand.emit()]
+
+
+@dataclass
+class IDivQ(Instruction):
+    """Divides the 128-bit %rdx:%rax pair by `operand` (signed) --
+    the IDivQ counterpart to IDiv (`idivl`, 32-bit). Quotient in %rax,
+    remainder in %rdx, otherwise identical in every respect to IDiv
+    one register-width up -- including doubling as int64's own MODULO
+    implementation the same way IDiv does for int/int8/uint8 (see
+    gen_binary_op's own MODULO case)."""
+    operand: Operand
+    mnemonic = "idivq"
 
     def operands(self) -> list[str]:
         return [self.operand.emit()]
@@ -300,6 +394,18 @@ class And(Instruction):
 
 
 @dataclass
+class AndQ(Instruction):
+    """64-bit dst &= src (`andq`) -- the AndQ counterpart to And
+    (`andl`, 32-bit), needed for int64's own bitwise AND."""
+    src: Operand
+    dst: Operand
+    mnemonic = "andq"
+
+    def operands(self) -> list[str]:
+        return [self.src.emit(), self.dst.emit()]
+
+
+@dataclass
 class Or(Instruction):
     """dst |= src (bitwise OR)."""
     src: Operand
@@ -311,11 +417,35 @@ class Or(Instruction):
 
 
 @dataclass
+class OrQ(Instruction):
+    """64-bit dst |= src (`orq`) -- the OrQ counterpart to Or (`orl`,
+    32-bit), needed for int64's own bitwise OR."""
+    src: Operand
+    dst: Operand
+    mnemonic = "orq"
+
+    def operands(self) -> list[str]:
+        return [self.src.emit(), self.dst.emit()]
+
+
+@dataclass
 class Xor(Instruction):
     """dst ^= src (bitwise XOR)."""
     src: Operand
     dst: Operand
     mnemonic = "xorl"
+
+    def operands(self) -> list[str]:
+        return [self.src.emit(), self.dst.emit()]
+
+
+@dataclass
+class XorQ(Instruction):
+    """64-bit dst ^= src (`xorq`) -- the XorQ counterpart to Xor
+    (`xorl`, 32-bit), needed for int64's own bitwise XOR."""
+    src: Operand
+    dst: Operand
+    mnemonic = "xorq"
 
     def operands(self) -> list[str]:
         return [self.src.emit(), self.dst.emit()]
@@ -340,6 +470,22 @@ class ShiftLeft(Instruction):
 
 
 @dataclass
+class ShiftLeftQ(Instruction):
+    """64-bit dst <<= %cl (`shlq`) -- the ShiftLeftQ counterpart to
+    ShiftLeft (`shll`, 32-bit), needed for int64's own left shift. %cl
+    is still hardcoded, and still already correctly populated by the
+    time this runs, for the identical reason ShiftLeft's own docstring
+    explains -- the shift COUNT itself is never wider than a byte
+    regardless of the value being shifted, so this needs no 64-bit
+    change to the count operand at all, only to `dst`'s own width."""
+    dst: Operand
+    mnemonic = "shlq"
+
+    def operands(self) -> list[str]:
+        return ['%cl', self.dst.emit()]
+
+
+@dataclass
 class ShiftRightArithmetic(Instruction):
     """dst >>= %cl, sign-extending (arithmetic) shift -- matches this
     language's `int` being signed, so `-8 >> 1 == -4`, not some large
@@ -347,6 +493,19 @@ class ShiftRightArithmetic(Instruction):
     docstring for why %cl is hardcoded rather than a general `src`."""
     dst: Operand
     mnemonic = "sarl"
+
+    def operands(self) -> list[str]:
+        return ['%cl', self.dst.emit()]
+
+
+@dataclass
+class ShiftRightArithmeticQ(Instruction):
+    """64-bit dst >>= %cl, sign-extending (`sarq`) -- the
+    ShiftRightArithmeticQ counterpart to ShiftRightArithmetic (`sarl`,
+    32-bit), needed for int64's own right shift, matching int64 being
+    signed the same way int already is."""
+    dst: Operand
+    mnemonic = "sarq"
 
     def operands(self) -> list[str]:
         return ['%cl', self.dst.emit()]

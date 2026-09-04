@@ -6318,6 +6318,1019 @@ class TestByte:
             _parse("def int main():\n    int byte = 5\n    return byte\n")
 
 
+# ---------------------------------------------------------------------------
+# Casting -- `TYPE(expr)`, e.g. `int8(x)`. Scoped to int/int8/uint8 only:
+# widening (int8/uint8 -> int) is always safe, narrowing (int -> int8/
+# uint8) and same-width reinterpretation (int8 <-> uint8) both truncate/
+# wrap silently, matching this language's own established int8/uint8
+# arithmetic-wrapping behavior -- no runtime check or panic on overflow.
+# bool and str are deliberately excluded: this language already treats
+# bool as non-numeric everywhere else (no implicit int-to-bool coercion at
+# all), and str conversion is a fundamentally different KIND of operation
+# (formatting/parsing digits) than a numeric cast (a bit-level
+# reinterpretation) ever does, left for a separate, later feature.
+#
+# The one real subtlety, worth a dedicated test rather than just asserting
+# it: a cast's own RESULT has to be genuinely, correctly narrowed
+# IMMEDIATELY, not merely "correct once eventually written somewhere" --
+# `int8(300) + 5` needs 300 already wrapped to 44 before the addition
+# happens. test_cast_truncates_immediately_not_just_worked_when_written
+# is the test that actually proves this, and it specifically CAN'T use
+# addition/subtraction to do it: (a mod 256 + b) mod 256 == (a + b) mod
+# 256 regardless of when truncation happens, so an add/sub-based test
+# would pass identically whether the cast itself truncates or a bug left
+# truncation to happen only at the eventual write -- found and corrected
+# during this feature's own testing, not a hypothetical concern. Division
+# and comparison, whose own results genuinely depend on an operand's full
+# magnitude rather than just its low byte, are what actually distinguish
+# the two.
+#
+# A second, non-obvious change this feature needed: parse_statement's own
+# existing dispatch already treated any statement starting with a scalar
+# type keyword as unconditionally the start of a VarDecl -- committing to
+# parse_type() immediately. `int8(x)` used as a bare statement (discarding
+# its result) starts with that exact same token shape, so this needed a
+# one-token-of-lookahead fix (does '(' immediately follow the keyword?)
+# BEFORE that commitment, not after -- see parse_statement's own comment.
+# test_ordinary_vardecl_still_parses_correctly and test_cast_as_bare_
+# statement are the regression pair proving neither shape broke the other.
+# ---------------------------------------------------------------------------
+
+class TestCasting:
+    def test_int_to_int8_cast_type_checks(self):
+        ast = _parse(
+            "def int8 main():\n"
+            "    int x = 300\n"
+            "    return int8(x)\n"
+        )
+        analyze(ast)
+
+    def test_int8_to_int_cast_type_checks(self):
+        ast = _parse(
+            "def int main():\n"
+            "    int8 x = 5\n"
+            "    return int(x)\n"
+        )
+        analyze(ast)
+
+    def test_int8_to_uint8_cast_type_checks(self):
+        ast = _parse(
+            "def uint8 main():\n"
+            "    int8 x = -5\n"
+            "    return uint8(x)\n"
+        )
+        analyze(ast)
+
+    def test_cast_result_type_matches_target_exactly(self):
+        """A cast's own result has to flow into a slot of that EXACT
+        type -- casting to int8 doesn't somehow satisfy an int-typed
+        slot without ANOTHER cast, matching this language's consistent
+        no-implicit-widening stance even for a cast's own output."""
+        ast = _parse(
+            "def int main():\n"
+            "    int8 x = 5\n"
+            "    int y = int8(x)\n"
+            "    return y\n"
+        )
+        with pytest.raises(SemanticError, match="Cannot initialize"):
+            analyze(ast)
+
+    def test_cast_to_bool_is_rejected(self):
+        ast = _parse(
+            "def int main():\n"
+            "    int x = 5\n"
+            "    bool b = bool(x)\n"
+            "    return 0\n"
+        )
+        with pytest.raises(SemanticError, match="Cannot cast"):
+            analyze(ast)
+
+    def test_cast_to_str_is_rejected(self):
+        ast = _parse(
+            "def int main():\n"
+            "    int x = 5\n"
+            "    str s = str(x)\n"
+            "    return 0\n"
+        )
+        with pytest.raises(SemanticError, match="Cannot cast"):
+            analyze(ast)
+
+    def test_cast_from_bool_is_rejected(self):
+        ast = _parse(
+            "def int main():\n"
+            "    bool b = true\n"
+            "    int x = int(b)\n"
+            "    return 0\n"
+        )
+        with pytest.raises(SemanticError, match="Cannot cast"):
+            analyze(ast)
+
+    def test_cast_to_a_type_alias_name_is_not_yet_supported(self):
+        """A documented, deliberate gap, not an oversight: `MyByte(x)`
+        parses as an ordinary Call (MyByte is an IDENTIFIER token,
+        never one of the five keyword types Cast recognizes -- see
+        Cast's own docstring), which check_call has no cast-aware case
+        for, so it's rejected as an undeclared function -- the same
+        underlying limitation already documented for constructing a
+        struct via its own alias name."""
+        ast = _parse(
+            "type MyByte = int8\n"
+            "\n"
+            "def int main():\n"
+            "    int x = 5\n"
+            "    MyByte y = MyByte(x)\n"
+            "    return 0\n"
+        )
+        with pytest.raises(SemanticError, match="undeclared"):
+            analyze(ast)
+
+    def test_ordinary_vardecl_still_parses_correctly(self):
+        """Regression check on parse_statement's own new lookahead:
+        proves the fix for disambiguating a bare cast statement from a
+        VarDecl didn't break the far more common VarDecl case it sits
+        right next to."""
+        ast = _parse("def int main():\n    int8 x = 5\n    return 0\n")
+        analyze(ast)
+
+
+class TestCastingCodegen:
+    pytestmark = GCC_SKIP
+
+    def test_narrowing_cast_int_300_to_int8(self):
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    int x = 300\n"
+            "    return int8(x)\n",
+            44,
+        )
+
+    def test_narrowing_cast_int_200_to_int8_crosses_sign_boundary(self):
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    int x = 200\n"
+            "    return int8(x)\n",
+            256 - 56,
+        )
+
+    def test_reinterpreting_cast_uint8_to_int8(self):
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    uint8 x = 200\n"
+            "    return int8(x)\n",
+            256 - 56,
+        )
+
+    def test_reinterpreting_cast_int8_to_uint8(self):
+        assert_program_exit_code(
+            "def uint8 main():\n"
+            "    int8 x = -5\n"
+            "    return uint8(x)\n",
+            256 - 5,
+        )
+
+    def test_widening_cast_int8_to_int(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    int8 x = -5\n"
+            "    return int(x)\n",
+            256 - 5,
+        )
+
+    def test_widening_cast_uint8_to_int(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    uint8 x = 200\n"
+            "    return int(x)\n",
+            200,
+        )
+
+    def test_cast_truncates_immediately_not_just_worked_when_written(self):
+        """The real proof this feature works correctly, not just that
+        it type-checks -- see this class's own module comment for why
+        this specifically has to use division (or comparison), never
+        addition/subtraction, to actually distinguish "the cast itself
+        truncates" from "truncation only happened to occur once written
+        to storage": 300/7 (uncorrected) is 42; 44/7 (the CORRECT,
+        truncated-then-divided value) is 6 -- a genuinely different
+        result, not one that coincidentally matches either way."""
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    int x = 300\n"
+            "    int8 y = 7\n"
+            "    return int8(x) / y\n",
+            44 // 7,
+        )
+
+    def test_cast_truncation_proven_via_comparison_true_case(self):
+        """300 truncates to 44, which genuinely IS less than 50 -- an
+        untruncated 300 would also (coincidentally) satisfy `< 50` as
+        false, so this needs its OWN reverse-direction test just below
+        to fully rule out a missing truncation."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    int x = 300\n"
+            "    int8 y = 50\n"
+            "    if int8(x) < y:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_cast_truncation_proven_via_comparison_false_case(self):
+        """60 truncates to 60 (no wraparound needed), which is NOT
+        less than 50 -- if the cast failed to apply at all, this would
+        still correctly read as `60 < 50` == false by coincidence, so
+        the real proof is the PAIR of these two tests together: the
+        true case above only makes sense if 300 was actually narrowed
+        to a small number first."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    int x = 60\n"
+            "    int8 y = 50\n"
+            "    if int8(x) < y:\n"
+            "        return 1\n"
+            "    return 0\n",
+            0,
+        )
+
+    def test_cast_as_bare_statement(self):
+        """A cast used purely as a statement, discarding its own
+        result -- unusual, but has to compile and run without
+        crashing; also the direct regression check for parse_
+        statement's own new lookahead (see this class's own module
+        comment)."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    int x = 5\n"
+            "    int8(x)\n"
+            "    return 0\n",
+            0,
+        )
+
+    def test_nested_casts(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    int x = 300\n"
+            "    return int(int8(x))\n",
+            44,
+        )
+
+    def test_cast_of_a_literal(self):
+        assert_program_exit_code(
+            "def int8 main():\n    return int8(300)\n",
+            44,
+        )
+
+    def test_cast_of_an_arithmetic_expression(self):
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    int a = 250\n"
+            "    int b = 100\n"
+            "    return int8(a + b)\n",
+            (250 + 100) % 256,
+        )
+
+    def test_print_narrowing_cast_result(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    int x = 300\n"
+            "    print(int8(x))\n"
+            "    return 0\n",
+            "44\n",
+        )
+
+    def test_print_widening_cast_result(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    int8 x = -5\n"
+            "    print(int(x))\n"
+            "    return 0\n",
+            "-5\n",
+        )
+
+    def test_cast_as_function_argument(self):
+        assert_program_exit_code(
+            "def int8 identity(int8 x):\n"
+            "    return x\n"
+            "\n"
+            "def int8 main():\n"
+            "    int x = 300\n"
+            "    return identity(int8(x))\n",
+            44,
+        )
+
+    def test_cast_as_struct_field_value(self):
+        assert_program_exit_code(
+            "struct S:\n"
+            "    int8 v\n"
+            "\n"
+            "def int8 main():\n"
+            "    int x = 300\n"
+            "    S s = S(int8(x))\n"
+            "    return s.v\n",
+            44,
+        )
+
+
+# ---------------------------------------------------------------------------
+# int64, step 1 of 4: the TYPE SYSTEM only -- lexer/parser keywords,
+# TypeKind/Type additions, and arithmetic/cast type-checking rules, mirroring
+# int8/uint8's own step 1. Deliberately NOT yet about actual storage width or
+# 64-bit arithmetic: codegen.py is completely untouched by this step, and
+# type_byte_width's own fallthrough still returns 4 for int64 (an
+# intermediate, deliberately incorrect-but-harmless state for THIS step's own
+# scope, since nothing here exercises codegen at all) -- the identical
+# posture int8/uint8 went through first, in the opposite (narrowing, not
+# widening) direction.
+#
+# int64 is architecturally a bigger step than int8/uint8 overall (see the
+# design discussion that preceded this feature): unlike a narrower type,
+# which could reuse ordinary 32-bit arithmetic entirely via widen-compute-
+# truncate, int64 genuinely needs its own 64-bit instructions throughout,
+# since a 32-bit ADD/MUL/etc. isn't wide enough to hold every possible int64
+# result before any truncation could even apply. That real work is step 2's
+# job, not this one's -- these tests are semantic-layer-only, matching int8/
+# uint8's own step-1 tests.
+#
+# One deliberate, CONFIRMED design choice worth testing directly: unlike
+# int8/uint8 (which need a literal's value RANGE-checked, since narrowing can
+# lose information), a literal flowing into an int64 target needs no range
+# check at all -- int64's own range is a strict superset of int's -- but the
+# convenience still stops at a LITERAL specifically, matching int8/uint8's
+# own precedent: an arbitrary int-typed EXPRESSION (a variable) still needs
+# an explicit int64(...) cast, even though widening it would be perfectly
+# safe. test_int64_from_int_variable_still_requires_a_cast is the test that
+# proves the convenience didn't quietly become a general implicit-widening
+# rule.
+# ---------------------------------------------------------------------------
+
+class TestInt64TypeSystem:
+    def _check(self, src, expect_error=None):
+        """Mirrors TestInt8Uint8TypeSystem's own helper of the same
+        shape -- semantic analysis only, no codegen, no gcc."""
+        ast = _parse(src)
+        if expect_error is None:
+            analyze(ast)
+            return
+        try:
+            analyze(ast)
+        except SemanticError as e:
+            assert expect_error in str(e), f"expected error containing {expect_error!r}, got: {e}"
+            return
+        assert False, f"expected a SemanticError containing {expect_error!r}, got none"
+
+    def test_int64_literal_widening(self):
+        self._check("def int64 main():\n    int64 x = 5\n    return 0\n")
+
+    def test_int64_negative_literal_widening(self):
+        self._check("def int64 main():\n    int64 x = -5\n    return 0\n")
+
+    def test_int64_large_literal_widening(self):
+        """A value that wouldn't fit in int8/uint8 at all, and is well
+        past ordinary 32-bit int range too -- still just an ordinary
+        Constant node at parse time (this language has no int32-range
+        check on a plain int literal either), and int64's own literal
+        case needs no range check regardless."""
+        self._check("def int64 main():\n    int64 x = 9000000000\n    return 0\n")
+
+    def test_int64_from_int_variable_still_requires_a_cast(self):
+        """The direct proof of this step's own central design
+        decision: literal convenience does NOT extend to an arbitrary
+        int-typed expression, even though widening a variable would be
+        perfectly safe -- matching int8/uint8's own identical
+        restriction rather than carving out a special exception for
+        the safe direction."""
+        self._check(
+            "def int main():\n"
+            "    int y = 5\n"
+            "    int64 x = y\n"
+            "    return 0\n",
+            expect_error="Cannot initialize",
+        )
+
+    def test_int64_arithmetic_stays_int64(self):
+        self._check(
+            "def int main():\n"
+            "    int64 a = 5\n"
+            "    int64 b = 3\n"
+            "    int64 c = a + b\n"
+            "    return 0\n"
+        )
+
+    def test_int64_and_int_mixing_is_rejected(self):
+        self._check(
+            "def int main():\n"
+            "    int64 a = 5\n"
+            "    int b = 3\n"
+            "    int64 c = a + b\n"
+            "    return 0\n",
+            expect_error="requires two operands of the same integer type",
+        )
+
+    def test_int64_and_int8_mixing_is_rejected(self):
+        self._check(
+            "def int main():\n"
+            "    int64 a = 5\n"
+            "    int8 b = 3\n"
+            "    int64 c = a + b\n"
+            "    return 0\n",
+            expect_error="requires two operands of the same integer type",
+        )
+
+    def test_int64_unary_negate(self):
+        self._check(
+            "def int main():\n"
+            "    int64 a = 5\n"
+            "    int64 b = -a\n"
+            "    return 0\n"
+        )
+
+    def test_int64_unary_complement(self):
+        self._check(
+            "def int main():\n"
+            "    int64 a = 5\n"
+            "    int64 b = ~a\n"
+            "    return 0\n"
+        )
+
+    def test_int64_ordering_comparison(self):
+        self._check(
+            "def int main():\n"
+            "    int64 a = 5\n"
+            "    int64 b = 3\n"
+            "    bool r = a > b\n"
+            "    return 0\n"
+        )
+
+    def test_int64_equality(self):
+        self._check(
+            "def int main():\n"
+            "    int64 a = 5\n"
+            "    int64 b = 3\n"
+            "    bool r = a == b\n"
+            "    return 0\n"
+        )
+
+    def test_widening_cast_int_to_int64(self):
+        self._check(
+            "def int main():\n"
+            "    int a = 5\n"
+            "    int64 b = int64(a)\n"
+            "    return 0\n"
+        )
+
+    def test_narrowing_cast_int64_to_int(self):
+        self._check(
+            "def int main():\n"
+            "    int64 a = 5\n"
+            "    int b = int(a)\n"
+            "    return 0\n"
+        )
+
+    def test_cast_int64_to_int8(self):
+        self._check(
+            "def int main():\n"
+            "    int64 a = 5\n"
+            "    int8 b = int8(a)\n"
+            "    return 0\n"
+        )
+
+    def test_int64_as_function_parameter_and_return(self):
+        self._check(
+            "def int64 identity(int64 x):\n"
+            "    return x\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n"
+        )
+
+    def test_int64_struct_field(self):
+        self._check(
+            "struct S:\n"
+            "    int64 v\n"
+            "\n"
+            "def int main():\n"
+            "    S s = S(5)\n"
+            "    return 0\n"
+        )
+
+    def test_int64_array_element_type(self):
+        self._check("def int main():\n    [3]int64 arr\n    return 0\n")
+
+    def test_int64_type_alias(self):
+        self._check(
+            "type MyLong = int64\n"
+            "\n"
+            "def int main():\n"
+            "    MyLong x = 5\n"
+            "    return 0\n"
+        )
+
+
+# ---------------------------------------------------------------------------
+# int64, step 2 of 4 (storage + arithmetic + casting, per the design
+# discussion that preceded this feature -- casting ended up folding in here
+# naturally alongside storage, since it reuses the exact same gen_cast_
+# narrowing_into machinery int8/uint8 already built). Full compile-and-run
+# tests now, unlike step 1's semantic-layer-only ones.
+#
+# Unlike int8/uint8 (which could reuse ordinary 32-bit arithmetic entirely
+# via widen-compute-truncate), int64 genuinely needed its own 64-bit
+# instructions throughout -- ten new instruction classes (NegQ, NotQ, IMulQ,
+# Cqto, IDivQ, AndQ, OrQ, XorQ, ShiftLeftQ, ShiftRightArithmeticQ), plus
+# MovSXD for widening a cast INTO int64. gen_binary_op/gen_unary_op both took
+# a new operand_type parameter: callers still always pass the ordinary
+# 32-bit-named register, matching the convention _gen_read_scalar_into/
+# _gen_write_scalar_from already established, with these two methods
+# deciding internally whether to operate on the register's own 64-bit view.
+#
+# MANY of the tests below deliberately use a value beyond 32-bit range
+# (~2^31), not because a small value wouldn't exercise the code path, but
+# because a bug that silently truncated to 32 bits somewhere along the way
+# would still pass a small-value test by coincidence -- exactly the kind of
+# false confidence a large-value test is specifically designed to catch.
+# This is not a hypothetical concern: test_int64_function_argument_beyond_
+# 32bit_range is the direct regression test for a real bug FOUND this way --
+# gen_function's own parameter-binding logic read a stashed 64-bit argument
+# back out via a plain 32-bit Mov before ever handing it to _gen_write_
+# scalar_from, silently discarding an int64 argument's own high 32 bits.
+# Every SMALL-value version of that same test (e.g. identity(100)) passed
+# throughout development; only a large-value test ever caught it.
+# ---------------------------------------------------------------------------
+
+class TestInt64Storage:
+    pytestmark = GCC_SKIP
+
+    def test_int64_vardecl_and_return(self):
+        assert_program_exit_code(
+            "def int64 main():\n    int64 x = 5\n    return x\n",
+            5,
+        )
+
+    def test_int64_large_literal_vardecl_and_return(self):
+        """9000000000 is well beyond 32-bit range; truncated to its
+        own low byte for the exit code, but the literal itself must
+        still be correctly, fully stored and read back."""
+        assert_program_exit_code(
+            "def int64 main():\n    int64 x = 9000000000\n    return x\n",
+            9000000000 % 256,
+        )
+
+    def test_two_int64_locals_are_independently_stored(self):
+        assert_program_exit_code(
+            "def int64 main():\n"
+            "    int64 a = 10\n"
+            "    int64 b = 20\n"
+            "    return a\n",
+            10,
+        )
+
+    def test_int64_assign(self):
+        assert_program_exit_code(
+            "def int64 main():\n"
+            "    int64 x = 1\n"
+            "    x = 42\n"
+            "    return x\n",
+            42,
+        )
+
+    def test_int64_struct_field_read(self):
+        assert_program_exit_code(
+            "struct S:\n"
+            "    int64 v\n"
+            "\n"
+            "def int64 main():\n"
+            "    S s = S(5)\n"
+            "    return s.v\n",
+            5,
+        )
+
+    def test_int64_struct_field_assign(self):
+        assert_program_exit_code(
+            "struct S:\n"
+            "    int64 v\n"
+            "\n"
+            "def int64 main():\n"
+            "    S s = S(0)\n"
+            "    s.v = 77\n"
+            "    return s.v\n",
+            77,
+        )
+
+    def test_int64_array_element_read(self):
+        assert_program_exit_code(
+            "def int64 main():\n"
+            "    [3]int64 arr = [1, 2, 3]\n"
+            "    return arr[2]\n",
+            3,
+        )
+
+    def test_int64_array_index_assign(self):
+        assert_program_exit_code(
+            "def int64 main():\n"
+            "    [3]int64 arr = [0, 0, 0]\n"
+            "    arr[1] = 99\n"
+            "    return arr[1]\n",
+            99,
+        )
+
+    def test_int64_addition(self):
+        assert_program_exit_code(
+            "def int64 main():\n"
+            "    int64 a = 5\n"
+            "    int64 b = 3\n"
+            "    return a + b\n",
+            8,
+        )
+
+    def test_int64_addition_beyond_32bit_range(self):
+        """5000000000 + 3000000000 = 8000000000. A bug that silently
+        wrapped at 32 bits (giving 3705032704, from 8000000000 mod
+        2^32) would fail the '> 4000000000' check below; only the
+        genuinely correct 64-bit sum passes it."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    int64 a = 5000000000\n"
+            "    int64 b = 3000000000\n"
+            "    int64 c = a + b\n"
+            "    int64 threshold = 4000000000\n"
+            "    if c > threshold:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_int64_subtraction(self):
+        assert_program_exit_code(
+            "def int64 main():\n"
+            "    int64 a = 10\n"
+            "    int64 b = 3\n"
+            "    return a - b\n",
+            7,
+        )
+
+    def test_int64_multiplication_beyond_32bit_range(self):
+        """100000 * 100000 = 10,000,000,000, requiring genuine 64-bit
+        multiplication -- 32-bit imul would silently produce a
+        completely different, wrapped result."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    int64 a = 100000\n"
+            "    int64 b = 100000\n"
+            "    int64 c = a * b\n"
+            "    int64 threshold = 9000000000\n"
+            "    if c > threshold:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_int64_division_beyond_32bit_range(self):
+        """10000000000 / 3 = 3333333333 at correct 64-bit precision.
+        If division incorrectly operated on only the low 32 bits of
+        10000000000 (1410065408), the result (470021802) would be
+        far smaller than the threshold checked here."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    int64 a = 10000000000\n"
+            "    int64 b = 3\n"
+            "    int64 c = a / b\n"
+            "    int64 threshold = 3000000000\n"
+            "    if c > threshold:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_int64_modulo(self):
+        assert_program_exit_code(
+            "def int64 main():\n"
+            "    int64 a = 100\n"
+            "    int64 b = 7\n"
+            "    return a % b\n",
+            100 % 7,
+        )
+
+    def test_int64_bitwise_and_beyond_32bit_range(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    int64 a = 5000000000\n"
+            "    int64 b = 6000000000\n"
+            "    int64 c = a & b\n"
+            "    int64 threshold = 4000000000\n"
+            "    if c > threshold:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_int64_bitwise_or(self):
+        assert_program_exit_code(
+            "def int64 main():\n"
+            "    int64 a = 12\n"
+            "    int64 b = 10\n"
+            "    return a | b\n",
+            12 | 10,
+        )
+
+    def test_int64_bitwise_xor(self):
+        assert_program_exit_code(
+            "def int64 main():\n"
+            "    int64 a = 12\n"
+            "    int64 b = 10\n"
+            "    return a ^ b\n",
+            12 ^ 10,
+        )
+
+    def test_int64_shift_left(self):
+        assert_program_exit_code(
+            "def int64 main():\n"
+            "    int64 a = 3\n"
+            "    int64 b = 4\n"
+            "    return a << b\n",
+            3 << 4,
+        )
+
+    def test_int64_shift_right(self):
+        assert_program_exit_code(
+            "def int64 main():\n"
+            "    int64 a = 48\n"
+            "    int64 b = 2\n"
+            "    return a >> b\n",
+            48 >> 2,
+        )
+
+    def test_int64_negate_beyond_32bit_range(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    int64 a = 5000000000\n"
+            "    int64 b = -a\n"
+            "    int64 threshold = -4000000000\n"
+            "    if b < threshold:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_int64_complement(self):
+        assert_program_exit_code(
+            "def int64 main():\n"
+            "    int64 a = 5\n"
+            "    return ~a\n",
+            256 + (~5),
+        )
+
+    def test_int64_ordering_comparison_beyond_32bit_range(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    int64 a = 5000000001\n"
+            "    int64 b = 5000000000\n"
+            "    if a > b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_int64_equality(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    int64 a = 5\n"
+            "    int64 b = 5\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_widening_cast_int_to_int64(self):
+        assert_program_exit_code(
+            "def int64 main():\n"
+            "    int a = 5\n"
+            "    int64 b = int64(a)\n"
+            "    int64 c = 3\n"
+            "    return b + c\n",
+            8,
+        )
+
+    def test_widening_cast_int8_to_int64(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    int8 a = -5\n"
+            "    int64 b = int64(a)\n"
+            "    int64 threshold = -3\n"
+            "    if b < threshold:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_widening_cast_uint8_to_int64(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    uint8 a = 200\n"
+            "    int64 b = int64(a)\n"
+            "    int64 threshold = 100\n"
+            "    if b > threshold:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_narrowing_cast_int64_to_int(self):
+        raw = 5000000123 % (2 ** 32)
+        assert_program_exit_code(
+            "def int main():\n"
+            "    int64 a = 5000000123\n"
+            "    return int(a)\n",
+            raw % 256,
+        )
+
+    def test_narrowing_cast_int64_to_int8(self):
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    int64 a = 300\n"
+            "    return int8(a)\n",
+            44,
+        )
+
+    def test_cast_to_int8_truncates_immediately(self):
+        """The genuine proof, via division -- see this class's own
+        module comment for why addition/subtraction couldn't tell
+        this apart from a bug that deferred truncation until later."""
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    int64 a = 300\n"
+            "    int8 b = 7\n"
+            "    return int8(a) / b\n",
+            44 // 7,
+        )
+
+    def test_int64_function_parameter_and_return(self):
+        assert_program_exit_code(
+            "def int64 identity(int64 x):\n"
+            "    return x\n"
+            "\n"
+            "def int64 main():\n"
+            "    return identity(100)\n",
+            100,
+        )
+
+    def test_int64_function_argument_beyond_32bit_range(self):
+        """The direct regression test for the real gen_function
+        parameter-binding bug this step found and fixed -- see this
+        class's own module comment for the full story. Deliberately
+        checks the parameter's own value INSIDE the callee (no return
+        value involved at all), isolating the argument-passing
+        mechanism specifically from return-value propagation."""
+        assert_program_exit_code(
+            "def int checkParam(int64 x):\n"
+            "    int64 threshold = 4000000000\n"
+            "    if x > threshold:\n"
+            "        return 1\n"
+            "    return 0\n"
+            "\n"
+            "def int main():\n"
+            "    return checkParam(5000000000)\n",
+            1,
+        )
+
+    def test_int64_return_value_beyond_32bit_range(self):
+        """The other half of the same regression -- return-value
+        propagation specifically, isolated from argument passing by
+        using identity() and checking the caller's own received
+        result."""
+        assert_program_exit_code(
+            "def int64 identity(int64 x):\n"
+            "    return x\n"
+            "\n"
+            "def int main():\n"
+            "    int64 threshold = 4000000000\n"
+            "    int64 result = identity(5000000000)\n"
+            "    if result > threshold:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_multiple_int64_parameters_beyond_32bit_range(self):
+        assert_program_exit_code(
+            "def int64 addThem(int64 a, int64 b):\n"
+            "    return a + b\n"
+            "\n"
+            "def int main():\n"
+            "    int64 threshold = 8000000000\n"
+            "    int64 result = addThem(5000000000, 4000000000)\n"
+            "    if result > threshold:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_struct_with_int64_field_as_parameter(self):
+        assert_program_exit_code(
+            "struct Big:\n"
+            "    int64 v\n"
+            "\n"
+            "def int checkBig(Big b):\n"
+            "    int64 threshold = 4000000000\n"
+            "    if b.v > threshold:\n"
+            "        return 1\n"
+            "    return 0\n"
+            "\n"
+            "def int main():\n"
+            "    Big b = Big(5000000000)\n"
+            "    return checkBig(b)\n",
+            1,
+        )
+
+    def test_method_with_int64_argument_beyond_32bit_range(self):
+        assert_program_exit_code(
+            "struct S:\n"
+            "    int v\n"
+            "    def int checkArg(s, int64 x):\n"
+            "        int64 threshold = 4000000000\n"
+            "        if x > threshold:\n"
+            "            return 1\n"
+            "        return 0\n"
+            "\n"
+            "def int main():\n"
+            "    S s = S(1)\n"
+            "    return s.checkArg(5000000000)\n",
+            1,
+        )
+
+    def test_int64_array_equality_beyond_32bit_range(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    [2]int64 a = [5000000000, 6000000000]\n"
+            "    [2]int64 b = [5000000000, 6000000000]\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_int64_array_zero_init(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    [3]int64 arr\n"
+            "    int64 s = arr[0] + arr[1] + arr[2]\n"
+            "    int64 zero = 0\n"
+            "    if s == zero:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_int64_array_copy_beyond_32bit_range(self):
+        """The gen_array_copy fix from int8/uint8's own step 2 needed
+        no further changes for int64 -- 8 is already a clean multiple
+        of the 8-byte movq tier, so this exercises that generalization
+        held, rather than assuming it did."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    [2]int64 a = [5000000000, 6000000000]\n"
+            "    [2]int64 b = [0, 0]\n"
+            "    b = a\n"
+            "    int64 threshold = 4000000000\n"
+            "    if b[0] > threshold:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_int64_array_parameter_beyond_32bit_range(self):
+        assert_program_exit_code(
+            "def int64 sumFirst([2]int64 arr):\n"
+            "    return arr[0]\n"
+            "\n"
+            "def int main():\n"
+            "    [2]int64 a = [5000000000, 6000000000]\n"
+            "    int64 threshold = 4000000000\n"
+            "    int64 result = sumFirst(a)\n"
+            "    if result > threshold:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_print_int64_not_yet_supported(self):
+        """Explicitly documents the current, deliberate scope boundary
+        for this step: print's own type-descriptor machinery doesn't
+        recognize int64 yet (that's a later step's job, needing its
+        own parallel 64-bit decimal-conversion routine, since the
+        existing gen_int_to_decimal_into is written entirely in
+        32-bit instructions) -- this fails LOUDLY, with a clear
+        CodegenError, rather than silently misprinting or truncating,
+        which is the right failure mode for an intentionally-
+        incomplete feature."""
+        with pytest.raises(CodegenError, match="No type descriptor rule"):
+            source = "def int main():\n    int64 x = 5\n    print(x)\n    return 0\n"
+            ast = _parse(source)
+            analyze(ast)
+            generate_asm(ast, platform=ASM_PLATFORM)
+
+
 class TestTypedArrayLiterals:
     pytestmark = GCC_SKIP
 
@@ -9515,13 +10528,13 @@ class TestSemanticErrors:
     def test_negate_requires_int_not_bool(self):
         assert_semantic_error(
             "    return -true",
-            match="requires an int, int8, or uint8 operand",
+            match="requires an int, int8, uint8, or int64 operand",
         )
 
     def test_complement_requires_int_not_bool(self):
         assert_semantic_error(
             "    return ~true",
-            match="requires an int, int8, or uint8 operand",
+            match="requires an int, int8, uint8, or int64 operand",
         )
 
     def test_arithmetic_requires_int_operands(self):

@@ -62,6 +62,7 @@ class TokenType(Enum):
     INT = auto()
     INT8 = auto()
     UINT8 = auto()
+    INT64 = auto()
     STR = auto()
     RETURN = auto()
     AND = auto()
@@ -133,8 +134,16 @@ class Lexer():
             'int': TokenType.INT,
             'int8': TokenType.INT8,
             'uint8': TokenType.UINT8,
+            'int64': TokenType.INT64,
             # 'byte' is deliberately mapped to the SAME TokenType as
-            # 'uint8', not a new TokenType.BYTE.
+            # 'uint8' -- not a new TokenType.BYTE -- since the two are
+            # meant to be completely interchangeable everywhere, all
+            # the way down: a built-in alias for uint8 (see semantic.
+            # py's own _TYPE_NAMES), not a third, distinct type. The
+            # parser and everything downstream of it never needs to
+            # know which spelling actually appeared in the source, the
+            # same way it never needs to know that about a user-
+            # written type alias either.
             'byte': TokenType.UINT8,
             'str': TokenType.STR,
             'return': TokenType.RETURN,
