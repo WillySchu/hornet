@@ -14,7 +14,6 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- StringsMixin
 - CallingConventionMixin
 - StatementsMixin
 - ScalarsMixin

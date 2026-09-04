@@ -2,8 +2,22 @@
 
 from codegen.assembly_ast import Operand, Register
 from codegen.errors import CodegenError
-from parser import Node
+from parser import Node, BinaryOp
 from semantic import Type, TypeKind, StructInfo
+
+
+# BinaryOp -> the x86 condition-code suffix that implements it, given
+# that Cmp(src=right, dst=left) computes (left - right) and sets flags
+# accordingly. All six comparisons share one codegen path (see
+# gen_binary_op) that just plugs the relevant cc into SetCC.
+COMPARISON_CONDITION_CODES = {
+    BinaryOp.EQUAL: 'e',
+    BinaryOp.NOT_EQUAL: 'ne',
+    BinaryOp.LESS_THAN: 'l',
+    BinaryOp.GREATER_THAN: 'g',
+    BinaryOp.LESS_THAN_OR_EQUAL: 'le',
+    BinaryOp.GREATER_THAN_OR_EQUAL: 'ge',
+}
 
 
 # 32-bit register name -> its 8-bit low-byte alias (e.g. %eax -> %al).
