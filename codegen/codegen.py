@@ -1659,6 +1659,7 @@ from codegen.assembly_ast import (
     MovB,
     MovQ,
     MovZX,
+    MovSX,
     Neg,
     Not,
     Operand,
@@ -2196,7 +2197,7 @@ class CodeGenerator:
                 instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
             else:
                 instructions.append(Mov(src=Memory('rbp', temp_offset), dst=Register('eax')))
-                instructions.append(Mov(src=Register('eax'), dst=Memory('rbp', offset)))
+                instructions.extend(self._gen_write_scalar_from(Register('eax'), p_type, Memory('rbp', offset)))
 
         self._bounds_check_fail_labels = {}  # fresh, per-function jump targets; see their own docstring
         for stmt in fn.body:
@@ -2235,9 +2236,10 @@ class CodeGenerator:
         keying) -- kept as a separate method since Param and VarDecl
         are different AST node types, not because parameters need
         fundamentally different treatment. Each slot's width is the
-        parameter's own actual type width (see type_byte_width) -- 4
-        bytes for int/bool, 8 for str, and an array's own full,
-        flattened footprint for a stack-allocated array parameter --
+        parameter's own actual type width (see type_byte_width) -- 1
+        byte for int8/uint8, 4 for int/bool, 8 for str, and an array's
+        own full, flattened footprint for a stack-allocated array
+        parameter --
         except for an array parameter over _STACK_ARRAY_LIMIT_BYTES
         (see is_heap_allocated), which only needs 8 bytes here: its
         slot holds a pointer to a heap block gen_function's own
@@ -2274,9 +2276,9 @@ class CodeGenerator:
         now matters.
 
         Each slot's width is the variable's own actual type width (see
-        type_byte_width) -- 4 bytes for int/bool, 8 for str, and an
-        array's own full, flattened footprint (e.g. 24 bytes for
-        [2][3]int) for a stack-allocated array local. Uniform 8-byte
+        type_byte_width) -- 1 byte for int8/uint8, 4 for int/bool, 8
+        for str, and an array's own full, flattened footprint (e.g. 24
+        bytes for [2][3]int) for a stack-allocated array local. Uniform 8-byte
         slots were a deliberate simplification back when str was the
         only thing wider than 4 bytes; a fixed-size array can be
         arbitrarily larger than 8 bytes, so that simplification stops
@@ -4746,14 +4748,31 @@ class CodeGenerator:
         total byte width and the leaf element's own width (see
         type_byte_width/leaf_type).
 
-        Each leaf-sized chunk is copied as a flat run of 8-byte movqs
-        followed by one final 4-byte movl if the leaf's own width
-        isn't itself a multiple of 8 -- correct for ANY leaf width,
-        not just the three (4 for int/bool, 8 for str, 24 for a slice
-        descriptor) this used to hardcode explicitly. That generality
-        is exactly what a STRUCT leaf needs (a struct's own width can
-        be any multiple of 4: 12, 20, 28, ... depending on its fields),
-        and it needed no field-by-field recursion to get there: a raw,
+        Each leaf-sized chunk is copied as a flat run of 8-byte movqs,
+        then one trailing 4-byte movl if at least 4 bytes remain, then
+        a trailing run of 1-byte movbs for whatever's left after
+        that (0 to 3 bytes) -- correct for ANY leaf width at all, not
+        just a multiple of 4 the way this used to assume (back when
+        every leaf was at least 4 bytes wide: 4 for int/bool, 8 for
+        str, 24 for a slice descriptor, or a struct's own width, which
+        used to always be a sum of 4-and-8-byte fields and so always
+        landed on a multiple of 4 itself). int8/uint8's own genuinely
+        1-byte-wide storage broke that assumption two ways at once: a
+        BARE int8/uint8 leaf has leaf_width 1 directly, and a STRUCT
+        leaf containing an int8/uint8 field can land on any width at
+        all (1 int8 + 1 int field is 5, two int8s alone is 2, ...) --
+        both were a real, found bug, not a hypothetical one: the old
+        two-tier version (8-byte chunks, then EXACTLY one 4-byte
+        remainder or none at all) silently copied NOTHING for either
+        shape, since neither loop condition (`>= 8` chunks, `== 4`
+        exactly) was ever satisfied by a 1-byte or 5-byte leaf_width --
+        `b = a` for a `[3]int8` array, or an array of a struct with an
+        int8 field, was a complete, silent no-op, not a wrong-but-
+        partial copy. That generality is exactly why a STRUCT leaf
+        already worked at all before int8/uint8 existed (a struct's
+        own width can be any multiple of 4: 12, 20, 28, ... depending
+        on its fields), and it needed no field-by-field recursion to
+        get there: a raw,
         flat copy of every byte a value occupies is ALWAYS semantically
         identical to copying it "as" whatever logical type or fields
         those bytes represent, given this language's value semantics
@@ -4800,11 +4819,14 @@ class CodeGenerator:
         off = 0
         while off < total:
             # Copy exactly leaf_width bytes starting at offset `off`:
-            # as many 8-byte movq chunks as fit, then one trailing
-            # 4-byte movl if leaf_width isn't itself a multiple of 8
-            # (type_byte_width's own recursive definition guarantees
-            # leaf_width is always a multiple of 4, so this always
-            # covers it exactly, with no remainder left over).
+            # as many 8-byte movq chunks as fit, then one 4-byte movl
+            # if at least 4 bytes remain after that, then a trailing
+            # run of 1-byte movbs (via as_byte_register on the same
+            # scratch_32 register the 4-byte case already uses) for
+            # whatever's left after THAT -- always 0 to 3 bytes, so at
+            # most three movb pairs, never a real loop of its own. See
+            # this method's own docstring for why all three tiers are
+            # necessary now, not just the first two.
             chunk_off = 0
             while leaf_width - chunk_off >= 8:
                 field_src = Memory(src_mem.base, src_mem.offset + off + chunk_off)
@@ -4812,11 +4834,21 @@ class CodeGenerator:
                 instructions.append(MovQ(src=field_src, dst=Register(scratch_64)))
                 instructions.append(MovQ(src=Register(scratch_64), dst=field_dst))
                 chunk_off += 8
-            if leaf_width - chunk_off == 4:
+            if leaf_width - chunk_off >= 4:
                 field_src = Memory(src_mem.base, src_mem.offset + off + chunk_off)
                 field_dst = Memory(dst_mem.base, dst_mem.offset + off + chunk_off)
                 instructions.append(Mov(src=field_src, dst=Register(scratch_32)))
                 instructions.append(Mov(src=Register(scratch_32), dst=field_dst))
+                chunk_off += 4
+            scratch_8 = None
+            while leaf_width - chunk_off >= 1:
+                if scratch_8 is None:
+                    scratch_8 = as_byte_register(Register(scratch_32))
+                field_src = Memory(src_mem.base, src_mem.offset + off + chunk_off)
+                field_dst = Memory(dst_mem.base, dst_mem.offset + off + chunk_off)
+                instructions.append(MovB(src=field_src, dst=scratch_8))
+                instructions.append(MovB(src=scratch_8, dst=field_dst))
+                chunk_off += 1
             off += leaf_width
         return instructions
 
@@ -5311,9 +5343,9 @@ class CodeGenerator:
                 if protect_dst:
                     instructions.append(Mov(src=Register('eax'), dst=Register('r8d')))
                     instructions.append(Pop(Register(dst_mem.base)))
-                    instructions.append(Mov(src=Register('r8d'), dst=elem_mem))
+                    instructions.extend(self._gen_write_scalar_from(Register('r8d'), element_type, elem_mem))
                 else:
-                    instructions.append(Mov(src=Register('eax'), dst=elem_mem))
+                    instructions.extend(self._gen_write_scalar_from(Register('eax'), element_type, elem_mem))
         return instructions
 
     def _gen_protecting_dst_across(self, dst_mem: Memory, inner: List[Instruction]) -> List[Instruction]:
@@ -5552,9 +5584,9 @@ class CodeGenerator:
                 if protect_dst:
                     instructions.append(Mov(src=Register('eax'), dst=Register('r8d')))
                     instructions.append(Pop(Register(dst_mem.base)))
-                    instructions.append(Mov(src=Register('r8d'), dst=field_mem))
+                    instructions.extend(self._gen_write_scalar_from(Register('r8d'), field_type, field_mem))
                 else:
-                    instructions.append(Mov(src=Register('eax'), dst=field_mem))
+                    instructions.extend(self._gen_write_scalar_from(Register('eax'), field_type, field_mem))
         return instructions
 
     def gen_struct_value_into(self, expr: Node, dst_mem: Memory, struct_type: Type) -> List[Instruction]:
@@ -5889,7 +5921,7 @@ class CodeGenerator:
             instructions.extend(self.gen_expr_into(stmt.value, Register('eax')))
             instructions.append(Mov(src=Register('eax'), dst=Register('r8d')))
             instructions.append(Pop(addr_reg))
-            instructions.append(Mov(src=Register('r8d'), dst=Memory('rax', 0)))
+            instructions.extend(self._gen_write_scalar_from(Register('r8d'), element_type, Memory('rax', 0)))
         return instructions
 
     def gen_field_assign(self, stmt: FieldAssign) -> List[Instruction]:
@@ -5955,7 +5987,7 @@ class CodeGenerator:
             instructions.extend(self.gen_expr_into(stmt.value, Register('eax')))
             instructions.append(Mov(src=Register('eax'), dst=Register('r8d')))
             instructions.append(Pop(addr_reg))
-            instructions.append(Mov(src=Register('r8d'), dst=Memory('rax', 0)))
+            instructions.extend(self._gen_write_scalar_from(Register('r8d'), field_type, Memory('rax', 0)))
         return instructions
 
     def _check_struct_and_field_type(self, base_expr: Node, field_name: str) -> Type:
@@ -5979,8 +6011,12 @@ class CodeGenerator:
         docstrings); a slice is a fixed-size 24-byte descriptor,
         dispatched to gen_slice_value_into (see its own docstring) the
         same way; a str is an 8-byte pointer sitting in %rax and needs
-        `movq`; int/bool are still the original 4-byte `movl %eax,
-        ...` -- everything about gen_expr_into/gen_binary_into/
+        `movq`; int/bool/int8/uint8 all compute the same way (via
+        gen_expr_into, unmodified and oblivious to which of the four it
+        actually is) and then write out via _gen_write_scalar_from,
+        which is the one place that actually distinguishes a narrow,
+        1-byte store (int8/uint8) from an ordinary 4-byte one (int/
+        bool) -- everything about gen_expr_into/gen_binary_into/
         gen_unary_op's own internals stays exactly as it always has,
         oblivious to str (or arrays, slices, or structs) entirely;
         only this one call site needs to ask "which width, or which
@@ -5996,7 +6032,7 @@ class CodeGenerator:
         if value_type == Type.STR:
             instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
         else:
-            instructions.append(Mov(src=Register('eax'), dst=Memory('rbp', offset)))
+            instructions.extend(self._gen_write_scalar_from(Register('eax'), value_type, Memory('rbp', offset)))
         return instructions
 
     def _gen_epilogue(self) -> List[Instruction]:
@@ -6296,6 +6332,57 @@ class CodeGenerator:
             instructions.extend(self.gen_expr_into(element, Register('eax')))
         return instructions
 
+    def _gen_read_scalar_into(self, mem: Memory, t: Type, dst: Register) -> List[Instruction]:
+        """Reads a scalar value of type `t` (int, int8, uint8, or
+        bool) from `mem` into `dst` (a 32-bit register) -- the one
+        choke point every scalar READ site in this file goes through,
+        so int8/uint8's own genuinely narrow (1-byte) storage (see
+        type_byte_width) only needed teaching to ONE place, not
+        rediscovering at every Variable/Field/Index read site
+        individually.
+
+        int8 needs a SIGN-extending read (MovSX) and uint8 a ZERO-
+        extending one (MovZX, already built for SetE's own unrelated
+        need) rather than an ordinary 4-byte Mov, which would read
+        three bytes of adjacent memory that were never part of this
+        value at all -- and for int8 specifically, would also silently
+        misinterpret a negative value as a large positive one (int8(-1)
+        == 0xFF read as a raw 4-byte int would become 0x000000FF ==
+        255, not -1) even if the adjacent bytes happened to be zero.
+        Every later arithmetic/comparison instruction in this file
+        already assumes it's operating on a genuinely correct 32-bit
+        value, so getting the WIDENING right here, once, is what lets
+        everything downstream stay completely unaware int8/uint8 are
+        narrower than int at all. int and bool are untouched -- an
+        ordinary 4-byte Mov, exactly as before this method existed."""
+        if t == Type.INT8:
+            return [MovSX(src=mem, dst=dst)]
+        if t == Type.UINT8:
+            return [MovZX(src=mem, dst=dst)]
+        return [Mov(src=mem, dst=dst)]
+
+    def _gen_write_scalar_from(self, src: Register, t: Type, dst_mem: Memory) -> List[Instruction]:
+        """Writes a scalar value of type `t`, already computed into
+        `src` (a 32-bit register), into `dst_mem` -- the WRITE-side
+        counterpart to _gen_read_scalar_into, and the other half of
+        the same one-choke-point principle: every scalar WRITE site in
+        this file goes through this, rather than each one separately
+        remembering that int8/uint8 need a narrower store.
+
+        int8/uint8 need a 1-byte, TRUNCATING store (MovB, of src's own
+        low-byte alias -- see as_byte_register) rather than an ordinary
+        4-byte Mov, which would clobber whatever adjacent memory
+        happens to immediately follow this value (an adjacent struct
+        field, the next array element, ...) -- exactly the kind of
+        silent, hard-to-diagnose corruption a narrow type's own
+        storage existing at all is supposed to make possible to write
+        correctly, not introduce a new way to get wrong. int and bool
+        are untouched -- an ordinary 4-byte Mov, exactly as before
+        this method existed."""
+        if t == Type.INT8 or t == Type.UINT8:
+            return [MovB(src=as_byte_register(src), dst=dst_mem)]
+        return [Mov(src=src, dst=dst_mem)]
+
     def gen_expr_into(self, expr: Node, dst: Operand) -> List[Instruction]:
         """Emits the instructions needed to compute `expr` and leave its
         result sitting in `dst`.
@@ -6392,7 +6479,7 @@ class CodeGenerator:
                 )
             if var_type == Type.STR:
                 return [MovQ(src=Memory('rbp', offset), dst=as_qword_register(dst))]
-            return [Mov(src=Memory('rbp', offset), dst=dst)]
+            return self._gen_read_scalar_into(Memory('rbp', offset), var_type, dst)
         if isinstance(expr, Index):
             element_type = type_of(expr)
             if element_type.kind == TypeKind.ARRAY:
@@ -6424,7 +6511,7 @@ class CodeGenerator:
             if element_type == Type.STR:
                 instructions.append(MovQ(src=Memory(addr_reg.name, 0), dst=addr_reg))
             else:
-                instructions.append(Mov(src=Memory(addr_reg.name, 0), dst=dst))
+                instructions.extend(self._gen_read_scalar_into(Memory(addr_reg.name, 0), element_type, dst))
             return instructions
         if isinstance(expr, Field):
             field_type = type_of(expr)
@@ -6452,7 +6539,7 @@ class CodeGenerator:
             if field_type == Type.STR:
                 instructions.append(MovQ(src=Memory(addr_reg.name, 0), dst=addr_reg))
             else:
-                instructions.append(Mov(src=Memory(addr_reg.name, 0), dst=dst))
+                instructions.extend(self._gen_read_scalar_into(Memory(addr_reg.name, 0), field_type, dst))
             return instructions
         if isinstance(expr, Call):
             if type_of(expr).kind == TypeKind.ARRAY:
@@ -6671,8 +6758,15 @@ class CodeGenerator:
                 left_addr, right_addr, leaf.struct_name, total_width // struct_width, mismatch_label
             ))
         else:
+            # int8/uint8 need a 1-byte step (see this loop's own
+            # docstring for why 4 bytes at a time would be a real,
+            # out-of-bounds bug for either); int/bool/slice all stay
+            # the existing 4-byte step, since type_byte_width already
+            # guarantees their own total_width is a multiple of 4
+            # regardless of nesting depth.
+            step = 1 if leaf in (Type.INT8, Type.UINT8) else 4
             instructions.extend(self._gen_array_flat_byte_equality_loop(
-                left_addr, right_addr, total_width, mismatch_label
+                left_addr, right_addr, total_width, mismatch_label, step=step
             ))
 
         # Fell all the way through: every element matched.
@@ -6683,16 +6777,40 @@ class CodeGenerator:
         instructions.append(Label(done_label))
         return instructions
 
-    def _gen_array_flat_byte_equality_loop(self, left_addr: Register, right_addr: Register, total_width: int, mismatch_label: str) -> List[Instruction]:
-        """Compares `total_width` bytes at left_addr/right_addr, 4
-        bytes at a time -- int/bool are always 4-byte values, and
-        type_byte_width guarantees total_width is always a multiple of
-        4 for an int/bool-leaved array, however deeply nested --
-        jumping to mismatch_label the moment any 4-byte chunk differs,
-        or simply falling through once every chunk has matched. No
-        calls happen anywhere in this loop, so nothing here needs a
-        callee-saved register the way the str-leaf loop below does;
-        every register used is ordinary caller-saved scratch, freely
+    def _gen_array_flat_byte_equality_loop(self, left_addr: Register, right_addr: Register, total_width: int, mismatch_label: str, step: int = 4) -> List[Instruction]:
+        """Compares `total_width` bytes at left_addr/right_addr, `step`
+        bytes at a time -- 4 for an int/bool/slice leaf (type_byte_
+        width guarantees total_width is always a multiple of 4 for any
+        of those, however deeply nested), or 1 for an int8/uint8 leaf.
+
+        The 1-byte case is a real, found bug's fix, not a defensive
+        addition: this loop used to ALWAYS step 4 bytes at a time,
+        which was fine as long as every leaf this compiler had was 4
+        (or a multiple of 4, for a slice leaf's own 24) bytes wide --
+        but int8/uint8's own genuinely 1-byte-wide storage means
+        total_width isn't generally a multiple of 4 at all (a [3]int8
+        array is 3 bytes total). Stepping 4 bytes at a time regardless
+        read one byte past the end of the array on every comparison,
+        silently comparing whatever adjacent stack memory happened to
+        follow it instead of correctly reporting equality.
+
+        The 1-byte step reads each side via MovZX (zero-extending into
+        a 32-bit register) rather than a plain 4-byte Mov, needing a
+        second register (%edx, otherwise unused in this loop) to hold
+        the right side's own zero-extended value before comparing the
+        two directly -- correct regardless of whether the ACTUAL leaf
+        is signed (int8) or unsigned (uint8): byte-for-byte equality
+        never depends on how those bits are INTERPRETED, only on
+        whether they're identical, and zero-extension is a
+        deterministic, injective mapping from one byte to 32 bits, so
+        two bytes are equal if and only if their zero-extended 32-bit
+        versions are.
+
+        Jumps to mismatch_label the moment any chunk differs, or
+        simply falls through once every chunk has matched. No calls
+        happen anywhere in this loop, so nothing here needs a callee-
+        saved register the way the str-leaf loop below does; every
+        register used is ordinary caller-saved scratch, freely
         reusable by whatever runs after this method returns."""
         index_32 = Register('ecx')
         index_64 = Register('rcx')
@@ -6700,7 +6818,7 @@ class CodeGenerator:
         loop_done = self.new_label("array_eq_flat_done")
         left_word_addr = Register('r8')
         right_word_addr = Register('r9')
-        return [
+        instructions = [
             Mov(src=Imm(0), dst=index_32),
             Label(loop_start),
             Cmp(src=Imm(total_width), dst=index_32),
@@ -6709,13 +6827,19 @@ class CodeGenerator:
             AddQ(src=index_64, dst=left_word_addr),
             MovQ(src=right_addr, dst=right_word_addr),
             AddQ(src=index_64, dst=right_word_addr),
-            Mov(src=Memory(left_word_addr.name, 0), dst=Register('eax')),
-            Cmp(src=Memory(right_word_addr.name, 0), dst=Register('eax')),
-            Jne(mismatch_label),
-            Add(src=Imm(4), dst=index_32),
-            Jmp(loop_start),
-            Label(loop_done),
         ]
+        if step == 1:
+            instructions.append(MovZX(src=Memory(left_word_addr.name, 0), dst=Register('eax')))
+            instructions.append(MovZX(src=Memory(right_word_addr.name, 0), dst=Register('edx')))
+            instructions.append(Cmp(src=Register('edx'), dst=Register('eax')))
+        else:
+            instructions.append(Mov(src=Memory(left_word_addr.name, 0), dst=Register('eax')))
+            instructions.append(Cmp(src=Memory(right_word_addr.name, 0), dst=Register('eax')))
+        instructions.append(Jne(mismatch_label))
+        instructions.append(Add(src=Imm(step), dst=index_32))
+        instructions.append(Jmp(loop_start))
+        instructions.append(Label(loop_done))
+        return instructions
 
     def _gen_array_str_equality_loop(self, left_addr: Register, right_addr: Register, element_count: int, mismatch_label: str) -> List[Instruction]:
         """The str-leaf counterpart to _gen_array_flat_byte_equality_
@@ -6896,7 +7020,10 @@ class CodeGenerator:
         genuinely uninitialized memory it used to leave behind (see
         gen_var_decl's own note on the earlier, now-superseded
         behavior). Dispatches by kind:
-          - int/bool: an ordinary 0.
+          - int/bool/int8/uint8: an ordinary 0 -- a plain 4-byte write
+            for int/bool, a 1-byte one (MovB) for int8/uint8, matching
+            each type's own genuine storage width (see type_byte_
+            width).
           - str: the address of a single shared, static empty-string
             constant (_get_empty_str_label) -- NEVER a null pointer;
             see that method's own docstring for why a null zero value
@@ -6962,6 +7089,8 @@ class CodeGenerator:
                 LeaQ(label=self._get_empty_str_label(), dst=scratch),
                 MovQ(src=scratch, dst=dst_mem),
             ]
+        if t == Type.INT8 or t == Type.UINT8:
+            return [MovB(src=Imm(0), dst=dst_mem)]
         return [Mov(src=Imm(0), dst=dst_mem)]  # int or bool
 
     def _gen_zero_array_into(self, array_type: Type, dst_mem: Memory) -> List[Instruction]:
@@ -6974,20 +7103,26 @@ class CodeGenerator:
         determines whether the whole array can be zeroed as one flat
         run of raw bytes, or needs a real per-element write.
 
-          - int, bool, OR SLICE leaf: _gen_array_flat_zero_loop. All
-            three types' own zero value is ALL RAW ZERO BYTES with no
-            pointer or other special representation (a slice's own
-            none-shaped {0, 0, 0} descriptor -- see gen_none_into -- IS
-            24 zero bytes, nothing more), so the WHOLE array, however
-            many elements and however deeply nested, is zeroed as one
-            flat run -- the same "treat a nested array as one
-            contiguous block" trick gen_array_copy/array equality's own
-            flat-byte loop already rely on. Array equality couldn't
+          - int8/uint8, int, bool, OR SLICE leaf: _gen_array_flat_zero_
+            loop. All four types' own zero value is ALL RAW ZERO BYTES
+            with no pointer or other special representation (a slice's
+            own none-shaped {0, 0, 0} descriptor -- see gen_none_
+            into -- IS 24 zero bytes, nothing more), so the WHOLE
+            array, however many elements and however deeply nested, is
+            zeroed as one flat run -- the same "treat a nested array as
+            one contiguous block" trick gen_array_copy/array equality's
+            own flat-byte loop already rely on. Array equality couldn't
             offer slice this same treatment (a slice-typed array
             element isn't COMPARABLE at all yet, so it never reached
             that dispatch), but zeroing has no such restriction: there
             being nothing to compare, only a zero value to write, is
-            exactly what makes slice fit here for free.
+            exactly what makes slice fit here for free. int8/uint8 need
+            a 1-byte STEP through that same flat run rather than
+            int/bool/slice's own 4-byte one -- see _gen_array_flat_
+            zero_loop's own docstring for why (the identical "total_
+            width isn't generally a multiple of 4 for a genuinely
+            1-byte-wide leaf" reasoning array equality's own flat loop
+            already needed fixing for).
           - str leaf: _gen_array_str_zero_loop -- a str's own zero
             value is a POINTER (see _gen_zero_value_into's own STR
             case), so each element needs that same address written
@@ -7004,12 +7139,24 @@ class CodeGenerator:
         if leaf.kind == TypeKind.STRUCT:
             struct_width = type_byte_width(leaf, self.struct_registry)
             return self._gen_array_struct_zero_loop(dst_mem, leaf.struct_name, total_width // struct_width)
-        return self._gen_array_flat_zero_loop(dst_mem, total_width)  # int, bool, or slice leaf
+        step = 1 if leaf in (Type.INT8, Type.UINT8) else 4
+        return self._gen_array_flat_zero_loop(dst_mem, total_width, step=step)
 
-    def _gen_array_flat_zero_loop(self, dst_mem: Memory, total_width: int) -> List[Instruction]:
-        """Zeroes `total_width` bytes at dst_mem, 4 bytes at a time --
-        see _gen_zero_array_into's own docstring for why this is
-        correct for an int, bool, or slice leaf at any nesting depth.
+    def _gen_array_flat_zero_loop(self, dst_mem: Memory, total_width: int, step: int = 4) -> List[Instruction]:
+        """Zeroes `total_width` bytes at dst_mem, `step` bytes at a
+        time -- see _gen_zero_array_into's own docstring for why 4 is
+        correct for an int, bool, or slice leaf at any nesting depth,
+        via a plain 4-byte Mov of Imm(0).
+
+        1 is correct instead for an int8/uint8 leaf (via a 1-byte
+        MovB, rather than a 4-byte Mov, of that same Imm(0)) for the
+        identical reason _gen_array_flat_byte_equality_loop's own step
+        parameter exists: type_byte_width no longer guarantees total_
+        width is a multiple of 4 once a genuinely 1-byte-wide leaf
+        exists (a [3]int8 array is 3 bytes total) -- stepping 4 bytes
+        at a time regardless would write one byte past the end of the
+        array, corrupting whatever stack memory happens to follow it.
+
         No calls happen anywhere in this loop, so every register here
         is ordinary caller-saved scratch, freely reusable by whatever
         runs after this method returns -- the same posture _gen_array_
@@ -7039,8 +7186,11 @@ class CodeGenerator:
         instructions.append(Jae(loop_done))
         instructions.append(MovQ(src=base_reg, dst=write_addr))
         instructions.append(AddQ(src=index_64, dst=write_addr))
-        instructions.append(Mov(src=Imm(0), dst=Memory(write_addr.name, 0)))
-        instructions.append(Add(src=Imm(4), dst=index_32))
+        if step == 1:
+            instructions.append(MovB(src=Imm(0), dst=Memory(write_addr.name, 0)))
+        else:
+            instructions.append(Mov(src=Imm(0), dst=Memory(write_addr.name, 0)))
+        instructions.append(Add(src=Imm(step), dst=index_32))
         instructions.append(Jmp(loop_start))
         instructions.append(Label(loop_done))
         return instructions

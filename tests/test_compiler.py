@@ -5415,6 +5415,626 @@ class TestInt8Uint8TypeSystem:
         self._check("def int main():\n    [3]uint8 arr\n    return 0\n")
 
 
+# ---------------------------------------------------------------------------
+# int8/uint8, step 2 of 3: genuinely narrow (1-byte) STORAGE, layered on top
+# of step 1's already-correct type system. Full compile-and-run tests now,
+# unlike step 1's semantic-layer-only ones, since storage correctness is
+# exactly what this step is about.
+#
+# The central design: type_byte_width now returns 1 for int8/uint8 (making
+# every ADDRESS computation that already went through it -- array
+# indexing's own scale factor, a struct field's own offset -- correct for
+# free, no changes needed at either site). Every scalar READ site funnels
+# through a new _gen_read_scalar_into (sign/zero-extending via the new
+# MovSX/the existing MovZX rather than an ordinary 4-byte Mov), and every
+# scalar WRITE site through a new _gen_write_scalar_from (truncating via a
+# 1-byte MovB rather than a 4-byte Mov) -- the same "one choke point"
+# principle type_byte_width itself already demonstrated one level up.
+# Arithmetic wrapping needed NO changes to gen_binary_into/gen_unary_into
+# themselves: an operand is already correctly widened by the time it's
+# read, the result is already computed at ordinary 32-bit precision, and
+# truncation happens naturally the moment that result is written anywhere
+# -- see test_int8_addition_wraps and friends below, which is what actually
+# proves this rather than just asserting it.
+#
+# Two genuinely serious, pre-existing bugs were found (not introduced) by
+# this step, both from the same root cause: code that assumed a leaf's own
+# width was always a multiple of 4, an assumption that was only ever true
+# because no narrower type had existed until now.
+#   1. The array-equality and array-zero-init flat loops (_gen_array_flat_
+#      byte_equality_loop, _gen_array_flat_zero_loop) stepped 4 bytes at a
+#      time unconditionally -- reading or writing one byte past the end of
+#      any array whose total width wasn't a multiple of 4 (a [3]int8 array
+#      is 3 bytes). Fixed by parameterizing the step (1 for an int8/uint8
+#      leaf, 4 otherwise); the 1-byte equality case reads both sides via
+#      MovZX specifically BECAUSE byte equality doesn't care about sign
+#      interpretation, only raw identity.
+#   2. gen_array_copy -- the single mechanism behind plain array-to-array
+#      assignment, AND function parameter passing for an array argument --
+#      only ever emitted 8-byte chunks followed by EXACTLY one 4-byte
+#      remainder. A leaf width of 1 (a bare int8/uint8 leaf) or 5, 6, 9, ...
+#      (a STRUCT leaf containing an int8/uint8 field) satisfied neither
+#      condition, so the copy was a complete, SILENT no-op -- `arr2 = arr1`
+#      simply left arr2 unchanged, for any such leaf, with no error at all.
+#      Fixed by adding a third tier (a trailing run of 1-byte movbs for
+#      whatever remains after the 8- and 4-byte tiers), which generalizes
+#      correctly to any leaf width, not just int8/uint8's own narrow case.
+# ---------------------------------------------------------------------------
+
+class TestInt8Uint8Storage:
+    pytestmark = GCC_SKIP
+
+    def test_int8_vardecl_and_return(self):
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    int8 x = 5\n"
+            "    return x\n",
+            5,
+        )
+
+    def test_int8_negative_literal_wraps_as_exit_code(self):
+        """Exit codes are unsigned bytes at the OS level -- -5 comes
+        back as 251, the correct two's-complement reinterpretation,
+        not a sign/truncation bug of its own."""
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    int8 x = -5\n"
+            "    return x\n",
+            251,
+        )
+
+    def test_uint8_vardecl_and_return(self):
+        assert_program_exit_code(
+            "def uint8 main():\n"
+            "    uint8 x = 200\n"
+            "    return x\n",
+            200,
+        )
+
+    def test_two_int8_locals_are_independently_stored(self):
+        """Proves adjacent 1-byte slots don't alias each other -- a
+        real risk the moment storage is genuinely narrower than a
+        stack slot's own natural alignment."""
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    int8 a = 10\n"
+            "    int8 b = 20\n"
+            "    return a\n",
+            10,
+        )
+
+    def test_int8_assign(self):
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    int8 x = 1\n"
+            "    x = 42\n"
+            "    return x\n",
+            42,
+        )
+
+    def test_int8_struct_field_read(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int8 x\n"
+            "    uint8 y\n"
+            "\n"
+            "def int8 main():\n"
+            "    Point p = Point(5, 10)\n"
+            "    return p.x\n",
+            5,
+        )
+
+    def test_int8_struct_field_read_second_field(self):
+        """The struct's second field specifically -- proves _field_
+        offset lays out the first (narrower) field correctly, not
+        just that a lone field works."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int8 x\n"
+            "    uint8 y\n"
+            "\n"
+            "def uint8 main():\n"
+            "    Point p = Point(5, 10)\n"
+            "    return p.y\n",
+            10,
+        )
+
+    def test_int8_struct_field_assign(self):
+        assert_program_exit_code(
+            "struct S:\n"
+            "    int8 v\n"
+            "\n"
+            "def int8 main():\n"
+            "    S s = S(0)\n"
+            "    s.v = 77\n"
+            "    return s.v\n",
+            77,
+        )
+
+    def test_int_field_after_int8_field_in_struct(self):
+        """A wider field declared AFTER a narrower one -- proves its
+        own offset correctly accounts for the narrow field's real
+        (1-byte) width, not an assumed 4-byte one. Kept under 256 to
+        avoid any confusion with a process exit code's own unrelated
+        truncation to an unsigned byte at the OS level."""
+        assert_program_exit_code(
+            "struct S:\n"
+            "    int8 x\n"
+            "    int z\n"
+            "\n"
+            "def int main():\n"
+            "    S s = S(1, 200)\n"
+            "    return s.z\n",
+            200,
+        )
+
+    def test_int8_array_element_read(self):
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    [3]int8 arr = [1, 2, 3]\n"
+            "    return arr[2]\n",
+            3,
+        )
+
+    def test_int8_array_index_assign(self):
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    [3]int8 arr = [0, 0, 0]\n"
+            "    arr[1] = 99\n"
+            "    return arr[1]\n",
+            99,
+        )
+
+    def test_int8_function_parameter_and_return(self):
+        assert_program_exit_code(
+            "def int8 identity(int8 x):\n"
+            "    return x\n"
+            "\n"
+            "def int8 main():\n"
+            "    return identity(100)\n",
+            100,
+        )
+
+    def test_int8_negative_function_argument(self):
+        assert_program_exit_code(
+            "def int8 identity(int8 x):\n"
+            "    return x\n"
+            "\n"
+            "def int8 main():\n"
+            "    return identity(-5)\n",
+            251,
+        )
+
+    def test_uint8_function_parameter(self):
+        assert_program_exit_code(
+            "def uint8 identity(uint8 x):\n"
+            "    return x\n"
+            "\n"
+            "def uint8 main():\n"
+            "    return identity(200)\n",
+            200,
+        )
+
+    def test_int8_addition_wraps(self):
+        """100 + 100 = 200, out of int8's [-128, 127] range, wraps to
+        -56 -- the actual proof that widen-compute-truncate produces
+        correct wrapping arithmetic end to end, not just that the
+        type system allows the expression."""
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    int8 a = 100\n"
+            "    int8 b = 100\n"
+            "    int8 c = a + b\n"
+            "    return c\n",
+            256 - 56,
+        )
+
+    def test_uint8_addition_wraps(self):
+        assert_program_exit_code(
+            "def uint8 main():\n"
+            "    uint8 a = 200\n"
+            "    uint8 b = 100\n"
+            "    uint8 c = a + b\n"
+            "    return c\n",
+            44,
+        )
+
+    def test_int8_multiplication_wraps(self):
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    int8 a = 20\n"
+            "    int8 b = 20\n"
+            "    int8 c = a * b\n"
+            "    return c\n",
+            (20 * 20) % 256,
+        )
+
+    def test_int8_negate_boundary_wraps(self):
+        """-(-128) overflows int8's own range and wraps back to -128
+        -- the classic two's-complement negation-boundary case."""
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    int8 a = -128\n"
+            "    int8 b = -a\n"
+            "    return b\n",
+            256 - 128,
+        )
+
+    def test_int8_subtraction_negative_result(self):
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    int8 a = 5\n"
+            "    int8 b = 10\n"
+            "    int8 c = a - b\n"
+            "    return c\n",
+            256 - 5,
+        )
+
+    def test_int8_division(self):
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    int8 a = 100\n"
+            "    int8 b = 7\n"
+            "    int8 c = a / b\n"
+            "    return c\n",
+            100 // 7,
+        )
+
+    def test_int8_modulo(self):
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    int8 a = 100\n"
+            "    int8 b = 7\n"
+            "    int8 c = a % b\n"
+            "    return c\n",
+            100 % 7,
+        )
+
+    def test_int8_bitwise_and(self):
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    int8 a = 12\n"
+            "    int8 b = 10\n"
+            "    int8 c = a & b\n"
+            "    return c\n",
+            12 & 10,
+        )
+
+    def test_int8_complement(self):
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    int8 a = 5\n"
+            "    int8 b = ~a\n"
+            "    return b\n",
+            256 + (~5),
+        )
+
+    def test_int8_comparison_respects_sign(self):
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    int8 a = -1\n"
+            "    int8 b = 1\n"
+            "    if a < b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_uint8_comparison_is_unsigned(self):
+        """200 has to compare as GREATER than 100, not as a small or
+        negative number -- would fail if uint8 were ever accidentally
+        sign-extended instead of zero-extended when read."""
+        assert_program_exit_code(
+            "def uint8 main():\n"
+            "    uint8 a = 200\n"
+            "    uint8 b = 100\n"
+            "    if a > b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_int8_array_equality_equal(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    [3]int8 a = [1, 2, 3]\n"
+            "    [3]int8 b = [1, 2, 3]\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_int8_array_equality_not_equal(self):
+        """Regression check on the equality-loop step-size fix: proves
+        it doesn't just avoid crashing on a non-multiple-of-4 width,
+        it still correctly detects a genuine difference."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    [3]int8 a = [1, 2, 3]\n"
+            "    [3]int8 b = [1, 2, 9]\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            0,
+        )
+
+    def test_uint8_array_equality(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    [5]uint8 a = [1, 2, 3, 4, 5]\n"
+            "    [5]uint8 b = [1, 2, 3, 4, 5]\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_int8_array_zero_init_values(self):
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    [3]int8 arr\n"
+            "    return arr[0] + arr[1] + arr[2]\n",
+            0,
+        )
+
+    def test_int8_array_zero_init_does_not_corrupt_adjacent_local(self):
+        """The actual regression check for the zero-loop step-size
+        bug: a [3]int8 array zeroed 4 bytes at a time would write one
+        byte past its own end, which -- depending on stack layout --
+        could corrupt an adjacent local. Declaring the guard BEFORE
+        the array puts it at a lower address, exactly where a 4-byte-
+        stepping over-write from the array's own zero-init would
+        land."""
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    int8 guard = 42\n"
+            "    [3]int8 arr\n"
+            "    return guard\n",
+            42,
+        )
+
+    def test_struct_with_int8_field_zero_init(self):
+        assert_program_exit_code(
+            "struct S:\n"
+            "    int8 x\n"
+            "    uint8 y\n"
+            "    int z\n"
+            "\n"
+            "def int main():\n"
+            "    S s\n"
+            "    return s.z\n",
+            0,
+        )
+
+    def test_struct_with_int8_array_field_zero_init_does_not_corrupt_adjacent_field(self):
+        assert_program_exit_code(
+            "struct S:\n"
+            "    [3]int8 arr\n"
+            "    int guard\n"
+            "\n"
+            "def int main():\n"
+            "    S s\n"
+            "    return s.guard\n",
+            0,
+        )
+
+    def test_plain_array_assignment_with_int8_leaf(self):
+        """The actual regression check for the gen_array_copy bug: a
+        [3]int8 array's own leaf_width (1) satisfied neither of the
+        old two-tier copy loop's own conditions, making `b = a` a
+        complete, silent no-op. This is the single most direct test
+        of that fix."""
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    [3]int8 a = [1, 2, 3]\n"
+            "    [3]int8 b = [0, 0, 0]\n"
+            "    b = a\n"
+            "    return b[0] + b[1] + b[2]\n",
+            6,
+        )
+
+    def test_array_of_struct_with_int8_field_assignment(self):
+        """A struct LEAF containing an int8 field -- leaf_width 5 here
+        (1 + 4), which the old gen_array_copy also silently failed to
+        copy at all, for the identical underlying reason a bare int8
+        leaf did."""
+        assert_program_exit_code(
+            "struct S:\n"
+            "    int8 x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    [2]S a = [S(1, 10), S(2, 20)]\n"
+            "    [2]S b = [S(0, 0), S(0, 0)]\n"
+            "    b = a\n"
+            "    return b[0].y + b[1].y\n",
+            30,
+        )
+
+    def test_array_of_struct_with_two_int8_fields_assignment(self):
+        """leaf_width 2 here (1 + 1) -- neither the 8- nor the 4-byte
+        tier ever fires at all; the whole copy is exclusively 1-byte
+        movbs."""
+        assert_program_exit_code(
+            "struct Pair:\n"
+            "    int8 a\n"
+            "    int8 b\n"
+            "\n"
+            "def int8 main():\n"
+            "    [3]Pair arr = [Pair(1, 2), Pair(3, 4), Pair(5, 6)]\n"
+            "    [3]Pair arr2 = [Pair(0, 0), Pair(0, 0), Pair(0, 0)]\n"
+            "    arr2 = arr\n"
+            "    return arr2[2].b\n",
+            6,
+        )
+
+    def test_array_of_struct_with_mixed_field_widths_assignment(self):
+        """leaf_width 6 here (1 + 4 + 1) -- exercises all three tiers
+        (a 4-byte chunk, then two separate 1-byte ones) in a single
+        leaf's own copy."""
+        assert_program_exit_code(
+            "struct Mixed:\n"
+            "    int8 a\n"
+            "    int b\n"
+            "    uint8 c\n"
+            "\n"
+            "def uint8 main():\n"
+            "    [2]Mixed arr = [Mixed(1, 100, 2), Mixed(3, 200, 4)]\n"
+            "    [2]Mixed arr2 = [Mixed(0, 0, 0), Mixed(0, 0, 0)]\n"
+            "    arr2 = arr\n"
+            "    return arr2[1].c\n",
+            4,
+        )
+
+    def test_array_parameter_with_int8_leaf(self):
+        """Function parameter passing for an array argument goes
+        through gen_array_copy too (see gen_function's own parameter
+        loop) -- the identical fix, a different call site."""
+        assert_program_exit_code(
+            "def int8 sumFirstTwo([3]int8 arr):\n"
+            "    return arr[0] + arr[1]\n"
+            "\n"
+            "def int8 main():\n"
+            "    [3]int8 a = [10, 20, 30]\n"
+            "    return sumFirstTwo(a)\n",
+            30,
+        )
+
+    def test_array_returning_function_with_int8_leaf(self):
+        assert_program_exit_code(
+            "def [3]int8 makeArr():\n"
+            "    return [7, 8, 9]\n"
+            "\n"
+            "def int8 main():\n"
+            "    [3]int8 a = makeArr()\n"
+            "    return a[0] + a[1] + a[2]\n",
+            24,
+        )
+
+    def test_multidimensional_int8_array(self):
+        """Total width 6 (2*3*1) -- still not a multiple of 4,
+        exercising the same address math and flat-loop fixes one
+        dimension up."""
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    [2][3]int8 m = [[1, 2, 3], [4, 5, 6]]\n"
+            "    return m[1][2]\n",
+            6,
+        )
+
+    def test_multidimensional_int8_array_zero_init(self):
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    [2][3]int8 m\n"
+            "    return m[0][0] + m[1][2]\n",
+            0,
+        )
+
+    def test_multidimensional_int8_array_equality(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    [2][3]int8 a = [[1, 2, 3], [4, 5, 6]]\n"
+            "    [2][3]int8 b = [[1, 2, 3], [4, 5, 6]]\n"
+            "    if a == b:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_slice_of_int8_basic(self):
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    []int8 s = []int8[1, 2, 3]\n"
+            "    return s[0] + s[1] + s[2]\n",
+            6,
+        )
+
+    def test_slice_of_uint8_basic(self):
+        assert_program_exit_code(
+            "def uint8 main():\n"
+            "    []uint8 s = []uint8[200, 50]\n"
+            "    return s[0] + s[1]\n",
+            (200 + 50) % 256,
+        )
+
+    def test_slice_of_int8_index_assign(self):
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    []int8 s = []int8[1, 2, 3]\n"
+            "    s[1] = 99\n"
+            "    return s[1]\n",
+            99,
+        )
+
+    def test_slice_of_int8_len(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    []int8 s = []int8[1, 2, 3, 4, 5]\n"
+            "    return len(s)\n",
+            5,
+        )
+
+    def test_append_int8_to_slice(self):
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    []int8 s = []int8[1, 2]\n"
+            "    s = append(s, 3)\n"
+            "    return s[0] + s[1] + s[2]\n",
+            6,
+        )
+
+    def test_append_uint8_to_slice(self):
+        assert_program_exit_code(
+            "def uint8 main():\n"
+            "    []uint8 s = []uint8[1, 2]\n"
+            "    s = append(s, 250)\n"
+            "    return s[2]\n",
+            250,
+        )
+
+    def test_append_int8_across_multiple_growths(self):
+        """Repeated append (forcing several reallocations) with an
+        adjacent local -- a stress test for corruption during backing-
+        array growth, not just a single, small append."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    []int8 s = []int8[1]\n"
+            "    int guard = 77\n"
+            "    int i = 0\n"
+            "    while i < 20:\n"
+            "        s = append(s, 2)\n"
+            "        i = i + 1\n"
+            "    return guard\n",
+            77,
+        )
+
+    def test_append_int8_across_multiple_growths_values(self):
+        assert_program_exit_code(
+            "def int8 main():\n"
+            "    []int8 s = []int8[1]\n"
+            "    int i = 0\n"
+            "    while i < 20:\n"
+            "        s = append(s, 2)\n"
+            "        i = i + 1\n"
+            "    return s[20]\n",
+            2,
+        )
+
+    def test_print_int8_not_yet_supported(self):
+        """Explicitly documents the current, deliberate scope boundary
+        for this step: print's own type-descriptor machinery doesn't
+        recognize int8/uint8 yet (that's step 3's job) -- this fails
+        LOUDLY, with a clear CodegenError, rather than silently
+        misprinting or corrupting anything, which is the right failure
+        mode for an intentionally-incomplete feature."""
+        with pytest.raises(CodegenError, match="No type descriptor rule"):
+            source = "def int main():\n    int8 x = 5\n    print(x)\n    return 0\n"
+            ast = _parse(source)
+            analyze(ast)
+            generate_asm(ast, platform=ASM_PLATFORM)
+
+
 class TestTypedArrayLiterals:
     pytestmark = GCC_SKIP
 

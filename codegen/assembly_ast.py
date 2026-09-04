@@ -150,10 +150,35 @@ class MovZX(Instruction):
     """Zero-extends an 8-bit src into a 32-bit dst. Needed after SetE,
     since `sete` only ever writes the low byte (e.g. %al) and leaves the
     rest of the containing 32-bit register (e.g. %eax) untouched -- so
-    without this, %eax could still hold garbage in its upper 24 bits."""
+    without this, %eax could still hold garbage in its upper 24 bits.
+    Also reused directly for reading a uint8-typed value out of memory
+    into a 32-bit register for arithmetic -- src can be a plain Memory
+    operand here just as well as a register; the mnemonic itself
+    (movzbl) already tells the assembler to read exactly one byte from
+    wherever src points, with no size suffix needed on the operand
+    itself the way there would be in Intel syntax."""
     src: Operand
     dst: Operand
     mnemonic = "movzbl"
+
+    def operands(self) -> list[str]:
+        return [self.src.emit(), self.dst.emit()]
+
+
+@dataclass
+class MovSX(Instruction):
+    """Sign-extends an 8-bit src into a 32-bit dst (`movsbl`) -- the
+    int8 counterpart to MovZX's own uint8 one. Needed the first time
+    this compiler ever reads a SIGNED sub-word value: zero-extension
+    (MovZX) is correct for uint8 (there's no sign bit to propagate),
+    but wrong for int8 -- a negative int8 value zero-extended would
+    silently become a large POSITIVE 32-bit one instead (e.g. int8(-1)
+    == 0xFF would zero-extend to 0x000000FF == 255, not -1), corrupting
+    every arithmetic operation and comparison performed on it. Like
+    MovZX, src can be a plain Memory operand directly."""
+    src: Operand
+    dst: Operand
+    mnemonic = "movsbl"
 
     def operands(self) -> list[str]:
         return [self.src.emit(), self.dst.emit()]
