@@ -1631,20 +1631,13 @@ from typing import Dict, List, Optional, Tuple, Union
 from codegen.assembly_ast import (
     Add,
     AddQ,
-    And,
-    AndQ,
     AsmFunction,
     AsmProgram,
     CallInstr,
-    Cdq,
     Cmp,
     CmpQ,
-    Cqto,
-    IDiv,
-    IDivQ,
     Imm,
     IMul,
-    IMulQ,
     Instruction,
     Ja,
     Jae,
@@ -1661,28 +1654,15 @@ from codegen.assembly_ast import (
     MovB,
     MovQ,
     MovZX,
-    MovSX,
-    MovSXD,
-    Neg,
-    NegQ,
-    Not,
-    NotQ,
     Operand,
-    Or,
-    OrQ,
     Pop,
     Push,
     Register,
     Ret,
     SetCC,
-    ShiftLeft,
-    ShiftLeftQ,
     ShiftRightArithmetic,
-    ShiftRightArithmeticQ,
     Sub,
     SubQ,
-    Xor,
-    XorQ,
 )
 from codegen.calling_convention import CALLEE_SAVED_SCRATCH_REGISTERS, CallingConventionMixin
 from codegen.emitter import Emitter
@@ -1692,20 +1672,14 @@ from codegen.scalars import ScalarsMixin
 from codegen.statements import StatementsMixin
 from codegen.strings import StringsMixin
 from codegen.structs import StructsMixin
-from codegen.utils import as_byte_register, as_qword_register, leaf_type, type_byte_width, type_of, \
-    ARG_REGISTERS_64, COMPARISON_CONDITION_CODES
+from codegen.utils import as_byte_register, leaf_type, type_byte_width, type_of, ARG_REGISTERS_64
 from lexer import lex
 from parser import (
     ArrayLiteral,
     Assign,
     Binary,
     BinaryOp,
-    BoolLiteral,
-    Break,
     Call,
-    Cast,
-    Constant,
-    Continue,
     ExprStmt,
     Field,
     FieldAssign,
@@ -1720,9 +1694,7 @@ from parser import (
     Program,
     Return,
     Slice,
-    StringLiteral,
     Unary,
-    UnaryOp,
     VarDecl,
     Variable,
     While,
