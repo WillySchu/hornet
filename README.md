@@ -14,7 +14,6 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- ArraysSlicesMixin
 - Consider a FrameMixin
 - `type` type.
 - ` typeof`
