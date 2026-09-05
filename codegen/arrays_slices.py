@@ -972,6 +972,50 @@ class ArraysSlicesMixin:
         instructions.append(CallInstr(expr.name))
         return instructions
 
+    def gen_array_call_into(self, dst_mem: Memory, expr: Call, array_type: Type) -> list[Instruction]:
+        """Calls a function that returns an array, writing its result
+        directly into dst_mem via the hidden-pointer convention: the
+        callee receives a pointer to where its result should go as an
+        extra, FIRST argument (in %rdi), with every genuine argument
+        shifted one register position later (see gen_function's own
+        handling on the receiving side). The callee writes its return
+        value directly through that pointer (see gen_return's array
+        case) -- there's nothing for the CALLER to copy afterward,
+        unlike an ordinary array-typed expression. This is also what
+        makes forwarding one array-returning call's result straight out
+        of another free (`return bar()`, where bar also returns an
+        array): the SAME destination address just gets passed one
+        level deeper, with no intermediate copy -- see gen_return's own
+        docstring.
+
+        dst_mem's own address is computed and pushed onto the stack
+        FIRST, before any argument is evaluated, so it survives
+        regardless of what an argument expression does internally (a
+        nested call, string concatenation, another indexing operation
+        -- anything that might otherwise clobber a register holding it)
+        -- the same push-before-evaluating-something-else discipline
+        used everywhere else in this file a value needs to survive past
+        a sub-expression. Every other argument is handled by
+        _gen_call_arguments_into (reg_shift=1, since the hidden pointer
+        already occupies the first register slot) -- see its own
+        docstring for how a slice-typed argument's own three slots are
+        placed correctly among any ordinary scalar/array ones.
+        """
+        total_slots = 1 + self._total_arg_slots(expr.args)  # +1: the hidden pointer itself
+        if total_slots > 6:
+            raise CodegenError(
+                f"Call to '{expr.name}' needs {total_slots} argument "
+                f"register(s) (the hidden output pointer uses one, "
+                f"and a slice-typed argument needs 3) -- this compiler "
+                f"only supports up to 6"
+            )
+        instructions = self._gen_address_of_memory_into(dst_mem, Register('rax'))
+        instructions.append(Push(Register('rax')))
+        instructions.extend(self._gen_call_arguments_into(expr.args, reg_shift=1))
+        instructions.append(Pop(Register('rdi')))
+        instructions.append(CallInstr(expr.name))
+        return instructions
+
     def gen_array_literal_into(self, dst_mem: Memory, expr: ArrayLiteral, array_type: Type) -> list[Instruction]:
         """Stores an array literal's elements directly into consecutive
         memory locations starting at dst_mem -- almost always a fixed
@@ -2424,50 +2468,6 @@ class ArraysSlicesMixin:
                 CallInstr('fflush'),
                 CallInstr('abort'),
             ])
-        return instructions
-
-    def gen_array_call_into(self, dst_mem: Memory, expr: Call, array_type: Type) -> list[Instruction]:
-        """Calls a function that returns an array, writing its result
-        directly into dst_mem via the hidden-pointer convention: the
-        callee receives a pointer to where its result should go as an
-        extra, FIRST argument (in %rdi), with every genuine argument
-        shifted one register position later (see gen_function's own
-        handling on the receiving side). The callee writes its return
-        value directly through that pointer (see gen_return's array
-        case) -- there's nothing for the CALLER to copy afterward,
-        unlike an ordinary array-typed expression. This is also what
-        makes forwarding one array-returning call's result straight out
-        of another free (`return bar()`, where bar also returns an
-        array): the SAME destination address just gets passed one
-        level deeper, with no intermediate copy -- see gen_return's own
-        docstring.
-
-        dst_mem's own address is computed and pushed onto the stack
-        FIRST, before any argument is evaluated, so it survives
-        regardless of what an argument expression does internally (a
-        nested call, string concatenation, another indexing operation
-        -- anything that might otherwise clobber a register holding it)
-        -- the same push-before-evaluating-something-else discipline
-        used everywhere else in this file a value needs to survive past
-        a sub-expression. Every other argument is handled by
-        _gen_call_arguments_into (reg_shift=1, since the hidden pointer
-        already occupies the first register slot) -- see its own
-        docstring for how a slice-typed argument's own three slots are
-        placed correctly among any ordinary scalar/array ones.
-        """
-        total_slots = 1 + self._total_arg_slots(expr.args)  # +1: the hidden pointer itself
-        if total_slots > 6:
-            raise CodegenError(
-                f"Call to '{expr.name}' needs {total_slots} argument "
-                f"register(s) (the hidden output pointer uses one, "
-                f"and a slice-typed argument needs 3) -- this compiler "
-                f"only supports up to 6"
-            )
-        instructions = self._gen_address_of_memory_into(dst_mem, Register('rax'))
-        instructions.append(Push(Register('rax')))
-        instructions.extend(self._gen_call_arguments_into(expr.args, reg_shift=1))
-        instructions.append(Pop(Register('rdi')))
-        instructions.append(CallInstr(expr.name))
         return instructions
 
     def gen_len_call_into(self, expr: Call, dst: Operand) -> list[Instruction]:
