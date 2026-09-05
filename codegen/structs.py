@@ -26,18 +26,10 @@ from semantic import TypeKind, Type
 class StructsMixin:
     """TODO"""
     def _field_offset(self, struct_name: str, field_name: str) -> int:
-        """Returns the byte offset of `field_name` within a value of
-        the named struct type -- the sum of every PRECEDING field's
-        own width, in declaration order (StructInfo.fields is an
-        ordinary dict, which already preserves insertion order -- see
-        its own docstring in semantic.py). No padding or alignment is
-        ever inserted between fields: x86-64 doesn't require aligned
-        access the way some architectures do, the same reasoning
-        _frame_size's own docstring already gives for why a stack
-        frame's own locals need none either, so this is exactly the
-        same "sum of what came before" computation type_byte_width
-        itself already does for a struct's own TOTAL width, just
-        stopping partway through instead of summing everything."""
+        """Byte offset of `field_name` within struct_name: the sum of
+        every preceding field's width, in declaration order. No
+        padding or alignment is inserted between fields -- x86-64
+        doesn't require aligned access."""
         offset = 0
         for name, field_type in self.struct_registry[struct_name].fields.items():
             if name == field_name:
@@ -47,26 +39,12 @@ class StructsMixin:
 
     def gen_struct_address_into(self, expr: Node, dst: Register) -> list[Instruction]:
         """Computes the ADDRESS of a struct-typed expression -- a
-        Variable referring to a struct-typed local or parameter, a
-        Field node that itself resolves to a nested struct (`a.inner`,
-        the outer field of a chain like `a.inner.v`), or an Index node
-        that resolves to a struct-typed array element (`rows[0]`,
-        where `rows` is an array of structs) -- into the 64-bit
-        register `dst`. Mirrors gen_array_address_into exactly, one
-        level over -- see its own docstring for why a heap-allocated
-        Variable needs a genuinely different instruction (a movq to
-        LOAD the pointer its own slot holds) rather than just a
-        different offset, which applies identically here.
+        Variable, a Field resolving to a nested struct (`a.inner`), or
+        an Index into an array of structs (`rows[0]`) -- into `dst`.
+        Mirrors gen_array_address_into one level over.
 
-        A struct-returning Call as a field's own base (`makePoint(1,
-        2).x`) is deliberately NOT supported yet -- matching this
-        file's own established restriction on other unnamed-expression
-        bases (see gen_slice_arg_into's identical one for a slice-typed
-        call argument): materializing an arbitrary struct-returning
-        expression into a scratch slot just to immediately read one
-        field back out isn't taken on for what both cases judge to be
-        a comparatively rare shape. Assign it to a named variable
-        first."""
+        A struct-returning Call as a field's base (`makePoint(1,
+        2).x`) isn't supported -- assign it to a variable first."""
         if isinstance(expr, Variable):
             offset = self._local_offset(expr.name)
             struct_type = self._local_type(expr.name)
@@ -86,19 +64,12 @@ class StructsMixin:
         raise CodegenError(f"Cannot compute a struct address for: {expr!r}")
 
     def gen_field_address_into(self, expr: Field, dst: Register) -> list[Instruction]:
-        """Computes the address of `expr.base.expr.name` into `dst` (a
-        64-bit register) -- the shared foundation for reading a field
-        (gen_expr_into's Field case) and writing one (gen_field_
-        assign), exactly mirroring gen_index_address_into's own role
-        for Index one level over. expr.base's own address is computed
-        first (via gen_struct_address_into, which recurses through
-        however many further Field/Index links precede this one --
-        `a.b.c`, `rows[0].f`, ... -- with no depth limit, the same way
-        gen_array_address_into's own Index recursion has none), then
-        the field's own byte offset (see _field_offset) is added on
-        top -- skipped entirely when it's zero (the field is first in
-        its own struct's declaration order), since `addq $0, dst`
-        would be correct but pointlessly wasteful."""
+        """Computes the address of `expr.base.expr.name` into `dst` --
+        the shared foundation for reading (gen_expr_into's Field case)
+        and writing (gen_field_assign) a field. Recurses through
+        gen_struct_address_into for chains of arbitrary depth
+        (`a.b.c`, `rows[0].f`), then adds the field's own byte offset
+        (skipped when zero)."""
         base_type = type_of(expr.base)
         if base_type.kind != TypeKind.STRUCT:
             raise CodegenError(
@@ -112,103 +83,45 @@ class StructsMixin:
         return instructions
 
     def gen_struct_call_into(self, dst_mem: Memory, expr: Call) -> list[Instruction]:
-        """Calls a function that returns a struct, writing its result
-        directly into dst_mem via the exact same hidden-pointer
-        convention gen_array_call_into already uses -- see its own
-        docstring for the full reasoning, unchanged in every respect:
-        neither method's own body actually reads its (array- or
-        struct-typed) destination's width at all, since the callee is
-        the one that knows how many bytes its own return type needs
-        and writes exactly that many through the pointer it receives
-        -- so the exact same mechanism serves both without needing its
-        own struct-specific variant beyond this thin, separately-named
-        entry point (kept distinct from gen_array_call_into itself
-        purely so gen_struct_value_into's own Call case reads the same
-        way its Variable/Field/Index cases do -- one clearly-named
-        method per expression kind -- not because the underlying code
-        needs to differ at all)."""
+        """Calls a struct-returning function, writing the result into
+        dst_mem via gen_array_call_into's hidden-pointer convention
+        (which doesn't care whether the return type is an array or
+        struct). Kept as a separate, named entry point purely so
+        gen_struct_value_into's Call case reads the same way as its
+        other cases."""
         return self.gen_array_call_into(dst_mem, expr, None)
 
     def gen_struct_literal_into(self, expr: Call, dst_mem: Memory, struct_type: Type) -> list[Instruction]:
-        """Writes a struct literal's own fields directly into dst_mem,
-        one at a time -- already validated by semantic.py's own check_
-        struct_literal/_check_named_struct_literal, so this never
-        needs to guard against a missing, extra, unknown, or duplicate
-        field itself. Mirrors gen_array_literal_into's own per-element
-        writing, one level over: each field's value is routed to
-        whichever value-producing method its OWN declared type needs
-        -- gen_array_value_into/gen_slice_value_into/gen_struct_value_
-        into for a composite field, or a plain gen_expr_into for a
-        scalar (int/bool/str) field.
-
-        dst_mem's own base is protected via push/pop around EVERY
-        field's own write, when it isn't 'rbp' -- not just the scalar
-        case, and not just the ones that happen to need it. This used
-        to be scoped to the scalar case only, on the reasoning that
+        """Writes a struct literal's fields directly into dst_mem, one
+        at a time -- already validated by semantic.py, so no missing/
+        extra/duplicate/unknown field checking is needed here. Each
+        field's value is routed by its own declared type:
         gen_array_value_into/gen_slice_value_into/gen_struct_value_
-        into "already protect an arbitrary destination base
-        internally" -- true for THEIR OWN write, but not for what
-        happens to dst_mem.base's own physical register as a SIDE
-        EFFECT of writing that one field, which the NEXT field then
-        silently inherits. A composite field's own value can involve a
-        real function call (an array-, slice-, or struct-returning
-        Call) that clobbers dst_mem.base's own register as an ordinary
-        caller-saved side effect of that call -- verified directly: a
-        struct literal with an array-returning-call field FOLLOWED BY
-        any other field, on a heap-allocated destination, silently
-        corrupted that later field's own write (it computed the
-        field's address from whatever garbage the call left behind,
-        not the struct's real base) before this fix. Push-before-the-
-        field's-own-write, pop-after fixes it the same way the scalar
-        case's own push/compute/restore/write ordering already
-        avoided the identical hazard for a scalar-typed value's own
-        call: the call's own clobbering only matters for whether
-        dst_mem.base survives for the NEXT field, not for whether
-        THIS field's own write is correct (composite fields write
-        through a hidden pointer computed and pushed onto the real
-        stack BEFORE the call runs, so the call clobbering registers
-        afterward never affects a write that already happened).
+        into for a composite field, gen_expr_into for a scalar one. A
+        nested struct-typed field (another struct literal) recurses
+        through gen_struct_value_into like any other struct-typed
+        value -- no special-casing needed here.
 
-        A slice-typed field's value can be `none` -- checked here via
-        isinstance, not the field's own resolved type (which for a
-        NoneLiteral is always Type.NONE, never equal to the field's
-        declared SLICE type) -- exactly the same none-flowing-into-a-
-        slice-typed-slot short-circuit gen_var_decl/gen_assign/gen_
-        field_assign each already need of their own, for the identical
-        reason (see gen_none_into's own docstring).
+        dst_mem's base is push/pop-protected around EVERY field's
+        write, not just ones proven to need it: a composite field's
+        value can involve a function call that clobbers dst_mem.base
+        as an ordinary caller-saved side effect, corrupting a LATER
+        field's address computation if left unprotected. (Verified by
+        a real bug: an array-returning-call field followed by another
+        field, on a heap-allocated destination, silently corrupted the
+        second field's write before this fix.)
 
-        A struct-typed field's value can itself be a NESTED struct
-        literal (`Outer(inner=Inner(1), b=2)`, or the positional
-        `Outer(Inner(1), 2)`) -- recursing through gen_struct_value_
-        into exactly like any other struct-typed value, which already
-        detects a Call-is-a-struct-name and dispatches back into this
-        same method one level deeper; no special-casing needed here
-        for that, since it's just an ordinary struct-typed expression
-        as far as this method is concerned.
+        A slice-typed field's value can be `none`, checked via
+        isinstance rather than its resolved type (see gen_none_into).
 
-        NAMED construction (expr.kwargs populated instead of
-        expr.args -- see Call's own docstring in parser.py) is
-        normalized into the same (field_name, value_expr, field_type)
-        shape the positional form already iterates, via a dict lookup
-        by name instead of a zip-by-position -- but unlike the
-        positional form (always exhaustive), this walks EVERY one of
-        the struct's own fields, in declaration order, not just the
-        ones expr.kwargs actually provided: an omitted field's own
-        `value_expr` comes back as None from that lookup, which the
-        per-field loop recognizes as its own distinct case (see just
-        below) rather than being silently absent from the loop
-        entirely the way it used to be.
-
-        PARTIAL construction (a named literal omitting a field
-        entirely, `arg_expr is None` in the loop below) now gets that
-        field's own implicit zero value -- the exact same _gen_zero_
-        value_into a `T x` VarDecl with no initializer at all already
-        uses -- rather than being skipped and left as whatever dst_mem
-        already held. This closes the deliberate, temporary
-        inconsistency this docstring used to describe: partial
-        construction was left as a separate follow-up when zero-init
-        first shipped specifically so it could be revisited once that
-        feature existed to reuse, and this is that follow-up."""
+        Named construction (expr.kwargs) is normalized to the same
+        (field_name, value_expr, field_type) shape positional
+        construction already iterates, walking every field in
+        declaration order; an omitted field's value_expr comes back
+        None, which the loop below fills with that field's zero value
+        (_gen_zero_value_into) rather than leaving dst_mem's existing
+        bytes untouched.
+        """
         struct_info = self.struct_registry[struct_type.struct_name]
         if expr.kwargs is not None:
             provided = dict(expr.kwargs)
@@ -288,37 +201,24 @@ class StructsMixin:
 
     def gen_struct_value_into(self, expr: Node, dst_mem: Memory, struct_type: Type) -> list[Instruction]:
         """Stores a struct-typed expression's VALUE into dst_mem,
-        matching struct_type's own shape -- the struct counterpart to
-        gen_array_value_into just above, one level over, dispatched on
-        what kind of expression is producing the value:
-          - Call, where expr.name names a STRUCT (a struct literal,
-            `A a = A(6, 'hello')`): each argument written directly into
-            its own field -- see gen_struct_literal_into. Checked FIRST
-            and separately from the ordinary Call case below, via
-            struct_registry membership, exactly mirroring semantic.py's
-            own check_struct_literal/check_call split -- the two are
-            never ambiguous, since a name can never be both a struct
-            and a function (see semantic.py's own collision check in
-            analyze()).
-          - Variable: a copy from wherever the source's data actually
-            lives (via gen_array_copy, which already handles ANY
-            value's own flat byte copy correctly -- struct included,
-            see its own docstring for why no field-by-field recursion
-            is needed) into dst_mem, mirroring the array case's own
-            heap-vs-stack handling exactly.
-          - Field (a nested struct field, e.g. `Point p = outer.
-            inner`): its SOURCE address is computed first (gen_field_
-            address_into), then copied from that computed address --
-            the struct-specific case the array version doesn't need at
-            all, since Index already plays this same role for arrays
-            (an array can't itself be "a field" the way this specific
-            expression shape can be a struct).
-          - Index (a struct-typed array element, e.g. `Point p =
-            rows[i]`): mirrors the array case's own Index handling
-            exactly, via gen_index_address_into.
-          - Call, otherwise (an ordinary function returning a struct):
-            calls through the hidden-output-pointer convention, writing
-            directly into dst_mem -- see gen_struct_call_into."""
+        matching struct_type's shape -- the struct counterpart to
+        gen_array_value_into, dispatched on the producing expression:
+          - Call naming a struct (a struct literal): each field
+            written directly -- gen_struct_literal_into. Checked
+            before the ordinary Call case below via struct_registry
+            membership (a name can never be both a struct and a
+            function).
+          - Variable: copied via gen_array_copy (handles any value's
+            flat byte copy, struct included -- no field-by-field
+            recursion needed), loading the source pointer first if
+            heap-allocated.
+          - Field (a nested struct field, `outer.inner`): source
+            address computed via gen_field_address_into, then copied.
+          - Index (a struct-typed array element, `rows[i]`): via
+            gen_index_address_into, then copied.
+          - Call, otherwise (an ordinary struct-returning function):
+            via gen_struct_call_into's hidden-pointer convention.
+        """
         if isinstance(expr, Call) and expr.name in self.struct_registry:
             return self.gen_struct_literal_into(expr, dst_mem, struct_type)
         if isinstance(expr, Variable):
@@ -345,37 +245,23 @@ class StructsMixin:
         raise CodegenError(f"No codegen rule for a struct-typed value: {expr!r}")
 
     def _check_struct_and_field_type(self, base_expr: Node, field_name: str) -> Type:
-        """Returns field_name's own declared type within base_expr's
-        own struct type -- shared by gen_field_assign and gen_field_
-        address_into's own callers wherever the field's type (not just
-        its address) is needed, mirroring semantic.py's own _check_
-        struct_and_field, just returning a Type instead of raising on
-        an invalid access (already validated by the time codegen ever
-        runs -- see compile_to_asm)."""
+        """Returns field_name's declared type within base_expr's
+        struct type. Doesn't raise on an invalid access -- already
+        validated by semantic.py before codegen runs."""
         base_type = type_of(base_expr)
         return self.struct_registry[base_type.struct_name].fields[field_name]
 
     def _flatten_struct_fields(self, struct_name: str, base_offset: int = 0):
-        """Recursively walks struct_name's own fields (and, for any
-        field that's itself a STRUCT, that struct's own fields, and so
-        on, arbitrarily deep), yielding (leaf_field_type, absolute_
-        byte_offset_from_the_OUTERMOST_struct's_own_base) pairs in
-        declaration order -- entirely at compile time, in Python, with
-        no runtime recursion or register-protection complexity
-        involved at all: a nested struct's own fields are just as
-        directly addressable via a single constant offset from the
-        outermost struct's base as any of its own top-level fields
-        are (Memory operands already support an arbitrary base
-        register plus a constant offset natively), so flattening this
-        way up front is what lets _gen_struct_fields_equality_at_
-        addresses emit one simple, linear sequence of field
-        comparisons -- no genuine runtime recursion needed to walk a
-        struct's own nested shape, only to walk an ARRAY-typed field's
-        own runtime-many elements (see _gen_array_struct_equality_
-        loop), which is a fundamentally different kind of "how many"
-        (a compile-time-fixed number of fields vs. a size that can be
-        arbitrarily large) that this method deliberately doesn't try
-        to handle the same way."""
+        """Recursively walks struct_name's fields -- including any
+        nested struct field's fields, arbitrarily deep -- yielding
+        (leaf_field_type, absolute_byte_offset_from_the_outermost_
+        struct's_base) pairs in declaration order. Done entirely at
+        compile time (a struct's shape is fixed), so _gen_struct_
+        fields_equality_at_addresses can emit one flat sequence of
+        comparisons with no runtime recursion. An array-typed field's
+        runtime-many elements still need an actual loop
+        (_gen_array_struct_equality_loop) -- only the struct nesting
+        itself flattens away."""
         struct_info = self.struct_registry[struct_name]
         for field_name, field_type in struct_info.fields.items():
             field_offset = base_offset + self._field_offset(struct_name, field_name)
@@ -390,39 +276,20 @@ class StructsMixin:
             left_base: Register,
             right_base: Register,
             mismatch_label: str) -> list[Instruction]:
-        """Compares every one of struct_name's own fields -- including
-        those of any nested struct field, at any depth, via _flatten_
-        struct_fields's own compile-time flattening -- jumping to
-        mismatch_label the moment any one differs. Shared by gen_
-        struct_equality_into's own bare struct-vs-struct comparison
-        and _gen_array_struct_equality_loop's own per-element one;
-        this method itself has no idea (and doesn't need to know)
-        which of the two contexts it's being called from, only that
-        `left_base`/`right_base` are two registers currently holding
-        real addresses of two same-typed struct_name values.
+        """Compares every one of struct_name's fields -- including
+        nested struct fields, via _flatten_struct_fields -- jumping to
+        mismatch_label the moment any one differs. Shared by
+        gen_struct_equality_into (struct-vs-struct) and
+        _gen_array_struct_equality_loop (per-element); this method
+        only needs left_base/right_base to be two registers holding
+        real addresses of same-typed struct_name values.
 
-        left_base/right_base are protected on the real stack across
-        EVERY field's own comparison, unconditionally, not just the
-        ones that happen to need it -- computing that field's own
-        address into a FRESH scratch register first (or, for a
-        scalar field, simply reading it via Memory(base, offset)
-        directly, needing no separate address register at all), so
-        that whatever "risky" comparison follows (a strcmp call for a
-        str field, or one of the three array-equality loop helpers for
-        an array field -- each of which has its OWN internal register
-        usage that could otherwise collide with this method's own base
-        registers) is completely free to use any register it wants,
-        including left_base/right_base's own, without ever needing to
-        know or care what this method is doing with them. This is the
-        same "protect on the stack, then let the next thing use
-        whatever registers it wants" discipline used throughout this
-        file, just applied uniformly to every field rather than only
-        the ones proven to need it -- correct regardless of how many
-        fields there are, at the cost of a few unconditional push/pop
-        pairs even for the cheap int/bool case, exactly the kind of
-        "simple over maximally efficient" trade this file already
-        makes in plenty of other places (e.g. gen_binary_into's own
-        single-register stack-spill scheme)."""
+        left_base/right_base are pushed/popped around every field's
+        comparison, unconditionally -- even the cheap int/bool case --
+        so that whatever comparison follows (a strcmp call for a str
+        field, an array-equality loop for an array field) is free to
+        use any register, including left_base/right_base's own,
+        without needing to coordinate."""
         instructions = []
         for field_type, offset in self._flatten_struct_fields(struct_name):
             if field_type.kind == TypeKind.ARRAY:
@@ -472,28 +339,20 @@ class StructsMixin:
         return instructions
 
     def gen_struct_equality_into(self, expr: Binary, dst: Register) -> list[Instruction]:
-        """`left == right` / `left != right`, both the exact same
-        struct type (already guaranteed by semantic.py's own check_
-        binary, including that every one of the struct's own fields --
-        at any nesting depth, through further nested structs or array
-        fields -- is itself comparable: int, bool, str, a comparable
-        array, or another comparable struct; never a slice, which has
-        no '==' defined for it at all yet).
+        """`left == right` / `left != right` for two values of the
+        same struct type (semantic.py already guarantees every field,
+        at any nesting depth, is itself comparable).
 
-        `left`/`right` must each already have a real address (a
-        Variable, Field, or Index -- whatever gen_struct_address_into
-        already accepts); a struct literal or a struct-returning call
-        used directly as an equality operand isn't supported, matching
-        this file's established "assign it to a variable first"
-        restriction on unnamed struct/array values elsewhere.
+        `left`/`right` must each have a real address (Variable, Field,
+        or Index) -- a struct literal or struct-returning call used
+        directly as an operand isn't supported; assign it to a
+        variable first.
 
-        The actual field-by-field comparison is _gen_struct_fields_
-        equality_at_addresses's job -- this method just computes the
-        two base addresses, protects the first across evaluating the
-        second (the same push-before-evaluating-the-other-side pattern
-        used throughout this file), and wraps the result in the same
-        shared mismatch/done label shape gen_array_equality_into's own
-        docstring already explains."""
+        Computes both addresses (protecting the first while evaluating
+        the second), delegates the actual comparison to
+        _gen_struct_fields_equality_at_addresses, and wraps the result
+        in the same mismatch/done label shape gen_array_equality_into
+        uses."""
         struct_type = type_of(expr.left)
         left_base = Register('r10')
         right_base = Register('r11')
