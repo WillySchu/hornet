@@ -25,9 +25,11 @@ class CallingConventionMixin:
     def _gen_call_arguments_into(self, args: list[Node], reg_shift: int = 0) -> list[Instruction]:
         """Shared by gen_call_into, gen_array_call_into, and
         gen_slice_call_into: evaluates each argument in order
-        (gen_expr_into for a scalar, gen_array_arg_address_into for an
-        array, gen_slice_arg_into for a slice/none, which needs 3
-        register slots), pushing each result onto the stack
+        (gen_expr_ir for a scalar -- so a migrated sub-expression, a
+        nested Binary or scalar Call, stays real IR instead of being
+        immediately, separately lowered -- gen_array_arg_address_into
+        for an array, gen_slice_arg_into for a slice/none, which needs
+        3 register slots), pushing each result onto the stack
         immediately, then pops everything back off in reverse into the
         real SysV argument registers.
 
@@ -78,7 +80,9 @@ class CallingConventionMixin:
                 instructions.append(Push(Register('rax')))
                 arg_slot_counts.append(1)
             else:
-                instructions.extend(self.gen_expr_into(arg, Register('eax')))
+                ir, value = self.gen_expr_ir(arg)
+                instructions.extend(self.lower_ir(ir))
+                instructions.extend(self._gen_load_value(value, Register('eax')))
                 instructions.append(Push(Register('rax')))
                 arg_slot_counts.append(1)
 
