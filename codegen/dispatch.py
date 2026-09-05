@@ -296,19 +296,26 @@ class DispatchMixin:
                 return self.gen_struct_equality_into(expr, dst)
 
         # The ordinary case (arithmetic, or a comparison between two
-        # scalars): evaluate each operand into its own Temp, combine
-        # via IRBinOp, read the result into dst. lower_ir reuses
-        # gen_binary_op unchanged as this op's own instruction-
-        # selection rule, so the arithmetic itself isn't reimplemented
-        # here.
+        # scalars): build its IR (see _ir_binary), lower it, read the
+        # result into dst.
+        ir, t_result = self._ir_binary(expr)
+        instructions = self.lower_ir(ir)
+        instructions.extend(self._gen_read_scalar_into(self._temp_mem(t_result), t_result.type, dst))
+        return instructions
+
+    def _ir_binary(self, expr: Binary) -> tuple[list, object]:
+        """Builds (without lowering) the ordinary arithmetic/comparison
+        case's IR: evaluate each operand into its own Temp, combine
+        via IRBinOp. lower_ir reuses gen_binary_op unchanged as this
+        op's own instruction-selection rule, so the arithmetic itself
+        isn't reimplemented here. Returns (ir, t_result)."""
         operand_type = type_of(expr.left)  # left and right are guaranteed the same type by semantic.py's own check_binary
         t_left = self._new_temp(operand_type)
         t_right = self._new_temp(operand_type)
         t_result = self._new_temp(type_of(expr))
-        instructions = self.lower_ir([
+        ir = [
             IRRaw(self.gen_expr_into(expr.left, Register('eax')), dst=t_left),
             IRRaw(self.gen_expr_into(expr.right, Register('eax')), dst=t_right),
             IRBinOp(dst=t_result, op=expr.op, left=t_left, right=t_right),
-        ])
-        instructions.extend(self._gen_read_scalar_into(self._temp_mem(t_result), t_result.type, dst))
-        return instructions
+        ]
+        return ir, t_result

@@ -1,15 +1,17 @@
 """Lowers a list of ir.py instructions into assembly_ast.py
 Instructions -- the "instruction selection" step of this pipeline.
 v1, deliberately: every Temp gets its own permanent stack slot,
-reserved the moment it's created (the same self._next_offset allocator
-_collect_locals/_reserve_argument_temp already share). An op that
-combines two values loads them into scratch registers, then hands off
-to the existing gen_binary_op/gen_unary_op (ScalarsMixin) as this
-pass's own instruction-selection rule -- that arithmetic isn't
-reimplemented here. Real register allocation -- a Temp getting a
-physical register instead of a permanent slot when possible -- is a
-separate, later step: nothing here should need to change shape when
-that arrives, only which memory operand a Temp resolves to.
+assigned the first time it's referenced here (see _temp_mem; the same
+self._next_offset allocator _collect_locals/_reserve_argument_temp
+already share) -- allocating a Temp itself (_new_temp, in codegen.py)
+makes no storage decision at all. An op that combines two values
+loads them into scratch registers, then hands off to the existing
+gen_binary_op/gen_unary_op (ScalarsMixin) as this pass's own
+instruction-selection rule -- that arithmetic isn't reimplemented
+here. Real register allocation -- a Temp getting a physical register
+instead of a permanent slot when possible -- is a separate, later
+step: only _temp_mem's own policy should need to change when that
+arrives.
 """
 
 from codegen.assembly_ast import Instruction, Register, Memory, Imm, Mov, MovQ, Cmp, Je, Jmp, Label, CallInstr
@@ -32,18 +34,18 @@ from semantic import Type
 
 
 class IRLoweringMixin:
-    def _new_temp(self, t: Type) -> Temp:
-        """Allocates a fresh Temp of type `t` and immediately reserves
-        it a permanent stack slot, exactly like a VarDecl or an
-        argument-temp gets one -- there's no separate "IR temp"
-        allocator, just another use of the same running offset."""
-        temp_id = self._temp_count
-        self._temp_count += 1
-        self._next_offset -= type_byte_width(t, self.struct_registry)
-        self._temp_offsets[temp_id] = self._next_offset
-        return Temp(id=temp_id, type=t)
-
     def _temp_mem(self, temp: Temp) -> Memory:
+        """Returns temp's Memory location, assigning it a permanent
+        stack slot the first time it's referenced (memoized in
+        _temp_offsets) rather than at temp-creation time -- see
+        _new_temp's own docstring for why storage assignment is kept
+        separate from allocating the temp itself: this method is v1's
+        entire lowering policy for where a Temp lives, and a future
+        register allocator only needs to replace this one method, not
+        anything upstream that creates Temps."""
+        if temp.id not in self._temp_offsets:
+            self._next_offset -= type_byte_width(temp.type, self.struct_registry)
+            self._temp_offsets[temp.id] = self._next_offset
         return Memory('rbp', self._temp_offsets[temp.id])
 
     def _gen_load_value(self, value: IRValue, dst: Register) -> list[Instruction]:

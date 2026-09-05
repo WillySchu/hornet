@@ -284,7 +284,7 @@ class StatementsMixin:
         # the ordinary epilogue -- IRReturn with no value, same as the
         # scalar case below minus the load.
         if stmt.value is None:
-            return self.lower_ir([IRReturn(value=None)])
+            return self.lower_ir(self._ir_return(None))
 
         if isinstance(stmt.value, NoneLiteral):
             # none's resolved type (Type.NONE) never equals SLICE --
@@ -331,18 +331,27 @@ class StatementsMixin:
             instructions = [MovQ(src=Memory('rbp', self._hidden_return_ptr_offset), dst=ptr_reg)]
             instructions.extend(self.gen_struct_value_into(stmt.value, Memory('rax', 0), value_type))
         else:
-            # A scalar return: compute the value into a Temp, then
-            # IRReturn -- lower_ir loads it into %eax (or %rax, per
-            # its type) and emits the ordinary epilogue. None of the
+            # A scalar return: build its IR (see _ir_return) and lower
+            # it -- which loads the value into %eax (or %rax, per its
+            # type) and emits the ordinary epilogue. None of the
             # epilogue touches %eax/%rax/%rdx, so this is unaffected by
             # whatever those registers held during the body.
-            t_result = self._new_temp(value_type)
-            return self.lower_ir([
-                IRRaw(self.gen_expr_into(stmt.value, Register('eax')), dst=t_result),
-                IRReturn(value=t_result),
-            ])
+            return self.lower_ir(self._ir_return(stmt.value))
         instructions.extend(self._gen_epilogue())
         return instructions
+
+    def _ir_return(self, value_expr) -> list:
+        """Builds (without lowering) IRReturn for a bare return
+        (value_expr=None) or a scalar return -- the two cases
+        gen_return doesn't route through the hidden-pointer
+        convention."""
+        if value_expr is None:
+            return [IRReturn(value=None)]
+        t_result = self._new_temp(type_of(value_expr))
+        return [
+            IRRaw(self.gen_expr_into(value_expr, Register('eax')), dst=t_result),
+            IRReturn(value=t_result),
+        ]
 
     def gen_if(self, stmt: If) -> list[Instruction]:
         """Computes the condition into a Temp and branches on it via
@@ -371,12 +380,7 @@ class StatementsMixin:
         else_label = self.new_label("if_else")
         end_label = self.new_label("if_end")
 
-        t_cond = self._new_temp(Type.BOOL)
-        instructions = self.lower_ir([
-            IRRaw(self.gen_expr_into(stmt.condition, Register('eax')), dst=t_cond),
-            IRBranch(cond=t_cond, true_label=then_label, false_label=else_label),
-            IRLabel(then_label),
-        ])
+        instructions = self.lower_ir(self._ir_if_head(stmt, then_label, else_label))
 
         self._push_scope()
         for s in stmt.then_body:
@@ -392,7 +396,18 @@ class StatementsMixin:
         instructions.extend(self.lower_ir([IRLabel(end_label)]))
         return instructions
 
-        return instructions
+    def _ir_if_head(self, stmt: If, then_label: str, else_label: str) -> list:
+        """Builds (without lowering) the condition-and-branch IR
+        landing at the given then/else labels -- the caller (gen_if)
+        is responsible for the bodies and the trailing jump/labels
+        around them, since those still go through gen_statement, not
+        native IR."""
+        t_cond = self._new_temp(Type.BOOL)
+        return [
+            IRRaw(self.gen_expr_into(stmt.condition, Register('eax')), dst=t_cond),
+            IRBranch(cond=t_cond, true_label=then_label, false_label=else_label),
+            IRLabel(then_label),
+        ]
 
     def gen_while(self, stmt: While) -> list[Instruction]:
         """Computes the condition, re-checked before every iteration
@@ -425,13 +440,7 @@ class StatementsMixin:
         body_label = self.new_label("while_body")
         end_label = self.new_label("while_end")
 
-        t_cond = self._new_temp(Type.BOOL)
-        instructions = self.lower_ir([
-            IRLabel(start_label),
-            IRRaw(self.gen_expr_into(stmt.condition, Register('eax')), dst=t_cond),
-            IRBranch(cond=t_cond, true_label=body_label, false_label=end_label),
-            IRLabel(body_label),
-        ])
+        instructions = self.lower_ir(self._ir_while_head(stmt, start_label, body_label, end_label))
 
         self.loop_labels.append((start_label, end_label))
         self._push_scope()
@@ -442,6 +451,20 @@ class StatementsMixin:
 
         instructions.extend(self.lower_ir([IRJump(start_label), IRLabel(end_label)]))
         return instructions
+
+    def _ir_while_head(self, stmt: While, start_label: str, body_label: str, end_label: str) -> list:
+        """Builds (without lowering) the start-label/condition/branch
+        IR landing at the given body label -- the caller (gen_while)
+        is responsible for the body and the trailing jump/end-label
+        around it, since those still go through gen_statement, not
+        native IR."""
+        t_cond = self._new_temp(Type.BOOL)
+        return [
+            IRLabel(start_label),
+            IRRaw(self.gen_expr_into(stmt.condition, Register('eax')), dst=t_cond),
+            IRBranch(cond=t_cond, true_label=body_label, false_label=end_label),
+            IRLabel(body_label),
+        ]
 
     def gen_break(self, stmt: Break) -> list[Instruction]:
         # semantic.py already guarantees this only appears inside a

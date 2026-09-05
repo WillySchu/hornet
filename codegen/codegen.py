@@ -34,6 +34,7 @@ from codegen.dispatch import DispatchMixin
 from codegen.emitter import Emitter
 from codegen.errors import CodegenError
 from codegen.escape_analysis import analyze_array_escapes, is_heap_allocated
+from codegen.ir import Temp
 from codegen.ir_lowering import IRLoweringMixin
 from codegen.scalars import ScalarsMixin
 from codegen.statements import StatementsMixin
@@ -87,11 +88,12 @@ class CodeGenerator(
         self._label_count = 0
         self._var_offsets: Dict[int, int] = {}  # id(VarDecl node) -> its permanent Memory offset
         self._next_offset = 0
-        # IR temps (see ir.py/ir_lowering.py): _temp_count is a fresh-id
-        # counter, mirroring _label_count; _temp_offsets maps a Temp's
-        # id to its permanent stack slot, reserved the moment the Temp
-        # is created, from this same _next_offset allocator every other
-        # kind of slot already shares.
+        # IR temps (see ir.py): _temp_count is a fresh-id counter for
+        # _new_temp, mirroring _label_count. _temp_offsets maps a
+        # Temp's id to its permanent stack slot -- populated lazily by
+        # ir_lowering.py's _temp_mem, the first time a Temp is actually
+        # referenced during lowering, not when it's created; see
+        # _new_temp's own docstring for why that split matters.
         self._temp_count = 0
         self._temp_offsets: Dict[int, int] = {}
         self.scopes: List[Dict[str, tuple]] = []  # name -> (offset, Type), generation-time
@@ -156,6 +158,17 @@ class CodeGenerator(
         label = f".L{prefix}_{self._label_count}"
         self._label_count += 1
         return label
+
+    def _new_temp(self, t: Type) -> Temp:
+        """Allocates a fresh virtual register (see ir.py) of type `t`
+        -- id only, no storage decision yet. Where a Temp actually
+        lives is v1's own lowering policy, decided lazily on first
+        reference by ir_lowering.py's _temp_mem, not here -- this
+        method's only job is handing out an identity, the same way
+        new_label's only job is handing out a name."""
+        temp_id = self._temp_count
+        self._temp_count += 1
+        return Temp(id=temp_id, type=t)
 
     def generate(self, program: Program) -> AsmProgram:
         # getattr, not direct attribute access: Program.struct_registry

@@ -71,6 +71,21 @@ class ScalarsMixin:
         see gen_array_call_into and gen_slice_call_into, which share a
         hidden-pointer return convention that doesn't fit a single
         generic `dst`."""
+        if dst != Register('eax'):
+            raise CodegenError(f"Call codegen requires dst == %eax, got: {dst!r}")
+
+        ir, t_result = self._ir_call(expr)
+        instructions = self.lower_ir(ir)
+        if t_result is not None:
+            instructions.extend(self._gen_read_temp_into(t_result, dst))
+        return instructions
+
+    def _ir_call(self, expr: Call) -> tuple[list, object]:
+        """Builds (without lowering) an ordinary function call's IR:
+        args are marshaled via the existing calling-convention code,
+        not yet expressed in IR itself (see gen_call_into), then a
+        genuine IRCall. Returns (ir, t_result), t_result being None
+        for a void call."""
         total_slots = self._total_arg_slots(expr.args)
         if total_slots > 6:
             raise CodegenError(
@@ -80,17 +95,13 @@ class ScalarsMixin:
                 f"per the SysV ABI -- stack-passed arguments aren't "
                 f"implemented)"
             )
-        if dst != Register('eax'):
-            raise CodegenError(f"Call codegen requires dst == %eax, got: {dst!r}")
-
         result_type = type_of(expr)
         t_result = None if result_type == Type.VOID else self._new_temp(result_type)
-        instructions = self.lower_ir([
+        ir = [
             IRRaw(self._gen_call_arguments_into(expr.args)),
             IRCall(dst=t_result, name=expr.name, args=[]),
-        ])
-        if t_result is not None:
-            instructions.extend(self._gen_read_temp_into(t_result, dst))
+        ]
+        return ir, t_result
         return instructions
 
     def gen_short_circuit(
@@ -123,6 +134,15 @@ class ScalarsMixin:
         if not isinstance(dst, Register):
             raise CodegenError(f"Binary codegen requires a register destination, got: {dst!r}")
 
+        ir, t_result = self._ir_short_circuit(expr, short_circuit_value=short_circuit_value, label_prefix=label_prefix)
+        instructions = self.lower_ir(ir)
+        instructions.extend(self._gen_read_scalar_into(self._temp_mem(t_result), Type.BOOL, dst))
+        return instructions
+
+    def _ir_short_circuit(self, expr: Binary, *, short_circuit_value: int, label_prefix: str) -> tuple[list, object]:
+        """Builds (without lowering) gen_short_circuit's own IR --
+        see its docstring for the shared-label branch structure.
+        Returns (ir, t_result)."""
         fallthrough_value = 1 - short_circuit_value
         rhs_label = self.new_label(f"{label_prefix}_rhs")
         short_label = self.new_label(f"{label_prefix}_short")
@@ -143,7 +163,7 @@ class ScalarsMixin:
         left_true, left_false = targets(rhs_label)
         right_true, right_false = targets(fallthrough_label)
 
-        instructions = self.lower_ir([
+        ir = [
             IRRaw(self.gen_expr_into(expr.left, Register('eax')), dst=t_left),
             IRBranch(cond=t_left, true_label=left_true, false_label=left_false),
             IRLabel(rhs_label),
@@ -155,9 +175,8 @@ class ScalarsMixin:
             IRLabel(short_label),
             IRMove(dst=t_result, src=IRConst(short_circuit_value, Type.BOOL)),
             IRLabel(end_label),
-        ])
-        instructions.extend(self._gen_read_scalar_into(self._temp_mem(t_result), Type.BOOL, dst))
-        return instructions
+        ]
+        return ir, t_result
 
     def gen_binary_op(
             self, op: BinaryOp, src: Operand, dst: Operand, operand_type: Type = Type.INT) -> list[Instruction]:
