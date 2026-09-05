@@ -344,25 +344,18 @@ class CodeGenerator(
         for reg in CALLEE_SAVED_SCRATCH_REGISTERS:
             prologue.append(Push(Register(reg)))
 
-        # Everything from here on is built into `instructions`, kept
-        # SEPARATE from the prologue above, specifically because
-        # _new_temp (see ir_lowering.py) can still reserve MORE stack
-        # slots while this body is being generated -- gen_binary_into
-        # and anything migrated after it calls _new_temp lazily,
-        # per-expression, not from an up-front pre-pass the way
-        # locals/params/argument-temps already are. _frame_size() is
-        # only computed once ALL of that is done (right before
-        # returning), so the `subq` below always reserves enough space
-        # for every slot this function ends up using, including ones
-        # that didn't exist yet when this function started running.
-        # Found necessary by a real bug: computing frame_size and
-        # emitting `subq` up front here, the way this used to work,
-        # left every IR temp's slot sitting just past the allocated
-        # frame -- silently corrupted the moment anything else (a
-        # nested call, another iteration of a loop) touched that
-        # memory, which is exactly why this first surfaced in tests
-        # with lots of loop iterations or nested calls, not simple
-        # ones.
+        # Kept SEPARATE from the prologue above (rather than one list)
+        # because _new_temp (ir_lowering.py) can still reserve MORE
+        # stack slots while this body is generated -- unlike locals/
+        # params/argument-temps, which are all reserved by an up-front
+        # pre-pass. _frame_size() is computed only once this is fully
+        # built, so the `subq` below always covers every slot this
+        # function ends up using. Found necessary by a real bug:
+        # computing frame_size before the body left every IR temp's
+        # slot sitting past the allocated frame -- silently corrupted
+        # by anything else touching that memory (a nested call,
+        # another loop iteration), which is why it only surfaced in
+        # tests with real loop/call activity.
         instructions: List[Instruction] = []
 
         if self._hidden_return_ptr_offset is not None:

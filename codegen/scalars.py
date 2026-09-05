@@ -27,14 +27,10 @@ class ScalarsMixin:
 
         Argument marshaling isn't expressed in IR yet -- _gen_call_
         arguments_into's existing output is spliced in verbatim via
-        IRRaw, exactly as before, since folding it into IRCall.args
-        would mean first migrating array/slice/struct arguments too,
-        well beyond this construct. Only the call itself and its
-        result are real IR here: IRCall's dst is None for a void call
-        (nothing to read back -- semantic.py already guarantees a void
-        call's value is only ever read in a bare, discarding ExprStmt
-        context, so there's nothing here to preserve), or a fresh Temp
-        for a scalar-returning one, read back into `dst` afterward.
+        IRRaw, since folding it in would mean migrating array/slice/
+        struct arguments too. IRCall's dst is None for a void call, or
+        a fresh Temp for a scalar-returning one, read into `dst`
+        afterward.
 
         Never reached for a callee that returns an array or slice --
         see gen_array_call_into and gen_slice_call_into, which share a

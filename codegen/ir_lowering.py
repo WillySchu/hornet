@@ -1,18 +1,15 @@
 """Lowers a list of ir.py instructions into assembly_ast.py
 Instructions -- the "instruction selection" step of this pipeline.
 v1, deliberately: every Temp gets its own permanent stack slot,
-reserved the moment it's created (via the same self._next_offset
-allocator _collect_locals/_reserve_argument_temp already share), and
-every IR op that combines two values first loads them into ordinary
-scratch registers before handing off to the EXISTING gen_binary_op/
-gen_unary_op (ScalarsMixin) to do the actual arithmetic -- this
-migration reuses that already-correct, width-aware logic rather than
-reimplementing it, treating it as this pass's own instruction-
-selection rule for IRBinOp/IRUnOp. Real register allocation -- giving
-a Temp a physical register instead of a permanent slot whenever
-possible -- is a deliberately separate, later step: nothing here
-should need to change shape when that arrives, only which memory
-operand a Temp resolves to.
+reserved the moment it's created (the same self._next_offset allocator
+_collect_locals/_reserve_argument_temp already share). An op that
+combines two values loads them into scratch registers, then hands off
+to the existing gen_binary_op/gen_unary_op (ScalarsMixin) as this
+pass's own instruction-selection rule -- that arithmetic isn't
+reimplemented here. Real register allocation -- a Temp getting a
+physical register instead of a permanent slot when possible -- is a
+separate, later step: nothing here should need to change shape when
+that arrives, only which memory operand a Temp resolves to.
 """
 
 from codegen.assembly_ast import Instruction, Register, Memory, Imm, Mov, MovQ, Cmp, Je, Jmp, Label, CallInstr
@@ -52,15 +49,12 @@ class IRLoweringMixin:
 
     def _gen_read_temp_into(self, temp: Temp, dst: Register) -> list[Instruction]:
         """Reads a Temp's current value from its slot into `dst`.
-        str needs its own case here (a full 8-byte pointer read, via
-        MovQ into dst's 64-bit view) -- _gen_read_scalar_into
-        (ScalarsMixin) was never built to handle it: it only special-
-        cases int8/uint8/int64, falling through to a plain 4-byte Mov
-        for everything else, which would silently truncate a pointer
-        to its low 32 bits. Every existing caller of that method
-        elsewhere in this compiler already special-cases str itself
-        before ever reaching it; this is simply one more such caller,
-        not a gap in that method."""
+        str needs its own case (a full 8-byte pointer read via MovQ):
+        _gen_read_scalar_into (ScalarsMixin) only special-cases
+        int8/uint8/int64, falling through to a plain 4-byte Mov for
+        everything else -- which would truncate a pointer. Every
+        existing caller of that method already special-cases str
+        itself first; this is one more such caller, not a gap in it."""
         if temp.type == Type.STR:
             return [MovQ(src=self._temp_mem(temp), dst=as_qword_register(dst))]
         return self._gen_read_scalar_into(self._temp_mem(temp), temp.type, dst)
@@ -117,15 +111,12 @@ class IRLoweringMixin:
                 if instr.dst is not None:
                     out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
             elif isinstance(instr, IRReturn):
-                # The one terminator that doesn't jump to a label --
-                # it leaves the function entirely. If there's a value,
-                # load it into %eax (or %rax, via _gen_load_value's own
-                # str/int64 widening) first; either way, every return
-                # this compiler can express ends the same way: the
-                # ordinary epilogue. Never used for an array-, slice-,
-                # or struct-typed return -- those write through the
-                # hidden output pointer instead (see gen_return), a
-                # mechanism this doesn't touch.
+                # The one terminator that leaves the function entirely
+                # rather than jumping to a label. Load the value if
+                # there is one, then the ordinary epilogue either way.
+                # Never used for an array/slice/struct return -- those
+                # write through the hidden output pointer instead (see
+                # gen_return), a mechanism this doesn't touch.
                 if instr.value is not None:
                     out.extend(self._gen_load_value(instr.value, Register('eax')))
                 out.extend(self._gen_epilogue())

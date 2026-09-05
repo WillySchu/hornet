@@ -256,11 +256,8 @@ class DispatchMixin:
 
         AND/OR are handled separately (see gen_short_circuit) since
         they must not unconditionally evaluate both sides. Every other
-        binary operator -- arithmetic and comparisons alike -- goes
-        through the stack-spill scheme below, which always evaluates
-        both sides. Requires `dst` to be a register (a real 32-bit
-        register and its 64-bit alias get pushed/popped along the way,
-        which an Imm can't do).
+        binary operator -- arithmetic and comparisons alike -- always
+        evaluates both operands. Requires `dst` to be a register.
         """
         if expr.op == BinaryOp.AND:
             return self.gen_short_circuit(
@@ -280,13 +277,12 @@ class DispatchMixin:
 
         # A slice compared to `none` (either order) needs its own
         # dedicated codegen: a slice's "value" is a 24-byte descriptor,
-        # which can't flow through the single-register stack-spill
-        # scheme below. semantic.py's check_binary already guarantees
-        # exactly one side is slice-typed and the other none-typed by
-        # the time this is reached.
+        # which doesn't fit in a single Temp. semantic.py's check_binary
+        # already guarantees exactly one side is slice-typed and the
+        # other none-typed by the time this is reached.
         #
         # ARRAY and STRUCT equality are dispatched the same way, for
-        # the same reason: neither value fits in a single register.
+        # the same reason: neither value fits in a single Temp.
         # check_binary guarantees both sides are the same, comparable
         # array/struct type (no slice nested anywhere inside) -- see
         # gen_array_equality_into/gen_struct_equality_into for how
@@ -300,13 +296,11 @@ class DispatchMixin:
                 return self.gen_struct_equality_into(expr, dst)
 
         # The ordinary case (arithmetic, or a comparison between two
-        # scalars) is now built as a tiny, self-contained IR fragment
-        # -- evaluate each operand into its own Temp, combine via
-        # IRBinOp, read the result back into `dst` -- rather than the
-        # hand-woven push/pop dance this used to do directly. lower_ir
-        # reuses gen_binary_op (unchanged) as this op's own instruction-
-        # selection rule, so the actual arithmetic -- including the
-        # int64-vs-32-bit view decision -- isn't reimplemented here.
+        # scalars): evaluate each operand into its own Temp, combine
+        # via IRBinOp, read the result into dst. lower_ir reuses
+        # gen_binary_op unchanged as this op's own instruction-
+        # selection rule, so the arithmetic itself isn't reimplemented
+        # here.
         operand_type = type_of(expr.left)  # left and right are guaranteed the same type by semantic.py's own check_binary
         t_left = self._new_temp(operand_type)
         t_right = self._new_temp(operand_type)

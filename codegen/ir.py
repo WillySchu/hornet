@@ -2,35 +2,24 @@
 semantically-analyzed AST and assembly_ast.py's own, machine-level
 instruction set. Every value lives in a Temp -- a virtual register,
 unlimited in supply, carrying a real semantic.Type -- rather than a
-concrete x86 register. This is what lets a construct's codegen stop
-reasoning about which physical register a sub-expression's value
-happens to be sitting in: that's now lower_ir's job (see
-ir_lowering.py), not each construct's own.
+concrete x86 register, so a construct's codegen no longer has to
+reason about which physical register a sub-expression's value happens
+to be sitting in; that's lower_ir's job (ir_lowering.py).
 
 Every block ends in exactly one terminator (IRJump, IRBranch, or
-IRReturn) -- no implicit fallthrough anywhere in the IR itself, even
-where the eventual assembly will fall through naturally. This is a
-real correctness property: once anything ever reorders blocks (a
-future optimization pass), implicit fallthrough would silently break,
-while an explicit terminator can't. IRBranch always carries both
-target labels for the identical reason.
+IRReturn) -- no implicit fallthrough, even where the eventual assembly
+will fall through naturally. Once anything ever reorders blocks (a
+future optimization pass), implicit fallthrough would silently break;
+an explicit terminator can't. IRBranch always carries both target
+labels for the same reason.
 
-Every op defined here now has a real lowering rule in lower_ir --
-IRReturn was the last one, added once gen_return's scalar case
-actually needed it. The next op to be exercised for the first time
-will be whatever the next migrated construct turns out to need (a
-composite-value load/store, most likely, once arrays/slices/structs
-get their turn).
-
-IRRaw is the deliberate escape hatch that makes an incremental,
-construct-by-construct migration possible at all: it splices in a
-not-yet-migrated gen_X_into method's existing, unchanged output
-verbatim. By convention (matching every existing scalar gen_X_into
-method's own contract), those instructions are assumed to leave their
-result in Register('eax') (or its 64-bit view, for an int64-typed
-result) -- if `dst` is given, lower_ir appends one store from there
-into dst's slot. IRRaw is self-eliminating: once a construct's codegen
-builds real IR ops instead, nothing constructs an IRRaw for it again.
+IRRaw is the escape hatch that makes incremental, construct-by-
+construct migration possible: it splices in a not-yet-migrated
+gen_X_into method's existing output verbatim. By convention, those
+instructions leave their result in Register('eax') (or its 64-bit
+view, for int64) -- if `dst` is given, lower_ir appends one store from
+there into dst's slot. IRRaw is self-eliminating: once a construct
+builds real IR instead, nothing constructs one for it again.
 """
 
 from dataclasses import dataclass

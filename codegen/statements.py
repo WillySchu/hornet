@@ -4,10 +4,10 @@ uninitialized declaration gets its type's real zero value rather than
 leaving memory untouched, and the label-pair shape (start/end, or
 else/end) every branching or looping construct here builds on."""
 
-from codegen.assembly_ast import Instruction, MovQ, Register, Memory, Imm, Push, Pop, Mov, Cmp, Je, Jmp, Label, \
+from codegen.assembly_ast import Instruction, MovQ, Register, Memory, Imm, Push, Pop, Mov, Jmp, \
     LeaQ, MovB
 from codegen.errors import CodegenError
-from codegen.ir import IRRaw, IRReturn
+from codegen.ir import IRRaw, IRReturn, IRBranch, IRLabel, IRJump
 from codegen.utils import type_of
 from parser import Node, VarDecl, Assign, IndexAssign, FieldAssign, Return, If, While, Break, Continue, ExprStmt, \
     NoneLiteral, ArrayLiteral, Index, Slice
@@ -267,9 +267,8 @@ class StatementsMixin:
     def gen_return(self, stmt: Return) -> list[Instruction]:
         # A bare `return` (no value -- valid exactly when this function
         # has no declared return type) needs nothing computed, just
-        # the ordinary epilogue -- represented as an IRReturn with no
-        # value at all, exactly like a scalar return below, just with
-        # nothing to load into %eax first.
+        # the ordinary epilogue -- IRReturn with no value, same as the
+        # scalar case below minus the load.
         if stmt.value is None:
             return self.lower_ir([IRReturn(value=None)])
 
@@ -318,14 +317,11 @@ class StatementsMixin:
             instructions = [MovQ(src=Memory('rbp', self._hidden_return_ptr_offset), dst=ptr_reg)]
             instructions.extend(self.gen_struct_value_into(stmt.value, Memory('rax', 0), value_type))
         else:
-            # A scalar return, built as a small IR fragment: compute
-            # the value into a Temp, then IRReturn -- which lower_ir
-            # turns into "load it into %eax (or %rax, wherever its
-            # type needs), then the ordinary epilogue" -- exactly the
-            # same lowering the bare-return case above uses, just with
-            # a real value to load first. None of the epilogue touches
-            # %eax/%rax/%rdx, so this is unaffected by whatever those
-            # registers held during the body.
+            # A scalar return: compute the value into a Temp, then
+            # IRReturn -- lower_ir loads it into %eax (or %rax, per
+            # its type) and emits the ordinary epilogue. None of the
+            # epilogue touches %eax/%rax/%rdx, so this is unaffected by
+            # whatever those registers held during the body.
             t_result = self._new_temp(value_type)
             return self.lower_ir([
                 IRRaw(self.gen_expr_into(stmt.value, Register('eax')), dst=t_result),
@@ -335,18 +331,21 @@ class StatementsMixin:
         return instructions
 
     def gen_if(self, stmt: If) -> list[Instruction]:
-        """Computes the condition into %eax and compares it to 0, like
-        the short-circuit AND/OR codegen -- then jumps past the `then`
-        body when it's false:
+        """Computes the condition into a Temp and branches on it via
+        IRBranch:
 
-            <condition>          ; -> %eax
-            cmpl $0, %eax
-            je   .Lif_else_N     ; false -> skip straight to else (or end)
+            <condition>          ; -> t_cond
+            branch t_cond, .then, .else
+        .then:
             <then_body>
-            jmp  .Lif_end_N      ; true -> skip over else after then runs
-        .Lif_else_N:
+            jump .end
+        .else:
             <else_body>          ; only emitted if else_body is present
-        .Lif_end_N:
+        .end:
+
+        (lower_ir's own IRBranch rule always emits both jumps, so the
+        actual assembly has one redundant jmp right before .then -- no
+        peephole yet.)
 
         then_body and else_body each get their own pushed/popped scope
         (see _push_scope), matching semantic.py's independent-branch
@@ -354,66 +353,71 @@ class StatementsMixin:
         else_body, gen_statement's ordinary recursion handles a whole
         elif/else chain of any length with no extra logic here.
         """
-        dst = Register('eax')
+        then_label = self.new_label("if_then")
         else_label = self.new_label("if_else")
         end_label = self.new_label("if_end")
 
-        instructions = self.gen_expr_into(stmt.condition, dst)
-        instructions.append(Cmp(src=Imm(0), dst=dst))
-        instructions.append(Je(else_label))
+        t_cond = self._new_temp(Type.BOOL)
+        instructions = self.lower_ir([
+            IRRaw(self.gen_expr_into(stmt.condition, Register('eax')), dst=t_cond),
+            IRBranch(cond=t_cond, true_label=then_label, false_label=else_label),
+            IRLabel(then_label),
+        ])
 
         self._push_scope()
         for s in stmt.then_body:
             instructions.extend(self.gen_statement(s))
         self._pop_scope()
-        instructions.append(Jmp(end_label))
 
-        instructions.append(Label(else_label))
+        instructions.extend(self.lower_ir([IRJump(end_label), IRLabel(else_label)]))
         if stmt.else_body is not None:
             self._push_scope()
             for s in stmt.else_body:
                 instructions.extend(self.gen_statement(s))
             self._pop_scope()
-        instructions.append(Label(end_label))
+        instructions.extend(self.lower_ir([IRLabel(end_label)]))
+        return instructions
 
         return instructions
 
     def gen_while(self, stmt: While) -> list[Instruction]:
         """Computes the condition, re-checked before every iteration
-        (including the first), with the body sitting between two
-        labels that break/continue jump to:
+        (including the first), with the body sitting between the
+        start label (break/continue's own re-check target) and the
+        end label (loop exit):
 
-            .Lwhile_start_N:
-                <condition>          ; -> %eax
-                cmpl $0, %eax
-                je   .Lwhile_end_N   ; false -> exit the loop entirely
-                <body>
-                jmp  .Lwhile_start_N ; loop back to re-check the condition
-            .Lwhile_end_N:
+        .start:
+            <condition>          ; -> t_cond
+            branch t_cond, .body, .end
+        .body:
+            <body>
+            jump .start
+        .end:
 
-        Both labels get pushed onto self.loop_labels for the duration
-        of generating the body, so any Break/Continue statement inside
-        it -- including ones nested inside an If -- can find its way
-        back here via gen_break/gen_continue with no need to know
-        anything about where inside the body they are. Popped again
-        once the body's done, so a Break/Continue after this while (or
-        in a sibling loop) can't accidentally resolve to this loop's
-        labels.
+        Both labels get pushed onto self.loop_labels for the body's
+        duration, so any Break/Continue inside it -- including nested
+        inside an If -- finds its way back via gen_break/gen_continue
+        with no need to know where inside the body it is. Popped again
+        once the body's done, so a Break/Continue after this while
+        can't resolve to this loop's labels.
 
         The body gets its own pushed/popped scope, same as an If's
-        then/else bodies, even though it's the same physical stack
-        slots being reused on every iteration -- this is purely about
-        name resolution during code generation, not anything that
-        happens at runtime.
+        then/else bodies, even though the same physical stack slots
+        are reused on every iteration -- this is purely about name
+        resolution during codegen, not anything that happens at
+        runtime.
         """
-        dst = Register('eax')
         start_label = self.new_label("while_start")
+        body_label = self.new_label("while_body")
         end_label = self.new_label("while_end")
 
-        instructions = [Label(start_label)]
-        instructions.extend(self.gen_expr_into(stmt.condition, dst))
-        instructions.append(Cmp(src=Imm(0), dst=dst))
-        instructions.append(Je(end_label))
+        t_cond = self._new_temp(Type.BOOL)
+        instructions = self.lower_ir([
+            IRLabel(start_label),
+            IRRaw(self.gen_expr_into(stmt.condition, Register('eax')), dst=t_cond),
+            IRBranch(cond=t_cond, true_label=body_label, false_label=end_label),
+            IRLabel(body_label),
+        ])
 
         self.loop_labels.append((start_label, end_label))
         self._push_scope()
@@ -422,8 +426,7 @@ class StatementsMixin:
         self._pop_scope()
         self.loop_labels.pop()
 
-        instructions.append(Jmp(start_label))
-        instructions.append(Label(end_label))
+        instructions.extend(self.lower_ir([IRJump(start_label), IRLabel(end_label)]))
         return instructions
 
     def gen_break(self, stmt: Break) -> list[Instruction]:
