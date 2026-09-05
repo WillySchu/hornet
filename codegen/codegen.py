@@ -56,6 +56,7 @@ from codegen.dispatch import DispatchMixin
 from codegen.emitter import Emitter
 from codegen.errors import CodegenError
 from codegen.escape_analysis import analyze_array_escapes, is_heap_allocated
+from codegen.ir_lowering import IRLoweringMixin
 from codegen.scalars import ScalarsMixin
 from codegen.statements import StatementsMixin
 from codegen.strings import StringsMixin
@@ -98,6 +99,7 @@ class CodeGenerator(
         ArraysSlicesMixin,
         CallingConventionMixin,
         DispatchMixin,
+        IRLoweringMixin,
         ScalarsMixin,
         StatementsMixin,
         StringsMixin,
@@ -109,6 +111,13 @@ class CodeGenerator(
         self._label_count = 0
         self._var_offsets: Dict[int, int] = {}  # id(VarDecl node) -> its permanent Memory offset
         self._next_offset = 0
+        # IR temps (see ir.py/ir_lowering.py): _temp_count is a fresh-id
+        # counter, mirroring _label_count; _temp_offsets maps a Temp's
+        # id to its permanent stack slot, reserved the moment the Temp
+        # is created, from this same _next_offset allocator every other
+        # kind of slot already shares.
+        self._temp_count = 0
+        self._temp_offsets: Dict[int, int] = {}
         self.scopes: List[Dict[str, tuple]] = []  # name -> (offset, Type), generation-time
         self.loop_labels: List[tuple] = []  # stack of (start_label, end_label), innermost last
         self.string_literals: List[tuple] = []  # (label, content) pairs
@@ -325,7 +334,7 @@ class CodeGenerator(
                 "aren't implemented)"
             )
 
-        instructions: List[Instruction] = [
+        prologue: List[Instruction] = [
             Push(Register('rbp')),
             MovQ(src=Register('rsp'), dst=Register('rbp')),
         ]
@@ -333,11 +342,28 @@ class CodeGenerator(
         # just in functions that happen to do string work themselves --
         # required now that functions can call each other.
         for reg in CALLEE_SAVED_SCRATCH_REGISTERS:
-            instructions.append(Push(Register(reg)))
+            prologue.append(Push(Register(reg)))
 
-        frame_size = self._frame_size()
-        if frame_size:
-            instructions.append(SubQ(src=Imm(frame_size), dst=Register('rsp')))
+        # Everything from here on is built into `instructions`, kept
+        # SEPARATE from the prologue above, specifically because
+        # _new_temp (see ir_lowering.py) can still reserve MORE stack
+        # slots while this body is being generated -- gen_binary_into
+        # and anything migrated after it calls _new_temp lazily,
+        # per-expression, not from an up-front pre-pass the way
+        # locals/params/argument-temps already are. _frame_size() is
+        # only computed once ALL of that is done (right before
+        # returning), so the `subq` below always reserves enough space
+        # for every slot this function ends up using, including ones
+        # that didn't exist yet when this function started running.
+        # Found necessary by a real bug: computing frame_size and
+        # emitting `subq` up front here, the way this used to work,
+        # left every IR temp's slot sitting just past the allocated
+        # frame -- silently corrupted the moment anything else (a
+        # nested call, another iteration of a loop) touched that
+        # memory, which is exactly why this first surfaced in tests
+        # with lots of loop iterations or nested calls, not simple
+        # ones.
+        instructions: List[Instruction] = []
 
         if self._hidden_return_ptr_offset is not None:
             instructions.append(MovQ(src=Register('rdi'), dst=Memory('rbp', self._hidden_return_ptr_offset)))
@@ -456,7 +482,11 @@ class CodeGenerator(
             instructions.extend(self._gen_epilogue())
         instructions.extend(self._gen_bounds_check_panic_block())
 
-        return AsmFunction(name=fn.name, instructions=instructions)
+        frame_size = self._frame_size()
+        if frame_size:
+            prologue.append(SubQ(src=Imm(frame_size), dst=Register('rsp')))
+
+        return AsmFunction(name=fn.name, instructions=prologue + instructions)
 
     def _collect_params(self, params: List[Param]) -> None:
         """Gives each parameter its own permanent stack slot, exactly

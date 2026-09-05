@@ -7,13 +7,14 @@ caller passes a value's ordinary 32-bit-named register, and these
 (along with gen_binary_op/gen_unary_op/gen_cast_narrowing_into) decide
 internally which actual width to operate on."""
 
-from codegen.assembly_ast import (Operand, Instruction, MovQ, Imm, Mov, Memory, Je, Jne, Register, Push, Pop, AddQ, SubQ,
+from codegen.assembly_ast import (Operand, Instruction, MovQ, Imm, Mov, Memory, Register, AddQ, SubQ,
     IMulQ, Cqto, IDivQ, AndQ, OrQ, XorQ, ShiftLeftQ, ShiftRightArithmeticQ, Add, Sub, IMul, Cdq, IDiv, And, Or, Xor,
-    ShiftLeft, ShiftRightArithmetic, CmpQ, Cmp, SetCC, MovZX, NegQ, Neg, NotQ, Not, MovSX, MovSXD, MovB, CallInstr,
-    LeaQ, Jmp, Label,
+    ShiftLeft, ShiftRightArithmetic, CmpQ, Cmp, SetCC, MovZX, NegQ, Neg, NotQ, Not, MovSX, MovSXD, MovB,
+    LeaQ,
 )
 from codegen.errors import CodegenError
-from codegen.utils import as_qword_register, COMPARISON_CONDITION_CODES, as_byte_register
+from codegen.ir import IRRaw, IRBranch, IRJump, IRLabel, IRMove, IRConst, IRCall
+from codegen.utils import as_qword_register, COMPARISON_CONDITION_CODES, as_byte_register, type_of
 from parser import Call, Binary, BinaryOp, UnaryOp
 from semantic import Type
 
@@ -24,13 +25,21 @@ class ScalarsMixin:
         via the shared _gen_call_arguments_into, then calls the
         function.
 
-        The result already ends up exactly where gen_expr_into's
-        contract expects it (%rax/%eax, matching `dst`, always
-        Register('eax') throughout this file), so there's nothing left
-        to move once the call returns. Never reached for a callee that
-        returns an array or slice -- see gen_array_call_into and
-        gen_slice_call_into, which share a hidden-pointer return
-        convention that doesn't fit a single generic `dst`."""
+        Argument marshaling isn't expressed in IR yet -- _gen_call_
+        arguments_into's existing output is spliced in verbatim via
+        IRRaw, exactly as before, since folding it into IRCall.args
+        would mean first migrating array/slice/struct arguments too,
+        well beyond this construct. Only the call itself and its
+        result are real IR here: IRCall's dst is None for a void call
+        (nothing to read back -- semantic.py already guarantees a void
+        call's value is only ever read in a bare, discarding ExprStmt
+        context, so there's nothing here to preserve), or a fresh Temp
+        for a scalar-returning one, read back into `dst` afterward.
+
+        Never reached for a callee that returns an array or slice --
+        see gen_array_call_into and gen_slice_call_into, which share a
+        hidden-pointer return convention that doesn't fit a single
+        generic `dst`."""
         total_slots = self._total_arg_slots(expr.args)
         if total_slots > 6:
             raise CodegenError(
@@ -43,16 +52,20 @@ class ScalarsMixin:
         if dst != Register('eax'):
             raise CodegenError(f"Call codegen requires dst == %eax, got: {dst!r}")
 
-        instructions = self._gen_call_arguments_into(expr.args)
-        instructions.append(CallInstr(expr.name))
+        result_type = type_of(expr)
+        t_result = None if result_type == Type.VOID else self._new_temp(result_type)
+        instructions = self.lower_ir([
+            IRRaw(self._gen_call_arguments_into(expr.args)),
+            IRCall(dst=t_result, name=expr.name, args=[]),
+        ])
+        if t_result is not None:
+            instructions.extend(self._gen_read_temp_into(t_result, dst))
         return instructions
 
     def gen_short_circuit(
             self, expr: Binary,
             dst: Operand, *,
-            short_circuit_jump: type,
             short_circuit_value: int,
-            fallthrough_value: int,
             label_prefix: str) -> list[Instruction]:
         """Shared codegen for AND and OR -- mirror images of each
         other: each evaluates its left side, tests it against 0, and
@@ -62,31 +75,57 @@ class ScalarsMixin:
         AND, falsy for OR -- does the right side get evaluated, and
         that result decides the answer instead.
 
-          AND: jump early (to `short_circuit_value=0`) when left == 0.
-          OR:  jump early (to `short_circuit_value=1`) when left != 0.
+          AND: short_circuit_value=0 -- left (or then right) false
+               makes the whole thing false without evaluating further.
+          OR:  short_circuit_value=1 -- left (or then right) true
+               makes the whole thing true without evaluating further.
 
         This is what makes `0 and (1 / 0)` return 0 instead of
         crashing: the division is real code sitting in the binary, but
-        control flow jumps clean over it."""
+        control flow jumps clean over it.
+
+        Built as a small IR fragment: both left and right feed an
+        IRBranch on their own truthiness, sharing one `short` label
+        whichever one triggers it (`continue` picks between "go
+        evaluate right" for left, or "use the canonical fallthrough
+        value" for right -- the only difference between the two)."""
         if not isinstance(dst, Register):
             raise CodegenError(f"Binary codegen requires a register destination, got: {dst!r}")
 
+        fallthrough_value = 1 - short_circuit_value
+        rhs_label = self.new_label(f"{label_prefix}_rhs")
         short_label = self.new_label(f"{label_prefix}_short")
+        fallthrough_label = self.new_label(f"{label_prefix}_fallthrough")
         end_label = self.new_label(f"{label_prefix}_end")
 
-        instructions = self.gen_expr_into(expr.left, dst)
-        instructions.append(Cmp(src=Imm(0), dst=dst))
-        instructions.append(short_circuit_jump(short_label))
+        def targets(continue_label: str) -> tuple[str, str]:
+            # (true_target, false_target): whichever outcome matches
+            # short_circuit_value goes to `short_label`; the other
+            # goes to `continue_label`.
+            if short_circuit_value == 1:
+                return short_label, continue_label
+            return continue_label, short_label
 
-        instructions.extend(self.gen_expr_into(expr.right, dst))
-        instructions.append(Cmp(src=Imm(0), dst=dst))
-        instructions.append(short_circuit_jump(short_label))
+        t_left = self._new_temp(Type.BOOL)
+        t_right = self._new_temp(Type.BOOL)
+        t_result = self._new_temp(Type.BOOL)
+        left_true, left_false = targets(rhs_label)
+        right_true, right_false = targets(fallthrough_label)
 
-        instructions.append(Mov(src=Imm(fallthrough_value), dst=dst))
-        instructions.append(Jmp(end_label))
-        instructions.append(Label(short_label))
-        instructions.append(Mov(src=Imm(short_circuit_value), dst=dst))
-        instructions.append(Label(end_label))
+        instructions = self.lower_ir([
+            IRRaw(self.gen_expr_into(expr.left, Register('eax')), dst=t_left),
+            IRBranch(cond=t_left, true_label=left_true, false_label=left_false),
+            IRLabel(rhs_label),
+            IRRaw(self.gen_expr_into(expr.right, Register('eax')), dst=t_right),
+            IRBranch(cond=t_right, true_label=right_true, false_label=right_false),
+            IRLabel(fallthrough_label),
+            IRMove(dst=t_result, src=IRConst(fallthrough_value, Type.BOOL)),
+            IRJump(end_label),
+            IRLabel(short_label),
+            IRMove(dst=t_result, src=IRConst(short_circuit_value, Type.BOOL)),
+            IRLabel(end_label),
+        ])
+        instructions.extend(self._gen_read_scalar_into(self._temp_mem(t_result), Type.BOOL, dst))
         return instructions
 
     def gen_binary_op(

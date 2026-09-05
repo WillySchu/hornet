@@ -7,6 +7,7 @@ else/end) every branching or looping construct here builds on."""
 from codegen.assembly_ast import Instruction, MovQ, Register, Memory, Imm, Push, Pop, Mov, Cmp, Je, Jmp, Label, \
     LeaQ, MovB
 from codegen.errors import CodegenError
+from codegen.ir import IRRaw, IRReturn
 from codegen.utils import type_of
 from parser import Node, VarDecl, Assign, IndexAssign, FieldAssign, Return, If, While, Break, Continue, ExprStmt, \
     NoneLiteral, ArrayLiteral, Index, Slice
@@ -266,9 +267,11 @@ class StatementsMixin:
     def gen_return(self, stmt: Return) -> list[Instruction]:
         # A bare `return` (no value -- valid exactly when this function
         # has no declared return type) needs nothing computed, just
-        # the ordinary epilogue.
+        # the ordinary epilogue -- represented as an IRReturn with no
+        # value at all, exactly like a scalar return below, just with
+        # nothing to load into %eax first.
         if stmt.value is None:
-            return self._gen_epilogue()
+            return self.lower_ir([IRReturn(value=None)])
 
         if isinstance(stmt.value, NoneLiteral):
             # none's resolved type (Type.NONE) never equals SLICE --
@@ -315,11 +318,19 @@ class StatementsMixin:
             instructions = [MovQ(src=Memory('rbp', self._hidden_return_ptr_offset), dst=ptr_reg)]
             instructions.extend(self.gen_struct_value_into(stmt.value, Memory('rax', 0), value_type))
         else:
-            dst = Register('eax')
-            instructions = self.gen_expr_into(stmt.value, dst)
-        # None of the epilogue touches %eax/%rax/%rdx, so a scalar
-        # return value computed above is unaffected regardless of what
-        # these registers held during the body.
+            # A scalar return, built as a small IR fragment: compute
+            # the value into a Temp, then IRReturn -- which lower_ir
+            # turns into "load it into %eax (or %rax, wherever its
+            # type needs), then the ordinary epilogue" -- exactly the
+            # same lowering the bare-return case above uses, just with
+            # a real value to load first. None of the epilogue touches
+            # %eax/%rax/%rdx, so this is unaffected by whatever those
+            # registers held during the body.
+            t_result = self._new_temp(value_type)
+            return self.lower_ir([
+                IRRaw(self.gen_expr_into(stmt.value, Register('eax')), dst=t_result),
+                IRReturn(value=t_result),
+            ])
         instructions.extend(self._gen_epilogue())
         return instructions
 

@@ -5,8 +5,9 @@ node's type or kind and hand off to whichever feature file
 other dispatch-shaped method elsewhere is really just implementing one
 branch of one of these two."""
 
-from codegen.assembly_ast import Operand, Instruction, MovQ, Imm, Mov, Memory, Je, Register, Jne, Push, Pop
+from codegen.assembly_ast import Operand, Instruction, MovQ, Imm, Mov, Memory, Register
 from codegen.errors import CodegenError
+from codegen.ir import IRRaw, IRBinOp
 from codegen.utils import as_qword_register, type_of
 from parser import (
     Node,
@@ -264,17 +265,13 @@ class DispatchMixin:
         if expr.op == BinaryOp.AND:
             return self.gen_short_circuit(
                 expr, dst,
-                short_circuit_jump=Je,   # jump early when the left side is already false
-                short_circuit_value=0,   # ...and the overall result is false
-                fallthrough_value=1,     # both sides were truthy -> true
+                short_circuit_value=0,   # left (or then right) false -> whole thing false
                 label_prefix="and",
             )
         if expr.op == BinaryOp.OR:
             return self.gen_short_circuit(
                 expr, dst,
-                short_circuit_jump=Jne,  # jump early when the left side is already true
-                short_circuit_value=1,   # ...and the overall result is true
-                fallthrough_value=0,     # both sides were falsy -> false
+                short_circuit_value=1,   # left (or then right) true -> whole thing true
                 label_prefix="or",
             )
 
@@ -302,22 +299,22 @@ class DispatchMixin:
             if type_of(expr.left).kind == TypeKind.STRUCT:
                 return self.gen_struct_equality_into(expr, dst)
 
-        scratch = Register('ecx')  # holds the right-hand value while combining
+        # The ordinary case (arithmetic, or a comparison between two
+        # scalars) is now built as a tiny, self-contained IR fragment
+        # -- evaluate each operand into its own Temp, combine via
+        # IRBinOp, read the result back into `dst` -- rather than the
+        # hand-woven push/pop dance this used to do directly. lower_ir
+        # reuses gen_binary_op (unchanged) as this op's own instruction-
+        # selection rule, so the actual arithmetic -- including the
+        # int64-vs-32-bit view decision -- isn't reimplemented here.
         operand_type = type_of(expr.left)  # left and right are guaranteed the same type by semantic.py's own check_binary
-        instructions = self.gen_expr_into(expr.left, dst)   # dst = left
-        instructions.append(Push(as_qword_register(dst)))   # save left on the stack
-        instructions.extend(self.gen_expr_into(expr.right, dst))  # dst = right (left is safe)
-        if operand_type == Type.INT64:
-            # An ordinary 32-bit Mov here would silently drop the
-            # right-hand value's own high 32 bits -- scratch has to
-            # receive the SAME 64-bit view dst's own value was just
-            # computed into (see gen_expr_into's own Constant/Variable/
-            # Binary/Unary/Cast cases, all of which compute an int64
-            # result into dst's 64-bit view specifically for this
-            # reason), not just its low half.
-            instructions.append(MovQ(src=as_qword_register(dst), dst=as_qword_register(scratch)))
-        else:
-            instructions.append(Mov(src=dst, dst=scratch))       # scratch = right
-        instructions.append(Pop(as_qword_register(dst)))     # dst = left (restored)
-        instructions.extend(self.gen_binary_op(expr.op, src=scratch, dst=dst, operand_type=operand_type))
+        t_left = self._new_temp(operand_type)
+        t_right = self._new_temp(operand_type)
+        t_result = self._new_temp(type_of(expr))
+        instructions = self.lower_ir([
+            IRRaw(self.gen_expr_into(expr.left, Register('eax')), dst=t_left),
+            IRRaw(self.gen_expr_into(expr.right, Register('eax')), dst=t_right),
+            IRBinOp(dst=t_result, op=expr.op, left=t_left, right=t_right),
+        ])
+        instructions.extend(self._gen_read_scalar_into(self._temp_mem(t_result), t_result.type, dst))
         return instructions
