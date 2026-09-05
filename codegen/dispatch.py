@@ -1,4 +1,9 @@
-"""TODO"""
+"""The routing layer: gen_expr_into and gen_binary_into are the only
+two methods in this codebase whose actual job is to inspect an AST
+node's type or kind and hand off to whichever feature file
+(arrays_slices, structs, strings, scalars) owns that case -- every
+other dispatch-shaped method elsewhere is really just implementing one
+branch of one of these two."""
 
 from codegen.assembly_ast import Operand, Instruction, MovQ, Imm, Mov, Memory, Je, Register, Jne, Push, Pop
 from codegen.errors import CodegenError

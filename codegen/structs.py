@@ -1,4 +1,13 @@
-"""Structs. TODO"""
+"""Struct layout and value semantics. Fields sit at sequential byte
+offsets in declaration order with no padding (x86-64 doesn't require
+aligned access); a struct's nominal typing -- two structs with
+identical fields but different names are different types -- falls out
+of Type's existing structural-equality machinery for free, needing no
+new mechanism here. Struct assignment, parameter passing, and return
+all copy the whole value, never alias, exactly like arrays one level
+over; equality and zero-initialization work field by field, recursing
+into nested structs and delegating array-typed fields back to
+arrays_slices.py."""
 
 from codegen.assembly_ast import (
     Register,
@@ -24,7 +33,6 @@ from semantic import TypeKind, Type
 
 
 class StructsMixin:
-    """TODO"""
     def _field_offset(self, struct_name: str, field_name: str) -> int:
         """Byte offset of `field_name` within struct_name: the sum of
         every preceding field's width, in declaration order. No

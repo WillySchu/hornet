@@ -1,4 +1,11 @@
-"""Escape Analysis"""
+"""Decides which stack-allocated arrays actually need to be heap-
+allocated because a slice backed by them might outlive the function
+that declared them -- the memory-safety gap size-based promotion
+alone can't close. An intraprocedural, flow-insensitive analysis:
+every assignment to a slice variable anywhere in the function is
+unioned into one combined "what might this be backed by" answer,
+extended to cover slices stored as elements of an array-of-slices or
+a struct field (see analyze_array_escapes for the full algorithm)."""
 
 from typing import Optional
 

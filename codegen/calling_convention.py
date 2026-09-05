@@ -1,4 +1,12 @@
-"""TODO"""
+"""The SysV argument-marshaling layer shared by every kind of call
+this compiler emits -- an ordinary function, and the hidden-pointer
+convention array/slice/struct-returning ones share (see
+arrays_slices.py) -- including the evaluate-then-stack-then-pop-into-
+registers discipline that avoids clobbering an earlier argument while
+a later one is computed, the three-register convention a slice
+argument needs, and materializing real storage for an array or struct
+value (a literal, or another call's result) that has no address of
+its own to pass."""
 
 from codegen.assembly_ast import Instruction, Register, Push, Pop, Memory, MovQ, LeaQFrame
 from codegen.escape_analysis import is_heap_allocated

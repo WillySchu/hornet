@@ -1,4 +1,9 @@
-"""TODO"""
+"""A str value is a plain pointer -- to a literal's static address, or
+a concatenation's malloc'd buffer -- never copied for its bytes the
+way an array or struct is. Also home to hornet_stringify, the hand-
+built, recursive runtime function that turns any typed value into
+printable bytes via a shared growable-buffer append primitive, driven
+by a runtime type-descriptor tree built once per distinct type."""
 
 from codegen.assembly_ast import (
     Operand,

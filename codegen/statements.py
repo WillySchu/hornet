@@ -1,4 +1,8 @@
-"""TODO"""
+"""Statement-level codegen: declarations, assignment, control flow
+(if/while/break/continue), and return. Establishes that an
+uninitialized declaration gets its type's real zero value rather than
+leaving memory untouched, and the label-pair shape (start/end, or
+else/end) every branching or looping construct here builds on."""
 
 from codegen.assembly_ast import Instruction, MovQ, Register, Memory, Imm, Push, Pop, Mov, Cmp, Je, Jmp, Label, \
     LeaQ, MovB
@@ -520,3 +524,4 @@ class StatementsMixin:
         if t == Type.INT8 or t == Type.UINT8:
             return [MovB(src=Imm(0), dst=dst_mem)]
         return [Mov(src=Imm(0), dst=dst_mem)]  # int or bool
+

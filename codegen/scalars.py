@@ -1,4 +1,11 @@
-"""TODO"""
+"""Scalar value production and storage -- int, int8, uint8, int64, and
+bool. _gen_read_scalar_into/_gen_write_scalar_from are the one choke
+point for every scalar memory access in this compiler, so int8/uint8
+being genuinely 1 byte and int64 genuinely 8 only ever needed teaching
+to these two methods, not rediscovered at each read/write site: every
+caller passes a value's ordinary 32-bit-named register, and these
+(along with gen_binary_op/gen_unary_op/gen_cast_narrowing_into) decide
+internally which actual width to operate on."""
 
 from codegen.assembly_ast import (Operand, Instruction, MovQ, Imm, Mov, Memory, Je, Jne, Register, Push, Pop, AddQ, SubQ,
     IMulQ, Cqto, IDivQ, AndQ, OrQ, XorQ, ShiftLeftQ, ShiftRightArithmeticQ, Add, Sub, IMul, Cdq, IDiv, And, Or, Xor,
@@ -334,3 +341,4 @@ class ScalarsMixin:
         if t == Type.INT64:
             return [MovQ(src=as_qword_register(src), dst=dst_mem)]
         return [Mov(src=src, dst=dst_mem)]
+

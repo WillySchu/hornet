@@ -1,4 +1,9 @@
-"""Utility functions for codegen."""
+"""Small, stateless helpers shared across every mixin: register-width
+aliasing (a 32-bit name to its 8-bit or 64-bit alias), type-width and
+leaf-type computation, the resolved-type accessor every expression's
+codegen reads from, and the register-protection wrapper used wherever
+code that might use a destination's base register as scratch has to
+run before that destination is finally written to."""
 
 from codegen.assembly_ast import Operand, Register, Memory, Instruction, Pop, Push
 from codegen.errors import CodegenError
