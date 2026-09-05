@@ -14,7 +14,6 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- Consider a FrameMixin
 - `type` type.
 - ` typeof`
 - Require `type` keyword to declare new type for structs.
@@ -51,7 +50,6 @@ Updates:
 - int32
 - Change int to an alias.
 - Pointers
-- Register virtualization
 - float
 - Imports.
 - Multithreading

@@ -36,6 +36,7 @@ from codegen.errors import CodegenError
 from codegen.escape_analysis import analyze_array_escapes, is_heap_allocated
 from codegen.ir import Temp
 from codegen.ir_lowering import IRLoweringMixin
+from codegen.register_allocator import allocate_registers
 from codegen.scalars import ScalarsMixin
 from codegen.statements import StatementsMixin
 from codegen.strings import StringsMixin
@@ -96,6 +97,13 @@ class CodeGenerator(
         # _new_temp's own docstring for why that split matters.
         self._temp_count = 0
         self._temp_offsets: Dict[int, int] = {}
+        # Populated once per function, by gen_function, from
+        # register_allocator.allocate_registers -- maps a (necessarily
+        # anonymous, necessarily IRRaw/IRCall-free) Temp's id to the
+        # physical register it lives in instead of a memory slot. See
+        # ir_lowering.py's _gen_read_temp_into/_gen_write_temp_from,
+        # the only two places that consult it.
+        self._register_assignment: Dict[int, str] = {}
         self.scopes: List[Dict[str, tuple]] = []  # name -> (offset, Type), generation-time
         self.loop_labels: List[tuple] = []  # stack of (start_label, end_label), innermost last
         self.string_literals: List[tuple] = []  # (label, content) pairs
@@ -180,11 +188,12 @@ class CodeGenerator(
         runs, so there's no lazy decision left to make, and reusing
         that slot -- rather than allocating a second, redundant one --
         is what lets every read and write of that variable, for the
-        rest of the function, share one Temp identity."""
+        rest of the function, share one Temp identity. is_named_local
+        marks it as such -- see Temp's own docstring for why."""
         temp_id = self._temp_count
         self._temp_count += 1
         self._temp_offsets[temp_id] = offset
-        return Temp(id=temp_id, type=t)
+        return Temp(id=temp_id, type=t, is_named_local=True)
 
     def generate(self, program: Program) -> AsmProgram:
         # getattr, not direct attribute access: Program.struct_registry
@@ -456,15 +465,18 @@ class CodeGenerator(
 
         self._bounds_check_fail_labels = {}  # fresh, per-function jump targets
         # Accumulated as one IR list for the whole body -- see
-        # gen_statement_ir -- and lowered exactly once here, rather
-        # than per-statement, so a real register allocator will
-        # eventually see this entire function's Temps and their live
-        # ranges together, not one already-resolved statement at a
-        # time.
+        # gen_statement_ir -- and lowered exactly once here, seeing
+        # this entire function's Temps and their live ranges together,
+        # which is what allocate_registers itself needs: it can only
+        # decide which Temps are safe to keep in a register (and for
+        # how long) by looking at the whole function at once, not one
+        # already-resolved statement at a time.
         ir = []
         for stmt in fn.body:
             ir.extend(self.gen_statement_ir(stmt))
+        self._register_assignment = allocate_registers(ir)
         instructions.extend(self.lower_ir(ir))
+        self._register_assignment = {}  # never valid past this function's own body
         if return_type == Type.VOID:
             # A function with no declared return type never has to
             # guarantee every path returns explicitly (see

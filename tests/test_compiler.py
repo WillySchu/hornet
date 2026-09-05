@@ -4189,7 +4189,7 @@ class TestMethods:
     def test_method_and_free_function_sharing_a_name(self):
         """Methods live in their own registry, keyed by (struct,
         method) and resolved by receiver type, not by a bare name
-        lookup -- so a method and a free function can share a name
+        lookup -- so[O a method and a free function can share a name
         with zero conflict, unlike struct and function names, which
         DO share one namespace (see analyze()'s own collision check)."""
         assert_program_exit_code(

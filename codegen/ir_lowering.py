@@ -63,20 +63,46 @@ class IRLoweringMixin:
         return self._gen_read_temp_into(value, dst)
 
     def _gen_read_temp_into(self, temp: Temp, dst: Register) -> list[Instruction]:
-        """Reads a Temp's current value from its slot into `dst`.
-        str needs its own case (a full 8-byte pointer read via MovQ):
-        _gen_read_scalar_into (ScalarsMixin) only special-cases
-        int8/uint8/int64, falling through to a plain 4-byte Mov for
-        everything else -- which would truncate a pointer. Every
-        existing caller of that method already special-cases str
-        itself first; this is one more such caller, not a gap in it."""
+        """Reads a Temp's current value into `dst`.
+
+        If register_allocator.py assigned it a register (see
+        self._register_assignment, set once per function by
+        gen_function), the value is already sitting there, not in
+        memory -- this is just a register-to-register move (or, if it
+        already happens to BE `dst`, no instruction at all). Otherwise,
+        falls back to reading its memory slot: str needs its own case
+        (a full 8-byte pointer read via MovQ) since _gen_read_scalar_
+        into (ScalarsMixin) only special-cases int8/uint8/int64,
+        falling through to a plain 4-byte Mov for everything else --
+        which would truncate a pointer. Every existing caller of that
+        method already special-cases str itself first; this is one
+        more such caller, not a gap in it."""
+        reg_name = self._register_assignment.get(temp.id)
+        if reg_name is not None:
+            src = Register(reg_name)
+            wide = temp.type in (Type.INT64, Type.STR)
+            if wide:
+                src, dst = as_qword_register(src), as_qword_register(dst)
+            if src == dst:
+                return []
+            return [MovQ(src=src, dst=dst)] if wide else [Mov(src=src, dst=dst)]
         if temp.type == Type.STR:
             return [MovQ(src=self._temp_mem(temp), dst=as_qword_register(dst))]
         return self._gen_read_scalar_into(self._temp_mem(temp), temp.type, dst)
 
     def _gen_write_temp_from(self, src: Register, temp: Temp) -> list[Instruction]:
         """The write-side counterpart to _gen_read_temp_into -- same
-        str special case, for the same reason."""
+        register-assignment check, same str special case, for the
+        same reasons."""
+        reg_name = self._register_assignment.get(temp.id)
+        if reg_name is not None:
+            dst = Register(reg_name)
+            wide = temp.type in (Type.INT64, Type.STR)
+            if wide:
+                src, dst = as_qword_register(src), as_qword_register(dst)
+            if src == dst:
+                return []
+            return [MovQ(src=src, dst=dst)] if wide else [Mov(src=src, dst=dst)]
         if temp.type == Type.STR:
             return [MovQ(src=as_qword_register(src), dst=self._temp_mem(temp))]
         return self._gen_write_scalar_from(src, temp.type, self._temp_mem(temp))

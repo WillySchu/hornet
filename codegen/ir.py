@@ -35,9 +35,18 @@ class Temp:
     """A virtual register: unlimited supply, identified by `id` alone
     (two Temps are the same iff their ids match -- `type` is carried
     for convenience, not part of identity, so this stays a safe dict
-    key without needing Type's own equality involved at all)."""
+    key without needing Type's own equality involved at all).
+
+    `is_named_local`, set only by CodeGenerator._temp_at_offset, marks
+    a Temp that backs a source-level variable rather than an anonymous
+    compiler-generated value. register_allocator.py excludes these
+    unconditionally: a named variable's memory slot can still be read
+    or written directly (via _local_offset), bypassing the Temp
+    entirely, by any not-yet-migrated construct -- promoting one to a
+    register would risk exactly that code reading a stale value."""
     id: int
     type: Type
+    is_named_local: bool = False
 
     def __hash__(self):
         return hash(self.id)
