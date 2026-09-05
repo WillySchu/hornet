@@ -116,7 +116,8 @@ class StatementsMixin:
             # binding twice would just orphan a Temp id, harmlessly
             # but pointlessly.
             var_type = type_from_name(stmt.var_type, self.struct_registry, self.type_alias_registry)
-            if stmt.init is not None and not isinstance(stmt.init, NoneLiteral) and var_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
+            if stmt.init is not None and not isinstance(stmt.init, NoneLiteral) and var_type.kind not in (
+                    TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
                 self._bind_local(stmt)
                 ir, value = self.gen_expr_ir(stmt.init)
                 return ir + [IRMove(dst=self._local_temp(stmt.name), src=value)]
@@ -216,7 +217,8 @@ class StatementsMixin:
             instructions.append(MovQ(src=Imm(len(stmt.value.elements)), dst=Memory('rbp', offset + 8)))
             return instructions
         value_type = type_of(stmt.value)
-        if value_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and self._is_heap_allocated(self._local_decl_id(stmt.name), value_type):
+        if value_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and self._is_heap_allocated(
+                self._local_decl_id(stmt.name), value_type):
             # Reuses the EXISTING allocation from this variable's
             # declaration -- a fixed-size array's (or struct's) own
             # footprint never changes across its lifetime, so there's

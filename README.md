@@ -14,6 +14,7 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
+- `IRBranch` peephole optimization to skip redundant unconditional jumps.
 - `type` type.
 - ` typeof`
 - Require `type` keyword to declare new type for structs.

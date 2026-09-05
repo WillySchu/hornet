@@ -220,7 +220,8 @@ class CodeGenerator(
         functions = [self.gen_function(fn) for fn in program.functions]
         if self._print_used:
             functions.append(self.build_stringify_function())
-        return AsmProgram(functions=functions, string_literals=self.string_literals, type_descriptors=self.type_descriptors)
+        return AsmProgram(
+            functions=functions, string_literals=self.string_literals, type_descriptors=self.type_descriptors)
 
     def gen_function(self, fn: Function) -> AsmFunction:
         # Fresh allocator state per function -- offsets are relative to
@@ -230,7 +231,8 @@ class CodeGenerator(
         self._next_offset = 0
         # No declared return type means Type.VOID, the same internal-
         # only sentinel semantic.py's analyze_function uses.
-        return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.struct_registry, self.type_alias_registry)
+        return_type = Type.VOID if fn.return_type is None else type_from_name(
+            fn.return_type, self.struct_registry, self.type_alias_registry)
         param_types = [type_from_name(p.type, self.struct_registry, self.type_alias_registry) for p in fn.params]
 
         # Which of this function's array declarations need to be heap-
@@ -240,7 +242,8 @@ class CodeGenerator(
         # _collect_params/_collect_locals (below) need to know this to
         # decide how much stack space each declaration's slot takes (8
         # bytes for a heap pointer vs. the array's full width).
-        self._escaping_array_ids = analyze_array_escapes(fn, param_types, self.struct_registry, self.type_alias_registry)
+        self._escaping_array_ids = analyze_array_escapes(
+            fn, param_types, self.struct_registry, self.type_alias_registry)
 
         # An array- OR slice-typed return needs a hidden pointer -- the
         # caller passes the address to write the result into, as an
@@ -409,12 +412,16 @@ class CodeGenerator(
         reg_index = arg_shift
         for i, p_type in enumerate(param_types):
             if p_type.kind == TypeKind.SLICE:
-                instructions.append(MovQ(src=Register(ARG_REGISTERS_64[reg_index]), dst=Memory('rbp', param_temp_offsets[i])))
-                instructions.append(MovQ(src=Register(ARG_REGISTERS_64[reg_index + 1]), dst=Memory('rbp', param_temp_offsets[i] + 8)))
-                instructions.append(MovQ(src=Register(ARG_REGISTERS_64[reg_index + 2]), dst=Memory('rbp', param_temp_offsets[i] + 16)))
+                instructions.append(
+                    MovQ(src=Register(ARG_REGISTERS_64[reg_index]), dst=Memory('rbp', param_temp_offsets[i])))
+                instructions.append(
+                    MovQ(src=Register(ARG_REGISTERS_64[reg_index + 1]), dst=Memory('rbp', param_temp_offsets[i] + 8)))
+                instructions.append(
+                    MovQ(src=Register(ARG_REGISTERS_64[reg_index + 2]), dst=Memory('rbp', param_temp_offsets[i] + 16)))
                 reg_index += 3
             else:
-                instructions.append(MovQ(src=Register(ARG_REGISTERS_64[reg_index]), dst=Memory('rbp', param_temp_offsets[i])))
+                instructions.append(
+                    MovQ(src=Register(ARG_REGISTERS_64[reg_index]), dst=Memory('rbp', param_temp_offsets[i])))
                 reg_index += 1
 
         for i, p in enumerate(fn.params):
@@ -562,7 +569,8 @@ class CodeGenerator(
         for stmt in statements:
             if isinstance(stmt, VarDecl):
                 var_type = type_from_name(stmt.var_type, self.struct_registry, self.type_alias_registry)
-                width = 8 if self._is_heap_allocated(id(stmt), var_type) else type_byte_width(var_type, self.struct_registry)
+                width = 8 if self._is_heap_allocated(
+                    id(stmt), var_type) else type_byte_width(var_type, self.struct_registry)
                 self._next_offset -= width
                 self._var_offsets[id(stmt)] = self._next_offset
             elif isinstance(stmt, If):

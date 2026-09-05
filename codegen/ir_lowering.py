@@ -122,7 +122,8 @@ class IRLoweringMixin:
             elif isinstance(instr, IRBinOp):
                 out.extend(self._gen_load_value(instr.left, Register('eax')))
                 out.extend(self._gen_load_value(instr.right, Register('ecx')))
-                out.extend(self.gen_binary_op(instr.op, src=Register('ecx'), dst=Register('eax'), operand_type=instr.left.type))
+                out.extend(self.gen_binary_op(
+                    instr.op, src=Register('ecx'), dst=Register('eax'), operand_type=instr.left.type))
                 out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
             elif isinstance(instr, IRUnOp):
                 out.extend(self._gen_load_value(instr.operand, Register('eax')))
