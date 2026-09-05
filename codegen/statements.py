@@ -4,13 +4,27 @@ uninitialized declaration gets its type's real zero value rather than
 leaving memory untouched, and the label-pair shape (start/end, or
 else/end) every branching or looping construct here builds on."""
 
-from codegen.assembly_ast import Instruction, MovQ, Register, Memory, Imm, Push, Pop, Mov, Jmp, \
-    LeaQ, MovB
+from codegen.assembly_ast import Instruction, MovQ, Register, Memory, Imm, Push, Pop, Mov, Jmp, LeaQ, MovB
 from codegen.errors import CodegenError
 from codegen.ir import IRRaw, IRReturn, IRBranch, IRLabel, IRJump
 from codegen.utils import type_of
-from parser import Node, VarDecl, Assign, IndexAssign, FieldAssign, Return, If, While, Break, Continue, ExprStmt, \
-    NoneLiteral, ArrayLiteral, Index, Slice
+from parser import (
+    ArrayLiteral,
+    Assign,
+    Break,
+    Continue,
+    ExprStmt,
+    FieldAssign,
+    If,
+    Index,
+    IndexAssign,
+    Node,
+    NoneLiteral,
+    Return,
+    Slice,
+    VarDecl,
+    While,
+)
 from semantic import TypeKind, Type
 
 

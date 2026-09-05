@@ -59,3 +59,4 @@ Updates:
 - Bounds Check Elimination.
 - GC...
 - Free memory `malloc`ed by string concatenation.
+- Explore graph coloring algorithm for register allocation (Chaitin-Briggs).

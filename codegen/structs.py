@@ -10,21 +10,21 @@ into nested structs and delegating array-typed fields back to
 arrays_slices.py."""
 
 from codegen.assembly_ast import (
-    Register,
-    Instruction,
-    MovQ,
-    Memory,
-    LeaQFrame,
     AddQ,
-    Imm,
-    Push,
-    Pop,
-    Mov,
     CallInstr,
     Cmp,
-    Jne,
+    Instruction,
+    Imm,
     Jmp,
+    Jne,
     Label,
+    LeaQFrame,
+    Memory,
+    Mov,
+    MovQ,
+    Push,
+    Pop,
+    Register,
 )
 from codegen.errors import CodegenError
 from codegen.utils import type_byte_width, type_of, leaf_type, gen_protecting_dst_across

@@ -13,7 +13,20 @@ that arrives, only which memory operand a Temp resolves to.
 """
 
 from codegen.assembly_ast import Instruction, Register, Memory, Imm, Mov, MovQ, Cmp, Je, Jmp, Label, CallInstr
-from codegen.ir import Temp, IRConst, IRValue, IRMove, IRBinOp, IRUnOp, IRRaw, IRLabel, IRJump, IRBranch, IRCall, IRReturn
+from codegen.ir import (
+    IRBinOp,
+    IRBranch,
+    IRCall,
+    IRConst,
+    IRJump,
+    IRLabel,
+    IRMove,
+    IRRaw,
+    IRReturn,
+    IRUnOp,
+    IRValue,
+    Temp,
+)
 from codegen.utils import as_qword_register, type_byte_width
 from semantic import Type
 

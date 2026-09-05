@@ -10,21 +10,21 @@ from codegen.errors import CodegenError
 from codegen.ir import IRRaw, IRBinOp
 from codegen.utils import as_qword_register, type_of
 from parser import (
-    Node,
-    Constant,
-    BoolLiteral,
-    StringLiteral,
     ArrayLiteral,
-    Slice,
-    NoneLiteral,
-    Variable,
-    Index,
-    Field,
-    Call,
-    Cast,
-    Unary,
     Binary,
     BinaryOp,
+    BoolLiteral,
+    Call,
+    Cast,
+    Constant,
+    Field,
+    Index,
+    Node,
+    NoneLiteral,
+    StringLiteral,
+    Slice,
+    Unary,
+    Variable,
 )
 from semantic import Type, TypeKind
 

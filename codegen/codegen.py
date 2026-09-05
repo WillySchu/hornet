@@ -12,43 +12,21 @@ that chain lexing, parsing, semantic analysis, and codegen together.
 
 
 import argparse
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional
 
 from codegen.arrays_slices import ArraysSlicesMixin
 from codegen.assembly_ast import (
-    Add,
-    AddQ,
     AsmFunction,
     AsmProgram,
-    CallInstr,
-    Cmp,
-    CmpQ,
     Imm,
-    IMul,
     Instruction,
-    Ja,
-    Jae,
-    Je,
-    Jle,
-    Jmp,
-    Jne,
-    Label,
-    LeaQ,
-    LeaQFrame,
     Leave,
     Memory,
-    Mov,
-    MovB,
     MovQ,
-    MovZX,
-    Operand,
     Pop,
     Push,
     Register,
     Ret,
-    SetCC,
-    ShiftRightArithmetic,
-    Sub,
     SubQ,
 )
 from codegen.calling_convention import CALLEE_SAVED_SCRATCH_REGISTERS, CallingConventionMixin
@@ -61,13 +39,12 @@ from codegen.scalars import ScalarsMixin
 from codegen.statements import StatementsMixin
 from codegen.strings import StringsMixin
 from codegen.structs import StructsMixin
-from codegen.utils import as_byte_register, leaf_type, type_byte_width, type_of, ARG_REGISTERS_64
+from codegen.utils import type_byte_width, type_of, ARG_REGISTERS_64
 from lexer import lex
 from parser import (
     ArrayLiteral,
     Assign,
     Binary,
-    BinaryOp,
     Call,
     ExprStmt,
     Field,
@@ -77,7 +54,6 @@ from parser import (
     Index,
     IndexAssign,
     Node,
-    NoneLiteral,
     Param,
     Parser,
     Program,
