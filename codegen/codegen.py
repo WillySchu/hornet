@@ -439,8 +439,16 @@ class CodeGenerator(
                 instructions.extend(self._gen_write_scalar_from(Register('eax'), p_type, Memory('rbp', offset)))
 
         self._bounds_check_fail_labels = {}  # fresh, per-function jump targets
+        # Accumulated as one IR list for the whole body -- see
+        # gen_statement_ir -- and lowered exactly once here, rather
+        # than per-statement, so a real register allocator will
+        # eventually see this entire function's Temps and their live
+        # ranges together, not one already-resolved statement at a
+        # time.
+        ir = []
         for stmt in fn.body:
-            instructions.extend(self.gen_statement(stmt))
+            ir.extend(self.gen_statement_ir(stmt))
+        instructions.extend(self.lower_ir(ir))
         if return_type == Type.VOID:
             # A function with no declared return type never has to
             # guarantee every path returns explicitly (see

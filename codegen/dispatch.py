@@ -7,8 +7,9 @@ branch of one of these two."""
 
 from codegen.assembly_ast import Operand, Instruction, MovQ, Imm, Mov, Memory, Register
 from codegen.errors import CodegenError
-from codegen.ir import IRRaw, IRBinOp
+from codegen.ir import IRRaw, IRBinOp, IRValue
 from codegen.utils import as_qword_register, type_of
+from typing import Optional
 from parser import (
     ArrayLiteral,
     Binary,
@@ -251,6 +252,55 @@ class DispatchMixin:
             return self.gen_binary_into(expr, dst)
         raise CodegenError(f"No codegen rule for expression: {expr!r}")
 
+    def gen_expr_ir(self, expr: Node) -> tuple[list, Optional[IRValue]]:
+        """The IR-native counterpart to gen_expr_into: builds real IR
+        for the node kinds that have it -- Binary (see
+        _ir_expr_binary) and an ordinary scalar-or-void-returning Call
+        (see _ir_call) -- and falls back to wrapping gen_expr_into
+        itself, as a single opaque IRRaw, for everything else. That
+        fallback also covers every case gen_expr_into defensively
+        rejects (ArrayLiteral, Slice, NoneLiteral, a composite-
+        returning Call) without needing to reimplement any of it here.
+
+        Returns (ir, value) -- value is None only for a void call,
+        which can only legally appear via a bare ExprStmt (see
+        gen_statement_ir), never as another expression's operand."""
+        if isinstance(expr, Binary):
+            return self._ir_expr_binary(expr)
+        if isinstance(expr, Call) and expr.name not in ('print', 'len') and type_of(expr).kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
+            return self._ir_call(expr)
+        t = self._new_temp(type_of(expr))
+        return [IRRaw(self.gen_expr_into(expr, Register('eax')), dst=t)], t
+
+    def _ir_expr_binary(self, expr: Binary) -> tuple[list, IRValue]:
+        """The IR-native counterpart to gen_binary_into's own three-way
+        dispatch: short-circuit AND/OR (already real IR, via
+        _ir_short_circuit), slice/array/struct equality and string
+        concat/compare (none of those migrated -- wrapped via IRRaw,
+        each around its own existing method), or the ordinary
+        arithmetic/comparison case (already real IR, via _ir_binary)."""
+        if expr.op == BinaryOp.AND:
+            return self._ir_short_circuit(expr, short_circuit_value=0, label_prefix="and")
+        if expr.op == BinaryOp.OR:
+            return self._ir_short_circuit(expr, short_circuit_value=1, label_prefix="or")
+        if type_of(expr.left) == Type.STR:
+            t = self._new_temp(type_of(expr))
+            if expr.op == BinaryOp.ADD:
+                return [IRRaw(self.gen_string_concat_into(expr, Register('eax')), dst=t)], t
+            if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
+                return [IRRaw(self.gen_string_compare_into(expr, Register('eax')), dst=t)], t
+        if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
+            if type_of(expr.left).kind == TypeKind.SLICE or type_of(expr.right).kind == TypeKind.SLICE:
+                t = self._new_temp(Type.BOOL)
+                return [IRRaw(self.gen_slice_none_comparison_into(expr, Register('eax')), dst=t)], t
+            if type_of(expr.left).kind == TypeKind.ARRAY:
+                t = self._new_temp(Type.BOOL)
+                return [IRRaw(self.gen_array_equality_into(expr, Register('eax')), dst=t)], t
+            if type_of(expr.left).kind == TypeKind.STRUCT:
+                t = self._new_temp(Type.BOOL)
+                return [IRRaw(self.gen_struct_equality_into(expr, Register('eax')), dst=t)], t
+        return self._ir_binary(expr)
+
     def gen_binary_into(self, expr: Binary, dst: Operand) -> list[Instruction]:
         """Computes `expr.left OP expr.right` into `dst`.
 
@@ -305,17 +355,17 @@ class DispatchMixin:
 
     def _ir_binary(self, expr: Binary) -> tuple[list, object]:
         """Builds (without lowering) the ordinary arithmetic/comparison
-        case's IR: evaluate each operand into its own Temp, combine
-        via IRBinOp. lower_ir reuses gen_binary_op unchanged as this
-        op's own instruction-selection rule, so the arithmetic itself
-        isn't reimplemented here. Returns (ir, t_result)."""
-        operand_type = type_of(expr.left)  # left and right are guaranteed the same type by semantic.py's own check_binary
-        t_left = self._new_temp(operand_type)
-        t_right = self._new_temp(operand_type)
+        case's IR: evaluate each operand (via gen_expr_ir, so a nested
+        migrated sub-expression -- another Binary, a scalar Call --
+        stays real IR instead of being immediately, separately
+        lowered), combine via IRBinOp. lower_ir reuses gen_binary_op
+        unchanged as this op's own instruction-selection rule, so the
+        arithmetic itself isn't reimplemented here. Returns
+        (ir, t_result)."""
+        left_ir, left_value = self.gen_expr_ir(expr.left)
+        right_ir, right_value = self.gen_expr_ir(expr.right)
         t_result = self._new_temp(type_of(expr))
-        ir = [
-            IRRaw(self.gen_expr_into(expr.left, Register('eax')), dst=t_left),
-            IRRaw(self.gen_expr_into(expr.right, Register('eax')), dst=t_right),
-            IRBinOp(dst=t_result, op=expr.op, left=t_left, right=t_right),
+        ir = left_ir + right_ir + [
+            IRBinOp(dst=t_result, op=expr.op, left=left_value, right=right_value),
         ]
         return ir, t_result

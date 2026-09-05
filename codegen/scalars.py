@@ -157,18 +157,18 @@ class ScalarsMixin:
                 return short_label, continue_label
             return continue_label, short_label
 
-        t_left = self._new_temp(Type.BOOL)
-        t_right = self._new_temp(Type.BOOL)
         t_result = self._new_temp(Type.BOOL)
         left_true, left_false = targets(rhs_label)
         right_true, right_false = targets(fallthrough_label)
 
+        left_ir, left_value = self.gen_expr_ir(expr.left)
+        right_ir, right_value = self.gen_expr_ir(expr.right)
         ir = [
-            IRRaw(self.gen_expr_into(expr.left, Register('eax')), dst=t_left),
-            IRBranch(cond=t_left, true_label=left_true, false_label=left_false),
+            *left_ir,
+            IRBranch(cond=left_value, true_label=left_true, false_label=left_false),
             IRLabel(rhs_label),
-            IRRaw(self.gen_expr_into(expr.right, Register('eax')), dst=t_right),
-            IRBranch(cond=t_right, true_label=right_true, false_label=right_false),
+            *right_ir,
+            IRBranch(cond=right_value, true_label=right_true, false_label=right_false),
             IRLabel(fallthrough_label),
             IRMove(dst=t_result, src=IRConst(fallthrough_value, Type.BOOL)),
             IRJump(end_label),

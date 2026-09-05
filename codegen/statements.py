@@ -52,6 +52,62 @@ class StatementsMixin:
             return self.gen_expr_stmt(stmt)
         raise CodegenError(f"No codegen rule for statement: {stmt!r}")
 
+    def gen_statement_ir(self, stmt: Node) -> list:
+        """The IR-native counterpart to gen_statement: builds real IR
+        for Return/If/While (recursing into itself, not gen_statement,
+        for If/While bodies -- so nested control flow stays real IR
+        all the way down) and for a bare expression statement (via
+        gen_expr_ir, discarding whatever value comes back). Falls back
+        to wrapping gen_statement itself, as a single opaque IRRaw, for
+        everything else (VarDecl, Assign, IndexAssign, FieldAssign,
+        Break, Continue, and an ArrayLiteral/Slice-valued ExprStmt,
+        neither of which fits gen_expr_ir's own contract) -- a real,
+        deliberate scope boundary for this step, not an oversight:
+        those still need their own IR-native handling as a follow-up.
+        """
+        if isinstance(stmt, Return):
+            is_composite_return = isinstance(stmt.value, NoneLiteral) or (
+                stmt.value is not None and type_of(stmt.value).kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT)
+            )
+            if not is_composite_return:
+                return self._ir_return(stmt.value)
+        elif isinstance(stmt, If):
+            then_label = self.new_label("if_then")
+            else_label = self.new_label("if_else")
+            end_label = self.new_label("if_end")
+            ir = self._ir_if_head(stmt, then_label, else_label)
+            self._push_scope()
+            for s in stmt.then_body:
+                ir.extend(self.gen_statement_ir(s))
+            self._pop_scope()
+            ir.append(IRJump(end_label))
+            ir.append(IRLabel(else_label))
+            if stmt.else_body is not None:
+                self._push_scope()
+                for s in stmt.else_body:
+                    ir.extend(self.gen_statement_ir(s))
+                self._pop_scope()
+            ir.append(IRLabel(end_label))
+            return ir
+        elif isinstance(stmt, While):
+            start_label = self.new_label("while_start")
+            body_label = self.new_label("while_body")
+            end_label = self.new_label("while_end")
+            ir = self._ir_while_head(stmt, start_label, body_label, end_label)
+            self.loop_labels.append((start_label, end_label))
+            self._push_scope()
+            for s in stmt.body:
+                ir.extend(self.gen_statement_ir(s))
+            self._pop_scope()
+            self.loop_labels.pop()
+            ir.append(IRJump(start_label))
+            ir.append(IRLabel(end_label))
+            return ir
+        elif isinstance(stmt, ExprStmt) and not isinstance(stmt.expr, (ArrayLiteral, Slice)):
+            ir, _ = self.gen_expr_ir(stmt.expr)
+            return ir
+        return [IRRaw(self.gen_statement(stmt))]
+
     def gen_var_decl(self, stmt: VarDecl) -> list[Instruction]:
         # _collect_locals already reserved this VarDecl's slot;
         # _bind_local just makes its name resolvable in the current
@@ -347,11 +403,8 @@ class StatementsMixin:
         convention."""
         if value_expr is None:
             return [IRReturn(value=None)]
-        t_result = self._new_temp(type_of(value_expr))
-        return [
-            IRRaw(self.gen_expr_into(value_expr, Register('eax')), dst=t_result),
-            IRReturn(value=t_result),
-        ]
+        ir, value = self.gen_expr_ir(value_expr)
+        return ir + [IRReturn(value=value)]
 
     def gen_if(self, stmt: If) -> list[Instruction]:
         """Computes the condition into a Temp and branches on it via
@@ -402,10 +455,9 @@ class StatementsMixin:
         is responsible for the bodies and the trailing jump/labels
         around them, since those still go through gen_statement, not
         native IR."""
-        t_cond = self._new_temp(Type.BOOL)
-        return [
-            IRRaw(self.gen_expr_into(stmt.condition, Register('eax')), dst=t_cond),
-            IRBranch(cond=t_cond, true_label=then_label, false_label=else_label),
+        cond_ir, cond_value = self.gen_expr_ir(stmt.condition)
+        return cond_ir + [
+            IRBranch(cond=cond_value, true_label=then_label, false_label=else_label),
             IRLabel(then_label),
         ]
 
@@ -458,11 +510,9 @@ class StatementsMixin:
         is responsible for the body and the trailing jump/end-label
         around it, since those still go through gen_statement, not
         native IR."""
-        t_cond = self._new_temp(Type.BOOL)
-        return [
-            IRLabel(start_label),
-            IRRaw(self.gen_expr_into(stmt.condition, Register('eax')), dst=t_cond),
-            IRBranch(cond=t_cond, true_label=body_label, false_label=end_label),
+        cond_ir, cond_value = self.gen_expr_ir(stmt.condition)
+        return [IRLabel(start_label)] + cond_ir + [
+            IRBranch(cond=cond_value, true_label=body_label, false_label=end_label),
             IRLabel(body_label),
         ]
 
