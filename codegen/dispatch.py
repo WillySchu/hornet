@@ -59,43 +59,33 @@ class DispatchMixin:
         if isinstance(expr, ArrayLiteral):
             # Never reachable in correct codegen -- an array literal's
             # value can't fit in a single register, so every producer
-            # of one (VarDecl init, Assign, a nested literal element)
-            # routes through gen_array_value_into/gen_array_literal_into
-            # instead of ever calling gen_expr_into on it directly. A
-            # clear error here catches a codegen bug immediately rather
-            # than silently truncating an array down to whatever
-            # happens to fit in %eax.
+            # of one routes through gen_array_value_into/
+            # gen_array_literal_into instead of calling gen_expr_into
+            # on it directly. A clear error here catches a codegen bug
+            # immediately rather than silently truncating the array.
             raise CodegenError(
                 "Cannot compute an array literal via gen_expr_into -- "
                 "arrays don't fit in a single register; use "
                 "gen_array_value_into instead"
             )
         if isinstance(expr, Slice):
-            # Never reachable in correct codegen -- a slice's value is
-            # a 24-byte {ptr, len, cap} descriptor, which can't fit in a
-            # single register either. Every producer of one (VarDecl
-            # init, Assign) routes through gen_slice_value_into/
-            # gen_slice_into instead of ever calling gen_expr_into on
-            # it directly -- see ArrayLiteral's own case just above
-            # for the identical reasoning.
+            # Same reasoning as ArrayLiteral above: a slice's value is
+            # a 24-byte descriptor, which doesn't fit in a register
+            # either.
             raise CodegenError(
                 "Cannot compute a slice expression via gen_expr_into -- "
                 "slices don't fit in a single register; use "
                 "gen_slice_value_into instead"
             )
         if isinstance(expr, NoneLiteral):
-            # Never reachable in correct codegen either, for a
-            # different reason than ArrayLiteral/Slice above: it's not
-            # a SIZE problem here at all (rejected for the same size
-            # reason Slice is, now that none's own {0, 0, 0} descriptor
-            # is exactly as wide as any other slice's) -- it's that
-            # none has no ONE fixed target type of its own to compute
-            # INTO -- see gen_none_into's own docstring for why its
-            # callers (gen_var_decl/gen_assign's own NoneLiteral
-            # short-circuit) have to already know and pass the target
-            # type explicitly, something gen_expr_into's own signature
-            # has no way to supply. A slice-vs-none comparison (`s ==
-            # none`) is handled entirely separately too, via
+            # Rejected for a different reason than ArrayLiteral/Slice
+            # above: not a size problem (none's {0,0,0} descriptor is
+            # exactly as wide as any other slice) but that none has no
+            # one fixed target type to compute INTO -- its callers
+            # (gen_var_decl/gen_assign's NoneLiteral short-circuit)
+            # already know and pass the target type explicitly, which
+            # this method's signature has no way to supply. `s == none`
+            # is handled entirely separately, via
             # gen_slice_none_comparison_into, dispatched from
             # gen_binary_into before it would ever reach here.
             raise CodegenError(
@@ -134,23 +124,17 @@ class DispatchMixin:
         if isinstance(expr, Index):
             element_type = type_of(expr)
             if element_type.kind == TypeKind.ARRAY:
-                # Reading a sub-array (e.g. `matrix[i]` alone, not yet
-                # fully indexed down to a scalar) has the same "doesn't
-                # fit in a register" problem as an array literal --
-                # `[3]int row = matrix[i]` is handled via
-                # gen_array_value_into instead, which calls
-                # gen_array_address_into directly rather than ever
-                # reaching this method for the sub-array's VALUE.
+                # Reading a sub-array (`matrix[i]` alone) has the same
+                # register-width problem as ArrayLiteral above --
+                # `[3]int row = matrix[i]` goes through
+                # gen_array_value_into instead.
                 raise CodegenError(
                     "Cannot read a sub-array via gen_expr_into -- arrays "
                     "don't fit in a single register; use "
                     "gen_array_value_into or gen_array_address_into instead"
                 )
             if element_type.kind == TypeKind.STRUCT:
-                # Same reasoning, for a struct-typed array element
-                # (`rows[i]` where rows is an array of structs) --
-                # `Point p = rows[i]` is handled via gen_struct_value_
-                # into instead.
+                # Same reasoning, for a struct-typed array element.
                 raise CodegenError(
                     "Cannot read a struct-typed array element via "
                     "gen_expr_into -- a struct doesn't fit in a single "
@@ -194,26 +178,17 @@ class DispatchMixin:
             return instructions
         if isinstance(expr, Call):
             if type_of(expr).kind == TypeKind.ARRAY:
-                # Never reachable in correct codegen -- see ArrayLiteral
-                # and the Index sub-array case just above for the same
-                # reasoning. An array-returning call's result is only
-                # ever consumed via gen_array_value_into's own Call case
-                # (which writes it, through the hidden-pointer
-                # convention, straight into a given destination), never
-                # by trying to land it in a single register here.
+                # Never reachable in correct codegen -- same reasoning
+                # as ArrayLiteral above. An array-returning call's
+                # result is only ever consumed via gen_array_value_
+                # into's own Call case (hidden-pointer convention),
+                # never landed in a single register here.
                 raise CodegenError(
                     f"Cannot call '{expr.name}' (which returns an array) "
                     f"via gen_expr_into -- arrays don't fit in a single "
                     f"register; use gen_array_value_into instead"
                 )
             if type_of(expr).kind == TypeKind.SLICE:
-                # Same reasoning, for the same underlying cause: a
-                # slice-returning call now writes its result through
-                # the hidden-pointer convention too (see gen_slice_
-                # call_into), just like an array-returning one, never
-                # by trying to land it in a single register here. Only
-                # ever reached via gen_slice_value_into's own Call case
-                # (VarDecl/Assign) or gen_return's own forwarding case.
                 raise CodegenError(
                     f"Cannot call '{expr.name}' (which returns a slice) "
                     f"via gen_expr_into -- a slice descriptor doesn't "
@@ -221,9 +196,6 @@ class DispatchMixin:
                     f"instead"
                 )
             if type_of(expr).kind == TypeKind.STRUCT:
-                # Same reasoning again, for a struct-returning call --
-                # only ever reached via gen_struct_value_into's own
-                # Call case or gen_return's own forwarding case.
                 raise CodegenError(
                     f"Cannot call '{expr.name}' (which returns a struct) "
                     f"via gen_expr_into -- a struct doesn't fit in a "
@@ -235,50 +207,37 @@ class DispatchMixin:
                 return self.gen_len_call_into(expr, dst)
             return self.gen_call_into(expr, dst)
         if isinstance(expr, Cast):
-            # Compute the source expression into dst first (already
-            # correctly widened if it was itself int8/uint8-typed --
-            # see _gen_read_scalar_into), then re-narrow dst's own
-            # LOW BYTE if the target is int8/uint8 -- see gen_cast_
-            # narrowing_into's own docstring for why this single,
-            # register-to-register instruction is enough regardless
-            # of what the SOURCE type actually was. A target of int
-            # needs nothing further at all: the source's own already-
-            # widened value already IS a valid int.
+            # Compute the source into dst first (already correctly
+            # widened if it was int8/uint8-typed), then re-narrow dst's
+            # LOW BYTE if the target is int8/uint8 -- see
+            # gen_cast_narrowing_into. A target of int needs nothing
+            # further: the source's already-widened value already IS a
+            # valid int.
             instructions = self.gen_expr_into(expr.expr, dst)
             instructions.extend(self.gen_cast_narrowing_into(expr.resolved_type, dst))
             return instructions
         if isinstance(expr, Unary):
-            # Compute the operand into dst first, then apply this node's
-            # operator to whatever's now there. This is what makes chained
-            # operators (`~-2`) work: the inner Unary's instructions run
-            # first, then the outer operator's instructions run on top.
+            # Compute the operand into dst first, then apply this
+            # node's operator to whatever's now there -- what makes
+            # chained operators (`~-2`) work.
             #
             # operand_type reads type_of(expr) -- this OUTER node's own
             # resolved_type -- not type_of(expr.operand). The two are
-            # ordinarily identical (check_unary's own rule is "stays the
-            # operand's own type"), EXCEPT for a widened literal: `int64
-            # x = -5` sets resolved_type to int64 on the OUTER Unary node
-            # (see _check_value_flowing_into's own case 3), but the INNER
-            # Constant(5) node's own resolved_type is still whatever
-            # check_expr's earlier, ordinary recursive pass already set
-            # it to (Type.INT) -- never updated, since the widening logic
-            # only ever touches the outermost node of a literal
-            # expression. Reading the inner one here was a real, found
-            # bug: it silently fed the wrong operand_type into gen_
-            # unary_op, using 32-bit Neg instead of NegQ for `-5` widened
-            # to int64 -- invisible for int8/uint8 only because THEIR
-            # own unary dispatch never branched on operand_type at all
-            # before int64 existed, so any operand_type value produced
-            # the identical, correct 32-bit instruction either way.
+            # ordinarily identical, EXCEPT for a widened literal:
+            # `int64 x = -5` sets resolved_type to int64 on the OUTER
+            # Unary node, but the INNER Constant(5)'s own resolved_type
+            # is still Type.INT (widening only ever touches the
+            # outermost node of a literal expression). Reading the
+            # inner one here was a real, found bug: it silently fed the
+            # wrong operand_type into gen_unary_op, using 32-bit Neg
+            # instead of NegQ for `-5` widened to int64.
             instructions = self.gen_expr_into(expr.operand, dst)
             instructions.extend(self.gen_unary_op(expr.op, dst, operand_type=type_of(expr)))
             return instructions
         if isinstance(expr, Binary):
-            # ADD and the two equality operators are overloaded for str
-            # (concatenation and strcmp-backed comparison respectively;
-            # see the module docstring's STRINGS section) -- everything
-            # else, and ADD/==/!= between two ints or bools, goes
-            # through the original gen_binary_into completely unchanged.
+            # ADD and the two equality operators are overloaded for
+            # str (concatenation and strcmp-backed comparison) --
+            # everything else goes through gen_binary_into unchanged.
             if expr.op == BinaryOp.ADD and type_of(expr.left) == Type.STR:
                 return self.gen_string_concat_into(expr, dst)
             if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL) and type_of(expr.left) == Type.STR:
@@ -289,13 +248,13 @@ class DispatchMixin:
     def gen_binary_into(self, expr: Binary, dst: Operand) -> list[Instruction]:
         """Computes `expr.left OP expr.right` into `dst`.
 
-        AND/OR are handled entirely separately (see gen_short_circuit)
-        since they must not unconditionally evaluate both sides. Every
-        other binary operator -- arithmetic and comparisons alike -- goes
-        through the stack-spill scheme described in the module
-        docstring, which always evaluates both sides. Requires `dst` to
-        be a register (there's a real 32-bit register and its 64-bit
-        alias pushed/popped along the way, which an Imm can't do).
+        AND/OR are handled separately (see gen_short_circuit) since
+        they must not unconditionally evaluate both sides. Every other
+        binary operator -- arithmetic and comparisons alike -- goes
+        through the stack-spill scheme below, which always evaluates
+        both sides. Requires `dst` to be a register (a real 32-bit
+        register and its 64-bit alias get pushed/popped along the way,
+        which an Imm can't do).
         """
         if expr.op == BinaryOp.AND:
             return self.gen_short_circuit(
@@ -317,30 +276,19 @@ class DispatchMixin:
         if not isinstance(dst, Register):
             raise CodegenError(f"Binary codegen requires a register destination, got: {dst!r}")
 
-        # A slice compared to `none` (in either order -- `s == none`
-        # and `none == s` both reach here) needs its own dedicated
-        # codegen too, for a related but distinct reason from AND/OR
-        # above: a slice's "value" is a 24-byte descriptor, which
-        # can't flow through the ordinary single-register stack-spill
-        # scheme below the way an int/bool/str value can. semantic.py's
-        # check_binary already guarantees, by the time this is reached,
-        # that exactly one side is slice-typed and the other is none-
-        # typed -- a real slice compared to another real slice
-        # (`s1 == s2`), or none compared to none, is rejected earlier
-        # -- so this doesn't need to re-derive or defensively check
-        # which side is which beyond that.
+        # A slice compared to `none` (either order) needs its own
+        # dedicated codegen: a slice's "value" is a 24-byte descriptor,
+        # which can't flow through the single-register stack-spill
+        # scheme below. semantic.py's check_binary already guarantees
+        # exactly one side is slice-typed and the other none-typed by
+        # the time this is reached.
         #
         # ARRAY and STRUCT equality are dispatched the same way, for
-        # the same root reason: neither one's own value fits through a
-        # single register the way an int/bool/str value does.
-        # semantic.py's own check_binary already guarantees, by the
-        # time this is reached, that both sides are the exact same
-        # array or struct type, and that the type is actually
-        # comparable (see _is_comparable_type) -- no slice anywhere
-        # inside it, directly or nested through a struct field or an
-        # array element -- see gen_array_equality_into/gen_struct_
-        # equality_into's own docstrings for how each dispatches
-        # internally.
+        # the same reason: neither value fits in a single register.
+        # check_binary guarantees both sides are the same, comparable
+        # array/struct type (no slice nested anywhere inside) -- see
+        # gen_array_equality_into/gen_struct_equality_into for how
+        # each dispatches internally.
         if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
             if type_of(expr.left).kind == TypeKind.SLICE or type_of(expr.right).kind == TypeKind.SLICE:
                 return self.gen_slice_none_comparison_into(expr, dst)
