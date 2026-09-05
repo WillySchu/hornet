@@ -6,7 +6,7 @@ else/end) every branching or looping construct here builds on."""
 
 from codegen.assembly_ast import Instruction, MovQ, Register, Memory, Imm, Push, Pop, Mov, Jmp, LeaQ, MovB
 from codegen.errors import CodegenError
-from codegen.ir import IRRaw, IRReturn, IRBranch, IRLabel, IRJump
+from codegen.ir import IRRaw, IRReturn, IRBranch, IRLabel, IRJump, IRMove
 from codegen.utils import type_of
 from parser import (
     ArrayLiteral,
@@ -25,7 +25,7 @@ from parser import (
     VarDecl,
     While,
 )
-from semantic import TypeKind, Type
+from semantic import TypeKind, Type, type_from_name
 
 
 class StatementsMixin:
@@ -56,14 +56,16 @@ class StatementsMixin:
         """The IR-native counterpart to gen_statement: builds real IR
         for Return/If/While (recursing into itself, not gen_statement,
         for If/While bodies -- so nested control flow stays real IR
-        all the way down) and for a bare expression statement (via
-        gen_expr_ir, discarding whatever value comes back). Falls back
-        to wrapping gen_statement itself, as a single opaque IRRaw, for
-        everything else (VarDecl, Assign, IndexAssign, FieldAssign,
-        Break, Continue, and an ArrayLiteral/Slice-valued ExprStmt,
-        neither of which fits gen_expr_ir's own contract) -- a real,
-        deliberate scope boundary for this step, not an oversight:
-        those still need their own IR-native handling as a follow-up.
+        all the way down), a scalar VarDecl-with-initializer or Assign
+        (an IRMove into the variable's own persistent Temp -- see
+        _bind_local), and a bare expression statement (via gen_expr_ir,
+        discarding whatever value comes back). Falls back to wrapping
+        gen_statement itself, as a single opaque IRRaw, for everything
+        else (a no-initializer or composite-typed VarDecl, a composite-
+        typed Assign, IndexAssign, FieldAssign, Break, Continue, and an
+        ArrayLiteral/Slice-valued ExprStmt) -- a real, deliberate scope
+        boundary, not an oversight: those still need their own IR-
+        native handling as a follow-up.
         """
         if isinstance(stmt, Return):
             is_composite_return = isinstance(stmt.value, NoneLiteral) or (
@@ -103,6 +105,34 @@ class StatementsMixin:
             ir.append(IRJump(start_label))
             ir.append(IRLabel(end_label))
             return ir
+        elif isinstance(stmt, VarDecl):
+            # A scalar VarDecl WITH an initializer: bind the variable
+            # (creating its own persistent Temp -- see _bind_local),
+            # build the initializer's IR, and IRMove the result
+            # straight into that Temp. A no-initializer VarDecl (needs
+            # composite-aware zero-init) or an array/slice/struct-typed
+            # one falls to the catch-all below WITHOUT binding here --
+            # gen_var_decl does its own single _bind_local call, and
+            # binding twice would just orphan a Temp id, harmlessly
+            # but pointlessly.
+            var_type = type_from_name(stmt.var_type, self.struct_registry, self.type_alias_registry)
+            if stmt.init is not None and not isinstance(stmt.init, NoneLiteral) and var_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
+                self._bind_local(stmt)
+                ir, value = self.gen_expr_ir(stmt.init)
+                return ir + [IRMove(dst=self._local_temp(stmt.name), src=value)]
+        elif isinstance(stmt, Assign):
+            # Same shape as the VarDecl case above, for an existing
+            # scalar variable -- `var_type` here is necessarily
+            # already scalar in any well-typed program whenever it
+            # isn't ARRAY/SLICE/STRUCT (none of those, including
+            # NoneLiteral flowing into a slice target, can reach a
+            # non-composite variable at all), so no separate NoneLiteral
+            # check is needed the way VarDecl's own case above needs
+            # one.
+            var_type = self._local_type(stmt.name)
+            if var_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
+                ir, value = self.gen_expr_ir(stmt.value)
+                return ir + [IRMove(dst=self._local_temp(stmt.name), src=value)]
         elif isinstance(stmt, ExprStmt) and not isinstance(stmt.expr, (ArrayLiteral, Slice)):
             ir, _ = self.gen_expr_ir(stmt.expr)
             return ir

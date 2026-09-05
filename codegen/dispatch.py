@@ -254,17 +254,30 @@ class DispatchMixin:
 
     def gen_expr_ir(self, expr: Node) -> tuple[list, Optional[IRValue]]:
         """The IR-native counterpart to gen_expr_into: builds real IR
-        for the node kinds that have it -- Binary (see
-        _ir_expr_binary) and an ordinary scalar-or-void-returning Call
-        (see _ir_call) -- and falls back to wrapping gen_expr_into
-        itself, as a single opaque IRRaw, for everything else. That
-        fallback also covers every case gen_expr_into defensively
-        rejects (ArrayLiteral, Slice, NoneLiteral, a composite-
-        returning Call) without needing to reimplement any of it here.
+        for the node kinds that have it -- a scalar Variable (see
+        below), Binary (see _ir_expr_binary), and an ordinary scalar-
+        or-void-returning Call (see _ir_call) -- and falls back to
+        wrapping gen_expr_into itself, as a single opaque IRRaw, for
+        everything else. That fallback also covers every case
+        gen_expr_into defensively rejects (ArrayLiteral, Slice,
+        NoneLiteral, a composite-returning Call) without needing to
+        reimplement any of it here.
 
         Returns (ir, value) -- value is None only for a void call,
         which can only legally appear via a bare ExprStmt (see
-        gen_statement_ir), never as another expression's operand."""
+        gen_statement_ir), never as another expression's operand.
+
+        A Variable reference costs ZERO instructions here, not even a
+        load: `expr.name` already has its own persistent Temp (see
+        _bind_local), so reading it is just handing back that same
+        Temp -- materializing it into a real register only happens
+        later, lazily, wherever something actually needs the value.
+        Never reached for a composite-typed Variable (array/slice/
+        struct): gen_expr_into's own Variable case already rejects
+        those before this method could ever be called on one, the
+        same guarantee that already makes its fallback below safe."""
+        if isinstance(expr, Variable):
+            return [], self._local_temp(expr.name)
         if isinstance(expr, Binary):
             return self._ir_expr_binary(expr)
         if isinstance(expr, Call) and expr.name not in ('print', 'len') and type_of(expr).kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):

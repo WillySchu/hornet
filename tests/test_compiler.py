@@ -2178,6 +2178,26 @@ class TestFunctions:
             1,
         )
 
+    def test_reassignment_combining_self_reference_and_function_call(self):
+        """`c = c + addOne(a)`: the new value depends on both c's own
+        pre-assignment value and a function call's result, in the same
+        expression. c's own Temp is read once for the left operand and
+        written once at the end for the assignment itself -- proof c's
+        old value is fully consumed before the call runs (which, if
+        anything protecting it were missing, could clobber it) and
+        before the assignment's own new value overwrites it."""
+        assert_program_exit_code(
+            "def int addOne(int x):\n"
+            "    return x + 1\n"
+            "\n"
+            "def int main():\n"
+            "    int a = 5\n"
+            "    int c = 10\n"
+            "    c = c + addOne(a)\n"
+            "    return c\n",
+            16,
+        )
+
     def test_more_than_six_parameters_is_a_clean_codegen_error(self):
         """Only up to 6 parameters/arguments are supported (register-
         passed per the SysV ABI; stack-passed ones aren't implemented)
@@ -4169,7 +4189,7 @@ class TestMethods:
     def test_method_and_free_function_sharing_a_name(self):
         """Methods live in their own registry, keyed by (struct,
         method) and resolved by receiver type, not by a bare name
-        lookup -- so[O a method and a free function can share a name
+        lookup -- so a method and a free function can share a name
         with zero conflict, unlike struct and function names, which
         DO share one namespace (see analyze()'s own collision check)."""
         assert_program_exit_code(

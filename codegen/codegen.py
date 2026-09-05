@@ -170,6 +170,22 @@ class CodeGenerator(
         self._temp_count += 1
         return Temp(id=temp_id, type=t)
 
+    def _temp_at_offset(self, t: Type, offset: int) -> Temp:
+        """Allocates a fresh virtual register that already has a
+        known home -- `offset`, not a freshly-carved one -- registered
+        immediately rather than left for _temp_mem to decide lazily.
+        Used exactly once per named scalar local/parameter (see
+        _bind_local/_bind_param): a variable's own slot is already
+        fixed by _collect_locals/_collect_params before this ever
+        runs, so there's no lazy decision left to make, and reusing
+        that slot -- rather than allocating a second, redundant one --
+        is what lets every read and write of that variable, for the
+        rest of the function, share one Temp identity."""
+        temp_id = self._temp_count
+        self._temp_count += 1
+        self._temp_offsets[temp_id] = offset
+        return Temp(id=temp_id, type=t)
+
     def generate(self, program: Program) -> AsmProgram:
         # getattr, not direct attribute access: Program.struct_registry
         # is stamped on by semantic.analyze(), not a field the
@@ -505,9 +521,11 @@ class CodeGenerator(
         and declared type (as a real semantic.Type, via type_from_name,
         not the raw parser-level string/ArrayTypeExpr), plus id(p)
         itself, in the current scope, pointing at the permanent offset
-        _collect_params already assigned it."""
+        _collect_params already assigned it. Also creates `p`'s own
+        Temp (see _bind_local's own docstring for why)."""
         offset = self._var_offsets[id(p)]
-        self.scopes[-1][p.name] = (offset, type_from_name(p.type, self.struct_registry, self.type_alias_registry), id(p))
+        p_type = type_from_name(p.type, self.struct_registry, self.type_alias_registry)
+        self.scopes[-1][p.name] = (offset, p_type, id(p), self._temp_at_offset(p_type, offset))
         return offset
 
     def _collect_locals(self, statements: List[Node]) -> None:
@@ -718,9 +736,25 @@ class CodeGenerator(
         _local_type, and id(stmt) itself, needed by _local_decl_id --
         in the current (innermost) generation-time scope, pointing at
         the permanent offset _collect_locals already assigned this
-        exact VarDecl node, and returns that offset."""
+        exact VarDecl node, and returns that offset. Also creates
+        `stmt`'s own Temp (see _local_temp), pointed at that same
+        offset via _temp_at_offset rather than a freshly-carved one --
+        this is what lets a scalar VarDecl-with-initializer or Assign
+        (see gen_statement_ir) target this variable with a genuine
+        IRMove, and every later read of it (see gen_expr_ir's own
+        Variable case) resolve to the identical Temp, rather than each
+        read re-emitting its own throwaway copy: the same Temp
+        identity, reused for this variable's entire lifetime, is
+        exactly what would let a future register allocator consider
+        keeping it in a register instead of memory. Composite-typed
+        (array/struct/slice) locals get a Temp here too, for
+        uniformity, but never actually use it -- nothing in
+        arrays_slices.py/structs.py reads or writes through a Temp;
+        they address this variable's slot directly, exactly as
+        before."""
         offset = self._var_offsets[id(stmt)]
-        self.scopes[-1][stmt.name] = (offset, type_from_name(stmt.var_type, self.struct_registry, self.type_alias_registry), id(stmt))
+        var_type = type_from_name(stmt.var_type, self.struct_registry, self.type_alias_registry)
+        self.scopes[-1][stmt.name] = (offset, var_type, id(stmt), self._temp_at_offset(var_type, offset))
         return offset
 
     def _local_offset(self, name: str) -> int:
@@ -732,8 +766,8 @@ class CodeGenerator(
     def _local_type(self, name: str) -> Type:
         """Used specifically where a Variable's *offset* is also being
         looked up right alongside it (see gen_expr_into's Variable case)
-        -- both come from the same (offset, Type, decl_id) tuple in the
-        same scope-stack entry, which codegen has to maintain
+        -- both come from the same (offset, Type, decl_id, Temp) tuple
+        in the same scope-stack entry, which codegen has to maintain
         regardless of type_of's existence, since resolved_type has no
         way to encode *which* stack slot a name refers to. This is
         deliberately not replaced by type_of, even though it gives the
@@ -752,18 +786,30 @@ class CodeGenerator(
     def _local_decl_id(self, name: str) -> int:
         """Returns id(the VarDecl or Param node) that `name` currently
         resolves to -- the third element of the same (offset, Type,
-        decl_id) tuple _local_offset/_local_type read the first two of,
-        kept in the SAME scope-stack lookup (rather than a separate,
-        parallel name-to-id table) specifically so this respects
-        shadowing correctly: Hornet allows re-declaring a name in a
-        nested if/while block, so a plain name doesn't uniquely
-        identify a declaration the way id() of the actual AST node
-        does. Used by _is_heap_allocated to look up whether THIS
-        SPECIFIC declaration (not just any variable sharing its name)
-        was found to escape by analyze_array_escapes."""
+        decl_id, Temp) tuple _local_offset/_local_type/_local_temp
+        read the others of, kept in the SAME scope-stack lookup
+        (rather than a separate, parallel name-to-id table)
+        specifically so this respects shadowing correctly: Hornet
+        allows re-declaring a name in a nested if/while block, so a
+        plain name doesn't uniquely identify a declaration the way
+        id() of the actual AST node does. Used by _is_heap_allocated
+        to look up whether THIS SPECIFIC declaration (not just any
+        variable sharing its name) was found to escape by
+        analyze_array_escapes."""
         for scope in reversed(self.scopes):
             if name in scope:
                 return scope[name][2]
+        raise CodegenError(f"Reference to undeclared variable '{name}'")
+
+    def _local_temp(self, name: str) -> Temp:
+        """Returns `name`'s own persistent Temp -- the fourth element
+        of the same scope-stack tuple, created once by _bind_local/
+        _bind_param and reused for every read and write of this
+        variable for the rest of its scope (see _bind_local's own
+        docstring)."""
+        for scope in reversed(self.scopes):
+            if name in scope:
+                return scope[name][3]
         raise CodegenError(f"Reference to undeclared variable '{name}'")
 
     def _is_heap_allocated(self, decl_id: int, t: Type) -> bool:
