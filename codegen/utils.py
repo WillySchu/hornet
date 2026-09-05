@@ -23,28 +23,24 @@ COMPARISON_CONDITION_CODES = {
 # SysV ABI integer/pointer argument registers, in order, 64-bit and
 # 32-bit forms. Only the first 6 arguments of a call are supported --
 # beyond that the ABI moves to stack-passed arguments, which this
-# compiler doesn't implement (see gen_call_into and gen_function's
-# param-count checks). The 32-bit names don't follow one consistent
-# pattern: rdi/rsi/rdx/rcx are "legacy" registers with their own
-# historical e-prefixed names, while r8/r9 are x86-64-only and use a
-# d-suffix instead -- hence two explicit parallel lists rather than a
-# derived/computed mapping.
+# compiler doesn't implement. The 32-bit names don't follow one
+# consistent pattern: rdi/rsi/rdx/rcx are "legacy" registers with
+# their own historical e-prefixed names, while r8/r9 are x86-64-only
+# and use a d-suffix instead -- hence two explicit parallel lists
+# rather than a derived mapping.
 ARG_REGISTERS_64 = ['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
 ARG_REGISTERS_32 = ['edi', 'esi', 'edx', 'ecx', 'r8d', 'r9d']
 
 
 # 32-bit register name -> its 8-bit low-byte alias (e.g. %eax -> %al).
-# `sete` (and friends) can only target an 8-bit operand, so codegen needs
-# to be able to get from "the register I'm working in" to "its byte
-# alias". Covers every one of the 16 general-purpose registers, not just
-# the ones already in active use elsewhere in this file: once int8/uint8
-# have real, 1-byte-wide storage (see type_byte_width below), a scalar
-# write can be asked to truncate-and-store from WHATEVER register a given
-# call site happens to have its computed value sitting in -- %eax most of
-# the time, but also %r8d (a value protected across a stack push/pop, see
-# gen_struct_literal_into's own scalar case) or others -- so this needs to
-# be complete up front rather than extended reactively as a missing one is
-# discovered call site by call site.
+# `sete` (and friends) can only target an 8-bit operand, so codegen
+# needs to get from "the register I'm working in" to "its byte alias".
+# Covers all 16 general-purpose registers, not just the ones already
+# in active use: a scalar write can be asked to truncate-and-store
+# from whatever register a call site's value happens to be sitting in
+# (%eax most of the time, but also a protected register like %r8d),
+# so this needs to be complete up front rather than extended
+# reactively call site by call site.
 _BYTE_REGISTER_ALIASES = {
     'eax': 'al', 'ebx': 'bl', 'ecx': 'cl', 'edx': 'dl',
     'esi': 'sil', 'edi': 'dil', 'ebp': 'bpl', 'esp': 'spl',
@@ -61,15 +57,10 @@ def as_byte_register(reg: Operand) -> Register:
 
 # 32-bit register name -> its 64-bit alias (e.g. %eax -> %rax). Needed
 # because Push/Pop can't operate on a 32-bit operand size in long mode,
-# and because int64 now has real, genuinely 8-byte-wide storage (see
-# type_byte_width below) needing a full-width read/write from WHATEVER
-# register a given call site happens to have its computed value sitting
-# in -- %eax most of the time, but also %r8d (a value protected across a
-# stack push/pop, see gen_index_assign/gen_field_assign's own scalar
-# case) or others -- covers every one of the 16 general-purpose
-# registers up front for the identical reason _BYTE_REGISTER_ALIASES
-# just above does, rather than extended reactively one missing entry at
-# a time as int64's own write sites are discovered to need it.
+# and because int64 needs a full-width read/write from whatever
+# register a call site's computed value happens to be sitting in --
+# covers all 16 general-purpose registers up front for the same reason
+# _BYTE_REGISTER_ALIASES above does.
 _QWORD_REGISTER_ALIASES = {
     'eax': 'rax', 'ebx': 'rbx', 'ecx': 'rcx', 'edx': 'rdx',
     'esi': 'rsi', 'edi': 'rdi', 'ebp': 'rbp', 'esp': 'rsp',
@@ -85,39 +76,26 @@ def as_qword_register(reg: Operand) -> Register:
 
 
 def type_byte_width(t: Type, structs: dict[str, StructInfo]) -> int:
-    """Total bytes needed to store a value of type `t`: 1 for int8/
-    uint8, 4 for int/bool, 8 for str (a pointer), 24 for a slice (ptr,
-    len, cap), recursively `size * type_byte_width(element_type)` for
-    an array, and, for a struct, the SUM of type_byte_width over each
-    of its own fields' types, in declaration order (see the STRUCTS
-    section). This is the same "flatten it and add up the pieces" idea
-    the array case already uses, just over a heterogeneous field list
-    instead of N copies of one element type. `structs` is this
-    program's own struct registry (see StructInfo in semantic.py),
-    needed to look up a struct type's own field list by name;
-    threaded through every recursive call the same way type_from_
-    name's own registry parameter is. This is the one place that
-    recursion lives; every caller that needs an array's or struct's
-    total size (stack allocation, whole-value copies) or the shift-
-    per-index/per-field (address computation) goes through this or
+    """Total bytes needed to store a value of type `t`: 1 for
+    int8/uint8, 4 for int/bool, 8 for str (a pointer), 24 for a slice
+    (ptr, len, cap), recursively `size * type_byte_width(element_type)`
+    for an array, and, for a struct, the SUM of type_byte_width over
+    each field's type, in declaration order. `structs` is this
+    program's struct registry, needed to look up a struct type's field
+    list by name. This is the one place that recursion lives; every
+    caller that needs an array's or struct's total size, or the shift-
+    per-index/per-field for address computation, goes through this or
     leaf_type below rather than re-deriving either.
 
-    int8/uint8 returning 1 here (rather than falling through to the
-    4-byte default the way they used to, back when this compiler only
-    tracked their TYPE-checking rules and not yet their storage) is
-    what makes an array of them genuinely dense -- a [1000000]int8
-    buffer is 1MB, not 4MB -- and is the one change that made every
-    scalar read/write site elsewhere in codegen.py need to become
-    width-aware instead of unconditionally moving 4 bytes: an
-    address computed from this width (array indexing, struct field
-    offsets) now genuinely points at a 1-byte slot, so reading or
-    writing it 4 bytes at a time would touch memory that was never
-    part of this value at all. int64 returning 8 is the identical
-    change in the opposite direction -- a genuinely wide, not merely
-    type-checked, 8-byte value -- for the identical underlying reason:
-    an address computed from THIS width needs a full 8-byte read/write
-    to actually reach every byte the value occupies, not just its low
-    4."""
+    int8/uint8 returning 1 (rather than the 4-byte default other
+    scalars get) is what makes an array of them genuinely dense -- a
+    [1000000]int8 buffer is 1MB, not 4MB -- and is why every scalar
+    read/write site elsewhere in codegen needs to be width-aware
+    instead of unconditionally moving 4 bytes: an address computed
+    from this width now genuinely points at a 1-byte slot. int64
+    returning 8 is the same change in the opposite direction, for the
+    same reason: an address computed from that width needs a full
+    8-byte read/write to reach every byte the value occupies."""
     if t == Type.INT8 or t == Type.UINT8:
         return 1
     if t == Type.INT64:
@@ -138,30 +116,27 @@ def leaf_type(t: Type) -> Type:
     element type -- e.g. for [2][3]int, the leaf type is int. Used
     wherever codegen needs to know the actual SCALAR type stored at
     the bottom of a (possibly multi-dimensional) array, e.g. to decide
-    whether a flat element-by-element copy should move 1 (int8/uint8),
-    4 (int/bool), or 8 (str/a struct/array leaf wide enough to need
-    it) bytes at a time -- a multi-dimensional array is just one
+    whether a flat element-by-element copy should move 1, 4, or 8
+    bytes at a time -- a multi-dimensional array is just one
     contiguous block of leaf values for copying purposes, with no
     per-dimension logic needed once this is known.
 
-    Stops at a SLICE the same way it already stops at STR -- neither
-    is unwrapped further, since both are copied as one fixed-size
-    unit (a pointer, or a {pointer, length} pair) rather than
-    recursed into element by element."""
+    Stops at a SLICE the same way it stops at STR -- neither is
+    unwrapped further, since both are copied as one fixed-size unit
+    rather than recursed into element by element."""
     while t.kind == TypeKind.ARRAY:
         t = t.element_type
     return t
 
 
 def escape_for_asciz(s: str) -> str:
-    """Escapes `s` (an already-unescaped Hornet string value -- see
-    parser.py's _unescape_string_literal) for embedding in a GAS
-    `.asciz "..."` directive. Backslash has to be escaped *first*, or
-    the escapes added for the other characters would themselves get
-    re-escaped; double-quote needs escaping since that's the
-    directive's own delimiter; the rest are the common control
-    characters getting their standard short escape so the emitted
-    assembly stays readable text rather than raw control bytes."""
+    """Escapes `s` (an already-unescaped Hornet string value) for
+    embedding in a GAS `.asciz "..."` directive. Backslash is escaped
+    *first*, or the escapes added for the other characters would
+    themselves get re-escaped; double-quote needs escaping since
+    that's the directive's own delimiter; the rest are the common
+    control characters getting their standard short escape so the
+    emitted assembly stays readable text."""
     s = s.replace('\\', '\\\\')
     s = s.replace('"', '\\"')
     s = s.replace('\n', '\\n')
@@ -171,14 +146,14 @@ def escape_for_asciz(s: str) -> str:
 
 
 def type_of(expr: Node) -> Type:
-    """Reads the type semantic.py already resolved and annotated onto this
-    exact node (expr.resolved_type -- see semantic.py's check_expr) rather
-    than re-deriving it independently.
+    """Reads the type semantic.py already resolved and annotated onto
+    this node (expr.resolved_type) rather than re-deriving it
+    independently.
 
-    Raises a clear, defensive CodegenError (matching _local_offset's own
-    posture) rather than a bare AttributeError if resolved_type is somehow
-    None. The one legitimate way that happens is codegen being invoked on an
-    AST that skipped semantic analysis entirely.
+    Raises a clear, defensive CodegenError rather than a bare
+    AttributeError if resolved_type is somehow None -- the one
+    legitimate way that happens is codegen being invoked on an AST
+    that skipped semantic analysis entirely.
 
     Returns a full semantic.Type object. Callers can compare against
     Type.INT/Type.BOOL/Type.STR directly, or inspect
@@ -192,20 +167,18 @@ def type_of(expr: Node) -> Type:
 
 
 def gen_protecting_dst_across(dst_mem: Memory, inner: list[Instruction]) -> list[Instruction]:
-    """Wraps `inner` with a push/pop protecting dst_mem's own base
-    register across it, but only when that base isn't 'rbp' -- the
-    frame pointer, never clobbered by anything in this file, so
-    wrapping would just be wasted instructions. Used wherever code
-    that might use dst_mem.base as scratch internally (bounds-
-    checking, evaluating an arbitrary expression, computing another
-    address entirely) has to run before dst_mem is finally read
-    from or written to -- e.g. gen_array_value_into's Index case
-    below, where gen_array_address_into's own bounds-checking and
-    index arithmetic freely uses %rax/%rcx, which would otherwise
-    silently destroy a hidden return pointer received in %rax
-    before it was ever used. Found necessary by a real bug during
-    development (a segfault on `return matrix[i]` from a function
-    returning an array), not assumed defensively."""
+    """Wraps `inner` with a push/pop protecting dst_mem's base register
+    across it, but only when that base isn't 'rbp' -- the frame
+    pointer, never clobbered by anything in this file, so wrapping
+    would be wasted instructions. Used wherever code that might use
+    dst_mem.base as scratch internally (bounds-checking, evaluating an
+    arbitrary expression, computing another address) has to run before
+    dst_mem is finally read from or written to -- e.g. a hidden return
+    pointer received in %rax could otherwise be silently destroyed by
+    an inner computation's own use of %rax/%rcx as scratch before it
+    was ever used. Found necessary by a real bug during development (a
+    segfault on `return matrix[i]` from a function returning an
+    array), not assumed defensively."""
     if dst_mem.base == 'rbp':
         return inner
     return [Push(Register(dst_mem.base))] + inner + [Pop(Register(dst_mem.base))]
