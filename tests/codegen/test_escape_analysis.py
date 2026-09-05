@@ -172,28 +172,6 @@ def test_analyze_array_escapes_fn_on_uninitialized_slice():
     assert expected == res
 
 
-def test_analyze_array_escapes_fn_on_uninitialized_slice():
-    fn = parser.Function(
-        name='main',
-        return_type=None,
-        body=[
-            parser.VarDecl(
-                name='sl',
-                var_type=parser.SliceTypeExpr(
-                    element_type='int',
-                ),
-            ),
-            parser.Call(
-                name='fn',
-                args=[parser.Variable(name='sl')],
-            ),
-        ],
-    )
-    expected = set()
-    res = ea.analyze_array_escapes(fn, [], {}, {})
-    assert expected == res
-
-
 # TODO(will): I feel like this should escape?
 def test_analyze_array_escapes_fn_on_initialized_slice():
     fn = parser.Function(
