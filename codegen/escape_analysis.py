@@ -462,8 +462,7 @@ class EscapeAnalyzer:
             # Break, Continue: nothing to do.
 
 
-def analyze_array_escapes(
-        fn: Function, param_types: list[Type], structs: dict[str, StructInfo], aliases: dict[str, Type]) -> set[int]:
+def analyze_array_escapes(fn: Function, param_types: list[Type], structs: dict[str, StructInfo], aliases: dict[str, Type]) -> set[int]:
     """Returns the set of id()s -- of this function's VarDecl or Param
     nodes -- for array-typed declarations that need to be heap-
     allocated because a slice backed by them might outlive this

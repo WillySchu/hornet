@@ -1,0 +1,20 @@
+def int main():
+    [3000]int arr
+    int i = 0
+    while i < 3000:
+        arr[i] = 3000 - i
+        i = i + 1
+    int n = 3000
+    int swapped = 1
+    while swapped == 1:
+        swapped = 0
+        int j = 0
+        while j < n - 1:
+            if arr[j] > arr[j + 1]:
+                int temp = arr[j]
+                arr[j] = arr[j + 1]
+                arr[j + 1] = temp
+                swapped = 1
+            j = j + 1
+        n = n - 1
+    return (arr[0] + arr[2999]) % 256

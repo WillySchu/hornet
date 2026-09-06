@@ -1,0 +1,11 @@
+def int main():
+    int total = 0
+    int i = 0
+    while i < 20000000:
+        int k = i % 1000
+        int a = k + 3
+        int b = k - 1
+        int c = (a + b) * (a - b) + (a * b) - (k % 7)
+        total = (total + c) % 1000003
+        i = i + 1
+    return total % 256

@@ -1,0 +1,7 @@
+def int main():
+    int sum = 0
+    int i = 0
+    while i < 50000000:
+        sum = sum + i
+        i = i + 1
+    return sum % 256

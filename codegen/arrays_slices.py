@@ -364,8 +364,7 @@ class ArraysSlicesMixin:
         addr_reg = Register('rbx')
         len_reg = Register('r11')
         cap_reg = Register('r14')
-        base_instructions, length_operand, cap_operand = self.gen_indexable_base_into(
-            expr.array, addr_reg, len_reg, cap_reg)
+        base_instructions, length_operand, cap_operand = self.gen_indexable_base_into(expr.array, addr_reg, len_reg, cap_reg)
         instructions.extend(base_instructions)
         is_runtime_length = isinstance(length_operand, Register)
 

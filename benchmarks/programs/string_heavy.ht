@@ -1,0 +1,14 @@
+def str repeatChar(str s, int n):
+    str result = ''
+    int i = 0
+    while i < n:
+        result = result + s
+        i = i + 1
+    return result
+
+def int main():
+    str r1 = repeatChar('ab', 6000)
+    str r2 = repeatChar('ab', 6000)
+    if r1 == r2:
+        return 1
+    return 0

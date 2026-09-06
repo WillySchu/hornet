@@ -1,0 +1,19 @@
+struct Point:
+    int x
+    int y
+
+def int distSquared(Point a, Point b):
+    int dx = a.x - b.x
+    int dy = a.y - b.y
+    return dx * dx + dy * dy
+
+def int main():
+    int total = 0
+    int i = 0
+    while i < 2000000:
+        int k = i % 500
+        Point a = Point(k, k + 1)
+        Point b = Point(k + 2, k + 3)
+        total = (total + distSquared(a, b)) % 1000003
+        i = i + 1
+    return total % 256

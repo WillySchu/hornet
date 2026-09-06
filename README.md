@@ -55,6 +55,8 @@ Updates:
 - Imports.
 - Multithreading
 - Optimization / mid level IR
+- Consider adding a semantic AST with type information rather than annotating the existing AST from the parser.
+- Consider adding a desugar step in between the parser and the semantic analysis (semantic analysis currently handles method desugaring, which is a little awkward).
 - Bounds Check Elimination.
 - GC...
 - Free memory `malloc`ed by string concatenation.

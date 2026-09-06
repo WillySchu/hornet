@@ -7,7 +7,7 @@ branch of one of these two."""
 
 from codegen.assembly_ast import Operand, Instruction, MovQ, Imm, Mov, Memory, Register
 from codegen.errors import CodegenError
-from codegen.ir import IRRaw, IRBinOp, IRValue
+from codegen.ir import IRRaw, IRBinOp, IRValue, IRConst
 from codegen.utils import as_qword_register, type_of
 from typing import Optional
 from parser import (
@@ -254,34 +254,44 @@ class DispatchMixin:
 
     def gen_expr_ir(self, expr: Node) -> tuple[list, Optional[IRValue]]:
         """The IR-native counterpart to gen_expr_into: builds real IR
-        for the node kinds that have it -- a scalar Variable (see
-        below), Binary (see _ir_expr_binary), and an ordinary scalar-
-        or-void-returning Call (see _ir_call) -- and falls back to
-        wrapping gen_expr_into itself, as a single opaque IRRaw, for
-        everything else. That fallback also covers every case
-        gen_expr_into defensively rejects (ArrayLiteral, Slice,
-        NoneLiteral, a composite-returning Call) without needing to
-        reimplement any of it here.
+        for the node kinds that have it -- a bare Constant/BoolLiteral
+        (see below), a scalar Variable (see below), Binary (see
+        _ir_expr_binary), and an ordinary scalar-or-void-returning
+        Call (see _ir_call) -- and falls back to wrapping gen_expr_into
+        itself, as a single opaque IRRaw, for everything else. That
+        fallback also covers every case gen_expr_into defensively
+        rejects (ArrayLiteral, Slice, NoneLiteral, a composite-
+        returning Call) without needing to reimplement any of it here.
 
         Returns (ir, value) -- value is None only for a void call,
         which can only legally appear via a bare ExprStmt (see
         gen_statement_ir), never as another expression's operand.
 
-        A Variable reference costs ZERO instructions here, not even a
-        load: `expr.name` already has its own persistent Temp (see
-        _bind_local), so reading it is just handing back that same
-        Temp -- materializing it into a real register only happens
-        later, lazily, wherever something actually needs the value.
-        Never reached for a composite-typed Variable (array/slice/
-        struct): gen_expr_into's own Variable case already rejects
-        those before this method could ever be called on one, the
-        same guarantee that already makes its fallback below safe."""
+        A Constant/BoolLiteral or a Variable reference each cost ZERO
+        instructions here -- the former is just IRConst, a compile-
+        time value IR already had a case for since it was first
+        designed (see ir.py), simply never actually produced until
+        now: every existing caller of gen_expr_into's own Mov-emitting
+        Constant/BoolLiteral case still works exactly as before, this
+        only changes what a NEW caller building real IR gets instead.
+        The latter's `expr.name` already has its own persistent Temp
+        (see _bind_local), so reading it is just handing back that
+        same Temp -- materializing either kind of value into a real
+        register only happens later, lazily, wherever something
+        actually needs it. Never reached for a composite-typed
+        Variable (array/slice/struct): gen_expr_into's own Variable
+        case already rejects those before this method could ever be
+        called on one, the same guarantee that already makes its
+        fallback below safe."""
+        if isinstance(expr, Constant):
+            return [], IRConst(expr.value, type_of(expr))
+        if isinstance(expr, BoolLiteral):
+            return [], IRConst(1 if expr.value else 0, Type.BOOL)
         if isinstance(expr, Variable):
             return [], self._local_temp(expr.name)
         if isinstance(expr, Binary):
             return self._ir_expr_binary(expr)
-        if isinstance(expr, Call) and expr.name not in ('print', 'len') and type_of(expr).kind not in (
-                TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
+        if isinstance(expr, Call) and expr.name not in ('print', 'len') and type_of(expr).kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
             return self._ir_call(expr)
         t = self._new_temp(type_of(expr))
         return [IRRaw(self.gen_expr_into(expr, Register('eax')), dst=t)], t
