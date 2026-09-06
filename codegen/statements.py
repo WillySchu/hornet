@@ -6,7 +6,7 @@ else/end) every branching or looping construct here builds on."""
 
 from codegen.assembly_ast import Instruction, MovQ, Register, Memory, Imm, Push, Pop, Mov, Jmp, LeaQ, MovB
 from codegen.errors import CodegenError
-from codegen.ir import IRRaw, IRReturn, IRBranch, IRLabel, IRJump, IRMove
+from codegen.ir import IRRaw, IRReturn, IRBranch, IRLabel, IRJump, IRMove, IRStore
 from codegen.utils import type_of
 from parser import (
     ArrayLiteral,
@@ -56,16 +56,18 @@ class StatementsMixin:
         """The IR-native counterpart to gen_statement: builds real IR
         for Return/If/While (recursing into itself, not gen_statement,
         for If/While bodies -- so nested control flow stays real IR
-        all the way down), a scalar VarDecl-with-initializer or Assign
-        (an IRMove into the variable's own persistent Temp -- see
-        _bind_local), and a bare expression statement (via gen_expr_ir,
-        discarding whatever value comes back). Falls back to wrapping
-        gen_statement itself, as a single opaque IRRaw, for everything
-        else (a no-initializer or composite-typed VarDecl, a composite-
-        typed Assign, IndexAssign, FieldAssign, Break, Continue, and an
-        ArrayLiteral/Slice-valued ExprStmt) -- a real, deliberate scope
-        boundary, not an oversight: those still need their own IR-
-        native handling as a follow-up.
+        all the way down), a scalar VarDecl-with-initializer, Assign,
+        IndexAssign, or FieldAssign (an IRMove into a variable's own
+        persistent Temp, or an IRStore through an address -- see
+        _ir_index_assign/_ir_field_assign -- for the latter two), and
+        a bare expression statement (via gen_expr_ir, discarding
+        whatever value comes back). Falls back to wrapping gen_
+        statement itself, as a single opaque IRRaw, for everything
+        else (a no-initializer or composite-typed VarDecl, a
+        composite-typed Assign/IndexAssign/FieldAssign, Break,
+        Continue, and an ArrayLiteral/Slice-valued ExprStmt) -- a
+        real, deliberate scope boundary, not an oversight: those
+        still need their own IR-native handling as a follow-up.
         """
         if isinstance(stmt, Return):
             is_composite_return = isinstance(stmt.value, NoneLiteral) or (
@@ -133,6 +135,21 @@ class StatementsMixin:
             if var_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
                 ir, value = self.gen_expr_ir(stmt.value)
                 return ir + [IRMove(dst=self._local_temp(stmt.name), src=value)]
+        elif isinstance(stmt, IndexAssign):
+            # Same scope boundary as gen_index_assign itself: a
+            # SLICE/STRUCT-typed element falls to the catch-all below,
+            # since its whole-value production isn't something a
+            # register could ever hold anyway.
+            element_type = type_of(stmt.array).element_type
+            if element_type.kind not in (TypeKind.SLICE, TypeKind.STRUCT):
+                return self._ir_index_assign(stmt, element_type)
+        elif isinstance(stmt, FieldAssign):
+            # Same idea one level over -- FieldAssign's grammar can
+            # ALSO produce an ARRAY-typed field (unlike IndexAssign),
+            # so that's excluded here too, alongside SLICE/STRUCT.
+            field_type = self._check_struct_and_field_type(stmt.base, stmt.name)
+            if field_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
+                return self._ir_field_assign(stmt, field_type)
         elif isinstance(stmt, ExprStmt) and not isinstance(stmt.expr, (ArrayLiteral, Slice)):
             ir, _ = self.gen_expr_ir(stmt.expr)
             return ir
@@ -233,16 +250,14 @@ class StatementsMixin:
     def gen_index_assign(self, stmt: IndexAssign) -> list[Instruction]:
         """`array[index] = value` -- computes the target element's
         address (via gen_index_address_into, which includes the
-        runtime bounds check), protects it on the stack while the
-        value expression is evaluated, then writes through it. The
-        element's DECLARED type -- derived from stmt.array's type, not
-        stmt.value's -- decides the store width, exactly like
-        _gen_store does for an ordinary variable: str needs `movq`,
-        everything else `movl`, and a SLICE element (`rows[i] =
-        someSlice`) needs its own 24-byte descriptor write via
-        gen_slice_value_into, which already protects an arbitrary
-        dst_mem.base internally, so this can hand it Memory('rax', 0)
-        directly without its own push/pop dance.
+        runtime bounds check). A SLICE element (`rows[i] = someSlice`)
+        needs its own 24-byte descriptor write via gen_slice_value_
+        into, which already protects an arbitrary dst_mem.base
+        internally, so this can hand it Memory('rax', 0) directly
+        without its own push/pop dance. The scalar case is built as
+        IR -- see _ir_index_assign, which is also what actually
+        decides the store's width from the element's own DECLARED
+        type, not stmt.value's.
 
         Deliberately NOT stmt.value's resolved type: an untyped array
         literal flowing into a SLICE-typed element (`rows[0] = [9, 9,
@@ -265,30 +280,35 @@ class StatementsMixin:
             return instructions
         if element_type.kind == TypeKind.STRUCT:
             return instructions + self.gen_struct_value_into(stmt.value, Memory('rax', 0), element_type)
-        instructions.append(Push(addr_reg))
-        if element_type == Type.STR:
-            instructions.extend(self.gen_expr_into(stmt.value, Register('eax')))
-            instructions.append(MovQ(src=Register('rax'), dst=Register('r8')))  # value survives the pop below
-            instructions.append(Pop(addr_reg))
-            instructions.append(MovQ(src=Register('r8'), dst=Memory('rax', 0)))
-        else:
-            instructions.extend(self.gen_expr_into(stmt.value, Register('eax')))
-            if element_type == Type.INT64:
-                instructions.append(MovQ(src=Register('rax'), dst=Register('r8')))
-            else:
-                instructions.append(Mov(src=Register('eax'), dst=Register('r8d')))
-            instructions.append(Pop(addr_reg))
-            instructions.extend(self._gen_write_scalar_from(Register('r8d'), element_type, Memory('rax', 0)))
-        return instructions
+        return self.lower_ir(self._ir_index_assign(stmt, element_type))
+
+    def _ir_index_assign(self, stmt: IndexAssign, element_type) -> list:
+        """Builds (without lowering) the scalar-element case of
+        gen_index_assign -- the caller (gen_index_assign or
+        gen_statement_ir) is responsible for already having ruled out
+        SLICE/STRUCT. Captures the already-bounds-checked address
+        (gen_index_address_into, entirely unchanged -- address
+        computation stays old-style; only the final store becomes
+        real IR) into an INT64 Temp, builds the value's own IR
+        (already works, via gen_expr_ir), then IRStores it through
+        the address, at the ELEMENT's own declared width -- not
+        necessarily the value's own, per IRStore's own docstring."""
+        addr_temp = self._new_temp(Type.INT64)
+        addr_ir = [IRRaw(
+            self.gen_index_address_into(Index(array=stmt.array, index=stmt.index), Register('rax')),
+            dst=addr_temp,
+        )]
+        value_ir, value = self.gen_expr_ir(stmt.value)
+        return addr_ir + value_ir + [IRStore(address=addr_temp, value=value, value_type=element_type)]
 
     def gen_field_assign(self, stmt: FieldAssign) -> list[Instruction]:
         """`base.name = value` -- mirrors gen_index_assign one level
         over: computes the target field's address (via
-        gen_field_address_into), protects it on the stack while the
-        value expression is evaluated, then writes through it. The
-        field's DECLARED type -- derived from stmt.base's struct type,
-        not stmt.value's -- decides the store width, for the same
-        reason gen_index_assign uses the element's declared type.
+        gen_field_address_into). The scalar case is built as IR -- see
+        _ir_field_assign, which is also what actually decides the
+        store's width from the field's own DECLARED type, not
+        stmt.value's -- for the same reason gen_index_assign uses the
+        element's declared type.
 
         A STRUCT-typed field (`s.inner = otherInner`) is handled via
         gen_struct_value_into's flat copy, since a field write of a
@@ -319,21 +339,21 @@ class StatementsMixin:
             return instructions + self.gen_struct_value_into(stmt.value, Memory('rax', 0), field_type)
         if field_type.kind == TypeKind.ARRAY:
             return instructions + self.gen_array_value_into(stmt.value, Memory('rax', 0), field_type)
-        instructions.append(Push(addr_reg))
-        if field_type == Type.STR:
-            instructions.extend(self.gen_expr_into(stmt.value, Register('eax')))
-            instructions.append(MovQ(src=Register('rax'), dst=Register('r8')))  # value survives the pop below
-            instructions.append(Pop(addr_reg))
-            instructions.append(MovQ(src=Register('r8'), dst=Memory('rax', 0)))
-        else:
-            instructions.extend(self.gen_expr_into(stmt.value, Register('eax')))
-            if field_type == Type.INT64:
-                instructions.append(MovQ(src=Register('rax'), dst=Register('r8')))
-            else:
-                instructions.append(Mov(src=Register('eax'), dst=Register('r8d')))
-            instructions.append(Pop(addr_reg))
-            instructions.extend(self._gen_write_scalar_from(Register('r8d'), field_type, Memory('rax', 0)))
-        return instructions
+        return self.lower_ir(self._ir_field_assign(stmt, field_type))
+
+    def _ir_field_assign(self, stmt: FieldAssign, field_type) -> list:
+        """Builds (without lowering) the scalar-field case of
+        gen_field_assign -- the caller (gen_field_assign or
+        gen_statement_ir) is responsible for already having ruled out
+        SLICE/STRUCT/ARRAY (and the slice-typed NoneLiteral case).
+        Same shape as _ir_index_assign one level over: captures the
+        already-computed address (gen_field_address_into, unchanged)
+        into an INT64 Temp, builds the value's own IR, then IRStores
+        it through the address at the FIELD's own declared width."""
+        addr_temp = self._new_temp(Type.INT64)
+        addr_ir = [IRRaw(self.gen_field_address_into(stmt, Register('rax')), dst=addr_temp)]
+        value_ir, value = self.gen_expr_ir(stmt.value)
+        return addr_ir + value_ir + [IRStore(address=addr_temp, value=value, value_type=field_type)]
 
     def _gen_store(self, offset: int, value_expr: Node) -> list[Instruction]:
         """Shared by VarDecl-with-initializer and Assign: both are just

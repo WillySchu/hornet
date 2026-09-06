@@ -108,6 +108,38 @@ class IRReturn:
 
 
 @dataclass
+class IRLoad:
+    """dst = *address, reading dst.type's own width from that
+    location. `address` is an ordinary INT64-typed IRValue -- an
+    address needs no dedicated representation of its own, since it's
+    already just a 64-bit value like any other; whatever computed it
+    (bounds-checked array indexing, a struct field's byte offset) is
+    typically still old-style code, spliced in via IRRaw producing
+    this same INT64 Temp, not rewritten to build IR itself. See
+    gen_expr_ir's Index/Field cases."""
+    dst: Temp
+    address: IRValue
+
+
+@dataclass
+class IRStore:
+    """*address = value, writing at `value_type`'s own width to that
+    location -- the DECLARED type of the destination, deliberately
+    not necessarily value.type: an untyped literal or expression
+    flowing into a differently (but compatibly) typed slot can
+    disagree, the same reason gen_index_assign/gen_field_assign
+    already use the element's/field's own declared type rather than
+    the value's for exactly this decision. IRMove doesn't need this
+    same explicit field only because its own destination is a Temp,
+    which already carries its own correct, declared type on dst.type
+    -- an address carries none, so there's nowhere else for it to
+    live. See gen_statement_ir's IndexAssign/FieldAssign cases."""
+    address: IRValue
+    value: IRValue
+    value_type: Type
+
+
+@dataclass
 class IRLabel:
     """A jump target."""
     name: str
@@ -140,4 +172,4 @@ class IRRaw:
     dst: Optional[Temp] = None
 
 
-IRInstr = Union[IRMove, IRBinOp, IRUnOp, IRCall, IRReturn, IRLabel, IRJump, IRBranch, IRRaw]
+IRInstr = Union[IRMove, IRBinOp, IRUnOp, IRCall, IRReturn, IRLabel, IRJump, IRBranch, IRRaw, IRLoad, IRStore]

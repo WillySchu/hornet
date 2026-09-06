@@ -8,10 +8,10 @@ makes no storage decision at all. An op that combines two values
 loads them into scratch registers, then hands off to the existing
 gen_binary_op/gen_unary_op (ScalarsMixin) as this pass's own
 instruction-selection rule -- that arithmetic isn't reimplemented
-here. Real register allocation -- a Temp getting a physical register
-instead of a permanent slot when possible -- is a separate, later
-step: only _temp_mem's own policy should need to change when that
-arrives.
+here. Real register allocation now exists (register_allocator.py) and
+hooks in at _gen_read_temp_into/_gen_write_temp_from: _temp_mem's own
+permanent-stack-slot policy remains exactly this, used as the
+fallback for whichever Temps the allocator didn't promote.
 """
 
 from codegen.assembly_ast import Instruction, Register, Memory, Imm, Mov, MovQ, Cmp, Je, Jmp, Label, CallInstr
@@ -22,9 +22,11 @@ from codegen.ir import (
     IRConst,
     IRJump,
     IRLabel,
+    IRLoad,
     IRMove,
     IRRaw,
     IRReturn,
+    IRStore,
     IRUnOp,
     IRValue,
     Temp,
@@ -39,10 +41,12 @@ class IRLoweringMixin:
         stack slot the first time it's referenced (memoized in
         _temp_offsets) rather than at temp-creation time -- see
         _new_temp's own docstring for why storage assignment is kept
-        separate from allocating the temp itself: this method is v1's
-        entire lowering policy for where a Temp lives, and a future
-        register allocator only needs to replace this one method, not
-        anything upstream that creates Temps."""
+        separate from allocating the temp itself. This is the
+        fallback every Temp used to rely on unconditionally; now it's
+        only reached for one that register_allocator.py didn't (or
+        couldn't -- see its own module docstring) promote to a
+        physical register -- see _gen_read_temp_into/_gen_write_temp_
+        from, the two places that actually decide which applies."""
         if temp.id not in self._temp_offsets:
             self._next_offset -= type_byte_width(temp.type, self.struct_registry)
             self._temp_offsets[temp.id] = self._next_offset
@@ -161,6 +165,40 @@ class IRLoweringMixin:
                 if instr.value is not None:
                     out.extend(self._gen_load_value(instr.value, Register('eax')))
                 out.extend(self._gen_epilogue())
+            elif isinstance(instr, IRLoad):
+                # `address` is always INT64-typed, so this already
+                # widens to %rax internally -- reading through it
+                # right back into %eax (its own 32-bit alias) is safe
+                # even though that clobbers the address: the read
+                # happens before the overwrite, in the same
+                # instruction, and nothing here needs the address
+                # again afterward.
+                out.extend(self._gen_load_value(instr.address, Register('eax')))
+                if instr.dst.type == Type.STR:
+                    out.append(MovQ(src=Memory('rax', 0), dst=Register('rax')))
+                else:
+                    out.extend(self._gen_read_scalar_into(Memory('rax', 0), instr.dst.type, Register('eax')))
+                out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
+            elif isinstance(instr, IRStore):
+                # The address and the value need to be alive
+                # SIMULTANEOUSLY for the final write, unlike IRLoad --
+                # loaded into %r9 and %eax respectively so neither
+                # step can clobber the other. %r9, not one of
+                # register_allocator.py's own pool registers
+                # (%r10d/%r11d/%r15d), deliberately: those CAN be a
+                # Temp's actual home, and this runs with no visibility
+                # into whether one is live across this exact point --
+                # %r9 never persistently holds a value outside a
+                # call's own narrow argument-placement window, so
+                # nothing else could be relying on it surviving here.
+                # instr.value_type -- not instr.value.type -- decides
+                # the write's own width, per IRStore's own docstring.
+                out.extend(self._gen_load_value(instr.address, Register('r9d')))
+                out.extend(self._gen_load_value(instr.value, Register('eax')))
+                if instr.value_type == Type.STR:
+                    out.append(MovQ(src=Register('rax'), dst=Memory('r9', 0)))
+                else:
+                    out.extend(self._gen_write_scalar_from(Register('eax'), instr.value_type, Memory('r9', 0)))
             else:
                 raise NotImplementedError(f"lower_ir has no rule for: {instr!r}")
         return out
