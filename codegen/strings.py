@@ -244,7 +244,8 @@ class StringsMixin:
         instructions.append(Label(loop_label))
         instructions.append(MovQ(src=Imm(0), dst=Register('rdx')))  # zero-extend: this is an UNSIGNED divide
         instructions.append(DivQ(Register('rcx')))
-        instructions.append(Add(src=Imm(ord('0')), dst=Register('edx')))  # the remainder is always a single digit (< 10), so this stays 32-bit
+        # the remainder is always a single digit (< 10), so this stays 32-bit
+        instructions.append(Add(src=Imm(ord('0')), dst=Register('edx')))
         instructions.append(SubQ(src=Imm(1), dst=write_pos))
         instructions.append(MovB(src=as_byte_register(Register('edx')), dst=Memory(write_pos.name, 0)))
         instructions.append(CmpQ(src=Imm(0), dst=Register('rax')))

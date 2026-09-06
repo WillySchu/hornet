@@ -20,7 +20,20 @@ ALLOCATABLE_REGISTERS below), not the algorithm.
 from dataclasses import dataclass, field
 from typing import Optional
 
-from codegen.ir import Temp, IRMove, IRBinOp, IRUnOp, IRCall, IRReturn, IRLabel, IRJump, IRBranch, IRRaw, IRLoad, IRStore
+from codegen.ir import (
+    IRBinOp,
+    IRBranch,
+    IRCall,
+    IRJump,
+    IRLabel,
+    IRLoad,
+    IRMove,
+    IRRaw,
+    IRReturn,
+    IRStore,
+    IRUnOp,
+    Temp,
+)
 
 # %r10d, %r11d, %r15d (the ordinary 32-bit-named form, matching every
 # other register this codebase passes around by default -- widened via

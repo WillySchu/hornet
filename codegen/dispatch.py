@@ -298,7 +298,8 @@ class DispatchMixin:
             return self._ir_load(self.gen_field_address_into(expr, Register('rax')), type_of(expr))
         if isinstance(expr, Binary):
             return self._ir_expr_binary(expr)
-        if isinstance(expr, Call) and expr.name not in ('print', 'len') and type_of(expr).kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
+        if isinstance(expr, Call) and expr.name not in ('print', 'len') and type_of(expr).kind not in (
+                TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
             return self._ir_call(expr)
         t = self._new_temp(type_of(expr))
         return [IRRaw(self.gen_expr_into(expr, Register('eax')), dst=t)], t
