@@ -4,21 +4,23 @@ Only two kinds of Temp are excluded from allocation, both for
 correctness, not performance: a named-variable Temp
 (Temp.is_named_local -- see its own docstring), because its memory
 slot can still be read or written directly by not-yet-migrated code
-bypassing the Temp entirely; and any Temp whose live range spans an
-IRRaw or IRCall, because neither the caller-saved registers (which a
-call definitely clobbers) nor the existing callee-saved ones (already
+bypassing the Temp entirely; and any Temp that needs to SURVIVE
+THROUGH an IRRaw or IRCall it doesn't own (see eligible_intervals'
+own docstring for why being defined BY one is a different, safe
+case), because neither the caller-saved registers (which a call
+definitely clobbers) nor the existing callee-saved ones (already
 used internally, for unrelated purposes, by old-style string/append
-code) can be trusted to survive an opaque block untouched. Everything
-else here -- basic blocks, liveness, linear scan itself -- is standard
-and unsurprising; the interesting decisions are those two exclusions
-and the register pool choice (see ALLOCATABLE_REGISTERS below), not
-the algorithm.
+code) can be trusted to carry a value across an opaque block
+untouched. Everything else here -- basic blocks, liveness, linear
+scan itself -- is standard and unsurprising; the interesting
+decisions are those two exclusions and the register pool choice (see
+ALLOCATABLE_REGISTERS below), not the algorithm.
 """
 
 from dataclasses import dataclass, field
 from typing import Optional
 
-from codegen.ir import Temp, IRMove, IRBinOp, IRUnOp, IRCall, IRReturn, IRLabel, IRJump, IRBranch, IRRaw
+from codegen.ir import Temp, IRMove, IRBinOp, IRUnOp, IRCall, IRReturn, IRLabel, IRJump, IRBranch, IRRaw, IRLoad, IRStore
 
 # %r10d, %r11d, %r15d (the ordinary 32-bit-named form, matching every
 # other register this codebase passes around by default -- widened via
@@ -124,6 +126,10 @@ def _reads(instr) -> set:
         return {instr.value} if isinstance(instr.value, Temp) else set()
     if isinstance(instr, IRBranch):
         return {instr.cond} if isinstance(instr.cond, Temp) else set()
+    if isinstance(instr, IRLoad):
+        return {instr.address} if isinstance(instr.address, Temp) else set()
+    if isinstance(instr, IRStore):
+        return {v for v in (instr.address, instr.value) if isinstance(v, Temp)}
     return set()
 
 
@@ -131,7 +137,7 @@ def _writes(instr) -> set:
     """The Temps `instr` defines. IRRaw's own `dst`, when present,
     counts here even though it's set from outside the wrapped
     instructions -- see IRRaw's own docstring."""
-    if isinstance(instr, (IRMove, IRBinOp, IRUnOp)):
+    if isinstance(instr, (IRMove, IRBinOp, IRUnOp, IRLoad)):
         return {instr.dst}
     if isinstance(instr, (IRCall, IRRaw)):
         return {instr.dst} if instr.dst is not None else set()
@@ -225,14 +231,27 @@ def compute_live_intervals(blocks: list[BasicBlock], live_in: list, live_out: li
 def eligible_intervals(ir: list, intervals: dict) -> dict:
     """Filters out every interval that can't be safely register-
     allocated -- see this module's own docstring for why named-local
-    Temps and any Temp spanning an IRRaw/IRCall are excluded
-    unconditionally, not just usually."""
+    Temps and any Temp SURVIVING THROUGH an IRRaw/IRCall it doesn't
+    own are excluded unconditionally, not just usually.
+
+    Deliberately `start < pos`, not `start <= pos`: a Temp defined BY
+    an IRRaw/IRCall (as its own dst) isn't put at risk by that same
+    op, only by one that runs somewhere between its definition and a
+    later use. IRRaw never reads a Temp as input (its wrapped
+    instructions are self-contained -- see ir.py's own docstring), and
+    IRCall.args is currently always empty (see gen_call_into's own
+    docstring for why), so an unsafe position can only ever coincide
+    with interval.start by being that Temp's own def -- never a read
+    of it -- which is exactly the case that's safe to allow. This is
+    what makes _ir_index_assign/_ir_load's own address Temp (captured
+    via IRRaw, consumed immediately by the very next IRLoad/IRStore)
+    correctly eligible, rather than excluded by construction."""
     unsafe_positions = [i for i, instr in enumerate(ir) if isinstance(instr, (IRRaw, IRCall))]
     result = {}
     for tid, interval in intervals.items():
         if interval.temp.is_named_local:
             continue
-        if any(interval.start <= pos <= interval.end for pos in unsafe_positions):
+        if any(interval.start < pos <= interval.end for pos in unsafe_positions):
             continue
         result[tid] = interval
     return result

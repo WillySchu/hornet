@@ -10,20 +10,20 @@
     },
     "instruction_count": 105,
     "name": "arithmetic_heavy",
-    "runtime_seconds": 0.11535859100000323
+    "runtime_seconds": 0.13680233799999542
   },
   "array_heavy": {
     "allocation": {
-      "allocated": 10,
-      "eligible": 10,
+      "allocated": 23,
+      "eligible": 23,
       "named_local_excluded": 5,
       "spilled": 0,
-      "total_temps": 20,
-      "unsafe_span_excluded": 5
+      "total_temps": 31,
+      "unsafe_span_excluded": 3
     },
-    "instruction_count": 240,
+    "instruction_count": 251,
     "name": "array_heavy",
-    "runtime_seconds": 0.025798036999987062
+    "runtime_seconds": 0.03301360099999329
   },
   "loop_accumulator": {
     "allocation": {
@@ -36,45 +36,45 @@
     },
     "instruction_count": 47,
     "name": "loop_accumulator",
-    "runtime_seconds": 0.06837680099999943
+    "runtime_seconds": 0.07306878600002165
   },
   "recursive_fibonacci": {
     "allocation": {
-      "allocated": 3,
-      "eligible": 3,
+      "allocated": 5,
+      "eligible": 5,
       "named_local_excluded": 1,
       "spilled": 0,
       "total_temps": 7,
-      "unsafe_span_excluded": 3
+      "unsafe_span_excluded": 1
     },
     "instruction_count": 82,
     "name": "recursive_fibonacci",
-    "runtime_seconds": 0.061066617000008705
+    "runtime_seconds": 0.0654841109999893
   },
   "string_heavy": {
     "allocation": {
-      "allocated": 2,
-      "eligible": 2,
+      "allocated": 7,
+      "eligible": 7,
       "named_local_excluded": 5,
       "spilled": 0,
       "total_temps": 12,
-      "unsafe_span_excluded": 5
+      "unsafe_span_excluded": 0
     },
     "instruction_count": 134,
     "name": "string_heavy",
-    "runtime_seconds": 0.03183306800001162
+    "runtime_seconds": 0.03318228400001999
   },
   "struct_heavy": {
     "allocation": {
-      "allocated": 11,
-      "eligible": 11,
+      "allocated": 18,
+      "eligible": 18,
       "named_local_excluded": 5,
       "spilled": 0,
-      "total_temps": 21,
-      "unsafe_span_excluded": 5
+      "total_temps": 25,
+      "unsafe_span_excluded": 2
     },
-    "instruction_count": 149,
+    "instruction_count": 157,
     "name": "struct_heavy",
-    "runtime_seconds": 0.03689862100000596
+    "runtime_seconds": 0.03769301599999153
   }
 }

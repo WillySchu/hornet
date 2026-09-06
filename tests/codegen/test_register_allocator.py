@@ -3,7 +3,7 @@ dataflow (build_cfg/compute_liveness) -- the linear-scan algorithm
 itself is tested separately, in test_register_allocator.py."""
 
 from semantic import Type
-from codegen.ir import Temp, IRConst, IRMove, IRBinOp, IRUnOp, IRLabel, IRJump, IRBranch, IRReturn, IRRaw, IRCall
+from codegen.ir import Temp, IRConst, IRMove, IRBinOp, IRUnOp, IRLabel, IRJump, IRBranch, IRReturn, IRRaw, IRCall, IRLoad, IRStore
 from codegen.register_allocator import (
     build_cfg,
     compute_liveness,
@@ -234,6 +234,39 @@ def test_liveness_ircall_args_and_dst():
     assert t(0) not in live_in[0]
 
 
+def test_liveness_irload_address_and_dst():
+    """A real bug this module shipped with initially: IRLoad/IRStore
+    had no case in _reads/_writes at all, making them completely
+    invisible to liveness -- an address Temp's interval would end
+    right where it was DEFINED, not where an IRStore/IRLoad actually
+    LAST USED it, silently letting the allocator hand its register to
+    something else while it was still needed."""
+    ir = [
+        IRLoad(dst=t(1), address=t(0)),
+        IRReturn(value=t(1)),
+    ]
+    blocks = build_cfg(ir)
+    live_in, live_out = compute_liveness(blocks)
+    # t(0), the address being read through, must already be live
+    # coming in -- this block doesn't produce it itself.
+    assert t(0) in live_in[0]
+    # t(1), the loaded value, is defined here, not received.
+    assert t(1) not in live_in[0]
+
+
+def test_liveness_irstore_address_and_value():
+    """Same bug, the write side: BOTH address and value must count as
+    reads -- an IRStore never defines anything."""
+    ir = [
+        IRStore(address=t(0), value=t(1), value_type=Type.INT),
+        IRReturn(value=None),
+    ]
+    blocks = build_cfg(ir)
+    live_in, live_out = compute_liveness(blocks)
+    assert t(0) in live_in[0]
+    assert t(1) in live_in[0]
+
+
 # -- compute_live_intervals ---------------------------------------------------
 
 def test_compute_live_intervals_tight_span_for_a_purely_local_temp():
@@ -314,6 +347,44 @@ def test_eligible_intervals_includes_pure_temp_arithmetic():
     intervals = {0: _interval(t(0), 0, 2), 1: _interval(t(1), 1, 2)}
     result = eligible_intervals(ir, intervals)
     assert set(result.keys()) == {0, 1}
+
+
+def test_eligible_intervals_includes_temp_defined_by_its_own_irraw():
+    """A Temp's OWN defining IRRaw isn't a hazard to itself -- only
+    surviving THROUGH one it doesn't own is (see eligible_intervals'
+    own docstring). This is exactly the address-Temp pattern
+    _ir_index_assign/_ir_load use: capture an address via IRRaw,
+    consume it immediately with the very next instruction. Regression
+    test for a real off-by-one this module shipped with initially."""
+    ir = [
+        IRRaw(instructions=[], dst=t(0)),  # 0: t(0) defined BY this IRRaw
+        IRBinOp(dst=t(1), op=BinaryOp.ADD, left=t(0), right=IRConst(1, Type.INT)),  # 1: used right after
+    ]
+    intervals = {0: _interval(t(0), 0, 1)}
+    assert 0 in eligible_intervals(ir, intervals)
+
+
+def test_eligible_intervals_includes_temp_defined_by_its_own_ircall():
+    """Same as the IRRaw case above, for IRCall's own dst."""
+    ir = [
+        IRCall(dst=t(0), name='foo', args=[]),  # 0: t(0) defined BY this call
+        IRBinOp(dst=t(1), op=BinaryOp.ADD, left=t(0), right=IRConst(1, Type.INT)),  # 1: used right after
+    ]
+    intervals = {0: _interval(t(0), 0, 1)}
+    assert 0 in eligible_intervals(ir, intervals)
+
+
+def test_eligible_intervals_still_excludes_a_temp_surviving_through_an_unowned_irraw():
+    """The fix above must not overcorrect: a Temp defined BEFORE an
+    IRRaw it doesn't own, and used AFTER it, is still genuinely
+    unsafe."""
+    ir = [
+        IRMove(dst=t(0), src=IRConst(1, Type.INT)),   # 0: t(0) defined here
+        IRRaw(instructions=[], dst=t(1)),              # 1: an unrelated, opaque op
+        IRBinOp(dst=t(2), op=BinaryOp.ADD, left=t(0), right=t(1)),  # 2: t(0) used here, AFTER the IRRaw
+    ]
+    intervals = {0: _interval(t(0), 0, 2)}
+    assert eligible_intervals(ir, intervals) == {}
 
 
 # -- linear_scan ---------------------------------------------------------------
