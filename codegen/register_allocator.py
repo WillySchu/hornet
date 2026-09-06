@@ -247,38 +247,59 @@ def eligible_intervals(ir: list, intervals: dict) -> dict:
     Temps and any Temp SURVIVING THROUGH an IRRaw/IRCall it doesn't
     own are excluded unconditionally, not just usually.
 
-    Deliberately `start < pos`, not `start <= pos`: a Temp defined BY
-    an IRRaw/IRCall (as its own dst) isn't put at risk by that same
-    op, only by one that runs somewhere between its definition and a
-    later use. IRRaw never reads a Temp as input (its wrapped
-    instructions are self-contained -- see ir.py's own docstring), so
-    an unsafe position can only ever coincide with interval.start via
-    an IRRaw by being that Temp's own def -- never a read of it --
-    which is exactly the case that's safe to allow. This is what makes
-    _ir_index_assign/_ir_load's own address Temp (captured via IRRaw,
-    consumed immediately by the very next IRLoad/IRStore) correctly
-    eligible, rather than excluded by construction.
+    Two boundary cases are deliberately safe, not excluded, even
+    though they touch an unsafe position -- see _is_hazard for the
+    precise reasoning behind each:
 
-    IRCall.args can now hold real Temps too (see _ir_call), each read
-    -- and so each such Temp's own interval extended to cover -- at
-    the call's own position, exactly where its result Temp is
-    defined. This code deliberately does NOT extend the same
-    "safe on one side" reasoning to that case: an argument Temp's
-    interval ending exactly at its own IRCall (pos == end) is still
-    conservatively excluded here, even though the read genuinely
-    happens before the call's own clobbering. Correct either way,
-    just not maximally precise -- a real, deliberately deferred
-    refinement, not a bug, and not one to stack on top of the def-side
-    fix in the same change."""
+      pos == interval.start: this Temp's own def, via IRRaw/IRCall's
+      dst -- that same op can't put it at risk, only one running
+      strictly after its definition can.
+
+      pos == interval.end, when ir[pos] is an IRCall and this Temp is
+      one of ITS OWN args: the read that places it into an argument
+      register happens before that same call's own clobbering, not
+      across it -- symmetric to the start case, just on the other
+      side of the unsafe op.
+
+    Anything strictly between start and end is always a hazard,
+    regardless of which op it is."""
     unsafe_positions = [i for i, instr in enumerate(ir) if isinstance(instr, (IRRaw, IRCall))]
     result = {}
     for tid, interval in intervals.items():
         if interval.temp.is_named_local:
             continue
-        if any(interval.start < pos <= interval.end for pos in unsafe_positions):
+        if any(_is_hazard(interval, pos, ir) for pos in unsafe_positions):
             continue
         result[tid] = interval
     return result
+
+
+def _is_hazard(interval: LiveInterval, pos: int, ir: list) -> bool:
+    """Whether unsafe position `pos` genuinely threatens `interval`'s
+    own Temp -- see eligible_intervals' own docstring for the two safe
+    boundary cases this rules out (pos == start; pos == end when
+    ir[pos] is an IRCall reading this exact Temp as one of its own
+    args). Anything strictly between start and end is always a
+    hazard, regardless of what `ir[pos]` actually is: it's impossible
+    for interval.end to land exactly ON an unrelated IRCall's own
+    position purely from block-boundary liveness extension, since any
+    genuine downstream need would already have pulled `end` out
+    further than that -- so this only ever needs to special-case the
+    Temp's own true last position, never an earlier one it merely
+    passes through. `unsafe_positions` spans the WHOLE function, not
+    just this one interval's own span, so pos > end (entirely after
+    this Temp is already dead) needs its own explicit case too --
+    falling through to the IRCall-membership check for that case,
+    rather than returning early, was a real bug this method shipped
+    with initially: conservative rather than unsafe (it could only
+    ever produce a spurious exclusion, never a wrong allocation), but
+    a real mismatch with the intended design regardless."""
+    if pos <= interval.start or pos > interval.end:
+        return False
+    if pos < interval.end:
+        return True
+    instr = ir[pos]
+    return not (isinstance(instr, IRCall) and interval.temp in instr.args)
 
 
 def linear_scan(intervals: dict, available_registers: list[str] = ALLOCATABLE_REGISTERS) -> dict:

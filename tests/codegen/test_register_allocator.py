@@ -338,6 +338,70 @@ def test_eligible_intervals_excludes_span_across_ircall():
     assert eligible_intervals(ir, intervals) == {}
 
 
+def test_eligible_intervals_includes_argument_temp_consumed_by_the_call_it_ends_at():
+    """The symmetric end-side counterpart to the def-side fix above:
+    a Temp used as one of an IRCall's OWN args, with nothing needed
+    after, is safe -- the read that places it into an argument
+    register happens before that same call's own clobbering, not
+    across it. Regression test for a real, deliberately deferred
+    refinement mentioned when call-argument IR semantics first
+    shipped, now actually implemented."""
+    ir = [
+        IRMove(dst=t(0), src=IRConst(1, Type.INT)),  # 0: t(0) defined
+        IRCall(dst=t(1), name='foo', args=[t(0)]),    # 1: t(0) consumed here, its own last use
+    ]
+    intervals = {0: _interval(t(0), 0, 1)}
+    assert 0 in eligible_intervals(ir, intervals)
+
+
+def test_eligible_intervals_still_excludes_temp_surviving_through_an_unrelated_call_before_being_used_as_an_argument():
+    """The fix above must not overcorrect: a Temp that needs to
+    survive through an EARLIER, unrelated call before finally being
+    consumed as a LATER call's own argument is still genuinely unsafe
+    -- mirrors `foo(t); bar(t)` where t is computed once and passed to
+    two separate calls."""
+    ir = [
+        IRMove(dst=t(0), src=IRConst(1, Type.INT)),  # 0: t(0) defined
+        IRCall(dst=t(1), name='foo', args=[]),         # 1: unrelated call -- t(0) must survive through this
+        IRCall(dst=t(2), name='bar', args=[t(0)]),     # 2: t(0)'s own last use, as bar's argument
+    ]
+    intervals = {0: _interval(t(0), 0, 2)}
+    assert eligible_intervals(ir, intervals) == {}
+
+
+def test_eligible_intervals_still_excludes_argument_temp_also_needed_after_the_call():
+    """If a Temp used as an IRCall's own argument is ALSO needed
+    again afterward, its interval extends past that call, and the
+    call becomes a genuine survive-through hazard again -- the end-
+    side fix only ever applies when the argument use IS the Temp's
+    own true last position."""
+    ir = [
+        IRMove(dst=t(0), src=IRConst(1, Type.INT)),  # 0: t(0) defined
+        IRCall(dst=t(1), name='foo', args=[t(0)]),     # 1: used as an argument here...
+        IRBinOp(dst=t(2), op=BinaryOp.ADD, left=t(0), right=IRConst(1, Type.INT)),  # 2: ...but needed again after
+    ]
+    intervals = {0: _interval(t(0), 0, 2)}
+    assert eligible_intervals(ir, intervals) == {}
+
+
+def test_eligible_intervals_unaffected_by_an_unrelated_ircall_entirely_after_its_own_lifetime():
+    """A real bug the end-side fix shipped with initially: an unsafe
+    position AFTER a Temp's own interval has already ended (it's
+    already dead by then) must never count against it -- this Temp's
+    own interval [0,1] ends well before the SECOND call at position 2,
+    which has nothing to do with it at all. Caught empirically (not by
+    the unit tests above, which didn't happen to cover a later,
+    unrelated call existing at all) by inspecting real compiler
+    output where this exact shape appeared."""
+    ir = [
+        IRMove(dst=t(0), src=IRConst(1, Type.INT)),   # 0: t(0) defined
+        IRBinOp(dst=t(1), op=BinaryOp.ADD, left=t(0), right=IRConst(1, Type.INT)),  # 1: t(0)'s own last use
+        IRCall(dst=t(2), name='foo', args=[]),          # 2: unrelated, and AFTER t(0) is already dead
+    ]
+    intervals = {0: _interval(t(0), 0, 1)}
+    assert 0 in eligible_intervals(ir, intervals)
+
+
 def test_eligible_intervals_includes_pure_temp_arithmetic():
     ir = [
         IRMove(dst=t(0), src=IRConst(1, Type.INT)),
