@@ -31,7 +31,7 @@ from codegen.ir import (
     IRValue,
     Temp,
 )
-from codegen.utils import as_qword_register, type_byte_width
+from codegen.utils import as_qword_register, type_byte_width, ARG_REGISTERS_32
 from semantic import Type
 
 
@@ -148,11 +148,18 @@ class IRLoweringMixin:
                 out.append(Je(instr.false_label))
                 out.append(Jmp(instr.true_label))
             elif isinstance(instr, IRCall):
-                # `args` is unused for now -- see gen_call_into's own
-                # docstring for why argument marshaling still happens
+                # `args` is empty for a call with any slice argument
+                # (see _ir_call's own docstring for why) -- marshaled
                 # entirely through the pre-existing calling-convention
                 # code, spliced in as an IRRaw immediately before this
-                # op runs, rather than through this field.
+                # op runs, in that case. Otherwise, each one is placed
+                # directly into its own argument register, in any
+                # order: no push/pop dance needed, since nothing a
+                # Temp could ever be assigned to (memory, or the
+                # allocator's own pool) overlaps an argument register,
+                # so placing one can never clobber another's source.
+                for i, arg_value in enumerate(instr.args):
+                    out.extend(self._gen_load_value(arg_value, Register(ARG_REGISTERS_32[i])))
                 out.append(CallInstr(instr.name))
                 if instr.dst is not None:
                     out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))

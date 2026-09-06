@@ -2178,6 +2178,44 @@ class TestFunctions:
             1,
         )
 
+    def test_call_mixing_scalar_and_array_arguments(self):
+        """Exercises passing a scalar and an array argument to the
+        SAME call together -- previously untested combination, and
+        exactly the shape that changed when array arguments started
+        being placed directly into their own argument register
+        (alongside a scalar's own value) instead of always going
+        through the old push-then-pop-in-reverse mechanism."""
+        assert_program_exit_code(
+            "def int sumWithBase([3]int arr, int base):\n"
+            "    return arr[0] + arr[1] + arr[2] + base\n"
+            "\n"
+            "def int main():\n"
+            "    [3]int nums = [1, 2, 3]\n"
+            "    int base = 100\n"
+            "    return sumWithBase(nums, base)\n",
+            106,
+        )
+
+    def test_call_mixing_scalar_and_struct_arguments(self):
+        """Same idea one level over, with a struct argument instead of
+        an array -- both are passed as an address, but reached via a
+        different codegen path (gen_struct_address_into, not gen_
+        array_arg_address_into), so this is a genuinely distinct case
+        to cover, not a duplicate of the array one above."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int distFromOrigin(Point p, int scale):\n"
+            "    return (p.x + p.y) * scale\n"
+            "\n"
+            "def int main():\n"
+            "    Point p = Point(3, 4)\n"
+            "    return distFromOrigin(p, 2)\n",
+            14,
+        )
+
     def test_reassignment_combining_self_reference_and_function_call(self):
         """`c = c + addOne(a)`: the new value depends on both c's own
         pre-assignment value and a function call's result, in the same

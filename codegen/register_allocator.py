@@ -251,14 +251,25 @@ def eligible_intervals(ir: list, intervals: dict) -> dict:
     an IRRaw/IRCall (as its own dst) isn't put at risk by that same
     op, only by one that runs somewhere between its definition and a
     later use. IRRaw never reads a Temp as input (its wrapped
-    instructions are self-contained -- see ir.py's own docstring), and
-    IRCall.args is currently always empty (see gen_call_into's own
-    docstring for why), so an unsafe position can only ever coincide
-    with interval.start by being that Temp's own def -- never a read
-    of it -- which is exactly the case that's safe to allow. This is
-    what makes _ir_index_assign/_ir_load's own address Temp (captured
-    via IRRaw, consumed immediately by the very next IRLoad/IRStore)
-    correctly eligible, rather than excluded by construction."""
+    instructions are self-contained -- see ir.py's own docstring), so
+    an unsafe position can only ever coincide with interval.start via
+    an IRRaw by being that Temp's own def -- never a read of it --
+    which is exactly the case that's safe to allow. This is what makes
+    _ir_index_assign/_ir_load's own address Temp (captured via IRRaw,
+    consumed immediately by the very next IRLoad/IRStore) correctly
+    eligible, rather than excluded by construction.
+
+    IRCall.args can now hold real Temps too (see _ir_call), each read
+    -- and so each such Temp's own interval extended to cover -- at
+    the call's own position, exactly where its result Temp is
+    defined. This code deliberately does NOT extend the same
+    "safe on one side" reasoning to that case: an argument Temp's
+    interval ending exactly at its own IRCall (pos == end) is still
+    conservatively excluded here, even though the read genuinely
+    happens before the call's own clobbering. Correct either way,
+    just not maximally precise -- a real, deliberately deferred
+    refinement, not a bug, and not one to stack on top of the def-side
+    fix in the same change."""
     unsafe_positions = [i for i, instr in enumerate(ir) if isinstance(instr, (IRRaw, IRCall))]
     result = {}
     for tid, interval in intervals.items():

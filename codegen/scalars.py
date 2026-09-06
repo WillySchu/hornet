@@ -50,21 +50,18 @@ from codegen.assembly_ast import (
 from codegen.errors import CodegenError
 from codegen.ir import IRRaw, IRBranch, IRJump, IRLabel, IRMove, IRConst, IRCall
 from codegen.utils import as_qword_register, COMPARISON_CONDITION_CODES, as_byte_register, type_of
-from parser import Call, Binary, BinaryOp, UnaryOp
-from semantic import Type
+from parser import Call, Binary, BinaryOp, UnaryOp, Variable, Field, Index, NoneLiteral
+from semantic import Type, TypeKind
 
 
 class ScalarsMixin:
     def gen_call_into(self, expr: Call, dst: Operand) -> list[Instruction]:
         """`name(arg1, arg2, ...)`: evaluates and passes every argument
-        via the shared _gen_call_arguments_into, then calls the
-        function.
-
-        Argument marshaling isn't expressed in IR yet -- _gen_call_
-        arguments_into's existing output is spliced in verbatim via
-        IRRaw, since folding it in would mean migrating array/slice/
-        struct arguments too. IRCall's dst is None for a void call, or
-        a fresh Temp for a scalar-returning one, read into `dst`
+        (see _ir_call for how -- scalar and array/struct arguments are
+        real IR; a slice argument still falls back to the old
+        _gen_call_arguments_into mechanism, for the whole call), then
+        calls the function. IRCall's dst is None for a void call, or a
+        fresh Temp for a scalar-returning one, read into `dst`
         afterward.
 
         Never reached for a callee that returns an array or slice --
@@ -81,11 +78,28 @@ class ScalarsMixin:
         return instructions
 
     def _ir_call(self, expr: Call) -> tuple[list, object]:
-        """Builds (without lowering) an ordinary function call's IR:
-        args are marshaled via the existing calling-convention code,
-        not yet expressed in IR itself (see gen_call_into), then a
-        genuine IRCall. Returns (ir, t_result), t_result being None
-        for a void call."""
+        """Builds (without lowering) an ordinary function call's IR.
+
+        Argument marshaling is real IR too, as long as no argument is
+        slice-typed: a scalar's own value (via gen_expr_ir, so a
+        migrated sub-expression stays real IR), or an array/struct's
+        own ADDRESS (the address computation itself stays old-style,
+        captured via IRRaw into an INT64 Temp -- exactly the same
+        pattern _ir_index_assign/_ir_load already use), is an ordinary
+        IRValue either way.
+
+        A slice argument needs 3 register slots for one logical value,
+        which doesn't fit IRCall.args' one-value-per-argument shape.
+        Rather than interleave native and opaque argument placement
+        WITHIN one call -- a real hazard, since an opaque slice
+        computation running between two already-placed native
+        arguments could clobber one, exactly the reason the old
+        push-then-pop-in-reverse dance existed in the first place --
+        a call with ANY slice argument falls back to the entire
+        existing _gen_call_arguments_into mechanism, unchanged, for
+        ALL of its arguments.
+
+        Returns (ir, t_result), t_result being None for a void call."""
         total_slots = self._total_arg_slots(expr.args)
         if total_slots > 6:
             raise CodegenError(
@@ -97,12 +111,37 @@ class ScalarsMixin:
             )
         result_type = type_of(expr)
         t_result = None if result_type == Type.VOID else self._new_temp(result_type)
-        ir = [
-            IRRaw(self._gen_call_arguments_into(expr.args)),
-            IRCall(dst=t_result, name=expr.name, args=[]),
-        ]
+
+        if any(type_of(a).kind == TypeKind.SLICE or isinstance(a, NoneLiteral) for a in expr.args):
+            ir = [
+                IRRaw(self._gen_call_arguments_into(expr.args)),
+                IRCall(dst=t_result, name=expr.name, args=[]),
+            ]
+            return ir, t_result
+
+        arg_ir = []
+        arg_values = []
+        for arg in expr.args:
+            arg_type = type_of(arg)
+            if arg_type.kind == TypeKind.ARRAY:
+                addr_temp = self._new_temp(Type.INT64)
+                arg_ir.append(IRRaw(self.gen_array_arg_address_into(arg, Register('rax')), dst=addr_temp))
+                arg_values.append(addr_temp)
+            elif arg_type.kind == TypeKind.STRUCT:
+                addr_temp = self._new_temp(Type.INT64)
+                if isinstance(arg, (Variable, Field, Index)):
+                    addr_instructions = self.gen_struct_address_into(arg, Register('rax'))
+                else:
+                    addr_instructions = self._gen_materialize_argument_temp_into(arg, arg_type, Register('rax'))
+                arg_ir.append(IRRaw(addr_instructions, dst=addr_temp))
+                arg_values.append(addr_temp)
+            else:
+                ir, value = self.gen_expr_ir(arg)
+                arg_ir.extend(ir)
+                arg_values.append(value)
+
+        ir = arg_ir + [IRCall(dst=t_result, name=expr.name, args=arg_values)]
         return ir, t_result
-        return instructions
 
     def gen_short_circuit(
             self, expr: Binary,
