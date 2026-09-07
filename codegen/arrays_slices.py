@@ -43,6 +43,7 @@ from codegen.assembly_ast import (
     Sub,
 )
 from codegen.errors import CodegenError
+from codegen.ir import IRRaw, IRBinOp, IRConst, IRBoundsCheck
 from codegen.utils import type_of, type_byte_width, leaf_type, as_byte_register, gen_protecting_dst_across
 from parser import Node, ArrayLiteral, Call, Field, Index, Slice, Variable, NoneLiteral, Binary, BinaryOp
 from semantic import TypeKind, Type
@@ -238,11 +239,21 @@ class ArraysSlicesMixin:
 
     def gen_index_address_into(self, expr: Index, dst: Register) -> list[Instruction]:
         """Computes the address of `expr.array[expr.index]` into `dst`
-        -- the shared foundation for reading an element
-        (gen_expr_into's Index case), writing one (gen_index_assign),
+        -- the old-style foundation for reading an element (gen_expr_
+        into's Index case, still used for a composite-typed one not
+        yet migrated to IR), writing one (gen_index_assign, likewise),
         and reading a whole SUB-array for multi-dimensional access
         (this method's own recursive base case, via
         gen_array_address_into, when `expr.array` is itself an Index).
+
+        A scalar element's own address is real IR now instead -- see
+        _ir_index_address, which replicates this exact same recursion,
+        bounds check (via IRBoundsCheck), and offset arithmetic (via
+        ordinary IRBinOp) rather than calling this method at all; see
+        _ir_index_address_or_fallback for when this method is still
+        reached (expr.array's own base out of scope for real IR --
+        an ArrayLiteral, or a slice-typed base other than a bare,
+        named Variable).
 
         `expr.array` can be array- OR slice-typed (indexing into a
         slice, `s[i]`, uses this same method) -- see
@@ -305,6 +316,150 @@ class ArraysSlicesMixin:
         instructions.append(AddQ(src=Register('rax'), dst=Register('rcx')))
         instructions.append(MovQ(src=Register('rcx'), dst=dst))
         return instructions
+
+    def _ir_array_address(self, expr: Node):
+        """Mirrors gen_array_address_into's own three cases as real
+        IR -- Variable is the one genuine leaf (a fixed, compile-time
+        %rbp-relative offset, or a single pointer read if heap-
+        allocated; neither is a computation OVER other values, so it
+        stays a small IRRaw-wrapped leaf, the same deliberate scope
+        boundary _ir_struct_address's own Variable case draws),
+        Index/Field recurse into _ir_index_address/_ir_field_address.
+
+        Returns None for an ArrayLiteral (construction, not an
+        existing address -- out of scope for now, same as
+        gen_indexable_base_into's own ArrayLiteral case)."""
+        if isinstance(expr, Variable):
+            offset = self._local_offset(expr.name)
+            array_type = self._local_type(expr.name)
+            addr_temp = self._new_temp(Type.INT64)
+            if self._is_heap_allocated(self._local_decl_id(expr.name), array_type):
+                leaf = [MovQ(src=Memory('rbp', offset), dst=Register('rax'))]
+            else:
+                leaf = [LeaQFrame(offset=offset, dst=Register('rax'))]
+            return [IRRaw(leaf, dst=addr_temp)], addr_temp
+        if isinstance(expr, Index):
+            return self._ir_index_address(expr)
+        if isinstance(expr, Field):
+            return self._ir_field_address(expr)
+        return None
+
+    def _ir_indexable_base(self, expr: Node):
+        """Builds (without lowering) the address and length of an
+        indexable base as real IR -- returns (ir, addr_value, length_
+        value), or None when expr's own shape is still out of scope
+        (an ArrayLiteral; any slice-typed expression other than a
+        bare, named Variable -- a Slice, an Index, a Field, or a Call
+        all still need gen_indexable_base_into's own shared-scratch-
+        slot materialization, real, separate follow-up work, not
+        attempted here). Mirrors gen_indexable_base_into's own two-
+        way split:
+
+        ARRAY-typed: delegates to _ir_array_address (Variable/Field/
+        Index all in scope, matching gen_array_address_into's own
+        three cases exactly); length is always a compile-time IRConst.
+
+        SLICE-typed: only a bare, named Variable is in scope -- a
+        leaf read of its own descriptor's ptr/len fields, mirroring
+        _ir_array_address's own Variable leaf one field over. len is
+        captured as an INT (32-bit) Temp directly, not INT64 -- an
+        array/slice's own length always fits in 32 bits, the same
+        assumption the old-style bounds check's own len_reg_32
+        already makes; reading only the descriptor's own lower 4
+        bytes (little-endian) is exactly equivalent to the old-style
+        64-bit read followed by narrowing, for a value guaranteed to
+        fit either way."""
+        base_type = type_of(expr)
+        if base_type.kind == TypeKind.ARRAY:
+            if not isinstance(expr, (Variable, Field, Index)):
+                return None
+            addr_result = self._ir_array_address(expr)
+            if addr_result is None:
+                return None
+            addr_ir, addr_value = addr_result
+            return addr_ir, addr_value, IRConst(base_type.size, Type.INT)
+        if base_type.kind == TypeKind.SLICE:
+            if not isinstance(expr, Variable):
+                return None
+            offset = self._local_offset(expr.name)
+            ptr_temp = self._new_temp(Type.INT64)
+            len_temp = self._new_temp(Type.INT)
+            ir = [
+                IRRaw([MovQ(src=Memory('rbp', offset), dst=Register('rax'))], dst=ptr_temp),
+                IRRaw([Mov(src=Memory('rbp', offset + 8), dst=Register('eax'))], dst=len_temp),
+            ]
+            return ir, ptr_temp, len_temp
+        return None
+
+    def _ir_index_address(self, expr: Index):
+        """Builds (without lowering) the address of expr.array[expr.
+        index] as real IR -- the shared foundation for a scalar
+        element read/write (dispatch.py's _ir_load / this module's
+        own _ir_index_assign) and a sub-array (this method's own
+        recursive base case, via _ir_array_address, when expr.array
+        is itself an Index -- the identical mutual recursion gen_
+        index_address_into/gen_array_address_into already use one
+        level down, so `matrix[i][j]` falls out with no special-
+        casing for depth).
+
+        Returns None when expr.array's own base is out of scope for
+        real IR right now -- see _ir_indexable_base.
+
+        The bounds check aside (IRBoundsCheck -- see its own
+        docstring for why no ordinary BinaryOp can express it), the
+        actual arithmetic is ordinary IRBinOp: multiply the index by
+        the element's own stride, add to the base. Reuses exactly the
+        same 32-bit-multiply-then-64-bit-add shape gen_index_address_
+        into's own comment already justifies -- the bounds check
+        guarantees a small, non-negative index, so a 32-bit multiply
+        is safe, and its own write already zero-extends into the full
+        64-bit register the following ADD reads (IRBinOp's own
+        lowering derives each operation's width from its LEFT operand
+        -- INT for the multiply, INT64 for the add -- with no explicit
+        width juggling needed here at all).
+
+        No push/pop protection is needed around evaluating expr.index,
+        unlike the old-style version: base_addr/length_value are
+        already safely stored in their own Temp homes (register or
+        memory, via the allocator) the moment their own IRRaw/leaf
+        finishes, before expr.index (which could itself be arbitrarily
+        complex, even a call) ever runs -- the same "a Temp's home is
+        independent of what computed it" property that already made
+        IRCopy's own two-address capture protection-free."""
+        base = self._ir_indexable_base(expr.array)
+        if base is None:
+            return None
+        base_ir, base_addr, length_value = base
+        element_type = type_of(expr.array).element_type
+        element_stride = type_byte_width(element_type, self.struct_registry)
+
+        index_ir, index_value = self.gen_expr_ir(expr.index)
+        check = IRBoundsCheck(index=index_value, length=length_value)
+
+        offset_temp = self._new_temp(Type.INT)
+        multiply = IRBinOp(dst=offset_temp, op=BinaryOp.MULTIPLY, left=index_value, right=IRConst(element_stride, Type.INT))
+
+        result = self._new_temp(Type.INT64)
+        add = IRBinOp(dst=result, op=BinaryOp.ADD, left=base_addr, right=offset_temp)
+
+        return base_ir + index_ir + [check, multiply, add], result
+
+    def _ir_index_address_or_fallback(self, expr: Index) -> tuple[list, object]:
+        """Tries _ir_index_address first; falls back to wrapping the
+        old-style gen_index_address_into as a single opaque IRRaw when
+        expr.array's own base is still out of scope (see _ir_
+        indexable_base's own docstring) -- an ArrayLiteral, or a
+        slice-typed base other than a bare Variable. Shared by
+        dispatch.py's gen_expr_ir (a scalar element read) and this
+        module's own gen_statement_ir case (a scalar element write,
+        via _ir_index_assign) -- both need the identical "use real IR
+        when possible, fall back otherwise" decision, and this is the
+        one place it's made."""
+        result = self._ir_index_address(expr)
+        if result is not None:
+            return result
+        addr_temp = self._new_temp(Type.INT64)
+        return [IRRaw(self.gen_index_address_into(expr, Register('rax')), dst=addr_temp)], addr_temp
 
     def gen_slice_into(self, expr: Slice, dst_mem: Memory) -> list[Instruction]:
         """Generates `expr.array[expr.low:expr.high]`'s resulting

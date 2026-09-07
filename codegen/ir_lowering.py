@@ -28,9 +28,10 @@ listed here, in one place, rather than discovered by grepping for
 self. across the rest of the codebase.
 """
 
-from codegen.assembly_ast import Instruction, Register, Memory, Imm, Mov, MovQ, Cmp, Je, Jmp, Label, CallInstr
+from codegen.assembly_ast import Instruction, Register, Memory, Imm, Mov, MovQ, Cmp, Je, Jae, Jmp, Label, CallInstr
 from codegen.ir import (
     IRBinOp,
+    IRBoundsCheck,
     IRBranch,
     IRCall,
     IRConst,
@@ -268,6 +269,24 @@ class InstructionSelector:
                 out.extend(self._gen_load_value(instr.dst_address, Register('r9d')))
                 out.extend(self._gen_load_value(instr.src_address, Register('r8d')))
                 out.extend(self.host.gen_array_copy(Memory('r9', 0), Memory('r8', 0), instr.value_type))
+            elif isinstance(instr, IRBoundsCheck):
+                # Same unsigned comparison the old-style bounds check
+                # already used (Cmp is always unsigned; the signed/
+                # unsigned distinction lives entirely in which jump
+                # follows it -- Jae here, Jge/Jg/etc for an ordinary
+                # signed BinaryOp comparison), and the identical
+                # shared, per-function/per-message fail label -- see
+                # IRBoundsCheck's own docstring for why this couldn't
+                # be an ordinary BinaryOp instead. The message itself
+                # ("array index out of bounds") is hardcoded here,
+                # not carried on the op, since indexing is the only
+                # caller so far; slicing's own, different message
+                # would be a real, separate reason to add one later,
+                # not something to generalize for speculatively now.
+                out.extend(self._gen_load_value(instr.length, Register('ecx')))
+                out.extend(self._gen_load_value(instr.index, Register('eax')))
+                out.append(Cmp(src=Register('ecx'), dst=Register('eax')))
+                out.append(Jae(self.host._get_bounds_check_fail_label("array index out of bounds")))
             else:
                 raise NotImplementedError(f"lower_ir has no rule for: {instr!r}")
         return out

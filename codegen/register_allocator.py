@@ -26,6 +26,7 @@ from typing import Optional
 
 from codegen.ir import (
     IRBinOp,
+    IRBoundsCheck,
     IRBranch,
     IRCall,
     IRCopy,
@@ -150,6 +151,8 @@ def _reads(instr) -> set:
         return {v for v in (instr.address, instr.value) if isinstance(v, Temp)}
     if isinstance(instr, IRCopy):
         return {v for v in (instr.dst_address, instr.src_address) if isinstance(v, Temp)}
+    if isinstance(instr, IRBoundsCheck):
+        return {v for v in (instr.index, instr.length) if isinstance(v, Temp)}
     return set()
 
 

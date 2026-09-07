@@ -293,9 +293,11 @@ class DispatchMixin:
         if isinstance(expr, Variable):
             return [], self._local_temp(expr.name)
         if isinstance(expr, Index) and type_of(expr).kind not in (TypeKind.ARRAY, TypeKind.STRUCT):
-            return self._ir_load(self.gen_index_address_into(expr, Register('rax')), type_of(expr))
+            addr_ir, addr_value = self._ir_index_address_or_fallback(expr)
+            return self._ir_load(addr_ir, addr_value, type_of(expr))
         if isinstance(expr, Field) and type_of(expr).kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
-            return self._ir_load(self.gen_field_address_into(expr, Register('rax')), type_of(expr))
+            addr_ir, addr_value = self._ir_field_address(expr)
+            return self._ir_load(addr_ir, addr_value, type_of(expr))
         if isinstance(expr, Binary):
             return self._ir_expr_binary(expr)
         if isinstance(expr, Call) and expr.name not in ('print', 'len') and type_of(expr).kind not in (
@@ -304,18 +306,18 @@ class DispatchMixin:
         t = self._new_temp(type_of(expr))
         return [IRRaw(self.gen_expr_into(expr, Register('eax')), dst=t)], t
 
-    def _ir_load(self, addr_instructions: list, value_type) -> tuple[list, IRValue]:
-        """Shared by gen_expr_ir's Index/Field cases: wraps
-        addr_instructions -- already-computed, old-style address
-        computation (gen_index_address_into/gen_field_address_into,
-        unchanged; writes into %rax) -- as an IRRaw producing an
-        INT64 Temp, then IRLoads value_type's own width through it.
-        Address computation itself stays old-style; only the read
-        becomes real IR, exactly like _ir_index_assign/
-        _ir_field_assign do for the write side."""
-        addr_temp = self._new_temp(Type.INT64)
+    def _ir_load(self, addr_ir: list, addr_value, value_type) -> tuple[list, IRValue]:
+        """Shared by gen_expr_ir's Index/Field cases: given an
+        address already built as real IR -- or, when _ir_index_
+        address_or_fallback decided expr.array's own base is still
+        out of scope, an old-style gen_index_address_into call
+        captured via a single opaque IRRaw instead -- IRLoads value_
+        type's own width through it. Address computation itself is
+        now real IR wherever possible (see _ir_index_address/_ir_
+        field_address); only the genuinely-deferred cases still fall
+        back to an opaque leaf."""
         t = self._new_temp(value_type)
-        return [IRRaw(addr_instructions, dst=addr_temp), IRLoad(dst=t, address=addr_temp)], t
+        return addr_ir + [IRLoad(dst=t, address=addr_value)], t
 
     def _ir_expr_binary(self, expr: Binary) -> tuple[list, IRValue]:
         """The IR-native counterpart to gen_binary_into's own three-way

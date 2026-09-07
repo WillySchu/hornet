@@ -337,20 +337,16 @@ class StatementsMixin:
         """Builds (without lowering) the scalar-element case of
         gen_index_assign -- the caller (gen_index_assign or
         gen_statement_ir) is responsible for already having ruled out
-        SLICE/STRUCT. Captures the already-bounds-checked address
-        (gen_index_address_into, entirely unchanged -- address
-        computation stays old-style; only the final store becomes
-        real IR) into an INT64 Temp, builds the value's own IR
+        SLICE/STRUCT. Captures the address via _ir_index_address_or_
+        fallback (real IR wherever expr.array's own base allows it --
+        see its own docstring for the genuinely-deferred cases that
+        still fall back to an opaque leaf), builds the value's own IR
         (already works, via gen_expr_ir), then IRStores it through
         the address, at the ELEMENT's own declared width -- not
         necessarily the value's own, per IRStore's own docstring."""
-        addr_temp = self._new_temp(Type.INT64)
-        addr_ir = [IRRaw(
-            self.gen_index_address_into(Index(array=stmt.array, index=stmt.index), Register('rax')),
-            dst=addr_temp,
-        )]
+        addr_ir, addr_value = self._ir_index_address_or_fallback(Index(array=stmt.array, index=stmt.index))
         value_ir, value = self.gen_expr_ir(stmt.value)
-        return addr_ir + value_ir + [IRStore(address=addr_temp, value=value, value_type=element_type)]
+        return addr_ir + value_ir + [IRStore(address=addr_value, value=value, value_type=element_type)]
 
     def _ir_copy_assign(self, dst_expr: Node, src_expr: Node, value_type) -> list:
         """Builds (without lowering) a whole-array/whole-struct copy
@@ -425,13 +421,14 @@ class StatementsMixin:
         gen_statement_ir) is responsible for already having ruled out
         SLICE/STRUCT/ARRAY (and the slice-typed NoneLiteral case).
         Same shape as _ir_index_assign one level over: captures the
-        already-computed address (gen_field_address_into, unchanged)
-        into an INT64 Temp, builds the value's own IR, then IRStores
-        it through the address at the FIELD's own declared width."""
-        addr_temp = self._new_temp(Type.INT64)
-        addr_ir = [IRRaw(self.gen_field_address_into(stmt, Register('rax')), dst=addr_temp)]
+        address via _ir_field_address (real IR -- a struct-typed
+        base's own shape is always Variable/Field/Index, never
+        needing a fallback the way an array/slice base can; see its
+        own docstring), builds the value's own IR, then IRStores it
+        through the address at the FIELD's own declared width."""
+        addr_ir, addr_value = self._ir_field_address(Field(base=stmt.base, name=stmt.name))
         value_ir, value = self.gen_expr_ir(stmt.value)
-        return addr_ir + value_ir + [IRStore(address=addr_temp, value=value, value_type=field_type)]
+        return addr_ir + value_ir + [IRStore(address=addr_value, value=value, value_type=field_type)]
 
     def _gen_store(self, offset: int, value_expr: Node) -> list[Instruction]:
         """Shared by VarDecl-with-initializer and Assign: both are just

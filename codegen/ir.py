@@ -168,6 +168,31 @@ class IRCopy:
 
 
 @dataclass
+class IRBoundsCheck:
+    """Traps (via the same shared, already-existing per-function/per-
+    message panic label _get_bounds_check_fail_label already manages
+    -- see gen_index_address_into's own docstring for the full "why"
+    of the check itself) if `index`, treated as unsigned, is >=
+    `length` -- catching a negative index and a too-large one in the
+    identical single check the old-style bounds check already does,
+    for the identical reason: no ordinary BinaryOp can express this
+    (COMPARISON_CONDITION_CODES only has signed condition codes, and
+    Hornet itself has no unsigned-comparison operator a program could
+    ever write -- this is purely an internal codegen concept, not a
+    source-level one, so it doesn't belong in BinaryOp).
+
+    No result Temp -- like IRCopy, this writes nothing to a Temp; it
+    only conditionally jumps elsewhere in the function (never falls
+    through to something that reads a result), so eligible_intervals'
+    own start/end reasoning for a Temp's own def/use never applies to
+    it. `index`/`length` are both ordinary INT-typed IRValues (32-bit
+    -- an array/slice's own length always fits, exactly like the old-
+    style check's own len_reg_32 already assumes)."""
+    index: IRValue
+    length: IRValue
+
+
+@dataclass
 class IRLabel:
     """A jump target."""
     name: str

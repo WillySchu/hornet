@@ -27,6 +27,7 @@ from codegen.assembly_ast import (
     Register,
 )
 from codegen.errors import CodegenError
+from codegen.ir import IRRaw, IRBinOp, IRConst
 from codegen.utils import type_byte_width, type_of, leaf_type, gen_protecting_dst_across
 from parser import Node, Variable, Field, Index, Call, NoneLiteral, Binary, BinaryOp
 from semantic import TypeKind, Type
@@ -73,11 +74,17 @@ class StructsMixin:
 
     def gen_field_address_into(self, expr: Field, dst: Register) -> list[Instruction]:
         """Computes the address of `expr.base.expr.name` into `dst` --
-        the shared foundation for reading (gen_expr_into's Field case)
-        and writing (gen_field_assign) a field. Recurses through
-        gen_struct_address_into for chains of arbitrary depth
-        (`a.b.c`, `rows[0].f`), then adds the field's own byte offset
-        (skipped when zero)."""
+        the old-style foundation for reading (gen_expr_into's Field
+        case, still used for a composite-typed field/element not yet
+        migrated to IR) and writing (gen_field_assign, likewise).
+        Recurses through gen_struct_address_into for chains of
+        arbitrary depth (`a.b.c`, `rows[0].f`), then adds the field's
+        own byte offset (skipped when zero).
+
+        A scalar field's own address is real IR now instead -- see
+        _ir_field_address, which replicates this exact same recursion
+        and offset-add via IRBinOp rather than calling this method at
+        all."""
         base_type = type_of(expr.base)
         if base_type.kind != TypeKind.STRUCT:
             raise CodegenError(
@@ -89,6 +96,61 @@ class StructsMixin:
         if offset:
             instructions.append(AddQ(src=Imm(offset), dst=dst))
         return instructions
+
+    def _ir_struct_address(self, expr: Node) -> tuple[list, object]:
+        """Builds (without lowering) the address of a struct-typed
+        expr -- Variable, Field, or Index -- as real IR. Mirrors gen_
+        struct_address_into's own three cases; Field/Index delegate to
+        _ir_field_address/_ir_index_address, which call back into this
+        method for their own STRUCT-typed base -- the identical mutual
+        recursion gen_struct_address_into/gen_field_address_into/gen_
+        index_address_into already use, so a chain of arbitrary depth
+        (`a.b.c`, `rows[0].f`) falls out with no special-casing.
+
+        The Variable case is the one genuine leaf: a named struct
+        variable's own address is either a fixed, compile-time %rbp-
+        relative offset or, if heap-allocated, a single pointer read
+        -- neither is a computation OVER other values, so it stays a
+        small, IRRaw-wrapped leaf rather than its own IR concept, the
+        same deliberate scope boundary IRLoad/IRStore's own address
+        capture already draws."""
+        if isinstance(expr, Variable):
+            offset = self._local_offset(expr.name)
+            struct_type = self._local_type(expr.name)
+            addr_temp = self._new_temp(Type.INT64)
+            if self._is_heap_allocated(self._local_decl_id(expr.name), struct_type):
+                leaf = [MovQ(src=Memory('rbp', offset), dst=Register('rax'))]
+            else:
+                leaf = [LeaQFrame(offset=offset, dst=Register('rax'))]
+            return [IRRaw(leaf, dst=addr_temp)], addr_temp
+        if isinstance(expr, Field):
+            return self._ir_field_address(expr)
+        if isinstance(expr, Index):
+            return self._ir_index_address(expr)
+        raise CodegenError(f"Cannot compute a struct address for: {expr!r}")
+
+    def _ir_field_address(self, expr: Field) -> tuple[list, object]:
+        """Builds (without lowering) the address of `expr.base.expr.
+        name` as real IR: the base's own address (recursively, via
+        _ir_struct_address), plus expr.name's fixed byte offset, as an
+        ordinary IRBinOp(ADD) on two INT64 values -- offset already
+        fits IRBinOp's existing type-driven lowering with no changes
+        needed at all (it already derives its own operand width from
+        left.type, already INT64 here). Skips the add entirely when
+        offset is 0, matching gen_field_address_into's own shortcut."""
+        base_type = type_of(expr.base)
+        if base_type.kind != TypeKind.STRUCT:
+            raise CodegenError(
+                f"Cannot access field '{expr.name}' on a value of "
+                f"non-struct type {base_type}"
+            )
+        offset = self._field_offset(base_type.struct_name, expr.name)
+        base_ir, base_addr = self._ir_struct_address(expr.base)
+        if offset == 0:
+            return base_ir, base_addr
+        result = self._new_temp(Type.INT64)
+        add_op = IRBinOp(dst=result, op=BinaryOp.ADD, left=base_addr, right=IRConst(offset, Type.INT64))
+        return base_ir + [add_op], result
 
     def gen_struct_call_into(self, dst_mem: Memory, expr: Call) -> list[Instruction]:
         """Calls a struct-returning function, writing the result into

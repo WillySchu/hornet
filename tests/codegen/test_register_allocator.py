@@ -3,7 +3,7 @@ dataflow (build_cfg/compute_liveness) -- the linear-scan algorithm
 itself is tested separately, in test_register_allocator.py."""
 
 from semantic import Type
-from codegen.ir import Temp, IRConst, IRMove, IRBinOp, IRUnOp, IRLabel, IRJump, IRBranch, IRReturn, IRRaw, IRCall, IRLoad, IRStore, IRCopy
+from codegen.ir import Temp, IRConst, IRMove, IRBinOp, IRUnOp, IRLabel, IRJump, IRBranch, IRReturn, IRRaw, IRCall, IRLoad, IRStore, IRCopy, IRBoundsCheck
 from codegen.register_allocator import (
     build_cfg,
     compute_liveness,
@@ -283,6 +283,21 @@ def test_liveness_ircopy_reads_both_addresses_and_writes_nothing():
     assert t(1) in live_in[0]
 
 
+def test_liveness_irboundscheck_reads_index_and_length_and_writes_nothing():
+    """IRBoundsCheck reads both index and length -- like IRCopy, it
+    writes to no Temp at all (it only conditionally jumps elsewhere in
+    the function, via a shared, already-existing panic label; see its
+    own docstring)."""
+    ir = [
+        IRBoundsCheck(index=t(0), length=t(1)),
+        IRReturn(value=None),
+    ]
+    blocks = build_cfg(ir)
+    live_in, live_out = compute_liveness(blocks)
+    assert t(0) in live_in[0]
+    assert t(1) in live_in[0]
+
+
 # -- compute_live_intervals ---------------------------------------------------
 
 def test_compute_live_intervals_tight_span_for_a_purely_local_temp():
@@ -409,6 +424,19 @@ def test_eligible_intervals_includes_temp_surviving_across_an_ircopy():
     ir = [
         IRMove(dst=t(0), src=IRConst(1, Type.INT)),
         IRCopy(dst_address=t(1), src_address=t(2), value_type=Type.INT),
+        IRBinOp(dst=t(3), op=BinaryOp.ADD, left=t(0), right=IRConst(1, Type.INT)),
+    ]
+    intervals = {0: _interval(t(0), 0, 2)}
+    assert 0 in eligible_intervals(ir, intervals)
+
+
+def test_eligible_intervals_includes_temp_surviving_across_an_irboundscheck():
+    """Same reasoning as IRCopy just above: IRBoundsCheck's own
+    lowering only ever touches %eax/%ecx (never the pool), so a Temp
+    allocated to the pool safely survives across it too."""
+    ir = [
+        IRMove(dst=t(0), src=IRConst(1, Type.INT)),
+        IRBoundsCheck(index=t(1), length=t(2)),
         IRBinOp(dst=t(3), op=BinaryOp.ADD, left=t(0), right=IRConst(1, Type.INT)),
     ]
     intervals = {0: _interval(t(0), 0, 2)}
