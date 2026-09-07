@@ -81,8 +81,8 @@ class CallingConventionMixin:
                 arg_slot_counts.append(1)
             else:
                 ir, value = self.gen_expr_ir(arg)
-                instructions.extend(self.lower_ir(ir))
-                instructions.extend(self._gen_load_value(value, Register('eax')))
+                instructions.extend(self._instruction_selector.lower_ir(ir))
+                instructions.extend(self._instruction_selector._gen_load_value(value, Register('eax')))
                 instructions.append(Push(Register('rax')))
                 arg_slot_counts.append(1)
 

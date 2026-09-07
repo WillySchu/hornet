@@ -318,6 +318,50 @@ def test_eligible_intervals_excludes_named_local():
     assert eligible_intervals(ir, intervals) == {}
 
 
+def test_eligible_intervals_includes_named_local_in_safe_set():
+    """A named-local Temp whose own variable was never touched by
+    old-style code (see CodeGenerator._escaped_offsets, populated via
+    legacy access tracking) is exempted from the named-local exclusion
+    specifically -- not automatically eligible, just no longer
+    excluded FOR THAT reason. Here there's no other hazard either, so
+    it becomes eligible."""
+    named = Temp(id=0, type=Type.INT, is_named_local=True)
+    intervals = {0: _interval(named, 0, 5)}
+    ir = [IRMove(dst=named, src=IRConst(1, Type.INT))] * 6
+    assert 0 in eligible_intervals(ir, intervals, safe_named_locals=frozenset({0}))
+
+
+def test_eligible_intervals_safe_named_local_still_subject_to_other_hazards():
+    """Being in safe_named_locals lifts ONLY the named-local exclusion
+    -- a Temp that's ALSO exempted from that but genuinely survives
+    through an IRRaw/IRCall it doesn't own is still excluded for that
+    separate reason, exactly like any other Temp would be."""
+    named = Temp(id=0, type=Type.INT, is_named_local=True)
+    ir = [
+        IRMove(dst=named, src=IRConst(1, Type.INT)),   # 0: named defined
+        IRRaw(instructions=[], dst=t(1)),               # 1: unrelated, opaque -- named must survive through it
+        IRBinOp(dst=t(2), op=BinaryOp.ADD, left=named, right=t(1)),  # 2: named finally used
+    ]
+    intervals = {0: _interval(named, 0, 2)}
+    assert eligible_intervals(ir, intervals, safe_named_locals=frozenset({0})) == {}
+
+
+def test_eligible_intervals_safe_set_is_specific_to_the_temp_id():
+    """safe_named_locals must be checked per-Temp-id, not treated as a
+    blanket switch: a DIFFERENT named-local Temp not in the set is
+    still excluded, even when some other Temp id is present in it."""
+    named_a = Temp(id=0, type=Type.INT, is_named_local=True)
+    named_b = Temp(id=1, type=Type.INT, is_named_local=True)
+    ir = [
+        IRMove(dst=named_a, src=IRConst(1, Type.INT)),
+        IRMove(dst=named_b, src=IRConst(2, Type.INT)),
+    ]
+    intervals = {0: _interval(named_a, 0, 0), 1: _interval(named_b, 1, 1)}
+    result = eligible_intervals(ir, intervals, safe_named_locals=frozenset({0}))
+    assert 0 in result
+    assert 1 not in result
+
+
 def test_eligible_intervals_excludes_span_across_irraw():
     ir = [
         IRMove(dst=t(0), src=IRConst(1, Type.INT)),   # 0: t(0) defined

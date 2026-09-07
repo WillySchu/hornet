@@ -35,7 +35,7 @@ from codegen.emitter import Emitter
 from codegen.errors import CodegenError
 from codegen.escape_analysis import analyze_array_escapes, is_heap_allocated
 from codegen.ir import Temp
-from codegen.ir_lowering import IRLoweringMixin
+from codegen.ir_lowering import InstructionSelector
 from codegen.register_allocator import allocate_registers
 from codegen.scalars import ScalarsMixin
 from codegen.statements import StatementsMixin
@@ -77,7 +77,6 @@ class CodeGenerator(
         ArraysSlicesMixin,
         CallingConventionMixin,
         DispatchMixin,
-        IRLoweringMixin,
         ScalarsMixin,
         StatementsMixin,
         StringsMixin,
@@ -86,6 +85,7 @@ class CodeGenerator(
     produces an equivalent AsmProgram."""
 
     def __init__(self):
+        self._instruction_selector = InstructionSelector(self)
         self._label_count = 0
         self._var_offsets: Dict[int, int] = {}  # id(VarDecl node) -> its permanent Memory offset
         self._next_offset = 0
@@ -97,6 +97,29 @@ class CodeGenerator(
         # _new_temp's own docstring for why that split matters.
         self._temp_count = 0
         self._temp_offsets: Dict[int, int] = {}
+        # Legacy access tracking: every offset _local_offset has ever
+        # been asked to resolve, for the CURRENT function (reset in
+        # gen_function, alongside _next_offset -- these are frame-
+        # relative, so a raw offset value means nothing across a
+        # function boundary). A named-local Temp is normally excluded
+        # from register allocation unconditionally, since old-style
+        # code can still read its memory slot directly, bypassing the
+        # Temp -- but that's only a real hazard for a variable old-
+        # style code actually touches. _local_offset is the one
+        # chokepoint every such access goes through (the IR-native
+        # path resolves a variable via _local_temp instead, which
+        # never touches this), so this set is an exact, by-
+        # construction record of which variables genuinely need to
+        # stay memory-resident -- see register_allocator.py's own
+        # eligible_intervals for how gen_function turns this into the
+        # safe_named_locals it passes in.
+        self._escaped_offsets: set[int] = set()
+        # False from the start of gen_function until this function's
+        # OWN allocate_registers call has returned -- see ir_lowering.
+        # py's _gen_read_temp_into/_gen_write_temp_from for why a
+        # named-local Temp's memory fallback needs to know this, not
+        # just whether register_allocator.py assigned it a register.
+        self._allocation_finalized: bool = False
         # Populated once per function, by gen_function, from
         # register_allocator.allocate_registers -- maps a (necessarily
         # anonymous, necessarily IRRaw/IRCall-free) Temp's id to the
@@ -229,6 +252,8 @@ class CodeGenerator(
         self._var_offsets = {}
         self._argument_temp_offsets = {}  # id(ArrayLiteral or Call) -> its permanent slot; see _collect_argument_temps
         self._next_offset = 0
+        self._escaped_offsets = set()
+        self._allocation_finalized = False
         # No declared return type means Type.VOID, the same internal-
         # only sentinel semantic.py's analyze_function uses.
         return_type = Type.VOID if fn.return_type is None else type_from_name(
@@ -464,9 +489,21 @@ class CodeGenerator(
                 instructions.append(MovQ(src=Memory('rbp', temp_offset + 16), dst=Register('rax')))
                 instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset + 16)))
             elif p_type == Type.STR:
+                # A parameter's initial value is always established via
+                # a direct write to its permanent slot, never through
+                # _gen_write_temp_from -- register_allocator.py's own
+                # decision for this Temp isn't even made yet at this
+                # point in gen_function (it depends on the whole
+                # function's body, built below). Recording this here,
+                # not migrating it to go through the Temp itself,
+                # keeps this fix scoped to tracking, not to teaching
+                # parameter initialization to be allocator-aware -- a
+                # real, separate piece of follow-up work, not this one.
+                self._escaped_offsets.add(offset)
                 instructions.append(MovQ(src=Memory('rbp', temp_offset), dst=Register('rax')))
                 instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
             else:
+                self._escaped_offsets.add(offset)  # see the STR case just above for why
                 instructions.extend(self._gen_read_scalar_into(Memory('rbp', temp_offset), p_type, Register('eax')))
                 instructions.extend(self._gen_write_scalar_from(Register('eax'), p_type, Memory('rbp', offset)))
 
@@ -481,8 +518,23 @@ class CodeGenerator(
         ir = []
         for stmt in fn.body:
             ir.extend(self.gen_statement_ir(stmt))
-        self._register_assignment = allocate_registers(ir)
-        instructions.extend(self.lower_ir(ir))
+        # A named-local Temp is safe to allocate despite is_named_local
+        # (see eligible_intervals' own docstring) exactly when old-
+        # style code never touched its own variable's raw memory --
+        # i.e. its own offset was never recorded in _escaped_offsets,
+        # this function's own legacy-access record (see _local_offset).
+        # Harmless to compute over every Temp ever created so far, not
+        # just this function's own: allocate_registers below only ever
+        # looks a Temp id up if it's already present in THIS function's
+        # own intervals, so an unrelated, earlier function's Temp id
+        # appearing here too changes nothing.
+        safe_named_locals = frozenset(
+            temp_id for temp_id, offset in self._temp_offsets.items()
+            if offset not in self._escaped_offsets
+        )
+        self._register_assignment = allocate_registers(ir, safe_named_locals)
+        self._allocation_finalized = True
+        instructions.extend(self._instruction_selector.lower_ir(ir))
         self._register_assignment = {}  # never valid past this function's own body
         if return_type == Type.VOID:
             # A function with no declared return type never has to
@@ -778,9 +830,17 @@ class CodeGenerator(
         return offset
 
     def _local_offset(self, name: str) -> int:
+        """Resolves `name` to its own permanent Memory offset -- see
+        _escaped_offsets' own docstring for why every call here is
+        recorded: this is the one chokepoint every old-style read or
+        write of a variable's raw memory location goes through, so
+        recording each result is what lets register_allocator.py know
+        which named-local Temps are genuinely safe to allocate."""
         for scope in reversed(self.scopes):
             if name in scope:
-                return scope[name][0]
+                offset = scope[name][0]
+                self._escaped_offsets.add(offset)
+                return offset
         raise CodegenError(f"Reference to undeclared variable '{name}'")
 
     def _local_type(self, name: str) -> Type:

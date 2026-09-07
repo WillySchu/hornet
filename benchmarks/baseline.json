@@ -1,42 +1,42 @@
 {
   "arithmetic_heavy": {
     "allocation": {
-      "allocated": 15,
-      "eligible": 15,
-      "named_local_excluded": 6,
-      "spilled": 0,
+      "allocated": 16,
+      "eligible": 21,
+      "named_local_excluded": 0,
+      "spilled": 5,
       "total_temps": 21,
       "unsafe_span_excluded": 0
     },
     "instruction_count": 105,
     "name": "arithmetic_heavy",
-    "runtime_seconds": 0.12049380399997744
+    "runtime_seconds": 0.12868509400000505
   },
   "array_heavy": {
     "allocation": {
       "allocated": 23,
       "eligible": 23,
-      "named_local_excluded": 5,
+      "named_local_excluded": 2,
       "spilled": 0,
       "total_temps": 31,
-      "unsafe_span_excluded": 3
+      "unsafe_span_excluded": 6
     },
     "instruction_count": 251,
     "name": "array_heavy",
-    "runtime_seconds": 0.027681168000015077
+    "runtime_seconds": 0.03232429199999842
   },
   "loop_accumulator": {
     "allocation": {
-      "allocated": 4,
-      "eligible": 4,
-      "named_local_excluded": 2,
+      "allocated": 6,
+      "eligible": 6,
+      "named_local_excluded": 0,
       "spilled": 0,
       "total_temps": 6,
       "unsafe_span_excluded": 0
     },
     "instruction_count": 47,
     "name": "loop_accumulator",
-    "runtime_seconds": 0.06254062800002202
+    "runtime_seconds": 0.06928553999999565
   },
   "recursive_fibonacci": {
     "allocation": {
@@ -49,32 +49,32 @@
     },
     "instruction_count": 76,
     "name": "recursive_fibonacci",
-    "runtime_seconds": 0.05126156699998319
+    "runtime_seconds": 0.05625724099999729
   },
   "string_heavy": {
     "allocation": {
       "allocated": 9,
       "eligible": 9,
-      "named_local_excluded": 5,
+      "named_local_excluded": 4,
       "spilled": 0,
       "total_temps": 14,
-      "unsafe_span_excluded": 0
+      "unsafe_span_excluded": 1
     },
     "instruction_count": 126,
     "name": "string_heavy",
-    "runtime_seconds": 0.02718935100000408
+    "runtime_seconds": 0.028812349000006066
   },
   "struct_heavy": {
     "allocation": {
-      "allocated": 19,
-      "eligible": 19,
-      "named_local_excluded": 5,
+      "allocated": 20,
+      "eligible": 20,
+      "named_local_excluded": 1,
       "spilled": 0,
       "total_temps": 27,
-      "unsafe_span_excluded": 3
+      "unsafe_span_excluded": 6
     },
     "instruction_count": 157,
     "name": "struct_heavy",
-    "runtime_seconds": 0.03159075899998243
+    "runtime_seconds": 0.035996279999992
   }
 }

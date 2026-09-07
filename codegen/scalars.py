@@ -72,9 +72,9 @@ class ScalarsMixin:
             raise CodegenError(f"Call codegen requires dst == %eax, got: {dst!r}")
 
         ir, t_result = self._ir_call(expr)
-        instructions = self.lower_ir(ir)
+        instructions = self._instruction_selector.lower_ir(ir)
         if t_result is not None:
-            instructions.extend(self._gen_read_temp_into(t_result, dst))
+            instructions.extend(self._instruction_selector._gen_read_temp_into(t_result, dst))
         return instructions
 
     def _ir_call(self, expr: Call) -> tuple[list, object]:
@@ -174,8 +174,8 @@ class ScalarsMixin:
             raise CodegenError(f"Binary codegen requires a register destination, got: {dst!r}")
 
         ir, t_result = self._ir_short_circuit(expr, short_circuit_value=short_circuit_value, label_prefix=label_prefix)
-        instructions = self.lower_ir(ir)
-        instructions.extend(self._gen_read_scalar_into(self._temp_mem(t_result), Type.BOOL, dst))
+        instructions = self._instruction_selector.lower_ir(ir)
+        instructions.extend(self._gen_read_scalar_into(self._instruction_selector._temp_mem(t_result), Type.BOOL, dst))
         return instructions
 
     def _ir_short_circuit(self, expr: Binary, *, short_circuit_value: int, label_prefix: str) -> tuple[list, object]:

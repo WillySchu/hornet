@@ -185,6 +185,12 @@ class StatementsMixin:
                 instructions.extend(self._gen_zero_value_into(var_type, Memory('rax', 0)))
             return instructions
         if stmt.init is None:
+            # A no-initializer variable's zero value is always written
+            # directly to its permanent slot, never through _gen_write_
+            # temp_from -- same reasoning as the parameter-initialization
+            # case in gen_function's own prologue loop (see its own
+            # comment for why this is recorded rather than migrated).
+            self._escaped_offsets.add(offset)
             return self._gen_zero_value_into(var_type, Memory('rbp', offset))
         if isinstance(stmt.init, NoneLiteral):
             # none's resolved type (Type.NONE) never equals var_type --
@@ -282,7 +288,7 @@ class StatementsMixin:
             return instructions
         if element_type.kind == TypeKind.STRUCT:
             return instructions + self.gen_struct_value_into(stmt.value, Memory('rax', 0), element_type)
-        return self.lower_ir(self._ir_index_assign(stmt, element_type))
+        return self._instruction_selector.lower_ir(self._ir_index_assign(stmt, element_type))
 
     def _ir_index_assign(self, stmt: IndexAssign, element_type) -> list:
         """Builds (without lowering) the scalar-element case of
@@ -341,7 +347,7 @@ class StatementsMixin:
             return instructions + self.gen_struct_value_into(stmt.value, Memory('rax', 0), field_type)
         if field_type.kind == TypeKind.ARRAY:
             return instructions + self.gen_array_value_into(stmt.value, Memory('rax', 0), field_type)
-        return self.lower_ir(self._ir_field_assign(stmt, field_type))
+        return self._instruction_selector.lower_ir(self._ir_field_assign(stmt, field_type))
 
     def _ir_field_assign(self, stmt: FieldAssign, field_type) -> list:
         """Builds (without lowering) the scalar-field case of
@@ -392,7 +398,7 @@ class StatementsMixin:
         # the ordinary epilogue -- IRReturn with no value, same as the
         # scalar case below minus the load.
         if stmt.value is None:
-            return self.lower_ir(self._ir_return(None))
+            return self._instruction_selector.lower_ir(self._ir_return(None))
 
         if isinstance(stmt.value, NoneLiteral):
             # none's resolved type (Type.NONE) never equals SLICE --
@@ -444,7 +450,7 @@ class StatementsMixin:
             # type) and emits the ordinary epilogue. None of the
             # epilogue touches %eax/%rax/%rdx, so this is unaffected by
             # whatever those registers held during the body.
-            return self.lower_ir(self._ir_return(stmt.value))
+            return self._instruction_selector.lower_ir(self._ir_return(stmt.value))
         instructions.extend(self._gen_epilogue())
         return instructions
 
@@ -485,20 +491,20 @@ class StatementsMixin:
         else_label = self.new_label("if_else")
         end_label = self.new_label("if_end")
 
-        instructions = self.lower_ir(self._ir_if_head(stmt, then_label, else_label))
+        instructions = self._instruction_selector.lower_ir(self._ir_if_head(stmt, then_label, else_label))
 
         self._push_scope()
         for s in stmt.then_body:
             instructions.extend(self.gen_statement(s))
         self._pop_scope()
 
-        instructions.extend(self.lower_ir([IRJump(end_label), IRLabel(else_label)]))
+        instructions.extend(self._instruction_selector.lower_ir([IRJump(end_label), IRLabel(else_label)]))
         if stmt.else_body is not None:
             self._push_scope()
             for s in stmt.else_body:
                 instructions.extend(self.gen_statement(s))
             self._pop_scope()
-        instructions.extend(self.lower_ir([IRLabel(end_label)]))
+        instructions.extend(self._instruction_selector.lower_ir([IRLabel(end_label)]))
         return instructions
 
     def _ir_if_head(self, stmt: If, then_label: str, else_label: str) -> list:
@@ -544,7 +550,7 @@ class StatementsMixin:
         body_label = self.new_label("while_body")
         end_label = self.new_label("while_end")
 
-        instructions = self.lower_ir(self._ir_while_head(stmt, start_label, body_label, end_label))
+        instructions = self._instruction_selector.lower_ir(self._ir_while_head(stmt, start_label, body_label, end_label))
 
         self.loop_labels.append((start_label, end_label))
         self._push_scope()
@@ -553,7 +559,7 @@ class StatementsMixin:
         self._pop_scope()
         self.loop_labels.pop()
 
-        instructions.extend(self.lower_ir([IRJump(start_label), IRLabel(end_label)]))
+        instructions.extend(self._instruction_selector.lower_ir([IRJump(start_label), IRLabel(end_label)]))
         return instructions
 
     def _ir_while_head(self, stmt: While, start_label: str, body_label: str, end_label: str) -> list:

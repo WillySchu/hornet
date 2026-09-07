@@ -394,8 +394,8 @@ class DispatchMixin:
         # scalars): build its IR (see _ir_binary), lower it, read the
         # result into dst.
         ir, t_result = self._ir_binary(expr)
-        instructions = self.lower_ir(ir)
-        instructions.extend(self._gen_read_scalar_into(self._temp_mem(t_result), t_result.type, dst))
+        instructions = self._instruction_selector.lower_ir(ir)
+        instructions.extend(self._gen_read_scalar_into(self._instruction_selector._temp_mem(t_result), t_result.type, dst))
         return instructions
 
     def _ir_binary(self, expr: Binary) -> tuple[list, object]:
