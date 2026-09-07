@@ -26,7 +26,7 @@ syn match   hornetEscape /\\./ contained
 " Types
 " ---------------------------------------------------------------------------
 
-syn keyword hornetType int bool str
+syn keyword hornetType int int8 uint8 int64 bool str struct
 " Array/slice type syntax is structural; the type keywords above still
 " highlight the element type inside forms such as [5]int and []int.
 syn match   hornetTypeBrackets /[\[\]]/
