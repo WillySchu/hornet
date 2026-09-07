@@ -144,15 +144,24 @@ class IRCopy:
     """Copies value_type's own byte width from the address src_
     address to the address dst_address -- both ordinary INT64-typed
     IRValues, the same address-as-a-Temp pattern IRLoad/IRStore
-    already use. Whole-array/whole-struct assignment between two
-    already-addressable locations (a Variable/Field/Index on both
-    sides -- see gen_statement_ir's own VarDecl/Assign/IndexAssign/
-    FieldAssign cases, and _ir_copy_assign, for exactly which shapes
-    reach this and which still don't): `b = a`, `s.inner = a`, `rows[i]
-    = a`, or any mix, but not an ArrayLiteral/struct-literal Call
-    (construction, not a copy from an existing address) or an
-    ordinary composite-returning Call (writes through a hidden output
-    pointer instead, never through two already-existing addresses).
+    already use. Whole-array/whole-struct/whole-slice assignment
+    between two already-addressable locations (a Variable/Field/Index
+    on both sides -- see gen_statement_ir's own VarDecl/Assign/
+    IndexAssign/FieldAssign cases, and _ir_copy_assign, for exactly
+    which shapes reach this and which still don't): `b = a`, `s.inner
+    = a`, `rows[i] = a`, or any mix, but not an ArrayLiteral/struct-
+    literal Call/Slice (construction, not a copy from an existing
+    address) or an ordinary composite-returning Call (writes through
+    a hidden output pointer instead, never through two already-
+    existing addresses).
+
+    A slice value_type needs no special handling here at all: a
+    slice's own 24-byte descriptor is exactly one leaf-sized value as
+    far as gen_array_copy is concerned (see its own docstring -- this
+    is the identical flat-byte-copy mechanism an array-of-slices'
+    own slice-typed elements already relied on before this op existed
+    at all), so lower_ir's own call to it is unchanged regardless of
+    which of the three kinds value_type actually is.
 
     dst_address/src_address are named for what they hold, not `dst`/
     `src` alone, specifically to avoid reading like a result-Temp the

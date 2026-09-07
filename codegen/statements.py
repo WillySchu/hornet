@@ -129,17 +129,23 @@ class StatementsMixin:
                 self._bind_local(stmt)
                 ir, value = self.gen_expr_ir(stmt.init)
                 return ir + [IRMove(dst=self._local_temp(stmt.name), src=value)]
-            # An array/struct-typed initializer that's itself a
+            # An array/struct/slice-typed initializer that's itself a
             # Variable/Field/Index (an existing value with a real
             # address to copy from, not a literal or a call producing
             # a fresh one) -- see _ir_copy_assign. Checked, and bound,
             # only once the shape is already known to qualify, so an
-            # ArrayLiteral/Call initializer still falls to the
+            # ArrayLiteral/Slice/Call initializer still falls to the
             # catch-all with no binding done here either.
-            if var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and isinstance(stmt.init, (Variable, Field, Index)):
+            if var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE) and isinstance(stmt.init, (Variable, Field, Index)):
                 offset = self._bind_local(stmt)
                 ir = []
-                if self._is_heap_allocated(id(stmt), var_type):
+                # A slice variable is never heap-allocated (see gen_
+                # assign's own heap-allocation check, scoped to ARRAY/
+                # STRUCT only -- a slice's own descriptor is always a
+                # small, fixed-size, stack-resident value), so this
+                # malloc step is explicitly skipped for SLICE, not
+                # left to _is_heap_allocated's own implicit False.
+                if var_type.kind != TypeKind.SLICE and self._is_heap_allocated(id(stmt), var_type):
                     # Unlike Assign/IndexAssign/FieldAssign, this
                     # destination is BRAND NEW -- its slot holds
                     # nothing yet, heap-allocated or not. A heap-
@@ -167,31 +173,32 @@ class StatementsMixin:
                 ir, value = self.gen_expr_ir(stmt.value)
                 return ir + [IRMove(dst=self._local_temp(stmt.name), src=value)]
             # Same Variable/Field/Index-shaped copy as VarDecl's own
-            # case just above.
-            if var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and isinstance(stmt.value, (Variable, Field, Index)):
+            # case just above -- no heap-allocation branch needed here
+            # at all (unlike VarDecl's own): an existing slice
+            # variable is never heap-allocated in the first place, and
+            # an existing array/struct one already has its own real
+            # allocation from declaration time, reused in place.
+            if var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE) and isinstance(stmt.value, (Variable, Field, Index)):
                 return self._ir_copy_assign(Variable(name=stmt.name), stmt.value, var_type)
         elif isinstance(stmt, IndexAssign):
-            # Same scope boundary as gen_index_assign itself: a
-            # SLICE-typed element falls to the catch-all below, since
-            # its whole-value production isn't something a register
-            # could ever hold anyway. ARRAY never occurs here at all
-            # (IndexAssign's own grammar can't produce an array-typed
-            # element -- see gen_field_assign's own docstring for the
-            # contrast with FieldAssign, which can).
+            # Same scope boundary as gen_index_assign itself. ARRAY
+            # never occurs here at all (IndexAssign's own grammar
+            # can't produce an array-typed element -- see gen_field_
+            # assign's own docstring for the contrast with
+            # FieldAssign, which can).
             element_type = type_of(stmt.array).element_type
             if element_type.kind not in (TypeKind.SLICE, TypeKind.STRUCT):
                 return self._ir_index_assign(stmt, element_type)
-            if element_type.kind == TypeKind.STRUCT and isinstance(stmt.value, (Variable, Field, Index)):
+            if element_type.kind in (TypeKind.STRUCT, TypeKind.SLICE) and isinstance(stmt.value, (Variable, Field, Index)):
                 dst_expr = Index(array=stmt.array, index=stmt.index)
                 return self._ir_copy_assign(dst_expr, stmt.value, element_type)
         elif isinstance(stmt, FieldAssign):
             # Same idea one level over -- FieldAssign's grammar can
-            # ALSO produce an ARRAY-typed field (unlike IndexAssign),
-            # so that's excluded here too, alongside SLICE.
+            # ALSO produce an ARRAY-typed field (unlike IndexAssign).
             field_type = self._check_struct_and_field_type(stmt.base, stmt.name)
             if field_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
                 return self._ir_field_assign(stmt, field_type)
-            if field_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and isinstance(stmt.value, (Variable, Field, Index)):
+            if field_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE) and isinstance(stmt.value, (Variable, Field, Index)):
                 dst_expr = Field(base=stmt.base, name=stmt.name)
                 return self._ir_copy_assign(dst_expr, stmt.value, field_type)
         elif isinstance(stmt, ExprStmt) and not isinstance(stmt.expr, (ArrayLiteral, Slice)):
@@ -349,31 +356,37 @@ class StatementsMixin:
         return addr_ir + value_ir + [IRStore(address=addr_value, value=value, value_type=element_type)]
 
     def _ir_copy_assign(self, dst_expr: Node, src_expr: Node, value_type) -> list:
-        """Builds (without lowering) a whole-array/whole-struct copy
-        as real IR: captures both sides' addresses via gen_array_
-        address_into/gen_struct_address_into -- the exact same helpers
-        the old-style gen_array_value_into/gen_struct_value_into
-        already call for their own Variable/Field/Index cases, so a
-        heap-allocated variable or a nested field/index source is
-        handled identically, with no new address-computation logic at
-        all -- each into its own INT64 Temp, then IRCopy between them.
+        """Builds (without lowering) a whole-array/whole-struct/whole-
+        slice copy as real IR: captures both sides' addresses via
+        _ir_array_address/_ir_struct_address/_ir_slice_address --
+        real IR themselves (see their own docstrings), so a heap-
+        allocated variable or a nested field/index source is handled
+        identically, with the address computation itself inspectable
+        rather than opaque -- then IRCopy between them.
+
+        Dispatches on value_type.kind, not on dst_expr/src_expr's own
+        shape: SLICE has no old-style equivalent to fall back to at
+        all (a slice's own address is only ever computed inline,
+        inside gen_slice_value_into's own Variable/Index/Field cases,
+        never as a standalone reusable method) -- so all three kinds
+        go through the real-IR builders uniformly here, not a mix.
 
         Callers are responsible for already having confirmed src_expr
         is a Variable/Field/Index -- an ArrayLiteral, a struct-literal
-        Call, or an ordinary composite-returning Call is a genuinely
-        different case (construction, or the hidden-output-pointer
-        convention) with no existing address to capture at all, and
-        stays on the old-style path instead; see gen_statement_ir's
-        own VarDecl/Assign/IndexAssign/FieldAssign cases for where
-        that check happens."""
-        address_into = self.gen_array_address_into if value_type.kind == TypeKind.ARRAY else self.gen_struct_address_into
-        dst_addr = self._new_temp(Type.INT64)
-        src_addr = self._new_temp(Type.INT64)
-        ir = [
-            IRRaw(address_into(dst_expr, Register('rax')), dst=dst_addr),
-            IRRaw(address_into(src_expr, Register('rax')), dst=src_addr),
-        ]
-        return ir + [IRCopy(dst_address=dst_addr, src_address=src_addr, value_type=value_type)]
+        Call, a Slice (slice production), or an ordinary composite-
+        returning Call is a genuinely different case (construction,
+        or the hidden-output-pointer convention) with no existing
+        address to capture at all, and stays on the old-style path
+        instead; see gen_statement_ir's own VarDecl/Assign/
+        IndexAssign/FieldAssign cases for where that check happens."""
+        address_of = {
+            TypeKind.ARRAY: self._ir_array_address,
+            TypeKind.STRUCT: self._ir_struct_address,
+            TypeKind.SLICE: self._ir_slice_address,
+        }[value_type.kind]
+        dst_ir, dst_addr = address_of(dst_expr)
+        src_ir, src_addr = address_of(src_expr)
+        return dst_ir + src_ir + [IRCopy(dst_address=dst_addr, src_address=src_addr, value_type=value_type)]
 
     def gen_field_assign(self, stmt: FieldAssign) -> list[Instruction]:
         """`base.name = value` -- mirrors gen_index_assign one level

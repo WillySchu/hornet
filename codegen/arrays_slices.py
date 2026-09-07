@@ -344,6 +344,34 @@ class ArraysSlicesMixin:
             return self._ir_field_address(expr)
         return None
 
+    def _ir_slice_address(self, expr: Node):
+        """Mirrors _ir_array_address's own shape for a slice-typed
+        expr, but simpler: a slice variable is never heap-allocated
+        (see gen_assign's own heap-allocation check, scoped to ARRAY/
+        STRUCT only -- a slice's own 24-byte descriptor is always a
+        small, fixed-size, stack-resident value, regardless of
+        whether its backing array is heap-allocated), so the Variable
+        leaf is just a single LeaQFrame, no heap-vs-stack branch
+        needed at all. Index/Field recurse into _ir_index_address/
+        _ir_field_address exactly like _ir_array_address's own do --
+        neither cares what the result's own type is, only its address
+        and byte width (already correct for SLICE via type_byte_
+        width/_field_offset, with no changes needed there).
+
+        Returns None for a Slice (`arr[a:b]`, slice production -- a
+        fresh descriptor, not an existing address) or a Call (a
+        slice-returning function call) -- both genuinely out of scope
+        for now, real, separate follow-up work."""
+        if isinstance(expr, Variable):
+            offset = self._local_offset(expr.name)
+            addr_temp = self._new_temp(Type.INT64)
+            return [IRRaw([LeaQFrame(offset=offset, dst=Register('rax'))], dst=addr_temp)], addr_temp
+        if isinstance(expr, Index):
+            return self._ir_index_address(expr)
+        if isinstance(expr, Field):
+            return self._ir_field_address(expr)
+        return None
+
     def _ir_indexable_base(self, expr: Node):
         """Builds (without lowering) the address and length of an
         indexable base as real IR -- returns (ir, addr_value, length_
