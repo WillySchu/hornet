@@ -7,12 +7,15 @@ def []int ret_sl():
 
 
 def int8 test():
-    int8 a = 127
-    int8 b = 1
-    print(a + b)
-    int8 c = a + b
-    print(c)
-    return a + b
+    #int8 a = 127
+    #int8 b = 1
+    #print(a + b)
+    #int8 c = a + b
+    #print(c)
+    #return a + b
+    []int ints = ret_sl()
+    ints[:][0]
+    return 0
 
 
 def int8 main():

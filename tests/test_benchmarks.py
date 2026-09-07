@@ -31,6 +31,7 @@ EXPECTED_EXIT_CODES = {
     'array_heavy': 185,
     'struct_heavy': 19,
     'string_heavy': 1,  # r1 == r2 -- two independently-built copies of the same repeated string
+    'copy_heavy': 135,  # whole-array/whole-struct copy between named variables in a hot loop
 }
 
 

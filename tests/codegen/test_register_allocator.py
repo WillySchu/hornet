@@ -3,7 +3,7 @@ dataflow (build_cfg/compute_liveness) -- the linear-scan algorithm
 itself is tested separately, in test_register_allocator.py."""
 
 from semantic import Type
-from codegen.ir import Temp, IRConst, IRMove, IRBinOp, IRUnOp, IRLabel, IRJump, IRBranch, IRReturn, IRRaw, IRCall, IRLoad, IRStore
+from codegen.ir import Temp, IRConst, IRMove, IRBinOp, IRUnOp, IRLabel, IRJump, IRBranch, IRReturn, IRRaw, IRCall, IRLoad, IRStore, IRCopy
 from codegen.register_allocator import (
     build_cfg,
     compute_liveness,
@@ -267,6 +267,22 @@ def test_liveness_irstore_address_and_value():
     assert t(1) in live_in[0]
 
 
+def test_liveness_ircopy_reads_both_addresses_and_writes_nothing():
+    """IRCopy reads dst_address and src_address alike -- unlike every
+    other op's own `dst` field, neither one is a result Temp here
+    (see IRCopy's own docstring for why they're named dst_address/
+    src_address specifically, not dst/src): a copy writes to memory,
+    never to a Temp, so it must never appear in _writes either."""
+    ir = [
+        IRCopy(dst_address=t(0), src_address=t(1), value_type=Type.INT),
+        IRReturn(value=None),
+    ]
+    blocks = build_cfg(ir)
+    live_in, live_out = compute_liveness(blocks)
+    assert t(0) in live_in[0]
+    assert t(1) in live_in[0]
+
+
 # -- compute_live_intervals ---------------------------------------------------
 
 def test_compute_live_intervals_tight_span_for_a_purely_local_temp():
@@ -380,6 +396,23 @@ def test_eligible_intervals_excludes_span_across_ircall():
     ]
     intervals = {0: _interval(t(0), 0, 2)}
     assert eligible_intervals(ir, intervals) == {}
+
+
+def test_eligible_intervals_includes_temp_surviving_across_an_ircopy():
+    """Unlike IRRaw/IRCall, IRCopy is deliberately NOT in unsafe_
+    positions at all: its own lowering is pinned to %r9/%r8 (the
+    address registers) plus whatever gen_array_copy's own scratch pick
+    resolves to given those two bases -- never one of register_
+    allocator.py's own pool registers (%r10d/%r11d/%r15d) -- so a Temp
+    allocated to the pool can safely survive across it. t(0) here has
+    nothing to do with the copy at all, and must remain eligible."""
+    ir = [
+        IRMove(dst=t(0), src=IRConst(1, Type.INT)),
+        IRCopy(dst_address=t(1), src_address=t(2), value_type=Type.INT),
+        IRBinOp(dst=t(3), op=BinaryOp.ADD, left=t(0), right=IRConst(1, Type.INT)),
+    ]
+    intervals = {0: _interval(t(0), 0, 2)}
+    assert 0 in eligible_intervals(ir, intervals)
 
 
 def test_eligible_intervals_includes_argument_temp_consumed_by_the_call_it_ends_at():

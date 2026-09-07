@@ -140,6 +140,34 @@ class IRStore:
 
 
 @dataclass
+class IRCopy:
+    """Copies value_type's own byte width from the address src_
+    address to the address dst_address -- both ordinary INT64-typed
+    IRValues, the same address-as-a-Temp pattern IRLoad/IRStore
+    already use. Whole-array/whole-struct assignment between two
+    already-addressable locations (a Variable/Field/Index on both
+    sides -- see gen_statement_ir's own VarDecl/Assign/IndexAssign/
+    FieldAssign cases, and _ir_copy_assign, for exactly which shapes
+    reach this and which still don't): `b = a`, `s.inner = a`, `rows[i]
+    = a`, or any mix, but not an ArrayLiteral/struct-literal Call
+    (construction, not a copy from an existing address) or an
+    ordinary composite-returning Call (writes through a hidden output
+    pointer instead, never through two already-existing addresses).
+
+    dst_address/src_address are named for what they hold, not `dst`/
+    `src` alone, specifically to avoid reading like a result-Temp the
+    way every other op's own `dst` field is -- neither one is a
+    result here; both are addresses being READ, and this op writes to
+    memory, not to any Temp at all. lower_ir hands both, plus value_
+    type, straight to the existing gen_array_copy unchanged -- this
+    only makes the address capture and the copy itself real IR, not a
+    redesign of the underlying byte-copying mechanism."""
+    dst_address: IRValue
+    src_address: IRValue
+    value_type: Type
+
+
+@dataclass
 class IRLabel:
     """A jump target."""
     name: str

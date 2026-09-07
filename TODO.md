@@ -14,7 +14,9 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
+- Indexing into an unnamed or computed slice to IR.
 - `IRBranch` peephole optimization to skip redundant unconditional jumps.
+- IRAddress
 - CSE pass optimization for array addresses and thus indexes.
 - `type` type.
 - ` typeof`
@@ -51,12 +53,12 @@ Updates:
 - Sum types / pattern matching.
 - int32
 - Change int to an alias.
-- IRAddress
 - Pointers
 - float
 - Imports.
 - Multithreading
 - Optimization / mid level IR
+- `gen_array_copy` currently copies each leaf one by one, so for small leaf types (int8, etc.) this is calling many `movb` rather than a few `movq`.
 - Consider adding a semantic AST with type information rather than annotating the existing AST from the parser.
 - Consider adding a desugar step in between the parser and the semantic analysis (semantic analysis currently handles method desugaring, which is a little awkward).
 - Bounds Check Elimination.

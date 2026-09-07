@@ -1,0 +1,17 @@
+struct Point:
+    int x
+    int y
+
+def int main():
+    [4]int base = [1, 2, 3, 4]
+    Point origin = Point(0, 0)
+    int total = 0
+    int i = 0
+    while i < 2000000:
+        [4]int copy = base
+        copy[0] = i % 100
+        Point p = origin
+        p.x = i % 50
+        total = (total + copy[0] + p.x) % 1000003
+        i = i + 1
+    return total % 256

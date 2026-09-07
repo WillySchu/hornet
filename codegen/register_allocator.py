@@ -28,6 +28,7 @@ from codegen.ir import (
     IRBinOp,
     IRBranch,
     IRCall,
+    IRCopy,
     IRJump,
     IRLabel,
     IRLoad,
@@ -147,6 +148,8 @@ def _reads(instr) -> set:
         return {instr.address} if isinstance(instr.address, Temp) else set()
     if isinstance(instr, IRStore):
         return {v for v in (instr.address, instr.value) if isinstance(v, Temp)}
+    if isinstance(instr, IRCopy):
+        return {v for v in (instr.dst_address, instr.src_address) if isinstance(v, Temp)}
     return set()
 
 

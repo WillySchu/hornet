@@ -34,6 +34,7 @@ from codegen.ir import (
     IRBranch,
     IRCall,
     IRConst,
+    IRCopy,
     IRJump,
     IRLabel,
     IRLoad,
@@ -252,6 +253,21 @@ class InstructionSelector:
                     out.append(MovQ(src=Register('rax'), dst=Memory('r9', 0)))
                 else:
                     out.extend(self.host._gen_write_scalar_from(Register('eax'), instr.value_type, Memory('r9', 0)))
+            elif isinstance(instr, IRCopy):
+                # dst_address/src_address both need to be alive
+                # simultaneously, so both get their own fixed,
+                # never-a-Temp's-actual-home register -- %r9/%r8,
+                # extending IRStore's own reasoning for %r9 to a
+                # second register here. Pinning both is also what
+                # lets gen_array_copy's own dynamic "pick a scratch
+                # register that isn't either base" logic collapse to
+                # always just %rax: %r9/%r8 can never be an allocated
+                # Temp's home, so %rax can never collide with either
+                # base the way it could when gen_array_copy is handed
+                # two arbitrary, possibly-overlapping Memory operands.
+                out.extend(self._gen_load_value(instr.dst_address, Register('r9d')))
+                out.extend(self._gen_load_value(instr.src_address, Register('r8d')))
+                out.extend(self.host.gen_array_copy(Memory('r9', 0), Memory('r8', 0), instr.value_type))
             else:
                 raise NotImplementedError(f"lower_ir has no rule for: {instr!r}")
         return out
