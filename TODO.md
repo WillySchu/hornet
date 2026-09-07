@@ -15,6 +15,7 @@ Binary Ops:
 
 Updates:
 - `IRBranch` peephole optimization to skip redundant unconditional jumps.
+- CSE pass optimization for array addresses and thus indexes.
 - `type` type.
 - ` typeof`
 - Require `type` keyword to declare new type for structs.
@@ -50,6 +51,7 @@ Updates:
 - Sum types / pattern matching.
 - int32
 - Change int to an alias.
+- IRAddress
 - Pointers
 - float
 - Imports.

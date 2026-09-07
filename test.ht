@@ -6,12 +6,15 @@ def []int ret_sl():
     return []int[1, 2, 3]
 
 
-def main():
-    [3]int a = [1,2,3]
-    [3]int b = [1,2,3]
-    []int s = [1, 2, 3]
-    print(hello())
-    print(a == b)
-    print([]int[1, 2, 3])
-    print(ret_sl())
-    print(s)
+def int8 test():
+    int8 a = 127
+    int8 b = 1
+    print(a + b)
+    int8 c = a + b
+    print(c)
+    return a + b
+
+
+def int8 main():
+    print(test())
+    return test()
