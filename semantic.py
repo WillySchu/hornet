@@ -5,395 +5,189 @@ ever runs if it's not well-formed: an undeclared variable is
 referenced, a variable is declared twice, or any expression's type
 doesn't match what the surrounding context requires.
 
-This is a genuinely new *phase* in the pipeline, not an extension of an
-existing one:
-
     lex (lexer.py) -> parse (parser.py) -> analyze (semantic.py) -> codegen (codegen.py)
 
-Before this pass existed, undeclared/double-declared variables were
-only caught incidentally, deep inside codegen, when a variable's stack
-offset was looked up. That worked, but it meant a name-resolution
-problem only ever surfaced as a side effect of code generation, with no
-place for a *type* system to hook in at all. Putting a real pass here
-instead means codegen can go back to only ever being asked to generate
-code for programs already known to be valid -- it doesn't need to
-(and after this, mostly doesn't) defend against malformed input itself.
+Putting a real pass here (rather than catching name/type problems
+incidentally inside codegen, as a side effect of a stack-offset
+lookup) means codegen only ever runs on programs already known valid.
 
 THE TYPE SYSTEM
 -----------------
-`int` and `bool` were the first two types (see semantic.Type for the
-full, current set -- `str`, fixed-size arrays, slices, and structs
-have all been added since, each with their own typing rules documented
-at their own check_* method rather than repeated here). This is a
-genuinely *strong* static type system in the traditional PL sense:
-there is no implicit conversion between them in either direction. A
-bool is not a 0-or-1 int that happens to print differently -- it's a
-distinct type, and using one where the other is expected is a type
-error, full stop. In particular (and this is the part most likely to
-surprise someone coming from C): `not`, `and`, and `or` all require
-real `bool` operands. `not 0` is a type error, not "not true". Write
-`not (x == 0)` or `not false` instead.
+A genuinely strong static type system: no implicit conversion in
+either direction between any two types (see Type for the full set --
+int, bool, str, array, slice, struct, plus the internal-only VOID/
+NONE below). A bool is not a 0-or-1 int; `not`/`and`/`or` all require
+real bool operands (`not 0` is a type error, not "not true").
 
-The operator typing rules, precisely:
-  - Arithmetic (+ - * /) and the two purely-numeric unary operators
-    (- ~): both/the operand(s) must be `int`; result is `int`.
-  - Ordering comparisons (< > <= >=): both operands must be `int`;
-    result is `bool`. (There's no inherent ordering on bool, so these
-    don't accept bool operands.)
-  - Equality (== !=): both operands must be the *same* type (either
-    both int or both bool); result is `bool`. Comparing an int to a
-    bool is a type error even though both are "just numbers" underneath
-    -- that's exactly the kind of mismatch strong typing exists to
-    catch.
-  - Logical (not/and/or): all operands must be `bool`; result is `bool`.
-  - An `if`/`elif` condition must be `bool` -- same rule as everywhere
-    else: no int-as-truthy shortcut, write `x != 0` or similar.
-  - A VarDecl's initializer, an Assign's value, and a Return's value
-    must all match the relevant declared type (the variable's declared
-    type, or the function's declared return type) exactly.
+Operator typing, precisely:
+  - Arithmetic (+ - * /) and unary (- ~): int operand(s), int result.
+  - Ordering (< > <= >=): int operands only, bool result.
+  - Equality (== !=): both operands the *same* type, bool result --
+    int vs bool is a type error even though both are "just numbers".
+  - Logical (not/and/or): bool operands, bool result.
+  - An if/elif condition must be bool -- no int-as-truthy shortcut.
+  - A VarDecl initializer, Assign value, or Return value must match
+    the relevant declared type exactly.
 
-Number literals are always `int`. There's no float type in this
-language yet, even though the lexer's NUMBER rule matches decimals (a
-holdover from before there was any type checking to catch this) --
-check_constant rejects a non-whole-number literal as a type error
-rather than silently truncating or miscompiling it (codegen has no
-instruction for a fractional immediate; before this pass existed, a
-literal like `2.5` would have produced literally invalid assembly,
-`movl $2.5, %eax`, with no clear error pointing at why).
+Number literals are always `int` -- there's no float type yet, even
+though the lexer's NUMBER rule matches decimals; check_constant
+rejects a non-whole-number literal as a type error (codegen has no
+fractional-immediate instruction).
 
 SCOPING
 --------
-Blocks now nest (if/elif/else, and while), so scope tracking is a real
-stack: self.scopes is a List[Dict[str, Type]], one dict per
-currently-open block, with the function's own top-level body as the
-bottom entry. Two rules fall out of using a stack rather than one flat
-dict per function:
-  - A variable declared inside an `if` (or `else`, or a `while` body)
-    is only visible for the rest of that block -- analyze_if/
-    analyze_while push a fresh scope before walking their statements
-    and pop it again afterward, so the name simply isn't there anymore
-    once the block ends. This applies uniformly whether the block runs
-    zero times, once, or (for a while body) many times -- the scope is
-    a *static* fact about the program text, pushed and popped exactly
-    once during analysis, regardless of how many times the block might
-    actually execute at runtime.
-  - Shadowing is allowed: a block can declare a variable with the same
-    name as one in an enclosing scope. Declaration only checks the
-    *current* (innermost) scope for a collision (see _declare), while
-    a reference or assignment resolves by walking outward from
-    innermost to outermost until it finds a match (see _lookup) -- the
-    same lookup order used for the classic "nearest enclosing
-    declaration wins" semantics most block-scoped languages use.
-  - The `then` and `else` branches of one `if` get *independent*
-    scopes (each is its own push/pop), since they're mutually
-    exclusive at runtime -- a name declared in `then` has no business
-    being visible in `else`, and vice versa.
+self.scopes is a List[Dict[str, Type]], one dict per open block
+(if/elif/else, while), the function's top-level body as the bottom
+entry. A block's own scope is pushed before walking its statements
+and popped after (analyze_if/analyze_while) -- a static fact about
+the program text, independent of how many times a while body actually
+runs. Shadowing is allowed: declaration only checks the *current*
+scope for a collision (_declare); a reference resolves by walking
+outward from innermost to outermost (_lookup). An if's then/else
+branches get independent scopes, since they're mutually exclusive.
 
-Aside from that, analyze_function/analyze_if/analyze_while still walk
-statements in *program order*, adding each variable to its scope only
-once its own VarDecl has actually been processed, so declare-before-use
-in textual order and rejection of self-referential initializers
-(`int a = a`) both still fall out for free, exactly as before -- they
-just now apply per-scope rather than per-function.
+Statements are walked in program order, adding each variable to scope
+only once its own VarDecl is processed, so declare-before-use and
+rejection of `int a = a` both fall out for free, per-scope. This
+differs from codegen.py's own local handling, which pre-scans a whole
+function body up front just to size the stack frame (layout, not
+validity) -- by the time it runs, this pass has already guaranteed
+well-formedness.
 
-This is notably different from codegen.py's own local-variable
-handling, which pre-scans a whole function body (recursively, into
-every if/else branch and while body) for VarDecls up front purely to
-size the stack frame before emitting any instructions -- that pass is
-about layout, not validity, and by the time it runs this one has
-already guaranteed the program is well-formed. codegen.py also ends up
-needing its own scope-stack, for a different reason: see its LOCAL
-VARIABLES section.
-
-LOOPS: break/continue VALIDITY
+LOOPS: break/continue validity
 ---------------------------------
-`break` and `continue` are each only meaningful inside a loop -- there's
-nothing to break out of, or skip the rest of an iteration of, at the
-top level of a function. This is tracked with a simple counter,
-self.loop_depth, incremented before analyzing a while's body and
-decremented after (analyze_while), rather than anything scope-related:
-it needs to survive being nested inside an `if` (a `break` inside an
-`if` that's inside a `while` is fine -- loop_depth doesn't care about
-intervening non-loop blocks) while still correctly resetting once a
-nested while's own body finishes being analyzed, so an outer loop's
-break/continue isn't accidentally validated by an inner loop that has
-nothing to do with it. codegen.py mirrors this with its own stack of
-(start_label, end_label) pairs -- see its LOOPS section -- for the same
-underlying reason: break/continue always target the *innermost*
-enclosing loop, never an outer one.
+Tracked with a counter, self.loop_depth, incremented/decremented
+around a while's body (analyze_while) -- survives nesting inside an
+if (a break inside an if inside a while is fine) while still
+resetting once a nested while's own body finishes, so an outer loop's
+break/continue is never validated by an unrelated inner loop.
+codegen.py mirrors this with its own (start_label, end_label) stack,
+for the same reason: break/continue always target the *innermost*
+enclosing loop.
 
 FUNCTIONS
 ----------
-self.functions (name -> (param types, return type)) is deliberately a
-single, program-wide, flat namespace -- completely separate from
-self.scopes (variable names). That's what lets a variable and a
-function share a name without colliding, and it's built in a dedicated
-first pass over *every* function in the Program, before any function's
-own body is checked (see analyze()). Doing it in two passes rather than
-building each function's signature just before checking that function
-is what makes call order not matter at all: a function can call one
-defined later in the file, and a function can call itself (or two
-functions can call each other) recursively, since by the time
-analyze_function ever looks anything up in self.functions, every
-signature -- including the current function's own -- is already there.
+self.functions (name -> (param types, return type)) is a single,
+program-wide flat namespace, separate from self.scopes -- so a
+variable and a function can share a name. Built in a dedicated first
+pass over every function (analyze()) before any body is checked, so
+call order never matters: forward references and (mutual) recursion
+both just work, since every signature is already present by the time
+any body looks one up.
 
-Parameters are bound into the function's own scope right at the start
-of analyze_function, before any statement is walked, exactly like
-already-declared locals -- which, as a side effect, means a duplicate
-parameter name (`def int f(int a, int a):`) is caught by the ordinary
-_declare collision check, with no separate check needed for it.
+Parameters are bound into the function's own scope at the start of
+analyze_function, like already-declared locals -- so a duplicate
+parameter name is caught by the ordinary _declare collision check,
+with no separate check needed.
 
 FUNCTIONS WITH NO DECLARED RETURN TYPE
 -------------------------------------------
-`def NAME(params):` -- the type before the name omitted entirely, not
-a `void`/`none` keyword -- means this function has no declared return
-type at all (Function.return_type is None, see its own docstring in
-parser.py). This is deliberately NOT a new user-facing type: there is
-no keyword for it, no way to declare a variable/parameter/array or
-slice element of it, and no plan to add one. Internally, though, it's
-given a real singleton, Type.VOID (see Type's own docstring), rather
-than reusing Python's own None for "this expression's type is void" --
-resolved_type's OWN None already means "not yet type-checked"
-everywhere it's used (see check_expr and codegen.py's own _type_of),
-and conflating the two would make a legitimately void expression
-indistinguishable from one semantic analysis simply hadn't reached
-yet.
+`def NAME(params):`, the type before the name omitted entirely (not a
+void/none keyword) -- Function.return_type is None. Internally this
+gets a real singleton, Type.VOID, kept distinct from resolved_type's
+own None (which means "not yet type-checked") so a legitimately void
+expression is never confused with one analysis hasn't reached yet.
 
-Two syntactic consequences follow directly, both documented on their
-own AST nodes in parser.py: such a function's body may fall off the
-end with no explicit `return` anywhere (Return.value can be None, a
-bare `return`, valid exactly when the enclosing function's return_type
-is Type.VOID -- see analyze_return), and always_returns is skipped
-entirely for it (see the ALL PATHS RETURN section above) -- there's
-nothing to guarantee returns, since falling off the end IS how such a
-function is expected to exit when it doesn't return early.
-
-Everywhere else Type.VOID might try to flow as a real value -- a
-VarDecl initializer, an Assign, a function-call argument, an array/
-slice base -- is already rejected for free by the exact same type-
-mismatch check that site already had: none of those ever compares
-against a type a user could actually write as "void", so Type.VOID
-simply never matches. check_print_call and check_binary's equality
-handling are the two exceptions that needed an explicit check apiece:
-print's argument-type check previously accepted anything unconditionally
-(added when arrays/slices became printable, before this feature
-existed), and `Type.VOID == Type.VOID` is trivially true by structural
-equality alone, the same way any type equals itself -- comparing two
-"nothing"s to each other would otherwise silently type-check fine.
-
-print itself is Type.VOID now -- its own docstring used to say
-outright that it returned a hardcoded, meaningless int 0 specifically
-*because* there was no real void type to give it; see check_print_call.
+Such a function's body may fall off the end with no explicit `return`
+(a bare `return` is valid exactly when return_type is Type.VOID -- see
+analyze_return), and always_returns is skipped for it entirely (see
+ALL PATHS RETURN below). Type.VOID flowing where a real value is
+expected (a VarDecl initializer, an argument, ...) is already rejected
+by the ordinary type-mismatch check at each site, since none of those
+ever compares against something a user could write as "void" --
+except print's argument check and binary equality, which needed an
+explicit case apiece (print used to accept anything unconditionally;
+`Type.VOID == Type.VOID` is trivially true by structural equality, the
+same way any type equals itself). print itself is Type.VOID now.
 
 NONE
 -----
-`none` -- Hornet's nil-style zero value, analogous to Go's own `nil`,
-but deliberately narrower internally: Go's own nil has no fixed type
-of its own at all, adapting to whatever nilable type context expects
-it via Go's general untyped-constant mechanism (the same one numeric
-literals use there). Hornet has no untyped-constant mechanism for ANY
-literal yet, so building one just for `none` would be a much bigger
-structural change than adding a value -- every expression's type is
-currently derivable purely from itself and its children, with no
-context needed, and an untyped node would break that invariant
-everywhere check_expr is called. See NoneLiteral's own docstring in
-parser.py for the full reasoning.
-
-Instead, `none` resolves to one single, fixed, internal type, Type.NONE
-(a fifth singleton alongside INT/BOOL/STR/VOID -- see Type.NONE's own
-docstring), and _types_compatible checks COMPATIBILITY -- not equality
--- specifically wherever a value flows into a slice-typed context: a
-VarDecl initializer, an Assign, an IndexAssign, a function-call
-argument, or a return value all go through it now instead of a bare
-`!=` comparison. From the outside this behaves like Go's own nil for
-everything usable today (`[]int s = none`, `if s == none`); only the
-internal mechanism is narrower. Only slices are nilable so far -- none
-is NOT compatible with int/bool/str/array, even though str is also a
-pointer under the hood at the machine level. Extending this to other
-composite/reference types, if any come along later, is real, separable
-follow-up work, not implemented here.
-
-Equality (`==`/`!=`) has no such fixed "target" side the way an
-assignment does -- either operand could be the none one -- so
-check_binary checks for a slice-vs-none pair directly rather than
-going through _types_compatible, before falling through to its
-existing array/slice/void rejection (which NONE now also joins, for
-the same reason VOID is there: `none == none` would otherwise
-trivially type-check, comparing two "nothing"s to each other the same
-way two void results would).
-
-codegen.py is where `none`'s actual runtime representation (a {ptr: 0,
-len: 0} slice descriptor -- Go's own nil slice shape) and the ptr-only
-comparison that implements `s == none` correctly (matching Go's own
-nil-vs-empty-slice distinction) both live -- see its own NONE: THE
-SLICE ZERO VALUE section.
+`none` -- see NoneLiteral's own docstring in parser.py for the full
+reasoning. Resolves to one fixed internal type, Type.NONE, checked for
+COMPATIBILITY (not equality, via _types_compatible) wherever a value
+flows into a slice-typed context (VarDecl initializer, Assign,
+IndexAssign, argument, return). Only slices are nilable. Equality has
+no fixed "target" side (either operand could be the none one), so
+check_binary checks for a slice-vs-none pair directly before falling
+through to its array/slice/void rejection, which NONE now also joins
+(`none == none` would otherwise trivially type-check). codegen.py
+holds none's actual runtime representation ({ptr: 0, len: 0}) and the
+ptr-only `== none` comparison.
 
 BUILTINS
 ---------
-`print`, `len`, and `append` are builtins -- callables that aren't
-ordinary user-defined functions and don't go through self.functions at
-all. check_call special-cases each of them before ever consulting
-self.functions, and analyze()'s signature-collection pass rejects any
-user function whose name collides with a builtin
-(_BUILTIN_FUNCTION_NAMES), so there's no ambiguity about which one
-wins -- a program simply can't define its own `print`, `len`, or
-`append`.
+print/len/append are builtins, not ordinary user-defined functions --
+check_call special-cases each before ever consulting self.functions,
+and analyze()'s signature-collection pass rejects a user function
+whose name collides with one (_BUILTIN_FUNCTION_NAMES).
 
-check_print_call accepts exactly one argument of any REAL type (int,
-bool, str, array, and slice are all printable, and there's no reason to
-force a caller to pick a differently-named builtin per type the way an
-ordinary function's fixed parameter types would require) and is itself
-Type.VOID -- print's first real user, now that a real (if internal-only)
-void type exists at all; see the FUNCTIONS WITH NO DECLARED RETURN TYPE
-section below. codegen.py is where print's actual behavior (which
-underlying libc call per argument type) lives -- see its own PRINTING
-ARRAYS AND SLICES section for the array/slice case specifically.
-
-check_len_call is print's near-opposite in shape: where print accepts
-almost every type and carves out VOID/NONE as the only exceptions,
-len accepts almost nothing -- only array or slice -- with str explicitly
-rejected by its own, specific "not supported yet" message (a real,
-separable follow-up, not an oversight) rather than folded into the
-same generic rejection every other wrong type gets. Always returns
-Type.INT, a real, useful value unlike print's VOID -- `len(x)` works
-as an ordinary expression (a loop bound, an operand, ...), not just a
-bare statement. codegen.py's gen_len_call_into is where the actual
-array-vs-slice split lives (a compile-time constant vs. a runtime
-descriptor read); see its own docstring for why the argument itself
-is still fully evaluated either way, regardless of whether the
-resulting length ends up depending on its runtime value at all.
-
-check_append_call requires a slice as its first argument and a value
-matching that slice's own element type as its second, always returning
-the same slice type back (append never changes what a slice is a slice
-OF, only how many elements are in it). The value flows into the
-element type via _check_value_flowing_into, not a plain check_expr --
-the same recursive treatment analyze_var_decl/analyze_assign/
-analyze_index_assign already give a value flowing into an already-
-typed slot, so `append(rows, [5, 6])` on a slice-of-slices correctly
-constructs a fresh, nested slice for the new element. Unlike len,
-check_append_call doesn't restrict what KIND of expression the first
-argument is -- that's a codegen-level restriction (see codegen.py's
-gen_append_call_into for why it's deliberately narrower there than
-len's own), not a type-checking one. codegen.py's own APPEND BUILTIN
-section covers the actual growth-and-aliasing mechanics, which
-semantic.py has no need to know anything about.
+check_print_call accepts one argument of any real type and is itself
+Type.VOID. check_len_call is the near-opposite: only array or slice
+(str explicitly rejected with its own message, a separable follow-up,
+not folded into the generic rejection), always returning Type.INT.
+check_append_call requires a slice and a value matching its element
+type (via _check_value_flowing_into, the same recursive treatment a
+VarDecl/Assign/IndexAssign value gets), always returning that same
+slice type back.
 
 TYPES: ANNOTATING THE AST FOR codegen.py
 -------------------------------------------
-check_expr does one thing beyond type-checking: after computing an
-expression's Type, it stores that result on the node itself
-(expr.resolved_type = result) before returning. Every check_* method
-below stays a pure type-computation function with no knowledge of
-this -- the annotation happens in exactly one place, check_expr's own
-dispatch, and every recursive call for an operand, argument, or
-condition anywhere in this file already goes through check_expr rather
-than some check_* method directly (see analyze_var_decl, check_binary,
-check_unary, check_call, and every other caller). That means every
-expression node anywhere in a program, no matter how deeply nested,
-ends up annotated automatically, with no separate wiring needed and no
-per-node-type case to remember adding as this pass grows.
+check_expr, after computing an expression's Type, stores it on the
+node (expr.resolved_type = result) before returning -- the one place
+this happens; every check_* method stays a pure type-computation
+function, and every recursive call anywhere in this file for an
+operand/argument/condition already goes through check_expr rather
+than a check_* method directly. So every expression node ends up
+annotated automatically, with nothing to remember wiring up as this
+file grows. resolved_type holds the actual Type object (not a name
+string, since an array type needs its own element_type/size too).
 
-resolved_type holds the actual Type object directly (Type.INT, an
-ARRAY-kind Type with its own element_type/size, Type.VOID, ...), not a
-name string -- a bare name like 'int'/'bool'/'str' stopped being able to
-represent everything a type might be once arrays existed (an array also
-needs its element type and size, which no string alone can carry).
-codegen.py imports Type from this module directly and compares against
-it (Type.STR, Type.INT, Type.VOID, ...) rather than string literals, and
-can freely inspect .kind/.element_type/.size on whatever comes back.
-
-codegen.py reads this directly (see its _type_of) instead of
-re-deriving an expression's type with its own independent logic, which
-is what it used to do, via a method called _infer_type. That older
-approach was a real liability, not just an aesthetic one: adding
-`print` needed a Call case added to _infer_type separately from this
-file's own check_call, and adding the six int-only operators (%  &  |
-^  <<  >>) needed them added to _infer_type's own int-producing branch
-separately from this file's own _INT_ONLY_BINARY_OPS. Both omissions
-were easy to make and were only caught by manual testing, not by
-anything that would have failed loudly on its own. Annotating the AST
-here and having codegen.py read the annotation removes that second,
-independently-maintained copy of the logic entirely -- whatever this
-file already decided is just read directly downstream, whatever it
-happens to be, with nothing left elsewhere to fall out of sync.
-
-codegen.py's own scope-stack (offset AND type per local variable, kept
-for resolving which of possibly-several same-named declarations a
-Variable reference means -- see its LOCAL VARIABLES section) is a
-deliberate, separate exception to this: it still exists after this
-change, unrelated to resolved_type, since an expression's type alone
-can never tell codegen *which stack slot* a variable reference resolves
-to. That's a distinct kind of duplication (of scope/offset resolution,
-not of type inference) that this annotation mechanism doesn't attempt
-to address.
+codegen.py reads this directly instead of re-deriving a type with its
+own independent logic, which is what it used to do via a method called
+_infer_type -- a real liability: adding `print` needed a Call case
+added there separately from this file's own check_call, and the six
+int-only operators needed a separate addition to its own int-producing
+branch. Both omissions were easy to make and were only caught by
+manual testing. Annotating here and having codegen.py read the
+annotation removes that second, independently-maintained copy
+entirely. codegen.py's own scope-stack (offset AND type per local,
+for resolving which of several same-named declarations a reference
+means) remains a separate, unrelated exception -- an expression's type
+alone can never say which stack slot it resolves to.
 
 ALL PATHS RETURN
 ------------------
-analyze_function's last step, after every statement in a function's
-body is already known to be individually well-typed, is
-always_returns(fn.body): does every execution path through this
-function's body reach a `return` before falling off the end? This
-applies to every function with a REAL declared return type -- and it's
-not just a correctness nicety. Once functions could call each other
-(see codegen.py's FUNCTIONS section), a function whose generated code
-falls through to whatever comes after it with no `ret` ever executed
-doesn't just return garbage to its caller -- it corrupts the *calling*
-function's own stack, since there's a real return address sitting on
-the stack from the `call` that invoked it, with nothing left to pop it
-and jump there.
+analyze_function's last step, once every statement is already known
+well-typed: always_returns(fn.body), for every function with a real
+declared return type. Not just a nicety -- a function whose generated
+code falls through with no `ret` corrupts the calling function's own
+stack (the return address from `call` is never popped). A VOID
+function is the one exception, skipped entirely (see FUNCTIONS WITH NO
+DECLARED RETURN TYPE above).
 
-A function with NO declared return type (return_type is Type.VOID) is
-the one deliberate exception, skipped entirely rather than run and
-ignored -- see the FUNCTIONS WITH NO DECLARED RETURN TYPE section below
-for why falling off such a function's end is exactly how it's expected
-to exit, and how codegen.py still guarantees a real `ret` executes
-either way.
-
-This is deliberately modeled as a simple, conservative "terminating
-statement" check (the same shape Go's specification uses for this exact
-problem) rather than a fully general flow analysis: always_returns scans
-a list of statements front-to-back for the first one that, *on its
-own*, guarantees a return, and stops there (anything after it doesn't
-matter to this question -- dead/unreachable code is a separate concern
-this doesn't address). A statement guarantees a return if it's a Return
-itself; an If with a non-None else_body where both branches themselves
-guarantee a return (which, since elif desugars into a nested If in
-else_body, handles an elif chain of any length for free); or a `while
-true` loop with no reachable break anywhere in its body.
-
-That last case is the one genuinely subtle piece here. In general a
-while loop can't guarantee anything -- its condition might be false
-immediately, so its body might run zero times -- except when the
-condition is the literal constant `true` (checked structurally, as
-`isinstance(condition, BoolLiteral) and condition.value is True`; this
-does not try to prove some other expression is always true, e.g. `1 ==
-1` -- only the literal keyword counts). Even then, a `while true` loop
-only guarantees a return if there's no way to escape it other than
-returning: if it also contains a `break`, that break could fire and
-fall through to whatever comes after the loop, so the loop stops
-counting as guaranteeing anything on its own, and something has to
-catch that path explicitly (typically a return placed right after the
-loop). contains_reachable_break finds a break anywhere in a loop's own
-body, including nested arbitrarily deep inside if/elif/else -- but
-deliberately does NOT recurse into a *nested* while loop's own body, on
-the same reasoning break already has for its own validity (see
-analyze_break/loop_depth) and at the codegen level (see codegen.py's
-loop_labels stack): a break inside an inner loop belongs to that inner
-loop, not whatever loop encloses it.
+A simple, conservative "terminating statement" check (like Go's own
+spec), not full flow analysis: scans a statement list front-to-back
+for the first one that, on its own, guarantees a return -- a Return
+itself; an If with a non-None else_body where both branches guarantee
+one (handling any elif chain for free, since elif desugars into a
+nested If); or a `while true` loop with no reachable break. The while
+case is the subtle one: only the literal `true` counts (checked
+structurally, not "prove this expression is always true"), and even
+then only if there's no `break` to escape through -- contains_
+reachable_break finds one anywhere in the loop's own body, including
+nested inside if/elif/else, but deliberately not inside a *nested*
+while's own body (same reasoning as break's own validity/loop_depth,
+and codegen.py's loop_labels stack): a break inside an inner loop
+belongs to that loop, not whatever encloses it.
 
 ERROR REPORTING
 -----------------
-This raises SemanticError on the *first* problem found and stops,
-matching how ParseError and CodegenError already behave elsewhere in
-this pipeline, rather than collecting every error in the program and
-reporting them all at once. Neither AST nodes nor this pass currently
-track source positions (that information exists only transiently, on
-Tokens, during parsing), so error messages name the offending variable,
-operator, or type mismatch as specifically as possible without being
-able to point at a line/column -- the same limitation CodegenError
-already had. Adding position tracking to AST nodes would be a good,
-fairly contained follow-up if these messages need to get more precise.
+Raises SemanticError on the *first* problem and stops, matching
+ParseError/CodegenError elsewhere in this pipeline, rather than
+collecting every error. Neither AST nodes nor this pass track source
+positions (only Tokens do, transiently, during parsing), so messages
+name the offending variable/operator/type as specifically as possible
+without a line/column, the same limitation CodegenError has.
 """
 
 import argparse
@@ -421,7 +215,6 @@ from parser import (
     If,
     Index,
     IndexAssign,
-    MethodDef,
     Node,
     NoneLiteral,
     Param,
@@ -432,7 +225,6 @@ from parser import (
     SliceTypeExpr,
     StringLiteral,
     StructDef,
-    StructField,
     TypeAlias,
     Unary,
     UnaryOp,
@@ -463,50 +255,25 @@ class TypeKind(Enum):
 
 @dataclass(frozen=True)
 class Type:
-    """A type in this language: one of the three scalars (kind alone,
-    element_type/size/struct_name all None), an array (kind=ARRAY,
-    element_type the Type one level down, size that dimension's fixed
-    length), a slice (kind=SLICE, element_type the Type one level
-    down, size always None -- a slice's LENGTH is a runtime property
-    of the slice VALUE, not part of its type the way an array's size
-    is; see SliceTypeExpr's own docstring in parser.py), or a struct
-    (kind=STRUCT, struct_name the struct's own declared name, element_
-    type/size both None -- a struct's own field LAYOUT lives in the
-    struct registry, keyed by this same name, not duplicated onto
-    every Type instance that refers to it). Two slices of the same
-    element type are the same Type regardless of how long either one
-    happens to be at runtime, unlike two arrays of different sizes,
-    which are different types even with the same element type.
+    """A type: one of the three-plus scalars (kind alone), an array
+    (kind=ARRAY, element_type one level down, size that dimension's
+    fixed length), a slice (kind=SLICE, element_type one level down,
+    size always None -- a slice's length is a runtime property of the
+    VALUE, not its type), or a struct (kind=STRUCT, struct_name the
+    declared name, element_type/size both None -- field layout lives
+    in the struct registry, not duplicated here).
 
-    Frozen specifically to get structural equality and hashing for
-    free from the dataclass machinery, rather than writing __eq__ by
-    hand -- which is what makes `Type(ARRAY, Type.INT, 3) ==
-    Type(ARRAY, Type.INT, 3)` (two SEPARATE Type objects describing the
-    same array shape) correctly True, and, just as importantly,
-    `Type(ARRAY, Type.INT, 3) != Type(ARRAY, Type.INT, 4)` correctly
-    True too -- [3]int and [4]int are different types, exactly like
-    [3]int and [3]bool are, with no special-casing needed anywhere
-    that already just does `left_type != right_type` (see
-    check_binary's equality handling, analyze_var_decl,
-    analyze_assign, check_call's argument checking -- none of them
-    needed to change at all to correctly handle arrays, once Type
-    itself became structurally comparable). This recurses correctly to
-    arbitrary nesting depth for free too, since element_type is itself
-    just another Type -- and the same structural-equality machinery is
-    what makes `Type(SLICE, Type.INT) == Type(SLICE, Type.INT)` true
-    regardless of which two separate Type objects produced it, with no
-    additional code needed for SLICE specifically.
-
-    This is ALSO exactly what gives struct types NOMINAL equality (two
-    structs with identical field lists but different declared names
-    are different types) essentially for free, rather than needing a
-    separate mechanism: struct_name is just one more field this same
-    structural-equality machinery already compares, so `Type(STRUCT,
-    struct_name='Point') == Type(STRUCT, struct_name='Point')` is True
-    (same name, same type) and `!= Type(STRUCT, struct_name='Vector')`
-    is True (different name, different type, regardless of whether
-    Point and Vector happen to declare the exact same fields) with no
-    field-by-field comparison ever entering into it at all.
+    Frozen to get structural equality/hashing for free: `Type(ARRAY,
+    Type.INT, 3) == Type(ARRAY, Type.INT, 3)` is correctly True for
+    two separate objects, and `!= Type(ARRAY, Type.INT, 4)` is
+    correctly True too, recursing to arbitrary depth since element_
+    type is itself a Type -- no special-casing needed anywhere that
+    already does `left_type != right_type` (check_binary, analyze_
+    var_decl, check_call, ...). This is also what gives struct types
+    NOMINAL equality essentially for free: struct_name is just one
+    more field this same machinery compares, so two structs with
+    identical fields but different names are correctly different
+    types, with no field-by-field comparison involved.
     """
     kind: TypeKind
     element_type: Optional['Type'] = None  # set when kind == ARRAY or SLICE
@@ -523,81 +290,27 @@ class Type:
         return self.kind.name.lower()
 
 
-# Singleton instances for the three scalar kinds -- assigned as class
-# attributes after the class body (not instance fields set via
-# __init__), so every existing `Type.INT`/`Type.BOOL`/`Type.STR`
-# reference throughout this file keeps working completely unchanged.
-# `frozen=True` only prevents mutating an INSTANCE's own fields after
-# construction; it has nothing to say about adding attributes to the
-# Type CLASS object itself, which is all this is doing.
+# Singleton instances -- class attributes assigned after the class
+# body, not instance fields, so every Type.INT/BOOL/STR/... reference
+# throughout this file works unchanged. `frozen=True` only prevents
+# mutating an instance's own fields; it says nothing about adding
+# attributes to the Type class object itself.
 Type.INT = Type(TypeKind.INT)
-# int8/uint8: this language's first types narrower than 4 bytes, and
-# uint8 its first UNSIGNED one -- see the module docstring's own note
-# (if one exists by the time this is read) or the design discussion
-# that preceded this for the full reasoning on why these needed no
-# new register class the way a future float type will. As of THIS
-# change, these are real, type-checked types (a literal flowing into
-# one is range-checked -- see _check_value_flowing_into's own INT8/
-# UINT8 case -- and arithmetic on them wraps at 8 bits, staying INT8/
-# UINT8 rather than promoting to INT the way C's own integer
-# promotion rules would) but codegen.py doesn't yet know they're
-# narrower than 4 bytes at all: type_byte_width's own fallthrough
-# already returns 4 for anything it doesn't explicitly recognize,
-# which is EXACTLY correct for this intermediate state -- an int8/
-# uint8 value is computed and wrapped correctly, just still stored in
-# a full 4-byte slot everywhere (a VarDecl, a struct field, an array
-# element) until a later pass makes storage genuinely 1 byte wide.
-# That's a real, deliberate, temporary inefficiency, not a bug: it
-# keeps this change testable and correct entirely at the type-system
-# level before touching every scalar read/write site in codegen.py.
 Type.INT8 = Type(TypeKind.INT8)
 Type.UINT8 = Type(TypeKind.UINT8)
-# int64: this language's first type WIDER than 4 bytes, in the
-# opposite direction from int8/uint8's own narrowing. Unlike int8/
-# uint8, this is NOT free once storage is sorted: int64 arithmetic
-# genuinely needs its own 64-bit instructions throughout (add/sub/mul/
-# div/bitwise/shifts/compare), since ordinary 32-bit ones aren't wide
-# enough to hold every possible intermediate result the way they
-# already are for a NARROWER type -- see the design discussion that
-# preceded this change for the full accounting of what's genuinely new
-# work here (new 64-bit instruction classes, a parallel 64-bit print
-# conversion routine) versus what generalizes for free (type_byte_
-# width-driven address math). As of THIS change, codegen.py doesn't
-# yet know int64 needs 8-byte storage or 64-bit arithmetic at all --
-# type_byte_width's own fallthrough still returns 4 for anything it
-# doesn't explicitly recognize, the identical deliberate, temporary
-# intermediate state int8/uint8 went through first, in the opposite
-# direction.
 Type.INT64 = Type(TypeKind.INT64)
 Type.BOOL = Type(TypeKind.BOOL)
 Type.STR = Type(TypeKind.STR)
-# A "fourth" kind of singleton in spirit, if not in a literal count
-# anymore now that int8/uint8/int64 exist too -- kept deliberately OUT
-# of _TYPE_NAMES below (and
-# there's no lexer keyword for it either) -- Type.VOID can never be
-# reached by parsing a type expression from source, only ever
-# produced internally, as the "return type" of a function with no
-# declared one (see analyze_function/analyze/check_call). This is
-# purely a bookkeeping value, not a user-facing type: there's no way
-# to declare a void-typed variable, parameter, or array/slice element,
-# and there's no plan to add one -- see the module docstring's
-# FUNCTIONS WITH NO DECLARED RETURN TYPE section for why a real
-# (if internal-only) Type was still worth it here rather than reusing
-# Python's own None for this: None already means "not yet type-
-# checked" everywhere resolved_type is used, and conflating the two
-# would make a legitimately void expression indistinguishable from
-# one semantic analysis simply hadn't reached yet.
+# VOID and NONE are both kept deliberately out of _TYPE_NAMES below --
+# neither is reachable by parsing an ordinary type expression from
+# source. VOID is purely internal bookkeeping (the "return type" of a
+# function with no declared one -- see analyze_function/check_call);
+# there's no keyword for it and no way to declare a void-typed
+# anything. NONE, despite `none` being a real, user-writable keyword,
+# is only ever reached through parse_primary's NoneLiteral production,
+# never through parse_type -- `none` is a VALUE (see NoneLiteral's own
+# docstring in parser.py), never a type annotation.
 Type.VOID = Type(TypeKind.VOID)
-# A fifth singleton, ALSO kept deliberately out of _TYPE_NAMES below --
-# despite `none` being a real, user-writable keyword (unlike `void`,
-# which has none), it's only ever reachable through parse_primary's own
-# NoneLiteral production, never through parse_type. There is, and is
-# meant to be, no way to write `none x` as a declaration -- `none` is
-# a VALUE (Hornet's nil-style zero value for slices, analogous to Go's
-# own nil -- see NoneLiteral's own docstring in parser.py), never a
-# type annotation. Comparing against Type.NONE directly (rather than
-# via _TYPE_NAMES/type_from_name, which stay reserved for real,
-# declarable types) is check_expr's own NoneLiteral case's job.
 Type.NONE = Type(TypeKind.NONE)
 
 
@@ -605,17 +318,10 @@ _TYPE_NAMES = {
     'int': Type.INT,
     'int8': Type.INT8,
     'uint8': Type.UINT8,
-    # 'byte' is a built-in ALIAS for uint8 -- the exact same Type
-    # object, not a third TypeKind -- so a byte-typed value is
-    # completely interchangeable with a uint8-typed one everywhere,
-    # all the way down to codegen: type_byte_width, the scalar read/
-    # write helpers, array equality/zero-init, and print all dispatch
-    # on Type.UINT8 directly and never learn 'byte' exists as a
-    # concept at all. Like a user-written type alias, this means
-    # 'byte' leaves no trace of itself in an error message or print()
-    # output -- both will always say "uint8", even for a value
-    # declared with `byte` -- a deliberate consequence of aliasing to
-    # the identical Type instance, not an oversight.
+    # 'byte' is a built-in alias for uint8 -- the same Type object, not
+    # a third TypeKind -- so it's interchangeable everywhere down to
+    # codegen, and leaves no trace in an error message or print()
+    # output (both always say "uint8").
     'byte': Type.UINT8,
     'int64': Type.INT64,
     'bool': Type.BOOL,
@@ -626,73 +332,34 @@ _TYPE_NAMES = {
 @dataclass
 class StructInfo:
     """Everything semantic analysis (and, via Program.struct_registry,
-    codegen) needs to know about one declared struct: its own name
-    (redundant with whatever key it's stored under in a registry dict,
-    but kept here too so a StructInfo is self-describing on its own --
-    useful in error messages and anywhere one gets passed around
-    without its own dict key close at hand) and its fields, as an
-    ordinary dict from field name to that field's own resolved Type.
-    Field ORDER matters and is preserved here exactly as declared --
-    a plain dict already does this (insertion order, since Python
-    3.7), so no separate ordered-list structure is needed alongside
-    it -- since it determines both codegen's own memory layout (fields
-    are laid out at sequential byte offsets in declaration order) and
-    print's own field-printing order."""
+    codegen) needs about one declared struct: its name and its fields,
+    an ordinary dict from field name to resolved Type. Field order is
+    preserved (a plain dict already does this) since it determines
+    codegen's memory layout and print's field order."""
     name: str
     fields: Dict[str, Type]
 
 
 def type_from_name(type_expr, structs: Dict[str, StructInfo], aliases: Dict[str, Type]) -> Type:
-    """Converts a parsed type expression (VarDecl.var_type /
-    Function.return_type / Param.type / StructField.field_type,
-    straight from parser.py) into a Type. `type_expr` is a plain str
-    for a scalar type, a struct name, OR a type alias name (see below),
-    an ArrayTypeExpr for an array type, or a SliceTypeExpr for a slice
-    type (see their own docstrings in parser.py) -- handled here by
-    recursing on element_type, which is itself a plain str, another
-    ArrayTypeExpr, or another SliceTypeExpr, naturally bottoming out at
-    a scalar, struct, or alias name and handling arbitrarily-nested
-    types (`[2][3]int`, `[][]int`, `[][3]int`, `[]MyStruct`, ...) with
-    no depth limit or special-casing for "how many dimensions" or
-    "which mix of array, slice, and struct".
+    """Converts a parsed type expression (VarDecl.var_type/Function.
+    return_type/Param.type/StructField.field_type) into a Type.
+    `type_expr` is a plain str (scalar, struct name, or alias name), an
+    ArrayTypeExpr, or a SliceTypeExpr (see their own docstrings in
+    parser.py) -- handled by recursing on element_type, bottoming out
+    at a scalar/struct/alias name with no depth limit.
 
-    `structs` is this program's own struct registry (see StructInfo),
-    already fully built by the time this is ever called with a
-    struct-name type_expr -- see SemanticAnalyzer.analyze's own
-    struct-collection pass, which runs before function signatures (and
-    therefore before anything that might reference a struct type) are
-    resolved at all. A REQUIRED parameter, not one defaulted to an
-    empty dict: every call site in this file and in codegen.py was
-    updated to pass its own analyzer's or function's struct registry
-    through when struct support was added, specifically so a call site
-    that got missed fails loudly (a TypeError for a missing argument)
-    rather than silently misresolving any struct-typed declaration it
-    happens to touch as "unknown type".
+    `structs` and `aliases` are both required parameters, not defaulted
+    to empty dicts, so a call site that forgets to pass one fails
+    loudly (TypeError) rather than silently misresolving a struct- or
+    alias-typed declaration as unknown. Both registries are already
+    fully built by the time this is called with a name needing them
+    (see analyze()'s ordering: aliases, then structs, then function
+    signatures) -- resolving either is a single dict lookup, never a
+    recursive re-resolution.
 
-    `aliases` is the identical idea, one registry over: every alias
-    name has ALREADY been resolved down to its own real, final Type by
-    the time this is ever called (see _collect_type_aliases, which
-    runs before struct collection even starts, since a struct field's
-    own type can itself be an alias) -- so resolving `type_expr` here
-    is a single dict lookup, never a recursive re-resolution of the
-    alias's own target. Also a REQUIRED parameter, for the identical
-    "fail loudly, not silently" reason `structs` already is; every
-    existing call site in this file and codegen.py was updated
-    alongside this one when aliases were added, which is the entire
-    point of resolving type names through this one function everywhere
-    -- every one of those call sites gained alias support for free,
-    with no changes needed beyond threading this registry through the
-    same way they already thread `structs` through.
-
-    Only ever fails for a program that isn't syntactically valid in
-    the first place, OR references a type name that isn't a declared
-    struct or alias -- parse_type() already restricts a scalar
-    type_expr to 'int'/'bool'/'str'/an identifier, and already
-    validates an ArrayTypeExpr's size is a positive whole number at
-    parse time, so the only genuinely user-facing failure here is an
-    unrecognized identifier; the dict lookups are otherwise a
-    defensive check, not a user-facing validation path in their own
-    right."""
+    Only fails for a program that isn't syntactically valid, or
+    references an undeclared struct/alias name -- parse_type() already
+    restricts everything else at parse time."""
     if isinstance(type_expr, ArrayTypeExpr):
         element = type_from_name(type_expr.element_type, structs, aliases)
         return Type(TypeKind.ARRAY, element_type=element, size=type_expr.size)
@@ -710,60 +377,40 @@ def type_from_name(type_expr, structs: Dict[str, StructInfo], aliases: Dict[str,
 
 def always_returns(statements: List[Node]) -> bool:
     """Does every execution path through this list of statements reach
-    a `return` before falling off the end? Used to enforce that every
-    function returns on every code path -- see the module docstring's
-    ALL PATHS RETURN section for the full reasoning and what this
-    deliberately does and doesn't try to prove.
-
-    Scans front-to-back for the first statement that, on its own,
-    guarantees a return; if one is found, everything after it is
-    irrelevant to *this* question (dead code is a separate concern this
-    function doesn't address). Reaching the end without finding one
-    means False -- there's some path through this block that falls
-    through without returning.
+    a `return` before falling off the end? See the module docstring's
+    ALL PATHS RETURN section for the full reasoning. Scans front-to-
+    back for the first statement that, on its own, guarantees a return
+    (everything after it is irrelevant to this question); reaching the
+    end without finding one means False.
     """
     for stmt in statements:
         if isinstance(stmt, Return):
             return True
         if isinstance(stmt, If):
-            # Only counts if there's an else at all, and *both* sides
-            # are themselves guaranteed to return -- an if with no else
-            # can always just not run its body, so it can never by
-            # itself guarantee anything about what happens next.
+            # Only counts with an else where BOTH sides guarantee a
+            # return -- an if with no else can always just not run its
+            # body.
             if stmt.else_body is not None and always_returns(stmt.then_body) and always_returns(stmt.else_body):
                 return True
         if isinstance(stmt, While):
-            # A `while <cond>: ...` loop's body might run zero times
-            # (whenever cond isn't literally the constant `true`), so in
-            # general a while loop can never by itself guarantee a
-            # return -- *unless* it's a genuine `while true` with no way
-            # to break out of it, in which case it never falls through
-            # to whatever comes after it at all (it either returns from
-            # inside, or loops forever) -- either way, nothing after it
-            # is reachable, which vacuously satisfies "never falls off
-            # the end without returning". See contains_reachable_break
-            # for why a break anywhere inside changes this.
+            # A while's body might run zero times, so it can never
+            # guarantee a return on its own -- unless it's a genuine
+            # `while true` with no reachable break, in which case
+            # nothing after it is reachable at all.
             is_infinite = isinstance(stmt.condition, BoolLiteral) and stmt.condition.value is True
             if is_infinite and not contains_reachable_break(stmt.body):
                 return True
-        # VarDecl, Assign, Break, Continue, ExprStmt: none of these can
-        # themselves guarantee a return, and none of them stop the scan
-        # -- move on to the next statement.
+        # VarDecl, Assign, Break, Continue, ExprStmt: none of these
+        # guarantee a return; move on to the next statement.
     return False
 
 
 def contains_reachable_break(statements: List[Node]) -> bool:
-    """Does this list of statements contain a `break` that refers to
-    *this* loop -- i.e., one not already claimed by a nested loop?
-    Recurses into if/elif/else bodies (a break inside an if that's
-    directly in this loop's body still belongs to this loop), but
-    deliberately does NOT recurse into a nested While's own body -- a
-    break there refers to that inner loop, not this one, exactly the
-    same scoping break already has at the semantic-error-checking level
-    (see analyze_break/loop_depth) and at the codegen level (see
-    codegen.py's loop_labels stack). Only used by always_returns, to
-    decide whether a `while true` loop is genuinely inescapable-except-
-    by-return or not.
+    """Does this list of statements contain a `break` belonging to
+    *this* loop (not already claimed by a nested one)? Recurses into
+    if/elif/else bodies, but deliberately not into a nested While's own
+    body -- same scoping break already has (analyze_break/loop_depth)
+    and codegen.py's loop_labels stack. Only used by always_returns.
     """
     for stmt in statements:
         if isinstance(stmt, Break):
@@ -777,13 +424,9 @@ def contains_reachable_break(statements: List[Node]) -> bool:
     return False
 
 
-# Names that are builtins rather than ordinary user-definable functions
-# -- see check_call and the module docstring's BUILTINS section. Kept as
-# a set (not hardcoded string comparisons scattered around) so adding
-# another builtin later is "add a name here plus its own check_*/gen_*
-# pair", not a search-and-replace -- print and len were both added this
-# way in turn, and append (the third) is what actually exercised that
-# claim for the first time.
+# Builtins, not ordinary user-definable functions -- see check_call.
+# Kept as a set so adding another is "a name plus its own check_*/
+# gen_* pair", not a search-and-replace.
 _BUILTIN_FUNCTION_NAMES = {'print', 'len', 'append'}
 
 
@@ -800,20 +443,12 @@ class SemanticError(Exception):
 # Analyzer
 # ---------------------------------------------------------------------------
 
-# BinaryOp -> which typing rule applies. See the module docstring for
-# what each category actually requires; this table is only "which
-# bucket does this operator fall into", kept separate from check_binary
-# so adding an operator later is "add it to the right set" rather than
-# another branch of if/elif. ADD is deliberately NOT in this set -- it's
-# overloaded (int+int is arithmetic, str+str is concatenation), so
-# check_binary handles it as its own case rather than lumping it in with
-# operators that only ever mean one thing.
-#
-# Named _INT_ONLY_BINARY_OPS rather than "_ARITHMETIC" now that it
-# covers modulo, the bitwise operators, and the shifts too -- all of
-# which share the exact same rule (both operands int, result int) as
-# the original arithmetic operators, even though "arithmetic" isn't
-# really the right word for, say, bitwise XOR.
+# BinaryOp -> which typing rule applies (see the module docstring for
+# what each category requires). ADD is deliberately NOT here -- it's
+# overloaded (int+int arithmetic, str+str concatenation), handled as
+# its own case in check_binary. Named _INT_ONLY rather than
+# "_ARITHMETIC" since it also covers modulo, bitwise, and shifts, all
+# sharing the same rule (both operands int, result int).
 _INT_ONLY_BINARY_OPS = {
     BinaryOp.SUBTRACT, BinaryOp.MULTIPLY, BinaryOp.DIVIDE, BinaryOp.MODULO,
     BinaryOp.BITWISE_AND, BinaryOp.BITWISE_OR, BinaryOp.BITWISE_XOR,
@@ -824,25 +459,15 @@ _ORDERING_OPS = {BinaryOp.LESS_THAN, BinaryOp.GREATER_THAN,
 _EQUALITY_OPS = {BinaryOp.EQUAL, BinaryOp.NOT_EQUAL}
 _LOGICAL_OPS = {BinaryOp.AND, BinaryOp.OR}
 
-# Every type this language's arithmetic/ordering/unary operators
-# accept -- checked as a SET membership test (is this an integer type
-# at all) plus an exact-match test (are both operands the SAME one),
-# never a mix: int8 + uint8, int8 + int, or int64 + int, are all
-# rejected exactly like bool + int already is, matching this
-# language's consistent "explicit over implicit" stance. Kept as its
-# own set, separate from _NARROW_INT_RANGES just below (which is about
-# int8/uint8's own LITERAL range, a completely different question from
-# which types an operator accepts at all).
+# Every integer type arithmetic/ordering/unary operators accept --
+# mixing (int8 + uint8, int8 + int, ...) is rejected exactly like
+# bool + int already is.
 _INTEGER_TYPES = {Type.INT, Type.INT8, Type.UINT8, Type.INT64}
 
-# int8's own range is the ordinary two's-complement one; uint8's is
-# unsigned, starting at 0 -- both exactly 256 values wide, as any
-# 8-bit type's range has to be. Used only by _check_value_flowing_
-# into's own literal-range-checking case (see its docstring): this is
-# NOT the same thing as int8/uint8 arithmetic wrapping at runtime
-# (that's codegen's own job, still to come) -- this is a compile-time
-# check on a LITERAL's own written value, the only way to produce an
-# int8/uint8 value at all before casting exists.
+# int8/uint8's own literal ranges (two's-complement / unsigned, both
+# 256 values wide) -- used only by _check_value_flowing_into's literal-
+# range check, a compile-time check on a literal's written value, not
+# runtime arithmetic wrapping (codegen's job).
 _NARROW_INT_RANGES = {
     Type.INT8: (-128, 127),
     Type.UINT8: (0, 255),
@@ -864,63 +489,39 @@ class SemanticAnalyzer:
         self.type_aliases: Dict[str, Type] = {}  # name -> resolved target Type; see _collect_type_aliases
 
     def analyze(self, program: Program) -> None:
-        # First pass: reserve every struct's own NAME (not yet its
-        # fields). Splitting struct collection into this and
-        # _resolve_struct_fields below -- rather than one combined
-        # _collect_structs, as this used to be -- makes room for type-
-        # alias resolution to run in between: an alias can target a
-        # struct name (`type PointAlias = Point`), which only needs a
-        # struct's own NAME to exist, never its fields.
+        # Pass order matters and is load-bearing:
+        # 1. Reserve every struct's NAME only (not fields yet) -- makes
+        #    room for alias resolution next, since an alias can target
+        #    a struct name (`type PointAlias = Point`), needing only
+        #    the name to exist.
         struct_registry = self._reserve_struct_names(program.structs)
 
-        # Second pass: resolve every type alias, now that struct NAMES
-        # (though not yet their fields) exist -- an alias's own target
-        # can be int/bool/str, a struct name, or another alias (see
-        # _collect_type_aliases's own docstring for exactly what's
-        # supported and why). This has to finish before the third pass
-        # below, since a struct FIELD's own type can itself be an
-        # alias, needing the alias registry already fully resolved by
-        # the time type_from_name is ever called on that field.
+        # 2. Resolve every type alias (target can be int/bool/str, a
+        #    struct name, or another alias). Must finish before struct
+        #    field resolution, since a field's own type can itself be
+        #    an alias.
         self.type_aliases = self._collect_type_aliases(program.type_aliases, struct_registry)
         program.type_alias_registry = self.type_aliases  # stashed for codegen.py's own use, mirroring struct_registry
 
-        # Third pass: resolve every struct's own field types (now that
-        # aliases exist too), then check for cycles -- see _resolve_
-        # struct_fields's own docstring for why THIS pass itself needs
-        # two separate internal sub-passes (field types, then cycle
-        # detection), the same forward-reference reasoning one level up.
+        # 3. Resolve every struct's field types, then check for cycles.
         self.structs = self._resolve_struct_fields(program.structs, struct_registry)
         program.struct_registry = self.structs  # stashed for codegen.py's own use
 
-        # 3.5th pass: collect every struct's own methods, immediately
-        # lowering each one into an ordinary, mangled-name Function and
-        # appending it directly to program.functions -- see _collect_
-        # methods's own docstring for the full design. This has to run
-        # AFTER struct fields are fully resolved (a method's own
-        # receiver, and any other parameter or return type, might be
-        # a struct type that needs to already be real) but BEFORE the
-        # ordinary function-signature pass just below, since that pass
-        # (and the body-checking pass after it) need to see the
-        # synthesized functions already sitting in program.functions,
-        # not bolted on separately -- from this point on, a method is
-        # indistinguishable from a function that happened to be
-        # written directly at the top level.
+        # 3.5. Collect struct methods, immediately lowering each into
+        #    an ordinary mangled-name Function appended to program.
+        #    functions -- see _collect_methods. Must run after struct
+        #    fields are resolved (a receiver or param might need a
+        #    real struct type) but before function-signature collection
+        #    below, so that pass sees the synthesized functions too.
         self.methods = self._collect_methods(program)
 
-        # Fourth pass: collect every function's signature before
-        # checking any function's body. This is what makes call order
-        # not matter -- a function can call one defined later in the
-        # file, or call itself recursively -- since by the time
-        # analyze_function ever looks anything up in self.functions,
-        # every signature is already there. See the module docstring's
-        # FUNCTIONS section. This pass also, harmlessly, registers each
-        # synthesized method-function's own mangled name here too --
-        # never actually looked up through self.functions (a method
-        # call resolves through self.methods instead, by receiver type
-        # and method name, not by name lookup), but a mangled name can
-        # never collide with anything in this dict anyway (see
-        # MethodDef's own docstring for why), so there's nothing to
-        # guard against by skipping them here.
+        # 4. Collect every function's signature before checking any
+        #    body -- what makes call order not matter (forward
+        #    references, recursion). Also registers each synthesized
+        #    method-function's mangled name here, harmlessly -- never
+        #    looked up through self.functions (method calls resolve
+        #    via self.methods instead), but a mangled name can't
+        #    collide with anything else here regardless.
         self.functions = {}
         for fn in program.functions:
             if fn.name in _BUILTIN_FUNCTION_NAMES:
@@ -949,49 +550,27 @@ class SemanticAnalyzer:
             return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.structs, self.type_aliases)
             self.functions[fn.name] = (param_types, return_type)
 
-        # Fifth pass: now check each function's own body -- including
-        # every synthesized method-function's, via the exact same
-        # analyze_function this pass already calls for everything
-        # else: a method's receiver is just its own first Param by
-        # this point, so nothing here needs to know it started out as
-        # a receiver at all.
+        # 5. Check each function's own body, including every
+        #    synthesized method-function's, via the same analyze_
+        #    function -- a method's receiver is just its first Param by
+        #    now, indistinguishable from an ordinary function.
         for fn in program.functions:
             self.analyze_function(fn)
 
     def _collect_methods(self, program: Program) -> Dict[Tuple[str, str], Tuple[List[Type], Type, str]]:
-        """For every struct's own methods, in declaration order: reject
-        a duplicate method name on that SAME struct (two DIFFERENT
-        structs having a same-named method is completely fine -- see
-        below), then synthesize an ordinary Function node -- the
-        receiver becomes an ordinary first Param, typed as the
-        enclosing struct, with the method's own declared params
-        following it -- and append that Function directly onto
-        program.functions, mutating the list in place the same way
-        analyze() already stashes program.struct_registry directly
-        onto `program` for codegen.py's own later use.
+        """For every struct's methods: reject a duplicate name on the
+        SAME struct (fine across different structs), synthesize an
+        ordinary Function (receiver becomes a typed first Param) and
+        append it to program.functions in place.
 
-        The synthesized function's own name is `StructName.methodName`
-        -- '.' is not a character _construction_ that can appear
-        inside a single Hornet IDENTIFIER token (see the lexer's own
-        regex, r'[a-zA-Z_]\\w*'), so this mangled name can NEVER
-        collide with anything a user could actually write: not an
-        ordinary free function (whatever a user names it, it can't
-        contain '.'), not a method of the same name on a DIFFERENT
-        struct (the struct name itself is part of the mangled name),
-        and not a builtin. This is a structural guarantee, not
-        something enforced by an explicit collision check anywhere --
-        exactly the same "make the bad case impossible to construct in
-        the first place" principle behind, say, gen_indexable_base_
-        into's own scratch-slot reuse being safe by construction rather
-        than by a runtime check.
+        The synthesized name is `StructName.methodName` -- '.' can't
+        appear in a Hornet IDENTIFIER, so it structurally can't
+        collide with any free function, another struct's method, or a
+        builtin; no explicit collision check needed.
 
-        Returns a lookup dict keyed by (struct_name, method_name),
-        giving check_call's own _check_method_call everything it needs
-        to resolve a call and rewrite it: the method's own parameter
-        types (NOT including the receiver -- a method call's own
-        argument list, as written, never includes it either), its
-        return type, and the mangled name to rewrite the call site's
-        own `name` field to."""
+        Returns a (struct_name, method_name) -> (param types excluding
+        the receiver, return type, mangled name) lookup for check_
+        call's _check_method_call to resolve and rewrite a call site."""
         methods: Dict[Tuple[str, str], Tuple[List[Type], Type, str]] = {}
         for sd in program.structs:
             seen_names: Set[str] = set()
@@ -1016,96 +595,40 @@ class SemanticAnalyzer:
         return methods
 
     def _collect_type_aliases(self, alias_defs: List[TypeAlias], structs: Dict[str, StructInfo]) -> Dict[str, Type]:
-        """Builds this program's own alias registry: name -> the
-        alias's own, fully-resolved Type -- resolved ALL THE WAY DOWN
-        here, once, rather than left as "one more level of indirection"
-        for every later type_from_name call to re-chase. Runs AFTER
-        struct NAMES are reserved (_reserve_struct_names) but BEFORE
-        struct FIELDS are resolved (_resolve_struct_fields) -- see
-        analyze()'s own comment for the full ordering and why it has
-        to split struct collection into those two separate steps to
-        make room for this pass in between: an alias can target a
-        struct name (`type PointAlias = Point`), which only needs
-        struct NAMES to exist, never their fields; a struct FIELD can
-        target an alias, which needs aliases fully resolved before
-        struct fields are.
+        """Builds this program's alias registry: name -> the alias's
+        fully-resolved Type, resolved all the way down once here
+        rather than left as indirection for every type_from_name call
+        to re-chase. Runs after struct names are reserved but before
+        struct fields are resolved -- an alias can target a struct
+        name (needs only the name), and a struct field can target an
+        alias (needs aliases fully resolved first).
 
         Two passes, mirroring _reserve_struct_names/_resolve_struct_
-        fields's own identical shape one level down:
-        1. Reserve every alias's own NAME first (rejecting a duplicate,
-           a builtin-function-name collision, or a collision with an
-           ALREADY-reserved struct name), before resolving any of
-           their targets -- reserving names up front first is what
-           lets one alias reference another declared LATER in the
-           file (`type A = B` followed later by `type B = int`): by
-           the time pass 2 resolves A's own target, B's name is
-           already a recognized key, even with its own target not yet
-           resolved.
-        2. Resolve each alias's own target via `resolve`, a small
-           memoized resolver with its own cycle guard keyed by ALIAS
-           NAME (`type A = B; type B = A;` has to be rejected, not
-           infinitely recurse) -- the same general shape _check_
-           struct_contains uses for detecting a cyclic struct, just
-           over a flat name-to-name chain instead of a field graph.
-           `resolve` itself only ever handles "what does this ALIAS
-           NAME'S OWN target resolve to" (memoization and cycle
-           detection); the actual "what type does this EXPRESSION
-           denote" recursion -- a bare name, or an Array/SliceTypeExpr
-           wrapping one, arbitrarily nested (`[2][3]int`, `[]MyInt`,
-           `[3]Point`, ...) -- is `resolve_target`'s own job, calling
-           BACK into `resolve` whenever it bottoms out at a bare name
-           that's itself another alias. This split mirrors type_from_
-           name's own array/slice recursion one level up, but can't
-           just reuse type_from_name directly: that function expects
-           its own `aliases` dict to already be fully resolved (a
-           single, non-recursive lookup), which isn't true yet while
-           THIS pass is still building it -- resolve_target's own
-           bare-name case has to be able to recurse into `resolve` for
-           an alias that hasn't been resolved yet yet, something type_
-           from_name has no way to do.
+        fields one level down: (1) reserve every name first, which is
+        what lets one alias forward-reference another declared later;
+        (2) resolve each target via a small memoized resolver with its
+        own cycle guard (`type A = B; type B = A;` must be rejected,
+        not infinitely recurse) -- the same shape _check_struct_
+        contains uses for a cyclic struct, over a flat name chain
+        instead of a field graph. A cycle is still caught even through
+        array/slice wrapping (`type A = []B; type B = []A;`), since
+        resolving a bare alias name always re-enters the same resolver
+        regardless of how many array/slice layers wrap it -- unlike a
+        struct field, which can safely self-reference through a slice,
+        an alias whose entire definition is just "a slice of X" has no
+        other structure to bottom out at.
 
-           An array or slice target's own element type can be int,
-           bool, str, a struct name, or another alias, at any nesting
-           depth -- resolving to Type(ARRAY, ...)/Type(SLICE, ...)
-           structurally identical to what type_from_name would produce
-           for that same expression written directly, so an alias
-           targeting an array or slice is completely interchangeable
-           with writing that array/slice type out directly, everywhere
-           a type name is expected, with no further changes needed
-           anywhere downstream -- every one of those already resolves
-           through type_from_name. A struct name target works the
-           identical way, one level simpler (see below).
-
-           A cycle can still occur even through array/slice wrapping
-           (`type A = []B; type B = []A;`) -- and is still correctly
-           rejected by the exact same `resolving` set, with no special
-           handling needed for the wrapping: resolve_target's own
-           recursion into resolve(target) for a bare alias name is
-           what actually re-enters `resolve`, regardless of how many
-           array/slice layers sit in between, so the cycle is detected
-           the same way a direct one is. This isn't a false positive
-           the way it might first look, either: unlike a struct field
-           (which can safely self-reference through a slice, since the
-           struct itself still has a finite, well-defined shape even
-           with one recursive field), an alias whose ENTIRE definition
-           is just "a slice/array of X" has no other structure to
-           bottom out at -- if X never resolves to a real, concrete
-           type, the alias itself never means anything at all, exactly
-           the same failure a direct `type A = A` already represents.
-           Struct literal construction (`PointAlias(1, 2)`) is the one
-           place struct-name interchangeability doesn't extend to:
-           resolved by check_call's own direct `expr.name in self.
-           structs` membership check, which an alias name never
-           satisfies (self.structs is keyed by a struct's own real
-           name only) -- a separate, narrower gap, not fixed here."""
-        # Pass 1: reserve names, rejecting a duplicate alias name, one
-        # that collides with a builtin FUNCTION name (print/len/
-        # append), or one that collides with an already-reserved
-        # struct name -- reachable, unlike a collision with a builtin
-        # TYPE keyword ('int'/'bool'/'str'), which never needs its own
-        # check: those are their own token types, never tokenized as
-        # an IDENTIFIER at all, so the parser could never produce a
-        # TypeAlias with one of those names in the first place.
+        Struct literal construction (`PointAlias(1, 2)`) is the one
+        place alias-to-struct interchangeability doesn't extend: check_
+        call's own membership check (`expr.name in self.structs`) never
+        matches an alias name -- a separate, narrower gap, not fixed
+        here."""
+        # Pass 1: reserve names, rejecting a duplicate, a builtin-
+        # function-name collision, or a struct-name collision. No
+        # check needed for a builtin TYPE keyword ('int'/'bool'/'str'):
+        # those are their own token types, never tokenized as an
+        # IDENTIFIER, so the parser could never produce a TypeAlias
+        # with one of those names.
         seen: Dict[str, TypeAlias] = {}
         for ad in alias_defs:
             if ad.name in _BUILTIN_FUNCTION_NAMES:
@@ -1166,26 +689,19 @@ class SemanticAnalyzer:
         return resolved
 
     def _reserve_struct_names(self, struct_defs: List[StructDef]) -> Dict[str, StructInfo]:
-        """Reserves every struct's own NAME up front (as a None
-        placeholder in the registry dict), rejecting a duplicate or
-        builtin-colliding name outright -- split out from what used to
-        be _collect_structs's own internal pass 1, specifically so
-        type-alias resolution (_collect_type_aliases) can run in
-        between this and _resolve_struct_fields below: an alias can
-        now target a struct name (`type PointAlias = Point`), which
-        only needs a struct's own NAME to exist, never its fields --
-        while a struct's own FIELD can target an alias, which needs
-        the OPPOSITE ordering one level down. Splitting struct
-        collection into two explicit passes, with alias resolution
-        running between them, is what satisfies both without needing
-        either one to somehow finish "first" in an absolute sense.
+        """Reserves every struct's NAME up front (a None placeholder
+        in the registry), rejecting a duplicate or builtin-colliding
+        name. Split from field resolution (_resolve_struct_fields) so
+        type-alias resolution can run in between them -- an alias can
+        target a struct name (needs only the name), while a struct
+        field can target an alias (needs aliases resolved first); the
+        opposite orderings are satisfied by splitting struct collection
+        into two passes with alias resolution between them.
 
-        The alias-name collision check that used to live in this exact
-        loop has moved to _collect_type_aliases instead (checking a
-        NEW alias name against an ALREADY-reserved struct name here,
-        rather than the reverse) -- the natural consequence of
-        aliases now being collected second: by the time this runs, no
-        alias exists yet to collide with at all."""
+        The alias-vs-struct-name collision check lives in _collect_
+        type_aliases instead (a new alias name against an already-
+        reserved struct name) -- by the time this runs, no alias
+        exists yet to collide with."""
         registry: Dict[str, StructInfo] = {}
         for sd in struct_defs:
             if sd.name in _BUILTIN_FUNCTION_NAMES:
@@ -1199,38 +715,21 @@ class SemanticAnalyzer:
         return registry
 
     def _resolve_struct_fields(self, struct_defs: List[StructDef], registry: Dict[str, StructInfo]) -> Dict[str, StructInfo]:
-        """Resolves every struct's own field types, then checks for
-        cycles -- what used to be _collect_structs's own internal
-        passes 2 and 3, now split from pass 1 (_reserve_struct_names)
-        so type-alias resolution can run between them; see that
-        method's own docstring for why. `registry` already has every
-        struct's own NAME reserved (a None placeholder) by the time
-        this runs, which is what lets a forward reference work
-        (`struct A: B b` followed later by `struct B: ...`): by the
-        time this resolves A's own field types, B's name is already a
-        recognized key in the registry dict, even though B's own
-        fields haven't been filled in yet -- and type_from_name's own
-        struct-name check only ever needs NAME membership, never the
-        associated value, so a None placeholder is exactly as good as
-        a real StructInfo for that purpose at this point.
+        """Resolves every struct's field types, then checks for
+        cycles. `registry` already has every struct's NAME reserved (a
+        None placeholder), which is what lets a forward reference work
+        (`struct A: B b` before `struct B: ...` is declared) -- type_
+        from_name's struct-name check only needs NAME membership.
 
-        1. Resolve each struct's own field types (via type_from_name,
-           passing this same registry-in-progress, now alongside
-           self.type_aliases -- already fully resolved by the time
-           this runs), rejecting a duplicate field name within one
-           struct, and replace that struct's own None placeholder with
-           a real StructInfo. A field's own type can be anything,
-           including a slice (directly, or through an array or nested
-           struct) -- see codegen.py's own analyze_array_escapes,
-           specifically field_slot_of and _contains_slice's own STRUCT
-           case, for how a slice-typed field's own backing array gets
-           the identical escape-analysis treatment array-of-slices and
-           slice-of-slices elements already have.
-        2. Only once EVERY struct's own fields are fully resolved,
-           check each one for a cycle (see _check_struct_contains) --
-           cycle detection needs the real, resolved field types to
-           walk, not just which names exist, so it has to be its own
-           pass after 1 fully finishes, not interleaved with it."""
+        1. Resolve each struct's field types (rejecting a duplicate
+           field name), replacing its None placeholder with a real
+           StructInfo. A field's type can be anything, including a
+           slice (see codegen.py's analyze_array_escapes for how a
+           slice-typed field's backing array gets the same escape
+           treatment as other slice-holding shapes).
+        2. Only once every struct's fields are fully resolved, check
+           each for a cycle (_check_struct_contains) -- needs real,
+           resolved types to walk, so it's a separate pass after 1."""
         for sd in struct_defs:
             fields: Dict[str, Type] = {}
             for f in sd.fields:
@@ -1247,31 +746,19 @@ class SemanticAnalyzer:
         return registry
 
     def _check_struct_contains(self, name: str, registry: Dict[str, StructInfo], path: List[str]) -> None:
-        """DFS over the struct-containment graph -- struct X has an
-        edge to struct Y if X has a field whose type is Y, DIRECTLY or
-        through any depth of array wrapping (`[5]Y`, `[2][3]Y`, ...),
-        since an array embeds its element inline, N times over, so a
-        struct containing an array of a struct that (directly or
-        transitively) contains the FIRST struct is exactly as size-
-        infinite as directly containing itself would be. A SLICE field
-        (`[]Y`) deliberately does NOT count as an edge here: a slice's
-        own backing storage is a separate, runtime-sized allocation,
-        not embedded inline in the containing struct's own layout, so
-        `struct A: []A elements` doesn't make A's own size depend on
-        itself at all -- it's a real, genuinely supported pattern (a
-        tree or linked structure built from slices), not merely
-        tolerated: this method's own job is only ever "would this
-        create a size-infinite cycle", and a slice field never can, by
-        construction, regardless of whether slice-typed fields
-        themselves are otherwise allowed.
+        """DFS over the struct-containment graph -- X has an edge to Y
+        if X has a field of type Y, directly or through any depth of
+        array wrapping (an array embeds its element inline, N times
+        over, so an array of a struct that contains X is exactly as
+        size-infinite as X containing itself). A SLICE field
+        deliberately doesn't count: its backing storage is a separate,
+        runtime-sized allocation, not embedded inline -- `struct A:
+        []A elements` is a genuinely supported pattern (a tree or
+        linked structure), not merely tolerated.
 
-        `path` is the chain of struct names visited to reach `name`,
-        purely for a readable error message -- a real cycle stops this
-        DFS from ever needing memoization against already-fully-
-        explored, cycle-free structs the way a general-purpose cycle
-        detector might for efficiency: struct counts are small enough
-        that re-walking a shared, cycle-free dependency from multiple
-        starting points costs nothing worth guarding against."""
+        `path` is the visited chain, for a readable error message --
+        struct counts are small enough that this doesn't need
+        memoization against already-explored, cycle-free structs."""
         if name in path:
             cycle = ' -> '.join(path + [name])
             raise SemanticError(
@@ -1286,10 +773,9 @@ class SemanticAnalyzer:
 
     @staticmethod
     def _directly_embedded_struct_name(field_type: Type) -> Optional[str]:
-        """If `field_type` is a struct, or an array (at any nesting
-        depth) OF a struct, returns that struct's own name -- see
-        _check_struct_contains's own docstring for exactly why arrays
-        count here and slices don't. Returns None for a scalar field,
+        """If `field_type` is a struct, or an array (at any depth) of
+        one, returns that struct's name -- see _check_struct_contains
+        for why arrays count and slices don't. None for a scalar field,
         a slice-typed field (of anything), or an array of scalars."""
         while field_type.kind == TypeKind.ARRAY:
             field_type = field_type.element_type
@@ -1307,22 +793,12 @@ class SemanticAnalyzer:
         return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.structs, self.type_aliases)
         for stmt in fn.body:
             self.analyze_statement(stmt, return_type)
-        # Checked last, after every statement is individually known to
-        # be well-typed -- see the module docstring's ALL PATHS RETURN
-        # section. Every OTHER function needs this regardless of its
-        # return type, since falling off the end of a function's
-        # generated code was always wrong, and became a real safety
-        # issue once functions could call each other (see codegen.py's
-        # FUNCTIONS section) -- control falling through with no `ret`
-        # executed corrupts the calling function's own stack, not just
-        # the callee's exit code. A function with NO declared return
-        # type is the one deliberate exception: falling off the end is
-        # exactly how such a function is expected to exit when it
-        # doesn't return early (see the module docstring's FUNCTIONS
-        # WITH NO DECLARED RETURN TYPE section) -- codegen.py's own
-        # gen_function still guarantees a real `ret` executes either
-        # way, just via an unconditional trailing epilogue instead of
-        # relying on every path having its own explicit one.
+        # Checked last, after every statement is individually known
+        # well-typed -- see the module docstring's ALL PATHS RETURN
+        # section. A function with no declared return type is the one
+        # exception: falling off the end is exactly how it's expected
+        # to exit (codegen.py's gen_function still guarantees a real
+        # `ret` either way, via an unconditional trailing epilogue).
         if return_type != Type.VOID and not always_returns(fn.body):
             raise SemanticError(
                 f"Function '{fn.name}' (declared to return {return_type}) "
@@ -1383,53 +859,33 @@ class SemanticAnalyzer:
 
     def _types_compatible(self, value_type: Type, target_type: Type) -> bool:
         """True if a value of `value_type` can be used where
-        `target_type` is expected -- ordinary type equality, OR the
-        one exception this language allows: `none` (Type.NONE) is
-        compatible with ANY slice type, representing that slice's
-        zero/nil value (see NoneLiteral's own docstring in parser.py).
-        Deliberately narrow, at least for now: none is compatible with
-        a slice target and nothing else -- not int/bool/str/array,
-        even though str is also a pointer under the hood at the
-        machine level. Extending this to other composite/reference
-        types, if any come along later, is real, separable follow-up
-        work, not implemented here.
+        `target_type` is expected -- ordinary equality, or the one
+        exception this language allows: Type.NONE is compatible with
+        ANY slice type (its zero/nil value). Deliberately narrow --
+        not int/bool/str/array, even though str is also a pointer
+        under the hood.
 
-        Shared by every site a value flows into an already-typed slot
-        with a clear "this is the expected type" side -- a VarDecl
-        initializer, an Assign, an IndexAssign, a function-call
-        argument, a return value -- so `none` becomes valid at all of
-        them uniformly, with nothing to remember re-adding per site.
-        Equality between two operands with no such fixed side (`==`/
-        `!=`) is checked separately, directly in check_binary, since
-        neither operand there is "the target" the other must match."""
+        Shared by every site with a clear "this is the expected type"
+        side (a VarDecl initializer, Assign, IndexAssign, argument,
+        return value), so `none` becomes valid at all of them
+        uniformly. Equality (`==`/`!=`) has no such fixed side and is
+        checked separately, directly in check_binary."""
         if value_type == target_type:
             return True
         return value_type == Type.NONE and target_type.kind == TypeKind.SLICE
 
     def _as_folded_int_literal(self, expr: Node) -> Optional[int]:
         """If `expr` is a compile-time integer literal -- a bare
-        Constant, or a Unary NEGATE wrapping one -- returns its own
-        folded integer value; None for anything else (a variable, a
-        call, an arithmetic expression, ...), which isn't eligible for
-        the int8/uint8 literal-range-checked coercion _check_value_
-        flowing_into's own new case uses this for.
-
-        Checking for Unary(NEGATE, Constant) specifically, not just a
-        bare Constant, matters more than it might look: `-100` parses
-        as exactly that shape (Unary wrapping a POSITIVE Constant),
-        never as a Constant already holding -100 -- the lexer's own
-        NUMBER rule has no minus sign in it at all (see its own regex),
-        so a negative literal is always a unary negation of a positive
-        one syntactically. Without this case, `int8 x = -100` -- a
-        completely ordinary, expected thing to write -- would silently
-        fail the range check by never being recognized as a literal in
-        the first place, not by correctly rejecting an out-of-range
-        value.
-
-        Deliberately doesn't fold anything deeper (`- -100`, `100 + 1`,
-        ...) -- this is specifically for the two shapes source code
-        actually produces for a signed or unsigned literal, not a
-        general constant-folding pass."""
+        Constant, or a Unary NEGATE wrapping one -- returns its folded
+        value; None otherwise (a variable, call, arithmetic
+        expression, ...). Checking Unary(NEGATE, Constant) matters:
+        `-100` always parses as that shape (the lexer's NUMBER rule has
+        no minus sign), never as a Constant already holding -100 -- so
+        without this case, `int8 x = -100` would fail the int8/uint8
+        range check by never being recognized as a literal at all.
+        Doesn't fold anything deeper (`- -100`, `100 + 1`) -- this is
+        for the two shapes source actually produces, not general
+        constant folding."""
         if isinstance(expr, Constant):
             return expr.value
         if isinstance(expr, Unary) and expr.op == UnaryOp.NEGATE and isinstance(expr.operand, Constant):
@@ -1438,110 +894,44 @@ class SemanticAnalyzer:
 
     def _check_value_flowing_into(self, expr: Node, target_type: Type) -> Type:
         """Type-checks `expr` as a value flowing into an already-typed
-        slot (target_type), returning its own type for the caller's
-        own _types_compatible check afterward -- almost always just
-        check_expr, with two exceptions:
+        slot, returning its type for the caller's _types_compatible
+        check -- almost always just check_expr, with three exceptions:
 
-        1. An UNTYPED array literal (isinstance(expr, ArrayLiteral) and
-           expr.type_expr is None) flowing directly into a SLICE- or
-           ARRAY-typed target (`[]int s = [1, 2, 3]`, `[3]int8 arr =
-           [1, 2, 3]`) is checked against target_type's own element
-           type directly (via check_array_literal's own expected_
-           element_type parameter) rather than purely inferring a type
-           from its elements that would then need to separately match
-           against target_type -- this is what makes the untyped form
-           behave identically to the fully-typed `[]int s = []int[1,
-           2, 3]`/`[3]int8 arr = [3]int8[1, 2, 3]`, just inferring the
-           element count (and, for a slice target, not needing one to
-           match at all) and checking element types against the
-           DECLARED element type instead of restating it.
+        1. An UNTYPED array literal flowing into a SLICE- or ARRAY-
+           typed target is checked against target_type's own element
+           type directly (via check_array_literal's expected_element_
+           type), not purely inferred and then matched -- what makes
+           the untyped form behave identically to the fully-typed one,
+           and what lets it correctly produce int8/uint8 elements (an
+           independently-inferred element would land on plain int and
+           simply fail to match). Returns target_type itself for a
+           SLICE target (an actual, named array is deliberately NOT
+           given this treatment -- it still needs an explicit `arr[:]`
+           to become one); returns the literal's own computed array
+           type for an ARRAY target, so a real size mismatch still
+           surfaces as an ordinary _types_compatible failure.
 
-           The ARRAY case is what makes an untyped literal correctly
-           produce int8/uint8 elements at all: without it, each
-           element would be independently inferred via plain check_
-           expr (landing on ordinary Type.INT, from check_constant),
-           which would then simply fail to match an int8/uint8 target
-           element type -- `[3]int arr = [1, 2, 3]` only ever worked
-           by COINCIDENCE, since an untyped literal's own default
-           inferred element type (int) happens to already match that
-           particular target; the coincidence breaks for any element
-           type a bare literal wouldn't naturally land on by itself.
+        2. A compile-time integer LITERAL (see _as_folded_int_literal)
+           flowing into an int8/uint8 target is checked against that
+           type's own range instead of requiring an exact type match
+           -- the only way to produce one at all, with no casting yet.
+           An arbitrary int-typed EXPRESSION does NOT get this
+           treatment (`int8 x = someIntVariable` is a real mismatch,
+           matching this language's explicit-over-implicit stance).
+           Annotates target_type onto expr directly, overwriting
+           check_expr's own Type.INT, and returns target_type so the
+           compatibility check trivially succeeds.
 
-           Returns target_type ITSELF for a SLICE target (not the
-           array type check_array_literal actually computed for the
-           literal's own elements), so the caller's own _types_
-           compatible check against target_type trivially succeeds,
-           the same way it would for any other already-slice-typed
-           value -- `[]int s = arr` (an ordinary, NAMED array, not a
-           literal) is deliberately NOT given this same treatment:
-           only this one, specific expression SHAPE is special-cased,
-           not "any array-typed value is compatible with a slice
-           target," so an actual array still has to be explicitly
-           sliced (`arr[:]`) to become one. Returns the literal's own
-           COMPUTED array type (size included) for an ARRAY target
-           instead, so a genuine size mismatch (`[3]int8 arr = [1,
-           2]`) still surfaces as an ordinary _types_compatible
-           failure at the call site, exactly as it always has for a
-           mismatched array size -- there's nothing here to trust the
-           literal's own element count against the target's size
-           itself; that comparison already happens for free via
-           ordinary Type equality once both sizes are visible to it.
+        3. The same literal shape flowing into int64 gets the same
+           treatment minus the range check (int64's range is a strict
+           superset of int's) -- still scoped to a literal only, not
+           an arbitrary expression, for the same explicit-over-
+           implicit consistency, even though widening would be safe.
 
-        2. A compile-time integer LITERAL (see _as_folded_int_literal
-           for exactly which two shapes count) flowing into an int8 or
-           uint8 target is checked against THAT type's own range
-           (_NARROW_INT_RANGES) rather than requiring an exact type
-           match -- this is, for now, the ONLY way to produce an int8/
-           uint8 value at all: there's no casting yet to convert an
-           ordinary int expression into one, and unlike a struct or
-           array literal, int8/uint8 have no syntax of their own to
-           construct a value directly. An arbitrary int-TYPED
-           EXPRESSION (a variable, a function call, an arithmetic
-           result) does NOT get this same treatment -- `int8 x =
-           someIntVariable` is a real type mismatch, same as it would
-           be for any other two distinct types, matching this
-           language's consistent "explicit over implicit" stance
-           (no implicit narrowing, the same way there's no implicit
-           int-to-bool coercion) -- only a LITERAL, whose exact value
-           is known right here at compile time, gets checked against
-           the target's own range instead of its declared type.
-
-           Annotates target_type onto expr directly (overwriting
-           whatever check_expr's own dispatch already set it to --
-           Type.INT, from check_constant, or check_unary's own pass-
-           through of that same Type.INT for the Unary-NEGATE case),
-           and returns target_type itself, so the caller's own _types_
-           compatible check trivially succeeds -- the exact same
-           "return target_type, not what was actually inferred" shape
-           case 1 above already uses, for the identical reason.
-
-        3. The identical compile-time integer LITERAL shape flowing
-           into an int64 target (`int64 x = 5`) gets the SAME kind of
-           treatment as case 2, minus the range check -- there's
-           nothing to validate, since int64's own range is a strict
-           SUPERSET of int's, so any literal that could ever be
-           written as an ordinary int already fits. This is
-           DELIBERATELY still scoped to a LITERAL specifically, not
-           extended to an arbitrary int-typed EXPRESSION (`int64 x =
-           someIntVariable` is still a real type mismatch, needing an
-           explicit int64(...) cast) -- even though widening a
-           variable would be perfectly SAFE, unlike int8/uint8's own
-           narrowing case, this stays consistent with this language's
-           uniform "a literal is special because there'd otherwise be
-           no way to write this value at all; an arbitrary expression
-           always needs an explicit cast, regardless of which
-           direction the conversion goes" rule, rather than carving
-           out an extra exception for the safe direction specifically.
-
-        Cases 2 and 3 both bypass check_expr's own generic dispatch
-        (or override its result after the fact) since check_expr has
-        no way to receive an expected type at all; every other kind of
-        value goes through check_expr completely unaffected. Shared by
-        analyze_var_decl and analyze_assign -- the two places a value
-        flows into an already-typed slot with a clear "this is the
-        expected type" side (unlike `==`/`!=`, which has no such
-        side -- see check_binary's own, separate none-vs-slice
-        handling for why that case can't reuse this)."""
+        Cases 2/3 bypass check_expr's dispatch since it has no way to
+        receive an expected type. Shared by analyze_var_decl/analyze_
+        assign -- the two places with a clear "expected type" side
+        (unlike `==`/`!=`, handled separately in check_binary)."""
         if isinstance(expr, ArrayLiteral) and expr.type_expr is None and target_type.kind in (TypeKind.SLICE, TypeKind.ARRAY):
             array_type = self.check_array_literal(expr, expected_element_type=target_type.element_type)
             expr.resolved_type = array_type
@@ -1566,76 +956,48 @@ class SemanticAnalyzer:
 
     def _annotate_literal_resolved_type(self, expr: Node, target_type: Type) -> None:
         """Sets expr.resolved_type = target_type -- and, if expr is a
-        Unary NEGATE wrapping a Constant (the `-100` shape; see _as_
-        folded_int_literal's own docstring for why that's the other
-        shape a literal can take besides a bare Constant), ALSO sets
-        the INNER Constant's own resolved_type to target_type.
-
-        This second part is necessary, not defensive: check_expr's own
-        earlier, ordinary recursive pass through expr already set the
-        inner Constant's own resolved_type to plain Type.INT (via
-        check_constant) before this method ever runs, and codegen.py's
-        own gen_expr_into reads a Constant node's OWN resolved_type
-        directly to decide how to emit it -- Type.INT64 needs a full,
-        64-bit MovQ-with-immediate (since the literal's own value can
-        exceed ordinary 32-bit range, e.g. `int64 x = -9000000000`),
-        while Type.INT8/UINT8/INT all stay an ordinary 32-bit Mov
-        (their own value always fits regardless of the DECLARED
-        target, so no width decision depends on it there). Leaving the
-        inner Constant's own annotation stale at plain Type.INT was a
-        real, found bug for the int64 case specifically: gen_expr_into
-        would still take the 32-bit path for the inner literal itself,
-        silently truncating a large value's own immediate before the
-        outer Unary's -- correctly dispatched via THIS method's own
-        target_type annotation on the OUTER node -- 64-bit negation
-        ever got a chance to run on the full, correct value."""
+        Unary NEGATE wrapping a Constant (the `-100` shape), ALSO sets
+        the inner Constant's own resolved_type. The second part is a
+        real, previously-found bug fix, not defensive: check_expr's
+        earlier pass already set the inner Constant to plain Type.INT,
+        and codegen.py's gen_expr_into reads a Constant's own resolved_
+        type directly to decide its width -- INT64 needs a full 64-bit
+        MovQ (the value can exceed 32-bit range), while INT8/UINT8/INT
+        stay an ordinary 32-bit Mov. Leaving the inner annotation stale
+        silently truncated a large int64 literal's own immediate
+        before the outer negation ever ran on the correct value."""
         expr.resolved_type = target_type
         if isinstance(expr, Unary) and expr.op == UnaryOp.NEGATE and isinstance(expr.operand, Constant):
             expr.operand.resolved_type = target_type
 
     def _check_expr_allowing_struct_literal(self, expr: Node) -> Type:
-        """check_expr, except a struct literal (isinstance(expr, Call)
-        and expr.name in self.structs) is recognized and routed
-        through check_struct_literal instead of falling into check_
-        call's own rejection of it. Shared by every position that
-        allows a struct literal to appear directly with no "already-
-        typed slot" of its own to flow into: check_call's own
-        argument-checking loop (a function-call argument, `foo(A(1,
-        2))`), analyze_return (a return value, `return A(1, 2)`),
-        check_struct_literal's own argument-checking loop (nested
-        inside another struct literal, `A(B(1, 2), 3)`), and check_
-        array_literal's fully-untyped inference branch (an array
-        literal element, when no target element type exists yet to
-        check against). See _check_value_flowing_into_allowing_
-        struct_literal, its sibling just below, for the positions that
-        ALSO need the untyped-array-literal-into-slice-target
-        treatment on top of this same detection.
+        """check_expr, except a struct literal is recognized and
+        routed through check_struct_literal instead of falling into
+        check_call's rejection of it. Shared by every position that
+        allows a struct literal with no "already-typed slot" to flow
+        into: a call argument, a return value, a nested struct-literal
+        argument, and an array-literal element with no target element
+        type yet. See _check_value_flowing_into_allowing_struct_
+        literal, its sibling below, for positions that also need the
+        untyped-array-into-slice treatment on top of this.
 
         Deliberately NOT used by analyze_index_assign/analyze_field_
-        assign, which still call _check_value_flowing_into directly,
-        unchanged -- a struct literal as an IndexAssign/FieldAssign
-        value remains a separate, not-yet-covered follow-up; see
-        check_struct_literal's own docstring for the full, current
-        list of positions this covers."""
+        assign -- a struct literal as an IndexAssign/FieldAssign value
+        remains a separate, not-yet-covered follow-up."""
         if isinstance(expr, Call) and expr.name in self.structs:
             return self.check_struct_literal(expr)
         return self.check_expr(expr)
 
     def _check_value_flowing_into_allowing_struct_literal(self, expr: Node, target_type: Type) -> Type:
         """The _check_value_flowing_into counterpart to _check_expr_
-        allowing_struct_literal just above, for positions that ALSO
-        need the untyped-array-literal-into-slice-target treatment on
-        top of struct-literal detection: analyze_var_decl/analyze_
-        assign (a VarDecl initializer or Assign value) and check_
-        array_literal's own typed and expected-element-type branches
-        (an array literal's own element, when a target element type IS
-        already known). Struct-literal detection is checked FIRST,
-        before target_type is ever consulted -- exactly like every
-        other call site -- since a struct literal's own type comes
-        entirely from its own name, never from whatever it's flowing
-        into; a mismatch against target_type is still caught
-        afterward, by the caller's own ordinary _types_compatible
-        check, exactly as if this had gone through plain check_expr."""
+        allowing_struct_literal above, for positions that also need
+        the untyped-array-into-slice treatment: analyze_var_decl/
+        analyze_assign, and check_array_literal's typed/expected-
+        element-type branches. Struct-literal detection is checked
+        first, before target_type is consulted, since a struct
+        literal's type comes entirely from its own name -- a mismatch
+        is still caught afterward by the caller's ordinary _types_
+        compatible check."""
         if isinstance(expr, Call) and expr.name in self.structs:
             return self.check_struct_literal(expr)
         return self._check_value_flowing_into(expr, target_type)
@@ -1664,29 +1026,13 @@ class SemanticAnalyzer:
             )
 
     def analyze_index_assign(self, stmt: IndexAssign) -> None:
-        """`array[index] = value`. value flows into the indexed
-        element's own type the same way any other value flows into an
-        already-typed slot -- via _check_value_flowing_into_allowing_
-        struct_literal, not a plain check_expr -- so an untyped array
-        literal assigned directly into a SLICE-typed element (`rows[0]
-        = [9, 9, 9]`, one element of an array OF slices) gets the same
-        recursive slice-construction treatment analyze_var_decl/
-        analyze_assign already give a VarDecl/Assign's own value (see
-        that method's own docstring), and a struct literal assigned
-        directly into a STRUCT-typed element (`pts[0] = Point(1, 2)`)
-        is recognized the same way every other now-allowed position
-        already is. Needed no codegen changes at all for either: gen_
-        index_assign's own SLICE and STRUCT branches already call
-        gen_slice_value_into/gen_struct_value_into, both of which
-        already handle every shape this can now produce.
-
-        Found the untyped-array-literal case as the same bug-class in
-        a third location, not a hypothetical extension: `rows[0] =
-        someNamedSlice` and the explicitly-typed `rows[0] =
-        []int[9, 9, 9]` both already worked (their own values already
-        carry a real SLICE type by the time they reach here), which is
-        exactly what masked this gap until the untyped form specifically
-        was tried."""
+        """`array[index] = value` -- value flows into the element type
+        via _check_value_flowing_into_allowing_struct_literal, not a
+        plain check_expr, so an untyped array/slice literal or a
+        struct literal assigned into a slice- or struct-typed element
+        gets the same treatment every other already-typed slot does.
+        Needed no codegen changes: gen_index_assign's SLICE/STRUCT
+        branches already handle every shape this can produce."""
         element_type = self._check_indexable_and_index(stmt.array, stmt.index)
         value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, element_type)
         if not self._types_compatible(value_type, element_type):
@@ -1696,22 +1042,8 @@ class SemanticAnalyzer:
             )
 
     def analyze_field_assign(self, stmt: FieldAssign) -> None:
-        """`base.name = value` -- mirrors analyze_index_assign exactly,
-        one level over: value flows into the field's own declared type
-        via _check_value_flowing_into_allowing_struct_literal, not a
-        plain check_expr, so an untyped array literal (or slice
-        literal) assigned directly into a slice-typed field gets the
-        same recursive slice-construction treatment every other
-        already-typed slot (a VarDecl, an Assign, an IndexAssign's own
-        element) already gives one, and a struct literal assigned
-        directly into a struct-typed field (`o.i = Inner(9)`) is
-        recognized the same way every other now-allowed position
-        already is -- written the general way from the start, exactly
-        like analyze_index_assign's own already was, rather than only
-        handling the field types a given phase happened to support at
-        the time. Needed no codegen changes at all for the struct case:
-        gen_field_assign's own STRUCT branch already calls gen_struct_
-        value_into, which already handles a struct-literal Call."""
+        """`base.name = value` -- mirrors analyze_index_assign one
+        level over, for the identical reasons."""
         field_type = self._check_struct_and_field(stmt.base, stmt.name)
         value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, field_type)
         if not self._types_compatible(value_type, field_type):
@@ -1721,27 +1053,18 @@ class SemanticAnalyzer:
             )
 
     def _check_indexable_and_index(self, base_expr: Node, index_expr: Node) -> Type:
-        """Shared by check_index (reading `base[index]`) and
-        analyze_index_assign (writing `base[index] = value`):
-        validates that `base_expr` is actually indexable -- array- or
-        slice-typed, see below -- and `index_expr` is int-typed,
-        returning the element type: what a successful `[index]`
-        operation on it would read or write. Recurses correctly for
-        multi-dimensional access for free: for `matrix[i][j]`, the
-        outer call's `base_expr` is itself an Index node
-        (`matrix[i]`), so checking IT via check_expr recursively runs
-        this same method again, returning the row's element type (e.g.
-        int, if matrix's rows are [3]int) -- which is exactly the type
-        this outer call then needs `base_expr` to have.
+        """Shared by check_index (`base[index]`) and analyze_index_
+        assign (`base[index] = value`): validates `base_expr` is
+        array- or slice-typed and `index_expr` is int-typed, returning
+        the element type. Recurses correctly for multi-dimensional
+        access for free: for `matrix[i][j]`, the outer call's base_expr
+        is itself an Index node, so checking it via check_expr runs
+        this same method again, returning the row's own element type.
 
-        Named for what it actually accepts, not just for arrays
-        specifically: `s[i]`, where `s` is Slice-typed, uses this exact
-        same check (and was the reason for the rename from this
-        method's original _check_array_and_index) -- indexing into a
-        slice works identically to indexing into an array from
-        semantic.py's point of view, the only difference being where
-        codegen eventually finds the address to read from.
-        """
+        Named for what it accepts, not just arrays -- `s[i]` on a
+        Slice uses this same check, since indexing a slice works
+        identically to indexing an array from this file's point of
+        view; only codegen differs in where it finds the address."""
         base_type = self.check_expr(base_expr)
         if base_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE):
             raise SemanticError(
@@ -1754,16 +1077,12 @@ class SemanticAnalyzer:
         return base_type.element_type
 
     def check_slice(self, expr: Slice) -> Type:
-        """`array[low:high]`. `array` must be indexable -- array- or
-        slice-typed, exactly the same acceptance _check_indexable_and_
-        index already uses for ordinary indexing, since slicing a
-        slice (`s2 = s[1:3]`) and slicing the outer dimension of a
-        multi-dimensional array (`matrix[0:2]`, yielding a slice of
-        ROWS, type [][3]int) are both valid. Either bound, if present,
-        must be int; an omitted bound (low=None or high=None, see
-        Slice's own docstring in parser.py) needs no check at all
-        here, since its default value is resolved later, at codegen
-        time, not something semantic.py fills in or validates.
+        """`array[low:high]`. `array` must be array- or slice-typed,
+        the same acceptance _check_indexable_and_index uses, since
+        slicing a slice and slicing a multi-dimensional array's outer
+        dimension are both valid. Either bound, if present, must be
+        int; an omitted bound needs no check here -- its default is
+        resolved later, at codegen time.
 
         The result is ALWAYS Type(SLICE, element_type=...) regardless
         of what's being sliced -- a slice expression's own type never
@@ -1787,30 +1106,19 @@ class SemanticAnalyzer:
         return Type(TypeKind.SLICE, element_type=base_type.element_type)
 
     def analyze_return(self, stmt: Return, return_type: Type) -> None:
-        """`return <expr>` or a bare `return` (stmt.value is None, see
-        Return's own docstring in parser.py). A bare return is valid
-        exactly when the enclosing function has no declared return
-        type (return_type is Type.VOID) -- the reverse direction
-        (returning a VALUE from such a function) is checked after
-        type-checking that value, not before, so a genuine error
-        inside the value expression itself is still reported rather
-        than masked by the "this function can't return a value at
-        all" rejection.
+        """`return <expr>` or a bare `return` (Return's own docstring
+        in parser.py). A bare return is valid exactly when the
+        enclosing function has no declared return type. Returning a
+        value from such a function is checked AFTER type-checking that
+        value, not before, so a genuine error inside the value itself
+        is reported rather than masked.
 
-        A struct literal returned directly (`return A(1, 2)`) is
-        checked via _check_expr_allowing_struct_literal, shared by
-        every position that allows a struct literal to appear directly
-        with no already-typed slot to flow into -- see check_struct_
-        literal's own docstring for the full list of positions this
-        now covers. An array literal returned directly (`return [1, 2,
-        3]`) needs no equivalent special-casing at all: array literals
-        were never restricted to begin with, so plain check_expr
-        already handles one correctly -- this asymmetry (struct
-        literals needing explicit detection, array literals not) is
-        purely a consequence of struct literals being the ONLY literal
-        kind check_call rejects outside a short, explicit allow-list;
-        nothing here treats the two kinds of returned value
-        differently on purpose."""
+        A struct literal returned directly is checked via _check_expr_
+        allowing_struct_literal. An array literal needs no equivalent
+        special-casing -- array literals were never restricted, so
+        plain check_expr already handles one correctly; this asymmetry
+        is purely because struct literals are the only kind check_call
+        rejects outside a short allow-list."""
         if stmt.value is None:
             if return_type != Type.VOID:
                 raise SemanticError(
@@ -1845,12 +1153,10 @@ class SemanticAnalyzer:
             self.analyze_statement(s, return_type)
         self._pop_scope()
 
-        # then/else get independent scopes -- see module docstring --
-        # so a name declared in one is never visible in the other. When
-        # else_body came from an elif, it's a single nested If (see
-        # parser.py's If docstring); analyze_if just recurses into it
-        # like any other statement, so the elif gets its own condition
-        # check and its own then/else scopes automatically.
+        # then/else get independent scopes (module docstring), so a
+        # name in one is never visible in the other. An elif's else_
+        # body is a single nested If (parser.py's If docstring);
+        # analyze_if just recurses into it like any other statement.
         if stmt.else_body is not None:
             self._push_scope()
             for s in stmt.else_body:
@@ -1866,12 +1172,9 @@ class SemanticAnalyzer:
                 f"instead of `x`)"
             )
 
-        # loop_depth (not the scope stack) is what break/continue check
-        # against -- see analyze_break/analyze_continue. It has to be a
-        # counter rather than a boolean so nested while loops work: the
-        # inner loop's own push/pop shouldn't make an outer loop's
-        # break/continue look invalid once the inner one's body is done
-        # being analyzed.
+        # loop_depth, not the scope stack, is what break/continue check
+        # against -- a counter, not a boolean, so a nested while's own
+        # push/pop doesn't make an outer loop's break/continue invalid.
         self.loop_depth += 1
         self._push_scope()
         for s in stmt.body:
@@ -1894,26 +1197,12 @@ class SemanticAnalyzer:
 
     def check_expr(self, expr: Node) -> Type:
         """Type-checks `expr` and, as a side effect, annotates it with
-        the result (expr.resolved_type = result) before returning.
-        This is the ONE place that annotation happens -- every check_*
-        method below stays a pure type-computation function with no
-        knowledge of the annotation step, and every recursive call for
-        an operand or argument already goes through check_expr (see
-        check_binary/check_unary/check_call), so every expression node
-        anywhere in the tree gets annotated automatically, no matter
-        how deeply nested, with no risk of a new node type being added
-        later and someone forgetting to wire up the annotation for it.
-        See the module docstring's TYPES section for why this replaced
-        codegen.py's old, independently-duplicated _infer_type.
-
-        Stores the actual Type object here, not str(result) -- that
-        changed when array types were added, since a bare name string
-        ('int'/'bool'/'str') can no longer represent everything a type
-        might be (an array also needs its element type and size).
-        codegen.py imports Type from this module directly and compares
-        against it (Type.STR, Type.INT, ...) rather than string
-        literals, and can freely inspect .kind/.element_type/.size on
-        whatever it reads back."""
+        the result (expr.resolved_type = result) -- the ONE place this
+        happens; see the module docstring's TYPES section for the full
+        design and why this replaced codegen.py's old, independently-
+        duplicated _infer_type. Stores the actual Type object, not a
+        name string, since an array type needs its own element_type/
+        size too."""
         if isinstance(expr, Constant):
             result = self.check_constant(expr)
         elif isinstance(expr, BoolLiteral):
@@ -1947,105 +1236,41 @@ class SemanticAnalyzer:
 
     def check_array_literal(self, expr: ArrayLiteral, expected_element_type: Optional[Type] = None) -> Type:
         """`[e1, e2, ...]`, or the fully-typed `[N]TYPE[e1, e2, ...]`
-        (expr.type_expr is not None -- see ArrayLiteral's own
-        docstring in parser.py). Either way, every element must be the
-        same type -- this language doesn't support heterogeneous
-        arrays.
+        (expr.type_expr set). Every element must be the same type --
+        no heterogeneous arrays.
 
-        UNTYPED form, no external context (type_expr is None,
-        expected_element_type is None): the array's own type is
-        INFERRED entirely from its elements -- checked by type-
-        checking each one (via check_expr, so a nested ArrayLiteral
-        for a multi-dimensional literal is handled by plain recursion,
-        no special-casing needed) and comparing every element's type
-        to the first one's. A "ragged" literal like `[[1,2,3],[4,5]]`
-        is rejected by this same check, with no extra logic needed:
-        the two rows' types are [3]int and [2]int, which -- now that
-        Type is structurally comparable -- are simply different types,
-        exactly like [3]int and [3]bool would be. Needs at least one
-        element -- with nothing else to go on, an empty literal here
-        gives no type information at all.
+        UNTYPED form (type_expr and expected_element_type both None):
+        the type is inferred entirely from elements, each checked via
+        check_expr and compared to the first. A ragged literal (e.g.
+        `[[1,2,3],[4,5]]`) is rejected by this same check for free,
+        since the two rows' types ([3]int vs [2]int) are simply
+        different types once Type is structurally comparable. Needs at
+        least one element -- nothing to infer from otherwise.
 
-        TYPED form (expr.type_expr is not None): the declared type is
-        resolved FIRST (via type_from_name), and used as the standard
-        every element (and the literal's own size) is checked AGAINST,
-        rather than inferred from them -- the exact same
-        _types_compatible check used everywhere else a value flows
-        into an already-typed slot (a VarDecl initializer, an
-        Assign, ...), so `none` would be just as valid an element here
-        as it is anywhere else a slice is expected.
+        TYPED form (an explicit type_expr, or a supplied expected_
+        element_type from an untyped literal flowing into an already-
+        typed VarDecl/Assign value): the declared type is resolved
+        first and used as the standard every element is checked
+        AGAINST, via _check_value_flowing_into_allowing_struct_literal
+        (not plain check_expr) -- the same recursive treatment a top-
+        level value gets. This is what makes genuinely nested slice
+        construction (a slice of slices, `[][]int rows = [][]int[[1,
+        2], [3, 4]]`) fall out for free rather than only working one
+        level deep: a plain check_expr would infer each inner literal
+        as an ordinary array, which would then fail to match the
+        expected slice type (`[][2]int` happened to work by
+        coincidence before this, since array-vs-array equality was all
+        that case needed -- which is exactly what masked the gap until
+        a genuinely nested slice was tried). Either typed path also
+        correctly allows zero elements, unlike the untyped path -- a
+        real, externally-known type exists even with nothing to infer.
 
-        expected_element_type, when supplied (and type_expr is still
-        None): used for an UNTYPED literal flowing directly into an
-        already-typed VarDecl/Assign value, whether that declared type
-        is a SLICE (`[]int s = [1, 2, 3]`) or an ARRAY (`[3]int8 arr =
-        [1, 2, 3]`) -- see _check_value_flowing_into's own callers,
-        which bypass check_expr's generic dispatch specifically to
-        pass this through, since check_expr has no way to receive
-        context at all. Checked the exact same way the explicitly-
-        typed form is, just against a type supplied by the CALLER
-        instead of restated in the literal itself. The ARRAY case
-        specifically is what makes an untyped literal correctly
-        produce int8/uint8 (or any other element type a bare literal
-        wouldn't naturally land on by itself) elements at all: without
-        routing through this, each element would be independently
-        inferred via plain check_expr instead (landing on ordinary
-        Type.INT for a numeric literal, via check_constant), which
-        would then simply fail to match a narrower declared element
-        type -- `[3]int arr = [1, 2, 3]` only ever worked without this
-        by COINCIDENCE, since an untyped literal's own default
-        inferred element type happens to already match that
-        particular target.
-
-        Either typed path (an explicit type_expr, or a supplied
-        expected_element_type) allows -- and correctly handles -- zero
-        elements, unlike the fully-untyped path above: `[]int[]` (see
-        parser.py's own Slice-wrapping of a slice literal) or `[]int s
-        = []` both have a real, externally-known type to report even
-        with nothing to infer from, the same way parse_type() itself
-        already allows a slice type with no length embedded in it at
-        all -- only the ordinary, standalone array literal has size as
-        part of its declared type (enforced at parse time, `parse_
-        type`'s own ArrayTypeExpr validation), which is what makes
-        zero genuinely uninformative only in that one, fully-untyped
-        case.
-
-        Both typed paths check each element via _check_value_flowing_
-        into_allowing_struct_literal rather than a plain check_expr --
-        not just an ordinary recursive call, but the SAME recursive-
-        slice-construction treatment analyze_var_decl/analyze_assign
-        already give a top-level value (see that helper's own sibling,
-        _check_expr_allowing_struct_literal, for the struct-literal
-        detection itself): an untyped ArrayLiteral element flowing into
-        a SLICE-kind expected type (e.g. `[][]int rows = [][]int[[1,
-        2], [3, 4]]` -- the OUTER literal's own element type is []int,
-        a slice, so each INNER `[1, 2]`/`[3, 4]` needs this same
-        treatment recursively) is what makes genuinely nested slice
-        construction -- a slice of slices, arbitrarily deep -- fall
-        out for free, rather than only ever working one level deep.
-        A plain check_expr here would infer each inner literal as an
-        ordinary ARRAY ([2]int), which would then correctly fail the
-        _types_compatible check against the expected SLICE type --
-        this was a real, found bug, not a hypothetical one: `[][2]int`
-        (array-typed inner elements matching an array-typed expected
-        element) happened to still work by coincidence, since ordinary
-        type equality was all that case ever needed, which is exactly
-        what masked the gap until a genuinely nested slice was tried.
-
-        A STRUCT-typed element -- an ordinary struct value (a
-        Variable, Field, Index, or struct-returning Call) or, as of
-        this same fix, a struct LITERAL directly (`[Point(1,2),
-        Point(3,4)]`) -- is checked the identical way as any other
-        element in all three branches below (this method never needed
-        its own special case for struct-typed elements at the
-        semantic layer; check_expr/_check_value_flowing_into already
-        handle a Variable/Field/Index/Call's own type correctly
-        regardless of what kind it is). What DID need a real fix was
-        codegen: gen_array_literal_into had no STRUCT-typed element
-        case at all before this, so a struct-typed array element
-        failed even for an ordinary struct VARIABLE, with no literal
-        involved -- see its own docstring for the actual fix.
-        """
+        A struct-typed element (a Variable/Field/Index/Call, or a
+        struct literal directly) needs no special case here -- check_
+        expr/_check_value_flowing_into already handle it like any
+        other type. codegen's gen_array_literal_into needed the actual
+        fix, for a struct-typed element with no literal involved at
+        all."""
         if expr.type_expr is not None:
             declared_type = type_from_name(expr.type_expr, self.structs, self.type_aliases)
             if len(expr.elements) != declared_type.size:
@@ -2095,15 +1320,12 @@ class SemanticAnalyzer:
         return self._check_struct_and_field(expr.base, expr.name)
 
     def _check_struct_and_field(self, base_expr: Node, field_name: str) -> Type:
-        """Shared by check_field (reading `base.name`) and
-        analyze_field_assign (writing `base.name = value`), mirroring
-        _check_indexable_and_index's own shared-helper shape one level
-        over: check base_expr's own type is actually a struct, look up
-        field_name in that struct's own registered field list, and
-        return the field's own type -- or raise a clear error at
-        whichever of the two things actually went wrong (base_expr
-        isn't struct-typed at all, or it is but this particular struct
-        has no field by this name)."""
+        """Shared by check_field (`base.name`) and analyze_field_
+        assign (`base.name = value`), mirroring _check_indexable_and_
+        index one level over: check base_expr is struct-typed, look up
+        field_name in its registered field list, and return the
+        field's type -- or raise a clear error for whichever went
+        wrong."""
         base_type = self.check_expr(base_expr)
         if base_type.kind != TypeKind.STRUCT:
             raise SemanticError(
@@ -2118,94 +1340,38 @@ class SemanticAnalyzer:
 
     def check_struct_literal(self, expr: Call) -> Type:
         """`Name(arg1, arg2, ...)` -- a struct literal, e.g. `A a =
-        A(6, 'hello')` for `struct A: int x; str y`. Disambiguated from
-        an ordinary function call purely by registry membership --
-        `Name` is a struct, not a function -- with no dedicated parser
-        syntax at all: `A(6, 'hello')` already parses as an ordinary
-        Call node (see parser.py), exactly like any other call. This is
-        never ambiguous: analyze()'s own struct/function collision
-        check guarantees a name can never be both a struct and a
-        function, so a Call's own name membership in self.structs vs.
-        self.functions is a clean, mutually-exclusive dispatch.
+        A(6, 'hello')`. Disambiguated from an ordinary function call
+        purely by registry membership (`Name` is a struct, not a
+        function) -- no dedicated parser syntax; analyze()'s struct/
+        function collision check guarantees a name can never be both.
 
         Positional and exhaustive: exactly one argument per field, in
-        the struct's own declaration order -- no named arguments, no
-        partial construction with an implicit zero value for an
-        omitted field, matching this language's existing preference
-        for explicit over implicit (e.g. no int-to-bool coercion
-        anywhere else either).
+        declaration order -- no partial construction with an implicit
+        zero value, matching this language's explicit-over-implicit
+        stance.
 
         Each argument is checked via _check_expr_allowing_struct_
-        literal -- the same shared helper every other call site below
-        uses -- rather than a plain check_expr, so a NESTED struct
-        literal argument (`A(B(1, 2), 3)`) recurses right back into
-        THIS method. That's what makes arbitrarily deep nesting work
-        with no depth limit and no extra bookkeeping: each level's own
-        argument-checking loop is the same recursive call, terminating
-        naturally once every argument bottoms out at an ordinary,
-        non-struct-literal expression. (`none` flowing into a slice-
-        typed field still works fine here, since that's an ordinary
-        _types_compatible check with no recursive construction
-        involved; an untyped array literal argument flowing into an
-        array- or slice-typed field is a smaller, related gap left for
-        now, unrelated to struct literals as such.)
+        literal, not plain check_expr, so a nested struct-literal
+        argument (`A(B(1, 2), 3)`) recurses back into this same
+        method -- arbitrary nesting depth for free. Reached from every
+        position that allows a struct literal directly: analyze_var_
+        decl/analyze_assign/analyze_index_assign/analyze_field_assign
+        (via the shared helper), check_call's own argument loop,
+        analyze_return, check_array_literal's own element loop, and
+        this method's own argument loop recursively. Every OTHER
+        position (a Binary operand, a Field-access base, ...) funnels
+        through check_expr's ordinary dispatch into check_call, which
+        rejects a struct-name Call -- the entire mechanism keeping
+        struct literals scoped narrower than an ordinary call.
+        Annotates expr.resolved_type directly, bypassing check_expr's
+        own dispatch and its annotation step.
 
-        Only ever reached from analyze_var_decl/analyze_assign/
-        analyze_index_assign/analyze_field_assign (all four via
-        _check_value_flowing_into_allowing_struct_literal, for a
-        VarDecl initializer, an Assign value, an IndexAssign's own
-        element, or a FieldAssign's own field), check_call's own
-        argument-checking loop (a direct function-call argument,
-        `foo(A(1, 2))`), analyze_return (a direct return value,
-        `return A(1, 2)`), check_array_literal (an array literal's own
-        element, `[A(1, 2), A(3, 4)]` -- see its own docstring for why
-        this needed a genuine codegen fix too, not just this same
-        semantic detection: gen_array_literal_into had no STRUCT-typed
-        element case at all before this, so a struct-typed array
-        element failed even for an ordinary struct VARIABLE, with no
-        literal involved), and -- recursively -- its OWN argument-
-        checking loop (a struct literal nested as an argument to
-        another struct literal). Every one of those checks for this
-        exact shape (isinstance(expr, Call) and expr.name in self.
-        structs) BEFORE calling _check_value_flowing_into/check_expr
-        at all -- via one of the two small shared helpers just above
-        analyze_var_decl, not duplicated inline at each site anymore.
-        Every OTHER place a Call can appear (a bare statement, or most
-        other kinds of expressions -- a Binary operand, a Field-access
-        base, ...) still funnels through check_expr's ordinary
-        dispatch into check_call instead, which rejects a struct-name
-        Call there. That's the entire mechanism that keeps struct
-        literals scoped to exactly these positions, deliberately
-        narrower than where an ordinary function call is allowed to
-        appear. Both IndexAssign and FieldAssign needed no codegen
-        changes at all once semantic.py allowed this: gen_index_
-        assign/gen_field_assign already call gen_slice_value_into/
-        gen_struct_value_into for their own SLICE/STRUCT branches, both
-        of which already handled every shape this can now produce.
-
-        Annotates expr.resolved_type directly (mirroring _check_value_
-        flowing_into's own array-literal-into-slice special case, for
-        the identical reason: this bypasses check_expr's generic
-        dispatch -- and its own annotation step -- entirely, so
-        nothing else would perform it).
-
-        NAMED construction (`A(x=1, y='a')`, expr.kwargs populated
-        instead of expr.args -- see Call's own docstring in parser.py
-        for the full design and why the two are mutually exclusive by
-        construction) is delegated to _check_named_struct_literal
-        below, which also supports PARTIAL construction (`A(x=1)`,
-        omitting a field entirely) -- given its own type's implicit
-        zero value now, via the exact same _gen_zero_value_into a `T
-        x` VarDecl with no initializer at all already uses (see gen_
-        struct_literal_into's own docstring in codegen.py for the
-        actual generation, and the register-safety fix it needed
-        alongside this). This closes what used to be a deliberate,
-        temporary inconsistency: partial construction was left
-        genuinely uninitialized when implicit zero-init first shipped,
-        specifically so it could be revisited once that feature
-        existed to reuse -- this is that revisit. Positional
-        construction stays exhaustive (this method's own existing
-        behavior, unchanged); only the named form can be partial."""
+        NAMED construction (`A(x=1, y='a')`, expr.kwargs populated) is
+        delegated to _check_named_struct_literal, which also supports
+        PARTIAL construction (omitting a field, given its type's
+        implicit zero value -- see gen_struct_literal_into in
+        codegen.py). Positional construction stays exhaustive; only
+        the named form can be partial."""
         struct_info = self.structs[expr.name]
         field_items = list(struct_info.fields.items())
         if expr.kwargs is not None:
@@ -2230,32 +1396,18 @@ class SemanticAnalyzer:
         return result
 
     def _check_named_struct_literal(self, expr: Call, struct_info: StructInfo, field_items: list) -> Type:
-        """`A(x=1, y='a')`, or a PARTIAL `A(x=1)` -- named-field
-        construction, reached from check_struct_literal whenever
-        expr.kwargs is populated instead of expr.args. Unlike the
-        positional form, this is deliberately NOT required to be
-        exhaustive: any field not mentioned gets that field's own
-        implicit zero value (see gen_struct_literal_into), exactly the
-        same value an ordinary `A a` VarDecl with no initializer at
-        all would give every one of its fields.
+        """`A(x=1, y='a')`, or a PARTIAL `A(x=1)`. Unlike the
+        positional form, not required to be exhaustive -- an unmentioned
+        field gets its implicit zero value (gen_struct_literal_into),
+        the same value an ordinary `A a` VarDecl with no initializer
+        gives every field.
 
-        Each named field is checked against real membership (a name
-        that isn't one of the struct's own fields is rejected, with
-        the valid names listed) and against being specified more than
-        once (`A(x=1, x=2)`) -- both genuine semantic questions the
-        parser has no way to answer itself, since it doesn't know
-        `expr.name` refers to a struct with these specific fields at
-        all (see Call's own docstring in parser.py). Order of
-        appearance in kwargs is preserved from parsing but doesn't
-        matter for validation here -- unlike the positional form,
-        where order IS the only thing that maps an argument to a
-        field, a named field's own identity comes entirely from its
-        name.
-
-        Each value is checked via _check_expr_allowing_struct_literal,
-        exactly like the positional form's own arguments -- a nested
-        struct literal as a named field's own value (`Outer(inner=
-        Inner(1), b=2)`) recurses the identical way."""
+        Each name is checked against real field membership and against
+        being specified more than once (`A(x=1, x=2)`) -- both genuine
+        semantic questions the parser can't answer itself. Each value
+        is checked via _check_expr_allowing_struct_literal, same as
+        the positional form -- a nested struct literal as a field's
+        value recurses the identical way."""
         field_types = struct_info.fields
         valid_names = ', '.join(name for name, _ in field_items)
         seen = set()
@@ -2284,36 +1436,24 @@ class SemanticAnalyzer:
 
     def _check_method_call(self, expr: Call) -> Type:
         """`receiver.name(args)` -- resolves and validates a method
-        call, then REWRITES `expr` in place into an ordinary call to
+        call, then rewrites `expr` in place into an ordinary call to
         the matching mangled function (see Call's own docstring in
-        parser.py for why this in-place rewrite, rather than a
-        separate node type kept alive through codegen, is the design).
+        parser.py for why an in-place rewrite).
 
-        The receiver's own type is checked via plain check_expr, not
-        _check_expr_allowing_struct_literal -- a struct literal or a
-        struct-returning call used directly as a receiver
-        (`Point(1,2).add_b(5)`, `makePoint().add_b(5)`) is deliberately
-        NOT given any special treatment here. The former is already
-        rejected by check_call's own struct-literal guard the moment
-        check_expr recurses into it (a struct literal still isn't
-        allowed as a method-call receiver, since that's not one of its
-        own allowed positions); the latter type-checks fine here (an
-        ordinary struct-returning call is unrestricted almost
-        everywhere), but is then rejected by codegen's own gen_struct_
-        address_into once it tries to compute an address for something
-        with none -- the exact same "assign it to a variable first"
-        restriction print's own struct/array arguments and several
-        other unnamed-struct positions already have, gotten here for
-        free by simply not special-casing the receiver at all, rather
-        than needing its own dedicated check.
+        The receiver's type is checked via plain check_expr, not
+        _check_expr_allowing_struct_literal -- a struct literal used
+        directly as a receiver is already rejected by check_call's own
+        guard; a struct-returning call as a receiver type-checks fine
+        here but is later rejected by codegen's gen_struct_address_into
+        (the same "assign to a variable first" restriction several
+        other unnamed-struct positions already have), gotten for free
+        by simply not special-casing the receiver.
 
-        Argument checking mirrors check_call's own ordinary-function
-        loop: exact count, each checked via _check_expr_allowing_
-        struct_literal (so a struct literal works as a method
-        argument, exactly like it does for an ordinary function call),
-        against the method's own declared parameter types -- the
-        receiver is never counted here, since it's never written in
-        the call's own argument list to begin with."""
+        Argument checking mirrors check_call's ordinary-function loop:
+        exact count, each checked via _check_expr_allowing_struct_
+        literal against the method's declared parameter types -- the
+        receiver is never counted, since it's never in the written
+        argument list."""
         receiver_type = self.check_expr(expr.receiver)
         if receiver_type.kind != TypeKind.STRUCT:
             raise SemanticError(
@@ -2349,17 +1489,10 @@ class SemanticAnalyzer:
 
     def check_call(self, expr: Call) -> Type:
         if expr.receiver is not None:
-            # `receiver.name(args)` -- a method call, checked and
-            # rewritten by _check_method_call entirely -- see its own
-            # docstring. Checked FIRST, before anything else in this
-            # method: expr.name here is a METHOD name (e.g. 'add_b'),
-            # which could coincidentally match a struct name or a
-            # builtin in self.structs/_BUILTIN_FUNCTION_NAMES purely by
-            # coincidence (a method and a struct, or a method and a
-            # builtin, share no namespace at all, so this is completely
-            # legal) -- letting expr.receiver's presence take priority
-            # is what avoids a false-positive match against either of
-            # those checks below.
+            # Checked first: expr.name here is a METHOD name, which
+            # could coincidentally match a struct or builtin name (no
+            # shared namespace, so this is legal) -- receiver presence
+            # takes priority to avoid a false-positive match below.
             return self._check_method_call(expr)
         if expr.name in self.structs:
             raise SemanticError(
@@ -2375,18 +1508,10 @@ class SemanticAnalyzer:
                 f"positions"
             )
         if expr.kwargs is not None:
-            # Named arguments (`foo(x=1)`) parse into exactly the same
-            # shape a named struct literal does -- the parser can't
-            # tell them apart at all (see Call's own docstring in
-            # parser.py) -- so this is the one place that distinction
-            # actually gets made, once `expr.name` is known NOT to be
-            # a struct (the check just above already handles the case
-            # where it is). Named construction is deliberately scoped
-            # to struct literals only, not a general calling
-            # convention, so an ordinary function -- or print/len/
-            # append, all handled below -- never accepts this shape at
-            # all, regardless of whether the names given would even
-            # line up with real parameters.
+            # Named arguments parse into the same shape a named struct
+            # literal does -- this is the one place that distinction
+            # is made, now that expr.name is known not to be a struct.
+            # Named construction is scoped to struct literals only.
             raise SemanticError(
                 f"'{expr.name}(...)' uses named arguments, which are "
                 f"only supported for struct literals, not function calls"
@@ -2407,26 +1532,12 @@ class SemanticAnalyzer:
                 f"argument(s), got {len(expr.args)}"
             )
         for i, (arg, expected_type) in enumerate(zip(expr.args, param_types), start=1):
-            # A struct literal used directly as an argument (`foo(A(1,
-            # 2))`) is checked via _check_value_flowing_into_allowing_
-            # struct_literal, shared by every position that allows this
-            # shape AND has an already-typed slot to flow into -- see
-            # check_struct_literal's own docstring for the full,
-            # current list of positions a struct literal is allowed to
-            # appear in directly, and for why every position NOT on
-            # that list still funnels through the ordinary check_expr
-            # -> check_call dispatch above, which rejects a struct-name
-            # Call there. Using the value-flowing-into variant here
-            # (rather than the plain _check_expr_allowing_struct_
-            # literal every one of these call sites originally used)
-            # is what lets an untyped array literal argument flow into
-            # a slice-typed parameter (`foo([1, 2, 3])` where foo takes
-            # []int), and what lets an int8/uint8-typed parameter
-            # accept a range-checked literal argument directly
-            # (`foo(100)` where foo takes int8) -- both previously
-            # fell through to a plain type mismatch, since neither
-            # special case lived anywhere except _check_value_flowing_
-            # into itself, which nothing here was routed through yet.
+            # _check_value_flowing_into_allowing_struct_literal, not
+            # just _check_expr_allowing_struct_literal, so an untyped
+            # array literal argument can flow into a slice-typed
+            # parameter, and an int8/uint8-typed parameter can accept
+            # a range-checked literal directly -- both previously fell
+            # through to a plain mismatch here.
             actual_type = self._check_value_flowing_into_allowing_struct_literal(arg, expected_type)
             if not self._types_compatible(actual_type, expected_type):
                 raise SemanticError(
@@ -2436,33 +1547,20 @@ class SemanticAnalyzer:
         return return_type
 
     def check_print_call(self, expr: Call) -> Type:
-        """`print` takes exactly one argument, of any REAL type --
-        unlike an ordinary function it isn't tied to one fixed
-        parameter type, since every type Hornet has is printable and
-        there's no reason to force a caller to pick a differently-
-        named builtin per type. "Real" excludes Type.VOID specifically
-        -- the result of calling a function with no declared return
-        type -- since there's nothing to format for a value that
-        doesn't exist; see check_call for how that's already the
-        result you'd get calling one of those. An array or slice
-        argument is formatted as `TYPE[elem, elem, ...]` -- e.g.
-        `[3]int[1, 2, 3]` or `[]int[1, 2, 3]` -- the type prefix
-        appearing exactly once, at the outermost level, with no
-        repetition for nested rows (see codegen.py's own
+        """`print` takes exactly one argument, of any REAL type -- not
+        tied to one fixed parameter type, since every Hornet type is
+        printable. "Real" excludes Type.VOID (the result of calling a
+        no-declared-return-type function) specifically. An array or
+        slice argument formats as `TYPE[elem, elem, ...]`, the type
+        prefix appearing once at the outermost level (see codegen.py's
         _gen_print_collection); a str element is quoted inside a
-        collection (`'alice'`) even though a bare str argument prints
-        unquoted -- matching how most languages format a string
-        differently in a collection than when printed on its own.
+        collection even though a bare str argument prints unquoted.
 
         print itself is Type.VOID -- Hornet's first, and so far only,
-        builtin with no meaningful value to return. Nothing has to
-        change in codegen.py for this: gen_print_call_into still
-        leaves *something* in %eax at the end of every path (a
-        harmless leftover from before print had anywhere real to
-        return to), but nothing ever reads it anymore, the same way
-        nothing reads any OTHER void call's leftover register value
-        -- see the module docstring's FUNCTIONS WITH NO DECLARED
-        RETURN TYPE section."""
+        builtin with no meaningful value to return. Nothing changes in
+        codegen.py for this: gen_print_call_into still leaves something
+        in %eax at the end of every path, but nothing reads it, same
+        as any other void call's leftover register value."""
         if len(expr.args) != 1:
             raise SemanticError(
                 f"'print' expects exactly 1 argument, got {len(expr.args)}"
@@ -2483,25 +1581,18 @@ class SemanticAnalyzer:
 
     def check_len_call(self, expr: Call) -> Type:
         """`len(x)`: x must be array- or slice-typed -- str isn't
-        supported yet (see the module docstring's LEN BUILTIN section
-        for why that's a real, separable follow-up rather than an
-        oversight), and every other type (int, bool, void, none) is
-        rejected by the same, single "must be array or slice" check,
-        with no per-type carve-out needed the way print's own, much
-        more permissive check needs several: len accepts almost
-        nothing, where print accepts almost everything.
+        supported yet (a real, separable follow-up, not an oversight);
+        every other type is rejected by this same, single check, where
+        print's own much more permissive one needs several carve-outs.
 
-        x is still fully type-checked via check_expr regardless of
-        whether codegen ends up needing its computed VALUE for
-        anything (an array's own length is a compile-time constant,
-        never actually read out of the argument at all -- see
-        codegen.py's gen_len_call_into) -- so an invalid expression
-        buried inside x (an undeclared variable, a type error) is
-        still caught here exactly like it would be anywhere else.
+        x is fully type-checked via check_expr regardless of whether
+        codegen needs its computed value (an array's length is a
+        compile-time constant, never actually read -- see gen_len_
+        call_into), so an invalid expression buried inside x is still
+        caught here.
 
-        Always returns int -- unlike print, len has a real, useful
-        value, so `len(x)` is usable as an ordinary expression (a loop
-        bound, an operand, ...), not just a bare statement."""
+        Always returns int -- a real, useful value, unlike print's
+        VOID, so `len(x)` works as an ordinary expression."""
         if len(expr.args) != 1:
             raise SemanticError(
                 f"'len' expects exactly 1 argument, got {len(expr.args)}"
@@ -2520,36 +1611,21 @@ class SemanticAnalyzer:
     def check_append_call(self, expr: Call) -> Type:
         """`append(s, value)`, Hornet's third builtin -- Go-style:
         returns a NEW slice rather than mutating s in place (see
-        codegen.py's own APPEND BUILTIN section for the full growth-
-        and-aliasing story).
+        codegen.py's APPEND BUILTIN section).
 
-        s must be slice-typed; value must match its own element type,
-        checked via _check_value_flowing_into_allowing_struct_literal
-        rather than a plain check_expr -- the same recursive treatment
-        analyze_var_decl/analyze_assign/analyze_index_assign already
-        give a value flowing into an already-typed slot, so appending
-        an untyped array literal into a slice-of-slices (`append(rows,
-        [5, 6])`) correctly constructs a fresh, nested slice for the
-        new element, exactly like assigning one directly already does
-        -- and, as of the same fix that added struct literals as array
-        elements, appending a struct literal directly into a slice of
-        structs (`append(pts, Point(1, 2))`) is recognized the same
-        way any other position allowing this shape already is, rather
-        than falling through to check_call's own rejection of it.
+        s must be slice-typed; value must match its element type,
+        checked via _check_value_flowing_into_allowing_struct_literal,
+        the same recursive treatment a VarDecl/Assign/IndexAssign value
+        gets -- so appending an untyped array literal into a slice-of-
+        slices correctly constructs a fresh nested slice, and a struct
+        literal appended into a slice of structs is recognized the
+        same way any other allowed position is.
 
-        Always returns s's own slice type -- the NEW slice's type is
-        identical to the one appended to, obviously, since append
-        never changes what a slice is a slice OF, only how many
-        elements are in it.
-
-        Doesn't restrict what KIND of expression s itself is (a bare
-        Variable, an Index, a re-slice, a whole slice literal, ...) --
-        matching gen_append_call_into's own generality on the codegen
-        side now (any slice-typed expression materializes into the
-        shared unnamed-slice scratch slot if it isn't already a bare
-        Variable or `none`), unlike print's and len's own argument-
-        shape restrictions, which are real and still enforced only at
-        the codegen layer for those two.
+        Always returns s's own slice type -- append never changes what
+        a slice is a slice OF. Doesn't restrict what kind of expression
+        s is, matching gen_append_call_into's own generality on the
+        codegen side, unlike print's/len's argument-shape restrictions
+        (real, still enforced only at the codegen layer for those two).
         """
         if len(expr.args) != 2:
             raise SemanticError(
@@ -2606,48 +1682,28 @@ class SemanticAnalyzer:
         raise SemanticError(f"No semantic rule for unary operator: {expr.op}")
 
     def check_cast(self, expr: Cast) -> Type:
-        """`TYPE(expr)` -- an explicit numeric cast (see Cast's own
-        docstring in parser.py for the full syntax design). Resolves
-        target_type via type_from_name, exactly like every other
-        type-name resolution in this file (a VarDecl's own type, a
-        param's, ...), even though expr.target_type is always one of
-        the five bare scalar keyword strings here -- reusing the same
-        choke point rather than a direct _TYPE_NAMES lookup costs
-        nothing and stays consistent with everywhere else a type name
-        gets resolved.
+        """`TYPE(expr)` -- an explicit numeric cast. Resolves target_
+        type via type_from_name, the same choke point every other
+        type-name resolution in this file uses.
 
-        The source expression is checked via plain check_expr, NOT
-        the target-type-aware _check_value_flowing_into a VarDecl or
-        Assign uses -- a cast's whole POINT is converting an ALREADY-
-        typed value into another type, unlike VarDecl/Assign's own
-        literal-range-checking special case, which exists specifically
-        because a cast (this!) didn't exist yet as an alternative way
-        to produce an int8/uint8 value. Now that it does, a literal
-        argument still gets ordinary Type.INT treatment here, then
-        gets converted like any other int-typed expression -- `int8(
-        200)` truncates/wraps to -56 exactly like `int8(someIntVar)`
-        holding 200 would, with no compile-time range check either
-        way; range-checking only ever made sense for the "no other way
-        to produce this value" case _check_value_flowing_into's own
-        literal special case still covers.
+        The source is checked via plain check_expr, not the target-
+        aware _check_value_flowing_into a VarDecl/Assign uses -- a
+        cast's point is converting an ALREADY-typed value, unlike that
+        special case, which exists specifically because a cast didn't
+        yet exist as an alternative way to produce an int8/uint8 value.
+        A literal argument still gets ordinary Type.INT treatment here,
+        then converts like any other int-typed expression -- `int8(
+        200)` wraps to -56 with no compile-time range check, since
+        range-checking only makes sense for the "no other way to
+        produce this value" case _check_value_flowing_into covers.
 
-        Only int/int8/uint8 -- _INTEGER_TYPES -- are supported on
-        EITHER side right now. bool and str are still syntactically
-        valid targets (see Cast's own docstring on why the parser
-        doesn't reject them itself), but rejected here with a clear
-        message: this language already treats bool as non-numeric
-        everywhere else (no implicit int-to-bool coercion at all, see
-        check_unary's own NOT case just above), and str conversion is
-        a fundamentally different KIND of operation -- formatting
-        digits, or parsing them -- than a numeric cast (a bit-level
-        reinterpretation) ever does, so it's deliberately left as a
-        separate, later feature rather than folded into this one.
-
-        Unlike arithmetic (where int8 stays int8, never promoted to
-        int -- see check_binary/check_unary), a cast always produces
-        EXACTLY the type it names, regardless of the source type --
-        there's no operand-dependent result to derive here, since
-        converting to that exact type is the entire point."""
+        Only int/int8/uint8/int64 are supported on either side; bool
+        and str are syntactically valid targets but rejected here
+        (bool is non-numeric everywhere else; str conversion is a
+        fundamentally different kind of operation, a separate, later
+        feature). A cast always produces exactly the type it names,
+        unlike arithmetic (where int8 stays int8) -- there's no
+        operand-dependent result to derive."""
         target_type = type_from_name(expr.target_type, self.structs, self.type_aliases)
         source_type = self.check_expr(expr.expr)
         if target_type not in _INTEGER_TYPES or source_type not in _INTEGER_TYPES:
@@ -2659,27 +1715,20 @@ class SemanticAnalyzer:
         return target_type
 
     def _is_comparable_type(self, t: Type) -> bool:
-        """Whether '==' is defined for a value of type `t` at all --
-        true for int/bool/str; recursively true for an ARRAY whose own
-        element type is itself comparable (any nesting depth: this
-        method IS the recursion, unwrapping one ARRAY level per call,
-        so it doubles as what used to be a separate leaf-type
-        extraction); recursively true for a STRUCT whose OWN fields
-        (at any nesting depth, including through further nested
-        structs) are ALL comparable; always false for a SLICE, since
-        slice equality beyond `s == none` isn't defined at all yet
-        (see check_binary's own note on why).
+        """Whether '==' is defined for a value of type `t` -- true for
+        int/bool/str; recursively true for an ARRAY whose element type
+        is itself comparable (this method IS the recursion, unwrapping
+        one ARRAY level per call); recursively true for a STRUCT whose
+        fields are all comparable; always false for a SLICE (slice
+        equality beyond `s == none` isn't defined).
 
-        Used by check_binary's own ARRAY-vs-ARRAY and STRUCT-vs-STRUCT
-        branches alike -- the same one method serves both, since an
-        array's own comparability already depends on this exact
-        question applied to its element type, and (as of struct
-        equality existing) that element type can now legitimately be
-        a struct, which needs the identical recursive check. This is
-        also what makes an array of comparable structs -- e.g. [3]
-        Point, where Point has no slice-typed field anywhere -- work
-        correctly with no extra plumbing: check_binary's own ARRAY
-        branch calls this on the WHOLE array type, which unwraps down
+        Used by check_binary's ARRAY-vs-ARRAY and STRUCT-vs-STRUCT
+        branches alike -- an array's own comparability already depends
+        on this question applied to its element type, which can now
+        legitimately be a struct, needing the identical recursive
+        check. This is also what makes an array of comparable structs
+        work with no extra plumbing: check_binary's ARRAY branch calls
+        this on the whole array type, which unwraps down
         to the STRUCT case, which recurses into Point's own fields,
         exactly like it would for a bare Point-vs-Point comparison."""
         if t.kind == TypeKind.ARRAY:
@@ -2697,15 +1746,12 @@ class SemanticAnalyzer:
         op = expr.op
 
         if op == BinaryOp.ADD:
-            # Overloaded: int-family+int-family (both the SAME one --
-            # int8+int8, uint8+uint8, int+int, never mixed) is
-            # arithmetic addition, str+str is concatenation. Anything
-            # else -- mixing two different integer types, mixing
-            # either with str, or trying to add a bool -- is a type
-            # error. This has to be checked explicitly here rather
-            # than via _require_same_integer_type, since there's a
-            # second, entirely different valid shape (str+str) that
-            # helper knows nothing about.
+            # Overloaded: int-family+int-family (both the SAME one,
+            # never mixed) is arithmetic, str+str is concatenation.
+            # Anything else is a type error. Checked explicitly here,
+            # not via _require_same_integer_type, since str+str is a
+            # second, entirely different valid shape that helper
+            # knows nothing about.
             if left_type in _INTEGER_TYPES and left_type == right_type:
                 return left_type
             if left_type == Type.STR and right_type == Type.STR:
@@ -2717,11 +1763,9 @@ class SemanticAnalyzer:
             )
 
         if op in _INT_ONLY_BINARY_OPS:
-            # Stays whichever integer type both operands already were
-            # -- int8 + int8 is int8, not promoted to int the way C's
-            # own integer-promotion rules would have it (see the
-            # module's own design notes for why this follows Rust's
-            # model instead).
+            # Stays whichever integer type both operands were -- int8
+            # + int8 is int8, never promoted to int (unlike C's own
+            # integer-promotion rules).
             return self._require_same_integer_type(left_type, right_type, op)
 
         if op in _ORDERING_OPS:
@@ -2729,14 +1773,9 @@ class SemanticAnalyzer:
             return Type.BOOL
 
         if op in _EQUALITY_OPS:
-            # A slice compared to `none` (in EITHER order) is one of
-            # three exceptions to the slice/void/none rejection
-            # further below -- `s == none` / `none == s`, checking
-            # whether a slice is the nil/zero-value slice (see
-            # NoneLiteral's own docstring in parser.py). Checked
-            # first, before the general rejection, since it's a case
-            # that's actually meaningful and allowed to proceed rather
-            # than be rejected by it.
+            # A slice compared to `none` (either order) is checked
+            # first, since it's meaningful and allowed -- one of three
+            # exceptions to the slice/void/none rejection below.
             none_vs_slice = (
                 (left_type == Type.NONE and right_type.kind == TypeKind.SLICE) or
                 (right_type == Type.NONE and left_type.kind == TypeKind.SLICE)
@@ -2744,20 +1783,13 @@ class SemanticAnalyzer:
             if none_vs_slice:
                 return Type.BOOL
 
-            # ARRAY vs ARRAY is the second exception: valid exactly
-            # when both sides are the SAME array type outright (same
-            # length AND same element type -- Type's own structural
-            # dataclass equality already checks both at once, the
-            # same way it already does for any other type comparison
-            # in this file, so there's no need to separately compare
-            # .size and .element_type by hand), AND the array is
-            # actually comparable (see _is_comparable_type) -- which,
-            # now that struct equality exists too, includes an array
-            # of comparable STRUCTS, not just int/bool/str: closing
-            # that gap needed no changes here beyond generalizing what
-            # "comparable" means, since this branch already applied
-            # the check to the whole array type rather than assuming
-            # a fixed set of leaf kinds.
+            # ARRAY vs ARRAY: valid when both sides are the exact same
+            # array type (Type's own structural equality already
+            # checks size and element type together) AND the array is
+            # comparable (_is_comparable_type) -- which now includes
+            # an array of comparable structs, needing no changes here
+            # since this branch already applies the check to the
+            # whole array type rather than a fixed set of leaf kinds.
             if left_type.kind == TypeKind.ARRAY and right_type.kind == TypeKind.ARRAY:
                 if left_type != right_type:
                     raise SemanticError(
@@ -2774,18 +1806,11 @@ class SemanticAnalyzer:
                     )
                 return Type.BOOL
 
-            # STRUCT vs STRUCT is the third exception: valid exactly
-            # when both sides are the exact same struct type (Type's
-            # own structural equality already checks the struct_name
-            # field, so two DIFFERENT structs -- or a struct compared
-            # to anything else -- both correctly fail this) AND every
-            # one of that struct's own fields, at any nesting depth
-            # (through further nested structs, or through an array
-            # field), is itself comparable -- see _is_comparable_type.
-            # A struct with a slice-typed field anywhere (directly, or
-            # buried inside a nested struct or array field) has no
-            # well-defined way to be compared field-by-field, for the
-            # identical reason an array of slices doesn't just above.
+            # STRUCT vs STRUCT: valid when both sides are the exact
+            # same struct type AND every field, at any nesting depth,
+            # is itself comparable. A slice-typed field anywhere has
+            # no well-defined field-by-field comparison, same reason
+            # an array of slices doesn't just above.
             if left_type.kind == TypeKind.STRUCT and right_type.kind == TypeKind.STRUCT:
                 if left_type != right_type:
                     raise SemanticError(
@@ -2803,53 +1828,24 @@ class SemanticAnalyzer:
                     )
                 return Type.BOOL
 
-            # Every OTHER slice comparison is rejected outright by
-            # this point -- a bare slice compared to another slice
-            # (`s1 == s2`, as opposed to the none-comparison already
-            # handled above): codegen.py has no slice-vs-slice
-            # comparison logic at all (unlike array and struct, which
-            # now each have a real, element/field-wise one just
-            # above, for operands they know how to compare). Slice
-            # equality in particular isn't even well-defined yet on
-            # its own terms: would `s1 == s2` compare elements (now
-            # that array equality exists, a real, buildable
-            # extension), or the underlying pointer/length/cap triple
-            # the way Go's own `==` restriction on slices hints at? A
-            # real, well-defined feature to consider later, just not
-            # implemented yet. ARRAY and STRUCT no longer need to be
-            # listed here at all: a same-type-but-incomparable array
-            # or struct is already rejected by its own dedicated
-            # branch above, and a genuinely MISMATCHED pair involving
-            # either (an array vs an int, a struct vs a slice, two
-            # DIFFERENT structs, ...) is already caught by the
-            # ordinary "both sides must be the same type" check just
-            # below, with no need for this tuple to special-case them.
+            # A bare slice-vs-slice comparison is rejected outright:
+            # codegen has no slice comparison logic, and it isn't even
+            # well-defined yet (compare elements, like array equality
+            # now does, or the pointer/length/cap triple?) -- a real
+            # feature to consider later, not implemented yet.
             #
-            # VOID is rejected for a completely different reason: it's
-            # not a missing FEATURE, it's structurally nonsensical --
-            # `foo() == bar()`, where neither foo nor bar has a
-            # declared return type, would otherwise type-check fine
-            # here (Type.VOID == Type.VOID is trivially true, same as
-            # any other type compared to itself), comparing two
-            # "nothing"s to each other. Every OTHER place a void call's
-            # result might flow (VarDecl, Assign, a binary operand,
-            # function argument, array/slice base) is already rejected
-            # for free, just by never matching the real, user-declared
-            # type each of those checks compares against -- this is the
-            # one place two void operands could accidentally match each
-            # other instead of a real type, so it needs its own,
-            # explicit check.
+            # VOID is rejected because it's structurally nonsensical,
+            # not a missing feature: `foo() == bar()`, neither with a
+            # declared return type, would otherwise trivially type-
+            # check (Type.VOID == Type.VOID), comparing two "nothing"s.
+            # Every other place a void result might flow is already
+            # rejected by never matching a real, user-declared type --
+            # equality is the one place two void operands could match
+            # each other instead.
             #
-            # NONE is rejected here for the SAME reason as VOID
-            # (`none == none` would otherwise trivially type-check,
-            # comparing two "nothing"s the same way two void results
-            # would), EXCEPT for the one case already handled above.
-            # Every OTHER place `none` might flow (VarDecl, Assign,
-            # function argument, return value) already allows it
-            # specifically via _types_compatible, which has a real
-            # target type to check none against -- equality has no
-            # such fixed target on either side, so this needed its own
-            # explicit exception rather than reusing that helper as-is.
+            # NONE is rejected for the same reason, except the case
+            # already handled above -- equality has no fixed target
+            # side the way _types_compatible's other callers do.
             if left_type.kind in (TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE) or right_type.kind in (TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE):
                 raise SemanticError(
                     f"'{op.symbol()}' does not support slice, void, or "
@@ -2877,14 +1873,11 @@ class SemanticAnalyzer:
 
     def _require_same_integer_type(self, left_type: Type, right_type: Type, op) -> Type:
         """Requires left_type and right_type to be the exact SAME
-        integer type (int, int8, uint8, or int64 -- see _INTEGER_
-        TYPES) -- never a mix, even between two different-but-both-
-        integer types (`int8 + uint8` is rejected exactly like `bool +
-        int` already is), matching this language's consistent
-        "explicit over implicit" stance. Returns that shared type,
-        which becomes the operator's own result type wherever this is
-        called -- check_binary's own _INT_ONLY_BINARY_OPS and
-        ordering-operator cases both use this directly."""
+        integer type -- never a mix, even between two different-but-
+        both-integer types (`int8 + uint8` is rejected like `bool +
+        int` already is). Returns that shared type as the operator's
+        own result -- used directly by check_binary's _INT_ONLY_
+        BINARY_OPS and ordering-operator cases."""
         if left_type not in _INTEGER_TYPES or left_type != right_type:
             raise SemanticError(
                 f"'{op.symbol()}' requires two operands of the same "
