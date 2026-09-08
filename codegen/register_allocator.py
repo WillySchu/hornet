@@ -36,6 +36,7 @@ from codegen.ir import (
     IRMove,
     IRRaw,
     IRReturn,
+    IRSliceBoundsCheck,
     IRStore,
     IRUnOp,
     Temp,
@@ -153,6 +154,8 @@ def _reads(instr) -> set:
         return {v for v in (instr.dst_address, instr.src_address) if isinstance(v, Temp)}
     if isinstance(instr, IRBoundsCheck):
         return {v for v in (instr.index, instr.length) if isinstance(v, Temp)}
+    if isinstance(instr, IRSliceBoundsCheck):
+        return {v for v in (instr.value, instr.bound) if isinstance(v, Temp)}
     return set()
 
 

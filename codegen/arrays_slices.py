@@ -43,7 +43,7 @@ from codegen.assembly_ast import (
     Sub,
 )
 from codegen.errors import CodegenError
-from codegen.ir import IRRaw, IRBinOp, IRConst, IRBoundsCheck
+from codegen.ir import IRRaw, IRBinOp, IRConst, IRBoundsCheck, IRSliceBoundsCheck, IRStore
 from codegen.utils import type_of, type_byte_width, leaf_type, as_byte_register, gen_protecting_dst_across
 from parser import Node, ArrayLiteral, Call, Field, Index, Slice, Variable, NoneLiteral, Binary, BinaryOp
 from semantic import TypeKind, Type
@@ -373,30 +373,36 @@ class ArraysSlicesMixin:
         return None
 
     def _ir_indexable_base(self, expr: Node):
-        """Builds (without lowering) the address and length of an
-        indexable base as real IR -- returns (ir, addr_value, length_
-        value), or None when expr's own shape is still out of scope
-        (an ArrayLiteral; any slice-typed expression other than a
-        bare, named Variable -- a Slice, an Index, a Field, or a Call
-        all still need gen_indexable_base_into's own shared-scratch-
-        slot materialization, real, separate follow-up work, not
-        attempted here). Mirrors gen_indexable_base_into's own two-
-        way split:
+        """Builds (without lowering) the address, length, and capacity
+        of an indexable base as real IR -- returns (ir, addr_value,
+        length_value, cap_value), or None when expr's own shape is
+        still out of scope (an ArrayLiteral; any slice-typed
+        expression other than a bare, named Variable -- a Slice, an
+        Index, a Field, or a Call all still need gen_indexable_base_
+        into's own shared-scratch-slot materialization, real,
+        separate follow-up work, not attempted here). Mirrors gen_
+        indexable_base_into's own two-way split and its own full
+        three-value contract -- cap is always computed here too, even
+        by callers (_ir_index_address) that never read it back, for
+        the identical reason gen_indexable_base_into's own docstring
+        gives: cheap enough that one uniform contract beats making it
+        optional.
 
         ARRAY-typed: delegates to _ir_array_address (Variable/Field/
         Index all in scope, matching gen_array_address_into's own
-        three cases exactly); length is always a compile-time IRConst.
+        three cases exactly); length and cap are both always the same
+        compile-time IRConst -- an array has no separate capacity.
 
         SLICE-typed: only a bare, named Variable is in scope -- a
-        leaf read of its own descriptor's ptr/len fields, mirroring
-        _ir_array_address's own Variable leaf one field over. len is
-        captured as an INT (32-bit) Temp directly, not INT64 -- an
-        array/slice's own length always fits in 32 bits, the same
-        assumption the old-style bounds check's own len_reg_32
-        already makes; reading only the descriptor's own lower 4
-        bytes (little-endian) is exactly equivalent to the old-style
-        64-bit read followed by narrowing, for a value guaranteed to
-        fit either way."""
+        leaf read of its own descriptor's ptr/len/cap fields,
+        mirroring _ir_array_address's own Variable leaf one field
+        over. len/cap are captured as INT (32-bit) Temps directly, not
+        INT64 -- an array/slice's own length or capacity always fits
+        in 32 bits, the same assumption the old-style bounds check's
+        own len_reg_32/cap_operand already make; reading only each
+        field's own lower 4 bytes (little-endian) is exactly
+        equivalent to the old-style 64-bit read followed by
+        narrowing, for a value guaranteed to fit either way."""
         base_type = type_of(expr)
         if base_type.kind == TypeKind.ARRAY:
             if not isinstance(expr, (Variable, Field, Index)):
@@ -405,18 +411,21 @@ class ArraysSlicesMixin:
             if addr_result is None:
                 return None
             addr_ir, addr_value = addr_result
-            return addr_ir, addr_value, IRConst(base_type.size, Type.INT)
+            size_const = IRConst(base_type.size, Type.INT)
+            return addr_ir, addr_value, size_const, size_const
         if base_type.kind == TypeKind.SLICE:
             if not isinstance(expr, Variable):
                 return None
             offset = self._local_offset(expr.name)
             ptr_temp = self._new_temp(Type.INT64)
             len_temp = self._new_temp(Type.INT)
+            cap_temp = self._new_temp(Type.INT)
             ir = [
                 IRRaw([MovQ(src=Memory('rbp', offset), dst=Register('rax'))], dst=ptr_temp),
                 IRRaw([Mov(src=Memory('rbp', offset + 8), dst=Register('eax'))], dst=len_temp),
+                IRRaw([Mov(src=Memory('rbp', offset + 16), dst=Register('eax'))], dst=cap_temp),
             ]
-            return ir, ptr_temp, len_temp
+            return ir, ptr_temp, len_temp, cap_temp
         return None
 
     def _ir_index_address(self, expr: Index):
@@ -457,7 +466,7 @@ class ArraysSlicesMixin:
         base = self._ir_indexable_base(expr.array)
         if base is None:
             return None
-        base_ir, base_addr, length_value = base
+        base_ir, base_addr, length_value, _cap_value = base
         element_type = type_of(expr.array).element_type
         element_stride = type_byte_width(element_type, self.struct_registry)
 
@@ -634,6 +643,97 @@ class ArraysSlicesMixin:
         instructions.append(MovQ(src=high_reg, dst=Memory(dst_mem.base, dst_mem.offset + 8)))
         instructions.append(MovQ(src=Register('r13'), dst=Memory(dst_mem.base, dst_mem.offset + 16)))
         return instructions
+
+    def _ir_slice_into(self, expr: Slice):
+        """Builds (without lowering) expr.array[expr.low:expr.high]'s
+        resulting {ptr, len, cap} triple as real IR -- returns (ir,
+        ptr_value, len_value, cap_value), or None when expr.array's
+        own base is out of scope (see _ir_indexable_base) -- an
+        ArrayLiteral, or a slice-typed base other than a bare, named
+        Variable.
+
+        Mirrors gen_slice_into's own logic exactly, just via real IR:
+        resolve low/high (each defaulting to 0 / the base's own
+        length -- high defaults to LENGTH, not CAP: `arr[3:]` means
+        "to the current end", not "to the full capacity"; only an
+        explicitly-given high is allowed to reach cap), three bounds
+        checks (IRSliceBoundsCheck -- low <= cap, high <= cap, low <=
+        high, matching gen_slice_into's own order and its own comment
+        for why cap, not len, is the bound), then the three derived
+        values (new_cap = cap - low, new_len = high - low, ptr = addr
+        + low*stride) via ordinary IRBinOp.
+
+        Unlike gen_slice_into's own careful "compute new_cap/new_len
+        BEFORE low is scaled" ordering (needed there because low_32
+        is mutated in place by the following IMul), no such ordering
+        matters here at all: low_value/high_value/cap_value are
+        immutable once computed -- every IRBinOp below just reads
+        them, never mutates them -- so new_cap/new_len/ptr can be
+        computed in any order.
+
+        No push/pop protection needed anywhere in here either, unlike
+        the old-style version's own extensive stack discipline: every
+        intermediate value already has its own, independent Temp home,
+        safely written before whatever evaluates next (even expr.low/
+        expr.high, which could be arbitrarily complex) ever runs --
+        the same property that already made _ir_index_address
+        protection-free."""
+        base = self._ir_indexable_base(expr.array)
+        if base is None:
+            return None
+        base_ir, base_addr, length_value, cap_value = base
+        element_stride = type_byte_width(type_of(expr.array).element_type, self.struct_registry)
+
+        if expr.high is not None:
+            high_ir, high_value = self.gen_expr_ir(expr.high)
+        else:
+            high_ir, high_value = [], length_value
+        if expr.low is not None:
+            low_ir, low_value = self.gen_expr_ir(expr.low)
+        else:
+            low_ir, low_value = [], IRConst(0, Type.INT)
+
+        checks = [
+            IRSliceBoundsCheck(value=low_value, bound=cap_value),
+            IRSliceBoundsCheck(value=high_value, bound=cap_value),
+            IRSliceBoundsCheck(value=low_value, bound=high_value),
+        ]
+
+        new_cap = self._new_temp(Type.INT)
+        new_len = self._new_temp(Type.INT)
+        offset_temp = self._new_temp(Type.INT)
+        ptr = self._new_temp(Type.INT64)
+        arithmetic = [
+            IRBinOp(dst=new_cap, op=BinaryOp.SUBTRACT, left=cap_value, right=low_value),
+            IRBinOp(dst=new_len, op=BinaryOp.SUBTRACT, left=high_value, right=low_value),
+            IRBinOp(dst=offset_temp, op=BinaryOp.MULTIPLY, left=low_value, right=IRConst(element_stride, Type.INT)),
+            IRBinOp(dst=ptr, op=BinaryOp.ADD, left=base_addr, right=offset_temp),
+        ]
+
+        ir = base_ir + high_ir + low_ir + checks + arithmetic
+        return ir, ptr, new_len, new_cap
+
+    def _ir_write_slice_descriptor(self, dst_expr: Node, ptr_value, len_value, cap_value) -> list:
+        """Writes an already-produced {ptr, len, cap} triple through
+        dst_expr's own address -- always via _ir_slice_address, since
+        the destination is always slice-typed here -- at offsets
+        0/8/16, via three ordinary IRStores. The +8/+16 offsets are
+        themselves computed via ordinary IRBinOp, the same address-
+        as-a-Temp pattern used everywhere else in this file. Shared by
+        every gen_statement_ir case that produces a fresh slice value
+        via _ir_slice_into -- see its own docstring, and gen_
+        statement_ir's own VarDecl/Assign/IndexAssign/FieldAssign
+        cases for where the two are glued together."""
+        dst_ir, dst_addr = self._ir_slice_address(dst_expr)
+        len_addr = self._new_temp(Type.INT64)
+        cap_addr = self._new_temp(Type.INT64)
+        return dst_ir + [
+            IRStore(address=dst_addr, value=ptr_value, value_type=Type.INT64),
+            IRBinOp(dst=len_addr, op=BinaryOp.ADD, left=dst_addr, right=IRConst(8, Type.INT64)),
+            IRStore(address=len_addr, value=len_value, value_type=Type.INT),
+            IRBinOp(dst=cap_addr, op=BinaryOp.ADD, left=dst_addr, right=IRConst(16, Type.INT64)),
+            IRStore(address=cap_addr, value=cap_value, value_type=Type.INT),
+        ]
 
     def gen_slice_value_into(self, expr: Node, dst_mem: Memory) -> list[Instruction]:
         """Stores a slice-typed expression's VALUE (its {ptr, len,

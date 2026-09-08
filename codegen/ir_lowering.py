@@ -28,7 +28,7 @@ listed here, in one place, rather than discovered by grepping for
 self. across the rest of the codebase.
 """
 
-from codegen.assembly_ast import Instruction, Register, Memory, Imm, Mov, MovQ, Cmp, Je, Jae, Jmp, Label, CallInstr
+from codegen.assembly_ast import Instruction, Register, Memory, Imm, Mov, MovQ, Cmp, Je, Jae, Ja, Jmp, Label, CallInstr
 from codegen.ir import (
     IRBinOp,
     IRBoundsCheck,
@@ -42,6 +42,7 @@ from codegen.ir import (
     IRMove,
     IRRaw,
     IRReturn,
+    IRSliceBoundsCheck,
     IRStore,
     IRUnOp,
     IRValue,
@@ -280,13 +281,23 @@ class InstructionSelector:
                 # be an ordinary BinaryOp instead. The message itself
                 # ("array index out of bounds") is hardcoded here,
                 # not carried on the op, since indexing is the only
-                # caller so far; slicing's own, different message
-                # would be a real, separate reason to add one later,
-                # not something to generalize for speculatively now.
+                # caller. Slicing's own, different message AND
+                # comparison (`ja`, not `jae` -- see IRSliceBoundsCheck
+                # just below) is exactly the real, separate reason
+                # anticipated for not generalizing this op instead.
                 out.extend(self._gen_load_value(instr.length, Register('ecx')))
                 out.extend(self._gen_load_value(instr.index, Register('eax')))
                 out.append(Cmp(src=Register('ecx'), dst=Register('eax')))
                 out.append(Jae(self.host._get_bounds_check_fail_label("array index out of bounds")))
+            elif isinstance(instr, IRSliceBoundsCheck):
+                # Same shape as IRBoundsCheck's own lowering just
+                # above, with the two differences its own docstring
+                # names: `ja` (strictly above), not `jae`, and its own
+                # message.
+                out.extend(self._gen_load_value(instr.bound, Register('ecx')))
+                out.extend(self._gen_load_value(instr.value, Register('eax')))
+                out.append(Cmp(src=Register('ecx'), dst=Register('eax')))
+                out.append(Ja(self.host._get_bounds_check_fail_label("slice bounds out of range")))
             else:
                 raise NotImplementedError(f"lower_ir has no rule for: {instr!r}")
         return out

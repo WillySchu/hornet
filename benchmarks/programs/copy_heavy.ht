@@ -18,6 +18,7 @@ def int main():
         s[0] = i % 10
         points[0] = p
         Point extracted = points[0]
-        total = (total + copy[0] + p.x + s[0] + extracted.y) % 1000003
+        []int sliced = base[i % 3:4]
+        total = (total + copy[0] + p.x + s[0] + extracted.y + sliced[0]) % 1000003
         i = i + 1
     return total % 256

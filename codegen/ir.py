@@ -202,6 +202,32 @@ class IRBoundsCheck:
 
 
 @dataclass
+class IRSliceBoundsCheck:
+    """Traps (via the same shared per-function/per-message panic
+    label mechanism IRBoundsCheck's own lowering uses, just its own
+    "slice bounds out of range" message rather than "array index out
+    of bounds" -- see gen_slice_into's own docstring for the full
+    "why" of the check itself) if `value`, treated as unsigned, is
+    strictly greater than `bound`.
+
+    A deliberately separate op from IRBoundsCheck, not a generalized
+    version of it with a mode flag: slice production needs three of
+    these (low <= cap, high <= cap, low <= high -- each an ordinary
+    (value, bound) pair, just with different operands), and unlike
+    indexing's own single `>=` check, `value == bound` is VALID here
+    (`arr[5:5]` on a 5-element array is a valid, empty-slice-producing
+    expression) -- a real, different comparison, not just a different
+    message, so it earns a real, separate op rather than overloading
+    IRBoundsCheck's own meaning.
+
+    No result Temp, for the identical reason IRBoundsCheck has none:
+    this only conditionally jumps elsewhere in the function, never
+    produces a value anything reads back."""
+    value: IRValue
+    bound: IRValue
+
+
+@dataclass
 class IRLabel:
     """A jump target."""
     name: str

@@ -159,6 +159,22 @@ class StatementsMixin:
                         self._gen_malloc_array(var_type) + [MovQ(src=Register('rax'), dst=Memory('rbp', offset))]
                     ))
                 return ir + self._ir_copy_assign(Variable(name=stmt.name), stmt.init, var_type)
+            # A slice-typed initializer that's itself a Slice
+            # production (`arr[a:b]`, not an alias of an existing
+            # slice -- see _ir_slice_into for exactly which shapes of
+            # `arr` it covers). _ir_slice_into is tried FIRST, before
+            # any binding, since whether it succeeds depends only on
+            # stmt.init's own array/base, never on the destination --
+            # binding only happens once it's already known to
+            # succeed, so an out-of-scope base still falls to the
+            # catch-all with no binding done here either, matching
+            # every other case in this method.
+            if var_type.kind == TypeKind.SLICE and isinstance(stmt.init, Slice):
+                production = self._ir_slice_into(stmt.init)
+                if production is not None:
+                    slice_ir, ptr_value, len_value, cap_value = production
+                    self._bind_local(stmt)
+                    return slice_ir + self._ir_write_slice_descriptor(Variable(name=stmt.name), ptr_value, len_value, cap_value)
         elif isinstance(stmt, Assign):
             # Same shape as the VarDecl case above, for an existing
             # scalar variable -- `var_type` here is necessarily
@@ -180,6 +196,14 @@ class StatementsMixin:
             # allocation from declaration time, reused in place.
             if var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE) and isinstance(stmt.value, (Variable, Field, Index)):
                 return self._ir_copy_assign(Variable(name=stmt.name), stmt.value, var_type)
+            # Same Slice-production case as VarDecl's own, just above
+            # -- no binding concern here at all, unlike VarDecl's own
+            # (the destination already exists).
+            if var_type.kind == TypeKind.SLICE and isinstance(stmt.value, Slice):
+                production = self._ir_slice_into(stmt.value)
+                if production is not None:
+                    slice_ir, ptr_value, len_value, cap_value = production
+                    return slice_ir + self._ir_write_slice_descriptor(Variable(name=stmt.name), ptr_value, len_value, cap_value)
         elif isinstance(stmt, IndexAssign):
             # Same scope boundary as gen_index_assign itself. ARRAY
             # never occurs here at all (IndexAssign's own grammar
@@ -192,6 +216,12 @@ class StatementsMixin:
             if element_type.kind in (TypeKind.STRUCT, TypeKind.SLICE) and isinstance(stmt.value, (Variable, Field, Index)):
                 dst_expr = Index(array=stmt.array, index=stmt.index)
                 return self._ir_copy_assign(dst_expr, stmt.value, element_type)
+            if element_type.kind == TypeKind.SLICE and isinstance(stmt.value, Slice):
+                production = self._ir_slice_into(stmt.value)
+                if production is not None:
+                    slice_ir, ptr_value, len_value, cap_value = production
+                    dst_expr = Index(array=stmt.array, index=stmt.index)
+                    return slice_ir + self._ir_write_slice_descriptor(dst_expr, ptr_value, len_value, cap_value)
         elif isinstance(stmt, FieldAssign):
             # Same idea one level over -- FieldAssign's grammar can
             # ALSO produce an ARRAY-typed field (unlike IndexAssign).
@@ -201,6 +231,12 @@ class StatementsMixin:
             if field_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE) and isinstance(stmt.value, (Variable, Field, Index)):
                 dst_expr = Field(base=stmt.base, name=stmt.name)
                 return self._ir_copy_assign(dst_expr, stmt.value, field_type)
+            if field_type.kind == TypeKind.SLICE and isinstance(stmt.value, Slice):
+                production = self._ir_slice_into(stmt.value)
+                if production is not None:
+                    slice_ir, ptr_value, len_value, cap_value = production
+                    dst_expr = Field(base=stmt.base, name=stmt.name)
+                    return slice_ir + self._ir_write_slice_descriptor(dst_expr, ptr_value, len_value, cap_value)
         elif isinstance(stmt, ExprStmt) and not isinstance(stmt.expr, (ArrayLiteral, Slice)):
             ir, _ = self.gen_expr_ir(stmt.expr)
             return ir
