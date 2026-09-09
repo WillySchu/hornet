@@ -43,7 +43,7 @@ from codegen.assembly_ast import (
     Sub,
 )
 from codegen.errors import CodegenError
-from codegen.ir import IRRaw, IRBinOp, IRConst, IRBoundsCheck, IRSliceBoundsCheck, IRStore
+from codegen.ir import IRRaw, IRBinOp, IRConst, IRBoundsCheck, IRSliceBoundsCheck, IRStore, IRLoad
 from codegen.utils import type_of, type_byte_width, leaf_type, as_byte_register, gen_protecting_dst_across
 from parser import Node, ArrayLiteral, Call, Field, Index, Slice, Variable, NoneLiteral, Binary, BinaryOp
 from semantic import TypeKind, Type
@@ -252,8 +252,7 @@ class ArraysSlicesMixin:
         ordinary IRBinOp) rather than calling this method at all; see
         _ir_index_address_or_fallback for when this method is still
         reached (expr.array's own base out of scope for real IR --
-        an ArrayLiteral, or a slice-typed base other than a bare,
-        named Variable).
+        an ArrayLiteral, or a Call, when expr.array is slice-typed).
 
         `expr.array` can be array- OR slice-typed (indexing into a
         slice, `s[i]`, uses this same method) -- see
@@ -376,33 +375,64 @@ class ArraysSlicesMixin:
         """Builds (without lowering) the address, length, and capacity
         of an indexable base as real IR -- returns (ir, addr_value,
         length_value, cap_value), or None when expr's own shape is
-        still out of scope (an ArrayLiteral; any slice-typed
-        expression other than a bare, named Variable -- a Slice, an
-        Index, a Field, or a Call all still need gen_indexable_base_
-        into's own shared-scratch-slot materialization, real,
-        separate follow-up work, not attempted here). Mirrors gen_
-        indexable_base_into's own two-way split and its own full
-        three-value contract -- cap is always computed here too, even
-        by callers (_ir_index_address) that never read it back, for
-        the identical reason gen_indexable_base_into's own docstring
-        gives: cheap enough that one uniform contract beats making it
-        optional.
+        still out of scope (an ArrayLiteral; a Call, when expr is
+        slice-typed -- a composite-returning call is entirely old-
+        style right now, with no real-IR production to delegate to at
+        all; that's separate, calling-convention-level follow-up work,
+        not attempted here). Mirrors gen_indexable_base_into's own
+        two-way split and its own full three-value contract -- cap is
+        always computed here too, even by callers (_ir_index_address)
+        that never read it back, for the identical reason gen_
+        indexable_base_into's own docstring gives: cheap enough that
+        one uniform contract beats making it optional.
 
         ARRAY-typed: delegates to _ir_array_address (Variable/Field/
         Index all in scope, matching gen_array_address_into's own
         three cases exactly); length and cap are both always the same
         compile-time IRConst -- an array has no separate capacity.
 
-        SLICE-typed: only a bare, named Variable is in scope -- a
-        leaf read of its own descriptor's ptr/len/cap fields,
-        mirroring _ir_array_address's own Variable leaf one field
-        over. len/cap are captured as INT (32-bit) Temps directly, not
-        INT64 -- an array/slice's own length or capacity always fits
-        in 32 bits, the same assumption the old-style bounds check's
-        own len_reg_32/cap_operand already make; reading only each
-        field's own lower 4 bytes (little-endian) is exactly
-        equivalent to the old-style 64-bit read followed by
-        narrowing, for a value guaranteed to fit either way."""
+        SLICE-typed, Variable: a leaf read of its own descriptor's
+        ptr/len/cap fields, mirroring _ir_array_address's own Variable
+        leaf one field over. len/cap are captured as INT (32-bit)
+        Temps directly, not INT64 -- an array/slice's own length or
+        capacity always fits in 32 bits, the same assumption the old-
+        style bounds check's own len_reg_32/cap_operand already make;
+        reading only each field's own lower 4 bytes (little-endian) is
+        exactly equivalent to the old-style 64-bit read followed by
+        narrowing, for a value guaranteed to fit either way.
+
+        SLICE-typed, Field/Index (`p.values`, `rows[i]`): unlike the
+        Variable case, there's no fixed, compile-time offset to read
+        three fields from directly -- the descriptor's own address is
+        itself a runtime value, computed via _ir_field_address/_ir_
+        index_address (already generic over the result's own type, so
+        neither needed any change to support this). ptr is read
+        straight off that address via IRLoad; len/cap need their own
+        +8/+16 addresses computed first, via ordinary IRBinOp, since
+        IRLoad always reads at its address's own location, with no
+        offset field of its own. This is also what makes a slice
+        reached through a chain (`outer.inner.values[0]`, or a slice-
+        of-slices `rows[i][j]`, where rows[i] is itself SLICE-typed
+        and reached via this exact branch recursively) fall out for
+        free: _ir_field_address/_ir_index_address already recurse
+        through arbitrary Variable/Field/Index chains on their own.
+
+        SLICE-typed, Slice (`arr[:][0]`, `s[a:b][c:d]`): delegates
+        straight to _ir_slice_into, whose own return shape (ir, ptr,
+        len, cap) already matches this method's own exactly -- there
+        is no scratch-slot materialization to do here at all, unlike
+        the old-style gen_indexable_base_into's own Slice case. That
+        mechanism existed only to work around hand-written assembly's
+        fixed registers; _ir_slice_into already produces its own
+        triple as ordinary, independent Temps, so using them directly
+        is not a shortcut around some missing step, it's simply what
+        the values already are. This is also what makes arbitrarily
+        deep chains (`arr[a:b][c:d][e]`) fall out for free, via the
+        same mutual recursion _ir_index_address/_ir_array_address/
+        this method already use for multi-dimensional arrays -- each
+        nested _ir_slice_into call gets its own fresh Temps, so unlike
+        the old-style shared slot, there is no nested-lifetime safety
+        argument to make here at all."""
         base_type = type_of(expr)
         if base_type.kind == TypeKind.ARRAY:
             if not isinstance(expr, (Variable, Field, Index)):
@@ -414,18 +444,38 @@ class ArraysSlicesMixin:
             size_const = IRConst(base_type.size, Type.INT)
             return addr_ir, addr_value, size_const, size_const
         if base_type.kind == TypeKind.SLICE:
-            if not isinstance(expr, Variable):
-                return None
-            offset = self._local_offset(expr.name)
-            ptr_temp = self._new_temp(Type.INT64)
-            len_temp = self._new_temp(Type.INT)
-            cap_temp = self._new_temp(Type.INT)
-            ir = [
-                IRRaw([MovQ(src=Memory('rbp', offset), dst=Register('rax'))], dst=ptr_temp),
-                IRRaw([Mov(src=Memory('rbp', offset + 8), dst=Register('eax'))], dst=len_temp),
-                IRRaw([Mov(src=Memory('rbp', offset + 16), dst=Register('eax'))], dst=cap_temp),
-            ]
-            return ir, ptr_temp, len_temp, cap_temp
+            if isinstance(expr, Variable):
+                offset = self._local_offset(expr.name)
+                ptr_temp = self._new_temp(Type.INT64)
+                len_temp = self._new_temp(Type.INT)
+                cap_temp = self._new_temp(Type.INT)
+                ir = [
+                    IRRaw([MovQ(src=Memory('rbp', offset), dst=Register('rax'))], dst=ptr_temp),
+                    IRRaw([Mov(src=Memory('rbp', offset + 8), dst=Register('eax'))], dst=len_temp),
+                    IRRaw([Mov(src=Memory('rbp', offset + 16), dst=Register('eax'))], dst=cap_temp),
+                ]
+                return ir, ptr_temp, len_temp, cap_temp
+            if isinstance(expr, (Field, Index)):
+                addr_result = self._ir_field_address(expr) if isinstance(expr, Field) else self._ir_index_address(expr)
+                if addr_result is None:
+                    return None
+                addr_ir, descriptor_addr = addr_result
+                ptr_temp = self._new_temp(Type.INT64)
+                len_addr = self._new_temp(Type.INT64)
+                len_temp = self._new_temp(Type.INT)
+                cap_addr = self._new_temp(Type.INT64)
+                cap_temp = self._new_temp(Type.INT)
+                ir = addr_ir + [
+                    IRLoad(dst=ptr_temp, address=descriptor_addr),
+                    IRBinOp(dst=len_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(8, Type.INT64)),
+                    IRLoad(dst=len_temp, address=len_addr),
+                    IRBinOp(dst=cap_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(16, Type.INT64)),
+                    IRLoad(dst=cap_temp, address=cap_addr),
+                ]
+                return ir, ptr_temp, len_temp, cap_temp
+            if isinstance(expr, Slice):
+                return self._ir_slice_into(expr)
+            return None
         return None
 
     def _ir_index_address(self, expr: Index):
@@ -486,7 +536,7 @@ class ArraysSlicesMixin:
         old-style gen_index_address_into as a single opaque IRRaw when
         expr.array's own base is still out of scope (see _ir_
         indexable_base's own docstring) -- an ArrayLiteral, or a
-        slice-typed base other than a bare Variable. Shared by
+        Call, when expr.array is slice-typed. Shared by
         dispatch.py's gen_expr_ir (a scalar element read) and this
         module's own gen_statement_ir case (a scalar element write,
         via _ir_index_assign) -- both need the identical "use real IR
@@ -649,8 +699,7 @@ class ArraysSlicesMixin:
         resulting {ptr, len, cap} triple as real IR -- returns (ir,
         ptr_value, len_value, cap_value), or None when expr.array's
         own base is out of scope (see _ir_indexable_base) -- an
-        ArrayLiteral, or a slice-typed base other than a bare, named
-        Variable.
+        ArrayLiteral, or a Call, when expr.array is slice-typed.
 
         Mirrors gen_slice_into's own logic exactly, just via real IR:
         resolve low/high (each defaulting to 0 / the base's own

@@ -2,11 +2,18 @@ struct Point:
     int x
     int y
 
+struct Container:
+    []int values
+
 def int main():
     [4]int base = [1, 2, 3, 4]
     Point origin = Point(0, 0)
     []int baseSlice = base[0:3]
     [2]Point points
+    Container c
+    c.values = base[0:3]
+    [1][]int rows
+    rows[0] = base[0:3]
     int total = 0
     int i = 0
     while i < 2000000:
@@ -19,6 +26,9 @@ def int main():
         points[0] = p
         Point extracted = points[0]
         []int sliced = base[i % 3:4]
-        total = (total + copy[0] + p.x + s[0] + extracted.y + sliced[0]) % 1000003
+        int fromField = c.values[i % 3]
+        int fromIndex = rows[0][i % 3]
+        int chained = base[i % 2:4][0]
+        total = (total + copy[0] + p.x + s[0] + extracted.y + sliced[0] + fromField + fromIndex + chained) % 1000003
         i = i + 1
     return total % 256

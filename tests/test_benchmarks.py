@@ -31,7 +31,7 @@ EXPECTED_EXIT_CODES = {
     'array_heavy': 185,
     'struct_heavy': 19,
     'string_heavy': 1,  # r1 == r2 -- two independently-built copies of the same repeated string
-    'copy_heavy': 46,  # whole-array/whole-struct/whole-slice copy (Variable and Field/Index sources), plus slice production, in a hot loop -- s aliases baseSlice aliases base, so s[0]=... visibly mutates base[0] before sliced=base[...] reads it back; verified against a Go-style aliasing simulation, not independent-copy semantics
+    'copy_heavy': 38,  # whole-array/whole-struct/whole-slice copy, slice production, indexing through a slice-typed struct field/array element, and indexing directly into a fresh slice production, in a hot loop -- verified against a Go-style aliasing simulation, not independent-copy semantics
 }
 
 

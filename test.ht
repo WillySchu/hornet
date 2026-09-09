@@ -13,8 +13,7 @@ def int8 test():
     #int8 c = a + b
     #print(c)
     #return a + b
-    []int ints = ret_sl()
-    ints[:][0]
+    print(ret_sl()[0])
     return 0
 
 
