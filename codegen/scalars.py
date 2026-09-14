@@ -77,76 +77,17 @@ class ScalarsMixin:
             instructions.extend(self._instruction_selector._gen_read_temp_into(t_result, dst))
         return instructions
 
-    def _ir_call(self, expr: Call) -> tuple[list, object]:
-        """Builds (without lowering) an ordinary function call's IR.
-
-        Argument marshaling is now per-argument, not per-call: each
-        argument independently tries real IR first, falling back to
-        an opaque, IRRaw-wrapped materialization only for THAT one
-        argument when out of scope -- never forcing the whole call
-        back to old-style just because one argument isn't real-IR-
-        capable yet, unlike this method's own earlier version (which
-        fell back entirely for ANY slice argument). That earlier
-        restriction existed to avoid interleaving native and opaque
-        argument placement within one call -- a genuine hazard when
-        values are placed directly into fixed argument registers as
-        they're computed, since an opaque computation running between
-        two already-placed arguments could clobber one. That hazard
-        doesn't exist here at all: every argument, real-IR or opaque
-        fallback alike, is computed into its own independent Temp
-        first, and IRCall's own lowering is what places all of them
-        into argument registers, together, immediately before the
-        call -- the same "a Temp's home is independent of what
-        computed it" property this whole arc has relied on
-        repeatedly. Mixing native and opaque arguments freely is safe
-        for the identical reason IRCall's own lowering already never
-        needs a push/pop dance between arguments (see its own
-        comment): nothing a Temp could be assigned to overlaps an
-        argument register until IRCall's own lowering runs.
-
-        A scalar argument is its own value (via gen_expr_ir, so a
-        migrated sub-expression stays real IR). An array/struct
-        argument is its own ADDRESS -- via _ir_array_address/_ir_
-        struct_address for a Variable/Field/Index (real IR, and, for
-        arrays, a genuine fix over the old gen_array_arg_address_into,
-        which never supported Field at all), or the existing _gen_
-        materialize_argument_temp_into for an ArrayLiteral/struct-
-        literal Call/composite-returning Call (still one opaque IRRaw,
-        capturing the one address it produces, same as before). A
-        slice-typed argument -- or a bare `none` (checked separately,
-        via isinstance, since NoneLiteral's own type_of is Type.NONE,
-        never SLICE) -- contributes THREE flat IRValues (ptr, len,
-        cap) to args, not one, via _ir_slice_arg: _ir_indexable_base
-        for a Variable/Field/Index/Slice (or three IRConst(0, ...)s
-        for `none` itself), or the existing shared-scratch-slot
-        materialization (gen_slice_value_into) for anything still out
-        of scope (a slice-returning Call, chiefly), read back out via
-        three more IRRaw leaves -- the identical "materialize into a
-        fixed, known location, then read fields back out via fixed-
-        offset leaves" shape _ir_indexable_base's own Variable-slice
-        leaf already uses, just at the shared scratch offset instead
-        of a named variable's own. IRCall's own existing register-
-        placement loop already treats args as a flat, one-value-per-
-        register-slot list -- see its own lowering -- so three flat
-        slice values need no change there at all.
-
-        Returns (ir, t_result), t_result being None for a void call.
-        """
-        total_slots = self._total_arg_slots(expr.args)
-        if total_slots > 6:
-            raise CodegenError(
-                f"Call to '{expr.name}' needs {total_slots} argument "
-                f"register(s) (a slice-typed argument needs 3); this "
-                f"compiler only supports up to 6 (passed via registers "
-                f"per the SysV ABI -- stack-passed arguments aren't "
-                f"implemented)"
-            )
-        result_type = type_of(expr)
-        t_result = None if result_type == Type.VOID else self._new_temp(result_type)
-
+    def _ir_call_arguments(self, args: list) -> tuple:
+        """The shared per-argument marshaling loop between _ir_call
+        and _ir_composite_call -- see _ir_call's own docstring for the
+        full per-argument real-IR-or-fallback reasoning; this is just
+        the extracted loop, returning (arg_ir, arg_values) rather than
+        building the final IRCall itself, since the two callers differ
+        in exactly that (an ordinary dst Temp vs. a hidden hidden-
+        pointer argument with dst=None)."""
         arg_ir = []
         arg_values = []
-        for arg in expr.args:
+        for arg in args:
             arg_type = type_of(arg)
             if arg_type.kind == TypeKind.ARRAY:
                 addr_result = self._ir_array_address(arg) if isinstance(arg, (Variable, Field, Index)) else None
@@ -174,9 +115,100 @@ class ScalarsMixin:
                 ir, value = self.gen_expr_ir(arg)
                 arg_ir.extend(ir)
                 arg_values.append(value)
+        return arg_ir, arg_values
 
+    def _ir_call(self, expr: Call) -> tuple[list, object]:
+        """Builds (without lowering) an ordinary function call's IR.
+
+        Argument marshaling is now per-argument, not per-call: each
+        argument independently tries real IR first, falling back to
+        an opaque, IRRaw-wrapped materialization only for THAT one
+        argument when out of scope -- never forcing the whole call
+        back to old-style just because one argument isn't real-IR-
+        capable yet, unlike this method's own earlier version (which
+        fell back entirely for ANY slice argument). That earlier
+        restriction existed to avoid interleaving native and opaque
+        argument placement within one call -- a genuine hazard when
+        values are placed directly into fixed argument registers as
+        they're computed, since an opaque computation running between
+        two already-placed arguments could clobber one. That hazard
+        doesn't exist here at all: every argument, real-IR or opaque
+        fallback alike, is computed into its own independent Temp
+        first, and IRCall's own lowering is what places all of them
+        into argument registers, together, immediately before the
+        call -- the same "a Temp's home is independent of what
+        computed it" property this whole arc has relied on
+        repeatedly. Mixing native and opaque arguments freely is safe
+        for the identical reason IRCall's own lowering already never
+        needs a push/pop dance between arguments (see its own
+        comment): nothing a Temp could be assigned to overlaps an
+        argument register until IRCall's own lowering runs.
+
+        See _ir_call_arguments for the actual per-argument dispatch
+        (shared with _ir_composite_call, for a composite-returning
+        call, which needs the identical marshaling for its own
+        ordinary arguments, just with a hidden pointer prepended and
+        dst=None instead of an ordinary result Temp).
+
+        Returns (ir, t_result), t_result being None for a void call.
+        """
+        total_slots = self._total_arg_slots(expr.args)
+        if total_slots > 6:
+            raise CodegenError(
+                f"Call to '{expr.name}' needs {total_slots} argument "
+                f"register(s) (a slice-typed argument needs 3); this "
+                f"compiler only supports up to 6 (passed via registers "
+                f"per the SysV ABI -- stack-passed arguments aren't "
+                f"implemented)"
+            )
+        result_type = type_of(expr)
+        t_result = None if result_type == Type.VOID else self._new_temp(result_type)
+        arg_ir, arg_values = self._ir_call_arguments(expr.args)
         ir = arg_ir + [IRCall(dst=t_result, name=expr.name, args=arg_values)]
         return ir, t_result
+
+    def _ir_composite_call(self, dst_address, call_expr: Call, value_type: Type) -> list:
+        """Builds (without lowering) a composite-returning function
+        call's IR, writing its result through dst_address -- an
+        ordinary INT64-typed IRValue, however the caller already has
+        it: a freshly-computed _ir_array_address/_ir_struct_address/
+        _ir_slice_address for a VarDecl/Assign/IndexAssign/FieldAssign
+        target, or the current function's own received hidden pointer
+        for a forwarding `return someFn()` (see gen_statement_ir's own
+        Return case). This method doesn't care which -- both are just
+        an address to it.
+
+        The key realization making this possible with no new IR
+        concept at all: the hidden-pointer convention IS just
+        "dst_address as args[0], every genuine argument shifted one
+        register position later, dst=None since the callee never
+        leaves a scalar result in %eax at all" -- which IRCall's own,
+        already-generic lowering (`for i, arg_value in enumerate(
+        instr.args): load into ARG_REGISTERS_32[i]`) already produces
+        exactly, with no changes needed to IRCall itself. dst=None
+        here means "nothing to capture from %eax," not "this call is
+        void" -- the two happen to coincide for every OTHER IRCall
+        this compiler builds, but not this one: the call is
+        definitely not void at the Hornet-language level, it just has
+        no scalar result for %eax to hold.
+
+        Reuses _ir_call_arguments directly for the genuine arguments
+        (the identical per-argument real-IR-or-fallback dispatch
+        _ir_call itself uses), then prepends dst_address as the
+        actual first argument value -- nothing about that loop needs
+        to know a hidden pointer is involved at all."""
+        total_slots = 1 + self._total_arg_slots(call_expr.args)
+        if total_slots > 6:
+            raise CodegenError(
+                f"Call to '{call_expr.name}' needs {total_slots} argument "
+                f"register(s) (the hidden return pointer needs its own "
+                f"slot, plus 3 for a slice-typed argument); this "
+                f"compiler only supports up to 6 (passed via registers "
+                f"per the SysV ABI -- stack-passed arguments aren't "
+                f"implemented)"
+            )
+        arg_ir, arg_values = self._ir_call_arguments(call_expr.args)
+        return arg_ir + [IRCall(dst=None, name=call_expr.name, args=[dst_address] + arg_values)]
 
     def gen_short_circuit(
             self, expr: Binary,

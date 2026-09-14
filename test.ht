@@ -18,8 +18,9 @@ def [5]int test([5]int arr):
 def int8 main():
     HasArray ha = HasArray([1,2,3,4,5])
     # TODO(will): Fix these commented out examples.
-    # ha.values = test(ha.values)
-    # test(ha.values)
+    #ha.values = test(ha.values)
+    #test(ha.values)
     [5]int values = ha.values
     values = test(values)
+    test(values)
     return 0

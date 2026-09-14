@@ -71,23 +71,38 @@ class StatementsMixin:
         value shapes, for all four statement kinds alike: a Variable/
         Field/Index value (an IRCopy between two captured addresses --
         see _ir_copy_assign); a Slice production, for a slice-typed
-        target (see _ir_slice_into/_ir_write_slice_descriptor); and an
+        target (see _ir_slice_into/_ir_write_slice_descriptor); an
         append(...) call, likewise slice-typed-target only (see _ir_
-        append_call/_ir_write_slice_descriptor). For a slice-typed
+        append_call/_ir_write_slice_descriptor); and an ordinary
+        (non-struct-literal, non-append) function call returning a
+        composite value, via the hidden-pointer convention (see _ir_
+        composite_call) -- writing directly through this target's own
+        address, computed the same way _ir_copy_assign's own does, with
+        no intermediate copy ever materialized. For a slice-typed
         VarDecl specifically, no initializer at all is real IR too
         (the nil zero value, three IRConst(0, ...)s through _ir_
         write_slice_descriptor -- see that case's own comment for why
         this is cheap enough to close even though array/struct's own
         zero-init isn't, yet).
 
+        Return's own composite case is narrower: only forwarding
+        another composite-returning call's result (`return someFn()`)
+        is real IR (the current function's own received hidden
+        pointer, read via an ordinary address-as-a-Temp leaf, handed
+        straight to the same _ir_composite_call) -- a Variable/Field/
+        Index/ArrayLiteral/struct-literal return value still falls
+        back, a real, deliberate scope boundary matching how narrowly
+        everything else in this arc has been scoped, not an oversight.
+
         Falls back to wrapping gen_statement itself, as a single
         opaque IRRaw, for everything else (a no-initializer array/
         struct VarDecl; an array/struct/slice-typed VarDecl/Assign/
         IndexAssign/FieldAssign whose value is an ArrayLiteral/struct-
-        literal Call or an ordinary composite-returning Call; Break,
-        Continue, and an ArrayLiteral/Slice-valued ExprStmt) -- a
-        real, deliberate scope boundary, not an oversight: those
-        still need their own IR-native handling as a follow-up.
+        literal Call; every non-Call-forwarding composite Return case
+        just described; Break, Continue, and an ArrayLiteral/Slice-
+        valued ExprStmt) -- a real, deliberate scope boundary, not an
+        oversight: those still need their own IR-native handling as a
+        follow-up.
         """
         if isinstance(stmt, Return):
             is_composite_return = isinstance(stmt.value, NoneLiteral) or (
@@ -95,6 +110,36 @@ class StatementsMixin:
             )
             if not is_composite_return:
                 return self._ir_return(stmt.value)
+            # A composite return whose own value is an ordinary
+            # function call (`return someFn()`) -- forwards the
+            # CURRENT function's own received hidden pointer straight
+            # through as the destination for the INNER call, via the
+            # exact same _ir_composite_call every other composite-
+            # returning-call case above uses, with no intermediate
+            # copy ever materialized -- the identical "just pass the
+            # same address one level deeper" forwarding gen_return's
+            # own old-style version already does, now built from an
+            # ordinary address-as-a-Temp leaf (reading this function's
+            # own fixed, known hidden_return_ptr_offset) rather than a
+            # raw %rax reload. IRReturn(value=None) still needs to run
+            # -- there's no scalar result to pass back, but the
+            # epilogue still has to execute -- matching the bare-
+            # return shape exactly, since the result is already fully
+            # written through the pointer by the time control reaches
+            # it. Every OTHER composite return shape (a Variable/
+            # Field/Index/ArrayLiteral/struct-literal Call, or `return
+            # none`) still falls through to the old-style catch-all
+            # below -- a real, deliberate scope boundary matching how
+            # narrowly everything else in this arc has been scoped,
+            # not an oversight.
+            if isinstance(stmt.value, Call) and stmt.value.name != 'append' and stmt.value.name not in self.struct_registry:
+                value_type = type_of(stmt.value)
+                hidden_ptr = self._new_temp(Type.INT64)
+                hidden_ptr_ir = [IRRaw(
+                    [MovQ(src=Memory('rbp', self._hidden_return_ptr_offset), dst=Register('rax'))], dst=hidden_ptr,
+                )]
+                call_ir = self._ir_composite_call(hidden_ptr, stmt.value, value_type)
+                return hidden_ptr_ir + call_ir + [IRReturn(value=None)]
         elif isinstance(stmt, If):
             then_label = self.new_label("if_then")
             else_label = self.new_label("if_else")
@@ -201,6 +246,36 @@ class StatementsMixin:
                     append_ir, ptr_value, len_value, cap_value = production
                     self._bind_local(stmt)
                     return append_ir + self._ir_write_slice_descriptor(Variable(name=stmt.name), ptr_value, len_value, cap_value)
+            # An array/struct/slice-typed initializer that's an
+            # ordinary function call (not append -- already handled,
+            # more specifically, just above; not a struct-literal Call
+            # either -- those are construction, disambiguated the same
+            # way semantic.py's own check_call does, by registry
+            # membership, not by shape) -- writes directly through
+            # this variable's own address via the hidden-pointer
+            # convention (see _ir_composite_call's own docstring),
+            # with no intermediate copy at all. Needs the SAME heap-
+            # allocation-first step the Variable/Field/Index case
+            # above needs, and for the identical reason: this
+            # destination is BRAND NEW, so a heap-allocated one needs
+            # its own fresh backing allocation made BEFORE this
+            # variable's own address is ever computed.
+            if var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE) and (
+                    isinstance(stmt.init, Call) and stmt.init.name != 'append' and stmt.init.name not in self.struct_registry):
+                offset = self._bind_local(stmt)
+                ir = []
+                if var_type.kind != TypeKind.SLICE and self._is_heap_allocated(id(stmt), var_type):
+                    ir.append(IRRaw(
+                        self._gen_malloc_array(var_type) + [MovQ(src=Register('rax'), dst=Memory('rbp', offset))]
+                    ))
+                address_fn = {
+                    TypeKind.ARRAY: self._ir_array_address,
+                    TypeKind.STRUCT: self._ir_struct_address,
+                    TypeKind.SLICE: self._ir_slice_address,
+                }[var_type.kind]
+                dst_ir, dst_address = address_fn(Variable(name=stmt.name))
+                ir.extend(dst_ir)
+                return ir + self._ir_composite_call(dst_address, stmt.init, var_type)
             # A slice-typed VarDecl with NO initializer at all -- its
             # implicit zero value is the nil slice (ptr=0, len=0,
             # cap=0), needing no computation whatsoever: three
@@ -254,6 +329,16 @@ class StatementsMixin:
                 if production is not None:
                     append_ir, ptr_value, len_value, cap_value = production
                     return append_ir + self._ir_write_slice_descriptor(Variable(name=stmt.name), ptr_value, len_value, cap_value)
+            # Same ordinary-function-call case as VarDecl's own --
+            # append already handled, more specifically, just above.
+            if var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE) and (
+                    isinstance(stmt.value, Call) and stmt.value.name != 'append' and stmt.value.name not in self.struct_registry):
+                dst_ir, dst_address = {
+                    TypeKind.ARRAY: self._ir_array_address,
+                    TypeKind.STRUCT: self._ir_struct_address,
+                    TypeKind.SLICE: self._ir_slice_address,
+                }[var_type.kind](Variable(name=stmt.name))
+                return dst_ir + self._ir_composite_call(dst_address, stmt.value, var_type)
         elif isinstance(stmt, IndexAssign):
             # Same scope boundary as gen_index_assign itself. ARRAY
             # never occurs here at all (IndexAssign's own grammar
@@ -278,6 +363,12 @@ class StatementsMixin:
                     append_ir, ptr_value, len_value, cap_value = production
                     dst_expr = Index(array=stmt.array, index=stmt.index)
                     return append_ir + self._ir_write_slice_descriptor(dst_expr, ptr_value, len_value, cap_value)
+            if element_type.kind in (TypeKind.STRUCT, TypeKind.SLICE) and (
+                    isinstance(stmt.value, Call) and stmt.value.name != 'append' and stmt.value.name not in self.struct_registry):
+                dst_expr = Index(array=stmt.array, index=stmt.index)
+                address_fn = self._ir_struct_address if element_type.kind == TypeKind.STRUCT else self._ir_slice_address
+                dst_ir, dst_address = address_fn(dst_expr)
+                return dst_ir + self._ir_composite_call(dst_address, stmt.value, element_type)
         elif isinstance(stmt, FieldAssign):
             # Same idea one level over -- FieldAssign's grammar can
             # ALSO produce an ARRAY-typed field (unlike IndexAssign).
@@ -299,6 +390,16 @@ class StatementsMixin:
                     append_ir, ptr_value, len_value, cap_value = production
                     dst_expr = Field(base=stmt.base, name=stmt.name)
                     return append_ir + self._ir_write_slice_descriptor(dst_expr, ptr_value, len_value, cap_value)
+            if field_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE) and (
+                    isinstance(stmt.value, Call) and stmt.value.name != 'append' and stmt.value.name not in self.struct_registry):
+                dst_expr = Field(base=stmt.base, name=stmt.name)
+                address_fn = {
+                    TypeKind.ARRAY: self._ir_array_address,
+                    TypeKind.STRUCT: self._ir_struct_address,
+                    TypeKind.SLICE: self._ir_slice_address,
+                }[field_type.kind]
+                dst_ir, dst_address = address_fn(dst_expr)
+                return dst_ir + self._ir_composite_call(dst_address, stmt.value, field_type)
         elif isinstance(stmt, ExprStmt) and not isinstance(stmt.expr, (ArrayLiteral, Slice)):
             ir, _ = self.gen_expr_ir(stmt.expr)
             return ir
@@ -605,6 +706,15 @@ class StatementsMixin:
         # (forwarding another array/slice-returning call's result)
         # free: the Call case just passes that same address one level
         # deeper, with no intermediate copy ever materialized.
+        #
+        # Real IR now instead, for exactly that Call-forwarding case
+        # (a Variable/Field/Index/ArrayLiteral/struct-literal value
+        # still reaches this old-style path) -- see gen_statement_ir's
+        # own Return case, which reads the identical hidden_return_
+        # ptr_offset via an ordinary address-as-a-Temp leaf, then
+        # reuses _ir_composite_call (shared with every other composite-
+        # returning-call case in this arc) rather than calling this
+        # method at all.
         value_type = type_of(stmt.value)
         if value_type.kind == TypeKind.ARRAY:
             ptr_reg = Register('rax')

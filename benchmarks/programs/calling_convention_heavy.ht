@@ -7,6 +7,12 @@ def int sumArray([3]int arr):
 def int sumSlice([]int s):
     return s[0] + s[1]
 
+def [3]int makeArray(int seed):
+    return [seed % 7, (seed + 1) % 7, (seed + 2) % 7]
+
+def [3]int forwardArray(int seed):
+    return makeArray(seed)
+
 def int main():
     Container container
     int total = 0
@@ -18,6 +24,10 @@ def int main():
         int sumArr = sumArray(arr)
         int sumSl = sumSlice(s)
         int sumField = sumArray(container.values)
-        total = (total + sumArr + sumSl + sumField) % 1000003
+        [3]int made = makeArray(i)
+        int sumMade = made[0] + made[1] + made[2]
+        [3]int forwarded = forwardArray(i)
+        int sumForwarded = forwarded[0] + forwarded[1] + forwarded[2]
+        total = (total + sumArr + sumSl + sumField + sumMade + sumForwarded) % 1000003
         i = i + 1
     return total % 256
