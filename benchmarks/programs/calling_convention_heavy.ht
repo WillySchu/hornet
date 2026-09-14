@@ -13,6 +13,10 @@ def [3]int makeArray(int seed):
 def [3]int forwardArray(int seed):
     return makeArray(seed)
 
+def [3]int returnLocal(int seed):
+    [3]int local = [seed % 5, (seed + 1) % 5, (seed + 2) % 5]
+    return local
+
 def int main():
     Container container
     int total = 0
@@ -28,6 +32,8 @@ def int main():
         int sumMade = made[0] + made[1] + made[2]
         [3]int forwarded = forwardArray(i)
         int sumForwarded = forwarded[0] + forwarded[1] + forwarded[2]
-        total = (total + sumArr + sumSl + sumField + sumMade + sumForwarded) % 1000003
+        [3]int returned = returnLocal(i)
+        int sumReturned = returned[0] + returned[1] + returned[2]
+        total = (total + sumArr + sumSl + sumField + sumMade + sumForwarded + sumReturned) % 1000003
         i = i + 1
     return total % 256

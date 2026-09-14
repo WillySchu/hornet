@@ -10,7 +10,7 @@
     },
     "instruction_count": 105,
     "name": "arithmetic_heavy",
-    "runtime_seconds": 0.11391109799990318
+    "runtime_seconds": 0.1126317599999993
   },
   "array_heavy": {
     "allocation": {
@@ -23,20 +23,20 @@
     },
     "instruction_count": 287,
     "name": "array_heavy",
-    "runtime_seconds": 0.03298544300002959
+    "runtime_seconds": 0.033726927999992995
   },
   "calling_convention_heavy": {
     "allocation": {
-      "allocated": 69,
-      "eligible": 69,
+      "allocated": 84,
+      "eligible": 84,
       "named_local_excluded": 2,
       "spilled": 0,
-      "total_temps": 93,
-      "unsafe_span_excluded": 22
+      "total_temps": 112,
+      "unsafe_span_excluded": 26
     },
-    "instruction_count": 593,
+    "instruction_count": 724,
     "name": "calling_convention_heavy",
-    "runtime_seconds": 0.11650269899996601
+    "runtime_seconds": 0.12903911799998014
   },
   "copy_heavy": {
     "allocation": {
@@ -49,7 +49,7 @@
     },
     "instruction_count": 916,
     "name": "copy_heavy",
-    "runtime_seconds": 0.07443413499993312
+    "runtime_seconds": 0.06779434899999615
   },
   "loop_accumulator": {
     "allocation": {
@@ -62,7 +62,7 @@
     },
     "instruction_count": 47,
     "name": "loop_accumulator",
-    "runtime_seconds": 0.05828893299997162
+    "runtime_seconds": 0.059207519000011644
   },
   "recursive_fibonacci": {
     "allocation": {
@@ -75,7 +75,7 @@
     },
     "instruction_count": 76,
     "name": "recursive_fibonacci",
-    "runtime_seconds": 0.049107810999998946
+    "runtime_seconds": 0.04715992800001345
   },
   "string_heavy": {
     "allocation": {
@@ -88,7 +88,7 @@
     },
     "instruction_count": 120,
     "name": "string_heavy",
-    "runtime_seconds": 0.024707999999918684
+    "runtime_seconds": 0.021191731000016034
   },
   "struct_heavy": {
     "allocation": {
@@ -101,6 +101,6 @@
     },
     "instruction_count": 163,
     "name": "struct_heavy",
-    "runtime_seconds": 0.03209096800003408
+    "runtime_seconds": 0.03145836999999574
   }
 }

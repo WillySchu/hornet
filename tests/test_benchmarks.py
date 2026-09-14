@@ -32,7 +32,7 @@ EXPECTED_EXIT_CODES = {
     'struct_heavy': 19,
     'string_heavy': 1,  # r1 == r2 -- two independently-built copies of the same repeated string
     'copy_heavy': 9,  # whole-array/whole-struct/whole-slice copy, slice production, indexing through a slice-typed struct field/array element, chained slice production, repeated append, a no-initializer slice, and slice-vs-none comparison, in a hot loop -- verified against a Go-style aliasing simulation, not independent-copy semantics
-    'calling_convention_heavy': 237,  # array-typed, slice-typed, and array-typed-struct-field function arguments (the last exercising the Field-argument fix), plus composite-returning function calls including forwarding one level deep, in a hot loop
+    'calling_convention_heavy': 201,  # array-typed, slice-typed, and array-typed-struct-field function arguments (the last exercising the Field-argument fix), plus composite-returning function calls including forwarding one level deep and a bare local Variable return, in a hot loop
 }
 
 
