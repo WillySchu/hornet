@@ -338,10 +338,13 @@ class DispatchMixin:
     def _ir_expr_binary(self, expr: Binary) -> tuple[list, IRValue]:
         """The IR-native counterpart to gen_binary_into's own three-way
         dispatch: short-circuit AND/OR (already real IR, via
-        _ir_short_circuit), slice/array/struct equality and string
-        concat/compare (none of those migrated -- wrapped via IRRaw,
-        each around its own existing method), or the ordinary
-        arithmetic/comparison case (already real IR, via _ir_binary)."""
+        _ir_short_circuit), slice-vs-none comparison (real IR now too,
+        for a Variable/Field/Index/Slice base -- see _ir_slice_none_
+        comparison; an ArrayLiteral or slice-typed Call base still
+        falls back), array/struct equality and string concat/compare
+        (none of those migrated yet -- wrapped via IRRaw, each around
+        its own existing method), or the ordinary arithmetic/
+        comparison case (already real IR, via _ir_binary)."""
         if expr.op == BinaryOp.AND:
             return self._ir_short_circuit(expr, short_circuit_value=0, label_prefix="and")
         if expr.op == BinaryOp.OR:
@@ -354,6 +357,9 @@ class DispatchMixin:
                 return [IRRaw(self.gen_string_compare_into(expr, Register('eax')), dst=t)], t
         if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
             if type_of(expr.left).kind == TypeKind.SLICE or type_of(expr.right).kind == TypeKind.SLICE:
+                result = self._ir_slice_none_comparison(expr)
+                if result is not None:
+                    return result
                 t = self._new_temp(Type.BOOL)
                 return [IRRaw(self.gen_slice_none_comparison_into(expr, Register('eax')), dst=t)], t
             if type_of(expr.left).kind == TypeKind.ARRAY:

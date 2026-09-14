@@ -1732,6 +1732,33 @@ class ArraysSlicesMixin:
         instructions.append(Label(loop_done))
         return instructions
 
+    def _ir_slice_none_comparison(self, expr: Binary):
+        """Builds (without lowering) `slice_expr == none` or
+        `slice_expr != none` (in either operand order) as real IR --
+        returns (ir, value), or None when slice_expr's own base is
+        out of scope (see _ir_indexable_base's own docstring) -- an
+        ArrayLiteral, or a Call, when slice_expr is slice-typed.
+
+        Reuses _ir_indexable_base for the slice's own address,
+        discarding length/cap -- the same "keep one of three, discard
+        the rest" shape _ir_len_call already uses. An ordinary
+        IRBinOp (expr.op, ptr, IRConst(0, INT64)) already produces
+        exactly the right comparison, with no new IR op needed at
+        all: gen_binary_op's own existing dispatch already picks CmpQ
+        (64-bit) whenever operand_type is INT64, for ANY comparison
+        operator, not just arithmetic ones -- see its own docstring.
+        This matches gen_slice_none_comparison_into's own "checks
+        specifically whether the slice's ptr field is null" semantics
+        (Go's nil-vs-empty-slice distinction) exactly."""
+        slice_expr = expr.left if type_of(expr.left).kind == TypeKind.SLICE else expr.right
+        base = self._ir_indexable_base(slice_expr)
+        if base is None:
+            return None
+        base_ir, ptr, length, cap = base
+        t_result = self._new_temp(Type.BOOL)
+        check = IRBinOp(dst=t_result, op=expr.op, left=ptr, right=IRConst(0, Type.INT64))
+        return base_ir + [check], t_result
+
     def gen_slice_none_comparison_into(self, expr: Binary, dst: Register) -> list[Instruction]:
         """Computes `slice_expr == none` or `slice_expr != none` (in
         either operand order) into dst -- checking specifically
@@ -1756,6 +1783,14 @@ class ArraysSlicesMixin:
         comparison in this file uses -- checking only a pointer's low
         32 bits against zero could, in principle, miss a real, non-null
         pointer whose low 32 bits happen to be zero.
+
+        Real IR now instead, for a Variable/Field/Index/Slice base --
+        see _ir_slice_none_comparison, which replicates this exact
+        same check via _ir_indexable_base and an ordinary IRBinOp
+        rather than calling this method at all; this old-style path
+        is still reached for an ArrayLiteral or a slice-typed Call
+        base, matching gen_indexable_base_into's own remaining scope
+        exactly.
         """
         slice_expr = expr.left if type_of(expr.left).kind == TypeKind.SLICE else expr.right
         addr_reg = Register('rbx')

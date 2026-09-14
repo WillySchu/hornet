@@ -6,7 +6,7 @@ else/end) every branching or looping construct here builds on."""
 
 from codegen.assembly_ast import Instruction, MovQ, Register, Memory, Imm, Push, Pop, Mov, Jmp, LeaQ, MovB
 from codegen.errors import CodegenError
-from codegen.ir import IRRaw, IRReturn, IRBranch, IRLabel, IRJump, IRMove, IRStore, IRCopy
+from codegen.ir import IRRaw, IRReturn, IRBranch, IRLabel, IRJump, IRMove, IRStore, IRCopy, IRConst
 from codegen.utils import type_of
 from parser import (
     ArrayLiteral,
@@ -62,20 +62,32 @@ class StatementsMixin:
         all the way down), a scalar VarDecl-with-initializer, Assign,
         IndexAssign, or FieldAssign (an IRMove into a variable's own
         persistent Temp, or an IRStore through an address -- see
-        _ir_index_assign/_ir_field_assign -- for the latter two), an
-        array/struct-typed VarDecl/Assign/IndexAssign/FieldAssign whose
-        value is a Variable/Field/Index (an IRCopy between two
-        captured addresses -- see _ir_copy_assign), and a bare
-        expression statement (via gen_expr_ir, discarding whatever
-        value comes back). Falls back to wrapping gen_statement
-        itself, as a single opaque IRRaw, for everything else (a
-        no-initializer or slice-typed VarDecl, a slice-typed Assign/
-        IndexAssign/FieldAssign, an array/struct-typed one whose value
-        is an ArrayLiteral/struct-literal Call or an ordinary
-        composite-returning Call, Break, Continue, and an
-        ArrayLiteral/Slice-valued ExprStmt) -- a real, deliberate scope
-        boundary, not an oversight: those still need their own
-        IR-native handling as a follow-up.
+        _ir_index_assign/_ir_field_assign -- for the latter two), and
+        a bare expression statement (via gen_expr_ir, discarding
+        whatever value comes back).
+
+        An array/struct/slice-typed VarDecl/Assign/IndexAssign/
+        FieldAssign is also real IR now, across several distinct
+        value shapes, for all four statement kinds alike: a Variable/
+        Field/Index value (an IRCopy between two captured addresses --
+        see _ir_copy_assign); a Slice production, for a slice-typed
+        target (see _ir_slice_into/_ir_write_slice_descriptor); and an
+        append(...) call, likewise slice-typed-target only (see _ir_
+        append_call/_ir_write_slice_descriptor). For a slice-typed
+        VarDecl specifically, no initializer at all is real IR too
+        (the nil zero value, three IRConst(0, ...)s through _ir_
+        write_slice_descriptor -- see that case's own comment for why
+        this is cheap enough to close even though array/struct's own
+        zero-init isn't, yet).
+
+        Falls back to wrapping gen_statement itself, as a single
+        opaque IRRaw, for everything else (a no-initializer array/
+        struct VarDecl; an array/struct/slice-typed VarDecl/Assign/
+        IndexAssign/FieldAssign whose value is an ArrayLiteral/struct-
+        literal Call or an ordinary composite-returning Call; Break,
+        Continue, and an ArrayLiteral/Slice-valued ExprStmt) -- a
+        real, deliberate scope boundary, not an oversight: those
+        still need their own IR-native handling as a follow-up.
         """
         if isinstance(stmt, Return):
             is_composite_return = isinstance(stmt.value, NoneLiteral) or (
@@ -189,6 +201,23 @@ class StatementsMixin:
                     append_ir, ptr_value, len_value, cap_value = production
                     self._bind_local(stmt)
                     return append_ir + self._ir_write_slice_descriptor(Variable(name=stmt.name), ptr_value, len_value, cap_value)
+            # A slice-typed VarDecl with NO initializer at all -- its
+            # implicit zero value is the nil slice (ptr=0, len=0,
+            # cap=0), needing no computation whatsoever: three
+            # compile-time IRConst(0, ...) values handed straight to
+            # _ir_write_slice_descriptor, the same helper every other
+            # slice-producing case above already uses to write its own
+            # result. Array/struct's own no-initializer case still
+            # needs composite-aware zero-init (recursively zeroing
+            # every field/element, potentially through further nested
+            # composites) and stays old-style for now -- a slice's own
+            # zero value is uniquely trivial among the three, with
+            # nothing to recurse into at all.
+            if var_type.kind == TypeKind.SLICE and stmt.init is None:
+                self._bind_local(stmt)
+                zero_ptr = IRConst(0, Type.INT64)
+                zero_int = IRConst(0, Type.INT)
+                return self._ir_write_slice_descriptor(Variable(name=stmt.name), zero_ptr, zero_int, zero_int)
         elif isinstance(stmt, Assign):
             # Same shape as the VarDecl case above, for an existing
             # scalar variable -- `var_type` here is necessarily

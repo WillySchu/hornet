@@ -15,6 +15,7 @@ def int main():
     [1][]int rows
     rows[0] = base[0:3]
     []int growing = none
+    []int noInit
     int total = 0
     int i = 0
     while i < 2000000:
@@ -34,6 +35,9 @@ def int main():
             growing = none
         growing = append(growing, i % 7)
         int appended = growing[len(growing) - 1]
-        total = (total + copy[0] + p.x + s[0] + extracted.y + sliced[0] + fromField + fromIndex + chained + appended) % 1000003
+        int isNil = 0
+        if noInit == none:
+            isNil = 1
+        total = (total + copy[0] + p.x + s[0] + extracted.y + sliced[0] + fromField + fromIndex + chained + appended + isNil) % 1000003
         i = i + 1
     return total % 256

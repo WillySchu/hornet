@@ -10,7 +10,7 @@
     },
     "instruction_count": 105,
     "name": "arithmetic_heavy",
-    "runtime_seconds": 0.13363871800001448
+    "runtime_seconds": 0.1325148270000227
   },
   "array_heavy": {
     "allocation": {
@@ -23,20 +23,20 @@
     },
     "instruction_count": 287,
     "name": "array_heavy",
-    "runtime_seconds": 0.03966829800000937
+    "runtime_seconds": 0.039069306999977016
   },
   "copy_heavy": {
     "allocation": {
-      "allocated": 112,
-      "eligible": 115,
+      "allocated": 119,
+      "eligible": 122,
       "named_local_excluded": 0,
       "spilled": 3,
-      "total_temps": 158,
-      "unsafe_span_excluded": 43
+      "total_temps": 167,
+      "unsafe_span_excluded": 45
     },
-    "instruction_count": 872,
+    "instruction_count": 916,
     "name": "copy_heavy",
-    "runtime_seconds": 0.08568627100001436
+    "runtime_seconds": 0.08978505099997847
   },
   "loop_accumulator": {
     "allocation": {
@@ -49,7 +49,7 @@
     },
     "instruction_count": 47,
     "name": "loop_accumulator",
-    "runtime_seconds": 0.06491782099999455
+    "runtime_seconds": 0.06894152199998871
   },
   "recursive_fibonacci": {
     "allocation": {
@@ -62,7 +62,7 @@
     },
     "instruction_count": 76,
     "name": "recursive_fibonacci",
-    "runtime_seconds": 0.054450260000010076
+    "runtime_seconds": 0.05615772400000196
   },
   "string_heavy": {
     "allocation": {
@@ -75,7 +75,7 @@
     },
     "instruction_count": 126,
     "name": "string_heavy",
-    "runtime_seconds": 0.02367506199999525
+    "runtime_seconds": 0.029161328999975922
   },
   "struct_heavy": {
     "allocation": {
@@ -88,6 +88,6 @@
     },
     "instruction_count": 163,
     "name": "struct_heavy",
-    "runtime_seconds": 0.036842635999988715
+    "runtime_seconds": 0.036750056000016684
   }
 }
