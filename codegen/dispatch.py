@@ -292,6 +292,15 @@ class DispatchMixin:
             return [], IRConst(expr.value, type_of(expr))
         if isinstance(expr, BoolLiteral):
             return [], IRConst(1 if expr.value else 0, Type.BOOL)
+        if isinstance(expr, StringLiteral):
+            # A single instruction (LeaQ into a static .data label --
+            # see gen_string_literal_into's own docstring), captured
+            # via IRRaw the same way every other single-instruction
+            # leaf in this arc is (a named variable's own address,
+            # ...): not a genuine computation to make inspectable,
+            # just materializing a fixed, compile-time-known location.
+            t = self._new_temp(Type.STR)
+            return [IRRaw(self.gen_string_literal_into(expr, Register('eax')), dst=t)], t
         if isinstance(expr, Variable):
             return [], self._local_temp(expr.name)
         if isinstance(expr, Index) and type_of(expr).kind not in (TypeKind.ARRAY, TypeKind.STRUCT):
@@ -341,8 +350,12 @@ class DispatchMixin:
         _ir_short_circuit), slice-vs-none comparison (real IR now too,
         for a Variable/Field/Index/Slice base -- see _ir_slice_none_
         comparison; an ArrayLiteral or slice-typed Call base still
-        falls back), array/struct equality and string concat/compare
-        (none of those migrated yet -- wrapped via IRRaw, each around
+        falls back), string concat/compare (also real IR now, via
+        _ir_string_concat/_ir_string_compare -- composed entirely from
+        ordinary IRCall/IRBinOp, since IRCall's own lowering is
+        already generic over any callee name, external C library
+        functions included, with no new IR concept needed), array/
+        struct equality (not migrated yet -- wrapped via IRRaw, around
         its own existing method), or the ordinary arithmetic/
         comparison case (already real IR, via _ir_binary)."""
         if expr.op == BinaryOp.AND:
@@ -350,11 +363,10 @@ class DispatchMixin:
         if expr.op == BinaryOp.OR:
             return self._ir_short_circuit(expr, short_circuit_value=1, label_prefix="or")
         if type_of(expr.left) == Type.STR:
-            t = self._new_temp(type_of(expr))
             if expr.op == BinaryOp.ADD:
-                return [IRRaw(self.gen_string_concat_into(expr, Register('eax')), dst=t)], t
+                return self._ir_string_concat(expr)
             if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
-                return [IRRaw(self.gen_string_compare_into(expr, Register('eax')), dst=t)], t
+                return self._ir_string_compare(expr)
         if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
             if type_of(expr.left).kind == TypeKind.SLICE or type_of(expr.right).kind == TypeKind.SLICE:
                 result = self._ir_slice_none_comparison(expr)

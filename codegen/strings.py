@@ -44,6 +44,7 @@ from codegen.assembly_ast import (
 )
 from codegen.errors import CodegenError
 from codegen.utils import as_byte_register, type_byte_width, type_of, as_qword_register, COMPARISON_CONDITION_CODES
+from codegen.ir import IRBinOp, IRConst, IRCall
 from parser import Call, Variable, Field, Index, StringLiteral, Binary, Node, BinaryOp
 from semantic import Type, TypeKind
 
@@ -1057,6 +1058,97 @@ class StringsMixin:
         self.string_literals.append((label, expr.value))
         return [LeaQ(label=label, dst=as_qword_register(dst))]
 
+    def _ir_string_concat(self, expr: Binary):
+        """Builds (without lowering) `left + right` (both str) as real
+        IR -- returns (ir, value). Reuses ordinary IRCall directly for
+        strlen/malloc/strcpy/strcat: IRCall's own lowering is already
+        fully generic (just `CallInstr(instr.name)`), with no notion
+        of "Hornet function" baked in, so an external C library call
+        needs no new IR concept at all, unlike append's own
+        IRAppendGrow -- this is real IR entirely from EXISTING pieces
+        (IRCall, IRBinOp), composed.
+
+        left/right are each evaluated via gen_expr_ir now (a migrated
+        sub-expression -- another concatenation, a scalar Call --
+        stays real IR instead of being immediately, separately
+        lowered), rather than gen_string_concat_into's own gen_expr_
+        into. This is also what makes the old-style version's own
+        careful "protect left across evaluating right" stack dance
+        unnecessary here: left_value is already sitting safely in its
+        own Temp home (register or memory, via the allocator) the
+        moment gen_expr_ir(expr.left) returns, regardless of what
+        evaluating right does internally -- the same "a Temp's home is
+        independent of what computed it" property this whole arc has
+        relied on repeatedly (IRCopy's own two-address capture,
+        _ir_index_address's own protection-free design, ...).
+
+        MEMORY: _ir_free_if_fresh_concat replicates gen_string_concat_
+        into's own AST-shape check exactly (see its own docstring for
+        why this narrow check is safe with no broader escape
+        analysis) -- called once left's bytes are copied (strcpy) and
+        once right's are (strcat), matching the old-style ordering.
+        No stash-before-free dance is needed here either, for the
+        identical Temp-independence reason: the result buffer's own
+        Temp isn't touched by an intervening free() call the way the
+        old code's own fixed %eax would be."""
+        left_ir, left_value = self.gen_expr_ir(expr.left)
+        right_ir, right_value = self.gen_expr_ir(expr.right)
+
+        len_left = self._new_temp(Type.INT64)
+        len_right = self._new_temp(Type.INT64)
+        total_len = self._new_temp(Type.INT64)
+        plus_one = self._new_temp(Type.INT64)
+        new_buf = self._new_temp(Type.STR)
+
+        ir = left_ir + right_ir + [
+            IRCall(dst=len_left, name='strlen', args=[left_value]),
+            IRCall(dst=len_right, name='strlen', args=[right_value]),
+            IRBinOp(dst=total_len, op=BinaryOp.ADD, left=len_left, right=len_right),
+            IRBinOp(dst=plus_one, op=BinaryOp.ADD, left=total_len, right=IRConst(1, Type.INT64)),
+            IRCall(dst=new_buf, name='malloc', args=[plus_one]),
+            IRCall(dst=None, name='strcpy', args=[new_buf, left_value]),
+        ]
+        ir += self._ir_free_if_fresh_concat(expr.left, left_value)
+        ir += [IRCall(dst=None, name='strcat', args=[new_buf, right_value])]
+        ir += self._ir_free_if_fresh_concat(expr.right, right_value)
+        return ir, new_buf
+
+    def _ir_free_if_fresh_concat(self, operand: Node, value) -> list:
+        """The real-IR counterpart to _gen_free_if_fresh_concat --
+        identical AST-shape check (see its own docstring for why this
+        narrow check is safe), just emitting an ordinary IRCall(free)
+        instead of raw instructions against a fixed register."""
+        if isinstance(operand, Binary) and operand.op == BinaryOp.ADD:
+            return [IRCall(dst=None, name='free', args=[value])]
+        return []
+
+    def _ir_string_compare(self, expr: Binary):
+        """Builds (without lowering) `left == right` / `left != right`
+        (both str) as real IR -- returns (ir, value). Same shape as
+        _ir_string_concat: ordinary IRCall(strcmp) plus an ordinary
+        IRBinOp for the 0/1 bool conversion, reusing
+        _COMPARISON_CONDITION_CODES[op] indirectly via IRBinOp's own
+        existing comparison lowering rather than reimplementing the
+        cmp/SetCC/MovZX sequence here.
+
+        No stash-before-free dance needed here either, for the same
+        Temp-independence reason _ir_string_concat's own docstring
+        gives: strcmp's own result is already safely captured into
+        cmp_result before either free() call ever runs, so freeing a
+        fresh operand can't clobber it the way it could the old code's
+        own fixed %eax."""
+        left_ir, left_value = self.gen_expr_ir(expr.left)
+        right_ir, right_value = self.gen_expr_ir(expr.right)
+
+        cmp_result = self._new_temp(Type.INT)
+        t_result = self._new_temp(Type.BOOL)
+
+        ir = left_ir + right_ir + [IRCall(dst=cmp_result, name='strcmp', args=[left_value, right_value])]
+        ir += self._ir_free_if_fresh_concat(expr.left, left_value)
+        ir += self._ir_free_if_fresh_concat(expr.right, right_value)
+        ir += [IRBinOp(dst=t_result, op=expr.op, left=cmp_result, right=IRConst(0, Type.INT))]
+        return ir, t_result
+
     def gen_string_concat_into(self, expr: Binary, dst: Operand) -> list[Instruction]:
         """`left + right`, both str: builds a brand-new, malloc'd,
         null-terminated buffer holding left's bytes immediately
@@ -1098,6 +1190,14 @@ class StringsMixin:
         function call's return value -- its buffer is immediately
         freed. See _gen_free_if_fresh_concat for why this narrow case
         is safe to free automatically with no broader escape analysis.
+
+        Real IR now instead, reached only when an old-style block
+        needs to evaluate a nested str concatenation -- see _ir_
+        string_concat, which needs none of this method's own careful
+        stack/register-protection discipline at all: ordinary IRCall/
+        IRBinOp already keep left_value safe in its own Temp home
+        regardless of what evaluating right does, the same property
+        this whole arc has relied on repeatedly.
         """
         if not isinstance(dst, Register):
             raise CodegenError(f"Binary codegen requires a register destination, got: {dst!r}")
@@ -1178,7 +1278,15 @@ class StringsMixin:
         has to be stashed in a callee-saved register before either
         free() call, and restored into `dst` afterward, or freeing a
         fresh operand would silently destroy the comparison result
-        this method exists to compute."""
+        this method exists to compute.
+
+        Real IR now instead, reached only when an old-style block
+        needs to evaluate a nested str comparison -- see _ir_string_
+        compare, which needs no stash-before-free dance at all: strcmp's
+        own result is already safely captured into its own Temp before
+        either free() call ever runs, the same Temp-independence
+        property gen_string_concat_into's own updated docstring
+        describes."""
         if not isinstance(dst, Register):
             raise CodegenError(f"Binary codegen requires a register destination, got: {dst!r}")
         result = as_qword_register(dst)
