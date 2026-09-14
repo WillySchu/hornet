@@ -1,0 +1,23 @@
+struct Container:
+    [3]int values
+
+def int sumArray([3]int arr):
+    return arr[0] + arr[1] + arr[2]
+
+def int sumSlice([]int s):
+    return s[0] + s[1]
+
+def int main():
+    Container container
+    int total = 0
+    int i = 0
+    while i < 2000000:
+        [3]int arr = [i % 10, (i + 1) % 10, (i + 2) % 10]
+        []int s = arr[0:2]
+        container.values = arr
+        int sumArr = sumArray(arr)
+        int sumSl = sumSlice(s)
+        int sumField = sumArray(container.values)
+        total = (total + sumArr + sumSl + sumField) % 1000003
+        i = i + 1
+    return total % 256

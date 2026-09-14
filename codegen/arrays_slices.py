@@ -478,6 +478,53 @@ class ArraysSlicesMixin:
             return None
         return None
 
+    def _ir_slice_arg(self, expr: Node):
+        """Builds (without lowering) a slice-typed function-call
+        argument's own {ptr, len, cap} triple as real IR -- returns
+        (ir, ptr_value, len_value, cap_value). Unlike _ir_indexable_
+        base, this never returns None: every slice-typed argument
+        shape has SOME way to produce a triple, even when the out-of-
+        scope ones (chiefly a slice-returning Call) still need the
+        old-style shared-scratch-slot materialization (gen_slice_
+        value_into) to do it, read back out via three IRRaw leaves at
+        that fixed, known offset -- the identical "materialize into a
+        fixed location, then read fields back out via fixed-offset
+        leaves" shape _ir_indexable_base's own Variable-slice leaf
+        already uses, just at the shared scratch offset instead of a
+        named variable's own.
+
+        NoneLiteral (`none` passed directly as an argument) is its
+        own leaf here, not routed through _ir_indexable_base at all
+        (which has no NoneLiteral case, since it only ever handles an
+        already-typed slice expression) -- three IRConst(0, ...)s,
+        mirroring gen_slice_arg_into's own identical special case."""
+        if isinstance(expr, NoneLiteral):
+            ptr = self._new_temp(Type.INT64)
+            length = self._new_temp(Type.INT)
+            cap = self._new_temp(Type.INT)
+            ir = [
+                IRMove(dst=ptr, src=IRConst(0, Type.INT64)),
+                IRMove(dst=length, src=IRConst(0, Type.INT)),
+                IRMove(dst=cap, src=IRConst(0, Type.INT)),
+            ]
+            return ir, ptr, length, cap
+
+        base = self._ir_indexable_base(expr)
+        if base is not None:
+            return base
+
+        scratch = self._unnamed_slice_temp_offset
+        materialize_ir = [IRRaw(self.gen_slice_value_into(expr, Memory('rbp', scratch)))]
+        ptr = self._new_temp(Type.INT64)
+        length = self._new_temp(Type.INT)
+        cap = self._new_temp(Type.INT)
+        read_ir = [
+            IRRaw([MovQ(src=Memory('rbp', scratch), dst=Register('rax'))], dst=ptr),
+            IRRaw([Mov(src=Memory('rbp', scratch + 8), dst=Register('eax'))], dst=length),
+            IRRaw([Mov(src=Memory('rbp', scratch + 16), dst=Register('eax'))], dst=cap),
+        ]
+        return materialize_ir + read_ir, ptr, length, cap
+
     def _ir_index_address(self, expr: Index):
         """Builds (without lowering) the address of expr.array[expr.
         index] as real IR -- the shared foundation for a scalar
@@ -998,7 +1045,18 @@ class ArraysSlicesMixin:
         one copy -- the caller's own array is never mutated through it:
         the callee's copy is independent, preserving value semantics
         across the call the same way an ordinary `arr2 = arr1` does
-        within a single function."""
+        within a single function.
+
+        Never supported Field (`foo(container.someArrayField)`) at
+        all -- a real, pre-existing gap, not a deliberate exclusion --
+        unlike gen_struct_address_into, which always did. Real IR now
+        instead, for exactly this reason among others: see _ir_call,
+        which uses _ir_array_address directly for a Variable/Field/
+        Index argument (Field included, closing this gap) rather than
+        calling this method at all; this old-style path is still
+        reached from _gen_call_arguments_into, for a composite-
+        returning call's own ordinary arguments (composite returns
+        haven't been migrated to real IR yet)."""
         if isinstance(expr, (Variable, Index)):
             return self.gen_array_address_into(expr, dst)
         if isinstance(expr, (ArrayLiteral, Call)):
@@ -1038,7 +1096,15 @@ class ArraysSlicesMixin:
         the slot and pushed before the next argument's materialization
         touches the slot again -- and the same strictly-nested
         reasoning covers a slice-returning call whose own argument is
-        itself another unnamed slice."""
+        itself another unnamed slice.
+
+        Real IR now instead, for a Variable/Field/Index/Slice argument
+        (or a bare `none`) -- see _ir_slice_arg, which reuses this
+        method's own materialization step only for a slice-returning
+        Call argument (chiefly), reading the three fields back out via
+        ordinary IRRaw leaves rather than fixed registers; this old-
+        style path is still reached from _gen_call_arguments_into, for
+        a composite-returning call's own ordinary arguments."""
         if isinstance(expr, NoneLiteral):
             return [
                 MovQ(src=Imm(0), dst=ptr_dst),

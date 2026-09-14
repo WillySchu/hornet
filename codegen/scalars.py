@@ -80,26 +80,58 @@ class ScalarsMixin:
     def _ir_call(self, expr: Call) -> tuple[list, object]:
         """Builds (without lowering) an ordinary function call's IR.
 
-        Argument marshaling is real IR too, as long as no argument is
-        slice-typed: a scalar's own value (via gen_expr_ir, so a
-        migrated sub-expression stays real IR), or an array/struct's
-        own ADDRESS (the address computation itself stays old-style,
-        captured via IRRaw into an INT64 Temp -- exactly the same
-        pattern _ir_index_assign/_ir_load already use), is an ordinary
-        IRValue either way.
+        Argument marshaling is now per-argument, not per-call: each
+        argument independently tries real IR first, falling back to
+        an opaque, IRRaw-wrapped materialization only for THAT one
+        argument when out of scope -- never forcing the whole call
+        back to old-style just because one argument isn't real-IR-
+        capable yet, unlike this method's own earlier version (which
+        fell back entirely for ANY slice argument). That earlier
+        restriction existed to avoid interleaving native and opaque
+        argument placement within one call -- a genuine hazard when
+        values are placed directly into fixed argument registers as
+        they're computed, since an opaque computation running between
+        two already-placed arguments could clobber one. That hazard
+        doesn't exist here at all: every argument, real-IR or opaque
+        fallback alike, is computed into its own independent Temp
+        first, and IRCall's own lowering is what places all of them
+        into argument registers, together, immediately before the
+        call -- the same "a Temp's home is independent of what
+        computed it" property this whole arc has relied on
+        repeatedly. Mixing native and opaque arguments freely is safe
+        for the identical reason IRCall's own lowering already never
+        needs a push/pop dance between arguments (see its own
+        comment): nothing a Temp could be assigned to overlaps an
+        argument register until IRCall's own lowering runs.
 
-        A slice argument needs 3 register slots for one logical value,
-        which doesn't fit IRCall.args' one-value-per-argument shape.
-        Rather than interleave native and opaque argument placement
-        WITHIN one call -- a real hazard, since an opaque slice
-        computation running between two already-placed native
-        arguments could clobber one, exactly the reason the old
-        push-then-pop-in-reverse dance existed in the first place --
-        a call with ANY slice argument falls back to the entire
-        existing _gen_call_arguments_into mechanism, unchanged, for
-        ALL of its arguments.
+        A scalar argument is its own value (via gen_expr_ir, so a
+        migrated sub-expression stays real IR). An array/struct
+        argument is its own ADDRESS -- via _ir_array_address/_ir_
+        struct_address for a Variable/Field/Index (real IR, and, for
+        arrays, a genuine fix over the old gen_array_arg_address_into,
+        which never supported Field at all), or the existing _gen_
+        materialize_argument_temp_into for an ArrayLiteral/struct-
+        literal Call/composite-returning Call (still one opaque IRRaw,
+        capturing the one address it produces, same as before). A
+        slice-typed argument -- or a bare `none` (checked separately,
+        via isinstance, since NoneLiteral's own type_of is Type.NONE,
+        never SLICE) -- contributes THREE flat IRValues (ptr, len,
+        cap) to args, not one, via _ir_slice_arg: _ir_indexable_base
+        for a Variable/Field/Index/Slice (or three IRConst(0, ...)s
+        for `none` itself), or the existing shared-scratch-slot
+        materialization (gen_slice_value_into) for anything still out
+        of scope (a slice-returning Call, chiefly), read back out via
+        three more IRRaw leaves -- the identical "materialize into a
+        fixed, known location, then read fields back out via fixed-
+        offset leaves" shape _ir_indexable_base's own Variable-slice
+        leaf already uses, just at the shared scratch offset instead
+        of a named variable's own. IRCall's own existing register-
+        placement loop already treats args as a flat, one-value-per-
+        register-slot list -- see its own lowering -- so three flat
+        slice values need no change there at all.
 
-        Returns (ir, t_result), t_result being None for a void call."""
+        Returns (ir, t_result), t_result being None for a void call.
+        """
         total_slots = self._total_arg_slots(expr.args)
         if total_slots > 6:
             raise CodegenError(
@@ -112,29 +144,32 @@ class ScalarsMixin:
         result_type = type_of(expr)
         t_result = None if result_type == Type.VOID else self._new_temp(result_type)
 
-        if any(type_of(a).kind == TypeKind.SLICE or isinstance(a, NoneLiteral) for a in expr.args):
-            ir = [
-                IRRaw(self._gen_call_arguments_into(expr.args)),
-                IRCall(dst=t_result, name=expr.name, args=[]),
-            ]
-            return ir, t_result
-
         arg_ir = []
         arg_values = []
         for arg in expr.args:
             arg_type = type_of(arg)
             if arg_type.kind == TypeKind.ARRAY:
-                addr_temp = self._new_temp(Type.INT64)
-                arg_ir.append(IRRaw(self.gen_array_arg_address_into(arg, Register('rax')), dst=addr_temp))
-                arg_values.append(addr_temp)
-            elif arg_type.kind == TypeKind.STRUCT:
-                addr_temp = self._new_temp(Type.INT64)
-                if isinstance(arg, (Variable, Field, Index)):
-                    addr_instructions = self.gen_struct_address_into(arg, Register('rax'))
+                addr_result = self._ir_array_address(arg) if isinstance(arg, (Variable, Field, Index)) else None
+                if addr_result is not None:
+                    ir, addr_value = addr_result
                 else:
-                    addr_instructions = self._gen_materialize_argument_temp_into(arg, arg_type, Register('rax'))
-                arg_ir.append(IRRaw(addr_instructions, dst=addr_temp))
-                arg_values.append(addr_temp)
+                    addr_value = self._new_temp(Type.INT64)
+                    ir = [IRRaw(self._gen_materialize_argument_temp_into(arg, arg_type, Register('rax')), dst=addr_value)]
+                arg_ir.extend(ir)
+                arg_values.append(addr_value)
+            elif arg_type.kind == TypeKind.STRUCT:
+                addr_result = self._ir_struct_address(arg) if isinstance(arg, (Variable, Field, Index)) else None
+                if addr_result is not None:
+                    ir, addr_value = addr_result
+                else:
+                    addr_value = self._new_temp(Type.INT64)
+                    ir = [IRRaw(self._gen_materialize_argument_temp_into(arg, arg_type, Register('rax')), dst=addr_value)]
+                arg_ir.extend(ir)
+                arg_values.append(addr_value)
+            elif arg_type.kind == TypeKind.SLICE or isinstance(arg, NoneLiteral):
+                ir, ptr_value, len_value, cap_value = self._ir_slice_arg(arg)
+                arg_ir.extend(ir)
+                arg_values.extend([ptr_value, len_value, cap_value])
             else:
                 ir, value = self.gen_expr_ir(arg)
                 arg_ir.extend(ir)
