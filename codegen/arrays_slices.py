@@ -43,7 +43,7 @@ from codegen.assembly_ast import (
     Sub,
 )
 from codegen.errors import CodegenError
-from codegen.ir import IRRaw, IRBinOp, IRConst, IRBoundsCheck, IRSliceBoundsCheck, IRStore, IRLoad
+from codegen.ir import IRRaw, IRBinOp, IRConst, IRBoundsCheck, IRSliceBoundsCheck, IRStore, IRLoad, IRAppendGrow, IRMove, IRBranch, IRJump, IRLabel
 from codegen.utils import type_of, type_byte_width, leaf_type, as_byte_register, gen_protecting_dst_across
 from parser import Node, ArrayLiteral, Call, Field, Index, Slice, Variable, NoneLiteral, Binary, BinaryOp
 from semantic import TypeKind, Type
@@ -1782,10 +1782,11 @@ class ArraysSlicesMixin:
     ) -> list[Instruction]:
         """The reuse-vs-reallocate growth core shared by
         gen_append_call_into and the print buffer's single-byte append
-        (see gen_buffer_append_byte_into) -- factored out so the growth
-        arithmetic (new_cap = cap*2 if cap < 256, else cap + cap//4,
-        with a cap==0 floor of 1; see gen_append_call_into's docstring
-        for the reuse-vs-reallocate reasoning) never has to exist twice.
+        (see gen_buffer_append_byte_into) -- decides which of the two
+        paths applies, then delegates the reallocate half entirely to
+        _gen_realloc_and_append_one_into (see its own docstring for
+        the growth arithmetic itself), so that logic never has to
+        exist twice.
 
         Operates entirely on registers the caller has already loaded
         with a live {ptr, len, cap} triple (both the 64-bit register
@@ -1833,10 +1834,45 @@ class ArraysSlicesMixin:
         instructions.append(Add(src=Imm(1), dst=r_len_32))
         instructions.append(Jmp(end_label))
 
-        # REALLOCATE PATH: len == cap. new_cap computed from cap alone,
-        # in place -- the old cap value is never needed again once
-        # this decides new_cap, so overwriting r_cap_32 here is safe.
         instructions.append(Label(realloc_label))
+        instructions.extend(self._gen_realloc_and_append_one_into(
+            r_ptr, r_len, r_len_32, r_cap, r_cap_32, element_width, copy_one_element, write_new_value_at,
+        ))
+        instructions.append(Label(end_label))
+        return instructions
+
+    def _gen_realloc_and_append_one_into(
+            self,
+            r_ptr: Register,
+            r_len: Register,
+            r_len_32: Register,
+            r_cap: Register,
+            r_cap_32: Register,
+            element_width: int,
+            copy_one_element,
+            write_new_value_at,
+    ) -> list[Instruction]:
+        """Just the REALLOCATE half of _gen_grow_and_append_one_into's
+        own two-way split -- extracted into its own method specifically
+        so IRAppendGrow's own lowering can reach it directly, having
+        already made the reuse-vs-reallocate decision one level up, as
+        real IR (an ordinary IRBinOp comparison plus IRBranch), rather
+        than paying for this method's own internal len>=cap check a
+        second, redundant time.
+
+        Assumes the caller has ALREADY determined reallocation is
+        needed -- no internal check of any kind here. new_cap is
+        computed from cap alone, in place -- the old cap value is
+        never needed again once this decides new_cap, so overwriting
+        r_cap_32 here is safe: cap*2 while cap < 256, else cap +
+        cap//4 (a right shift by 1, matching integer division by 2,
+        then added back), with a cap==0 floor of 1 -- doubling zero
+        forever stays zero, so that case needs its own explicit floor.
+
+        See _gen_grow_and_append_one_into's own docstring for what
+        copy_one_element/write_new_value_at are each for, and for the
+        full register-usage contract (both are unchanged here)."""
+        instructions = []
         zero_label = self.new_label("append_cap_zero")
         quarter_label = self.new_label("append_cap_quarter")
         growth_done_label = self.new_label("append_growth_done")
@@ -1898,9 +1934,108 @@ class ArraysSlicesMixin:
 
         instructions.append(Add(src=Imm(1), dst=r_len_32))
         instructions.append(MovQ(src=r_new_ptr, dst=r_ptr))
-
-        instructions.append(Label(end_label))
         return instructions
+
+    def _ir_append_call(self, expr: Call):
+        """Builds (without lowering) append(s, value)'s resulting
+        {ptr, len, cap} triple as real IR -- returns (ir, ptr_value,
+        len_value, cap_value), or None when out of scope: a composite
+        element type (still needs the old-style, fully general gen_
+        append_call_into, since IRStore -- which the reuse path below
+        uses -- can't yet write a composite value through an address),
+        or s's own base out of scope (see _ir_indexable_base) --
+        anything but a Variable/Field/Index/Slice, or NoneLiteral.
+
+        The reuse-vs-reallocate decision itself is real IR now: an
+        ordinary IRBinOp comparison (length >= cap; a plain SIGNED
+        comparison is correct here, unlike IRBoundsCheck's own
+        unsigned trick -- len/cap are compiler-maintained invariants,
+        never a user-supplied value that could be negative) plus an
+        ordinary IRBranch, exactly the same shape every other
+        conditional decision in gen_expr_ir/gen_statement_ir already
+        uses. The REUSE path (length < cap) is entirely real IR too:
+        compute the target address, IRStore the value, increment
+        length. The REALLOCATE path (length >= cap) is IRAppendGrow --
+        see its own docstring for why it's a dedicated op rather than
+        an opaque IRRaw: it needs to consume an arbitrary Temp (value)
+        and produce three Temps, neither of which IRRaw can do.
+
+        Both paths write into the SAME three result Temps (result_ptr/
+        result_len/result_cap), then jump to a shared end label -- the
+        same "both branches assign the same Temp" pattern an if/else
+        already uses for a named-local variable, just for an anonymous
+        one here. This is the first expression in this compiler whose
+        own real-IR fragment contains a genuine branch-and-merge
+        (not just a one-way jump to a panic label that never returns,
+        the shape every bounds check so far has used) -- architecturally
+        new for an expression, though not for a statement (if/else
+        already does exactly this for named locals); the general
+        liveness/register-allocation machinery is agnostic to whether
+        a label/branch came from a statement or an expression, so no
+        changes were needed there beyond IRAppendGrow's own unsafe-
+        position registration."""
+        slice_arg, value_arg = expr.args
+        slice_type = type_of(slice_arg)
+        element_type = slice_type.element_type
+        if element_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
+            return None
+        element_width = type_byte_width(element_type, self.struct_registry)
+
+        if isinstance(slice_arg, NoneLiteral):
+            ptr = self._new_temp(Type.INT64)
+            length = self._new_temp(Type.INT)
+            cap = self._new_temp(Type.INT)
+            base_ir = [
+                IRMove(dst=ptr, src=IRConst(0, Type.INT64)),
+                IRMove(dst=length, src=IRConst(0, Type.INT)),
+                IRMove(dst=cap, src=IRConst(0, Type.INT)),
+            ]
+        else:
+            base = self._ir_indexable_base(slice_arg)
+            if base is None:
+                return None
+            base_ir, ptr, length, cap = base
+
+        value_ir, value = self.gen_expr_ir(value_arg)
+
+        result_ptr = self._new_temp(Type.INT64)
+        result_len = self._new_temp(Type.INT)
+        result_cap = self._new_temp(Type.INT)
+
+        reuse_label = self.new_label("ir_append_reuse")
+        realloc_label = self.new_label("ir_append_realloc")
+        end_label = self.new_label("ir_append_end")
+
+        needs_realloc = self._new_temp(Type.BOOL)
+        check = IRBinOp(dst=needs_realloc, op=BinaryOp.GREATER_THAN_OR_EQUAL, left=length, right=cap)
+        branch = IRBranch(cond=needs_realloc, true_label=realloc_label, false_label=reuse_label)
+
+        offset_temp = self._new_temp(Type.INT)
+        target_addr = self._new_temp(Type.INT64)
+        new_len = self._new_temp(Type.INT)
+        reuse_ir = [
+            IRLabel(reuse_label),
+            IRBinOp(dst=offset_temp, op=BinaryOp.MULTIPLY, left=length, right=IRConst(element_width, Type.INT)),
+            IRBinOp(dst=target_addr, op=BinaryOp.ADD, left=ptr, right=offset_temp),
+            IRStore(address=target_addr, value=value, value_type=element_type),
+            IRBinOp(dst=new_len, op=BinaryOp.ADD, left=length, right=IRConst(1, Type.INT)),
+            IRMove(dst=result_ptr, src=ptr),
+            IRMove(dst=result_len, src=new_len),
+            IRMove(dst=result_cap, src=cap),
+            IRJump(end_label),
+        ]
+
+        realloc_ir = [
+            IRLabel(realloc_label),
+            IRAppendGrow(
+                dst_ptr=result_ptr, dst_len=result_len, dst_cap=result_cap,
+                ptr=ptr, length=length, cap=cap, value=value,
+                element_width=element_width, value_type=element_type,
+            ),
+        ]
+
+        ir = base_ir + value_ir + [check, branch] + reuse_ir + realloc_ir + [IRLabel(end_label)]
+        return ir, result_ptr, result_len, result_cap
 
     def gen_append_call_into(self, expr: Call, dst_mem: Memory) -> list[Instruction]:
         """`append(s, value)` -- Go-style: writes a NEW {ptr, len, cap}

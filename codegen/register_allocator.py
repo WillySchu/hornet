@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from codegen.ir import (
+    IRAppendGrow,
     IRBinOp,
     IRBoundsCheck,
     IRBranch,
@@ -156,6 +157,8 @@ def _reads(instr) -> set:
         return {v for v in (instr.index, instr.length) if isinstance(v, Temp)}
     if isinstance(instr, IRSliceBoundsCheck):
         return {v for v in (instr.value, instr.bound) if isinstance(v, Temp)}
+    if isinstance(instr, IRAppendGrow):
+        return {v for v in (instr.ptr, instr.length, instr.cap, instr.value) if isinstance(v, Temp)}
     return set()
 
 
@@ -167,6 +170,8 @@ def _writes(instr) -> set:
         return {instr.dst}
     if isinstance(instr, (IRCall, IRRaw)):
         return {instr.dst} if instr.dst is not None else set()
+    if isinstance(instr, IRAppendGrow):
+        return {instr.dst_ptr, instr.dst_len, instr.dst_cap}
     return set()
 
 
@@ -286,7 +291,7 @@ def eligible_intervals(ir: list, intervals: dict, safe_named_locals: frozenset =
 
     Anything strictly between start and end is always a hazard,
     regardless of which op it is."""
-    unsafe_positions = [i for i, instr in enumerate(ir) if isinstance(instr, (IRRaw, IRCall))]
+    unsafe_positions = [i for i, instr in enumerate(ir) if isinstance(instr, (IRRaw, IRCall, IRAppendGrow))]
     result = {}
     for tid, interval in intervals.items():
         if interval.temp.is_named_local and tid not in safe_named_locals:

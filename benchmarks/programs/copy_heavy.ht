@@ -14,6 +14,7 @@ def int main():
     c.values = base[0:3]
     [1][]int rows
     rows[0] = base[0:3]
+    []int growing = none
     int total = 0
     int i = 0
     while i < 2000000:
@@ -29,6 +30,10 @@ def int main():
         int fromField = c.values[i % 3]
         int fromIndex = rows[0][i % 3]
         int chained = base[i % 2:4][0]
-        total = (total + copy[0] + p.x + s[0] + extracted.y + sliced[0] + fromField + fromIndex + chained) % 1000003
+        if i % 50 == 0:
+            growing = none
+        growing = append(growing, i % 7)
+        int appended = growing[len(growing) - 1]
+        total = (total + copy[0] + p.x + s[0] + extracted.y + sliced[0] + fromField + fromIndex + chained + appended) % 1000003
         i = i + 1
     return total % 256

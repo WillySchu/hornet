@@ -12,6 +12,7 @@ from parser import (
     ArrayLiteral,
     Assign,
     Break,
+    Call,
     Continue,
     ExprStmt,
     Field,
@@ -175,6 +176,19 @@ class StatementsMixin:
                     slice_ir, ptr_value, len_value, cap_value = production
                     self._bind_local(stmt)
                     return slice_ir + self._ir_write_slice_descriptor(Variable(name=stmt.name), ptr_value, len_value, cap_value)
+            # A slice-typed initializer that's a call to the append
+            # builtin specifically (`append(s, value)`) -- same "try
+            # first, bind only on success" discipline as the Slice
+            # production case just above, for the identical reason.
+            # See _ir_append_call for exactly which shapes of s/value
+            # it covers (a composite element type, or an out-of-scope
+            # s, both fall back here too).
+            if var_type.kind == TypeKind.SLICE and isinstance(stmt.init, Call) and stmt.init.name == 'append':
+                production = self._ir_append_call(stmt.init)
+                if production is not None:
+                    append_ir, ptr_value, len_value, cap_value = production
+                    self._bind_local(stmt)
+                    return append_ir + self._ir_write_slice_descriptor(Variable(name=stmt.name), ptr_value, len_value, cap_value)
         elif isinstance(stmt, Assign):
             # Same shape as the VarDecl case above, for an existing
             # scalar variable -- `var_type` here is necessarily
@@ -204,6 +218,13 @@ class StatementsMixin:
                 if production is not None:
                     slice_ir, ptr_value, len_value, cap_value = production
                     return slice_ir + self._ir_write_slice_descriptor(Variable(name=stmt.name), ptr_value, len_value, cap_value)
+            # Same append-call case as VarDecl's own, just above -- no
+            # binding concern here at all, unlike VarDecl's own.
+            if var_type.kind == TypeKind.SLICE and isinstance(stmt.value, Call) and stmt.value.name == 'append':
+                production = self._ir_append_call(stmt.value)
+                if production is not None:
+                    append_ir, ptr_value, len_value, cap_value = production
+                    return append_ir + self._ir_write_slice_descriptor(Variable(name=stmt.name), ptr_value, len_value, cap_value)
         elif isinstance(stmt, IndexAssign):
             # Same scope boundary as gen_index_assign itself. ARRAY
             # never occurs here at all (IndexAssign's own grammar
@@ -222,6 +243,12 @@ class StatementsMixin:
                     slice_ir, ptr_value, len_value, cap_value = production
                     dst_expr = Index(array=stmt.array, index=stmt.index)
                     return slice_ir + self._ir_write_slice_descriptor(dst_expr, ptr_value, len_value, cap_value)
+            if element_type.kind == TypeKind.SLICE and isinstance(stmt.value, Call) and stmt.value.name == 'append':
+                production = self._ir_append_call(stmt.value)
+                if production is not None:
+                    append_ir, ptr_value, len_value, cap_value = production
+                    dst_expr = Index(array=stmt.array, index=stmt.index)
+                    return append_ir + self._ir_write_slice_descriptor(dst_expr, ptr_value, len_value, cap_value)
         elif isinstance(stmt, FieldAssign):
             # Same idea one level over -- FieldAssign's grammar can
             # ALSO produce an ARRAY-typed field (unlike IndexAssign).
@@ -237,6 +264,12 @@ class StatementsMixin:
                     slice_ir, ptr_value, len_value, cap_value = production
                     dst_expr = Field(base=stmt.base, name=stmt.name)
                     return slice_ir + self._ir_write_slice_descriptor(dst_expr, ptr_value, len_value, cap_value)
+            if field_type.kind == TypeKind.SLICE and isinstance(stmt.value, Call) and stmt.value.name == 'append':
+                production = self._ir_append_call(stmt.value)
+                if production is not None:
+                    append_ir, ptr_value, len_value, cap_value = production
+                    dst_expr = Field(base=stmt.base, name=stmt.name)
+                    return append_ir + self._ir_write_slice_descriptor(dst_expr, ptr_value, len_value, cap_value)
         elif isinstance(stmt, ExprStmt) and not isinstance(stmt.expr, (ArrayLiteral, Slice)):
             ir, _ = self.gen_expr_ir(stmt.expr)
             return ir
