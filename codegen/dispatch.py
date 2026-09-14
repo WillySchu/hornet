@@ -258,9 +258,11 @@ class DispatchMixin:
         (see below), a scalar Variable (see below), a scalar-typed
         Index/Field read (see _ir_load -- the underlying address
         computation stays old-style; only the load itself is real
-        IR), Binary (see _ir_expr_binary), and an ordinary scalar-or-
-        void-returning Call (see _ir_call) -- and falls back to
-        wrapping gen_expr_into
+        IR), Binary (see _ir_expr_binary), a len(x) call (see _ir_
+        len_call, its own dedicated case, not routed through _ir_call
+        at all -- len isn't an ordinary function call), and an
+        ordinary scalar-or-void-returning Call (see _ir_call) -- and
+        falls back to wrapping gen_expr_into
         itself, as a single opaque IRRaw, for everything else. That
         fallback also covers every case gen_expr_into defensively
         rejects (ArrayLiteral, Slice, NoneLiteral, a composite-
@@ -300,6 +302,20 @@ class DispatchMixin:
             return self._ir_load(addr_ir, addr_value, type_of(expr))
         if isinstance(expr, Binary):
             return self._ir_expr_binary(expr)
+        if isinstance(expr, Call) and expr.name == 'len':
+            # A dedicated case, not routed through _ir_call at all --
+            # len isn't an ordinary function call (no calling
+            # convention, no argument-register placement), so it
+            # needs its own entry point the same way print's own
+            # exclusion from _ir_call already does. Falls through to
+            # the ordinary catch-all below when out of scope (see
+            # _ir_len_call's own docstring) -- _ir_call's own name
+            # exclusion ('len', alongside 'print') already keeps that
+            # dispatch from ever re-attempting this as an ordinary
+            # call.
+            result = self._ir_len_call(expr)
+            if result is not None:
+                return result
         if isinstance(expr, Call) and expr.name not in ('print', 'len') and type_of(expr).kind not in (
                 TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
             return self._ir_call(expr)

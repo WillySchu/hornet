@@ -2475,6 +2475,34 @@ class ArraysSlicesMixin:
             ])
         return instructions
 
+    def _ir_len_call(self, expr: Call):
+        """Builds (without lowering) len(x)'s own result as real IR --
+        returns (ir, value), or None when x's own base is out of
+        scope (see _ir_indexable_base's own docstring) -- an
+        ArrayLiteral, or a Call, when x is slice-typed.
+
+        Reuses _ir_indexable_base directly, the same "address plus
+        length, however each is represented" abstraction indexing and
+        slicing already share -- matching gen_len_call_into's own
+        reasoning exactly, just via real IR. x's own address (and
+        cap) are computed and then discarded, but NOT skipped: x is
+        still fully evaluated regardless, so any bounds check or
+        side effect buried in it genuinely runs -- the identical
+        deliberate behavior gen_len_call_into's own docstring
+        describes (`len(arr[i])` still aborts if i is out of range).
+
+        For an ARRAY base, the returned value is a compile-time
+        IRConst (x's declared size, never read out of x at runtime);
+        for a SLICE base, an ordinary INT Temp holding a runtime
+        value read from x's own descriptor -- either way, exactly
+        _ir_indexable_base's own second return value, unchanged."""
+        arg = expr.args[0]
+        base = self._ir_indexable_base(arg)
+        if base is None:
+            return None
+        base_ir, ptr, length, cap = base
+        return base_ir, length
+
     def gen_len_call_into(self, expr: Call, dst: Operand) -> list[Instruction]:
         """`len(x)`: reuses gen_indexable_base_into directly -- the
         same "address plus length, however each is represented"
@@ -2499,7 +2527,15 @@ class ArraysSlicesMixin:
         32-bit alias here, matching how every other reader of a
         slice's length field does, since Hornet's int is always 32
         bits even though the descriptor's len field is a full 8-byte
-        slot."""
+        slot.
+
+        Real IR now instead, for a Variable/Field/Index/Slice base --
+        see _ir_len_call, which replicates this exact same "evaluate x
+        regardless, keep only length" contract via _ir_indexable_base
+        rather than calling this method at all; this old-style path
+        is still reached for an ArrayLiteral or a slice-typed Call
+        base, matching gen_indexable_base_into's own remaining scope
+        exactly."""
         if dst != Register('eax'):
             raise CodegenError(f"Call codegen requires dst == %eax, got: {dst!r}")
         arg = expr.args[0]
