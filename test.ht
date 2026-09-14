@@ -1,3 +1,7 @@
+struct HasArray:
+    [5]int values
+
+
 def str hello():
     return 'hello'
 
@@ -6,17 +10,16 @@ def []int ret_sl():
     return []int[1, 2, 3]
 
 
-def int8 test():
-    #int8 a = 127
-    #int8 b = 1
-    #print(a + b)
-    #int8 c = a + b
-    #print(c)
-    #return a + b
-    print(ret_sl()[0])
-    return 0
+def [5]int test([5]int arr):
+    print(arr)
+    return arr
 
 
 def int8 main():
-    print(test())
-    return test()
+    HasArray ha = HasArray([1,2,3,4,5])
+    # TODO(will): Fix these commented out examples.
+    # ha.values = test(ha.values)
+    # test(ha.values)
+    [5]int values = ha.values
+    values = test(values)
+    return 0
