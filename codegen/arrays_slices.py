@@ -1424,6 +1424,30 @@ class ArraysSlicesMixin:
         write_struct_literal_into's own docstring for why that stays
         deferred).
 
+        CRITICAL: the ArrayLiteral case below checks value_type.kind
+        == ARRAY explicitly, not just isinstance(value_expr,
+        ArrayLiteral) -- the identical bracketed-list AST shape is
+        ALSO how a slice literal parses (`[1, 2]` used where a slice
+        is expected, e.g. the inner literals of the array-of-slices
+        `[2][]int[[1, 2], [3, 4]]`; see gen_array_literal_into's own
+        docstring for the same ambiguity from the old-style side).
+        Without this check, value_type.kind == SLICE reaches _ir_
+        write_array_literal_into anyway, which silently treats a
+        slice's own 24-byte descriptor width as if it were the outer
+        array's own element width -- corrupting every subsequent
+        element's computed address. A real bug, caught only once
+        VarDecl/Assign/IndexAssign/FieldAssign's own wiring (mirroring
+        Return's) finally exercised an array-of-slices literal through
+        this dispatcher for the first time; slice-typed elements never
+        reached here via any of this arc's own earlier test coverage
+        before that point. A slice-typed ArrayLiteral-shaped value_expr
+        currently falls through to the final `return None` below --
+        real slice-LITERAL construction (as opposed to slice
+        PRODUCTION via `arr[a:b]`, already real IR via _ir_slice_into)
+        has never been built as real IR anywhere in this arc; this is
+        a genuinely separate, unattempted piece of work, not something
+        this fix silently also solves.
+
         Unifies, into one place, every composite-producing shape this
         arc has already built SEPARATELY, each for its own original
         call site: an existing value's own address (_ir_copy_into_
@@ -1472,7 +1496,7 @@ class ArraysSlicesMixin:
                 return None
             append_ir, ptr_value, len_value, cap_value = production
             return append_ir + self._ir_write_slice_descriptor_into_address(dst_address, ptr_value, len_value, cap_value)
-        if isinstance(value_expr, ArrayLiteral):
+        if value_type.kind == TypeKind.ARRAY and isinstance(value_expr, ArrayLiteral):
             return self._ir_write_array_literal_into(dst_address, value_expr, value_type)
         if isinstance(value_expr, Call) and value_expr.name in self.struct_registry:
             return self._ir_write_struct_literal_into(dst_address, value_expr, value_type)

@@ -10454,6 +10454,36 @@ class TestNestedSlices:
             10,
         )
 
+    def test_array_of_slices_literal_via_reassignment_regression(self):
+        """Regression test for a real bug: _ir_write_composite_value_
+        into's dispatcher checked isinstance(value_expr, ArrayLiteral)
+        without also checking value_type.kind == ARRAY first. A slice
+        literal (`[1, 2]` used where a slice is expected) parses to
+        the IDENTICAL ArrayLiteral AST node as an array literal --
+        only the surrounding type context distinguishes them -- so
+        each inner [1, 2]/[3, 4] here was silently routed into
+        _ir_write_array_literal_into with value_type still SLICE,
+        which then computed a slice's own 24-byte descriptor width as
+        if it were the outer array's per-element width, corrupting
+        every element's computed address (a segfault or 'array index
+        out of bounds' abort, not a wrong-but-harmless answer).
+
+        This specific case -- an ASSIGN (reassigning an existing
+        variable), not a VarDecl -- is what actually caught this: the
+        bug was introduced when VarDecl/Assign/IndexAssign/FieldAssign
+        were first wired to call the same dispatcher Return's own
+        equivalent case already used, and Return's own prior test
+        coverage never happened to exercise a nested slice literal
+        through it, so the bug shipped silently until this wiring
+        exercised the exact same array-of-slices shape through a new
+        entry point."""
+        assert_exit_code(
+            "    [2][]int rows = [2][]int[[5, 6], [7, 8]]\n"
+            "    rows = [2][]int[[1, 2], [3, 4]]\n"
+            "    return rows[0][0] + rows[0][1] + rows[1][0] + rows[1][1]",
+            10,
+        )
+
     def test_empty_nested_slice_literal_is_not_nil(self):
         assert_exit_code(
             "    [][]int x = [][]int[[]int[], []int[]]\n"
@@ -12195,6 +12225,32 @@ class TestStructs:
             "    r.values = arr[0:3]\n"
             "    return r.values[0] + r.values[1] + r.values[2]\n",
             6,
+        )
+
+    def test_slice_literal_field_in_struct_literal_regression(self):
+        """Regression test for the same dispatch bug test_array_of_
+        slices_literal_via_reassignment_regression documents (see its
+        own docstring for the full account), but through the OTHER
+        recursive path into the same buggy dispatcher: a struct
+        literal's own field, not an array literal's own element.
+        `Row([10, 20, 30])` has one field, declared SLICE, given a
+        bare slice literal directly -- _ir_write_struct_literal_into
+        recurses into the identical _ir_write_composite_value_into
+        dispatcher for this field, so this exercises struct-literal
+        construction's own call site into the shared bug, independent
+        of the array-literal one the sibling regression test above
+        covers -- both needed fixing (they shared one root cause, a
+        single missing value_type.kind == ARRAY check), but a fix to
+        one call site's own recursion couldn't have been verified
+        against the other without a test like this one."""
+        assert_program_exit_code(
+            "struct Row:\n"
+            "    []int values\n"
+            "\n"
+            "def int main():\n"
+            "    Row r = Row([10, 20, 30])\n"
+            "    return r.values[0] + r.values[1] + r.values[2]\n",
+            60,
         )
 
     def test_array_of_slices_field_is_supported(self):

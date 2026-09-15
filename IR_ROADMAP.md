@@ -6,15 +6,6 @@ Arrays, structs, and slices are real IR across: production, whole-value copying,
 
 ## What's left
 
-**Tier 1 — cheap, mechanical, low-risk**
-
-- **`Break`/`Continue`**: still emit a raw `Jmp` instruction directly (verified: `gen_break`/`gen_continue` return `[Jmp(label)]`, not `IRJump`). This is a one-line swap per statement — trivial, just never prioritized over the bigger composite-value work.
-- **An `ArrayLiteral`/`Slice`-valued bare `ExprStmt`**: a composite expression evaluated only for a side effect and discarded (e.g. a slice production or array literal appearing as a standalone statement). Narrow, low-value edge case.
-
-**Tier 2 — machinery already exists, this is wiring**
-
-- **`ArrayLiteral`/struct-literal values (positional *and* named/partial) flowing into `VarDecl`/`Assign`/`IndexAssign`/`FieldAssign` directly** — verified this is still untouched: `_ir_write_array_literal_into`/`_ir_write_struct_literal_into` are only ever called from `Return`'s own case. The exact same functions already take an arbitrary destination address, so this is genuinely just replicating `Return`'s wiring (compute the destination address via `_ir_array_address`/`_ir_struct_address`, then call the same writer) at three more call sites. This is the most natural, lowest-risk next step, and I've flagged it as such at every step of the composite-return work.
-
 **Tier 3 — needs real, new design work**
 
 - **A composite-returning `Call` used directly as an addressable base** — `foo()[i]` (array or slice indexing), `foo().field` (struct field access), `foo()[a:b]` (slice production from a call's result). Verified: `_ir_indexable_base`'s own docstring still explicitly excludes Call for this reason, and the same exclusion propagates through `_ir_array_address`/`_ir_struct_address`. This is one root cause showing up in three places, not three separate problems — a composite-returning call has no address at all until the caller gives it one via the hidden-pointer convention, so using its result directly (without first assigning it to a named variable) needs the compiler to materialize it into a fresh scratch location first. Comparable in weight to the composite-calling-convention work.
@@ -26,6 +17,5 @@ Arrays, structs, and slices are real IR across: production, whole-value copying,
 
 ## Proposed roadmap
 
-2. **The `VarDecl`/`Assign`/`IndexAssign`/`FieldAssign` literal-value wiring** (Tier 2) next — cheapest real win left, closes out the composite-value arc almost entirely.
 3. Then a choice between **Call-as-addressable-base** and **array/struct equality** — both are genuinely separate, Tier-3-weight pieces deserving their own discussion-first scoping conversation, the way `append` and the calling convention did. I don't have a strong pull toward one over the other; Call-as-base closes a correctness/completeness gap across three related spots at once, while array/struct equality is a single, self-contained operator.
 4. **`print()`** last, as its own dedicated arc — it's unrelated to the composite-value work and large enough to warrant a fresh scoping discussion of its own rather than folding it in as a follow-up to anything else.

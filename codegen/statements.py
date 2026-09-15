@@ -73,30 +73,54 @@ class StatementsMixin:
         see _ir_copy_assign); a Slice production, for a slice-typed
         target (see _ir_slice_into/_ir_write_slice_descriptor); an
         append(...) call, likewise slice-typed-target only (see _ir_
-        append_call/_ir_write_slice_descriptor); and an ordinary
-        (non-struct-literal, non-append) function call returning a
+        append_call/_ir_write_slice_descriptor); an ordinary (non-
+        struct-literal, non-append) function call returning a
         composite value, via the hidden-pointer convention (see _ir_
         composite_call) -- writing directly through this target's own
-        address, computed the same way _ir_copy_assign's own does, with
-        no intermediate copy ever materialized. A VarDecl with NO
-        initializer at all is real IR too, for all three composite
-        kinds now, not just slice: a slice's own nil zero value needs
-        no computation at all (three IRConst(0, ...)s through _ir_
-        write_slice_descriptor), while an array/struct's own zero
-        value -- genuinely more work, since it can recurse through
-        further nested composites, and an array leaf needs a real,
-        bounded-count loop, not per-element unrolling, once its own
-        element count can be large -- goes through _ir_write_zero_
-        value_into/_ir_zero_array_loop (see gen_statement_ir's own
-        VarDecl case for exactly where the two zero-init paths split).
+        address, with no intermediate copy ever materialized; and now
+        an array literal or struct literal too (positional or named/
+        partial alike), via the exact same _ir_write_array_literal_
+        into/_ir_write_struct_literal_into/_ir_write_composite_value_
+        into machinery Return's own identical case already used --
+        both writers take an arbitrary destination address, never
+        assumed to be Return's own hidden pointer specifically, so
+        this was pure wiring: compute this target's own address the
+        same way every other case here already does, then hand it to
+        the same writer. (IndexAssign's own case is narrower here,
+        covering only struct literals, not array ones -- ARRAY never
+        occurs as an IndexAssign element type in the first place; see
+        that case's own opening comment.) A VarDecl with NO initializer
+        at all is real IR too, for all three composite kinds now, not
+        just slice: a slice's own nil zero value needs no computation
+        at all (three IRConst(0, ...)s through _ir_write_slice_
+        descriptor), while an array/struct's own zero value -- capable
+        of recursing through further nested composites, with a real,
+        bounded-count loop (not per-element unrolling) for an array
+        leaf -- goes through _ir_write_zero_value_into/_ir_zero_
+        array_loop.
+
+        A REAL BUG surfaced, and was fixed, only once this VarDecl/
+        Assign/IndexAssign/FieldAssign wiring finally exercised an
+        array-of-slices literal (`[2][]int[[1, 2], [3, 4]]`) through
+        _ir_write_composite_value_into for the first time: the same
+        bracketed-list AST shape parses identically for an array
+        literal and a slice literal, and the dispatcher's own
+        ArrayLiteral case wasn't checking value_type.kind == ARRAY
+        before routing there, silently corrupting every element's
+        computed address once value_type.kind was actually SLICE. See
+        that method's own docstring for the full account -- fixed by
+        an explicit kind check; genuine slice-LITERAL construction (as
+        opposed to slice PRODUCTION via `arr[a:b]`, already real IR)
+        remains unbuilt, an honest, separate gap, not something this
+        fix incidentally also solved.
 
         Return's own composite case now covers all but ONE genuinely
         hard shape: forwarding another composite-returning call's
         result (`return someFn()`, via _ir_composite_call), a
         Variable/Field/Index value (via _ir_copy_into_address), and an
-        array literal or struct literal -- POSITIONAL or named/partial
-        (kwargs) alike now, an omitted field's own zero value written
-        via _ir_write_zero_value_into -- (via _ir_write_array_literal_
+        array literal or struct literal -- positional or named/partial
+        (kwargs) alike, an omitted field's own zero value written via
+        _ir_write_zero_value_into -- (via _ir_write_array_literal_
         into/_ir_write_struct_literal_into) -- all reuse the current
         function's own received hidden pointer, read via an ordinary
         address-as-a-Temp leaf (_ir_hidden_return_ptr). A literal's own
@@ -107,14 +131,7 @@ class StatementsMixin:
         general-purpose dispatcher the two literal-writing methods call
         back into for their own composite elements/fields -- mutual
         recursion, the same shape address computation's own Field/
-        Index handling already relies on elsewhere in this arc. (_ir_
-        write_array_literal_into/_ir_write_struct_literal_into/_ir_
-        write_zero_value_into all take an arbitrary destination
-        address, not a Return-specific one -- directly reusable for
-        VarDecl/Assign/IndexAssign/FieldAssign's own identical
-        ArrayLiteral/struct-literal-value gap, a natural, cheap
-        follow-up; the array/struct no-initializer case above already
-        is that follow-up, for _ir_write_zero_value_into specifically.)
+        Index handling already relies on elsewhere in this arc.
 
         Break and Continue are real IR too (_ir_break/_ir_continue --
         an exact, zero-behavioral-difference IRJump-for-Jmp swap, see
@@ -127,9 +144,7 @@ class StatementsMixin:
         gen_expr_ir call).
 
         Falls back to wrapping gen_statement itself, as a single
-        opaque IRRaw, for everything else (an array/struct/slice-typed
-        VarDecl/Assign/IndexAssign/FieldAssign whose value is an
-        ArrayLiteral/struct-literal Call; a Return whose value is an
+        opaque IRRaw, for everything else (a Return whose value is an
         ArrayLiteral/struct-literal Call with some field/element out of
         scope for _ir_write_composite_value_into, or bare `none`; a
         Slice-valued ExprStmt whose own base is out of scope for _ir_
@@ -344,6 +359,44 @@ class StatementsMixin:
                 dst_ir, dst_address = address_fn(Variable(name=stmt.name))
                 ir.extend(dst_ir)
                 return ir + self._ir_composite_call(dst_address, stmt.init, var_type)
+            # An array/struct-typed initializer that's an array
+            # literal or a struct literal (positional or named/
+            # partial alike) -- writes directly through this
+            # variable's own address via the exact same _ir_write_
+            # array_literal_into/_ir_write_struct_literal_into
+            # machinery Return's own identical case already uses
+            # (both take an arbitrary destination address, never
+            # assumed to be Return's own hidden pointer specifically).
+            # Needs the SAME heap-allocation-first step every other
+            # fresh-value-producing case above needs.
+            #
+            # Binds FIRST, unlike Slice production/append above:
+            # producing this value needs the destination's own
+            # address as an INPUT (not just its own source shape), so
+            # there's no way to know success without it. This is safe
+            # regardless of outcome, though: _bind_local's own Temp
+            # always points at this VarDecl's own pre-computed,
+            # permanent offset (see its own docstring), so a second
+            # _bind_local call from gen_var_decl's own old-style
+            # fallback, if this one fails, resolves to the identical
+            # underlying storage location, not a different one -- the
+            # same "orphans a Temp id, harmlessly" waste already
+            # accepted elsewhere in this arc, not a genuine hazard.
+            if var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and (
+                    isinstance(stmt.init, ArrayLiteral) or (isinstance(stmt.init, Call) and stmt.init.name in self.struct_registry)):
+                offset = self._bind_local(stmt)
+                ir = []
+                if self._is_heap_allocated(id(stmt), var_type):
+                    ir.append(IRRaw(
+                        self._gen_malloc_array(var_type) + [MovQ(src=Register('rax'), dst=Memory('rbp', offset))]
+                    ))
+                address_fn = self._ir_array_address if var_type.kind == TypeKind.ARRAY else self._ir_struct_address
+                dst_ir, dst_address = address_fn(Variable(name=stmt.name))
+                ir.extend(dst_ir)
+                writer = self._ir_write_array_literal_into if isinstance(stmt.init, ArrayLiteral) else self._ir_write_struct_literal_into
+                write_ir = writer(dst_address, stmt.init, var_type)
+                if write_ir is not None:
+                    return ir + write_ir
             # A slice-typed VarDecl with NO initializer at all -- its
             # implicit zero value is the nil slice (ptr=0, len=0,
             # cap=0), needing no computation whatsoever: three
@@ -424,6 +477,17 @@ class StatementsMixin:
                     TypeKind.SLICE: self._ir_slice_address,
                 }[var_type.kind](Variable(name=stmt.name))
                 return dst_ir + self._ir_composite_call(dst_address, stmt.value, var_type)
+            # Same array-literal/struct-literal case as VarDecl's own,
+            # just above -- no binding concern here at all, unlike
+            # VarDecl's own (the destination already exists).
+            if var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and (
+                    isinstance(stmt.value, ArrayLiteral) or (isinstance(stmt.value, Call) and stmt.value.name in self.struct_registry)):
+                address_fn = self._ir_array_address if var_type.kind == TypeKind.ARRAY else self._ir_struct_address
+                dst_ir, dst_address = address_fn(Variable(name=stmt.name))
+                writer = self._ir_write_array_literal_into if isinstance(stmt.value, ArrayLiteral) else self._ir_write_struct_literal_into
+                write_ir = writer(dst_address, stmt.value, var_type)
+                if write_ir is not None:
+                    return dst_ir + write_ir
         elif isinstance(stmt, IndexAssign):
             # Same scope boundary as gen_index_assign itself. ARRAY
             # never occurs here at all (IndexAssign's own grammar
@@ -454,6 +518,17 @@ class StatementsMixin:
                 address_fn = self._ir_struct_address if element_type.kind == TypeKind.STRUCT else self._ir_slice_address
                 dst_ir, dst_address = address_fn(dst_expr)
                 return dst_ir + self._ir_composite_call(dst_address, stmt.value, element_type)
+            # A struct-literal (positional or named/partial) value --
+            # no ArrayLiteral case needed here at all, unlike VarDecl/
+            # Assign/FieldAssign's own: ARRAY never occurs as an
+            # IndexAssign element type in the first place (see this
+            # case's own opening comment).
+            if element_type.kind == TypeKind.STRUCT and isinstance(stmt.value, Call) and stmt.value.name in self.struct_registry:
+                dst_expr = Index(array=stmt.array, index=stmt.index)
+                dst_ir, dst_address = self._ir_struct_address(dst_expr)
+                write_ir = self._ir_write_struct_literal_into(dst_address, stmt.value, element_type)
+                if write_ir is not None:
+                    return dst_ir + write_ir
         elif isinstance(stmt, FieldAssign):
             # Same idea one level over -- FieldAssign's grammar can
             # ALSO produce an ARRAY-typed field (unlike IndexAssign).
@@ -485,6 +560,20 @@ class StatementsMixin:
                 }[field_type.kind]
                 dst_ir, dst_address = address_fn(dst_expr)
                 return dst_ir + self._ir_composite_call(dst_address, stmt.value, field_type)
+            # Same array-literal/struct-literal case as VarDecl/
+            # Assign's own -- FieldAssign's grammar can ALSO produce
+            # an array-typed field (unlike IndexAssign, per this
+            # case's own opening comment), so both apply here, just
+            # like VarDecl/Assign's own.
+            if field_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and (
+                    isinstance(stmt.value, ArrayLiteral) or (isinstance(stmt.value, Call) and stmt.value.name in self.struct_registry)):
+                dst_expr = Field(base=stmt.base, name=stmt.name)
+                address_fn = self._ir_array_address if field_type.kind == TypeKind.ARRAY else self._ir_struct_address
+                dst_ir, dst_address = address_fn(dst_expr)
+                writer = self._ir_write_array_literal_into if isinstance(stmt.value, ArrayLiteral) else self._ir_write_struct_literal_into
+                write_ir = writer(dst_address, stmt.value, field_type)
+                if write_ir is not None:
+                    return dst_ir + write_ir
         elif isinstance(stmt, Break):
             return self._ir_break()
         elif isinstance(stmt, Continue):
