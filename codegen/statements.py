@@ -116,15 +116,26 @@ class StatementsMixin:
         follow-up; the array/struct no-initializer case above already
         is that follow-up, for _ir_write_zero_value_into specifically.)
 
+        Break and Continue are real IR too (_ir_break/_ir_continue --
+        an exact, zero-behavioral-difference IRJump-for-Jmp swap, see
+        their own docstrings), as is an ArrayLiteral- or Slice-valued
+        ExprStmt (_ir_array_literal_side_effects_only/_ir_slice_into,
+        evaluating for side effects/the bounds check alone, with
+        nothing ever materialized or read back -- see gen_expr_stmt's
+        own docstring for exactly why an ArrayLiteral in particular
+        needs this narrower treatment rather than an ordinary
+        gen_expr_ir call).
+
         Falls back to wrapping gen_statement itself, as a single
         opaque IRRaw, for everything else (an array/struct/slice-typed
         VarDecl/Assign/IndexAssign/FieldAssign whose value is an
         ArrayLiteral/struct-literal Call; a Return whose value is an
         ArrayLiteral/struct-literal Call with some field/element out of
-        scope for _ir_write_composite_value_into, or bare `none`;
-        Break, Continue, and an ArrayLiteral/Slice-valued ExprStmt) --
-        a real, deliberate scope boundary, not an oversight: those
-        still need their own IR-native handling as a follow-up.
+        scope for _ir_write_composite_value_into, or bare `none`; a
+        Slice-valued ExprStmt whose own base is out of scope for _ir_
+        slice_into) -- a real, deliberate scope boundary, not an
+        oversight: those still need their own IR-native handling as a
+        follow-up.
         """
         if isinstance(stmt, Return):
             is_composite_return = isinstance(stmt.value, NoneLiteral) or (
@@ -474,7 +485,18 @@ class StatementsMixin:
                 }[field_type.kind]
                 dst_ir, dst_address = address_fn(dst_expr)
                 return dst_ir + self._ir_composite_call(dst_address, stmt.value, field_type)
-        elif isinstance(stmt, ExprStmt) and not isinstance(stmt.expr, (ArrayLiteral, Slice)):
+        elif isinstance(stmt, Break):
+            return self._ir_break()
+        elif isinstance(stmt, Continue):
+            return self._ir_continue()
+        elif isinstance(stmt, ExprStmt) and isinstance(stmt.expr, ArrayLiteral):
+            return self._ir_array_literal_side_effects_only(stmt.expr)
+        elif isinstance(stmt, ExprStmt) and isinstance(stmt.expr, Slice):
+            production = self._ir_slice_into(stmt.expr)
+            if production is not None:
+                slice_ir, _, _, _ = production
+                return slice_ir
+        elif isinstance(stmt, ExprStmt):
             ir, _ = self.gen_expr_ir(stmt.expr)
             return ir
         return [IRRaw(self.gen_statement(stmt))]
@@ -984,16 +1006,46 @@ class StatementsMixin:
         # loop; this check exists so codegen doesn't trust semantic
         # analysis unconditionally, the same defensive posture
         # _local_offset takes.
+        #
+        # Real IR now instead -- see _ir_break, an exact one-line swap
+        # (IRJump instead of Jmp; IRJump's own lowering already emits
+        # exactly this same Jmp, see its own docstring). This old-
+        # style path is still reached from gen_statement, the old-
+        # style statement dispatch.
         if not self.loop_labels:
             raise CodegenError("'break' outside of a loop")
         _, end_label = self.loop_labels[-1]
         return [Jmp(end_label)]
 
+    def _ir_break(self) -> list:
+        """The real-IR counterpart to gen_break: identical loop-label
+        lookup and the identical defensive check, just IRJump instead
+        of a raw Jmp -- IRJump's own lowering already emits exactly
+        that same Jmp (see codegen/ir.py's own docstring), so this is
+        a direct, zero-behavioral-difference swap, not a translation
+        needing any new reasoning."""
+        if not self.loop_labels:
+            raise CodegenError("'break' outside of a loop")
+        _, end_label = self.loop_labels[-1]
+        return [IRJump(end_label)]
+
     def gen_continue(self, stmt: Continue) -> list[Instruction]:
+        # Real IR now instead -- see _ir_continue, the identical one-
+        # line swap _ir_break's own docstring describes. This old-
+        # style path is still reached from gen_statement.
         if not self.loop_labels:
             raise CodegenError("'continue' outside of a loop")
         start_label, _ = self.loop_labels[-1]
         return [Jmp(start_label)]
+
+    def _ir_continue(self) -> list:
+        """The real-IR counterpart to gen_continue -- see _ir_break's
+        own docstring for why this is a direct, zero-behavioral-
+        difference swap."""
+        if not self.loop_labels:
+            raise CodegenError("'continue' outside of a loop")
+        start_label, _ = self.loop_labels[-1]
+        return [IRJump(start_label)]
 
     def gen_expr_stmt(self, stmt: ExprStmt) -> list[Instruction]:
         # Evaluated the same way as any other expression, into %eax --

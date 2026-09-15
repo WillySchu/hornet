@@ -1592,6 +1592,32 @@ class ArraysSlicesMixin:
             return self.gen_array_call_into(dst_mem, expr, array_type)
         raise CodegenError(f"No codegen rule for an array-typed value: {expr!r}")
 
+    def _ir_array_literal_side_effects_only(self, expr: ArrayLiteral) -> list:
+        """The real-IR counterpart to gen_array_literal_side_effects_
+        only: identical logic (recurse for a nested ArrayLiteral
+        element, raise for any other array/slice/struct-typed element
+        -- see that method's own docstring for exactly why this scope
+        boundary exists and isn't silently widened here), just
+        gen_expr_ir instead of gen_expr_into for a scalar element, so
+        a migrated sub-expression (e.g. a call) stays real IR too."""
+        ir = []
+        for element in expr.elements:
+            if isinstance(element, ArrayLiteral):
+                ir.extend(self._ir_array_literal_side_effects_only(element))
+                continue
+            element_type = type_of(element)
+            if element_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
+                raise CodegenError(
+                    f"A bare array-literal statement can't have a "
+                    f"{type(element).__name__} element of type "
+                    f"{element_type} -- assign the literal to a "
+                    f"variable first if you need this element's value "
+                    f"or side effect evaluated"
+                )
+            elem_ir, _ = self.gen_expr_ir(element)
+            ir.extend(elem_ir)
+        return ir
+
     def gen_array_literal_side_effects_only(self, expr: ArrayLiteral) -> list[Instruction]:
         """A bare array-literal statement (`[3]int[1, 2, 3]` alone,
         with no assignment) never needs its VALUE materialized
@@ -1612,7 +1638,13 @@ class ArraysSlicesMixin:
         Variable has no side effect worth preserving, but an array-
         returning Call might, and correctly distinguishing the two
         isn't implemented here. Raises a clear error rather than
-        silently skipping (which could drop a real side effect)."""
+        silently skipping (which could drop a real side effect).
+
+        Real IR now instead -- see _ir_array_literal_side_effects_
+        only, an exact translation of this same logic. This old-style
+        path is still reached from gen_expr_stmt, itself still
+        reached from gen_statement, the old-style statement dispatch.
+        """
         instructions = []
         for element in expr.elements:
             if isinstance(element, ArrayLiteral):

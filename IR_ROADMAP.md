@@ -26,9 +26,6 @@ Arrays, structs, and slices are real IR across: production, whole-value copying,
 
 ## Proposed roadmap
 
-1. **`Break`/`Continue`** first — take five minutes, no reason not to just close it out whenever convenient.
 2. **The `VarDecl`/`Assign`/`IndexAssign`/`FieldAssign` literal-value wiring** (Tier 2) next — cheapest real win left, closes out the composite-value arc almost entirely.
 3. Then a choice between **Call-as-addressable-base** and **array/struct equality** — both are genuinely separate, Tier-3-weight pieces deserving their own discussion-first scoping conversation, the way `append` and the calling convention did. I don't have a strong pull toward one over the other; Call-as-base closes a correctness/completeness gap across three related spots at once, while array/struct equality is a single, self-contained operator.
 4. **`print()`** last, as its own dedicated arc — it's unrelated to the composite-value work and large enough to warrant a fresh scoping discussion of its own rather than folding it in as a follow-up to anything else.
-
-The `ArrayLiteral`/`Slice`-valued `ExprStmt` edge case is low-value enough that I'd bundle it into whichever of the above happens to touch that code path naturally, rather than giving it its own step.
