@@ -635,12 +635,20 @@ class CodeGenerator(
     def _collect_argument_temps(self, statements: List[Node]) -> None:
         """Recursively walks `statements` -- including into every If's
         then_body/else_body and every While's body, like
-        _collect_locals -- looking for a function-call argument that is
-        array- or struct-typed but has no address of its own: an
-        ArrayLiteral, a struct literal, or an ordinary array/struct-
-        returning Call used DIRECTLY as an argument -- as opposed to a
+        _collect_locals -- looking for TWO kinds of array-/struct-
+        typed expression with no address of its own: a function-call
+        argument (an ArrayLiteral, a struct literal, or an ordinary
+        array/struct-returning Call used DIRECTLY as an argument), and
+        -- despite this method's own name, which predates this second
+        kind -- an ordinary composite-returning Call sitting directly
+        at an Index.array/Field.base position (`makeArray()[i]`,
+        `makePoint().x`; NOT a Slice.array position -- see _collect_
+        argument_temps_in_expr's own Slice case for why that one never
+        reserves a slot at all here, unlike these two). Neither is a
         Variable, Index, or Field, each of which already has a real
-        address via gen_array_address_into/gen_struct_address_into.
+        address via gen_array_address_into/gen_struct_address_into (or
+        their real-IR counterparts, _ir_array_address/_ir_struct_
+        address).
 
         Not just ORDINARY function-call arguments, despite the name:
         the walk finds a qualifying argument inside ANY Call node, with
@@ -713,6 +721,19 @@ class CodeGenerator(
                 self._collect_argument_temps_in_expr(stmt.expr)
             # Break/Continue carry no expressions at all.
 
+    def _is_ordinary_composite_call(self, expr: Node) -> bool:
+        """True for a Call that goes through the ordinary hidden-
+        pointer convention (see _ir_composite_call) -- excludes a
+        struct-literal Call (construction, not an ordinary call at
+        all -- Point(1,2).x needs its own, separate treatment, not
+        attempted here) and append (a builtin, never compiled as an
+        ordinary function -- calling it via the hidden-pointer
+        convention would try to call a symbol literally named
+        'append' that was never compiled), matching the identical
+        exclusion this arc has applied everywhere else a composite-
+        returning Call is distinguished from these two shapes."""
+        return isinstance(expr, Call) and expr.name != 'append' and expr.name not in self.struct_registry
+
     def _collect_argument_temps_in_expr(self, expr: Optional[Node]) -> None:
         """The general expression-tree walk _collect_argument_temps
         needs but _collect_locals never did -- recurses into every
@@ -745,12 +766,33 @@ class CodeGenerator(
         elif isinstance(expr, Index):
             self._collect_argument_temps_in_expr(expr.array)
             self._collect_argument_temps_in_expr(expr.index)
+            array_type = type_of(expr.array)
+            if array_type.kind in (TypeKind.ARRAY, TypeKind.SLICE) and self._is_ordinary_composite_call(expr.array):
+                self._reserve_argument_temp(expr.array, array_type)
         elif isinstance(expr, Field):
             self._collect_argument_temps_in_expr(expr.base)
+            base_type = type_of(expr.base)
+            if base_type.kind == TypeKind.STRUCT and self._is_ordinary_composite_call(expr.base):
+                self._reserve_argument_temp(expr.base, base_type)
         elif isinstance(expr, Slice):
             self._collect_argument_temps_in_expr(expr.array)
             self._collect_argument_temps_in_expr(expr.low)
             self._collect_argument_temps_in_expr(expr.high)
+            # Deliberately NEVER reserves a slot here, unlike the
+            # Index/Field cases just above: a slice PRODUCED from this
+            # base escapes -- its own ptr aliases whatever backs the
+            # base for as long as the slice itself is alive, which can
+            # far outlive this statement (assigned to a variable,
+            # returned, stored). A stack slot would be unsafe here
+            # regardless of size, the same reasoning _is_heap_
+            # allocated's own escape-analysis consultation already
+            # applies to a NAMED variable that's ever sliced -- except
+            # here there's no name to track at all (this base has none
+            # of its own), so the decision is made unconditionally
+            # rather than via that machinery. See _ir_materialize_
+            # composite_call's own docstring for the codegen-time half
+            # of this: no reservation found for id(expr.array) is
+            # exactly what tells it to malloc instead of using a slot.
         elif isinstance(expr, ArrayLiteral):
             for element in expr.elements:
                 self._collect_argument_temps_in_expr(element)

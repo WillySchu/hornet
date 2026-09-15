@@ -13634,6 +13634,203 @@ class TestArgumentMaterialization:
 # any particular value for.
 # ---------------------------------------------------------------------------
 
+class TestCompositeCallAsAddressableBase:
+    """A composite-returning function call used directly as an
+    addressable base (`makeArr()[i]`, `makePoint().x`, `makeArr()
+    [a:b]`) -- previously unsupported at all, even old-style
+    (CodegenError, not just a slower fallback): the callee's own
+    result exists only via the hidden-pointer convention, so it needs
+    somewhere real to be written before it can be indexed into, field-
+    read, or sliced. See _ir_materialize_composite_call's own
+    docstring for the full design, and _collect_argument_temps_in_
+    expr's own Index/Field/Slice cases for where a slot is (or, for
+    Slice specifically, is deliberately never) reserved ahead of
+    time."""
+
+    pytestmark = GCC_SKIP
+
+    def test_array_returning_call_indexed_directly(self):
+        assert_program_exit_code(
+            "def [3]int makeArr():\n"
+            "    return [7, 8, 9]\n"
+            "\n"
+            "def int main():\n"
+            "    return makeArr()[1]\n",
+            8,
+        )
+
+    def test_struct_returning_call_field_accessed_directly(self):
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def Point makePoint():\n"
+            "    return Point(3, 4)\n"
+            "\n"
+            "def int main():\n"
+            "    return makePoint().x + makePoint().y\n",
+            7,
+        )
+
+    def test_slice_returning_call_indexed_directly(self):
+        assert_program_exit_code(
+            "def []int makeSlice([5]int arr):\n"
+            "    return arr[1:4]\n"
+            "\n"
+            "def int main():\n"
+            "    return makeSlice([10, 20, 30, 40, 50])[1]\n",
+            30,
+        )
+
+    def test_slice_produced_from_array_returning_call(self):
+        """`makeArr()[a:b]` -- a slice PRODUCED from a materialized
+        call's own result, not just a single element read out of it.
+        The resulting slice's own ptr aliases the materialized
+        backing directly, so this exercises the always-heap-allocate
+        path (see _ir_materialize_composite_call's own docstring) even
+        though the array itself is tiny -- see the assembly-inspecting
+        tests below for direct proof that this is really what
+        happens, not just a plausible-looking exit code."""
+        assert_program_exit_code(
+            "def [5]int makeArr():\n"
+            "    return [1, 2, 3, 4, 5]\n"
+            "\n"
+            "def int main():\n"
+            "    []int s = makeArr()[1:4]\n"
+            "    return s[0] + s[1] + s[2]\n",
+            9,
+        )
+
+    def test_slice_from_call_survives_a_second_unrelated_materialization(self):
+        """THE test proving a single shared (or reused) scratch slot
+        would have been wrong here, the identical role test_two_array_
+        literals_alive_in_the_same_call plays for TestArgumentMaterial
+        ization: the slice produced from makeArrayA()'s own result has
+        to keep pointing at valid data even after makeArrayB() is
+        called and materialized afterward -- if both calls' own
+        results shared one slot, or the second reused the first's now-
+        freed one, makeArrayB()'s own write would corrupt s's own
+        backing before it's ever read."""
+        assert_program_exit_code(
+            "def [5]int makeArrayA():\n"
+            "    return [1, 2, 3, 4, 5]\n"
+            "\n"
+            "def [5]int makeArrayB():\n"
+            "    return [100, 200, 300, 400, 500]\n"
+            "\n"
+            "def int main():\n"
+            "    []int s = makeArrayA()[1:4]\n"
+            "    int unrelated = makeArrayB()[0]\n"
+            "    return s[0] + s[1] + s[2] + unrelated\n",
+            109,
+        )
+
+    def test_multiple_composite_calls_as_base_in_one_function(self):
+        """Three distinct calls, each used as an addressable base in
+        the same function -- proves each gets its own, independently
+        reserved slot (keyed by id(expr), the same mechanism _reserve_
+        argument_temp already uses for argument materialization), not
+        one shared slot silently overwritten by the next."""
+        assert_program_exit_code(
+            "def [3]int makeA():\n"
+            "    return [1, 2, 3]\n"
+            "\n"
+            "def [3]int makeB():\n"
+            "    return [10, 20, 30]\n"
+            "\n"
+            "def [3]int makeC():\n"
+            "    return [100, 200, 300]\n"
+            "\n"
+            "def int main():\n"
+            "    int a = makeA()[0]\n"
+            "    int b = makeB()[1]\n"
+            "    int c = makeC()[2]\n"
+            "    return a + b + c\n",
+            65,
+        )
+
+    def test_composite_call_as_base_inside_a_loop(self):
+        """The same reserved slot is written and read anew every
+        iteration -- safe because each iteration's own value is fully
+        consumed (read into a scalar) before the next iteration's own
+        call ever runs, the same left-to-right, fully-sequential
+        evaluation order this arc has relied on throughout."""
+        assert_program_exit_code(
+            "def [3]int makeArr(int seed):\n"
+            "    return [seed, seed + 1, seed + 2]\n"
+            "\n"
+            "def int main():\n"
+            "    int total = 0\n"
+            "    int i = 0\n"
+            "    while i < 1000:\n"
+            "        total = total + makeArr(i)[0]\n"
+            "        i = i + 1\n"
+            "    return total % 256\n",
+            44,
+        )
+
+    def test_small_array_returning_call_indexed_stays_on_stack(self):
+        """The size-threshold half of the design: an ordinary index
+        read of a SMALL composite-returning call's own result reuses a
+        reserved stack slot, exactly like an ordinary argument
+        materialization would -- no malloc call should appear in the
+        generated assembly at all."""
+        source = (
+            "def [3]int makeSmall():\n"
+            "    return [1, 2, 3]\n"
+            "\n"
+            "def int main():\n"
+            "    return makeSmall()[0]\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        assert "malloc" not in asm
+
+    def test_large_array_returning_call_indexed_is_heap_allocated(self):
+        """The other side of the same threshold: a call returning an
+        array over _STACK_ARRAY_LIMIT_BYTES gets malloc'd fresh at the
+        point of the call instead, needing no reserved frame slot at
+        all -- the identical size-based rule _reserve_argument_temp
+        already applies to an ordinary argument."""
+        n = 4097  # one int over the 16384-byte threshold
+        source = (
+            f"def [{n}]int makeBig():\n"
+            f"    [{n}]int arr\n"
+            f"    arr[0] = 1\n"
+            f"    arr[{n - 1}] = 2\n"
+            f"    return arr\n"
+            f"\n"
+            f"def int main():\n"
+            f"    return makeBig()[0]\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        assert "malloc" in asm
+
+    def test_slice_production_from_call_always_heap_allocates_regardless_of_size(self):
+        """Direct proof of the always-escape rule: even a TINY array-
+        returning call -- one small enough that an ordinary index read
+        of it stays on the stack (see test_small_array_returning_call_
+        indexed_stays_on_stack, same size) -- must still malloc when
+        the base is sliced rather than indexed, since the resulting
+        slice's own ptr can outlive this statement entirely."""
+        source = (
+            "def [3]int makeTiny():\n"
+            "    return [1, 2, 3]\n"
+            "\n"
+            "def int main():\n"
+            "    []int s = makeTiny()[0:2]\n"
+            "    return s[0]\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        assert "malloc" in asm
+
+
 class TestNamedStructLiterals:
     pytestmark = GCC_SKIP
 

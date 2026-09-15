@@ -17,9 +17,6 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
-- Unnamed struct field access.
-- Slice / index an array return directly on function calls.
-- Indexing into an unnamed or computed slice to IR.
 - `IRBranch` peephole optimization to skip redundant unconditional jumps.
 - IRAddress
 - CSE pass optimization for array addresses and thus indexes.

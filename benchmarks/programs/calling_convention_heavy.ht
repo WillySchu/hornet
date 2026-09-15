@@ -52,6 +52,10 @@ def int main():
         int sumPoint = pt.x + pt.y
         Line ln = makeLine(i)
         int sumLine = ln.start.x + ln.start.y + ln.end.x + ln.end.y
-        total = (total + sumArr + sumSl + sumField + sumMade + sumForwarded + sumReturned + sumPoint + sumLine) % 1000003
+        int madeArrIndexed = makeArray(i)[0]
+        int madePointField = makePoint(i).x
+        []int madeSlice = makeArray(i)[0:2]
+        int sumMadeSlice = madeSlice[0] + madeSlice[1]
+        total = (total + sumArr + sumSl + sumField + sumMade + sumForwarded + sumReturned + sumPoint + sumLine + madeArrIndexed + madePointField + sumMadeSlice) % 1000003
         i = i + 1
     return total % 256

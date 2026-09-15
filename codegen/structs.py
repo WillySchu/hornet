@@ -99,13 +99,16 @@ class StructsMixin:
 
     def _ir_struct_address(self, expr: Node) -> tuple[list, object]:
         """Builds (without lowering) the address of a struct-typed
-        expr -- Variable, Field, or Index -- as real IR. Mirrors gen_
-        struct_address_into's own three cases; Field/Index delegate to
-        _ir_field_address/_ir_index_address, which call back into this
-        method for their own STRUCT-typed base -- the identical mutual
-        recursion gen_struct_address_into/gen_field_address_into/gen_
-        index_address_into already use, so a chain of arbitrary depth
-        (`a.b.c`, `rows[0].f`) falls out with no special-casing.
+        expr -- Variable, Field, Index, or now an ordinary composite-
+        returning Call (`makePoint().x`, materialized first via _ir_
+        materialize_composite_call -- see its own docstring) -- as
+        real IR. Mirrors gen_struct_address_into's own cases; Field/
+        Index delegate to _ir_field_address/_ir_index_address, which
+        call back into this method for their own STRUCT-typed base --
+        the identical mutual recursion gen_struct_address_into/gen_
+        field_address_into/gen_index_address_into already use, so a
+        chain of arbitrary depth (`a.b.c`, `rows[0].f`) falls out with
+        no special-casing.
 
         The Variable case is the one genuine leaf: a named struct
         variable's own address is either a fixed, compile-time %rbp-
@@ -131,6 +134,8 @@ class StructsMixin:
             return self._ir_field_address(expr)
         if isinstance(expr, Index):
             return self._ir_index_address(expr)
+        if self._is_ordinary_composite_call(expr):
+            return self._ir_materialize_composite_call(expr, type_of(expr))
         raise CodegenError(f"Cannot compute a struct address for: {expr!r}")
 
     def _ir_field_address(self, expr: Field) -> tuple[list, object]:

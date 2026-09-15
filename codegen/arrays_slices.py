@@ -43,7 +43,7 @@ from codegen.assembly_ast import (
     Sub,
 )
 from codegen.errors import CodegenError
-from codegen.ir import IRRaw, IRBinOp, IRConst, IRBoundsCheck, IRSliceBoundsCheck, IRStore, IRLoad, IRAppendGrow, IRMove, IRBranch, IRJump, IRLabel, IRLocalAddress, IRStaticDataAddress
+from codegen.ir import IRRaw, IRBinOp, IRConst, IRBoundsCheck, IRSliceBoundsCheck, IRStore, IRLoad, IRAppendGrow, IRMove, IRBranch, IRJump, IRLabel, IRLocalAddress, IRStaticDataAddress, IRCall
 from codegen.utils import type_of, type_byte_width, leaf_type, as_byte_register, gen_protecting_dst_across
 from parser import Node, ArrayLiteral, Call, Field, Index, Slice, Variable, NoneLiteral, Binary, BinaryOp
 from semantic import TypeKind, Type
@@ -375,25 +375,65 @@ class ArraysSlicesMixin:
             return self._ir_field_address(expr)
         return None
 
+    def _ir_materialize_composite_call(self, call_expr: Call, value_type: Type):
+        """Builds (without lowering) an ordinary composite-returning
+        Call's own materialized address as real IR -- returns (ir,
+        address). Used wherever such a call sits directly at an
+        addressable-base position (Index.array, Field.base, Slice.
+        array) with no address of its own to compute, unlike a
+        Variable/Field/Index base.
+
+        Whether the result lands on the stack or the heap is decided
+        entirely by whether _collect_argument_temps_in_expr's own
+        pre-pass reserved a slot for id(call_expr) -- see its own
+        docstring for exactly which of the three base positions get
+        one (Index/Field, when small enough) and which never do
+        (Slice, which always escapes, regardless of size, since the
+        slice it produces can outlive this statement). No reservation
+        found here means malloc, matching the identical "no slot
+        reserved -> malloc" contract _gen_materialize_argument_temp_
+        into's own docstring already establishes for a composite-
+        returning Call used as an ordinary function argument -- this
+        is the same mechanism, reused for three more AST positions,
+        not a new one.
+
+        Either way, the destination address is handed to _ir_
+        composite_call exactly as any other composite-returning
+        call's own destination would be -- the result is written
+        through it via the ordinary hidden-pointer convention, with
+        no new IR concept needed at all."""
+        if id(call_expr) in self._argument_temp_offsets:
+            offset = self._argument_temp_offsets[id(call_expr)]
+            addr = self._new_temp(Type.INT64)
+            addr_ir = [IRLocalAddress(dst=addr, offset=offset)]
+        else:
+            addr = self._new_temp(Type.INT64)
+            size = type_byte_width(value_type, self.struct_registry)
+            addr_ir = [IRCall(dst=addr, name='malloc', args=[IRConst(size, Type.INT64)])]
+        call_ir = self._ir_composite_call(addr, call_expr, value_type)
+        return addr_ir + call_ir, addr
+
     def _ir_indexable_base(self, expr: Node):
         """Builds (without lowering) the address, length, and capacity
         of an indexable base as real IR -- returns (ir, addr_value,
         length_value, cap_value), or None when expr's own shape is
-        still out of scope (an ArrayLiteral; a Call, when expr is
-        slice-typed -- a composite-returning call is entirely old-
-        style right now, with no real-IR production to delegate to at
-        all; that's separate, calling-convention-level follow-up work,
-        not attempted here). Mirrors gen_indexable_base_into's own
+        still out of scope (an ArrayLiteral, or a struct-literal Call
+        used directly at this position -- construction, not an
+        ordinary call at all, needing its own, separate treatment not
+        attempted here). Mirrors gen_indexable_base_into's own
         two-way split and its own full three-value contract -- cap is
         always computed here too, even by callers (_ir_index_address)
         that never read it back, for the identical reason gen_
         indexable_base_into's own docstring gives: cheap enough that
         one uniform contract beats making it optional.
 
-        ARRAY-typed: delegates to _ir_array_address (Variable/Field/
-        Index all in scope, matching gen_array_address_into's own
-        three cases exactly); length and cap are both always the same
-        compile-time IRConst -- an array has no separate capacity.
+        ARRAY-typed: delegates to _ir_array_address for a Variable/
+        Field/Index base (matching gen_array_address_into's own three
+        cases exactly), or to _ir_materialize_composite_call for an
+        ordinary composite-returning Call (`makeArray()[i]`) -- see
+        its own docstring; length and cap are both always the same
+        compile-time IRConst either way -- an array has no separate
+        capacity.
 
         SLICE-typed, Variable: now the identical shape as the Field/
         Index case just below, just starting from IRLocalAddress (a
@@ -422,6 +462,16 @@ class ArraysSlicesMixin:
         free: _ir_field_address/_ir_index_address already recurse
         through arbitrary Variable/Field/Index chains on their own.
 
+        SLICE-typed, ordinary composite-returning Call
+        (`makeSlice()[i]`): same read shape as Field/Index just above,
+        just with the descriptor's own address coming from _ir_
+        materialize_composite_call instead. Also reached, via _ir_
+        slice_into's own delegation to this method for its OWN base,
+        by a slice PRODUCED from this call's result (`makeArray()
+        [a:b]`) -- see _ir_materialize_composite_call's own docstring
+        for why that specific shape always heap-allocates, regardless
+        of size, unlike an ordinary index/field read of the same call.
+
         SLICE-typed, Slice (`arr[:][0]`, `s[a:b][c:d]`): delegates
         straight to _ir_slice_into, whose own return shape (ir, ptr,
         len, cap) already matches this method's own exactly -- there
@@ -440,6 +490,10 @@ class ArraysSlicesMixin:
         argument to make here at all."""
         base_type = type_of(expr)
         if base_type.kind == TypeKind.ARRAY:
+            if self._is_ordinary_composite_call(expr):
+                addr_ir, addr_value = self._ir_materialize_composite_call(expr, base_type)
+                size_const = IRConst(base_type.size, Type.INT)
+                return addr_ir, addr_value, size_const, size_const
             if not isinstance(expr, (Variable, Field, Index)):
                 return None
             addr_result = self._ir_array_address(expr)
@@ -471,6 +525,21 @@ class ArraysSlicesMixin:
                 if addr_result is None:
                     return None
                 addr_ir, descriptor_addr = addr_result
+                ptr_temp = self._new_temp(Type.INT64)
+                len_addr = self._new_temp(Type.INT64)
+                len_temp = self._new_temp(Type.INT)
+                cap_addr = self._new_temp(Type.INT64)
+                cap_temp = self._new_temp(Type.INT)
+                ir = addr_ir + [
+                    IRLoad(dst=ptr_temp, address=descriptor_addr),
+                    IRBinOp(dst=len_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(8, Type.INT64)),
+                    IRLoad(dst=len_temp, address=len_addr),
+                    IRBinOp(dst=cap_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(16, Type.INT64)),
+                    IRLoad(dst=cap_temp, address=cap_addr),
+                ]
+                return ir, ptr_temp, len_temp, cap_temp
+            if self._is_ordinary_composite_call(expr):
+                addr_ir, descriptor_addr = self._ir_materialize_composite_call(expr, base_type)
                 ptr_temp = self._new_temp(Type.INT64)
                 len_addr = self._new_temp(Type.INT64)
                 len_temp = self._new_temp(Type.INT)
