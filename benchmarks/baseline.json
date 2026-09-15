@@ -10,7 +10,7 @@
     },
     "instruction_count": 105,
     "name": "arithmetic_heavy",
-    "runtime_seconds": 0.1126317599999993
+    "runtime_seconds": 0.11128906200002575
   },
   "array_heavy": {
     "allocation": {
@@ -23,20 +23,20 @@
     },
     "instruction_count": 287,
     "name": "array_heavy",
-    "runtime_seconds": 0.033726927999992995
+    "runtime_seconds": 0.029469296999991457
   },
   "calling_convention_heavy": {
     "allocation": {
-      "allocated": 84,
-      "eligible": 84,
-      "named_local_excluded": 2,
+      "allocated": 104,
+      "eligible": 104,
+      "named_local_excluded": 4,
       "spilled": 0,
-      "total_temps": 112,
-      "unsafe_span_excluded": 26
+      "total_temps": 136,
+      "unsafe_span_excluded": 28
     },
-    "instruction_count": 724,
+    "instruction_count": 801,
     "name": "calling_convention_heavy",
-    "runtime_seconds": 0.12903911799998014
+    "runtime_seconds": 0.13692342300004157
   },
   "copy_heavy": {
     "allocation": {
@@ -49,7 +49,7 @@
     },
     "instruction_count": 916,
     "name": "copy_heavy",
-    "runtime_seconds": 0.06779434899999615
+    "runtime_seconds": 0.07545829899999035
   },
   "loop_accumulator": {
     "allocation": {
@@ -62,7 +62,7 @@
     },
     "instruction_count": 47,
     "name": "loop_accumulator",
-    "runtime_seconds": 0.059207519000011644
+    "runtime_seconds": 0.05787032299997463
   },
   "recursive_fibonacci": {
     "allocation": {
@@ -75,7 +75,7 @@
     },
     "instruction_count": 76,
     "name": "recursive_fibonacci",
-    "runtime_seconds": 0.04715992800001345
+    "runtime_seconds": 0.04369757000000618
   },
   "string_heavy": {
     "allocation": {
@@ -88,7 +88,7 @@
     },
     "instruction_count": 120,
     "name": "string_heavy",
-    "runtime_seconds": 0.021191731000016034
+    "runtime_seconds": 0.020210210000016104
   },
   "struct_heavy": {
     "allocation": {
@@ -101,6 +101,6 @@
     },
     "instruction_count": 163,
     "name": "struct_heavy",
-    "runtime_seconds": 0.03145836999999574
+    "runtime_seconds": 0.02886724900002946
   }
 }

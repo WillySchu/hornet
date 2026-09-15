@@ -1271,6 +1271,38 @@ class ArraysSlicesMixin:
                     instructions.extend(self._gen_write_scalar_from(Register('eax'), element_type, elem_mem))
         return instructions
 
+    def _ir_write_array_literal_into(self, dst_address, expr: ArrayLiteral, array_type: Type):
+        """Builds (without lowering) an array literal's elements as
+        real IR, written through dst_address -- an ordinary INT64-
+        typed IRValue, however the caller already has it (see _ir_
+        composite_call's own docstring for the same "doesn't care how"
+        contract). Returns None when out of scope: every element must
+        be scalar (a nested composite element -- an array of arrays/
+        slices/structs -- needs its own recursive real-IR treatment, a
+        genuinely separate, later step, not attempted here).
+
+        Each element's own address is dst_address + i*element_width
+        via ordinary IRBinOp -- skipped entirely for element 0 (offset
+        0 needs no addition, matching _ir_write_slice_descriptor's own
+        identical shortcut for its own ptr field). Each value is
+        evaluated via gen_expr_ir (so a migrated sub-expression stays
+        real IR) and written via IRStore."""
+        element_type = array_type.element_type
+        if element_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
+            return None
+        element_width = type_byte_width(element_type, self.struct_registry)
+        ir = []
+        for i, elem_expr in enumerate(expr.elements):
+            elem_ir, elem_value = self.gen_expr_ir(elem_expr)
+            ir.extend(elem_ir)
+            if i == 0:
+                elem_addr = dst_address
+            else:
+                elem_addr = self._new_temp(Type.INT64)
+                ir.append(IRBinOp(dst=elem_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(i * element_width, Type.INT64)))
+            ir.append(IRStore(address=elem_addr, value=elem_value, value_type=element_type))
+        return ir
+
     def gen_array_value_into(self, expr: Node, dst_mem: Memory, array_type: Type) -> list[Instruction]:
         """Stores an array-typed expression's VALUE into dst_mem,
         matching array_type's shape. This is the array counterpart to

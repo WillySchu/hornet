@@ -27,7 +27,7 @@ from codegen.assembly_ast import (
     Register,
 )
 from codegen.errors import CodegenError
-from codegen.ir import IRRaw, IRBinOp, IRConst
+from codegen.ir import IRRaw, IRBinOp, IRConst, IRStore
 from codegen.utils import type_byte_width, type_of, leaf_type, gen_protecting_dst_across
 from parser import Node, Variable, Field, Index, Call, NoneLiteral, Binary, BinaryOp
 from semantic import TypeKind, Type
@@ -268,6 +268,48 @@ class StructsMixin:
                 else:
                     instructions.extend(self._gen_write_scalar_from(Register('eax'), field_type, field_mem))
         return instructions
+
+    def _ir_write_struct_literal_into(self, dst_address, expr: Call, struct_type: Type):
+        """Builds (without lowering) a struct literal's fields as real
+        IR, written through dst_address -- an ordinary INT64-typed
+        IRValue, however the caller already has it (see _ir_composite_
+        call's own docstring for the same "doesn't care how" contract).
+        Returns None when out of scope: positional construction only
+        (expr.kwargs -- named, possibly-partial construction, with its
+        own implicit-zero-value handling for an omitted field -- stays
+        old-style for now), and every field must be scalar (a nested
+        composite field needs its own recursive real-IR treatment, the
+        same kind of follow-up work _ir_indexable_base's own Call
+        exclusion already represents elsewhere in this arc).
+
+        Each field's own address is dst_address + its own, already-
+        correct _field_offset (computed once per field, the same
+        proven helper gen_struct_literal_into itself already calls,
+        rather than accumulating a running offset by hand and risking
+        it drifting out of sync with that method's own logic) via
+        ordinary IRBinOp -- skipped entirely for the first field
+        (offset 0 needs no addition, matching _ir_write_slice_
+        descriptor's own identical shortcut for its own ptr field).
+        Each value is evaluated via gen_expr_ir (so a migrated sub-
+        expression stays real IR) and written via IRStore."""
+        if expr.kwargs is not None:
+            return None
+        struct_info = self.struct_registry[struct_type.struct_name]
+        field_items = list(struct_info.fields.items())
+        if any(field_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT) for _, field_type in field_items):
+            return None
+        ir = []
+        for arg_expr, (field_name, field_type) in zip(expr.args, field_items):
+            arg_ir, arg_value = self.gen_expr_ir(arg_expr)
+            ir.extend(arg_ir)
+            offset = self._field_offset(struct_type.struct_name, field_name)
+            if offset == 0:
+                field_addr = dst_address
+            else:
+                field_addr = self._new_temp(Type.INT64)
+                ir.append(IRBinOp(dst=field_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(offset, Type.INT64)))
+            ir.append(IRStore(address=field_addr, value=arg_value, value_type=field_type))
+        return ir
 
     def gen_struct_value_into(self, expr: Node, dst_mem: Memory, struct_type: Type) -> list[Instruction]:
         """Stores a struct-typed expression's VALUE into dst_mem,

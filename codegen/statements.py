@@ -85,25 +85,32 @@ class StatementsMixin:
         this is cheap enough to close even though array/struct's own
         zero-init isn't, yet).
 
-        Return's own composite case now covers two of its three
-        shapes: forwarding another composite-returning call's result
-        (`return someFn()`, via _ir_composite_call) and a Variable/
-        Field/Index value (via _ir_copy_into_address) -- both reuse
-        the current function's own received hidden pointer, read via
-        an ordinary address-as-a-Temp leaf (_ir_hidden_return_ptr).
-        An ArrayLiteral or struct-literal Call value still falls back
-        -- a real, deliberate scope boundary, not an oversight:
-        literal construction needs its own, separate real-IR
-        treatment (recursively decomposing into per-element/per-field
-        writes), the same order of work _ir_slice_into/_ir_append_
-        call each needed as their own dedicated step.
+        Return's own composite case now covers all but the genuinely
+        hard shapes: forwarding another composite-returning call's
+        result (`return someFn()`, via _ir_composite_call), a
+        Variable/Field/Index value (via _ir_copy_into_address), and an
+        all-scalar array literal or positional struct literal (via
+        _ir_write_array_literal_into/_ir_write_struct_literal_into) --
+        all four reuse the current function's own received hidden
+        pointer, read via an ordinary address-as-a-Temp leaf (_ir_
+        hidden_return_ptr). A literal with a nested composite element/
+        field, or a named/partial (kwargs) struct literal, still falls
+        back -- a real, deliberate scope boundary, not an oversight:
+        each needs its own recursive real-IR treatment, the same order
+        of work _ir_slice_into/_ir_append_call each needed as their
+        own dedicated step. (_ir_write_array_literal_into/_ir_write_
+        struct_literal_into both take an arbitrary destination address,
+        not a Return-specific one -- directly reusable for VarDecl/
+        Assign/IndexAssign/FieldAssign's own identical ArrayLiteral/
+        struct-literal-value gap, a natural, cheap follow-up.)
 
         Falls back to wrapping gen_statement itself, as a single
         opaque IRRaw, for everything else (a no-initializer array/
         struct VarDecl; an array/struct/slice-typed VarDecl/Assign/
         IndexAssign/FieldAssign whose value is an ArrayLiteral/struct-
-        literal Call; an ArrayLiteral/struct-literal-valued or bare
-        `none` composite Return; Break, Continue, and an ArrayLiteral/
+        literal Call; a Return whose value is an array/struct literal
+        with a nested composite element/field, a named/partial struct
+        literal, or bare `none`; Break, Continue, and an ArrayLiteral/
         Slice-valued ExprStmt) -- a real, deliberate scope boundary,
         not an oversight: those still need their own IR-native
         handling as a follow-up.
@@ -151,16 +158,34 @@ class StatementsMixin:
                 hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr()
                 copy_ir = self._ir_copy_into_address(hidden_ptr, stmt.value, value_type)
                 return hidden_ptr_ir + copy_ir + [IRReturn(value=None)]
-            # Every OTHER composite return shape (an ArrayLiteral,
-            # struct-literal Call, or `return none`) still falls
-            # through to the old-style catch-all below -- a real,
-            # deliberate scope boundary matching how narrowly
-            # everything else in this arc has been scoped, not an
-            # oversight: literal construction genuinely needs its own,
-            # separate real-IR treatment (recursively decomposing into
-            # per-element/per-field writes), the same order of work
-            # _ir_slice_into/_ir_append_call each needed as their own
-            # dedicated step, not something to fold in here cheaply.
+            # A composite return whose own value is an array literal
+            # or a POSITIONAL struct literal, with every element/field
+            # scalar -- writes directly through the hidden pointer via
+            # _ir_write_array_literal_into/_ir_write_struct_literal_
+            # into. Both return None (no binding-style concern here at
+            # all, unlike VarDecl's own analogous cases -- there's
+            # nothing to bind for a Return) when out of scope: a
+            # nested composite element/field, or named/partial
+            # (kwargs) struct construction -- both still need their
+            # own recursive real-IR treatment, a genuinely separate,
+            # later step, not attempted here.
+            if isinstance(stmt.value, ArrayLiteral):
+                value_type = type_of(stmt.value)
+                hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr()
+                write_ir = self._ir_write_array_literal_into(hidden_ptr, stmt.value, value_type)
+                if write_ir is not None:
+                    return hidden_ptr_ir + write_ir + [IRReturn(value=None)]
+            if isinstance(stmt.value, Call) and stmt.value.name in self.struct_registry:
+                value_type = type_of(stmt.value)
+                hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr()
+                write_ir = self._ir_write_struct_literal_into(hidden_ptr, stmt.value, value_type)
+                if write_ir is not None:
+                    return hidden_ptr_ir + write_ir + [IRReturn(value=None)]
+            # Every OTHER composite return shape (an array literal or
+            # struct literal with a nested composite element/field, a
+            # named/partial struct literal, or `return none`) still
+            # falls through to the old-style catch-all below -- a
+            # real, deliberate scope boundary, not an oversight.
         elif isinstance(stmt, If):
             then_label = self.new_label("if_then")
             else_label = self.new_label("if_else")
@@ -753,16 +778,16 @@ class StatementsMixin:
         # deeper, with no intermediate copy ever materialized.
         #
         # Real IR now instead, for the Call-forwarding case (via _ir_
-        # composite_call) and for a Variable/Field/Index value (via
-        # _ir_copy_into_address) alike -- an ArrayLiteral or struct-
-        # literal Call value still reaches this old-style path,
-        # needing its own, separate real-IR treatment (recursively
-        # decomposing construction into per-element/per-field writes)
-        # not attempted yet. See gen_statement_ir's own Return case,
-        # which reads the identical hidden_return_ptr_offset via an
-        # ordinary address-as-a-Temp leaf (_ir_hidden_return_ptr),
-        # then reuses whichever of the two this method's own callers
-        # would have needed, rather than calling this method at all.
+        # composite_call), a Variable/Field/Index value (via _ir_copy_
+        # into_address), and an all-scalar array literal or positional
+        # struct literal (via _ir_write_array_literal_into/_ir_write_
+        # struct_literal_into) alike -- a nested composite element/
+        # field, a named/partial (kwargs) struct literal, or `return
+        # none` still reach this old-style path. See gen_statement_
+        # ir's own Return case, which reads the identical hidden_
+        # return_ptr_offset via an ordinary address-as-a-Temp leaf
+        # (_ir_hidden_return_ptr), then reuses whichever real-IR
+        # builder applies, rather than calling this method at all.
         value_type = type_of(stmt.value)
         if value_type.kind == TypeKind.ARRAY:
             ptr_reg = Register('rax')

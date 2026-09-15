@@ -1,6 +1,10 @@
 struct Container:
     [3]int values
 
+struct Point:
+    int x
+    int y
+
 def int sumArray([3]int arr):
     return arr[0] + arr[1] + arr[2]
 
@@ -16,6 +20,9 @@ def [3]int forwardArray(int seed):
 def [3]int returnLocal(int seed):
     [3]int local = [seed % 5, (seed + 1) % 5, (seed + 2) % 5]
     return local
+
+def Point makePoint(int seed):
+    return Point(seed % 11, (seed + 1) % 11)
 
 def int main():
     Container container
@@ -34,6 +41,8 @@ def int main():
         int sumForwarded = forwarded[0] + forwarded[1] + forwarded[2]
         [3]int returned = returnLocal(i)
         int sumReturned = returned[0] + returned[1] + returned[2]
-        total = (total + sumArr + sumSl + sumField + sumMade + sumForwarded + sumReturned) % 1000003
+        Point pt = makePoint(i)
+        int sumPoint = pt.x + pt.y
+        total = (total + sumArr + sumSl + sumField + sumMade + sumForwarded + sumReturned + sumPoint) % 1000003
         i = i + 1
     return total % 256
