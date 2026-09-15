@@ -13,7 +13,12 @@ Binary Ops:
 - Consider replacing ^ with ~
 - Exponentiation (either ** or ^)
 
+Documentation:
+- Clean up test\_compiler.py, the docstring of which is quite stale.
+
 Updates:
+- Unnamed struct field access.
+- Slice / index an array return directly on function calls.
 - Indexing into an unnamed or computed slice to IR.
 - `IRBranch` peephole optimization to skip redundant unconditional jumps.
 - IRAddress
@@ -27,10 +32,9 @@ Updates:
 - User defined types built off other types.
 - Change slice's zero type to an empty slice rather than `none`.
 - Struct literals as bare statement.
-- Unnamed struct field access.
 - Disallow untyped array literals from anything except assignment to a typed variable / parameter / return.
-- Add source location for error messages from semantic analysis.
 - Reconsider heap allocated literal arrays for `gen_indexable_base_into` (apparently `len([1, 2, 3])` and `[1, 2, 3][0]` work?)
+- Add source location for error messages from semantic analysis.
 - `assert`
 - `in` keyword.
 - `cap` builtin?
@@ -38,12 +42,10 @@ Updates:
 - Ternary.
 - For loops.
 - Dicts.
-- Slice / index an array return directly on function calls.
 - Stack based params to get around parameter limit.
-- Explore per frame vs per array heap promotion.
 - Slice equality?
 - Flow sensitive escape analysis.
-- Dedpulicate emitted type descriptors when we call print()
+- Deduplicate emitted type descriptors when we call print()
 - Variadic functions.
 - Make `append` variadic.
 - Spread operator.
