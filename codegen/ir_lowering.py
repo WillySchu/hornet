@@ -28,7 +28,7 @@ listed here, in one place, rather than discovered by grepping for
 self. across the rest of the codebase.
 """
 
-from codegen.assembly_ast import Instruction, Register, Memory, Imm, Mov, MovQ, Cmp, Je, Jae, Ja, Jmp, Label, CallInstr
+from codegen.assembly_ast import Instruction, Register, Memory, Imm, Mov, MovQ, Cmp, Je, Jae, Ja, Jmp, Label, CallInstr, LeaQFrame, LeaQ
 from codegen.ir import (
     IRAppendGrow,
     IRBinOp,
@@ -40,10 +40,12 @@ from codegen.ir import (
     IRJump,
     IRLabel,
     IRLoad,
+    IRLocalAddress,
     IRMove,
     IRRaw,
     IRReturn,
     IRSliceBoundsCheck,
+    IRStaticDataAddress,
     IRStore,
     IRUnOp,
     IRValue,
@@ -256,6 +258,21 @@ class InstructionSelector:
                     out.append(MovQ(src=Register('rax'), dst=Memory('r9', 0)))
                 else:
                     out.extend(self.host._gen_write_scalar_from(Register('eax'), instr.value_type, Memory('r9', 0)))
+            elif isinstance(instr, IRLocalAddress):
+                # LeaQFrame -- x86-64's own frame-relative address
+                # computation -- is the ONLY architecture-specific
+                # detail here; everything else about how this Temp is
+                # captured (register or spill slot) is the identical,
+                # already-architecture-agnostic _gen_write_temp_from
+                # every other op already uses. A hypothetical ARM64
+                # lowering changes exactly this one line.
+                out.append(LeaQFrame(offset=instr.offset, dst=Register('rax')))
+                out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
+            elif isinstance(instr, IRStaticDataAddress):
+                # Same shape as IRLocalAddress, one line swapped: LeaQ
+                # against a label instead of a frame offset.
+                out.append(LeaQ(label=instr.label, dst=Register('rax')))
+                out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
             elif isinstance(instr, IRCopy):
                 # dst_address/src_address both need to be alive
                 # simultaneously, so both get their own fixed,

@@ -6,8 +6,8 @@ else/end) every branching or looping construct here builds on."""
 
 from codegen.assembly_ast import Instruction, MovQ, Register, Memory, Imm, Push, Pop, Mov, Jmp, LeaQ, MovB
 from codegen.errors import CodegenError
-from codegen.ir import IRRaw, IRReturn, IRBranch, IRLabel, IRJump, IRMove, IRStore, IRCopy, IRConst
-from codegen.utils import type_of
+from codegen.ir import IRRaw, IRReturn, IRBranch, IRLabel, IRJump, IRMove, IRStore, IRCopy, IRConst, IRLoad, IRLocalAddress, IRCall
+from codegen.utils import type_of, type_byte_width
 from parser import (
     ArrayLiteral,
     Assign,
@@ -296,9 +296,7 @@ class StatementsMixin:
                     # ever tries to read an address out of this slot --
                     # otherwise it would read whatever pointer-sized
                     # garbage was already sitting there.
-                    ir.append(IRRaw(
-                        self._gen_malloc_array(var_type) + [MovQ(src=Register('rax'), dst=Memory('rbp', offset))]
-                    ))
+                    ir.extend(self._ir_malloc_and_store(var_type, offset))
                 return ir + self._ir_copy_assign(Variable(name=stmt.name), stmt.init, var_type)
             # A slice-typed initializer that's itself a Slice
             # production (`arr[a:b]`, not an alias of an existing
@@ -348,9 +346,7 @@ class StatementsMixin:
                 offset = self._bind_local(stmt)
                 ir = []
                 if var_type.kind != TypeKind.SLICE and self._is_heap_allocated(id(stmt), var_type):
-                    ir.append(IRRaw(
-                        self._gen_malloc_array(var_type) + [MovQ(src=Register('rax'), dst=Memory('rbp', offset))]
-                    ))
+                    ir.extend(self._ir_malloc_and_store(var_type, offset))
                 address_fn = {
                     TypeKind.ARRAY: self._ir_array_address,
                     TypeKind.STRUCT: self._ir_struct_address,
@@ -387,9 +383,7 @@ class StatementsMixin:
                 offset = self._bind_local(stmt)
                 ir = []
                 if self._is_heap_allocated(id(stmt), var_type):
-                    ir.append(IRRaw(
-                        self._gen_malloc_array(var_type) + [MovQ(src=Register('rax'), dst=Memory('rbp', offset))]
-                    ))
+                    ir.extend(self._ir_malloc_and_store(var_type, offset))
                 address_fn = self._ir_array_address if var_type.kind == TypeKind.ARRAY else self._ir_struct_address
                 dst_ir, dst_address = address_fn(Variable(name=stmt.name))
                 ir.extend(dst_ir)
@@ -424,9 +418,7 @@ class StatementsMixin:
                 offset = self._bind_local(stmt)
                 ir = []
                 if self._is_heap_allocated(id(stmt), var_type):
-                    ir.append(IRRaw(
-                        self._gen_malloc_array(var_type) + [MovQ(src=Register('rax'), dst=Memory('rbp', offset))]
-                    ))
+                    ir.extend(self._ir_malloc_and_store(var_type, offset))
                 address_fn = self._ir_array_address if var_type.kind == TypeKind.ARRAY else self._ir_struct_address
                 dst_ir, dst_address = address_fn(Variable(name=stmt.name))
                 ir.extend(dst_ir)
@@ -589,6 +581,36 @@ class StatementsMixin:
             ir, _ = self.gen_expr_ir(stmt.expr)
             return ir
         return [IRRaw(self.gen_statement(stmt))]
+
+    def _ir_malloc_and_store(self, var_type, offset: int) -> list:
+        """Builds (without lowering) a heap-allocated local's own
+        fresh backing allocation as real IR: an ordinary IRCall to
+        malloc -- IRCall's own lowering is already fully generic over
+        any callee name, external C library functions included, so
+        this needs no new IR concept at all, the identical realization
+        _ir_string_concat already relies on for strlen/strcpy/etc. --
+        then an ordinary IRStore writing the returned pointer into
+        this variable's own frame slot, via IRLocalAddress for the
+        slot's own address. IRLocalAddress always means "the address
+        of this slot," never "the value stored there" (see its own
+        docstring), so writing to it via IRStore, rather than reading
+        through it via IRLoad, is exactly the composition every other
+        caller of a heap-allocated slot's own address already needs.
+
+        Used wherever a fresh, heap-allocated array/struct local needs
+        its own backing allocation made before its address is ever
+        computed -- see this method's own four call sites in
+        gen_statement_ir's own VarDecl case, one per fresh-value-
+        producing shape (Variable/Field/Index copy, Slice production,
+        append, an ordinary composite-returning call)."""
+        size = type_byte_width(var_type, self.struct_registry)
+        ptr = self._new_temp(Type.INT64)
+        slot_addr = self._new_temp(Type.INT64)
+        return [
+            IRCall(dst=ptr, name='malloc', args=[IRConst(size, Type.INT64)]),
+            IRLocalAddress(dst=slot_addr, offset=offset),
+            IRStore(address=slot_addr, value=ptr, value_type=Type.INT64),
+        ]
 
     def gen_var_decl(self, stmt: VarDecl) -> list[Instruction]:
         # _collect_locals already reserved this VarDecl's slot;
@@ -971,13 +993,20 @@ class StatementsMixin:
         """Reads the current function's own received hidden return
         pointer (for a composite-returning function, passed by ITS
         OWN caller, at this function's own fixed, known hidden_
-        return_ptr_offset) as an ordinary address-as-a-Temp leaf --
-        returns (ir, address). Shared by every gen_statement_ir
+        return_ptr_offset) -- returns (ir, address). IRLocalAddress
+        for the slot's own address, then an ordinary IRLoad reading
+        the pointer stored there (IRLocalAddress always means "the
+        address of this slot," never "the value stored there" --
+        see its own docstring). Shared by every gen_statement_ir
         Return case that forwards into it (an ordinary function call,
         or a Variable/Field/Index value) -- neither cares how the
         address was obtained, only that it's an ordinary IRValue."""
+        slot_addr = self._new_temp(Type.INT64)
         hidden_ptr = self._new_temp(Type.INT64)
-        ir = [IRRaw([MovQ(src=Memory('rbp', self._hidden_return_ptr_offset), dst=Register('rax'))], dst=hidden_ptr)]
+        ir = [
+            IRLocalAddress(dst=slot_addr, offset=self._hidden_return_ptr_offset),
+            IRLoad(dst=hidden_ptr, address=slot_addr),
+        ]
         return ir, hidden_ptr
 
     def gen_if(self, stmt: If) -> list[Instruction]:

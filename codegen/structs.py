@@ -27,7 +27,7 @@ from codegen.assembly_ast import (
     Register,
 )
 from codegen.errors import CodegenError
-from codegen.ir import IRRaw, IRBinOp, IRConst, IRStore
+from codegen.ir import IRBinOp, IRConst, IRStore, IRLoad, IRLocalAddress
 from codegen.utils import type_byte_width, type_of, leaf_type, gen_protecting_dst_across
 from parser import Node, Variable, Field, Index, Call, NoneLiteral, Binary, BinaryOp
 from semantic import TypeKind, Type
@@ -109,20 +109,24 @@ class StructsMixin:
 
         The Variable case is the one genuine leaf: a named struct
         variable's own address is either a fixed, compile-time %rbp-
-        relative offset or, if heap-allocated, a single pointer read
-        -- neither is a computation OVER other values, so it stays a
-        small, IRRaw-wrapped leaf rather than its own IR concept, the
-        same deliberate scope boundary IRLoad/IRStore's own address
-        capture already draws."""
+        relative offset (IRLocalAddress directly) or, if heap-
+        allocated, the pointer STORED at that offset (IRLocalAddress
+        for the slot's own address, then an ordinary IRLoad reading
+        the pointer through it) -- IRLocalAddress always means "the
+        address of this slot," never "the value stored there," so the
+        heap-allocated case composes it with IRLoad rather than
+        needing its own, second meaning (see IRLocalAddress's own
+        docstring)."""
         if isinstance(expr, Variable):
             offset = self._local_offset(expr.name)
             struct_type = self._local_type(expr.name)
-            addr_temp = self._new_temp(Type.INT64)
+            slot_addr = self._new_temp(Type.INT64)
+            ir = [IRLocalAddress(dst=slot_addr, offset=offset)]
             if self._is_heap_allocated(self._local_decl_id(expr.name), struct_type):
-                leaf = [MovQ(src=Memory('rbp', offset), dst=Register('rax'))]
-            else:
-                leaf = [LeaQFrame(offset=offset, dst=Register('rax'))]
-            return [IRRaw(leaf, dst=addr_temp)], addr_temp
+                addr_temp = self._new_temp(Type.INT64)
+                ir.append(IRLoad(dst=addr_temp, address=slot_addr))
+                return ir, addr_temp
+            return ir, slot_addr
         if isinstance(expr, Field):
             return self._ir_field_address(expr)
         if isinstance(expr, Index):

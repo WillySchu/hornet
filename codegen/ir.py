@@ -6,6 +6,15 @@ concrete x86 register, so a construct's codegen no longer has to
 reason about which physical register a sub-expression's value happens
 to be sitting in; that's lower_ir's job (ir_lowering.py).
 
+Deliberately architecture-agnostic, not just x86-64-convenient: no op
+defined here references a concrete register, an x86-64 instruction, or
+any other machine-level detail -- IRLocalAddress/IRStaticDataAddress
+included, which represent INTENT ("the address of this frame slot,"
+"the address of this label") rather than the mechanism x86-64 happens
+to use for it (LeaQFrame/LeaQ). A hypothetical retarget to a different
+architecture would need only a new lower_ir, with every op defined in
+this file, and everything built from them, entirely unchanged.
+
 Every block ends in exactly one terminator (IRJump, IRBranch, or
 IRReturn) -- no implicit fallthrough, even where the eventual assembly
 will fall through naturally. Once anything ever reorders blocks (a
@@ -19,7 +28,10 @@ gen_X_into method's existing output verbatim. By convention, those
 instructions leave their result in Register('eax') (or its 64-bit
 view, for int64) -- if `dst` is given, lower_ir appends one store from
 there into dst's slot. IRRaw is self-eliminating: once a construct
-builds real IR instead, nothing constructs one for it again.
+builds real IR instead, nothing constructs one for it again. Unlike
+every other op in this file, IRRaw is NOT architecture-agnostic by
+nature -- it's a deliberate, temporary exception to this file's own
+goal, not a counterexample to it.
 """
 
 from dataclasses import dataclass
@@ -110,13 +122,27 @@ class IRReturn:
 @dataclass
 class IRLoad:
     """dst = *address, reading dst.type's own width from that
-    location. `address` is an ordinary INT64-typed IRValue -- an
-    address needs no dedicated representation of its own, since it's
-    already just a 64-bit value like any other; whatever computed it
-    (bounds-checked array indexing, a struct field's byte offset) is
-    typically still old-style code, spliced in via IRRaw producing
-    this same INT64 Temp, not rewritten to build IR itself. See
-    gen_expr_ir's Index/Field cases."""
+    location. `address` is an ordinary INT64-typed IRValue -- general
+    address ARITHMETIC (bounds-checked array indexing, a struct
+    field's byte offset) needs no dedicated representation of its own,
+    since it's already expressible as ordinary IRBinOp/IRBoundsCheck
+    composition against a Temp, and that composition is itself
+    already architecture-agnostic (no assembly-level instruction
+    embedded anywhere in it). The one thing that genuinely DOES need
+    its own representation is the irreducible BASE case that
+    arithmetic like this ultimately starts from -- the address of a
+    frame-relative local slot, or of a static data label -- since
+    those have no arithmetic to express via IRBinOp at all, just a
+    fixed, compile-time-known location. See IRLocalAddress/
+    IRStaticDataAddress for exactly that, and their own docstrings for
+    why they exist at all despite this file's long-standing "an
+    address is just a 64-bit value, nothing special" position: that
+    position is still correct for the arithmetic, just not for these
+    two remaining leaves, which used to be spliced in via IRRaw
+    wrapping a raw x86-64 instruction (LeaQFrame/LeaQ) directly --
+    architecture-specific machinery embedded in what's meant to be an
+    architecture-agnostic IR, unlike IRBinOp/IRLoad/IRStore
+    themselves, none of which reference anything x86-64-specific."""
     dst: Temp
     address: IRValue
 
@@ -137,6 +163,47 @@ class IRStore:
     address: IRValue
     value: IRValue
     value_type: Type
+
+
+@dataclass
+class IRLocalAddress:
+    """dst = the address of the current frame's own local slot at
+    `offset` bytes from its base -- x86-64's own LeaQFrame, expressed
+    architecture-agnostically: a hypothetical ARM64 lowering would
+    emit whatever ITS OWN frame-relative addressing looks like, with
+    zero change needed to this op, or to anything built on top of it
+    (every other real IR op already references nothing x86-64-
+    specific at all).
+
+    Always means "the address of this slot," never "the value stored
+    there," even for a slot that happens to hold a POINTER to heap-
+    allocated data rather than a value directly: a caller needing the
+    latter composes this with an ordinary IRLoad (reading the pointer
+    stored at that address) rather than this op having two different
+    meanings depending on context -- the same "one op, one meaning;
+    compose for the rest" discipline this whole arc has followed
+    throughout (see _ir_write_slice_descriptor_into_address's own
+    +8/+16 IRBinOp composition for an identical example).
+
+    Covers a named user variable's own slot, a compiler-reserved
+    scratch slot (_unnamed_slice_temp_offset), and the hidden-return-
+    pointer slot alike -- every one of these is "a value at a fixed,
+    compile-time-known frame offset," the same underlying concept
+    regardless of what put it there or who reserved it, so one op
+    covers all three with no special-casing."""
+    dst: Temp
+    offset: int
+
+
+@dataclass
+class IRStaticDataAddress:
+    """dst = the address of a static, read-only data label (e.g. a
+    string literal's own backing bytes, or the shared empty-string
+    constant) -- x86-64's own LeaQ against a label, expressed
+    architecture-agnostically the same way IRLocalAddress is for
+    frame-relative addresses."""
+    dst: Temp
+    label: str
 
 
 @dataclass
@@ -305,9 +372,24 @@ class IRRaw:
     in verbatim. If `dst` is given, those instructions are assumed (by
     the caller's own construction) to leave their result in
     Register('eax') or its 64-bit view, and lower_ir appends a store
-    from there into dst's slot."""
+    from there into dst's slot.
+
+    Every IRRaw is, by construction, architecture-specific: it embeds
+    literal x86-64 AT&T instructions in what's otherwise meant to be
+    an architecture-agnostic IR, so retargeting to a different
+    architecture would need every remaining IRRaw site individually
+    reimplemented by hand, not just a new lowering pass. Two leaf
+    shapes that used to route through here -- a named local's own
+    frame-relative address, and a static data label's address -- no
+    longer do, having migrated to IRLocalAddress/IRStaticDataAddress
+    (see their own docstrings); IRRaw remains the right tool for
+    everything else not yet decomposed into real IR ops, chiefly
+    whole, still-unmigrated statement/expression fallbacks and the
+    handful of leaves wrapping genuinely unmigrated, potentially-
+    arbitrary logic (array/struct equality, argument-materialization
+    fallbacks, and similar)."""
     instructions: list[Instruction]
     dst: Optional[Temp] = None
 
 
-IRInstr = Union[IRMove, IRBinOp, IRUnOp, IRCall, IRReturn, IRLabel, IRJump, IRBranch, IRRaw, IRLoad, IRStore]
+IRInstr = Union[IRMove, IRBinOp, IRUnOp, IRCall, IRReturn, IRLabel, IRJump, IRBranch, IRRaw, IRLoad, IRStore, IRLocalAddress, IRStaticDataAddress]

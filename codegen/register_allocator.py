@@ -34,10 +34,12 @@ from codegen.ir import (
     IRJump,
     IRLabel,
     IRLoad,
+    IRLocalAddress,
     IRMove,
     IRRaw,
     IRReturn,
     IRSliceBoundsCheck,
+    IRStaticDataAddress,
     IRStore,
     IRUnOp,
     Temp,
@@ -166,7 +168,7 @@ def _writes(instr) -> set:
     """The Temps `instr` defines. IRRaw's own `dst`, when present,
     counts here even though it's set from outside the wrapped
     instructions -- see IRRaw's own docstring."""
-    if isinstance(instr, (IRMove, IRBinOp, IRUnOp, IRLoad)):
+    if isinstance(instr, (IRMove, IRBinOp, IRUnOp, IRLoad, IRLocalAddress, IRStaticDataAddress)):
         return {instr.dst}
     if isinstance(instr, (IRCall, IRRaw)):
         return {instr.dst} if instr.dst is not None else set()
@@ -290,7 +292,16 @@ def eligible_intervals(ir: list, intervals: dict, safe_named_locals: frozenset =
       side of the unsafe op.
 
     Anything strictly between start and end is always a hazard,
-    regardless of which op it is."""
+    regardless of which op it is.
+
+    IRLocalAddress/IRStaticDataAddress are deliberately absent from
+    the unsafe set below, unlike the raw LeaQFrame/LeaQ leaves they
+    replaced (formerly spliced in via IRRaw, and so formerly unsafe
+    by nothing more than that wrapping): each writes only its own
+    dst, from a fixed, compile-time-known frame offset or label, with
+    no other register touched at all -- exactly as safe as an
+    ordinary IRBinOp/IRMove, and there's no reason to treat it any
+    more conservatively just because of what it used to be."""
     unsafe_positions = [i for i, instr in enumerate(ir) if isinstance(instr, (IRRaw, IRCall, IRAppendGrow))]
     result = {}
     for tid, interval in intervals.items():

@@ -43,7 +43,7 @@ from codegen.assembly_ast import (
     Sub,
 )
 from codegen.errors import CodegenError
-from codegen.ir import IRRaw, IRBinOp, IRConst, IRBoundsCheck, IRSliceBoundsCheck, IRStore, IRLoad, IRAppendGrow, IRMove, IRBranch, IRJump, IRLabel
+from codegen.ir import IRRaw, IRBinOp, IRConst, IRBoundsCheck, IRSliceBoundsCheck, IRStore, IRLoad, IRAppendGrow, IRMove, IRBranch, IRJump, IRLabel, IRLocalAddress, IRStaticDataAddress
 from codegen.utils import type_of, type_byte_width, leaf_type, as_byte_register, gen_protecting_dst_across
 from parser import Node, ArrayLiteral, Call, Field, Index, Slice, Variable, NoneLiteral, Binary, BinaryOp
 from semantic import TypeKind, Type
@@ -319,11 +319,14 @@ class ArraysSlicesMixin:
     def _ir_array_address(self, expr: Node):
         """Mirrors gen_array_address_into's own three cases as real
         IR -- Variable is the one genuine leaf (a fixed, compile-time
-        %rbp-relative offset, or a single pointer read if heap-
-        allocated; neither is a computation OVER other values, so it
-        stays a small IRRaw-wrapped leaf, the same deliberate scope
-        boundary _ir_struct_address's own Variable case draws),
-        Index/Field recurse into _ir_index_address/_ir_field_address.
+        %rbp-relative offset -- IRLocalAddress directly -- or, if
+        heap-allocated, the pointer STORED at that offset --
+        IRLocalAddress for the slot's own address, then an ordinary
+        IRLoad reading the pointer through it, the same composition
+        _ir_struct_address's own Variable case uses, for the identical
+        reason: IRLocalAddress always means "the address of this
+        slot," never "the value stored there"), Index/Field recurse
+        into _ir_index_address/_ir_field_address.
 
         Returns None for an ArrayLiteral (construction, not an
         existing address -- out of scope for now, same as
@@ -331,12 +334,13 @@ class ArraysSlicesMixin:
         if isinstance(expr, Variable):
             offset = self._local_offset(expr.name)
             array_type = self._local_type(expr.name)
-            addr_temp = self._new_temp(Type.INT64)
+            slot_addr = self._new_temp(Type.INT64)
+            ir = [IRLocalAddress(dst=slot_addr, offset=offset)]
             if self._is_heap_allocated(self._local_decl_id(expr.name), array_type):
-                leaf = [MovQ(src=Memory('rbp', offset), dst=Register('rax'))]
-            else:
-                leaf = [LeaQFrame(offset=offset, dst=Register('rax'))]
-            return [IRRaw(leaf, dst=addr_temp)], addr_temp
+                addr_temp = self._new_temp(Type.INT64)
+                ir.append(IRLoad(dst=addr_temp, address=slot_addr))
+                return ir, addr_temp
+            return ir, slot_addr
         if isinstance(expr, Index):
             return self._ir_index_address(expr)
         if isinstance(expr, Field):
@@ -364,7 +368,7 @@ class ArraysSlicesMixin:
         if isinstance(expr, Variable):
             offset = self._local_offset(expr.name)
             addr_temp = self._new_temp(Type.INT64)
-            return [IRRaw([LeaQFrame(offset=offset, dst=Register('rax'))], dst=addr_temp)], addr_temp
+            return [IRLocalAddress(dst=addr_temp, offset=offset)], addr_temp
         if isinstance(expr, Index):
             return self._ir_index_address(expr)
         if isinstance(expr, Field):
@@ -391,15 +395,16 @@ class ArraysSlicesMixin:
         three cases exactly); length and cap are both always the same
         compile-time IRConst -- an array has no separate capacity.
 
-        SLICE-typed, Variable: a leaf read of its own descriptor's
-        ptr/len/cap fields, mirroring _ir_array_address's own Variable
-        leaf one field over. len/cap are captured as INT (32-bit)
-        Temps directly, not INT64 -- an array/slice's own length or
-        capacity always fits in 32 bits, the same assumption the old-
-        style bounds check's own len_reg_32/cap_operand already make;
-        reading only each field's own lower 4 bytes (little-endian) is
-        exactly equivalent to the old-style 64-bit read followed by
-        narrowing, for a value guaranteed to fit either way.
+        SLICE-typed, Variable: now the identical shape as the Field/
+        Index case just below, just starting from IRLocalAddress (a
+        fixed, compile-time frame offset) instead of _ir_field_
+        address/_ir_index_address (a runtime-computed one) -- ptr read
+        straight off that address via IRLoad, len/cap via their own
+        +8/+16 addresses computed first through ordinary IRBinOp. len/
+        cap are captured as INT (32-bit) Temps directly, not INT64 --
+        an array/slice's own length or capacity always fits in 32
+        bits, the same assumption the old-style bounds check's own
+        len_reg_32/cap_operand already make.
 
         SLICE-typed, Field/Index (`p.values`, `rows[i]`): unlike the
         Variable case, there's no fixed, compile-time offset to read
@@ -446,13 +451,19 @@ class ArraysSlicesMixin:
         if base_type.kind == TypeKind.SLICE:
             if isinstance(expr, Variable):
                 offset = self._local_offset(expr.name)
+                descriptor_addr = self._new_temp(Type.INT64)
                 ptr_temp = self._new_temp(Type.INT64)
+                len_addr = self._new_temp(Type.INT64)
                 len_temp = self._new_temp(Type.INT)
+                cap_addr = self._new_temp(Type.INT64)
                 cap_temp = self._new_temp(Type.INT)
                 ir = [
-                    IRRaw([MovQ(src=Memory('rbp', offset), dst=Register('rax'))], dst=ptr_temp),
-                    IRRaw([Mov(src=Memory('rbp', offset + 8), dst=Register('eax'))], dst=len_temp),
-                    IRRaw([Mov(src=Memory('rbp', offset + 16), dst=Register('eax'))], dst=cap_temp),
+                    IRLocalAddress(dst=descriptor_addr, offset=offset),
+                    IRLoad(dst=ptr_temp, address=descriptor_addr),
+                    IRBinOp(dst=len_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(8, Type.INT64)),
+                    IRLoad(dst=len_temp, address=len_addr),
+                    IRBinOp(dst=cap_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(16, Type.INT64)),
+                    IRLoad(dst=cap_temp, address=cap_addr),
                 ]
                 return ir, ptr_temp, len_temp, cap_temp
             if isinstance(expr, (Field, Index)):
@@ -486,12 +497,11 @@ class ArraysSlicesMixin:
         shape has SOME way to produce a triple, even when the out-of-
         scope ones (chiefly a slice-returning Call) still need the
         old-style shared-scratch-slot materialization (gen_slice_
-        value_into) to do it, read back out via three IRRaw leaves at
-        that fixed, known offset -- the identical "materialize into a
-        fixed location, then read fields back out via fixed-offset
-        leaves" shape _ir_indexable_base's own Variable-slice leaf
-        already uses, just at the shared scratch offset instead of a
-        named variable's own.
+        value_into) to do it, read back out via IRLocalAddress plus
+        IRLoad/IRBinOp at that fixed, known offset -- the identical
+        shape _ir_indexable_base's own Variable-slice leaf already
+        uses, just at the shared scratch offset instead of a named
+        variable's own.
 
         NoneLiteral (`none` passed directly as an argument) is its
         own leaf here, not routed through _ir_indexable_base at all
@@ -515,13 +525,19 @@ class ArraysSlicesMixin:
 
         scratch = self._unnamed_slice_temp_offset
         materialize_ir = [IRRaw(self.gen_slice_value_into(expr, Memory('rbp', scratch)))]
+        descriptor_addr = self._new_temp(Type.INT64)
         ptr = self._new_temp(Type.INT64)
+        len_addr = self._new_temp(Type.INT64)
         length = self._new_temp(Type.INT)
+        cap_addr = self._new_temp(Type.INT64)
         cap = self._new_temp(Type.INT)
         read_ir = [
-            IRRaw([MovQ(src=Memory('rbp', scratch), dst=Register('rax'))], dst=ptr),
-            IRRaw([Mov(src=Memory('rbp', scratch + 8), dst=Register('eax'))], dst=length),
-            IRRaw([Mov(src=Memory('rbp', scratch + 16), dst=Register('eax'))], dst=cap),
+            IRLocalAddress(dst=descriptor_addr, offset=scratch),
+            IRLoad(dst=ptr, address=descriptor_addr),
+            IRBinOp(dst=len_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(8, Type.INT64)),
+            IRLoad(dst=length, address=len_addr),
+            IRBinOp(dst=cap_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(16, Type.INT64)),
+            IRLoad(dst=cap, address=cap_addr),
         ]
         return materialize_ir + read_ir, ptr, length, cap
 
@@ -1343,7 +1359,7 @@ class ArraysSlicesMixin:
             return self._ir_zero_array_loop(dst_address, value_type.element_type, value_type.size)
         if value_type == Type.STR:
             addr_temp = self._new_temp(Type.STR)
-            ir = [IRRaw([LeaQ(label=self._get_empty_str_label(), dst=Register('rax'))], dst=addr_temp)]
+            ir = [IRStaticDataAddress(dst=addr_temp, label=self._get_empty_str_label())]
             ir.append(IRStore(address=dst_address, value=addr_temp, value_type=Type.STR))
             return ir
         return [IRStore(address=dst_address, value=IRConst(0, value_type), value_type=value_type)]
