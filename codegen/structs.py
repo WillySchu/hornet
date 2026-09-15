@@ -274,13 +274,23 @@ class StructsMixin:
         IR, written through dst_address -- an ordinary INT64-typed
         IRValue, however the caller already has it (see _ir_composite_
         call's own docstring for the same "doesn't care how" contract).
-        Returns None when out of scope: positional construction only
-        (expr.kwargs -- named, possibly-partial construction, with its
-        own implicit-zero-value handling for an omitted field -- stays
-        old-style for now), and every field must be scalar (a nested
-        composite field needs its own recursive real-IR treatment, the
-        same kind of follow-up work _ir_indexable_base's own Call
-        exclusion already represents elsewhere in this arc).
+        Returns None only when some field's own value is itself out of
+        scope for _ir_write_composite_value_into -- a field that's
+        ITSELF composite is no longer automatically out of scope,
+        unlike this method's own earlier version: mutual recursion
+        through _ir_write_composite_value_into handles it, the same
+        shape address computation's own Field/Index handling already
+        relies on elsewhere in this arc.
+
+        Named construction (expr.kwargs) is normalized to the same
+        (field_name, value_expr, field_type) shape positional
+        construction already iterates, walking every field in
+        declaration order -- the same normalization gen_struct_
+        literal_into's own old-style version already does. An omitted
+        field's value_expr comes back None, filled via _ir_write_zero_
+        value_into (a TOTAL function -- see its own docstring for why
+        it never needs to fall back the way a value_expr-dependent
+        write can) rather than left as untouched, garbage bytes.
 
         Each field's own address is dst_address + its own, already-
         correct _field_offset (computed once per field, the same
@@ -289,26 +299,57 @@ class StructsMixin:
         it drifting out of sync with that method's own logic) via
         ordinary IRBinOp -- skipped entirely for the first field
         (offset 0 needs no addition, matching _ir_write_slice_
-        descriptor's own identical shortcut for its own ptr field).
-        Each value is evaluated via gen_expr_ir (so a migrated sub-
-        expression stays real IR) and written via IRStore."""
-        if expr.kwargs is not None:
-            return None
+        descriptor's own identical shortcut for its own ptr field). A
+        scalar field's value is evaluated via gen_expr_ir and written
+        via IRStore; a composite field delegates entirely to _ir_
+        write_composite_value_into. If ANY provided field's own value
+        turns out to be out of scope, the whole literal falls back
+        (returns None) -- see _ir_write_array_literal_into's own
+        docstring for why any IR already built for earlier fields
+        being discarded is harmless, not a partial-write risk."""
         struct_info = self.struct_registry[struct_type.struct_name]
         field_items = list(struct_info.fields.items())
-        if any(field_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT) for _, field_type in field_items):
-            return None
+        if expr.kwargs is not None:
+            provided = dict(expr.kwargs)
+            entries = [(field_name, provided.get(field_name), field_type) for field_name, field_type in field_items]
+        else:
+            entries = [(field_name, arg_expr, field_type) for arg_expr, (field_name, field_type) in zip(expr.args, field_items)]
         ir = []
-        for arg_expr, (field_name, field_type) in zip(expr.args, field_items):
-            arg_ir, arg_value = self.gen_expr_ir(arg_expr)
-            ir.extend(arg_ir)
+        for field_name, arg_expr, field_type in entries:
             offset = self._field_offset(struct_type.struct_name, field_name)
-            if offset == 0:
-                field_addr = dst_address
+            if arg_expr is None:
+                # An OMITTED field in a named, partial literal (only
+                # possible when expr.kwargs is not None -- positional
+                # construction is exhaustive, so arg_expr is never
+                # None there) -- gets its own type's implicit zero
+                # value via _ir_write_zero_value_into, a TOTAL
+                # function (see its own docstring), so this branch
+                # never needs to fall back the way the other two do.
+                if offset == 0:
+                    field_addr = dst_address
+                else:
+                    field_addr = self._new_temp(Type.INT64)
+                    ir.append(IRBinOp(dst=field_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(offset, Type.INT64)))
+                ir.extend(self._ir_write_zero_value_into(field_addr, field_type))
+            elif field_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
+                if offset == 0:
+                    field_addr = dst_address
+                else:
+                    field_addr = self._new_temp(Type.INT64)
+                    ir.append(IRBinOp(dst=field_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(offset, Type.INT64)))
+                field_ir = self._ir_write_composite_value_into(field_addr, arg_expr, field_type)
+                if field_ir is None:
+                    return None
+                ir.extend(field_ir)
             else:
-                field_addr = self._new_temp(Type.INT64)
-                ir.append(IRBinOp(dst=field_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(offset, Type.INT64)))
-            ir.append(IRStore(address=field_addr, value=arg_value, value_type=field_type))
+                arg_ir, arg_value = self.gen_expr_ir(arg_expr)
+                ir.extend(arg_ir)
+                if offset == 0:
+                    field_addr = dst_address
+                else:
+                    field_addr = self._new_temp(Type.INT64)
+                    ir.append(IRBinOp(dst=field_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(offset, Type.INT64)))
+                ir.append(IRStore(address=field_addr, value=arg_value, value_type=field_type))
         return ir
 
     def gen_struct_value_into(self, expr: Node, dst_mem: Memory, struct_type: Type) -> list[Instruction]:

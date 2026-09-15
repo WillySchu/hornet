@@ -5,6 +5,10 @@ struct Point:
     int x
     int y
 
+struct Line:
+    Point start
+    Point end
+
 def int sumArray([3]int arr):
     return arr[0] + arr[1] + arr[2]
 
@@ -23,6 +27,9 @@ def [3]int returnLocal(int seed):
 
 def Point makePoint(int seed):
     return Point(seed % 11, (seed + 1) % 11)
+
+def Line makeLine(int seed):
+    return Line(Point(seed % 13, (seed + 1) % 13), Point((seed + 2) % 13, (seed + 3) % 13))
 
 def int main():
     Container container
@@ -43,6 +50,8 @@ def int main():
         int sumReturned = returned[0] + returned[1] + returned[2]
         Point pt = makePoint(i)
         int sumPoint = pt.x + pt.y
-        total = (total + sumArr + sumSl + sumField + sumMade + sumForwarded + sumReturned + sumPoint) % 1000003
+        Line ln = makeLine(i)
+        int sumLine = ln.start.x + ln.start.y + ln.end.x + ln.end.y
+        total = (total + sumArr + sumSl + sumField + sumMade + sumForwarded + sumReturned + sumPoint + sumLine) % 1000003
         i = i + 1
     return total % 256

@@ -78,42 +78,53 @@ class StatementsMixin:
         composite value, via the hidden-pointer convention (see _ir_
         composite_call) -- writing directly through this target's own
         address, computed the same way _ir_copy_assign's own does, with
-        no intermediate copy ever materialized. For a slice-typed
-        VarDecl specifically, no initializer at all is real IR too
-        (the nil zero value, three IRConst(0, ...)s through _ir_
-        write_slice_descriptor -- see that case's own comment for why
-        this is cheap enough to close even though array/struct's own
-        zero-init isn't, yet).
+        no intermediate copy ever materialized. A VarDecl with NO
+        initializer at all is real IR too, for all three composite
+        kinds now, not just slice: a slice's own nil zero value needs
+        no computation at all (three IRConst(0, ...)s through _ir_
+        write_slice_descriptor), while an array/struct's own zero
+        value -- genuinely more work, since it can recurse through
+        further nested composites, and an array leaf needs a real,
+        bounded-count loop, not per-element unrolling, once its own
+        element count can be large -- goes through _ir_write_zero_
+        value_into/_ir_zero_array_loop (see gen_statement_ir's own
+        VarDecl case for exactly where the two zero-init paths split).
 
-        Return's own composite case now covers all but the genuinely
-        hard shapes: forwarding another composite-returning call's
+        Return's own composite case now covers all but ONE genuinely
+        hard shape: forwarding another composite-returning call's
         result (`return someFn()`, via _ir_composite_call), a
         Variable/Field/Index value (via _ir_copy_into_address), and an
-        all-scalar array literal or positional struct literal (via
-        _ir_write_array_literal_into/_ir_write_struct_literal_into) --
-        all four reuse the current function's own received hidden
-        pointer, read via an ordinary address-as-a-Temp leaf (_ir_
-        hidden_return_ptr). A literal with a nested composite element/
-        field, or a named/partial (kwargs) struct literal, still falls
-        back -- a real, deliberate scope boundary, not an oversight:
-        each needs its own recursive real-IR treatment, the same order
-        of work _ir_slice_into/_ir_append_call each needed as their
-        own dedicated step. (_ir_write_array_literal_into/_ir_write_
-        struct_literal_into both take an arbitrary destination address,
-        not a Return-specific one -- directly reusable for VarDecl/
-        Assign/IndexAssign/FieldAssign's own identical ArrayLiteral/
-        struct-literal-value gap, a natural, cheap follow-up.)
+        array literal or struct literal -- POSITIONAL or named/partial
+        (kwargs) alike now, an omitted field's own zero value written
+        via _ir_write_zero_value_into -- (via _ir_write_array_literal_
+        into/_ir_write_struct_literal_into) -- all reuse the current
+        function's own received hidden pointer, read via an ordinary
+        address-as-a-Temp leaf (_ir_hidden_return_ptr). A literal's own
+        elements/fields need not be scalar either: a nested composite
+        element/field (another literal, an existing value, a Slice
+        production, an append call, `none`, or an ordinary composite-
+        returning Call) is handled by _ir_write_composite_value_into, a
+        general-purpose dispatcher the two literal-writing methods call
+        back into for their own composite elements/fields -- mutual
+        recursion, the same shape address computation's own Field/
+        Index handling already relies on elsewhere in this arc. (_ir_
+        write_array_literal_into/_ir_write_struct_literal_into/_ir_
+        write_zero_value_into all take an arbitrary destination
+        address, not a Return-specific one -- directly reusable for
+        VarDecl/Assign/IndexAssign/FieldAssign's own identical
+        ArrayLiteral/struct-literal-value gap, a natural, cheap
+        follow-up; the array/struct no-initializer case above already
+        is that follow-up, for _ir_write_zero_value_into specifically.)
 
         Falls back to wrapping gen_statement itself, as a single
-        opaque IRRaw, for everything else (a no-initializer array/
-        struct VarDecl; an array/struct/slice-typed VarDecl/Assign/
-        IndexAssign/FieldAssign whose value is an ArrayLiteral/struct-
-        literal Call; a Return whose value is an array/struct literal
-        with a nested composite element/field, a named/partial struct
-        literal, or bare `none`; Break, Continue, and an ArrayLiteral/
-        Slice-valued ExprStmt) -- a real, deliberate scope boundary,
-        not an oversight: those still need their own IR-native
-        handling as a follow-up.
+        opaque IRRaw, for everything else (an array/struct/slice-typed
+        VarDecl/Assign/IndexAssign/FieldAssign whose value is an
+        ArrayLiteral/struct-literal Call; a Return whose value is an
+        ArrayLiteral/struct-literal Call with some field/element out of
+        scope for _ir_write_composite_value_into, or bare `none`;
+        Break, Continue, and an ArrayLiteral/Slice-valued ExprStmt) --
+        a real, deliberate scope boundary, not an oversight: those
+        still need their own IR-native handling as a follow-up.
         """
         if isinstance(stmt, Return):
             is_composite_return = isinstance(stmt.value, NoneLiteral) or (
@@ -328,17 +339,34 @@ class StatementsMixin:
             # compile-time IRConst(0, ...) values handed straight to
             # _ir_write_slice_descriptor, the same helper every other
             # slice-producing case above already uses to write its own
-            # result. Array/struct's own no-initializer case still
-            # needs composite-aware zero-init (recursively zeroing
-            # every field/element, potentially through further nested
-            # composites) and stays old-style for now -- a slice's own
-            # zero value is uniquely trivial among the three, with
-            # nothing to recurse into at all.
+            # result -- a slice's own zero value is uniquely trivial
+            # among the three, with nothing to recurse into at all.
             if var_type.kind == TypeKind.SLICE and stmt.init is None:
                 self._bind_local(stmt)
                 zero_ptr = IRConst(0, Type.INT64)
                 zero_int = IRConst(0, Type.INT)
                 return self._ir_write_slice_descriptor(Variable(name=stmt.name), zero_ptr, zero_int, zero_int)
+            # An array- or struct-typed VarDecl with NO initializer at
+            # all -- its implicit zero value is now real IR too, via
+            # _ir_write_zero_value_into (a TOTAL function -- see its
+            # own docstring for why it never needs to fall back).
+            # Needs the SAME heap-allocation-first step the composite-
+            # call case just above needs, and for the identical
+            # reason: this destination is BRAND NEW, so a heap-
+            # allocated one needs its own fresh backing allocation
+            # made BEFORE this variable's own address is ever
+            # computed.
+            if var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and stmt.init is None:
+                offset = self._bind_local(stmt)
+                ir = []
+                if self._is_heap_allocated(id(stmt), var_type):
+                    ir.append(IRRaw(
+                        self._gen_malloc_array(var_type) + [MovQ(src=Register('rax'), dst=Memory('rbp', offset))]
+                    ))
+                address_fn = self._ir_array_address if var_type.kind == TypeKind.ARRAY else self._ir_struct_address
+                dst_ir, dst_address = address_fn(Variable(name=stmt.name))
+                ir.extend(dst_ir)
+                return ir + self._ir_write_zero_value_into(dst_address, var_type)
         elif isinstance(stmt, Assign):
             # Same shape as the VarDecl case above, for an existing
             # scalar variable -- `var_type` here is necessarily
@@ -779,15 +807,18 @@ class StatementsMixin:
         #
         # Real IR now instead, for the Call-forwarding case (via _ir_
         # composite_call), a Variable/Field/Index value (via _ir_copy_
-        # into_address), and an all-scalar array literal or positional
-        # struct literal (via _ir_write_array_literal_into/_ir_write_
-        # struct_literal_into) alike -- a nested composite element/
-        # field, a named/partial (kwargs) struct literal, or `return
-        # none` still reach this old-style path. See gen_statement_
-        # ir's own Return case, which reads the identical hidden_
-        # return_ptr_offset via an ordinary address-as-a-Temp leaf
-        # (_ir_hidden_return_ptr), then reuses whichever real-IR
-        # builder applies, rather than calling this method at all.
+        # into_address), and an array literal or positional struct
+        # literal (via _ir_write_array_literal_into/_ir_write_struct_
+        # literal_into) alike -- including a NESTED composite element/
+        # field within either, via _ir_write_composite_value_into,
+        # which those two now call back into for their own composite
+        # elements/fields, mutually recursively. A named/partial
+        # (kwargs) struct literal, or `return none`, still reach this
+        # old-style path. See gen_statement_ir's own Return case,
+        # which reads the identical hidden_return_ptr_offset via an
+        # ordinary address-as-a-Temp leaf (_ir_hidden_return_ptr),
+        # then reuses whichever real-IR builder applies, rather than
+        # calling this method at all.
         value_type = type_of(stmt.value)
         if value_type.kind == TypeKind.ARRAY:
             ptr_reg = Register('rax')
@@ -1028,7 +1059,26 @@ class StatementsMixin:
         -- the same register-collision failure mode
         _gen_struct_fields_equality_at_addresses guards against for the
         identical reason. Applied unconditionally, even for the
-        scalar/slice cases that don't strictly need it."""
+        scalar/slice cases that don't strictly need it.
+
+        Real IR now instead, for a no-initializer array/struct VarDecl
+        (see gen_statement_ir's own VarDecl case) and an omitted field
+        in a named/partial struct literal (see _ir_write_struct_
+        literal_into) alike -- see _ir_write_zero_value_into, which
+        needs none of this method's own careful fixed-register
+        (%r10/%r12/%r13/...) protection across a recursive call, or
+        three separately hand-written array-leaf loop variants: every
+        Temp its own array-leaf loop uses is independent of whatever
+        Temps a recursive call allocates for itself, and one general-
+        purpose loop already dispatches uniformly on any leaf type,
+        rather than needing a separate flat-zero/str-address/struct-
+        recursive loop for each. This old-style path is still reached
+        from an ArrayLiteral/struct-literal-Call-valued VarDecl/
+        Assign/IndexAssign/FieldAssign (still old-style itself, so its
+        own zero-init needs -- an omitted field's own zero value, for
+        instance -- stay old-style too) and gen_var_decl's own
+        remaining callers.
+        """
         if t.kind == TypeKind.STRUCT:
             protect_dst = dst_mem.base != 'rbp'
             instructions = []

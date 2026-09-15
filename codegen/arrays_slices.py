@@ -809,27 +809,35 @@ class ArraysSlicesMixin:
         ir = base_ir + high_ir + low_ir + checks + arithmetic
         return ir, ptr, new_len, new_cap
 
+    def _ir_write_slice_descriptor_into_address(self, dst_address, ptr_value, len_value, cap_value) -> list:
+        """The shared core of _ir_write_slice_descriptor: given an
+        ALREADY-computed destination address (an ordinary IRValue --
+        however the caller has it), writes an already-produced {ptr,
+        len, cap} triple there at offsets 0/8/16, via three ordinary
+        IRStores. The +8/+16 offsets are themselves computed via
+        ordinary IRBinOp, the same address-as-a-Temp pattern used
+        everywhere else in this file."""
+        len_addr = self._new_temp(Type.INT64)
+        cap_addr = self._new_temp(Type.INT64)
+        return [
+            IRStore(address=dst_address, value=ptr_value, value_type=Type.INT64),
+            IRBinOp(dst=len_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(8, Type.INT64)),
+            IRStore(address=len_addr, value=len_value, value_type=Type.INT),
+            IRBinOp(dst=cap_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(16, Type.INT64)),
+            IRStore(address=cap_addr, value=cap_value, value_type=Type.INT),
+        ]
+
     def _ir_write_slice_descriptor(self, dst_expr: Node, ptr_value, len_value, cap_value) -> list:
         """Writes an already-produced {ptr, len, cap} triple through
         dst_expr's own address -- always via _ir_slice_address, since
-        the destination is always slice-typed here -- at offsets
-        0/8/16, via three ordinary IRStores. The +8/+16 offsets are
-        themselves computed via ordinary IRBinOp, the same address-
-        as-a-Temp pattern used everywhere else in this file. Shared by
-        every gen_statement_ir case that produces a fresh slice value
-        via _ir_slice_into -- see its own docstring, and gen_
-        statement_ir's own VarDecl/Assign/IndexAssign/FieldAssign
+        the destination is always slice-typed here -- then delegates
+        to _ir_write_slice_descriptor_into_address for the rest.
+        Shared by every gen_statement_ir case that produces a fresh
+        slice value via _ir_slice_into -- see its own docstring, and
+        gen_statement_ir's own VarDecl/Assign/IndexAssign/FieldAssign
         cases for where the two are glued together."""
         dst_ir, dst_addr = self._ir_slice_address(dst_expr)
-        len_addr = self._new_temp(Type.INT64)
-        cap_addr = self._new_temp(Type.INT64)
-        return dst_ir + [
-            IRStore(address=dst_addr, value=ptr_value, value_type=Type.INT64),
-            IRBinOp(dst=len_addr, op=BinaryOp.ADD, left=dst_addr, right=IRConst(8, Type.INT64)),
-            IRStore(address=len_addr, value=len_value, value_type=Type.INT),
-            IRBinOp(dst=cap_addr, op=BinaryOp.ADD, left=dst_addr, right=IRConst(16, Type.INT64)),
-            IRStore(address=cap_addr, value=cap_value, value_type=Type.INT),
-        ]
+        return dst_ir + self._ir_write_slice_descriptor_into_address(dst_addr, ptr_value, len_value, cap_value)
 
     def gen_slice_value_into(self, expr: Node, dst_mem: Memory) -> list[Instruction]:
         """Stores a slice-typed expression's VALUE (its {ptr, len,
@@ -1271,36 +1279,262 @@ class ArraysSlicesMixin:
                     instructions.extend(self._gen_write_scalar_from(Register('eax'), element_type, elem_mem))
         return instructions
 
+    def _ir_write_zero_value_into(self, dst_address, value_type: Type) -> list:
+        """Builds (without lowering) value_type's implicit zero value
+        as real IR, written through dst_address (an ordinary INT64-
+        typed IRValue, however the caller already has it -- see _ir_
+        composite_call's own docstring for the same "doesn't care how"
+        contract). Unlike _ir_write_composite_value_into, this is a
+        TOTAL function: it never returns None, since a type's own zero
+        value depends only on the type itself, never on some
+        unpredictable runtime expression's own shape -- always fully,
+        recursively computable at compile time.
+
+        Dispatches on value_type.kind, mirroring the old-style _gen_
+        zero_value_into's own dispatch, structured instead the same
+        way this arc's other composite writers already are (per-
+        field/per-element, recursing for a nested composite) rather
+        than that method's own flattening (_flatten_struct_fields) --
+        purely a style choice, both are equally correct, but this
+        keeps the shape consistent with _ir_write_struct_literal_into
+        right below:
+          - SLICE: none's own {0, 0, 0} descriptor, via the exact same
+            _ir_write_slice_descriptor_into_address every other slice-
+            producing case in this arc already uses -- a zero-value
+            slice and a none-valued one are, by design, the identical
+            representation (see gen_none_into).
+          - STRUCT: every field, each field's own address computed via
+            ordinary IRBinOp (skipped for the first field, offset 0
+            needing no addition -- the same shortcut used throughout
+            this arc), recursing back into this method for each
+            field's own type.
+          - ARRAY: delegates to _ir_zero_array_loop -- a genuine
+            runtime loop, not per-element unrolling: an array's own
+            element count can be large, and the old-style _gen_zero_
+            array_into's own choice to always loop, never unroll,
+            regardless of size, is worth preserving exactly, not
+            silently regressing into `count` separate IRStores.
+          - str: the address of a single shared, static empty-string
+            constant (_get_empty_str_label) -- never a null pointer,
+            for the exact reason _gen_zero_value_into's own docstring
+            gives (a null zero value would be an active hazard). A
+            single-instruction leaf (LeaQ), IRRaw-wrapped and captured
+            into a Temp, the same pattern gen_string_literal_into's
+            own real-IR counterpart already uses.
+          - int/bool/int8/uint8: an ordinary IRConst(0, value_type),
+            written via IRStore at value_type's own declared width."""
+        if value_type.kind == TypeKind.SLICE:
+            zero_ptr = IRConst(0, Type.INT64)
+            zero_int = IRConst(0, Type.INT)
+            return self._ir_write_slice_descriptor_into_address(dst_address, zero_ptr, zero_int, zero_int)
+        if value_type.kind == TypeKind.STRUCT:
+            struct_info = self.struct_registry[value_type.struct_name]
+            ir = []
+            for field_name, field_type in struct_info.fields.items():
+                offset = self._field_offset(value_type.struct_name, field_name)
+                if offset == 0:
+                    field_addr = dst_address
+                else:
+                    field_addr = self._new_temp(Type.INT64)
+                    ir.append(IRBinOp(dst=field_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(offset, Type.INT64)))
+                ir.extend(self._ir_write_zero_value_into(field_addr, field_type))
+            return ir
+        if value_type.kind == TypeKind.ARRAY:
+            return self._ir_zero_array_loop(dst_address, value_type.element_type, value_type.size)
+        if value_type == Type.STR:
+            addr_temp = self._new_temp(Type.STR)
+            ir = [IRRaw([LeaQ(label=self._get_empty_str_label(), dst=Register('rax'))], dst=addr_temp)]
+            ir.append(IRStore(address=dst_address, value=addr_temp, value_type=Type.STR))
+            return ir
+        return [IRStore(address=dst_address, value=IRConst(0, value_type), value_type=value_type)]
+
+    def _ir_zero_array_loop(self, dst_address, element_type: Type, count: int) -> list:
+        """Builds (without lowering) a genuine, bounded-count real-IR
+        loop zeroing `count` consecutive elements of element_type,
+        starting at dst_address -- the array-leaf counterpart to _ir_
+        write_zero_value_into's own scalar/slice/struct cases, all of
+        which can be straight-line code since their own size is
+        always small and fixed. Mirrors gen_while's own IRLabel/
+        IRBranch/IRJump shape exactly (see _ir_while_head), the first
+        genuine bounded-iteration loop built as real IR in this arc --
+        everything before this has been straight-line or branch-and-
+        merge, never actual iteration.
+
+        Each iteration recomputes its own element address from a loop
+        counter i (an ordinary, persistent Temp -- reassigned each
+        iteration via IRMove into a fresh next-value Temp, the exact
+        same shape an ordinary named `i = i + 1` statement already
+        compiles to, not a raw in-place IRBinOp), via the identical
+        32-bit-multiply-then-64-bit-add shape _ir_index_address's own
+        comment already justifies for ordinary indexing (a bounds-
+        checked runtime index there; a loop-bounded counter, never
+        exceeding `count`, here) -- IRBinOp's own lowering derives
+        each operation's width from its LEFT operand with no explicit
+        width juggling needed. Then delegates to _ir_write_zero_value_
+        into recursively for that one element, which could itself be
+        another array (a multi-dimensional zero-init), a struct, or a
+        scalar/slice leaf.
+
+        Needs NONE of the old-style _gen_array_struct_zero_loop's own
+        careful fixed-register (%r12/%r13) protection across that
+        recursive call -- and, unlike the old code's own three,
+        separately hand-written sibling loops (flat-zero/str-address/
+        struct-recursive, one per leaf shape, each needing its own
+        register-collision reasoning), needs only this ONE, because
+        _ir_write_zero_value_into already dispatches uniformly on the
+        leaf's own type. Every Temp this loop uses (i, the byte
+        offset, the per-iteration address) is independent of whatever
+        Temps that recursive call allocates for itself, the same "a
+        Temp's home is independent of what computed it" property this
+        whole arc has relied on repeatedly -- a genuine simplification
+        over the old code's own approach, not just a translation of
+        it, made possible by Temps replacing fixed registers
+        entirely."""
+        element_width = type_byte_width(element_type, self.struct_registry)
+        i = self._new_temp(Type.INT)
+        start_label = self.new_label("zero_array_start")
+        body_label = self.new_label("zero_array_body")
+        end_label = self.new_label("zero_array_end")
+        cond = self._new_temp(Type.BOOL)
+        ir = [
+            IRMove(dst=i, src=IRConst(0, Type.INT)),
+            IRLabel(start_label),
+            IRBinOp(dst=cond, op=BinaryOp.LESS_THAN, left=i, right=IRConst(count, Type.INT)),
+            IRBranch(cond=cond, true_label=body_label, false_label=end_label),
+            IRLabel(body_label),
+        ]
+        offset_temp = self._new_temp(Type.INT)
+        ir.append(IRBinOp(dst=offset_temp, op=BinaryOp.MULTIPLY, left=i, right=IRConst(element_width, Type.INT)))
+        elem_addr = self._new_temp(Type.INT64)
+        ir.append(IRBinOp(dst=elem_addr, op=BinaryOp.ADD, left=dst_address, right=offset_temp))
+        ir.extend(self._ir_write_zero_value_into(elem_addr, element_type))
+        next_i = self._new_temp(Type.INT)
+        ir.append(IRBinOp(dst=next_i, op=BinaryOp.ADD, left=i, right=IRConst(1, Type.INT)))
+        ir.append(IRMove(dst=i, src=next_i))
+        ir.append(IRJump(start_label))
+        ir.append(IRLabel(end_label))
+        return ir
+
+    def _ir_write_composite_value_into(self, dst_address, value_expr: Node, value_type: Type):
+        """The general-purpose dispatcher underlying nested literal
+        construction: writes value_expr's own value through
+        dst_address (an already-computed, ordinary IRValue), by
+        dispatching on value_expr's own shape. Returns None when out
+        of scope (a named/partial struct literal, chiefly -- see _ir_
+        write_struct_literal_into's own docstring for why that stays
+        deferred).
+
+        Unifies, into one place, every composite-producing shape this
+        arc has already built SEPARATELY, each for its own original
+        call site: an existing value's own address (_ir_copy_into_
+        address, originally built for Return/VarDecl/Assign/
+        IndexAssign/FieldAssign's own Variable/Field/Index case), a
+        Slice production or append call for a slice-typed value (both
+        via _ir_write_slice_descriptor_into_address, originally built
+        for VarDecl/Assign/IndexAssign/FieldAssign's own slice-
+        producing cases), an ordinary composite-returning Call (_ir_
+        composite_call, originally built for Return/VarDecl/Assign/
+        IndexAssign/FieldAssign's own forwarding case), or nested
+        literal construction itself -- recursing back into _ir_write_
+        array_literal_into/_ir_write_struct_literal_into, which now
+        call back into THIS dispatcher for any of their own composite
+        elements/fields in turn. Mutual recursion, the same shape
+        address computation's own Field/Index handling already relies
+        on elsewhere in this arc (_ir_array_address calling into
+        itself, indirectly, through _ir_field_address/_ir_index_
+        address, for a chain of arbitrary depth).
+
+        `append` is checked, and handled, BEFORE the generic ordinary-
+        Call case below -- append is a Call whose own name is never in
+        struct_registry, so without this explicit, earlier check it
+        would silently reach _ir_composite_call instead, trying to
+        call a function literally named 'append' that was never
+        compiled at all. This is the exact same ordering bug already
+        found and fixed in gen_statement_ir's own Return/VarDecl/
+        Assign/IndexAssign/FieldAssign cases -- worth being explicit
+        about here too, rather than risk reintroducing it in a new
+        location."""
+        if isinstance(value_expr, (Variable, Field, Index)):
+            return self._ir_copy_into_address(dst_address, value_expr, value_type)
+        if isinstance(value_expr, NoneLiteral):
+            zero_ptr = IRConst(0, Type.INT64)
+            zero_int = IRConst(0, Type.INT)
+            return self._ir_write_slice_descriptor_into_address(dst_address, zero_ptr, zero_int, zero_int)
+        if value_type.kind == TypeKind.SLICE and isinstance(value_expr, Slice):
+            production = self._ir_slice_into(value_expr)
+            if production is None:
+                return None
+            slice_ir, ptr_value, len_value, cap_value = production
+            return slice_ir + self._ir_write_slice_descriptor_into_address(dst_address, ptr_value, len_value, cap_value)
+        if value_type.kind == TypeKind.SLICE and isinstance(value_expr, Call) and value_expr.name == 'append':
+            production = self._ir_append_call(value_expr)
+            if production is None:
+                return None
+            append_ir, ptr_value, len_value, cap_value = production
+            return append_ir + self._ir_write_slice_descriptor_into_address(dst_address, ptr_value, len_value, cap_value)
+        if isinstance(value_expr, ArrayLiteral):
+            return self._ir_write_array_literal_into(dst_address, value_expr, value_type)
+        if isinstance(value_expr, Call) and value_expr.name in self.struct_registry:
+            return self._ir_write_struct_literal_into(dst_address, value_expr, value_type)
+        if isinstance(value_expr, Call):
+            return self._ir_composite_call(dst_address, value_expr, value_type)
+        return None
+
     def _ir_write_array_literal_into(self, dst_address, expr: ArrayLiteral, array_type: Type):
         """Builds (without lowering) an array literal's elements as
         real IR, written through dst_address -- an ordinary INT64-
         typed IRValue, however the caller already has it (see _ir_
         composite_call's own docstring for the same "doesn't care how"
-        contract). Returns None when out of scope: every element must
-        be scalar (a nested composite element -- an array of arrays/
-        slices/structs -- needs its own recursive real-IR treatment, a
-        genuinely separate, later step, not attempted here).
+        contract). Returns None when out of scope: only when some
+        element's own value is itself out of scope for _ir_write_
+        composite_value_into (a named/partial struct literal, chiefly
+        -- see its own docstring) -- an element that's ITSELF composite
+        (an array of arrays/slices/structs) is no longer automatically
+        out of scope, unlike this method's own earlier version: mutual
+        recursion through _ir_write_composite_value_into handles it,
+        the same shape address computation's own Field/Index handling
+        already relies on elsewhere in this arc.
 
         Each element's own address is dst_address + i*element_width
         via ordinary IRBinOp -- skipped entirely for element 0 (offset
         0 needs no addition, matching _ir_write_slice_descriptor's own
-        identical shortcut for its own ptr field). Each value is
-        evaluated via gen_expr_ir (so a migrated sub-expression stays
-        real IR) and written via IRStore."""
+        identical shortcut for its own ptr field). A scalar element's
+        value is evaluated via gen_expr_ir (so a migrated sub-
+        expression stays real IR) and written via IRStore; a composite
+        element delegates entirely to _ir_write_composite_value_into.
+        If ANY element turns out to be out of scope, the whole literal
+        falls back (this method returns None) -- any IR already built
+        for earlier elements (including a few now-orphaned Temp ids
+        from _new_temp) is simply discarded by the caller in favor of
+        old-style construction for the ENTIRE literal, the same
+        harmless-but-pointless waste already accepted elsewhere in
+        this arc (a VarDecl's own hidden-pointer leaf, built and then
+        discarded, when its own composite-call case turns out not to
+        apply) -- there's no risk of a partial, inconsistent write,
+        since none of this IR is ever actually emitted in that case."""
         element_type = array_type.element_type
-        if element_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
-            return None
         element_width = type_byte_width(element_type, self.struct_registry)
         ir = []
         for i, elem_expr in enumerate(expr.elements):
-            elem_ir, elem_value = self.gen_expr_ir(elem_expr)
-            ir.extend(elem_ir)
-            if i == 0:
-                elem_addr = dst_address
+            if element_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
+                if i == 0:
+                    elem_addr = dst_address
+                else:
+                    elem_addr = self._new_temp(Type.INT64)
+                    ir.append(IRBinOp(dst=elem_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(i * element_width, Type.INT64)))
+                elem_ir = self._ir_write_composite_value_into(elem_addr, elem_expr, element_type)
+                if elem_ir is None:
+                    return None
+                ir.extend(elem_ir)
             else:
-                elem_addr = self._new_temp(Type.INT64)
-                ir.append(IRBinOp(dst=elem_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(i * element_width, Type.INT64)))
-            ir.append(IRStore(address=elem_addr, value=elem_value, value_type=element_type))
+                elem_ir, elem_value = self.gen_expr_ir(elem_expr)
+                ir.extend(elem_ir)
+                if i == 0:
+                    elem_addr = dst_address
+                else:
+                    elem_addr = self._new_temp(Type.INT64)
+                    ir.append(IRBinOp(dst=elem_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(i * element_width, Type.INT64)))
+                ir.append(IRStore(address=elem_addr, value=elem_value, value_type=element_type))
         return ir
 
     def gen_array_value_into(self, expr: Node, dst_mem: Memory, array_type: Type) -> list[Instruction]:
