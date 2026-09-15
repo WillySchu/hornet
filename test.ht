@@ -2,6 +2,15 @@ struct HasArray:
     [5]int values
 
 
+struct Point:
+    int x
+    int y
+
+
+def Point make_point():
+    return Point(1, 2)
+
+
 def str hello():
     return 'hello'
 
@@ -14,13 +23,26 @@ def [5]int test([5]int arr):
     print(arr)
     return arr
 
+def HasArray make_ha():
+    return HasArray([1,2,3,4,5])
+
 
 def int8 main():
     HasArray ha = HasArray([1,2,3,4,5])
     # TODO(will): Fix these commented out examples.
     #ha.values = test(ha.values)
     #test(ha.values)
-    [5]int values = ha.values
-    values = test(values)
-    test(values)
+    #[5]int values = ha.values
+    #values = test(values)
+    #test(values)
+
+    # TODO(will): Fix these examples.
+    #print(ha.value == make_ha().values)
+    #print(make_ha().values)
+    #int x = make_point().x
+    #print(x)
+
+    # TODO(will): Fix this example.
+    #bool t = make_point() == make_point()
+    #print(t)
     return 0

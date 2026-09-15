@@ -17,6 +17,7 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
+- Array literal / struct literal / call in equality test.
 - `IRBranch` peephole optimization to skip redundant unconditional jumps.
 - IRAddress
 - CSE pass optimization for array addresses and thus indexes.
