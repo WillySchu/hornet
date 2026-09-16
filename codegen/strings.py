@@ -1065,7 +1065,7 @@ class StringsMixin:
         fully generic (just `CallInstr(instr.name)`), with no notion
         of "Hornet function" baked in, so an external C library call
         needs no new IR concept at all, unlike append's own
-        IRAppendGrow -- this is real IR entirely from EXISTING pieces
+        IRSliceGrow -- this is real IR entirely from EXISTING pieces
         (IRCall, IRBinOp), composed.
 
         left/right are each evaluated via gen_expr_ir now (a migrated

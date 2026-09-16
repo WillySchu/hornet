@@ -295,53 +295,65 @@ class IRSliceBoundsCheck:
 
 
 @dataclass
-class IRAppendGrow:
-    """The unconditional "must grow" half of append(s, value): mallocs
-    a fresh, larger backing array, copies the existing `length`
-    elements over, writes `value` into the newly-appended slot, and
-    produces the resulting {ptr, len, cap} triple. Reached only after
-    a real-IR bounds-style check (ordinary IRBinOp comparing length
-    against cap, plus IRBranch) has already determined there's no
-    spare room in the existing backing array -- this op itself makes
-    no such check, unlike the old-style _gen_grow_and_append_one_into
-    it shares its own growth arithmetic with (via _gen_realloc_and_
-    append_one_into specifically, which is exactly this same "no
-    internal check, caller has already decided" contract).
+class IRSliceGrow:
+    """The growth-ONLY half of append(s, value): mallocs a fresh,
+    larger backing array and copies the existing `length` elements
+    over from the old one, via an ordinary, generic byte-for-byte
+    copy loop -- correct for ANY element type (int/bool/str/array/
+    struct/slice alike), since copying an ALREADY-existing, already-
+    valid element is always just "copy element_width bytes," with no
+    type-specific construction logic needed at all. Produces the new
+    backing's own {ptr, cap} -- NOT length, and NOT the newly-
+    appended value itself: growth doesn't change how many elements
+    currently exist, only how much room there is, and writing the
+    new element is a genuinely separate concern, deliberately left to
+    the caller (see below).
 
-    The one op in this compiler with three result Temps instead of
-    one (dst_ptr, dst_len, dst_cap): a slice descriptor is inherently
-    a three-value thing, and this op genuinely produces a FRESH one
-    from scratch, unlike IRCopy/IRStore, which only ever move an
-    ALREADY-existing triple/value around without synthesizing one.
+    Reached only after a real-IR bounds-style check (ordinary IRBinOp
+    comparing length against cap, plus IRBranch) has already
+    determined there's no spare room in the existing backing array --
+    this op itself makes no such check, unlike the old-style _gen_
+    grow_and_append_one_into it shares its own growth arithmetic with
+    (via _gen_new_cap_into specifically, extracted so both share the
+    identical cap-doubling rule without duplicating it).
 
-    element_width/value_type are plain metadata, not IRValues -- an
-    element's own byte width and type are always known at IR-
-    construction time (the same way IRCopy/IRStore already carry
-    value_type this way), never something to compute at runtime.
+    Deliberately narrower than this compiler's own former IRAppendGrow,
+    which fused growth together with writing the newly-appended value,
+    and was scoped to a scalar element type only as a direct
+    consequence (its own write step used an ordinary scalar store,
+    with no way to write an arbitrary composite value through it).
+    Splitting the two apart is what let _ir_append_call support a
+    composite element type at all: writing the new value, whatever its
+    own type, now happens as an ordinary, SEPARATE step immediately
+    after this op returns, reusing _ir_write_composite_value_into (for
+    array/slice/struct) or an ordinary IRStore (for everything else)
+    completely unchanged -- the identical dispatcher every other
+    "write a composite value into a known address" site in this arc
+    already uses. This split also means a future runtime-call lowering
+    for growth specifically (mirroring hornet_stringify's own "one
+    hand-built function, shared across every call site" pattern, since
+    growth -- like stringify -- never needs to know anything about the
+    VALUE being handled, only its own byte width) would only ever need
+    to replace THIS op's own lowering, with zero change needed to how
+    the new value gets written afterward, for any element type.
 
-    Scoped to a scalar element type only: value is written via an
-    ordinary scalar store (the same mechanism IRStore itself uses),
-    so a composite element (an array/struct/slice element type) still
-    needs the old-style, fully general gen_append_call_into, which
-    can copy an arbitrary composite value via gen_array_copy instead.
+    element_width is plain metadata, not an IRValue -- an element's
+    own byte width is always known at IR-construction time.
 
-    Reads ptr/length/cap/value; writes dst_ptr/dst_len/dst_cap. Must
-    be treated as an unsafe position for register allocation, unlike
-    every other op in this file: its own lowering calls malloc, an
-    ordinary external function call that's free to clobber any
-    caller-saved register -- including %r10d/%r11d, two of this
-    compiler's own three allocator-pool registers -- so a Temp
-    allocated to the pool cannot safely survive across it, the same
-    reasoning that already makes IRCall/IRRaw unsafe positions."""
+    Reads ptr/length/cap; writes dst_ptr/dst_cap. Must be treated as
+    an unsafe position for register allocation, unlike every other op
+    in this file: its own lowering calls malloc, an ordinary external
+    function call that's free to clobber any caller-saved register --
+    including %r10d/%r11d, two of this compiler's own three allocator-
+    pool registers -- so a Temp allocated to the pool cannot safely
+    survive across it, the same reasoning that already makes IRCall/
+    IRRaw unsafe positions."""
     dst_ptr: Temp
-    dst_len: Temp
     dst_cap: Temp
     ptr: IRValue
     length: IRValue
     cap: IRValue
-    value: IRValue
     element_width: int
-    value_type: Type
 
 
 @dataclass

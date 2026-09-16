@@ -43,7 +43,7 @@ from codegen.assembly_ast import (
     Sub,
 )
 from codegen.errors import CodegenError
-from codegen.ir import IRRaw, IRBinOp, IRConst, IRBoundsCheck, IRSliceBoundsCheck, IRStore, IRLoad, IRAppendGrow, IRMove, IRBranch, IRJump, IRLabel, IRLocalAddress, IRStaticDataAddress, IRCall
+from codegen.ir import IRRaw, IRBinOp, IRConst, IRBoundsCheck, IRSliceBoundsCheck, IRStore, IRLoad, IRSliceGrow, IRMove, IRBranch, IRJump, IRLabel, IRLocalAddress, IRStaticDataAddress, IRCall
 from codegen.utils import type_of, type_byte_width, leaf_type, as_byte_register, gen_protecting_dst_across
 from parser import Node, ArrayLiteral, Call, Field, Index, Slice, Variable, NoneLiteral, Binary, BinaryOp
 from semantic import TypeKind, Type
@@ -2650,37 +2650,54 @@ class ArraysSlicesMixin:
         instructions.append(Label(end_label))
         return instructions
 
-    def _gen_realloc_and_append_one_into(
-            self,
-            r_ptr: Register,
-            r_len: Register,
-            r_len_32: Register,
-            r_cap: Register,
-            r_cap_32: Register,
-            element_width: int,
-            copy_one_element,
-            write_new_value_at,
-    ) -> list[Instruction]:
-        """Just the REALLOCATE half of _gen_grow_and_append_one_into's
-        own two-way split -- extracted into its own method specifically
-        so IRAppendGrow's own lowering can reach it directly, having
-        already made the reuse-vs-reallocate decision one level up, as
-        real IR (an ordinary IRBinOp comparison plus IRBranch), rather
-        than paying for this method's own internal len>=cap check a
-        second, redundant time.
+    def _gen_raw_byte_copy(self, dst: Register, src: Register, width: int) -> list[Instruction]:
+        """Copies exactly `width` bytes from the address in src to the
+        address in dst -- both hold an address directly (Memory(reg.
+        name, 0)), not an arbitrary Memory operand with its own offset,
+        unlike gen_array_copy's own dst_mem/src_mem. The identical
+        movq/movl/movb chunking gen_array_copy already uses (as many
+        8-byte movqs as fit, then one 4-byte movl if at least 4 bytes
+        remain, then a trailing run of 1-byte movbs for whatever's left
+        -- correct for any width, not just a multiple of 4), just
+        driven by a raw byte count instead of a Type -- gen_array_copy
+        itself needs a Type (for leaf_type/type_byte_width), which
+        _gen_slice_grow_into's own caller doesn't have and, by design,
+        never should: growth is deliberately type-agnostic, knowing
+        only an element's own byte width, never its shape (see
+        IRSliceGrow's own docstring for why that matters -- it's what
+        would let growth's own future lowering become a generic
+        runtime call, unlike writing a fresh value, which can't)."""
+        instructions = []
+        chunk_off = 0
+        while width - chunk_off >= 8:
+            instructions.append(MovQ(src=Memory(src.name, chunk_off), dst=Register('rax')))
+            instructions.append(MovQ(src=Register('rax'), dst=Memory(dst.name, chunk_off)))
+            chunk_off += 8
+        if width - chunk_off >= 4:
+            instructions.append(Mov(src=Memory(src.name, chunk_off), dst=Register('eax')))
+            instructions.append(Mov(src=Register('eax'), dst=Memory(dst.name, chunk_off)))
+            chunk_off += 4
+        while width - chunk_off >= 1:
+            instructions.append(MovB(src=Memory(src.name, chunk_off), dst=Register('al')))
+            instructions.append(MovB(src=Register('al'), dst=Memory(dst.name, chunk_off)))
+            chunk_off += 1
+        return instructions
 
-        Assumes the caller has ALREADY determined reallocation is
-        needed -- no internal check of any kind here. new_cap is
-        computed from cap alone, in place -- the old cap value is
-        never needed again once this decides new_cap, so overwriting
-        r_cap_32 here is safe: cap*2 while cap < 256, else cap +
-        cap//4 (a right shift by 1, matching integer division by 2,
-        then added back), with a cap==0 floor of 1 -- doubling zero
+    def _gen_new_cap_into(self, r_cap_32: Register) -> list[Instruction]:
+        """Computes append's own growth rule in place, overwriting
+        r_cap_32 with the new capacity: cap*2 while cap < 256, else
+        cap + cap//4 (a right shift by 1, matching integer division by
+        2, then added back), with a cap==0 floor of 1 -- doubling zero
         forever stays zero, so that case needs its own explicit floor.
+        Uses %eax/%ecx as scratch (the shift's own fixed operand
+        register); r_cap_32 itself is never one of those two, by every
+        one of this method's own callers' own convention.
 
-        See _gen_grow_and_append_one_into's own docstring for what
-        copy_one_element/write_new_value_at are each for, and for the
-        full register-usage contract (both are unchanged here)."""
+        Shared by _gen_realloc_and_append_one_into (the old-style,
+        fused growth-and-write path) and _gen_slice_grow_into (the
+        real-IR, growth-only path IRSliceGrow's own lowering uses) --
+        extracted here specifically so both apply the IDENTICAL
+        growth rule without duplicating this arithmetic twice."""
         instructions = []
         zero_label = self.new_label("append_cap_zero")
         quarter_label = self.new_label("append_cap_quarter")
@@ -2701,6 +2718,105 @@ class ArraysSlicesMixin:
         instructions.append(ShiftRightArithmetic(dst=r_cap_32))
         instructions.append(Add(src=Register('eax'), dst=r_cap_32))
         instructions.append(Label(growth_done_label))
+        return instructions
+
+    def _gen_slice_grow_into(
+            self,
+            r_ptr: Register,
+            r_len_32: Register,
+            r_cap: Register,
+            r_cap_32: Register,
+            element_width: int,
+    ) -> list[Instruction]:
+        """The growth-ONLY half of append -- IRSliceGrow's own
+        lowering. Mallocs a fresh, larger backing (sized via _gen_new_
+        cap_into, then multiplied by element_width) and copies the
+        existing r_len_32 elements over from r_ptr, via an ordinary,
+        generic byte-for-byte copy loop -- correct for ANY element
+        type, since copying an ALREADY-existing, already-valid element
+        is always just 'copy element_width bytes,' with no type-
+        specific construction logic needed here at all (unlike WRITING
+        a fresh element, which does need that, and is deliberately NOT
+        this method's own concern -- see IRSliceGrow's own docstring).
+
+        Leaves r_len_32 itself untouched: growth doesn't change how
+        many elements currently exist, only how much room there is.
+        r_ptr is overwritten with the new backing's own address on
+        return; r_cap/r_cap_32 hold the new capacity.
+
+        Assumes the caller has ALREADY determined reallocation is
+        needed -- no internal check of any kind here, the identical
+        "no internal check, caller has already decided" contract
+        _gen_realloc_and_append_one_into's own docstring establishes,
+        which this method's own copy loop is otherwise a direct,
+        write-free copy of."""
+        instructions = self._gen_new_cap_into(r_cap_32)
+        # r_cap_32 (and, via the zero-extension a 32-bit write always
+        # gives its own 64-bit register, r_cap itself) now holds
+        # new_cap.
+
+        instructions.append(Mov(src=r_cap_32, dst=Register('edi')))
+        instructions.append(IMul(src=Imm(element_width), dst=Register('edi')))
+        instructions.append(CallInstr('malloc'))
+        r_new_ptr = Register('r14')
+        instructions.append(MovQ(src=Register('rax'), dst=r_new_ptr))
+
+        # Copy the existing len elements from the OLD array (r_ptr)
+        # into the NEW one (r_new_ptr), via an ordinary, generic byte
+        # copy -- a genuine RUNTIME loop since len is a runtime value
+        # here.
+        loop_start_label = self.new_label("slice_grow_copy_loop")
+        loop_done_label = self.new_label("slice_grow_copy_done")
+        i_32 = Register('r9d')
+        instructions.append(Mov(src=Imm(0), dst=i_32))
+        instructions.append(Label(loop_start_label))
+        instructions.append(Cmp(src=r_len_32, dst=i_32))
+        instructions.append(Jae(loop_done_label))
+        instructions.append(Mov(src=i_32, dst=Register('r11d')))
+        instructions.append(IMul(src=Imm(element_width), dst=Register('r11d')))
+        instructions.append(MovQ(src=r_ptr, dst=Register('r10')))
+        instructions.append(AddQ(src=Register('r11'), dst=Register('r10')))
+        instructions.append(MovQ(src=r_new_ptr, dst=Register('r8')))
+        instructions.append(AddQ(src=Register('r11'), dst=Register('r8')))
+        instructions.extend(self._gen_raw_byte_copy(Register('r8'), Register('r10'), element_width))
+        instructions.append(Add(src=Imm(1), dst=i_32))
+        instructions.append(Jmp(loop_start_label))
+        instructions.append(Label(loop_done_label))
+
+        instructions.append(MovQ(src=r_new_ptr, dst=r_ptr))
+        return instructions
+
+    def _gen_realloc_and_append_one_into(
+            self,
+            r_ptr: Register,
+            r_len: Register,
+            r_len_32: Register,
+            r_cap: Register,
+            r_cap_32: Register,
+            element_width: int,
+            copy_one_element,
+            write_new_value_at,
+    ) -> list[Instruction]:
+        """Just the REALLOCATE half of _gen_grow_and_append_one_into's
+        own two-way split -- extracted into its own method specifically
+        so IRSliceGrow's own lowering (via _gen_slice_grow_into, this
+        method's own growth-only, write-free sibling) could reach the
+        same growth arithmetic without the write-related plumbing this
+        method still needs for its own, remaining old-style caller
+        (gen_append_call_into, still reached whenever a slice's own
+        base -- not element type -- is out of scope for real IR).
+
+        Assumes the caller has ALREADY determined reallocation is
+        needed -- no internal check of any kind here. new_cap itself
+        is computed via _gen_new_cap_into (see its own docstring for
+        the exact growth rule) -- shared with _gen_slice_grow_into
+        specifically so both apply the identical rule without
+        duplicating this arithmetic twice.
+
+        See _gen_grow_and_append_one_into's own docstring for what
+        copy_one_element/write_new_value_at are each for, and for the
+        full register-usage contract (both are unchanged here)."""
+        instructions = self._gen_new_cap_into(r_cap_32)
         # r_cap_32 (and, via the zero-extension a 32-bit write always
         # gives its own 64-bit register, r_cap itself) now holds
         # new_cap.
@@ -2745,49 +2861,90 @@ class ArraysSlicesMixin:
         instructions.append(MovQ(src=r_new_ptr, dst=r_ptr))
         return instructions
 
+    def _ir_write_append_value_at(self, target_addr, value_arg: Node, element_type: Type):
+        """Writes append(s, value)'s own `value` argument at an
+        already-computed target_addr -- called independently by both
+        of _ir_append_call's own REUSE and REALLOCATE branches, each
+        reaching a different target_addr through a different path.
+        Returns None when out of scope (propagating _ir_write_
+        composite_value_into's own None, for a composite element whose
+        own nested content is itself out of scope).
+
+        Scalar element types (int/bool/str/int64) go through an
+        ordinary IRStore, exactly as append's own real-IR work always
+        has. Composite element types (array/slice/struct) reuse _ir_
+        write_composite_value_into completely UNCHANGED -- the
+        identical dispatcher every other "write a composite value into
+        a known address" site in this arc already uses (VarDecl/
+        Assign/IndexAssign/FieldAssign/Return/a struct field/an array
+        element), so a slice-typed element correctly writes a fresh
+        {ptr, len, cap} descriptor, an array-typed element correctly
+        copies element-by-element, and a struct-typed element
+        correctly writes field-by-field -- append needed no new
+        writing logic of its own at all, only this one, small piece of
+        wiring calling into what already existed.
+
+        Called once per branch, not once upfront with the result
+        reused in both (the way a purely scalar value's own old
+        design could): a composite value has no single Temp of its
+        own to compute once and reuse, since WRITING it is the whole
+        operation -- there's no separate "the value" to hold onto
+        independently of where it gets written. This duplicates the
+        value argument's own codegen across both branches (ordinary
+        branch-and-merge code growth, the same any if/else already
+        accepts when both arms independently compute something), but
+        never double-EXECUTES it at runtime: exactly one of the two
+        branches ever runs for a given call, decided by the length-
+        vs-cap check before either branch's own code is ever reached."""
+        if element_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
+            return self._ir_write_composite_value_into(target_addr, value_arg, element_type)
+        value_ir, value = self.gen_expr_ir(value_arg)
+        return value_ir + [IRStore(address=target_addr, value=value, value_type=element_type)]
+
     def _ir_append_call(self, expr: Call):
         """Builds (without lowering) append(s, value)'s resulting
         {ptr, len, cap} triple as real IR -- returns (ir, ptr_value,
-        len_value, cap_value), or None when out of scope: a composite
-        element type (still needs the old-style, fully general gen_
-        append_call_into, since IRStore -- which the reuse path below
-        uses -- can't yet write a composite value through an address),
-        or s's own base out of scope (see _ir_indexable_base) --
-        anything but a Variable/Field/Index/Slice, or NoneLiteral.
+        len_value, cap_value), or None when out of scope: s's own base
+        out of scope (see _ir_indexable_base) -- anything but a
+        Variable/Field/Index/Slice/ArrayLiteral/an ordinary composite-
+        returning Call, or NoneLiteral -- or `value` itself out of
+        scope for _ir_write_append_value_at, when the element type is
+        composite (a named/partial struct literal nested inside it,
+        chiefly).
 
-        The reuse-vs-reallocate decision itself is real IR now: an
+        ANY element type is now in scope, including array/slice/
+        struct -- see _ir_write_append_value_at's own docstring for
+        how writing the value itself works for each. Previously
+        excluded entirely (falling back to the old-style, fully
+        general gen_append_call_into) purely because the growth path
+        (see below) used to fuse growth together with writing the new
+        value into one op (the old IRAppendGrow), scoped to a scalar
+        element only as a direct consequence.
+
+        The reuse-vs-reallocate decision itself is real IR: an
         ordinary IRBinOp comparison (length >= cap; a plain SIGNED
         comparison is correct here, unlike IRBoundsCheck's own
         unsigned trick -- len/cap are compiler-maintained invariants,
         never a user-supplied value that could be negative) plus an
         ordinary IRBranch, exactly the same shape every other
         conditional decision in gen_expr_ir/gen_statement_ir already
-        uses. The REUSE path (length < cap) is entirely real IR too:
-        compute the target address, IRStore the value, increment
-        length. The REALLOCATE path (length >= cap) is IRAppendGrow --
-        see its own docstring for why it's a dedicated op rather than
-        an opaque IRRaw: it needs to consume an arbitrary Temp (value)
-        and produce three Temps, neither of which IRRaw can do.
+        uses. The REUSE path (length < cap) is entirely real IR:
+        compute the target address, write the value, increment length.
+        The REALLOCATE path (length >= cap) grows first via IRSliceGrow
+        -- see its own docstring for why growth and writing the value
+        are two separate steps here, not fused into one op the way the
+        old, scalar-only IRAppendGrow used to -- THEN writes the value
+        into the newly-available slot at the same, already-known
+        offset (length * element_width) within the fresh backing.
 
         Both paths write into the SAME three result Temps (result_ptr/
         result_len/result_cap), then jump to a shared end label -- the
         same "both branches assign the same Temp" pattern an if/else
         already uses for a named-local variable, just for an anonymous
-        one here. This is the first expression in this compiler whose
-        own real-IR fragment contains a genuine branch-and-merge
-        (not just a one-way jump to a panic label that never returns,
-        the shape every bounds check so far has used) -- architecturally
-        new for an expression, though not for a statement (if/else
-        already does exactly this for named locals); the general
-        liveness/register-allocation machinery is agnostic to whether
-        a label/branch came from a statement or an expression, so no
-        changes were needed there beyond IRAppendGrow's own unsafe-
-        position registration."""
+        one here."""
         slice_arg, value_arg = expr.args
         slice_type = type_of(slice_arg)
         element_type = slice_type.element_type
-        if element_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
-            return None
         element_width = type_byte_width(element_type, self.struct_registry)
 
         if isinstance(slice_arg, NoneLiteral):
@@ -2805,8 +2962,6 @@ class ArraysSlicesMixin:
                 return None
             base_ir, ptr, length, cap = base
 
-        value_ir, value = self.gen_expr_ir(value_arg)
-
         result_ptr = self._new_temp(Type.INT64)
         result_len = self._new_temp(Type.INT)
         result_cap = self._new_temp(Type.INT)
@@ -2819,14 +2974,19 @@ class ArraysSlicesMixin:
         check = IRBinOp(dst=needs_realloc, op=BinaryOp.GREATER_THAN_OR_EQUAL, left=length, right=cap)
         branch = IRBranch(cond=needs_realloc, true_label=realloc_label, false_label=reuse_label)
 
+        # REUSE path (length < cap): write directly into the existing
+        # backing at its own next-free slot.
         offset_temp = self._new_temp(Type.INT)
-        target_addr = self._new_temp(Type.INT64)
+        reuse_target_addr = self._new_temp(Type.INT64)
         new_len = self._new_temp(Type.INT)
+        reuse_write_ir = self._ir_write_append_value_at(reuse_target_addr, value_arg, element_type)
+        if reuse_write_ir is None:
+            return None
         reuse_ir = [
             IRLabel(reuse_label),
             IRBinOp(dst=offset_temp, op=BinaryOp.MULTIPLY, left=length, right=IRConst(element_width, Type.INT)),
-            IRBinOp(dst=target_addr, op=BinaryOp.ADD, left=ptr, right=offset_temp),
-            IRStore(address=target_addr, value=value, value_type=element_type),
+            IRBinOp(dst=reuse_target_addr, op=BinaryOp.ADD, left=ptr, right=offset_temp),
+        ] + reuse_write_ir + [
             IRBinOp(dst=new_len, op=BinaryOp.ADD, left=length, right=IRConst(1, Type.INT)),
             IRMove(dst=result_ptr, src=ptr),
             IRMove(dst=result_len, src=new_len),
@@ -2834,16 +2994,38 @@ class ArraysSlicesMixin:
             IRJump(end_label),
         ]
 
+        # REALLOCATE path (length >= cap): grow first (IRSliceGrow,
+        # touching neither length nor the new value at all), THEN
+        # write the new value into the newly-available slot, at the
+        # same offset (length * element_width) the REUSE path's own
+        # slot would have been at, just within the fresh backing.
+        grow_ptr = self._new_temp(Type.INT64)
+        grow_cap = self._new_temp(Type.INT)
+        grow = IRSliceGrow(
+            dst_ptr=grow_ptr, dst_cap=grow_cap,
+            ptr=ptr, length=length, cap=cap,
+            element_width=element_width,
+        )
+        realloc_offset_temp = self._new_temp(Type.INT)
+        realloc_target_addr = self._new_temp(Type.INT64)
+        realloc_new_len = self._new_temp(Type.INT)
+        realloc_write_ir = self._ir_write_append_value_at(realloc_target_addr, value_arg, element_type)
+        if realloc_write_ir is None:
+            return None
         realloc_ir = [
             IRLabel(realloc_label),
-            IRAppendGrow(
-                dst_ptr=result_ptr, dst_len=result_len, dst_cap=result_cap,
-                ptr=ptr, length=length, cap=cap, value=value,
-                element_width=element_width, value_type=element_type,
-            ),
+            grow,
+            IRBinOp(dst=realloc_offset_temp, op=BinaryOp.MULTIPLY, left=length, right=IRConst(element_width, Type.INT)),
+            IRBinOp(dst=realloc_target_addr, op=BinaryOp.ADD, left=grow_ptr, right=realloc_offset_temp),
+        ] + realloc_write_ir + [
+            IRBinOp(dst=realloc_new_len, op=BinaryOp.ADD, left=length, right=IRConst(1, Type.INT)),
+            IRMove(dst=result_ptr, src=grow_ptr),
+            IRMove(dst=result_len, src=realloc_new_len),
+            IRMove(dst=result_cap, src=grow_cap),
+            IRJump(end_label),
         ]
 
-        ir = base_ir + value_ir + [check, branch] + reuse_ir + realloc_ir + [IRLabel(end_label)]
+        ir = base_ir + [check, branch] + reuse_ir + realloc_ir + [IRLabel(end_label)]
         return ir, result_ptr, result_len, result_cap
 
     def gen_append_call_into(self, expr: Call, dst_mem: Memory) -> list[Instruction]:

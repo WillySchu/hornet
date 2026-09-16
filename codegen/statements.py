@@ -378,9 +378,13 @@ class StatementsMixin:
             # builtin specifically (`append(s, value)`) -- same "try
             # first, bind only on success" discipline as the Slice
             # production case just above, for the identical reason.
-            # See _ir_append_call for exactly which shapes of s/value
-            # it covers (a composite element type, or an out-of-scope
-            # s, both fall back here too).
+            # ANY element type is in scope now, including array/slice/
+            # struct -- see _ir_append_call's own docstring. What still
+            # falls back here: s's own base out of scope (see _ir_
+            # indexable_base), or value itself out of scope for _ir_
+            # write_append_value_at when the element type is composite
+            # (a named/partial struct literal nested inside it,
+            # chiefly).
             if var_type.kind == TypeKind.SLICE and isinstance(stmt.init, Call) and stmt.init.name == 'append':
                 production = self._ir_append_call(stmt.init)
                 if production is not None:

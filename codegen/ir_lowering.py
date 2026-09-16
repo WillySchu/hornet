@@ -30,7 +30,6 @@ self. across the rest of the codebase.
 
 from codegen.assembly_ast import Instruction, Register, Memory, Imm, Mov, MovQ, Cmp, Je, Jae, Ja, Jmp, Label, CallInstr, LeaQFrame, LeaQ
 from codegen.ir import (
-    IRAppendGrow,
     IRBinOp,
     IRBoundsCheck,
     IRBranch,
@@ -45,6 +44,7 @@ from codegen.ir import (
     IRRaw,
     IRReturn,
     IRSliceBoundsCheck,
+    IRSliceGrow,
     IRStaticDataAddress,
     IRStore,
     IRUnOp,
@@ -316,47 +316,22 @@ class InstructionSelector:
                 out.extend(self._gen_load_value(instr.value, Register('eax')))
                 out.append(Cmp(src=Register('ecx'), dst=Register('eax')))
                 out.append(Ja(self.host._get_bounds_check_fail_label("slice bounds out of range")))
-            elif isinstance(instr, IRAppendGrow):
-                # Fixed registers matching gen_append_call_into's own
-                # existing convention exactly (%rbx/%r12/%r13 for ptr/
-                # len/cap, callee-saved so they survive the malloc
-                # call inside _gen_realloc_and_append_one_into) --
-                # this op's own contract already requires the caller
-                # (IRAppendGrow's own docstring) to have decided
-                # reallocation is needed, so no internal check happens
-                # here at all, unlike gen_append_call_into's own use
-                # of the sibling, checking _gen_grow_and_append_one_
-                # into. %r15/%r15d holds `value` -- outside the
-                # reserved set _gen_realloc_and_append_one_into's own
-                # docstring names (%r8/%r9/%r10/%r11/%eax/%ecx/%r14),
-                # and safe to use here precisely because this whole op
-                # is an unsafe position: nothing else can be relying
-                # on %r15 surviving across it.
+            elif isinstance(instr, IRSliceGrow):
+                # Fixed registers matching the old-style convention
+                # exactly (%rbx/%r12/%r13 for ptr/len/cap, callee-saved
+                # so they survive the malloc call inside _gen_slice_
+                # grow_into) -- this op's own contract already requires
+                # the caller (IRSliceGrow's own docstring) to have
+                # decided reallocation is needed, so no internal check
+                # happens here at all.
                 out.extend(self._gen_load_value(instr.ptr, Register('ebx')))
                 out.extend(self._gen_load_value(instr.length, Register('r12d')))
                 out.extend(self._gen_load_value(instr.cap, Register('r13d')))
-                out.extend(self._gen_load_value(instr.value, Register('r15d')))
-                value_reg = Register('r15d')
-
-                def write_value(target, value_type=instr.value_type, src=value_reg):
-                    # Same str-vs-else split IRStore's own lowering
-                    # already makes: a str is an 8-byte pointer, not a
-                    # plain scalar _gen_write_scalar_from's own "else"
-                    # branch (a 4-byte Mov) would corrupt.
-                    if value_type == Type.STR:
-                        return [MovQ(src=as_qword_register(src), dst=Memory(target.name, 0))]
-                    return self.host._gen_write_scalar_from(src, value_type, Memory(target.name, 0))
-
-                out.extend(self.host._gen_realloc_and_append_one_into(
-                    Register('rbx'), Register('r12'), Register('r12d'), Register('r13'), Register('r13d'),
+                out.extend(self.host._gen_slice_grow_into(
+                    Register('rbx'), Register('r12d'), Register('r13'), Register('r13d'),
                     instr.element_width,
-                    copy_one_element=lambda dst, src: self.host.gen_array_copy(
-                        Memory(dst.name, 0), Memory(src.name, 0), instr.value_type
-                    ),
-                    write_new_value_at=write_value,
                 ))
                 out.extend(self._gen_write_temp_from(Register('ebx'), instr.dst_ptr))
-                out.extend(self._gen_write_temp_from(Register('r12d'), instr.dst_len))
                 out.extend(self._gen_write_temp_from(Register('r13d'), instr.dst_cap))
             else:
                 raise NotImplementedError(f"lower_ir has no rule for: {instr!r}")
