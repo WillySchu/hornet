@@ -40,11 +40,13 @@ def int main():
         growingPts = append(growingPts, Point(i % 50, (i + 1) % 50))
         Point appendedPt = growingPts[len(growingPts) - 1]
         int sumAppendedPt = appendedPt.x + appendedPt.y
+        []int baseForAppend = [10, 20, 30]
+        int directAppendIndexed = append(baseForAppend, i % 5)[3]
         int isNil = 0
         if noInit == none:
             isNil = 1
         []int literalSlice = [i % 8, (i + 1) % 8]
         int sumLiteralSlice = literalSlice[0] + literalSlice[1]
-        total = (total + copy[0] + p.x + s[0] + extracted.y + sliced[0] + fromField + fromIndex + chained + appended + isNil + sumLiteralSlice + sumAppendedPt) % 1000003
+        total = (total + copy[0] + p.x + s[0] + extracted.y + sliced[0] + fromField + fromIndex + chained + appended + isNil + sumLiteralSlice + sumAppendedPt + directAppendIndexed) % 1000003
         i = i + 1
     return total % 256

@@ -549,6 +549,35 @@ class ArraysSlicesMixin:
         for why that specific shape always heap-allocates, regardless
         of size, unlike an ordinary index/field read of the same call.
 
+        SLICE-typed, append (`append(s, x)[i]`, `append(s, x) ==
+        none`, `sumSlice(append(s, x))`, ...): _ir_append_call already
+        returns exactly (ir, ptr, len, cap) -- the identical four-
+        tuple this method itself returns -- so this delegates straight
+        to it, the same "no materialization needed, the values already
+        are what this method wants back" shape the Slice case just
+        below uses for _ir_slice_into. append is checked here, before
+        the ordinary-composite-Call case just above, for the identical
+        reason it's always checked before an ordinary Call everywhere
+        else in this arc: it's a builtin, never a compiled function,
+        so _is_ordinary_composite_call already excludes it by name --
+        without a dedicated case here, `append(...)` used directly as
+        a base fell through to `if not isinstance(expr, (Variable,
+        Field, Index)): return None`, forcing every caller composed
+        through this method (index/field addressing, VarDecl/Assign/
+        IndexAssign/FieldAssign/Return's own copy logic, equality,
+        argument-passing, none-comparison) down old-style fallback
+        paths that were never actually exercised by this arc's own
+        test suite before -- three of which turned out to be
+        genuinely broken (a link-time "undefined reference to
+        `append`", a KeyError from a pre-pass assumption that never
+        held for this shape, and an implicit None return crashing
+        with a TypeError several frames away) rather than just slower.
+        This one, two-line addition is the fix for all of them at
+        once, not four separate patches: every one of those call
+        sites already recurses through this method for its own base
+        resolution, so they compose correctly automatically once this
+        method itself does.
+
         SLICE-typed, Slice (`arr[:][0]`, `s[a:b][c:d]`): delegates
         straight to _ir_slice_into, whose own return shape (ir, ptr,
         len, cap) already matches this method's own exactly -- there
@@ -622,6 +651,8 @@ class ArraysSlicesMixin:
                     IRLoad(dst=cap_temp, address=cap_addr),
                 ]
                 return ir, ptr_temp, len_temp, cap_temp
+            if isinstance(expr, Call) and expr.name == 'append':
+                return self._ir_append_call(expr)
             if self._is_ordinary_composite_call(expr):
                 addr_ir, descriptor_addr = self._ir_materialize_composite_call(expr, base_type)
                 ptr_temp = self._new_temp(Type.INT64)
@@ -647,14 +678,24 @@ class ArraysSlicesMixin:
         argument's own {ptr, len, cap} triple as real IR -- returns
         (ir, ptr_value, len_value, cap_value). Unlike _ir_indexable_
         base, this never returns None: every slice-typed argument
-        shape has SOME way to produce a triple, even when the out-of-
-        scope ones (chiefly a slice-returning Call) still need the
+        shape has SOME way to produce a triple, falling back to the
         old-style shared-scratch-slot materialization (gen_slice_
-        value_into) to do it, read back out via IRLocalAddress plus
-        IRLoad/IRBinOp at that fixed, known offset -- the identical
-        shape _ir_indexable_base's own Variable-slice leaf already
-        uses, just at the shared scratch offset instead of a named
-        variable's own.
+        value_into) -- read back out via IRLocalAddress plus IRLoad/
+        IRBinOp at that fixed, known offset, the identical shape _ir_
+        indexable_base's own Variable-slice leaf already uses, just at
+        the shared scratch offset instead of a named variable's own --
+        only when _ir_indexable_base itself returns None.
+
+        append(s, x) used directly as the argument (`sumSlice(append(
+        s, x))`), previously this method's own chief example of a
+        shape still needing that old-style path, is real IR now too:
+        _ir_indexable_base's own SLICE branch delegates straight to
+        _ir_append_call for it (see that branch's own docstring), the
+        same way it already did for an ordinary slice-returning Call.
+        Every slice-typed argument shape this arc's own tests
+        exercise now reaches real IR through this method without ever
+        falling back -- confirmed directly, not just no longer an
+        obvious example to name.
 
         NoneLiteral (`none` passed directly as an argument) is its
         own leaf here, not routed through _ir_indexable_base at all
@@ -751,13 +792,18 @@ class ArraysSlicesMixin:
         """Tries _ir_index_address first; falls back to wrapping the
         old-style gen_index_address_into as a single opaque IRRaw when
         expr.array's own base is still out of scope (see _ir_
-        indexable_base's own docstring) -- an ArrayLiteral, or a
-        Call, when expr.array is slice-typed. Shared by
-        dispatch.py's gen_expr_ir (a scalar element read) and this
-        module's own gen_statement_ir case (a scalar element write,
-        via _ir_index_assign) -- both need the identical "use real IR
-        when possible, fall back otherwise" decision, and this is the
-        one place it's made."""
+        indexable_base's own docstring) -- a struct-literal Call, when
+        expr.array is slice-typed, moot in practice since semantic.py
+        already rejects that outright wherever it would appear. An
+        ArrayLiteral or an ordinary Call (append included, via _ir_
+        indexable_base's own dedicated case) are both real IR now,
+        confirmed to no longer reach this fallback for every shape
+        this arc's own tests exercise. Shared by dispatch.py's gen_
+        expr_ir (a scalar element read) and this module's own gen_
+        statement_ir case (a scalar element write, via _ir_index_
+        assign) -- both need the identical "use real IR when possible,
+        fall back otherwise" decision, and this is the one place it's
+        made."""
         result = self._ir_index_address(expr)
         if result is not None:
             return result

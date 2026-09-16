@@ -9581,6 +9581,109 @@ class TestAppend:
             2,
         )
 
+    def test_append_result_indexed_as_function_argument(self):
+        """Regression test for a real bug: `sumPoint(append(s, Point(3,
+        4))[0])`, with append's own result never assigned to a
+        variable first, used to raise a KeyError (not even a clean
+        CodegenError) at compile time. The old-style argument-
+        materialization fallback's own pre-pass assumes ANY Index
+        argument already has a real address of its own (true for an
+        ordinary array/struct Variable, false here -- append's own
+        result has no pre-existing address at all), so it never
+        reserved the slot the fallback then tried to look up.
+        _ir_indexable_base's own new append case (see its own
+        docstring) closes this by making append(...) used as a base
+        real IR in the first place, so this old-style path -- and its
+        own bad assumption -- is never reached for this shape at all
+        anymore. Confirmed to have raised exactly this KeyError on the
+        reverted code before writing this test in."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int sumPoint(Point p):\n"
+            "    return p.x + p.y\n"
+            "\n"
+            "def int main():\n"
+            "    []Point s = [Point(1, 2)]\n"
+            "    return sumPoint(append(s, Point(3, 4))[0])\n",
+            3,
+        )
+
+    def test_append_result_indexed_as_vardecl_initializer(self):
+        """Regression test for a real bug, worse than the argument
+        case just above: `Point p = append(s, Point(3, 4))[0]` used to
+        crash with `TypeError: cannot unpack non-iterable NoneType
+        object` -- gen_statement_ir's own VarDecl dispatch fell all
+        the way through every explicit case for this shape without
+        any of them returning anything at all, so the method
+        implicitly returned None instead of a list of instructions,
+        several frames away from where the actual problem was.
+        _ir_indexable_base's own new append case fixes this exactly
+        the same way as the argument case above: append(...) used as
+        a base is real IR now, so this shape never reaches the old-
+        style dispatch chain that was failing to return at all.
+        Confirmed to have raised exactly this TypeError on the
+        reverted code before writing this test in."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    []Point s = [Point(1, 2)]\n"
+            "    Point p = append(s, Point(3, 4))[0]\n"
+            "    return p.x + p.y\n",
+            3,
+        )
+
+    def test_append_result_indexed_as_equality_operand(self):
+        """`append(s, Point(3,4))[0] == other`, append's own result
+        indexed directly as one side of a struct equality comparison.
+        Unlike the two regression tests just above, this one already
+        worked correctly even before _ir_indexable_base's own new
+        append case (confirmed: this exact program still compiles and
+        runs correctly with that case temporarily reverted, falling
+        back to old-style gen_struct_equality_into instead) -- kept
+        here as real-IR coverage for the same underlying shape, not
+        as its own bug regression test. Confirmed via instrumentation
+        that this now reaches real IR with zero old-style
+        invocations, where it previously did not."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    []Point s = [Point(1, 2)]\n"
+            "    Point other = Point(1, 2)\n"
+            "    if append(s, Point(3, 4))[0] == other:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_nested_append_as_slice_argument(self):
+        """`append(append(s, 1), 2)` -- an append call used directly
+        as ANOTHER append call's own slice argument, with neither
+        assigned to a variable first. Like the equality test just
+        above, this already worked correctly before _ir_indexable_
+        base's own new append case (the outer append's own value,
+        when real IR fails for the inner one, already fell back to
+        the fully general old-style gen_slice_value_into for the
+        whole assignment) -- kept here as real-IR coverage confirming
+        append composes with itself correctly, not as its own bug
+        regression test. Confirmed via instrumentation that this now
+        reaches real IR with zero old-style invocations."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    []int s = none\n"
+            "    s = append(append(s, 1), 2)\n"
+            "    return s[0] + s[1]\n",
+            3,
+        )
+
 
 class TestBareExpressionStatements:
     """A handful of expression shapes used directly as a bare,
