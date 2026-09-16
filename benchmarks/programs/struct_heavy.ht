@@ -7,6 +7,9 @@ def int distSquared(Point a, Point b):
     int dy = a.y - b.y
     return dx * dx + dy * dy
 
+def Point makePoint(int k):
+    return Point(k, k + 1)
+
 def int main():
     int total = 0
     int i = 0
@@ -20,6 +23,9 @@ def int main():
         int sameCheck = 0
         if a == a:
             sameCheck = 1
-        total = (total + distSquared(a, b) + eqCheck + sameCheck) % 1000003
+        int callEqCheck = 0
+        if a == makePoint(k):
+            callEqCheck = 1
+        total = (total + distSquared(a, b) + eqCheck + sameCheck + callEqCheck) % 1000003
         i = i + 1
     return total % 256

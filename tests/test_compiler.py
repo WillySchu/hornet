@@ -3717,6 +3717,69 @@ class TestArrayEquality:
             1,
         )
 
+    def test_two_bare_array_literals_compared_directly(self):
+        """Regression test for a real bug: `[1, 2, 3] == [1, 2, 3]`
+        used to raise a hard CodegenError, tracing back to the OLD-
+        style gen_array_address_into itself -- which never handled an
+        ArrayLiteral operand at all. This was never supported, even
+        old-style, not something this arc's own real-IR equality work
+        narrowed -- confirmed by temporarily reverting the fix and
+        watching this exact program fail to compile before writing it
+        in here."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    if [1, 2, 3] == [1, 2, 3]:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_two_bare_array_literals_compared_directly_not_equal(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    if [1, 2, 3] != [1, 2, 4]:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_two_array_returning_calls_compared_directly(self):
+        """`makeA() == makeB()`, with neither side ever assigned to a
+        variable first -- the same real bug as test_two_bare_array_
+        literals_compared_directly's own, just for an ordinary
+        composite-returning Call operand instead of a bracketed-list
+        literal."""
+        assert_program_exit_code(
+            "def [3]int makeA():\n"
+            "    return [1, 2, 3]\n"
+            "\n"
+            "def [3]int makeB():\n"
+            "    return [1, 2, 3]\n"
+            "\n"
+            "def int main():\n"
+            "    if makeA() == makeB():\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_array_literal_compared_to_array_returning_call(self):
+        """Mixed operand shapes on either side of the same comparison
+        -- a bracketed-list literal on the left, an ordinary composite-
+        returning Call on the right -- exercising _ir_composite_
+        operand_address's own dispatch independently per side, not
+        just once for a uniform pair."""
+        assert_program_exit_code(
+            "def [3]int makeArr():\n"
+            "    return [1, 2, 3]\n"
+            "\n"
+            "def int main():\n"
+            "    if [1, 2, 3] == makeArr():\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Struct equality: `s1 == s2` / `s1 != s2`, valid exactly when both sides are
@@ -4192,6 +4255,35 @@ class TestStructEquality:
             "    z.a = 200\n"
             "    z.b = 7\n"
             "    if x != z:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_two_struct_returning_calls_compared_directly(self):
+        """Regression test for a real bug: `makeP1() == makeP2()`, with
+        neither side ever assigned to a variable first, used to raise
+        a hard CodegenError, tracing back to the OLD-style gen_struct_
+        address_into itself -- which never handled a Call operand at
+        all. This was never supported, even old-style -- confirmed by
+        temporarily reverting the fix and watching this exact program
+        fail to compile before writing it in here. A struct LITERAL
+        used directly as an equality operand (`Point(1,2) == Point(3,
+        4)`) needs no equivalent test: semantic.py already rejects
+        that outright, wherever it would appear, not just here."""
+        assert_program_exit_code(
+            "struct Point:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def Point makeP1():\n"
+            "    return Point(5, 6)\n"
+            "\n"
+            "def Point makeP2():\n"
+            "    return Point(5, 6)\n"
+            "\n"
+            "def int main():\n"
+            "    if makeP1() == makeP2():\n"
             "        return 1\n"
             "    return 0\n",
             1,

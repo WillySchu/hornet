@@ -344,6 +344,52 @@ class DispatchMixin:
         t = self._new_temp(value_type)
         return addr_ir + [IRLoad(dst=t, address=addr_value)], t
 
+    def _ir_composite_operand_address(self, expr: Node, value_type: Type):
+        """Builds (without lowering) an ARRAY- or STRUCT-typed
+        equality operand's own address as real IR -- returns (ir,
+        address), or None when out of scope. Both of _ir_expr_binary's
+        own equality operands need this identical dispatch, so it's
+        factored out here rather than duplicated inline the way _ir_
+        indexable_base/_ir_call_arguments each dispatch their own,
+        different single operand -- this one genuinely needs the same
+        logic run twice within one call.
+
+        In dispatch order: a Variable/Field/Index (an existing
+        address, via _ir_array_address/_ir_struct_address); a bare
+        bracketed-list literal (ARRAY only -- _ir_materialize_array_
+        literal; there is no SLICE/STRUCT equivalent, since a struct
+        literal can never be compared this way at all -- see below);
+        an ordinary composite-returning Call (_ir_materialize_
+        composite_call, shared by both ARRAY and STRUCT).
+
+        A struct-literal Call needs no case here, unlike the ARRAY
+        side's own ArrayLiteral one: semantic.py already rejects a
+        struct literal as a Binary operand outright (`Point(1,2) ==
+        Point(1,2)` fails to type-check, naming the same narrow
+        whitelist of allowed positions this arc has already run into
+        at a Field/Index/Slice base) -- there is no gap here for
+        codegen to close, the identical situation _ir_materialize_
+        array_literal's own docstring already documents for those
+        other base positions.
+
+        A REAL BUG, found and fixed here rather than carried forward:
+        `[1,2,3] == [1,2,4]` and an ordinary array/struct-returning
+        call used directly as an equality operand both used to raise
+        a hard CodegenError, tracing back to the OLD-style gen_array_
+        address_into itself -- which never handled an ArrayLiteral or
+        Call operand at all. This was never supported, even old-style,
+        the identical situation a composite-returning call used
+        directly as an addressable base was in before this arc's own
+        earlier work there."""
+        if isinstance(expr, (Variable, Field, Index)):
+            address_fn = self._ir_array_address if value_type.kind == TypeKind.ARRAY else self._ir_struct_address
+            return address_fn(expr)
+        if value_type.kind == TypeKind.ARRAY and isinstance(expr, ArrayLiteral):
+            return self._ir_materialize_array_literal(expr)
+        if self._is_ordinary_composite_call(expr):
+            return self._ir_materialize_composite_call(expr, value_type)
+        return None
+
     def _ir_expr_binary(self, expr: Binary) -> tuple[list, IRValue]:
         """The IR-native counterpart to gen_binary_into's own three-way
         dispatch: short-circuit AND/OR (already real IR, via
@@ -355,15 +401,15 @@ class DispatchMixin:
         ordinary IRCall/IRBinOp, since IRCall's own lowering is
         already generic over any callee name, external C library
         functions included, with no new IR concept needed), array/
-        struct equality (now real IR too, for a Variable/Field/Index
-        operand on both sides -- see _ir_composite_equal; an
-        ArrayLiteral or composite-returning Call operand still falls
-        back, a deliberate scope boundary matching gen_array_equality_
-        into/gen_struct_equality_into's own existing one, not widened
-        here even though _ir_array_address/_ir_struct_address
-        themselves could now handle a Call operand, via the
-        addressable-base work), or the ordinary arithmetic/comparison
-        case (already real IR, via _ir_binary)."""
+        struct equality (now real IR too, for a Variable/Field/Index,
+        a bare bracketed-list literal (ARRAY only), or an ordinary
+        composite-returning Call, in any combination on either side --
+        see _ir_composite_operand_address/_ir_composite_equal; a
+        struct-literal Call is the one shape genuinely still out of
+        scope here, moot in practice since semantic.py already rejects
+        it as a Binary operand outright, not just here), or the
+        ordinary arithmetic/comparison case (already real IR, via
+        _ir_binary)."""
         if expr.op == BinaryOp.AND:
             return self._ir_short_circuit(expr, short_circuit_value=0, label_prefix="and")
         if expr.op == BinaryOp.OR:
@@ -381,37 +427,24 @@ class DispatchMixin:
                 t = self._new_temp(Type.BOOL)
                 return [IRRaw(self.gen_slice_none_comparison_into(expr, Register('eax')), dst=t)], t
             if type_of(expr.left).kind in (TypeKind.ARRAY, TypeKind.STRUCT):
-                # Deliberately still requires BOTH operands to already
-                # be a Variable/Field/Index, exactly like gen_array_
-                # equality_into/gen_struct_equality_into's own existing
-                # scope boundary already does -- NOT because _ir_array_
-                # address/_ir_struct_address themselves can't handle a
-                # Call operand (they can, via _ir_materialize_composite
-                # _call, from the addressable-base work), but because
-                # extending equality to an ArrayLiteral/Call operand
-                # directly is a genuinely separate scope decision this
-                # step deliberately doesn't make -- see this method's
-                # own module docstring.
-                if isinstance(expr.left, (Variable, Field, Index)) and isinstance(expr.right, (Variable, Field, Index)):
-                    value_type = type_of(expr.left)
-                    address_fn = self._ir_array_address if value_type.kind == TypeKind.ARRAY else self._ir_struct_address
-                    left_result = address_fn(expr.left)
-                    right_result = address_fn(expr.right)
-                    if left_result is not None and right_result is not None:
-                        left_ir, left_addr = left_result
-                        right_ir, right_addr = right_result
-                        mismatch_label = self.new_label("eq_mismatch")
-                        done_label = self.new_label("eq_done")
-                        cmp_ir = self._ir_composite_equal(left_addr, right_addr, value_type, mismatch_label)
-                        t = self._new_temp(Type.BOOL)
-                        ir = left_ir + right_ir + cmp_ir + [
-                            IRMove(dst=t, src=IRConst(1 if expr.op == BinaryOp.EQUAL else 0, Type.BOOL)),
-                            IRJump(done_label),
-                            IRLabel(mismatch_label),
-                            IRMove(dst=t, src=IRConst(0 if expr.op == BinaryOp.EQUAL else 1, Type.BOOL)),
-                            IRLabel(done_label),
-                        ]
-                        return ir, t
+                value_type = type_of(expr.left)
+                left_result = self._ir_composite_operand_address(expr.left, value_type)
+                right_result = self._ir_composite_operand_address(expr.right, value_type)
+                if left_result is not None and right_result is not None:
+                    left_ir, left_addr = left_result
+                    right_ir, right_addr = right_result
+                    mismatch_label = self.new_label("eq_mismatch")
+                    done_label = self.new_label("eq_done")
+                    cmp_ir = self._ir_composite_equal(left_addr, right_addr, value_type, mismatch_label)
+                    t = self._new_temp(Type.BOOL)
+                    ir = left_ir + right_ir + cmp_ir + [
+                        IRMove(dst=t, src=IRConst(1 if expr.op == BinaryOp.EQUAL else 0, Type.BOOL)),
+                        IRJump(done_label),
+                        IRLabel(mismatch_label),
+                        IRMove(dst=t, src=IRConst(0 if expr.op == BinaryOp.EQUAL else 1, Type.BOOL)),
+                        IRLabel(done_label),
+                    ]
+                    return ir, t
                 t = self._new_temp(Type.BOOL)
                 if type_of(expr.left).kind == TypeKind.ARRAY:
                     return [IRRaw(self.gen_array_equality_into(expr, Register('eax')), dst=t)], t
