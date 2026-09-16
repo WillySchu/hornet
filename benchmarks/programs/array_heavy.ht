@@ -6,6 +6,7 @@ def int main():
         i = i + 1
     int n = 3000
     int swapped = 1
+    int literalSum = 0
     while swapped == 1:
         swapped = 0
         int j = 0
@@ -15,6 +16,7 @@ def int main():
                 arr[j] = arr[j + 1]
                 arr[j + 1] = temp
                 swapped = 1
+            literalSum = (literalSum + [10, 20, 30][j % 3]) % 1000003
             j = j + 1
         n = n - 1
-    return (arr[0] + arr[2999]) % 256
+    return (arr[0] + arr[2999] + literalSum) % 256

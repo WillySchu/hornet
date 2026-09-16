@@ -28,7 +28,7 @@ EXPECTED_EXIT_CODES = {
     'arithmetic_heavy': 217,
     'recursive_fibonacci': 231,
     'loop_accumulator': 192,
-    'array_heavy': 185,
+    'array_heavy': 158,  # bubble sort, plus indexing directly into a bare bracketed-list literal (`[10, 20, 30][j % 3]`, no variable in between), in the innermost loop
     'struct_heavy': 13,  # per-field struct comparison (distSquared), plus struct equality itself: a genuine mismatch and a self-comparison, in a hot loop
     'string_heavy': 1,  # r1 == r2 -- two independently-built copies of the same repeated string
     'copy_heavy': 223,  # whole-array/whole-struct/whole-slice copy, slice production, indexing through a slice-typed struct field/array element, chained slice production, repeated append, a no-initializer slice, slice-vs-none comparison, and a bare bracketed-list literal resolved to SLICE by context, in a hot loop -- verified against a Go-style aliasing simulation, not independent-copy semantics

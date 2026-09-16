@@ -648,20 +648,24 @@ class CodeGenerator(
     def _collect_argument_temps(self, statements: List[Node]) -> None:
         """Recursively walks `statements` -- including into every If's
         then_body/else_body and every While's body, like
-        _collect_locals -- looking for TWO kinds of array-/struct-
+        _collect_locals -- looking for THREE kinds of array-/struct-
         typed expression with no address of its own: a function-call
         argument (an ArrayLiteral, a struct literal, or an ordinary
-        array/struct-returning Call used DIRECTLY as an argument), and
-        -- despite this method's own name, which predates this second
-        kind -- an ordinary composite-returning Call sitting directly
-        at an Index.array/Field.base position (`makeArray()[i]`,
-        `makePoint().x`; NOT a Slice.array position -- see _collect_
-        argument_temps_in_expr's own Slice case for why that one never
-        reserves a slot at all here, unlike these two). Neither is a
-        Variable, Index, or Field, each of which already has a real
-        address via gen_array_address_into/gen_struct_address_into (or
-        their real-IR counterparts, _ir_array_address/_ir_struct_
-        address).
+        array/struct-returning Call used DIRECTLY as an argument), an
+        ordinary composite-returning Call sitting directly at an
+        Index.array/Field.base position (`makeArray()[i]`,
+        `makePoint().x`), and a bare bracketed-list literal sitting
+        directly at an Index.array position (`[1, 2, 3][i]`) -- NOT a
+        Slice.array position, for any of these three, and no Field.
+        base equivalent for the third (a struct literal at a Field.
+        base position, `Point(1,2).x`, is already rejected outright by
+        semantic.py, wherever it would appear) -- see _collect_
+        argument_temps_in_expr's own Slice case for why that position
+        never reserves a slot at all here, unlike Index/Field. Neither
+        of the first two is a Variable, Index, or Field, each of which
+        already has a real address via gen_array_address_into/gen_
+        struct_address_into (or their real-IR counterparts, _ir_array_
+        address/_ir_struct_address).
 
         Not just ORDINARY function-call arguments, despite the name:
         the walk finds a qualifying argument inside ANY Call node, with
@@ -780,7 +784,8 @@ class CodeGenerator(
             self._collect_argument_temps_in_expr(expr.array)
             self._collect_argument_temps_in_expr(expr.index)
             array_type = type_of(expr.array)
-            if array_type.kind in (TypeKind.ARRAY, TypeKind.SLICE) and self._is_ordinary_composite_call(expr.array):
+            if array_type.kind in (TypeKind.ARRAY, TypeKind.SLICE) and (
+                    self._is_ordinary_composite_call(expr.array) or isinstance(expr.array, ArrayLiteral)):
                 self._reserve_argument_temp(expr.array, array_type)
         elif isinstance(expr, Field):
             self._collect_argument_temps_in_expr(expr.base)

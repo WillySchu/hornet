@@ -418,15 +418,67 @@ class ArraysSlicesMixin:
         call_ir = self._ir_composite_call(addr, call_expr, value_type)
         return addr_ir + call_ir, addr
 
+    def _ir_materialize_array_literal(self, expr: ArrayLiteral):
+        """Builds (without lowering) an ArrayLiteral's own materialized
+        address as real IR -- returns (ir, address), or None when some
+        element is itself out of scope for _ir_write_array_literal_
+        into. Used wherever such a literal sits directly at an
+        addressable-base position (`[1, 2, 3][i]`, `[1, 2, 3][a:b]`)
+        with no address of its own to compute -- the ArrayLiteral
+        counterpart to _ir_materialize_composite_call, sharing its
+        exact same skeleton (a reserved slot, or malloc when none was
+        reserved), just populating the backing via _ir_write_array_
+        literal_into instead of _ir_composite_call.
+
+        A struct-literal Call sitting at one of these same base
+        positions needs no equivalent of its own: semantic.py already
+        rejects that outright, wherever it would appear (Point(1,2).x
+        fails to type-check at all, naming the specific, narrow set of
+        positions a struct literal IS allowed in, none of which
+        include being a base) -- there is no gap here for codegen to
+        close.
+
+        Only ever reached from _ir_indexable_base's own ARRAY branch,
+        never its SLICE branch: type_of on a bare ArrayLiteral used
+        directly as a base (with no declared destination type to
+        resolve it against, unlike a VarDecl/Assign/FieldAssign/
+        IndexAssign/Return's own declared type) is always ARRAY-kind,
+        the same fact _ir_slice_literal's own docstring already
+        establishes -- so a Slice production from this kind of base
+        (`[1, 2, 3][a:b]`) still reaches this same ARRAY-branch
+        materialization for its own base, exactly like an ordinary
+        index read does, with _ir_slice_into itself producing the
+        actual slice descriptor one level up.
+
+        No value_type parameter, deliberately, for the identical
+        reason _ir_slice_literal's own docstring gives for dropping
+        its own: type_of(expr) is already exactly the ARRAY-kind Type
+        this needs, with no destination-type ambiguity possible here
+        at all (there IS no destination at this position)."""
+        array_type = type_of(expr)
+        if id(expr) in self._argument_temp_offsets:
+            offset = self._argument_temp_offsets[id(expr)]
+            addr = self._new_temp(Type.INT64)
+            addr_ir = [IRLocalAddress(dst=addr, offset=offset)]
+        else:
+            addr = self._new_temp(Type.INT64)
+            size = type_byte_width(array_type, self.struct_registry)
+            addr_ir = [IRCall(dst=addr, name='malloc', args=[IRConst(size, Type.INT64)])]
+        write_ir = self._ir_write_array_literal_into(addr, expr, array_type)
+        if write_ir is None:
+            return None
+        return addr_ir + write_ir, addr
+
     def _ir_indexable_base(self, expr: Node):
         """Builds (without lowering) the address, length, and capacity
         of an indexable base as real IR -- returns (ir, addr_value,
         length_value, cap_value), or None when expr's own shape is
-        still out of scope (an ArrayLiteral, or a struct-literal Call
-        used directly at this position -- construction, not an
-        ordinary call at all, needing its own, separate treatment not
-        attempted here). Mirrors gen_indexable_base_into's own
-        two-way split and its own full three-value contract -- cap is
+        still out of scope (a struct-literal Call used directly at
+        this position -- moot in practice, since semantic.py already
+        rejects that outright wherever it would appear, not just here;
+        see _ir_materialize_array_literal's own docstring). Mirrors
+        gen_indexable_base_into's own two-way split and its own full
+        three-value contract -- cap is
         always computed here too, even by callers (_ir_index_address)
         that never read it back, for the identical reason gen_
         indexable_base_into's own docstring gives: cheap enough that
@@ -434,9 +486,11 @@ class ArraysSlicesMixin:
 
         ARRAY-typed: delegates to _ir_array_address for a Variable/
         Field/Index base (matching gen_array_address_into's own three
-        cases exactly), or to _ir_materialize_composite_call for an
-        ordinary composite-returning Call (`makeArray()[i]`) -- see
-        its own docstring; length and cap are both always the same
+        cases exactly), to _ir_materialize_composite_call for an
+        ordinary composite-returning Call (`makeArray()[i]`), or to
+        _ir_materialize_array_literal for a bare bracketed-list
+        literal (`[1, 2, 3][i]`) -- see each one's own docstring;
+        length and cap are both always the same
         compile-time IRConst either way -- an array has no separate
         capacity.
 
@@ -497,6 +551,13 @@ class ArraysSlicesMixin:
         if base_type.kind == TypeKind.ARRAY:
             if self._is_ordinary_composite_call(expr):
                 addr_ir, addr_value = self._ir_materialize_composite_call(expr, base_type)
+                size_const = IRConst(base_type.size, Type.INT)
+                return addr_ir, addr_value, size_const, size_const
+            if isinstance(expr, ArrayLiteral):
+                production = self._ir_materialize_array_literal(expr)
+                if production is None:
+                    return None
+                addr_ir, addr_value = production
                 size_const = IRConst(base_type.size, Type.INT)
                 return addr_ir, addr_value, size_const, size_const
             if not isinstance(expr, (Variable, Field, Index)):

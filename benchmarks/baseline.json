@@ -10,20 +10,20 @@
     },
     "instruction_count": 105,
     "name": "arithmetic_heavy",
-    "runtime_seconds": 0.1164720610000245
+    "runtime_seconds": 0.13403097899998784
   },
   "array_heavy": {
     "allocation": {
-      "allocated": 49,
-      "eligible": 58,
+      "allocated": 59,
+      "eligible": 69,
       "named_local_excluded": 0,
-      "spilled": 9,
-      "total_temps": 58,
+      "spilled": 10,
+      "total_temps": 69,
       "unsafe_span_excluded": 0
     },
-    "instruction_count": 310,
+    "instruction_count": 368,
     "name": "array_heavy",
-    "runtime_seconds": 0.03359709199997951
+    "runtime_seconds": 0.05404431499999873
   },
   "calling_convention_heavy": {
     "allocation": {
@@ -36,7 +36,7 @@
     },
     "instruction_count": 1221,
     "name": "calling_convention_heavy",
-    "runtime_seconds": 0.2536730589999934
+    "runtime_seconds": 0.2886108270000136
   },
   "copy_heavy": {
     "allocation": {
@@ -49,7 +49,7 @@
     },
     "instruction_count": 1231,
     "name": "copy_heavy",
-    "runtime_seconds": 0.15717059600001448
+    "runtime_seconds": 0.1719050670000115
   },
   "loop_accumulator": {
     "allocation": {
@@ -62,7 +62,7 @@
     },
     "instruction_count": 47,
     "name": "loop_accumulator",
-    "runtime_seconds": 0.05937995299996146
+    "runtime_seconds": 0.06926826099999062
   },
   "recursive_fibonacci": {
     "allocation": {
@@ -75,7 +75,7 @@
     },
     "instruction_count": 76,
     "name": "recursive_fibonacci",
-    "runtime_seconds": 0.050527424000051724
+    "runtime_seconds": 0.05633992200000648
   },
   "string_heavy": {
     "allocation": {
@@ -88,7 +88,7 @@
     },
     "instruction_count": 120,
     "name": "string_heavy",
-    "runtime_seconds": 0.02921892500000922
+    "runtime_seconds": 0.030577061999963462
   },
   "struct_heavy": {
     "allocation": {
@@ -101,6 +101,6 @@
     },
     "instruction_count": 303,
     "name": "struct_heavy",
-    "runtime_seconds": 0.03639551099996652
+    "runtime_seconds": 0.03840283499999941
   }
 }
