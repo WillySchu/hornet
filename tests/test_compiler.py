@@ -4086,6 +4086,117 @@ class TestStructEquality:
             6,
         )
 
+    def test_int8_struct_field_equality_equal(self):
+        """Regression test for a real bug: the scalar-field branch of
+        struct equality comparison used to always do a 4-byte compare
+        regardless of the field's own declared width, so an int8
+        field's own 1-byte storage got read 4 bytes wide anyway --
+        silently comparing whatever garbage happened to sit adjacent
+        on the stack past the field's own real extent, rather than
+        just the field itself. Two structs whose int8 fields are
+        genuinely, byte-for-byte equal used to compare UNEQUAL because
+        of this -- confirmed by temporarily reverting the fix and
+        seeing this exact test fail (exit 0, not 1) before writing it
+        in here. test_int8_array_equality_equal already covers the
+        identical bug class for an ARRAY of int8 (fixed earlier); this
+        is the STRUCT-FIELD case specifically, which stayed broken
+        until array/struct equality moved to real IR."""
+        assert_program_exit_code(
+            "struct Small:\n"
+            "    int8 a\n"
+            "    int8 b\n"
+            "\n"
+            "def int main():\n"
+            "    Small x\n"
+            "    x.a = 5\n"
+            "    x.b = 6\n"
+            "    Small y\n"
+            "    y.a = 5\n"
+            "    y.b = 6\n"
+            "    if x == y:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_int8_struct_field_equality_not_equal(self):
+        """The bug test_int8_struct_field_equality_equal documents
+        never masks a genuine difference -- it only ever introduces a
+        FALSE mismatch for truly equal values, never a false match for
+        genuinely different ones -- so this side of the comparison
+        already passed even before the fix. Kept as a companion test
+        anyway, to confirm the fix didn't accidentally break the
+        already-correct "genuinely different" case while correcting
+        the "genuinely equal" one."""
+        assert_program_exit_code(
+            "struct Small:\n"
+            "    int8 a\n"
+            "    int8 b\n"
+            "\n"
+            "def int main():\n"
+            "    Small x\n"
+            "    x.a = 5\n"
+            "    x.b = 6\n"
+            "    Small z\n"
+            "    z.a = 5\n"
+            "    z.b = 7\n"
+            "    if x != z:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_uint8_struct_field_equality_equal(self):
+        """The uint8 counterpart to test_int8_struct_field_equality_
+        equal -- same bug, same fix, a different narrow-width type
+        using the identical IRLoad-at-value_type's-own-width code
+        path. 200 is deliberately chosen to also exercise uint8's own
+        unsigned interpretation (0xC8 as a raw byte, which int8 would
+        instead read as -56) -- not that this comparison depends on
+        signedness at all (byte equality never does), but to keep this
+        test from accidentally only ever exercising values that would
+        also happen to work if the field were mistakenly treated as
+        int8."""
+        assert_program_exit_code(
+            "struct Small:\n"
+            "    uint8 a\n"
+            "    uint8 b\n"
+            "\n"
+            "def int main():\n"
+            "    Small x\n"
+            "    x.a = 200\n"
+            "    x.b = 6\n"
+            "    Small y\n"
+            "    y.a = 200\n"
+            "    y.b = 6\n"
+            "    if x == y:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_uint8_struct_field_equality_not_equal(self):
+        """The uint8 companion to test_int8_struct_field_equality_
+        not_equal -- see its own docstring for why this side of the
+        comparison was never actually broken by the bug."""
+        assert_program_exit_code(
+            "struct Small:\n"
+            "    uint8 a\n"
+            "    uint8 b\n"
+            "\n"
+            "def int main():\n"
+            "    Small x\n"
+            "    x.a = 200\n"
+            "    x.b = 6\n"
+            "    Small z\n"
+            "    z.a = 200\n"
+            "    z.b = 7\n"
+            "    if x != z:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Methods: `def [type] name(receiver, param2, ...):` declared inside a struct

@@ -1500,6 +1500,118 @@ class ArraysSlicesMixin:
         ir.append(IRLabel(end_label))
         return ir
 
+    def _ir_composite_equal(self, left_addr, right_addr, value_type: Type, mismatch_label: str) -> list:
+        """Builds (without lowering) real IR that jumps to
+        mismatch_label the moment any element/field/byte differs
+        between the two given addresses -- falls through only once
+        everything has matched. Recurses for ARRAY (a bounded loop,
+        mirroring _ir_zero_array_loop's own shape exactly, just
+        comparing instead of zeroing) and STRUCT (per field, NOT
+        flattened via _flatten_struct_fields -- matching _ir_write_
+        struct_literal_into's own style, not the old-style _gen_
+        struct_fields_equality_at_addresses' -- both are equally
+        correct, this just keeps the shape consistent with this arc's
+        own newer code), reaching str (IRCall(strcmp), reused exactly
+        as _ir_string_compare already uses it) and int/bool/int8/
+        uint8 (an ordinary IRLoad-into-value_type's-own-width +
+        IRBinOp comparison) as its base cases.
+
+        A REAL BUG, found and fixed here rather than carried forward:
+        the old-style _gen_struct_fields_equality_at_addresses' own
+        scalar-field branch always did a 4-byte compare regardless of
+        the field's own declared width, silently reading past an
+        int8/uint8 field's own 1-byte storage into whatever garbage
+        happened to sit adjacent on the stack -- the exact same class
+        of bug _gen_array_flat_byte_equality_loop's own docstring
+        already documents finding and fixing for the ARRAY-of-int8
+        case, just never applied to the STRUCT-field case too. Here,
+        both go through the identical IRLoad-at-value_type's-own-
+        width call, so the width is correct by construction rather
+        than needing its own special case: IRLoad already reads at
+        dst.type's own declared width universally (see its own
+        docstring), int8/uint8 included, the same choke point
+        _gen_read_scalar_into's own docstring describes.
+
+        Two Temps' own live ranges spanning arbitrary further real IR
+        (nested loops, calls) is exactly the property this whole arc
+        has relied on repeatedly to avoid the old-style code's own
+        careful, fixed-register (%rbx/%r12/%r13/%r14/%r15) protection
+        across recursive comparisons, at any nesting depth -- every
+        Temp here gets its own, independent home from the allocator,
+        so there is no shared-register hazard to protect against at
+        all, unlike _gen_array_struct_equality_loop's own docstring,
+        which spends several paragraphs on exactly that hazard."""
+        if value_type.kind == TypeKind.ARRAY:
+            element_type = value_type.element_type
+            element_width = type_byte_width(element_type, self.struct_registry)
+            i = self._new_temp(Type.INT)
+            start_label = self.new_label("eq_array_start")
+            body_label = self.new_label("eq_array_body")
+            end_label = self.new_label("eq_array_end")
+            cond = self._new_temp(Type.BOOL)
+            ir = [
+                IRMove(dst=i, src=IRConst(0, Type.INT)),
+                IRLabel(start_label),
+                IRBinOp(dst=cond, op=BinaryOp.LESS_THAN, left=i, right=IRConst(value_type.size, Type.INT)),
+                IRBranch(cond=cond, true_label=body_label, false_label=end_label),
+                IRLabel(body_label),
+            ]
+            offset_temp = self._new_temp(Type.INT)
+            ir.append(IRBinOp(dst=offset_temp, op=BinaryOp.MULTIPLY, left=i, right=IRConst(element_width, Type.INT)))
+            left_elem_addr = self._new_temp(Type.INT64)
+            ir.append(IRBinOp(dst=left_elem_addr, op=BinaryOp.ADD, left=left_addr, right=offset_temp))
+            right_elem_addr = self._new_temp(Type.INT64)
+            ir.append(IRBinOp(dst=right_elem_addr, op=BinaryOp.ADD, left=right_addr, right=offset_temp))
+            ir.extend(self._ir_composite_equal(left_elem_addr, right_elem_addr, element_type, mismatch_label))
+            next_i = self._new_temp(Type.INT)
+            ir.append(IRBinOp(dst=next_i, op=BinaryOp.ADD, left=i, right=IRConst(1, Type.INT)))
+            ir.append(IRMove(dst=i, src=next_i))
+            ir.append(IRJump(start_label))
+            ir.append(IRLabel(end_label))
+            return ir
+        if value_type.kind == TypeKind.STRUCT:
+            struct_info = self.struct_registry[value_type.struct_name]
+            ir = []
+            for field_name, field_type in struct_info.fields.items():
+                offset = self._field_offset(value_type.struct_name, field_name)
+                if offset == 0:
+                    left_field_addr = left_addr
+                    right_field_addr = right_addr
+                else:
+                    left_field_addr = self._new_temp(Type.INT64)
+                    ir.append(IRBinOp(dst=left_field_addr, op=BinaryOp.ADD, left=left_addr, right=IRConst(offset, Type.INT64)))
+                    right_field_addr = self._new_temp(Type.INT64)
+                    ir.append(IRBinOp(dst=right_field_addr, op=BinaryOp.ADD, left=right_addr, right=IRConst(offset, Type.INT64)))
+                ir.extend(self._ir_composite_equal(left_field_addr, right_field_addr, field_type, mismatch_label))
+            return ir
+        continue_label = self.new_label("eq_continue")
+        if value_type == Type.STR:
+            left_val = self._new_temp(Type.STR)
+            right_val = self._new_temp(Type.STR)
+            cmp_result = self._new_temp(Type.INT)
+            mismatch_cond = self._new_temp(Type.BOOL)
+            return [
+                IRLoad(dst=left_val, address=left_addr),
+                IRLoad(dst=right_val, address=right_addr),
+                IRCall(dst=cmp_result, name='strcmp', args=[left_val, right_val]),
+                IRBinOp(dst=mismatch_cond, op=BinaryOp.NOT_EQUAL, left=cmp_result, right=IRConst(0, Type.INT)),
+                IRBranch(cond=mismatch_cond, true_label=mismatch_label, false_label=continue_label),
+                IRLabel(continue_label),
+            ]
+        # int, bool, int8, uint8 -- an ordinary, width-aware
+        # load-and-compare (see this method's own docstring for why
+        # this is the actual bug fix, not just a translation).
+        left_val = self._new_temp(value_type)
+        right_val = self._new_temp(value_type)
+        mismatch_cond = self._new_temp(Type.BOOL)
+        return [
+            IRLoad(dst=left_val, address=left_addr),
+            IRLoad(dst=right_val, address=right_addr),
+            IRBinOp(dst=mismatch_cond, op=BinaryOp.NOT_EQUAL, left=left_val, right=right_val),
+            IRBranch(cond=mismatch_cond, true_label=mismatch_label, false_label=continue_label),
+            IRLabel(continue_label),
+        ]
+
     def _ir_write_composite_value_into(self, dst_address, value_expr: Node, value_type: Type):
         """The general-purpose dispatcher underlying nested literal
         construction: writes value_expr's own value through
@@ -1807,7 +1919,20 @@ class ArraysSlicesMixin:
         element matched, and the final result is two immediate moves
         -- 1/0 for EQUAL, 0/1 for NOT_EQUAL -- the same "compute the
         boolean the long way, then pick the right immediate" shape
-        gen_short_circuit uses for AND/OR."""
+        gen_short_circuit uses for AND/OR.
+
+        Real IR now instead, for a Variable/Field/Index operand on
+        both sides -- see _ir_composite_equal, one general-purpose,
+        recursive comparator replacing all three of this method's own
+        leaf-specific loops (and _gen_struct_fields_equality_at_
+        addresses' own, for the struct-leaf case), needing none of
+        their careful, fixed-register (%rbx/%r12/%r13/%r14/%r15)
+        protection across nested recursive comparisons at any depth --
+        every Temp gets its own, independent home from the allocator
+        instead. This old-style path is still reached only for an
+        ArrayLiteral or composite-returning Call operand, a deliberate
+        scope boundary _ir_composite_equal's own callers still draw,
+        not a gap this migration widened."""
         array_type = type_of(expr.left)
         leaf = leaf_type(array_type)
         total_width = type_byte_width(array_type, self.struct_registry)

@@ -10,7 +10,7 @@
     },
     "instruction_count": 105,
     "name": "arithmetic_heavy",
-    "runtime_seconds": 0.1118969100000129
+    "runtime_seconds": 0.1006681389999926
   },
   "array_heavy": {
     "allocation": {
@@ -23,7 +23,7 @@
     },
     "instruction_count": 310,
     "name": "array_heavy",
-    "runtime_seconds": 0.032534612999995716
+    "runtime_seconds": 0.027949680000006083
   },
   "calling_convention_heavy": {
     "allocation": {
@@ -36,7 +36,7 @@
     },
     "instruction_count": 1221,
     "name": "calling_convention_heavy",
-    "runtime_seconds": 0.24000364699998045
+    "runtime_seconds": 0.23462739500001817
   },
   "copy_heavy": {
     "allocation": {
@@ -49,7 +49,7 @@
     },
     "instruction_count": 1105,
     "name": "copy_heavy",
-    "runtime_seconds": 0.08245643600000108
+    "runtime_seconds": 0.0899189799999931
   },
   "loop_accumulator": {
     "allocation": {
@@ -62,7 +62,7 @@
     },
     "instruction_count": 47,
     "name": "loop_accumulator",
-    "runtime_seconds": 0.05906075500001862
+    "runtime_seconds": 0.0685637990000032
   },
   "recursive_fibonacci": {
     "allocation": {
@@ -75,7 +75,7 @@
     },
     "instruction_count": 76,
     "name": "recursive_fibonacci",
-    "runtime_seconds": 0.047744862999991255
+    "runtime_seconds": 0.05415834999996605
   },
   "string_heavy": {
     "allocation": {
@@ -88,19 +88,19 @@
     },
     "instruction_count": 120,
     "name": "string_heavy",
-    "runtime_seconds": 0.029193173999999544
+    "runtime_seconds": 0.022232711000015115
   },
   "struct_heavy": {
     "allocation": {
-      "allocated": 32,
-      "eligible": 34,
+      "allocated": 52,
+      "eligible": 58,
       "named_local_excluded": 0,
-      "spilled": 2,
-      "total_temps": 36,
-      "unsafe_span_excluded": 2
+      "spilled": 6,
+      "total_temps": 62,
+      "unsafe_span_excluded": 4
     },
-    "instruction_count": 179,
+    "instruction_count": 303,
     "name": "struct_heavy",
-    "runtime_seconds": 0.03661440700000185
+    "runtime_seconds": 0.031144793999999365
   }
 }

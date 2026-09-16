@@ -14,6 +14,12 @@ def int main():
         int k = i % 500
         Point a = Point(k, k + 1)
         Point b = Point(k + 2, k + 3)
-        total = (total + distSquared(a, b)) % 1000003
+        int eqCheck = 0
+        if a == b:
+            eqCheck = 1
+        int sameCheck = 0
+        if a == a:
+            sameCheck = 1
+        total = (total + distSquared(a, b) + eqCheck + sameCheck) % 1000003
         i = i + 1
     return total % 256

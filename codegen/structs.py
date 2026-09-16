@@ -451,7 +451,21 @@ class StructsMixin:
         so that whatever comparison follows (a strcmp call for a str
         field, an array-equality loop for an array field) is free to
         use any register, including left_base/right_base's own,
-        without needing to coordinate."""
+        without needing to coordinate.
+
+        A KNOWN BUG, still present in this old-style method (see
+        _ir_composite_equal's own docstring for the fix, not applied
+        here): the scalar-field branch below always does a 4-byte
+        compare regardless of the field's own declared width, so an
+        int8/uint8 field's own 1-byte storage gets read 4 bytes wide
+        anyway -- silently comparing whatever garbage happens to sit
+        adjacent on the stack past the field's own real extent,
+        rather than just the field itself. _gen_array_flat_byte_
+        equality_loop's own docstring already documents finding and
+        fixing the identical class of bug for an ARRAY of int8/uint8;
+        it was never applied to this, the STRUCT-field case, until
+        _ir_composite_equal fixed it directly in real IR instead of
+        being backported here."""
         instructions = []
         for field_type, offset in self._flatten_struct_fields(struct_name):
             if field_type.kind == TypeKind.ARRAY:
@@ -514,7 +528,14 @@ class StructsMixin:
         the second), delegates the actual comparison to
         _gen_struct_fields_equality_at_addresses, and wraps the result
         in the same mismatch/done label shape gen_array_equality_into
-        uses."""
+        uses.
+
+        Real IR now instead, for a Variable/Field/Index operand on
+        both sides -- see _ir_composite_equal (shared with the array
+        case, recursing per-field here rather than per-element). This
+        old-style path is still reached only for a struct-literal or
+        composite-returning Call operand, a deliberate scope boundary
+        matching gen_array_equality_into's own identical one."""
         struct_type = type_of(expr.left)
         left_base = Register('r10')
         right_base = Register('r11')
