@@ -262,11 +262,29 @@ class DispatchMixin:
         len_call, its own dedicated case, not routed through _ir_call
         at all -- len isn't an ordinary function call), and an
         ordinary scalar-or-void-returning Call (see _ir_call) -- and
-        falls back to wrapping gen_expr_into
-        itself, as a single opaque IRRaw, for everything else. That
-        fallback also covers every case gen_expr_into defensively
-        rejects (ArrayLiteral, Slice, NoneLiteral, a composite-
-        returning Call) without needing to reimplement any of it here.
+        falls back to wrapping gen_expr_into itself, as a single
+        opaque IRRaw, for everything else still genuinely old-style.
+
+        This fallback does NOT "cover" an ArrayLiteral, Slice,
+        NoneLiteral, or a composite-returning Call the way an earlier
+        version of this docstring claimed -- gen_expr_into itself
+        defensively REJECTS every one of those (they don't fit in a
+        single register), so reaching this fallback with one of them
+        crashes, it doesn't handle it. A REAL BUG, found this way: a
+        bare `none` or a bare, discarded composite-returning Call used
+        directly as a statement (`none` or `makeArray()` alone on a
+        line) used to crash outright. The actual fix lives one level
+        up, in gen_statement_ir's own ExprStmt dispatch -- explicit
+        NoneLiteral/append/ordinary-composite-Call cases there route
+        around this fallback entirely for exactly those shapes, the
+        same "handle it before it ever reaches the generic case" shape
+        that method's own ArrayLiteral/Slice cases already used. An
+        ArrayLiteral or Slice reaching this method directly (not via a
+        bare ExprStmt) still isn't reachable in practice: every other
+        AST position either has its own, earlier real-IR case (a
+        VarDecl's own initializer, a function-call argument, ...) or
+        is one semantic.py itself doesn't allow these two shapes to
+        appear in at all.
 
         Returns (ir, value) -- value is None only for a void call,
         which can only legally appear via a bare ExprStmt (see

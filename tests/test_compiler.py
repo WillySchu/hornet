@@ -9537,6 +9537,98 @@ class TestAppend:
             5,
         )
 
+    def test_append_result_indexed_directly(self):
+        """Regression test for a real bug: `append(base, 3)[2]`, with
+        append's own result never assigned to a variable first, used
+        to fail at LINK time ("undefined reference to `append`"), not
+        just fall back to slower old-style codegen. gen_indexable_
+        base_into's own Call branch used to route ANY Call through
+        gen_slice_call_into unconditionally, with no check for append
+        by name at all -- unlike every real-IR path in this arc,
+        which has always excluded append from ordinary-Call handling
+        (it's a builtin, never a compiled function). gen_slice_call_
+        into emits an ordinary `call` to expr's own name literally, so
+        this tried to call a function actually named 'append', which
+        was never compiled -- confirmed by temporarily reverting the
+        fix and watching this exact program fail at link time, not
+        just produce a wrong value, before writing it in here."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    []int base = [1, 2]\n"
+            "    return append(base, 3)[2]\n",
+            3,
+        )
+
+    def test_bare_append_statement_does_not_mutate_original(self):
+        """Regression test for a real bug: `append(base, 3)` used
+        directly as a bare, discarded statement (no variable to
+        receive the result) used to crash outright (CodegenError,
+        "can't call 'append' ... via gen_expr_into" -- a slice
+        descriptor doesn't fit in a single register, the same class of
+        crash a bare composite-returning Call or bare `none` statement
+        also hit). The growth/write side effect still needs to happen
+        even though the result is discarded -- confirmed here by
+        reading base's own len back out afterward and confirming it's
+        UNCHANGED (append is Go-style: base itself never gets
+        mutated, regardless of whether its own result is captured) --
+        and confirmed to have crashed on the reverted code before
+        writing this test in."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    []int base = [1, 2]\n"
+            "    append(base, 3)\n"
+            "    return len(base)\n",
+            2,
+        )
+
+
+class TestBareExpressionStatements:
+    """A handful of expression shapes used directly as a bare,
+    discarded statement -- `none` or an array/struct/slice-returning
+    Call alone on a line, with no variable to receive the result.
+    Regression coverage for two real bugs found auditing every
+    remaining IRRaw site in this compiler: gen_expr_ir's own catch-all
+    fallback delegates to gen_expr_into for anything it doesn't
+    already have a real-IR case for, but gen_expr_into itself
+    defensively REJECTS both of these shapes (neither fits in a single
+    register) rather than handling them -- so reaching that fallback
+    with one of them crashed outright, despite gen_expr_ir's own
+    (wrong) docstring claim that it "covers" exactly these cases. The
+    actual fix routes around that fallback entirely, in gen_statement_
+    ir's own ExprStmt dispatch, for exactly these two shapes (plus
+    append, covered separately in TestAppend, for the identical
+    reason -- it's a builtin, never a compiled function, so it needs
+    its own, earlier check too)."""
+
+    pytestmark = GCC_SKIP
+
+    def test_bare_none_statement_is_a_no_op(self):
+        """A bare `none` has no side effect of any kind -- it's a
+        pure literal -- so the correct treatment is zero instructions,
+        the same as a bare Constant/BoolLiteral statement. Confirmed
+        to have crashed (CodegenError) on the code before this fix."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    none\n"
+            "    return 42\n",
+            42,
+        )
+
+    def test_bare_composite_returning_call_statement(self):
+        """`makeArr()` alone on a line, its own [3]int result entirely
+        discarded -- only the call's own side effect matters. Confirmed
+        to have crashed (CodegenError, "can't call 'makeArr' ... via
+        gen_expr_into") on the code before this fix."""
+        assert_program_exit_code(
+            "def [3]int makeArr():\n"
+            "    return [1, 2, 3]\n"
+            "\n"
+            "def int main():\n"
+            "    makeArr()\n"
+            "    return 42\n",
+            42,
+        )
+
 
 class TestSliceParametersAndReturns:
     pytestmark = GCC_SKIP

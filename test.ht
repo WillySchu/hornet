@@ -30,19 +30,9 @@ def HasArray make_ha():
 def int8 main():
     HasArray ha = HasArray([1,2,3,4,5])
     # TODO(will): Fix these commented out examples.
-    #ha.values = test(ha.values)
-    #test(ha.values)
-    #[5]int values = ha.values
-    #values = test(values)
-    #test(values)
+    #print(test(ha.values))
 
     # TODO(will): Fix these examples.
-    #print(ha.value == make_ha().values)
+    #print(ha.values == make_ha().values)
     #print(make_ha().values)
-    #int x = make_point().x
-    #print(x)
-
-    # TODO(will): Fix this example.
-    #bool t = make_point() == make_point()
-    #print(t)
     return 0

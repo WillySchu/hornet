@@ -197,11 +197,29 @@ class ArraysSlicesMixin:
                 instructions.append(MovQ(src=Memory('rbp', temp), dst=addr_dst))
                 return instructions, len_dst, cap_dst
             if isinstance(expr, Call):
-                # Slice-returning Call, via the hidden-pointer
-                # convention (gen_slice_call_into) -- same shared
-                # scratch slot as the other non-Variable cases.
+                # A REAL BUG, found and fixed here: this branch used to
+                # route ANY Call through gen_slice_call_into
+                # unconditionally, with no check for append by name --
+                # unlike every real-IR path in this arc (_is_ordinary_
+                # composite_call's own explicit exclusion), which has
+                # always treated append as a builtin, never an ordinary
+                # compiled function. `append(s, x)[i]` or `append(s, x)
+                # == none`, used directly without assigning to a
+                # variable first, used to fail at LINK time ("undefined
+                # reference to `append`") -- gen_slice_call_into always
+                # emits an ordinary `call` to expr's own name literally,
+                # and no function actually named `append` is ever
+                # compiled. append is dispatched to gen_append_call_
+                # into instead, matching gen_statement_ir's own append-
+                # before-ordinary-Call ordering exactly.
                 temp = self._unnamed_slice_temp_offset
-                instructions = self.gen_slice_call_into(Memory('rbp', temp), expr)
+                if expr.name == 'append':
+                    instructions = self.gen_append_call_into(expr, Memory('rbp', temp))
+                else:
+                    # Slice-returning Call, via the hidden-pointer
+                    # convention (gen_slice_call_into) -- same shared
+                    # scratch slot as the other non-Variable cases.
+                    instructions = self.gen_slice_call_into(Memory('rbp', temp), expr)
                 instructions.append(MovQ(src=Memory('rbp', temp + 8), dst=len_dst))
                 instructions.append(MovQ(src=Memory('rbp', temp + 16), dst=cap_dst))
                 instructions.append(MovQ(src=Memory('rbp', temp), dst=addr_dst))

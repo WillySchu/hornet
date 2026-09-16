@@ -660,6 +660,53 @@ class StatementsMixin:
             if production is not None:
                 slice_ir, _, _, _ = production
                 return slice_ir
+        elif isinstance(stmt, ExprStmt) and isinstance(stmt.expr, NoneLiteral):
+            # A REAL BUG, found and fixed here: a bare `none` used to
+            # crash (CodegenError, "Cannot compute 'none' via gen_expr_
+            # into"), since gen_expr_ir's own catch-all delegates to
+            # gen_expr_into for anything it doesn't already have a
+            # case for -- but gen_expr_into itself defensively REJECTS
+            # none rather than handling it (its own docstring's claim
+            # that this fallback "covers" every shape gen_expr_into
+            # rejects was simply wrong for this one). A bare `none`
+            # has no side effect of any kind -- it's a pure literal,
+            # nothing to compute or discard -- so the correct real-IR
+            # treatment is zero instructions, the same as a bare
+            # Constant/BoolLiteral ExprStmt already produces via gen_
+            # expr_ir's own first two cases.
+            return []
+        elif isinstance(stmt, ExprStmt) and isinstance(stmt.expr, Call) and stmt.expr.name == 'append':
+            # append(s, value) used directly as a bare statement,
+            # its own resulting {ptr, len, cap} triple entirely
+            # discarded -- only the growth/write side effect matters.
+            # Checked here, before the ordinary composite-Call case
+            # just below, for the identical reason append is always
+            # checked before an ordinary Call everywhere else in this
+            # arc: it's a builtin, never a compiled function, so
+            # falling through to that case instead would try to call
+            # a symbol literally named 'append' that doesn't exist.
+            production = self._ir_append_call(stmt.expr)
+            if production is not None:
+                append_ir, _, _, _ = production
+                return append_ir
+        elif isinstance(stmt, ExprStmt) and type_of(stmt.expr).kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT) and self._is_ordinary_composite_call(stmt.expr):
+            # A REAL BUG, found and fixed here: an array/struct/slice-
+            # returning ordinary Call used directly as a bare statement
+            # (`makeArray()` alone on a line, its own result entirely
+            # discarded) used to crash the identical way `none` did --
+            # gen_expr_into defensively rejects a composite-returning
+            # Call too (it can't fit the hidden-pointer convention's
+            # own result into a single register). The call's own side
+            # effect still needs to happen, so this materializes it via
+            # _ir_materialize_composite_call (never out of scope, unlike
+            # _ir_append_call above -- it has no base/value argument of
+            # its own that could be) and simply discards the resulting
+            # address -- the identical "malloc when nothing reserved a
+            # slot" fallback _ir_materialize_composite_call's own
+            # docstring already documents for the addressable-base
+            # case, reused here unchanged, with the result never read.
+            ir, _ = self._ir_materialize_composite_call(stmt.expr, type_of(stmt.expr))
+            return ir
         elif isinstance(stmt, ExprStmt):
             ir, _ = self.gen_expr_ir(stmt.expr)
             return ir
