@@ -48,7 +48,7 @@ from codegen.assembly_ast import (
     XorQ,
 )
 from codegen.errors import CodegenError
-from codegen.ir import IRRaw, IRBranch, IRJump, IRLabel, IRMove, IRConst, IRCall
+from codegen.ir import IRBranch, IRJump, IRLabel, IRMove, IRConst, IRCall
 from codegen.utils import as_qword_register, COMPARISON_CONDITION_CODES, as_byte_register, type_of
 from parser import Call, Binary, BinaryOp, UnaryOp, Variable, Field, Index, NoneLiteral, ArrayLiteral
 from semantic import Type, TypeKind
@@ -120,7 +120,6 @@ class ScalarsMixin:
         for arg in args:
             arg_type = type_of(arg)
             if arg_type.kind == TypeKind.ARRAY:
-                ir = None
                 if isinstance(arg, (Variable, Field, Index)):
                     result = self._ir_array_address(arg)
                     if result is not None:
@@ -131,13 +130,9 @@ class ScalarsMixin:
                         ir, addr_value = result
                 elif self._is_ordinary_composite_call(arg):
                     ir, addr_value = self._ir_materialize_composite_call(arg, arg_type)
-                if ir is None:
-                    addr_value = self._new_temp(Type.INT64)
-                    ir = [IRRaw(self._gen_materialize_argument_temp_into(arg, arg_type, Register('rax')), dst=addr_value)]
                 arg_ir.extend(ir)
                 arg_values.append(addr_value)
             elif arg_type.kind == TypeKind.STRUCT:
-                ir = None
                 if isinstance(arg, (Variable, Field, Index)):
                     result = self._ir_struct_address(arg)
                     if result is not None:
@@ -148,9 +143,6 @@ class ScalarsMixin:
                         ir, addr_value = result
                 elif self._is_ordinary_composite_call(arg):
                     ir, addr_value = self._ir_materialize_composite_call(arg, arg_type)
-                if ir is None:
-                    addr_value = self._new_temp(Type.INT64)
-                    ir = [IRRaw(self._gen_materialize_argument_temp_into(arg, arg_type, Register('rax')), dst=addr_value)]
                 arg_ir.extend(ir)
                 arg_values.append(addr_value)
             elif arg_type.kind == TypeKind.SLICE or isinstance(arg, NoneLiteral):

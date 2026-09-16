@@ -6,7 +6,9 @@ else/end) every branching or looping construct here builds on."""
 
 from codegen.assembly_ast import Instruction, MovQ, Register, Memory, Imm, Push, Pop, Mov, Jmp, LeaQ, MovB
 from codegen.errors import CodegenError
-from codegen.ir import IRRaw, IRReturn, IRBranch, IRLabel, IRJump, IRMove, IRStore, IRCopy, IRConst, IRLoad, IRLocalAddress, IRCall
+from codegen.ir import (
+    IRRaw, IRReturn, IRBranch, IRLabel, IRJump, IRMove, IRStore, IRCopy, IRConst, IRLoad, IRLocalAddress, IRCall,
+)
 from codegen.utils import type_of, type_byte_width
 from parser import (
     ArrayLiteral,
@@ -204,7 +206,11 @@ class StatementsMixin:
             # return shape exactly, since the result is already fully
             # written through the pointer by the time control reaches
             # it.
-            if isinstance(stmt.value, Call) and stmt.value.name != 'append' and stmt.value.name not in self.struct_registry:
+            if (
+                    isinstance(stmt.value, Call)
+                    and stmt.value.name != 'append'
+                    and stmt.value.name not in self.struct_registry
+            ):
                 value_type = type_of(stmt.value)
                 hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr()
                 call_ir = self._ir_composite_call(hidden_ptr, stmt.value, value_type)
@@ -281,7 +287,8 @@ class StatementsMixin:
                     production = self._ir_slice_literal(stmt.value)
                     if production is not None:
                         slice_ir, ptr_value, len_value, cap_value = production
-                        write_ir = self._ir_write_slice_descriptor_into_address(hidden_ptr, ptr_value, len_value, cap_value)
+                        write_ir = self._ir_write_slice_descriptor_into_address(
+                            hidden_ptr, ptr_value, len_value, cap_value)
                         return hidden_ptr_ir + slice_ir + write_ir + [IRReturn(value=None)]
             if isinstance(stmt.value, Call) and stmt.value.name in self.struct_registry:
                 value_type = type_of(stmt.value)
@@ -348,7 +355,10 @@ class StatementsMixin:
             # only once the shape is already known to qualify, so an
             # ArrayLiteral/Slice/Call initializer still falls to the
             # catch-all with no binding done here either.
-            if var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE) and isinstance(stmt.init, (Variable, Field, Index)):
+            if (
+                    var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE)
+                    and isinstance(stmt.init, (Variable, Field, Index))
+            ):
                 offset = self._bind_local(stmt)
                 ir = []
                 # A slice variable is never heap-allocated (see gen_
@@ -381,7 +391,8 @@ class StatementsMixin:
             if var_type.kind == TypeKind.SLICE and isinstance(stmt.init, NoneLiteral):
                 nil_ir, ptr_value, len_value, cap_value = self._ir_nil_slice()
                 self._bind_local(stmt)
-                return nil_ir + self._ir_write_slice_descriptor(Variable(name=stmt.name), ptr_value, len_value, cap_value)
+                return nil_ir + self._ir_write_slice_descriptor(
+                    Variable(name=stmt.name), ptr_value, len_value, cap_value)
             # A slice-typed initializer that's itself a Slice
             # production (`arr[a:b]`, not an alias of an existing
             # slice -- see _ir_slice_into for exactly which shapes of
@@ -397,7 +408,8 @@ class StatementsMixin:
                 if production is not None:
                     slice_ir, ptr_value, len_value, cap_value = production
                     self._bind_local(stmt)
-                    return slice_ir + self._ir_write_slice_descriptor(Variable(name=stmt.name), ptr_value, len_value, cap_value)
+                    return slice_ir + self._ir_write_slice_descriptor(
+                        Variable(name=stmt.name), ptr_value, len_value, cap_value)
             # A slice-typed initializer that's a bare bracketed-list
             # literal, resolved to SLICE by this VarDecl's own
             # declared type (`[]int s = [1, 2, 3]`) -- see _ir_slice_
@@ -415,7 +427,8 @@ class StatementsMixin:
                 if production is not None:
                     slice_ir, ptr_value, len_value, cap_value = production
                     self._bind_local(stmt)
-                    return slice_ir + self._ir_write_slice_descriptor(Variable(name=stmt.name), ptr_value, len_value, cap_value)
+                    return slice_ir + self._ir_write_slice_descriptor(
+                        Variable(name=stmt.name), ptr_value, len_value, cap_value)
             # A slice-typed initializer that's a call to the append
             # builtin specifically (`append(s, value)`) -- same "try
             # first, bind only on success" discipline as the Slice
@@ -432,7 +445,8 @@ class StatementsMixin:
                 if production is not None:
                     append_ir, ptr_value, len_value, cap_value = production
                     self._bind_local(stmt)
-                    return append_ir + self._ir_write_slice_descriptor(Variable(name=stmt.name), ptr_value, len_value, cap_value)
+                    return append_ir + self._ir_write_slice_descriptor(
+                        Variable(name=stmt.name), ptr_value, len_value, cap_value)
             # An array/struct/slice-typed initializer that's an
             # ordinary function call (not append -- already handled,
             # more specifically, just above; not a struct-literal Call
@@ -447,8 +461,11 @@ class StatementsMixin:
             # destination is BRAND NEW, so a heap-allocated one needs
             # its own fresh backing allocation made BEFORE this
             # variable's own address is ever computed.
-            if var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE) and (
-                    isinstance(stmt.init, Call) and stmt.init.name != 'append' and stmt.init.name not in self.struct_registry):
+            if (
+                    var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE)
+                    and (isinstance(stmt.init, Call)
+                         and stmt.init.name != 'append'
+                         and stmt.init.name not in self.struct_registry)):
                 offset = self._bind_local(stmt)
                 ir = []
                 if var_type.kind != TypeKind.SLICE and self._is_heap_allocated(id(stmt), var_type):
@@ -484,8 +501,10 @@ class StatementsMixin:
             # underlying storage location, not a different one -- the
             # same "orphans a Temp id, harmlessly" waste already
             # accepted elsewhere in this arc, not a genuine hazard.
-            if var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and (
-                    isinstance(stmt.init, ArrayLiteral) or (isinstance(stmt.init, Call) and stmt.init.name in self.struct_registry)):
+            if (
+                    var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT)
+                    and (isinstance(stmt.init, ArrayLiteral)
+                         or (isinstance(stmt.init, Call) and stmt.init.name in self.struct_registry))):
                 offset = self._bind_local(stmt)
                 ir = []
                 if self._is_heap_allocated(id(stmt), var_type):
@@ -493,7 +512,10 @@ class StatementsMixin:
                 address_fn = self._ir_array_address if var_type.kind == TypeKind.ARRAY else self._ir_struct_address
                 dst_ir, dst_address = address_fn(Variable(name=stmt.name))
                 ir.extend(dst_ir)
-                writer = self._ir_write_array_literal_into if isinstance(stmt.init, ArrayLiteral) else self._ir_write_struct_literal_into
+                if isinstance(stmt.init, ArrayLiteral):
+                    writer = self._ir_write_array_literal_into
+                else:
+                    writer = self._ir_write_struct_literal_into
                 write_ir = writer(dst_address, stmt.init, var_type)
                 if write_ir is not None:
                     return ir + write_ir
@@ -548,13 +570,17 @@ class StatementsMixin:
             # variable is never heap-allocated in the first place, and
             # an existing array/struct one already has its own real
             # allocation from declaration time, reused in place.
-            if var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE) and isinstance(stmt.value, (Variable, Field, Index)):
+            if (
+                    var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE)
+                    and isinstance(stmt.value, (Variable, Field, Index))
+            ):
                 return self._ir_copy_assign(Variable(name=stmt.name), stmt.value, var_type)
             # Same none-value case as VarDecl's own, just above -- no
             # binding concern here at all, unlike VarDecl's own.
             if var_type.kind == TypeKind.SLICE and isinstance(stmt.value, NoneLiteral):
                 nil_ir, ptr_value, len_value, cap_value = self._ir_nil_slice()
-                return nil_ir + self._ir_write_slice_descriptor(Variable(name=stmt.name), ptr_value, len_value, cap_value)
+                return nil_ir + self._ir_write_slice_descriptor(
+                    Variable(name=stmt.name), ptr_value, len_value, cap_value)
             # Same Slice-production case as VarDecl's own, just above
             # -- no binding concern here at all, unlike VarDecl's own
             # (the destination already exists).
@@ -562,25 +588,32 @@ class StatementsMixin:
                 production = self._ir_slice_into(stmt.value)
                 if production is not None:
                     slice_ir, ptr_value, len_value, cap_value = production
-                    return slice_ir + self._ir_write_slice_descriptor(Variable(name=stmt.name), ptr_value, len_value, cap_value)
+                    return slice_ir + self._ir_write_slice_descriptor(
+                        Variable(name=stmt.name), ptr_value, len_value, cap_value)
             # Same slice-literal case as VarDecl's own, just above --
             # no binding concern here at all, unlike VarDecl's own.
             if var_type.kind == TypeKind.SLICE and isinstance(stmt.value, ArrayLiteral):
                 production = self._ir_slice_literal(stmt.value)
                 if production is not None:
                     slice_ir, ptr_value, len_value, cap_value = production
-                    return slice_ir + self._ir_write_slice_descriptor(Variable(name=stmt.name), ptr_value, len_value, cap_value)
+                    return slice_ir + self._ir_write_slice_descriptor(
+                        Variable(name=stmt.name), ptr_value, len_value, cap_value)
             # Same append-call case as VarDecl's own, just above -- no
             # binding concern here at all, unlike VarDecl's own.
             if var_type.kind == TypeKind.SLICE and isinstance(stmt.value, Call) and stmt.value.name == 'append':
                 production = self._ir_append_call(stmt.value)
                 if production is not None:
                     append_ir, ptr_value, len_value, cap_value = production
-                    return append_ir + self._ir_write_slice_descriptor(Variable(name=stmt.name), ptr_value, len_value, cap_value)
+                    return append_ir + self._ir_write_slice_descriptor(
+                        Variable(name=stmt.name), ptr_value, len_value, cap_value)
             # Same ordinary-function-call case as VarDecl's own --
             # append already handled, more specifically, just above.
-            if var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE) and (
-                    isinstance(stmt.value, Call) and stmt.value.name != 'append' and stmt.value.name not in self.struct_registry):
+            if (
+                    var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE)
+                    and (isinstance(stmt.value, Call)
+                         and stmt.value.name != 'append'
+                         and stmt.value.name not in self.struct_registry)
+            ):
                 dst_ir, dst_address = {
                     TypeKind.ARRAY: self._ir_array_address,
                     TypeKind.STRUCT: self._ir_struct_address,
@@ -590,11 +623,17 @@ class StatementsMixin:
             # Same array-literal/struct-literal case as VarDecl's own,
             # just above -- no binding concern here at all, unlike
             # VarDecl's own (the destination already exists).
-            if var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and (
-                    isinstance(stmt.value, ArrayLiteral) or (isinstance(stmt.value, Call) and stmt.value.name in self.struct_registry)):
+            if (
+                    var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT)
+                    and (isinstance(stmt.value, ArrayLiteral)
+                         or (isinstance(stmt.value, Call) and stmt.value.name in self.struct_registry))
+            ):
                 address_fn = self._ir_array_address if var_type.kind == TypeKind.ARRAY else self._ir_struct_address
                 dst_ir, dst_address = address_fn(Variable(name=stmt.name))
-                writer = self._ir_write_array_literal_into if isinstance(stmt.value, ArrayLiteral) else self._ir_write_struct_literal_into
+                if isinstance(stmt.value, ArrayLiteral):
+                    writer = self._ir_write_array_literal_into
+                else:
+                    writer = self._ir_write_struct_literal_into
                 write_ir = writer(dst_address, stmt.value, var_type)
                 if write_ir is not None:
                     return dst_ir + write_ir
@@ -607,7 +646,10 @@ class StatementsMixin:
             element_type = type_of(stmt.array).element_type
             if element_type.kind not in (TypeKind.SLICE, TypeKind.STRUCT):
                 return self._ir_index_assign(stmt, element_type)
-            if element_type.kind in (TypeKind.STRUCT, TypeKind.SLICE) and isinstance(stmt.value, (Variable, Field, Index)):
+            if (
+                    element_type.kind in (TypeKind.STRUCT, TypeKind.SLICE)
+                    and isinstance(stmt.value, (Variable, Field, Index))
+            ):
                 dst_expr = Index(array=stmt.array, index=stmt.index)
                 return self._ir_copy_assign(dst_expr, stmt.value, element_type)
             # A REAL BUG, found and fixed here: `rows[0] = none` used
@@ -639,8 +681,12 @@ class StatementsMixin:
                     append_ir, ptr_value, len_value, cap_value = production
                     dst_expr = Index(array=stmt.array, index=stmt.index)
                     return append_ir + self._ir_write_slice_descriptor(dst_expr, ptr_value, len_value, cap_value)
-            if element_type.kind in (TypeKind.STRUCT, TypeKind.SLICE) and (
-                    isinstance(stmt.value, Call) and stmt.value.name != 'append' and stmt.value.name not in self.struct_registry):
+            if (
+                    element_type.kind in (TypeKind.STRUCT, TypeKind.SLICE)
+                    and (isinstance(stmt.value, Call)
+                         and stmt.value.name != 'append'
+                         and stmt.value.name not in self.struct_registry)
+            ):
                 dst_expr = Index(array=stmt.array, index=stmt.index)
                 address_fn = self._ir_struct_address if element_type.kind == TypeKind.STRUCT else self._ir_slice_address
                 dst_ir, dst_address = address_fn(dst_expr)
@@ -650,7 +696,11 @@ class StatementsMixin:
             # Assign/FieldAssign's own: ARRAY never occurs as an
             # IndexAssign element type in the first place (see this
             # case's own opening comment).
-            if element_type.kind == TypeKind.STRUCT and isinstance(stmt.value, Call) and stmt.value.name in self.struct_registry:
+            if (
+                    element_type.kind == TypeKind.STRUCT
+                    and isinstance(stmt.value, Call)
+                    and stmt.value.name in self.struct_registry
+            ):
                 dst_expr = Index(array=stmt.array, index=stmt.index)
                 dst_ir, dst_address = self._ir_struct_address(dst_expr)
                 write_ir = self._ir_write_struct_literal_into(dst_address, stmt.value, element_type)
@@ -662,7 +712,10 @@ class StatementsMixin:
             field_type = self._check_struct_and_field_type(stmt.base, stmt.name)
             if field_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
                 return self._ir_field_assign(stmt, field_type)
-            if field_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE) and isinstance(stmt.value, (Variable, Field, Index)):
+            if (
+                    field_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE)
+                    and isinstance(stmt.value, (Variable, Field, Index))
+            ):
                 dst_expr = Field(base=stmt.base, name=stmt.name)
                 return self._ir_copy_assign(dst_expr, stmt.value, field_type)
             # Same none-value case as IndexAssign's own, one level over.
@@ -688,8 +741,12 @@ class StatementsMixin:
                     append_ir, ptr_value, len_value, cap_value = production
                     dst_expr = Field(base=stmt.base, name=stmt.name)
                     return append_ir + self._ir_write_slice_descriptor(dst_expr, ptr_value, len_value, cap_value)
-            if field_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE) and (
-                    isinstance(stmt.value, Call) and stmt.value.name != 'append' and stmt.value.name not in self.struct_registry):
+            if (
+                    field_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE)
+                    and (isinstance(stmt.value, Call)
+                         and stmt.value.name != 'append'
+                         and stmt.value.name not in self.struct_registry)
+            ):
                 dst_expr = Field(base=stmt.base, name=stmt.name)
                 address_fn = {
                     TypeKind.ARRAY: self._ir_array_address,
@@ -703,12 +760,19 @@ class StatementsMixin:
             # an array-typed field (unlike IndexAssign, per this
             # case's own opening comment), so both apply here, just
             # like VarDecl/Assign's own.
-            if field_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and (
-                    isinstance(stmt.value, ArrayLiteral) or (isinstance(stmt.value, Call) and stmt.value.name in self.struct_registry)):
+            if (
+                    field_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT)
+                    and (isinstance(stmt.value, ArrayLiteral)
+                         or (isinstance(stmt.value, Call)
+                         and stmt.value.name in self.struct_registry))
+            ):
                 dst_expr = Field(base=stmt.base, name=stmt.name)
                 address_fn = self._ir_array_address if field_type.kind == TypeKind.ARRAY else self._ir_struct_address
                 dst_ir, dst_address = address_fn(dst_expr)
-                writer = self._ir_write_array_literal_into if isinstance(stmt.value, ArrayLiteral) else self._ir_write_struct_literal_into
+                if isinstance(stmt.value, ArrayLiteral):
+                    writer = self._ir_write_array_literal_into
+                else:
+                    writer = self._ir_write_struct_literal_into
                 write_ir = writer(dst_address, stmt.value, field_type)
                 if write_ir is not None:
                     return dst_ir + write_ir
@@ -752,7 +816,11 @@ class StatementsMixin:
             if production is not None:
                 append_ir, _, _, _ = production
                 return append_ir
-        elif isinstance(stmt, ExprStmt) and type_of(stmt.expr).kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT) and self._is_ordinary_composite_call(stmt.expr):
+        elif (
+                isinstance(stmt, ExprStmt)
+                and type_of(stmt.expr).kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT)
+                and self._is_ordinary_composite_call(stmt.expr)
+        ):
             # A REAL BUG, found and fixed here: an array/struct/slice-
             # returning ordinary Call used directly as a bare statement
             # (`makeArray()` alone on a line, its own result entirely
@@ -950,7 +1018,7 @@ class StatementsMixin:
         (already works, via gen_expr_ir), then IRStores it through
         the address, at the ELEMENT's own declared width -- not
         necessarily the value's own, per IRStore's own docstring."""
-        addr_ir, addr_value = self._ir_index_address_or_fallback(Index(array=stmt.array, index=stmt.index))
+        addr_ir, addr_value = self._ir_index_address(Index(array=stmt.array, index=stmt.index))
         value_ir, value = self.gen_expr_ir(stmt.value)
         return addr_ir + value_ir + [IRStore(address=addr_value, value=value, value_type=element_type)]
 
@@ -1288,7 +1356,8 @@ class StatementsMixin:
         body_label = self.new_label("while_body")
         end_label = self.new_label("while_end")
 
-        instructions = self._instruction_selector.lower_ir(self._ir_while_head(stmt, start_label, body_label, end_label))
+        instructions = self._instruction_selector.lower_ir(
+            self._ir_while_head(stmt, start_label, body_label, end_label))
 
         self.loop_labels.append((start_label, end_label))
         self._push_scope()

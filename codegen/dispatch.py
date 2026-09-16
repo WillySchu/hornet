@@ -7,7 +7,9 @@ branch of one of these two."""
 
 from codegen.assembly_ast import Operand, Instruction, MovQ, Imm, Mov, Memory, Register
 from codegen.errors import CodegenError
-from codegen.ir import IRRaw, IRBinOp, IRValue, IRConst, IRLoad, IRMove, IRJump, IRLabel, IRStaticDataAddress, IRUnOp, IRCast
+from codegen.ir import (
+    IRRaw, IRBinOp, IRValue, IRConst, IRLoad, IRMove, IRJump, IRLabel, IRStaticDataAddress, IRUnOp, IRCast
+)
 from codegen.utils import as_qword_register, type_of
 from typing import Optional
 from parser import (
@@ -329,7 +331,7 @@ class DispatchMixin:
         if isinstance(expr, Variable):
             return [], self._local_temp(expr.name)
         if isinstance(expr, Index) and type_of(expr).kind not in (TypeKind.ARRAY, TypeKind.STRUCT):
-            addr_ir, addr_value = self._ir_index_address_or_fallback(expr)
+            addr_ir, addr_value = self._ir_index_address(expr)
             return self._ir_load(addr_ir, addr_value, type_of(expr))
         if isinstance(expr, Field) and type_of(expr).kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
             addr_ir, addr_value = self._ir_field_address(expr)
@@ -473,11 +475,7 @@ class DispatchMixin:
                 return self._ir_string_compare(expr)
         if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
             if type_of(expr.left).kind == TypeKind.SLICE or type_of(expr.right).kind == TypeKind.SLICE:
-                result = self._ir_slice_none_comparison(expr)
-                if result is not None:
-                    return result
-                t = self._new_temp(Type.BOOL)
-                return [IRRaw(self.gen_slice_none_comparison_into(expr, Register('eax')), dst=t)], t
+                return self._ir_slice_none_comparison(expr)
             if type_of(expr.left).kind in (TypeKind.ARRAY, TypeKind.STRUCT):
                 value_type = type_of(expr.left)
                 left_result = self._ir_composite_operand_address(expr.left, value_type)
@@ -497,10 +495,6 @@ class DispatchMixin:
                         IRLabel(done_label),
                     ]
                     return ir, t
-                t = self._new_temp(Type.BOOL)
-                if type_of(expr.left).kind == TypeKind.ARRAY:
-                    return [IRRaw(self.gen_array_equality_into(expr, Register('eax')), dst=t)], t
-                return [IRRaw(self.gen_struct_equality_into(expr, Register('eax')), dst=t)], t
         return self._ir_binary(expr)
 
     def gen_binary_into(self, expr: Binary, dst: Operand) -> list[Instruction]:
@@ -552,7 +546,8 @@ class DispatchMixin:
         # result into dst.
         ir, t_result = self._ir_binary(expr)
         instructions = self._instruction_selector.lower_ir(ir)
-        instructions.extend(self._gen_read_scalar_into(self._instruction_selector._temp_mem(t_result), t_result.type, dst))
+        instructions.extend(
+            self._gen_read_scalar_into(self._instruction_selector._temp_mem(t_result), t_result.type, dst))
         return instructions
 
     def _ir_binary(self, expr: Binary) -> tuple[list, object]:

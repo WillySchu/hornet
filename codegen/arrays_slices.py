@@ -43,7 +43,22 @@ from codegen.assembly_ast import (
     Sub,
 )
 from codegen.errors import CodegenError
-from codegen.ir import IRRaw, IRBinOp, IRConst, IRBoundsCheck, IRSliceBoundsCheck, IRStore, IRLoad, IRSliceGrow, IRMove, IRBranch, IRJump, IRLabel, IRLocalAddress, IRStaticDataAddress, IRCall
+from codegen.ir import (
+    IRBinOp,
+    IRBoundsCheck,
+    IRBranch,
+    IRCall,
+    IRConst,
+    IRJump,
+    IRLabel,
+    IRLoad,
+    IRLocalAddress,
+    IRMove,
+    IRSliceBoundsCheck,
+    IRSliceGrow,
+    IRStaticDataAddress,
+    IRStore, Temp,
+)
 from codegen.utils import type_of, type_byte_width, leaf_type, as_byte_register, gen_protecting_dst_across
 from parser import Node, ArrayLiteral, Call, Field, Index, Slice, Variable, NoneLiteral, Binary, BinaryOp
 from semantic import TypeKind, Type
@@ -269,14 +284,6 @@ class ArraysSlicesMixin:
         (this method's own recursive base case, via
         gen_array_address_into, when `expr.array` is itself an Index).
 
-        A scalar element's own address is real IR now instead -- see
-        _ir_index_address, which replicates this exact same recursion,
-        bounds check (via IRBoundsCheck), and offset arithmetic (via
-        ordinary IRBinOp) rather than calling this method at all; see
-        _ir_index_address_or_fallback for when this method is still
-        reached (expr.array's own base out of scope for real IR --
-        an ArrayLiteral, or a Call, when expr.array is slice-typed).
-
         `expr.array` can be array- OR slice-typed (indexing into a
         slice, `s[i]`, uses this same method) -- see
         gen_indexable_base_into for how the base's address and length
@@ -398,7 +405,8 @@ class ArraysSlicesMixin:
             return self._ir_field_address(expr)
         return None
 
-    def _ir_materialize_composite_call(self, call_expr: Call, value_type: Type):
+    def _ir_materialize_composite_call(
+            self, call_expr: Call, value_type: Type) -> tuple[Union[IRLocalAddress, IRCall], Temp]:
         """Builds (without lowering) an ordinary composite-returning
         Call's own materialized address as real IR -- returns (ir,
         address). Used wherever such a call sits directly at an
@@ -699,58 +707,17 @@ class ArraysSlicesMixin:
         return ir, ptr, length, cap
 
     def _ir_slice_arg(self, expr: Node):
-        """Builds (without lowering) a slice-typed function-call
-        argument's own {ptr, len, cap} triple as real IR -- returns
-        (ir, ptr_value, len_value, cap_value). Unlike _ir_indexable_
-        base, this never returns None: every slice-typed argument
-        shape has SOME way to produce a triple, falling back to the
-        old-style shared-scratch-slot materialization (gen_slice_
-        value_into) -- read back out via IRLocalAddress plus IRLoad/
-        IRBinOp at that fixed, known offset, the identical shape _ir_
-        indexable_base's own Variable-slice leaf already uses, just at
-        the shared scratch offset instead of a named variable's own --
-        only when _ir_indexable_base itself returns None.
+        """Builds (without lowering) a slice-typed function-call argument's own
+        {ptr, len, cap} triple as real IR, returns (ir, ptr_value, len_value,
+        cap_value).
 
-        append(s, x) used directly as the argument (`sumSlice(append(
-        s, x))`), previously this method's own chief example of a
-        shape still needing that old-style path, is real IR now too:
-        _ir_indexable_base's own SLICE branch delegates straight to
-        _ir_append_call for it (see that branch's own docstring), the
-        same way it already did for an ordinary slice-returning Call.
-        Every slice-typed argument shape this arc's own tests
-        exercise now reaches real IR through this method without ever
-        falling back -- confirmed directly, not just no longer an
-        obvious example to name.
-
-        NoneLiteral (`none` passed directly as an argument) is its
-        own leaf here, not routed through _ir_indexable_base at all
-        (which has no NoneLiteral case, since it only ever handles an
-        already-typed slice expression) -- _ir_nil_slice's own triple,
-        mirroring gen_slice_arg_into's own identical special case."""
+        NoneLiteral (`none` passed directly as an argument) is its own leaf
+        here, _ir_nil_slice's own triple, mirroring gen_slice_arg_into's own
+        identical special case."""
         if isinstance(expr, NoneLiteral):
             return self._ir_nil_slice()
 
-        base = self._ir_indexable_base(expr)
-        if base is not None:
-            return base
-
-        scratch = self._unnamed_slice_temp_offset
-        materialize_ir = [IRRaw(self.gen_slice_value_into(expr, Memory('rbp', scratch)))]
-        descriptor_addr = self._new_temp(Type.INT64)
-        ptr = self._new_temp(Type.INT64)
-        len_addr = self._new_temp(Type.INT64)
-        length = self._new_temp(Type.INT)
-        cap_addr = self._new_temp(Type.INT64)
-        cap = self._new_temp(Type.INT)
-        read_ir = [
-            IRLocalAddress(dst=descriptor_addr, offset=scratch),
-            IRLoad(dst=ptr, address=descriptor_addr),
-            IRBinOp(dst=len_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(8, Type.INT64)),
-            IRLoad(dst=length, address=len_addr),
-            IRBinOp(dst=cap_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(16, Type.INT64)),
-            IRLoad(dst=cap, address=cap_addr),
-        ]
-        return materialize_ir + read_ir, ptr, length, cap
+        return self._ir_indexable_base(expr)
 
     def _ir_index_address(self, expr: Index):
         """Builds (without lowering) the address of expr.array[expr.
@@ -798,34 +765,13 @@ class ArraysSlicesMixin:
         check = IRBoundsCheck(index=index_value, length=length_value)
 
         offset_temp = self._new_temp(Type.INT)
-        multiply = IRBinOp(dst=offset_temp, op=BinaryOp.MULTIPLY, left=index_value, right=IRConst(element_stride, Type.INT))
+        multiply = IRBinOp(
+            dst=offset_temp, op=BinaryOp.MULTIPLY, left=index_value, right=IRConst(element_stride, Type.INT))
 
         result = self._new_temp(Type.INT64)
         add = IRBinOp(dst=result, op=BinaryOp.ADD, left=base_addr, right=offset_temp)
 
         return base_ir + index_ir + [check, multiply, add], result
-
-    def _ir_index_address_or_fallback(self, expr: Index) -> tuple[list, object]:
-        """Tries _ir_index_address first; falls back to wrapping the
-        old-style gen_index_address_into as a single opaque IRRaw when
-        expr.array's own base is still out of scope (see _ir_
-        indexable_base's own docstring) -- a struct-literal Call, when
-        expr.array is slice-typed, moot in practice since semantic.py
-        already rejects that outright wherever it would appear. An
-        ArrayLiteral or an ordinary Call (append included, via _ir_
-        indexable_base's own dedicated case) are both real IR now,
-        confirmed to no longer reach this fallback for every shape
-        this arc's own tests exercise. Shared by dispatch.py's gen_
-        expr_ir (a scalar element read) and this module's own gen_
-        statement_ir case (a scalar element write, via _ir_index_
-        assign) -- both need the identical "use real IR when possible,
-        fall back otherwise" decision, and this is the one place it's
-        made."""
-        result = self._ir_index_address(expr)
-        if result is not None:
-            return result
-        addr_temp = self._new_temp(Type.INT64)
-        return [IRRaw(self.gen_index_address_into(expr, Register('rax')), dst=addr_temp)], addr_temp
 
     def gen_slice_into(self, expr: Slice, dst_mem: Memory) -> list[Instruction]:
         """Generates `expr.array[expr.low:expr.high]`'s resulting
@@ -1665,15 +1611,18 @@ class ArraysSlicesMixin:
                     field_addr = dst_address
                 else:
                     field_addr = self._new_temp(Type.INT64)
-                    ir.append(IRBinOp(dst=field_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(offset, Type.INT64)))
+                    ir.append(
+                        IRBinOp(dst=field_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(offset, Type.INT64)))
                 ir.extend(self._ir_write_zero_value_into(field_addr, field_type))
             return ir
         if value_type.kind == TypeKind.ARRAY:
             return self._ir_zero_array_loop(dst_address, value_type.element_type, value_type.size)
         if value_type == Type.STR:
             addr_temp = self._new_temp(Type.STR)
-            ir = [IRStaticDataAddress(dst=addr_temp, label=self._get_empty_str_label())]
-            ir.append(IRStore(address=dst_address, value=addr_temp, value_type=Type.STR))
+            ir = [
+                IRStaticDataAddress(dst=addr_temp, label=self._get_empty_str_label()),
+                IRStore(address=dst_address, value=addr_temp, value_type=Type.STR)
+            ]
             return ir
         return [IRStore(address=dst_address, value=IRConst(0, value_type), value_type=value_type)]
 
@@ -1823,9 +1772,17 @@ class ArraysSlicesMixin:
                     right_field_addr = right_addr
                 else:
                     left_field_addr = self._new_temp(Type.INT64)
-                    ir.append(IRBinOp(dst=left_field_addr, op=BinaryOp.ADD, left=left_addr, right=IRConst(offset, Type.INT64)))
+                    ir.append(
+                        IRBinOp(
+                            dst=left_field_addr, op=BinaryOp.ADD, left=left_addr, right=IRConst(offset, Type.INT64),
+                        ),
+                    )
                     right_field_addr = self._new_temp(Type.INT64)
-                    ir.append(IRBinOp(dst=right_field_addr, op=BinaryOp.ADD, left=right_addr, right=IRConst(offset, Type.INT64)))
+                    ir.append(
+                        IRBinOp(
+                            dst=right_field_addr, op=BinaryOp.ADD, left=right_addr, right=IRConst(offset, Type.INT64),
+                        ),
+                    )
                 ir.extend(self._ir_composite_equal(left_field_addr, right_field_addr, field_type, mismatch_label))
             return ir
         continue_label = self.new_label("eq_continue")
@@ -1943,7 +1900,8 @@ class ArraysSlicesMixin:
             if production is None:
                 return None
             append_ir, ptr_value, len_value, cap_value = production
-            return append_ir + self._ir_write_slice_descriptor_into_address(dst_address, ptr_value, len_value, cap_value)
+            return append_ir + self._ir_write_slice_descriptor_into_address(
+                dst_address, ptr_value, len_value, cap_value)
         if value_type.kind == TypeKind.ARRAY and isinstance(value_expr, ArrayLiteral):
             return self._ir_write_array_literal_into(dst_address, value_expr, value_type)
         if value_type.kind == TypeKind.SLICE and isinstance(value_expr, ArrayLiteral):
@@ -1999,7 +1957,14 @@ class ArraysSlicesMixin:
                     elem_addr = dst_address
                 else:
                     elem_addr = self._new_temp(Type.INT64)
-                    ir.append(IRBinOp(dst=elem_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(i * element_width, Type.INT64)))
+                    ir.append(
+                        IRBinOp(
+                            dst=elem_addr,
+                            op=BinaryOp.ADD,
+                            left=dst_address,
+                            right=IRConst(i * element_width, Type.INT64),
+                        ),
+                    )
                 elem_ir = self._ir_write_composite_value_into(elem_addr, elem_expr, element_type)
                 if elem_ir is None:
                     return None
@@ -2011,7 +1976,14 @@ class ArraysSlicesMixin:
                     elem_addr = dst_address
                 else:
                     elem_addr = self._new_temp(Type.INT64)
-                    ir.append(IRBinOp(dst=elem_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(i * element_width, Type.INT64)))
+                    ir.append(
+                        IRBinOp(
+                            dst=elem_addr,
+                            op=BinaryOp.ADD,
+                            left=dst_address,
+                            right=IRConst(i * element_width, Type.INT64),
+                        ),
+                    )
                 ir.append(IRStore(address=elem_addr, value=elem_value, value_type=element_type))
         return ir
 

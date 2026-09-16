@@ -39,8 +39,8 @@ from codegen.assembly_ast import (
     Push,
     Register,
     Ret,
-    SubQ,
     SetCC,
+    SubQ,
 )
 from codegen.errors import CodegenError
 from codegen.utils import as_byte_register, type_byte_width, type_of, as_qword_register, COMPARISON_CONDITION_CODES

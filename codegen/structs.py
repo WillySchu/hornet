@@ -322,7 +322,9 @@ class StructsMixin:
             provided = dict(expr.kwargs)
             entries = [(field_name, provided.get(field_name), field_type) for field_name, field_type in field_items]
         else:
-            entries = [(field_name, arg_expr, field_type) for arg_expr, (field_name, field_type) in zip(expr.args, field_items)]
+            entries = [
+                (field_name, arg_expr, field_type) for arg_expr, (field_name, field_type) in zip(expr.args, field_items)
+            ]
         ir = []
         for field_name, arg_expr, field_type in entries:
             offset = self._field_offset(struct_type.struct_name, field_name)
@@ -338,14 +340,16 @@ class StructsMixin:
                     field_addr = dst_address
                 else:
                     field_addr = self._new_temp(Type.INT64)
-                    ir.append(IRBinOp(dst=field_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(offset, Type.INT64)))
+                    ir.append(
+                        IRBinOp(dst=field_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(offset, Type.INT64)))
                 ir.extend(self._ir_write_zero_value_into(field_addr, field_type))
             elif field_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
                 if offset == 0:
                     field_addr = dst_address
                 else:
                     field_addr = self._new_temp(Type.INT64)
-                    ir.append(IRBinOp(dst=field_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(offset, Type.INT64)))
+                    ir.append(
+                        IRBinOp(dst=field_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(offset, Type.INT64)))
                 field_ir = self._ir_write_composite_value_into(field_addr, arg_expr, field_type)
                 if field_ir is None:
                     return None
@@ -357,7 +361,8 @@ class StructsMixin:
                     field_addr = dst_address
                 else:
                     field_addr = self._new_temp(Type.INT64)
-                    ir.append(IRBinOp(dst=field_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(offset, Type.INT64)))
+                    ir.append(
+                        IRBinOp(dst=field_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(offset, Type.INT64)))
                 ir.append(IRStore(address=field_addr, value=arg_value, value_type=field_type))
         return ir
 

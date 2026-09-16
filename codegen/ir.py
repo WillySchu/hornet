@@ -426,4 +426,18 @@ class IRRaw:
     dst: Optional[Temp] = None
 
 
-IRInstr = Union[IRMove, IRBinOp, IRUnOp, IRCall, IRReturn, IRLabel, IRJump, IRBranch, IRRaw, IRLoad, IRStore, IRLocalAddress, IRStaticDataAddress]
+IRInstr = Union[
+    IRBinOp,
+    IRBranch,
+    IRCall,
+    IRJump,
+    IRLabel,
+    IRLoad,
+    IRLocalAddress,
+    IRMove,
+    IRRaw,
+    IRReturn,
+    IRStaticDataAddress,
+    IRStore,
+    IRUnOp,
+]
