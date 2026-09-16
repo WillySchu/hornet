@@ -6,6 +6,10 @@ def int main():
         int a = k + 3
         int b = k - 1
         int c = (a + b) * (a - b) + (a * b) - (k % 7)
-        total = (total + c) % 1000003
+        int negated = -k
+        int complemented = ~k
+        int8 narrowed = int8(k)
+        int widened = int(narrowed)
+        total = (total + c + negated + complemented + widened) % 1000003
         i = i + 1
     return total % 256

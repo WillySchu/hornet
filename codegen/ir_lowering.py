@@ -34,6 +34,7 @@ from codegen.ir import (
     IRBoundsCheck,
     IRBranch,
     IRCall,
+    IRCast,
     IRConst,
     IRCopy,
     IRJump,
@@ -183,6 +184,16 @@ class InstructionSelector:
             elif isinstance(instr, IRUnOp):
                 out.extend(self._gen_load_value(instr.operand, Register('eax')))
                 out.extend(self.host.gen_unary_op(instr.op, Register('eax'), operand_type=instr.operand.type))
+                out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
+            elif isinstance(instr, IRCast):
+                # Same three-step shape as IRUnOp's own lowering just
+                # above -- load, apply the one proven old-style
+                # helper unchanged, write back -- just with gen_cast_
+                # narrowing_into instead of gen_unary_op, and dst.type
+                # (not an operand's own type) as what tells it which
+                # way to (re)narrow.
+                out.extend(self._gen_load_value(instr.src, Register('eax')))
+                out.extend(self.host.gen_cast_narrowing_into(instr.dst.type, Register('eax')))
                 out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
             elif isinstance(instr, IRLabel):
                 out.append(Label(instr.name))

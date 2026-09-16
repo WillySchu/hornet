@@ -106,6 +106,28 @@ class IRUnOp:
 
 
 @dataclass
+class IRCast:
+    """dst = src, re-narrowed/re-widened to dst's own declared type --
+    the actual work behind an explicit `TYPE(expr)` cast. dst.type
+    alone carries the cast's own target type, the same convention
+    IRLoad already uses for its own read width -- no separate field
+    needed for it.
+
+    Deliberately its own op, not an ordinary IRMove into a
+    differently-typed Temp: IRMove's own narrowing (via _gen_write_
+    temp_from) only ever happens implicitly ON WRITE to storage, but a
+    cast's result has to be correctly narrowed in the VALUE itself,
+    immediately -- `int8(300) + int8(5)` needs 300 already wrapped to
+    44 BEFORE the addition runs, since every later int8/uint8
+    operation assumes its own operands already represent a correctly-
+    narrowed value, not just "correct once eventually stored." See
+    gen_cast_narrowing_into's own docstring, which this op's own
+    lowering reuses completely unchanged, for the full account."""
+    dst: Temp
+    src: IRValue
+
+
+@dataclass
 class IRCall:
     """dst = call name(args). dst is None for a void call."""
     dst: Optional[Temp]

@@ -29,6 +29,7 @@ from codegen.ir import (
     IRBoundsCheck,
     IRBranch,
     IRCall,
+    IRCast,
     IRCopy,
     IRJump,
     IRLabel,
@@ -139,6 +140,8 @@ def _reads(instr) -> set:
     Temp at all (see this module's own docstring)."""
     if isinstance(instr, IRMove):
         return {instr.src} if isinstance(instr.src, Temp) else set()
+    if isinstance(instr, IRCast):
+        return {instr.src} if isinstance(instr.src, Temp) else set()
     if isinstance(instr, IRBinOp):
         return {v for v in (instr.left, instr.right) if isinstance(v, Temp)}
     if isinstance(instr, IRUnOp):
@@ -168,7 +171,7 @@ def _writes(instr) -> set:
     """The Temps `instr` defines. IRRaw's own `dst`, when present,
     counts here even though it's set from outside the wrapped
     instructions -- see IRRaw's own docstring."""
-    if isinstance(instr, (IRMove, IRBinOp, IRUnOp, IRLoad, IRLocalAddress, IRStaticDataAddress)):
+    if isinstance(instr, (IRMove, IRBinOp, IRUnOp, IRLoad, IRLocalAddress, IRStaticDataAddress, IRCast)):
         return {instr.dst}
     if isinstance(instr, (IRCall, IRRaw)):
         return {instr.dst} if instr.dst is not None else set()

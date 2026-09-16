@@ -25,7 +25,7 @@ PROGRAMS_DIR = Path(__file__).parent.parent / 'benchmarks' / 'programs'
 # truncated-to-a-byte note on struct_heavy below for the one subtlety
 # that came up doing that.
 EXPECTED_EXIT_CODES = {
-    'arithmetic_heavy': 217,
+    'arithmetic_heavy': 197,  # basic scalar arithmetic in a hot loop, now also exercising all three Unary operators (negate, complement -- not, being bool-only, has no natural spot here) and an int8-narrowing/int-widening Cast round-trip, verified independently via a matching C simulation (int32 wraparound, truncating division/modulus)
     'recursive_fibonacci': 231,
     'loop_accumulator': 192,
     'array_heavy': 147,  # bubble sort, plus indexing directly into a bare bracketed-list literal (`[10, 20, 30][j % 3]`, no variable in between), and array equality with a bare bracketed-list literal on both sides, in the innermost loop

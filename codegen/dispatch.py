@@ -7,7 +7,7 @@ branch of one of these two."""
 
 from codegen.assembly_ast import Operand, Instruction, MovQ, Imm, Mov, Memory, Register
 from codegen.errors import CodegenError
-from codegen.ir import IRRaw, IRBinOp, IRValue, IRConst, IRLoad, IRMove, IRJump, IRLabel, IRStaticDataAddress
+from codegen.ir import IRRaw, IRBinOp, IRValue, IRConst, IRLoad, IRMove, IRJump, IRLabel, IRStaticDataAddress, IRUnOp, IRCast
 from codegen.utils import as_qword_register, type_of
 from typing import Optional
 from parser import (
@@ -353,6 +353,33 @@ class DispatchMixin:
         if isinstance(expr, Call) and expr.name not in ('print', 'len') and type_of(expr).kind not in (
                 TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
             return self._ir_call(expr)
+        if isinstance(expr, Unary):
+            # IRUnOp already existed, fully lowered (via gen_unary_op,
+            # the same already-proven old-style function IRBinOp's own
+            # lowering already reuses for binary operators) and
+            # already register-allocator-supported -- it was just
+            # never constructed anywhere. Recursing into expr.operand
+            # FIRST is what makes a chained operator (`~-2`) compose
+            # correctly: the inner Unary node builds its own IRUnOp
+            # through this identical case, so the outer one's own
+            # operand is already an ordinary Temp by the time it runs,
+            # no different from any other nested expression in this
+            # arc.
+            operand_ir, operand_value = self.gen_expr_ir(expr.operand)
+            t = self._new_temp(type_of(expr))
+            return operand_ir + [IRUnOp(dst=t, op=expr.op, operand=operand_value)], t
+        if isinstance(expr, Cast):
+            # IRCast is new -- see its own docstring for why an
+            # ordinary IRMove into a differently-typed Temp doesn't
+            # suffice here, unlike every other "produce a value of a
+            # specific type" case in this arc. Lowering reuses gen_
+            # cast_narrowing_into completely unchanged, the identical
+            # "wrap the one proven old-style helper, don't reimplement
+            # it" shape IRUnOp's own lowering already uses for gen_
+            # unary_op.
+            src_ir, src_value = self.gen_expr_ir(expr.expr)
+            t = self._new_temp(type_of(expr))
+            return src_ir + [IRCast(dst=t, src=src_value)], t
         t = self._new_temp(type_of(expr))
         return [IRRaw(self.gen_expr_into(expr, Register('eax')), dst=t)], t
 
