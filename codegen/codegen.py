@@ -179,6 +179,18 @@ class CodeGenerator(
         # fails with a clear AttributeError rather than silently
         # reading a stale value from a previous instance.
         self._hidden_return_ptr_offset = None
+        # This function's own DECLARED return type -- needed by
+        # gen_statement_ir's own Return case specifically to
+        # disambiguate an ArrayLiteral return value's own dispatch
+        # (ARRAY vs SLICE): type_of(stmt.value) is unusable for this,
+        # since semantic.py always annotates an ArrayLiteral node by
+        # its own literal shape ("N elements of type X"), regardless
+        # of what the surrounding context (here, this function's own
+        # signature) resolves the overall expression to. See gen_
+        # statement_ir's own Return/ArrayLiteral case for the bug this
+        # fixed: `return [1, 2, 3]` from a slice-returning function
+        # used to segfault because of exactly this ambiguity.
+        self._current_return_type = None
 
     def new_label(self, prefix: str) -> str:
         """Returns a fresh, uniquely-numbered local label like
@@ -290,6 +302,7 @@ class CodeGenerator(
         # another free (`return otherFn()`): the same address just gets
         # passed one level deeper, with no intermediate copy.
         self._hidden_return_ptr_offset = None
+        self._current_return_type = return_type
         arg_shift = 0
         if return_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
             self._next_offset -= 8

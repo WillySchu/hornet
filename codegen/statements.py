@@ -195,23 +195,65 @@ class StatementsMixin:
                 hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr()
                 copy_ir = self._ir_copy_into_address(hidden_ptr, stmt.value, value_type)
                 return hidden_ptr_ir + copy_ir + [IRReturn(value=None)]
-            # A composite return whose own value is an array literal
-            # or a POSITIONAL struct literal, with every element/field
-            # scalar -- writes directly through the hidden pointer via
-            # _ir_write_array_literal_into/_ir_write_struct_literal_
-            # into. Both return None (no binding-style concern here at
+            # A composite return whose own value is an array literal,
+            # a bare bracketed-list literal resolved to SLICE by this
+            # function's own declared return type, or a POSITIONAL
+            # struct literal, with every element/field scalar -- writes
+            # directly through the hidden pointer via _ir_write_array_
+            # literal_into/_ir_slice_literal/_ir_write_struct_literal_
+            # into. All return None (no binding-style concern here at
             # all, unlike VarDecl's own analogous cases -- there's
             # nothing to bind for a Return) when out of scope: a
             # nested composite element/field, or named/partial
             # (kwargs) struct construction -- both still need their
             # own recursive real-IR treatment, a genuinely separate,
             # later step, not attempted here.
+            #
+            # A REAL BUG, found and fixed here: this ARRAY case used to
+            # call _ir_write_array_literal_into unconditionally for
+            # ANY ArrayLiteral return value, with no value_type.kind ==
+            # ARRAY check first -- the identical AST-shape ambiguity
+            # (an ArrayLiteral node can resolve to either ARRAY or
+            # SLICE, depending on context) _ir_write_composite_value_
+            # into's own dispatcher was fixed for, just never
+            # backported to this, a separate call site that bypasses
+            # that dispatcher entirely. `return [1, 2, 3]` from a
+            # slice-returning function used to segfault: the hidden
+            # pointer for a SLICE return points at a three-field
+            # descriptor slot, not a bare array's own backing, so
+            # writing element bytes directly through it (as if it were
+            # one) corrupted memory immediately after the elements'
+            # own extent. See _ir_slice_literal's own docstring for
+            # the SLICE case's own, now-correct treatment just below.
             if isinstance(stmt.value, ArrayLiteral):
-                value_type = type_of(stmt.value)
-                hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr()
-                write_ir = self._ir_write_array_literal_into(hidden_ptr, stmt.value, value_type)
-                if write_ir is not None:
-                    return hidden_ptr_ir + write_ir + [IRReturn(value=None)]
+                # Dispatches on self._current_return_type (this
+                # function's own DECLARED return type), NOT type_of(
+                # stmt.value): the latter is always ARRAY-kind for an
+                # ArrayLiteral, correctly sized to its own element
+                # count, regardless of what the surrounding context
+                # (here, this function's own signature) resolves the
+                # overall expression to -- the identical ambiguity
+                # _ir_slice_literal's own docstring documents fixing
+                # for its own malloc-size computation. Using type_of(
+                # stmt.value) here instead used to make `return [1, 2,
+                # 3]` from a slice-returning function segfault: it
+                # always took the ARRAY branch, writing raw element
+                # bytes directly through the hidden pointer as if it
+                # addressed the array's own backing, when a SLICE
+                # return's hidden pointer actually addresses a three-
+                # field descriptor slot instead.
+                if self._current_return_type.kind == TypeKind.ARRAY:
+                    hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr()
+                    write_ir = self._ir_write_array_literal_into(hidden_ptr, stmt.value, self._current_return_type)
+                    if write_ir is not None:
+                        return hidden_ptr_ir + write_ir + [IRReturn(value=None)]
+                elif self._current_return_type.kind == TypeKind.SLICE:
+                    hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr()
+                    production = self._ir_slice_literal(stmt.value)
+                    if production is not None:
+                        slice_ir, ptr_value, len_value, cap_value = production
+                        write_ir = self._ir_write_slice_descriptor_into_address(hidden_ptr, ptr_value, len_value, cap_value)
+                        return hidden_ptr_ir + slice_ir + write_ir + [IRReturn(value=None)]
             if isinstance(stmt.value, Call) and stmt.value.name in self.struct_registry:
                 value_type = type_of(stmt.value)
                 hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr()
@@ -310,6 +352,24 @@ class StatementsMixin:
             # every other case in this method.
             if var_type.kind == TypeKind.SLICE and isinstance(stmt.init, Slice):
                 production = self._ir_slice_into(stmt.init)
+                if production is not None:
+                    slice_ir, ptr_value, len_value, cap_value = production
+                    self._bind_local(stmt)
+                    return slice_ir + self._ir_write_slice_descriptor(Variable(name=stmt.name), ptr_value, len_value, cap_value)
+            # A slice-typed initializer that's a bare bracketed-list
+            # literal, resolved to SLICE by this VarDecl's own
+            # declared type (`[]int s = [1, 2, 3]`) -- see _ir_slice_
+            # literal's own docstring for why this is a genuinely
+            # different AST shape from the Slice-production case just
+            # above (an ArrayLiteral, not a Slice node) and from the
+            # already-real-IR ARRAY-typed VarDecl case (same
+            # ArrayLiteral AST shape, disambiguated by var_type.kind,
+            # the exact fix _ir_write_composite_value_into's own
+            # identical disambiguation already applies for a nested
+            # element/field). Same "try first, bind only on success"
+            # discipline as Slice production/append above.
+            if var_type.kind == TypeKind.SLICE and isinstance(stmt.init, ArrayLiteral):
+                production = self._ir_slice_literal(stmt.init)
                 if production is not None:
                     slice_ir, ptr_value, len_value, cap_value = production
                     self._bind_local(stmt)
@@ -452,6 +512,13 @@ class StatementsMixin:
                 if production is not None:
                     slice_ir, ptr_value, len_value, cap_value = production
                     return slice_ir + self._ir_write_slice_descriptor(Variable(name=stmt.name), ptr_value, len_value, cap_value)
+            # Same slice-literal case as VarDecl's own, just above --
+            # no binding concern here at all, unlike VarDecl's own.
+            if var_type.kind == TypeKind.SLICE and isinstance(stmt.value, ArrayLiteral):
+                production = self._ir_slice_literal(stmt.value)
+                if production is not None:
+                    slice_ir, ptr_value, len_value, cap_value = production
+                    return slice_ir + self._ir_write_slice_descriptor(Variable(name=stmt.name), ptr_value, len_value, cap_value)
             # Same append-call case as VarDecl's own, just above -- no
             # binding concern here at all, unlike VarDecl's own.
             if var_type.kind == TypeKind.SLICE and isinstance(stmt.value, Call) and stmt.value.name == 'append':
@@ -498,6 +565,12 @@ class StatementsMixin:
                     slice_ir, ptr_value, len_value, cap_value = production
                     dst_expr = Index(array=stmt.array, index=stmt.index)
                     return slice_ir + self._ir_write_slice_descriptor(dst_expr, ptr_value, len_value, cap_value)
+            if element_type.kind == TypeKind.SLICE and isinstance(stmt.value, ArrayLiteral):
+                production = self._ir_slice_literal(stmt.value)
+                if production is not None:
+                    slice_ir, ptr_value, len_value, cap_value = production
+                    dst_expr = Index(array=stmt.array, index=stmt.index)
+                    return slice_ir + self._ir_write_slice_descriptor(dst_expr, ptr_value, len_value, cap_value)
             if element_type.kind == TypeKind.SLICE and isinstance(stmt.value, Call) and stmt.value.name == 'append':
                 production = self._ir_append_call(stmt.value)
                 if production is not None:
@@ -532,6 +605,12 @@ class StatementsMixin:
                 return self._ir_copy_assign(dst_expr, stmt.value, field_type)
             if field_type.kind == TypeKind.SLICE and isinstance(stmt.value, Slice):
                 production = self._ir_slice_into(stmt.value)
+                if production is not None:
+                    slice_ir, ptr_value, len_value, cap_value = production
+                    dst_expr = Field(base=stmt.base, name=stmt.name)
+                    return slice_ir + self._ir_write_slice_descriptor(dst_expr, ptr_value, len_value, cap_value)
+            if field_type.kind == TypeKind.SLICE and isinstance(stmt.value, ArrayLiteral):
+                production = self._ir_slice_literal(stmt.value)
                 if production is not None:
                     slice_ir, ptr_value, len_value, cap_value = production
                     dst_expr = Field(base=stmt.base, name=stmt.name)

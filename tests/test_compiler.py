@@ -10616,6 +10616,60 @@ class TestNestedSlices:
         )
 
 
+    def test_return_bare_slice_literal_from_slice_returning_function(self):
+        """Regression test for a real bug: gen_statement_ir's own
+        Return case used to dispatch a bare ArrayLiteral return value
+        (ARRAY vs SLICE) using type_of(stmt.value) -- but that's
+        ALWAYS ARRAY-kind for an ArrayLiteral node, correctly sized to
+        its own element count, regardless of what the function's own
+        declared return type resolves the overall expression to.
+        `return [7, 8, 9]` from a function declared to return []int
+        used to unconditionally take the ARRAY branch, writing the
+        three raw element bytes directly through the hidden pointer as
+        if it addressed the array's own backing -- when a SLICE
+        return's hidden pointer actually addresses a three-field
+        {ptr, len, cap} descriptor slot instead, corrupting memory the
+        moment the second element was written. This segfaulted before
+        the fix (self._current_return_type, the function's own
+        actually-declared return type, used for the dispatch instead)
+        -- confirmed by temporarily reverting it and seeing this exact
+        program crash before writing the test in here."""
+        assert_program_exit_code(
+            "def []int makeSlice():\n"
+            "    return [7, 8, 9]\n"
+            "\n"
+            "def int main():\n"
+            "    []int s = makeSlice()\n"
+            "    return s[0] + s[1] + s[2]\n",
+            24,
+        )
+
+    def test_return_bare_slice_literal_result_used_via_index_assign(self):
+        """A companion to test_return_bare_slice_literal_from_slice_
+        returning_function, from a different angle: assigns a slice-
+        literal-returning call's own result into an IndexAssign target
+        (a slice-typed array element) rather than a plain named
+        variable, alongside an ordinary slice-literal IndexAssign in
+        the same array. This combination is what the bug's own
+        corrupted memory first surfaced through during development,
+        initially looking like a separate, IndexAssign-specific bug
+        before tracing it back to the identical Return-dispatch root
+        cause the sibling test above already covers directly -- kept
+        here as its own test since the two genuinely exercise
+        different code paths converging on the same underlying call."""
+        assert_program_exit_code(
+            "def []int makeSlice():\n"
+            "    return [7, 8, 9]\n"
+            "\n"
+            "def int main():\n"
+            "    [2][]int rows\n"
+            "    rows[0] = [1, 2]\n"
+            "    rows[1] = makeSlice()\n"
+            "    return rows[0][0] + rows[0][1] + rows[1][0] + rows[1][1] + rows[1][2]\n",
+            27,
+        )
+
+
 class TestChainedSliceIndexing:
     """`rows[0][1]` -- indexing directly into a slice-typed Index
     result, with no intermediate named variable. A real, separate gap

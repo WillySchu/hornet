@@ -79,6 +79,11 @@ class ArraysSlicesMixin:
         statement that creates it, so it needs the same "can safely
         cross frame boundaries" guarantee every other sliced array
         gets, for the same reason.
+
+        Real IR now instead -- see _ir_slice_literal, which replicates
+        this exact same malloc(max(1, width))-then-write-elements
+        shape and the same reasoning for both of the details above (the
+        minimum-1-byte floor, and the unconditional heap allocation).
         """
         array_type = type_of(expr)
         width = max(1, type_byte_width(array_type, self.struct_registry))
@@ -894,6 +899,87 @@ class ArraysSlicesMixin:
         ir = base_ir + high_ir + low_ir + checks + arithmetic
         return ir, ptr, new_len, new_cap
 
+    def _ir_slice_literal(self, expr: ArrayLiteral):
+        """Builds (without lowering) a bare bracketed-list literal
+        resolved to SLICE by context (`[]int s = [1, 2, 3]`; the
+        general TYPED form, `[]int[1, 2, 3]`, is a different AST shape
+        entirely -- a Slice node wrapping an ArrayLiteral, reached
+        instead through _ir_indexable_base's own, still out-of-scope
+        ArrayLiteral case) as real IR -- returns (ir, ptr_value,
+        len_value, cap_value), or None when some element is itself out
+        of scope for _ir_write_composite_value_into. The identical
+        (ir, ptr, len, cap) shape _ir_slice_into already produces, so
+        this drops into every place that already consumes it (_ir_
+        write_slice_descriptor, and _ir_write_composite_value_into's
+        own Slice/append cases) with no new consuming code needed.
+
+        Always mallocs a fresh backing array, sized to fit -- at LEAST
+        1 byte, even for an empty literal (`[]int[]`), guaranteeing a
+        genuine, non-null, unique pointer regardless of malloc(0)'s
+        implementation-defined behavior, the same reason gen_array_
+        literal_heap_alloc_into's own docstring gives: this is what
+        makes `s == none` correctly false for an intentionally empty
+        slice literal (a real, live, zero-length slice, not a nil
+        one, same as `arr[5:5]`) -- rather than a genuinely new rule,
+        this replicates that old-style method's own exact behavior.
+        Always heap-allocated regardless of size, unlike an ordinary
+        array variable's own 16KB stack threshold: a slice literal's
+        backing has to outlive the statement that creates it, the
+        identical reasoning _ir_materialize_composite_call's own
+        docstring gives for why a slice PRODUCED from a materialized
+        call always escapes too.
+
+        The actual element-writing is _ir_write_array_literal_into,
+        reused completely UNCHANGED, not a new, parallel builder
+        mirroring it: that method only ever reads value_type's own
+        .element_type, never .kind or .size, so handing it a SLICE-
+        kind Type instead of an ARRAY-kind one works without any
+        change on its own end -- exactly what gen_array_literal_into,
+        its own old-style counterpart, already does today (see gen_
+        array_literal_heap_alloc_into's own call into it, with
+        type_of(expr) -- a SLICE-kind Type here -- passed as its own
+        array_type argument): this isn't a new capability being
+        assumed, it's the same one the old code already relies on.
+        Nested composite elements (a slice-of-structs, a slice-of-
+        slices) fall out for free the same way: _ir_write_array_
+        literal_into already recurses into _ir_write_composite_value_
+        into for those.
+
+        len and cap are both the literal's own element count -- a
+        fresh literal's own backing has no spare room to grow into
+        yet, matching gen_slice_value_into's own ArrayLiteral case
+        exactly ('cap is set equal to len').
+
+        Takes no value_type parameter, deliberately: type_of(expr) is
+        ALWAYS an ARRAY-kind Type, correctly sized to the literal's
+        own element count, regardless of what the surrounding context
+        resolves the overall expression to (SLICE, here) -- semantic.py
+        annotates an ArrayLiteral node by its own literal shape ("N
+        elements of type X"), never by how its caller happens to use
+        it. A REAL BUG, found and fixed before this ever shipped: an
+        earlier version of this method computed its own malloc size
+        from the CALLER's own SLICE-kind Type instead (type_byte_width
+        of ANY slice is always 24, the descriptor's own fixed size,
+        regardless of what it describes) -- for a slice-of-slices
+        literal with more than one outer element, this under-allocated
+        by exactly half (24 bytes reserved for what needed count * 24),
+        corrupting adjacent heap memory the moment the second element
+        was written. Caught by test_untyped_nested_slice_literal,
+        which returned 11 instead of 10 -- traced directly rather than
+        assumed, confirming type_of(expr) was already 48 bytes (2 * 24,
+        correct) while the old computation gave 24."""
+        array_type = type_of(expr)
+        count = len(expr.elements)
+        size = max(1, type_byte_width(array_type, self.struct_registry))
+        ptr = self._new_temp(Type.INT64)
+        malloc_ir = [IRCall(dst=ptr, name='malloc', args=[IRConst(size, Type.INT64)])]
+        write_ir = self._ir_write_array_literal_into(ptr, expr, array_type)
+        if write_ir is None:
+            return None
+        len_value = IRConst(count, Type.INT)
+        cap_value = IRConst(count, Type.INT)
+        return malloc_ir + write_ir, ptr, len_value, cap_value
+
     def _ir_write_slice_descriptor_into_address(self, dst_address, ptr_value, len_value, cap_value) -> list:
         """The shared core of _ir_write_slice_descriptor: given an
         ALREADY-computed destination address (an ordinary IRValue --
@@ -963,6 +1049,22 @@ class ArraysSlicesMixin:
             fresh backing array and writes the literal's elements into
             it. cap is set equal to len -- a fresh literal's backing
             array has no spare room to grow into yet.
+
+            Real IR now instead, for a VarDecl/Assign/IndexAssign/
+            FieldAssign target, or a Return whose own function is
+            declared to return SLICE -- see _ir_slice_literal, which
+            needs to dispatch on the DECLARED destination type in
+            every one of those cases, never type_of(expr) itself:
+            semantic.py always annotates a bare ArrayLiteral node by
+            its own literal shape (ARRAY-kind, correctly sized to its
+            own element count), regardless of what the surrounding
+            context resolves the overall expression to. Getting this
+            wrong is exactly what caused two real, found-by-hand bugs
+            during that migration -- see _ir_slice_literal's own
+            docstring for the malloc-size one, and gen_statement_ir's
+            own Return case for the dispatch one (`return [1, 2, 3]`
+            from a slice-returning function used to segfault, since
+            the ARRAY branch was taken unconditionally).
 
         Every case that does real work between "start" and "write the
         result" -- every one except Variable and Call -- protects
@@ -1637,13 +1739,20 @@ class ArraysSlicesMixin:
         Return's) finally exercised an array-of-slices literal through
         this dispatcher for the first time; slice-typed elements never
         reached here via any of this arc's own earlier test coverage
-        before that point. A slice-typed ArrayLiteral-shaped value_expr
-        currently falls through to the final `return None` below --
-        real slice-LITERAL construction (as opposed to slice
-        PRODUCTION via `arr[a:b]`, already real IR via _ir_slice_into)
-        has never been built as real IR anywhere in this arc; this is
-        a genuinely separate, unattempted piece of work, not something
-        this fix silently also solves.
+        before that point.
+
+        A slice-typed ArrayLiteral-shaped value_expr is now real IR
+        too, via _ir_slice_literal -- real slice-LITERAL construction
+        (as opposed to slice PRODUCTION via `arr[a:b]`, already real IR
+        via _ir_slice_into), a genuinely separate piece of work from
+        everything else in this method, built and wired in as its own,
+        later step. See _ir_slice_literal's own docstring for why it
+        takes no value_type parameter at all, unlike this method's own
+        ARRAY case just above -- and for two more real bugs (a malloc-
+        size one, and a Return-dispatch one) the identical ARRAY-vs-
+        SLICE ambiguity this docstring already documents above caused
+        during THAT migration too, in two different, more subtle
+        forms.
 
         Unifies, into one place, every composite-producing shape this
         arc has already built SEPARATELY, each for its own original
@@ -1695,6 +1804,12 @@ class ArraysSlicesMixin:
             return append_ir + self._ir_write_slice_descriptor_into_address(dst_address, ptr_value, len_value, cap_value)
         if value_type.kind == TypeKind.ARRAY and isinstance(value_expr, ArrayLiteral):
             return self._ir_write_array_literal_into(dst_address, value_expr, value_type)
+        if value_type.kind == TypeKind.SLICE and isinstance(value_expr, ArrayLiteral):
+            production = self._ir_slice_literal(value_expr)
+            if production is None:
+                return None
+            slice_ir, ptr_value, len_value, cap_value = production
+            return slice_ir + self._ir_write_slice_descriptor_into_address(dst_address, ptr_value, len_value, cap_value)
         if isinstance(value_expr, Call) and value_expr.name in self.struct_registry:
             return self._ir_write_struct_literal_into(dst_address, value_expr, value_type)
         if isinstance(value_expr, Call):
