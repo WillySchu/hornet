@@ -673,6 +673,31 @@ class ArraysSlicesMixin:
             return None
         return None
 
+    def _ir_nil_slice(self):
+        """Builds (without lowering) a nil slice's own {ptr, len, cap}
+        triple as real IR -- all-zero, matching this compiler's own
+        nil-slice representation throughout (ptr=0 -- never
+        dereferenced, since len=0 always gets checked first before any
+        element access; len=cap=0). Returns (ir, ptr_value, len_value,
+        cap_value), the identical shape _ir_indexable_base/_ir_
+        append_call/_ir_slice_into already return.
+
+        Shared by every VarDecl/Assign/IndexAssign/FieldAssign/Return
+        case initializing a slice-typed destination to a bare `none`,
+        and by _ir_slice_arg's own NoneLiteral case just below --
+        factored out here specifically so all of them build the
+        IDENTICAL triple from one place, rather than each duplicating
+        this same three-IRMove sequence independently."""
+        ptr = self._new_temp(Type.INT64)
+        length = self._new_temp(Type.INT)
+        cap = self._new_temp(Type.INT)
+        ir = [
+            IRMove(dst=ptr, src=IRConst(0, Type.INT64)),
+            IRMove(dst=length, src=IRConst(0, Type.INT)),
+            IRMove(dst=cap, src=IRConst(0, Type.INT)),
+        ]
+        return ir, ptr, length, cap
+
     def _ir_slice_arg(self, expr: Node):
         """Builds (without lowering) a slice-typed function-call
         argument's own {ptr, len, cap} triple as real IR -- returns
@@ -700,18 +725,10 @@ class ArraysSlicesMixin:
         NoneLiteral (`none` passed directly as an argument) is its
         own leaf here, not routed through _ir_indexable_base at all
         (which has no NoneLiteral case, since it only ever handles an
-        already-typed slice expression) -- three IRConst(0, ...)s,
+        already-typed slice expression) -- _ir_nil_slice's own triple,
         mirroring gen_slice_arg_into's own identical special case."""
         if isinstance(expr, NoneLiteral):
-            ptr = self._new_temp(Type.INT64)
-            length = self._new_temp(Type.INT)
-            cap = self._new_temp(Type.INT)
-            ir = [
-                IRMove(dst=ptr, src=IRConst(0, Type.INT64)),
-                IRMove(dst=length, src=IRConst(0, Type.INT)),
-                IRMove(dst=cap, src=IRConst(0, Type.INT)),
-            ]
-            return ir, ptr, length, cap
+            return self._ir_nil_slice()
 
         base = self._ir_indexable_base(expr)
         if base is not None:

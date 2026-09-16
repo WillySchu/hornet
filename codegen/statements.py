@@ -143,10 +143,24 @@ class StatementsMixin:
         needs this narrower treatment rather than an ordinary
         gen_expr_ir call).
 
+        A slice-typed VarDecl/Assign/IndexAssign/FieldAssign/Return
+        whose own value is a bare `none` is real IR too, via _ir_nil_
+        slice (an all-zero {ptr, len, cap} triple, matching this
+        compiler's own nil-slice representation) -- an ARRAY/STRUCT-
+        typed destination can never BE `none` at all, semantic.py
+        already rejects that outright, confirmed directly. A REAL BUG,
+        found and fixed as part of this same step: IndexAssign's own
+        `rows[0] = none` used to raise a hard CodegenError even via
+        old-style ("No codegen rule for a slice-typed value:
+        NoneLiteral") -- gen_slice_value_into itself never had a
+        NoneLiteral case at all, unlike gen_slice_arg_into's own
+        identical shape; confirmed to have crashed exactly this way on
+        the code before this fix, via revert-and-check.
+
         Falls back to wrapping gen_statement itself, as a single
         opaque IRRaw, for everything else (a Return whose value is an
         ArrayLiteral/struct-literal Call with some field/element out of
-        scope for _ir_write_composite_value_into, or bare `none`; a
+        scope for _ir_write_composite_value_into; a
         Slice-valued ExprStmt whose own base is out of scope for _ir_
         slice_into) -- a real, deliberate scope boundary, not an
         oversight: those still need their own IR-native handling as a
@@ -158,6 +172,21 @@ class StatementsMixin:
             )
             if not is_composite_return:
                 return self._ir_return(stmt.value)
+            # A composite return whose own value is a bare `none` --
+            # only ever reachable for a SLICE-typed return (ARRAY/
+            # STRUCT can never be `none` at all -- semantic.py already
+            # rejects that outright). _ir_nil_slice's own all-zero
+            # triple, written through the hidden pointer as an
+            # ordinary slice descriptor -- the same "materialize the
+            # value, write it through the hidden pointer" shape every
+            # other composite Return case here already uses. Real IR
+            # now; previously fell through to this method's own
+            # shared, final old-style fallback.
+            if isinstance(stmt.value, NoneLiteral):
+                hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr()
+                nil_ir, ptr_value, len_value, cap_value = self._ir_nil_slice()
+                write_ir = self._ir_write_slice_descriptor_into_address(hidden_ptr, ptr_value, len_value, cap_value)
+                return hidden_ptr_ir + nil_ir + write_ir + [IRReturn(value=None)]
             # A composite return whose own value is an ordinary
             # function call (`return someFn()`) -- forwards the
             # CURRENT function's own received hidden pointer straight
@@ -340,6 +369,19 @@ class StatementsMixin:
                     # garbage was already sitting there.
                     ir.extend(self._ir_malloc_and_store(var_type, offset))
                 return ir + self._ir_copy_assign(Variable(name=stmt.name), stmt.init, var_type)
+            # A slice-typed initializer that's a bare `none` -- _ir_
+            # nil_slice's own all-zero triple, matching this
+            # compiler's own nil-slice representation. Real IR now;
+            # previously fell through to this method's own shared,
+            # final old-style fallback, since no case anywhere in this
+            # dispatch handled a SLICE-typed destination with a bare
+            # NoneLiteral value specifically (ARRAY/STRUCT can never
+            # be `none` at all -- semantic.py already rejects that
+            # outright, confirmed directly).
+            if var_type.kind == TypeKind.SLICE and isinstance(stmt.init, NoneLiteral):
+                nil_ir, ptr_value, len_value, cap_value = self._ir_nil_slice()
+                self._bind_local(stmt)
+                return nil_ir + self._ir_write_slice_descriptor(Variable(name=stmt.name), ptr_value, len_value, cap_value)
             # A slice-typed initializer that's itself a Slice
             # production (`arr[a:b]`, not an alias of an existing
             # slice -- see _ir_slice_into for exactly which shapes of
@@ -508,6 +550,11 @@ class StatementsMixin:
             # allocation from declaration time, reused in place.
             if var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE) and isinstance(stmt.value, (Variable, Field, Index)):
                 return self._ir_copy_assign(Variable(name=stmt.name), stmt.value, var_type)
+            # Same none-value case as VarDecl's own, just above -- no
+            # binding concern here at all, unlike VarDecl's own.
+            if var_type.kind == TypeKind.SLICE and isinstance(stmt.value, NoneLiteral):
+                nil_ir, ptr_value, len_value, cap_value = self._ir_nil_slice()
+                return nil_ir + self._ir_write_slice_descriptor(Variable(name=stmt.name), ptr_value, len_value, cap_value)
             # Same Slice-production case as VarDecl's own, just above
             # -- no binding concern here at all, unlike VarDecl's own
             # (the destination already exists).
@@ -563,6 +610,17 @@ class StatementsMixin:
             if element_type.kind in (TypeKind.STRUCT, TypeKind.SLICE) and isinstance(stmt.value, (Variable, Field, Index)):
                 dst_expr = Index(array=stmt.array, index=stmt.index)
                 return self._ir_copy_assign(dst_expr, stmt.value, element_type)
+            # A REAL BUG, found and fixed here: `rows[0] = none` used
+            # to raise a hard CodegenError ("No codegen rule for a
+            # slice-typed value: NoneLiteral") even via old-style --
+            # gen_slice_value_into itself never had a NoneLiteral case
+            # at all, unlike gen_slice_arg_into's own identical shape.
+            # Confirmed to have crashed exactly this way on the code
+            # before this fix.
+            if element_type.kind == TypeKind.SLICE and isinstance(stmt.value, NoneLiteral):
+                nil_ir, ptr_value, len_value, cap_value = self._ir_nil_slice()
+                dst_expr = Index(array=stmt.array, index=stmt.index)
+                return nil_ir + self._ir_write_slice_descriptor(dst_expr, ptr_value, len_value, cap_value)
             if element_type.kind == TypeKind.SLICE and isinstance(stmt.value, Slice):
                 production = self._ir_slice_into(stmt.value)
                 if production is not None:
@@ -607,6 +665,11 @@ class StatementsMixin:
             if field_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE) and isinstance(stmt.value, (Variable, Field, Index)):
                 dst_expr = Field(base=stmt.base, name=stmt.name)
                 return self._ir_copy_assign(dst_expr, stmt.value, field_type)
+            # Same none-value case as IndexAssign's own, one level over.
+            if field_type.kind == TypeKind.SLICE and isinstance(stmt.value, NoneLiteral):
+                nil_ir, ptr_value, len_value, cap_value = self._ir_nil_slice()
+                dst_expr = Field(base=stmt.base, name=stmt.name)
+                return nil_ir + self._ir_write_slice_descriptor(dst_expr, ptr_value, len_value, cap_value)
             if field_type.kind == TypeKind.SLICE and isinstance(stmt.value, Slice):
                 production = self._ir_slice_into(stmt.value)
                 if production is not None:

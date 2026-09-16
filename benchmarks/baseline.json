@@ -10,7 +10,7 @@
     },
     "instruction_count": 105,
     "name": "arithmetic_heavy",
-    "runtime_seconds": 0.1336522020000075
+    "runtime_seconds": 0.11381491700001334
   },
   "array_heavy": {
     "allocation": {
@@ -23,7 +23,7 @@
     },
     "instruction_count": 499,
     "name": "array_heavy",
-    "runtime_seconds": 0.317868763999968
+    "runtime_seconds": 0.27589145900003587
   },
   "calling_convention_heavy": {
     "allocation": {
@@ -36,20 +36,20 @@
     },
     "instruction_count": 1362,
     "name": "calling_convention_heavy",
-    "runtime_seconds": 0.3347522909999725
+    "runtime_seconds": 0.2787296749999655
   },
   "copy_heavy": {
     "allocation": {
-      "allocated": 270,
-      "eligible": 304,
+      "allocated": 290,
+      "eligible": 328,
       "named_local_excluded": 0,
-      "spilled": 34,
-      "total_temps": 331,
+      "spilled": 38,
+      "total_temps": 355,
       "unsafe_span_excluded": 27
     },
-    "instruction_count": 1694,
+    "instruction_count": 1782,
     "name": "copy_heavy",
-    "runtime_seconds": 0.34423583599999574
+    "runtime_seconds": 0.27607953500000804
   },
   "loop_accumulator": {
     "allocation": {
@@ -62,7 +62,7 @@
     },
     "instruction_count": 47,
     "name": "loop_accumulator",
-    "runtime_seconds": 0.0689721360000135
+    "runtime_seconds": 0.05871858500000826
   },
   "recursive_fibonacci": {
     "allocation": {
@@ -75,7 +75,7 @@
     },
     "instruction_count": 76,
     "name": "recursive_fibonacci",
-    "runtime_seconds": 0.05613458900000978
+    "runtime_seconds": 0.047757282000020496
   },
   "string_heavy": {
     "allocation": {
@@ -88,7 +88,7 @@
     },
     "instruction_count": 120,
     "name": "string_heavy",
-    "runtime_seconds": 0.03190118899999561
+    "runtime_seconds": 0.02044600099998206
   },
   "struct_heavy": {
     "allocation": {
@@ -101,6 +101,6 @@
     },
     "instruction_count": 405,
     "name": "struct_heavy",
-    "runtime_seconds": 0.08780621299996483
+    "runtime_seconds": 0.06748429800001077
   }
 }

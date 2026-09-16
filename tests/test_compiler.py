@@ -11116,6 +11116,66 @@ class TestNone:
             "[]int[]\n",
         )
 
+    def test_slice_index_assign_with_none(self):
+        """Regression test for a real bug: `rows[0] = none` used to
+        raise a hard CodegenError ("No codegen rule for a slice-typed
+        value: NoneLiteral") even via old-style codegen -- gen_slice_
+        value_into itself never had a NoneLiteral case at all, unlike
+        gen_slice_arg_into's own identical shape. VarDecl/Assign's own
+        analogous case (see test_slice_vardecl_with_none/test_slice_
+        assign_with_none just above) already worked correctly, just
+        still via old-style -- this was a genuinely broken shape, not
+        just a slower one. Confirmed to have raised exactly this
+        CodegenError on the reverted code before writing this test
+        in."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    [1][]int rows\n"
+            "    rows[0] = none\n"
+            "    if rows[0] == none:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_slice_field_assign_with_none(self):
+        """`b.values = none` -- already worked correctly before this
+        arc's own real-IR fix (confirmed via instrumentation: this
+        already reached gen_statement's own shared, final old-style
+        fallback, unlike the IndexAssign case just above, which
+        crashed there instead), kept here as real-IR coverage, not a
+        bug regression test."""
+        assert_program_exit_code(
+            "struct Box:\n"
+            "    []int values\n"
+            "\n"
+            "def int main():\n"
+            "    Box b\n"
+            "    b.values = none\n"
+            "    if b.values == none:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_return_bare_none_from_slice_returning_function(self):
+        """`return none` from a slice-returning function -- already
+        worked correctly before this arc's own real-IR fix (confirmed
+        via instrumentation, the same way as the FieldAssign case just
+        above), kept here as real-IR coverage, not a bug regression
+        test."""
+        assert_program_exit_code(
+            "def []int makeNone():\n"
+            "    return none\n"
+            "\n"
+            "def int main():\n"
+            "    []int s = makeNone()\n"
+            "    if s == none:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
     def test_none_valued_slice_equals_none(self):
         assert_exit_code(
             "    []int s = none\n"
