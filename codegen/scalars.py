@@ -50,7 +50,7 @@ from codegen.assembly_ast import (
 from codegen.errors import CodegenError
 from codegen.ir import IRRaw, IRBranch, IRJump, IRLabel, IRMove, IRConst, IRCall
 from codegen.utils import as_qword_register, COMPARISON_CONDITION_CODES, as_byte_register, type_of
-from parser import Call, Binary, BinaryOp, UnaryOp, Variable, Field, Index, NoneLiteral
+from parser import Call, Binary, BinaryOp, UnaryOp, Variable, Field, Index, NoneLiteral, ArrayLiteral
 from semantic import Type, TypeKind
 
 
@@ -80,29 +80,75 @@ class ScalarsMixin:
     def _ir_call_arguments(self, args: list) -> tuple:
         """The shared per-argument marshaling loop between _ir_call
         and _ir_composite_call -- see _ir_call's own docstring for the
-        full per-argument real-IR-or-fallback reasoning; this is just
-        the extracted loop, returning (arg_ir, arg_values) rather than
-        building the final IRCall itself, since the two callers differ
-        in exactly that (an ordinary dst Temp vs. a hidden hidden-
-        pointer argument with dst=None)."""
+        general per-argument real-IR-or-fallback architecture; this is
+        just the extracted loop, returning (arg_ir, arg_values) rather
+        than building the final IRCall itself, since the two callers
+        differ in exactly that (an ordinary dst Temp vs. a hidden
+        hidden-pointer argument with dst=None).
+
+        ARRAY-typed argument, in dispatch order: a Variable/Field/
+        Index (an existing address, via _ir_array_address -- itself
+        can still return None for an Index/Field whose own BASE is out
+        of scope, so this checks for that explicitly rather than
+        assuming success); a bare bracketed-list literal (_ir_
+        materialize_array_literal); an ordinary composite-returning
+        Call (_ir_materialize_composite_call); anything else (there
+        isn't one -- every ARRAY-typed expression is one of these
+        three shapes) falls back to the old-style, IRRaw-wrapped
+        _gen_materialize_argument_temp_into, which only remains
+        reachable at all when one of the real-IR attempts above
+        returns None for its own, deeper reason (an out-of-scope
+        nested element, for instance).
+
+        STRUCT-typed argument: identical shape, just Variable/Field/
+        Index via _ir_struct_address, a struct-literal Call (name
+        found in self.struct_registry) via _ir_materialize_struct_
+        literal, then an ordinary composite-returning Call via _ir_
+        materialize_composite_call again -- the same three exhaustive
+        shapes, one level over.
+
+        Both of _ir_materialize_array_literal/_ir_materialize_struct_
+        literal are new here -- reusing a reservation _collect_
+        argument_temps has made for exactly this AST position since
+        before this arc's own addressable-base work existed at all;
+        this is that reservation finally getting a real-IR consumer of
+        its own, not a new mechanism. A struct-literal Call sitting
+        anywhere as an ARRAY-typed argument needs no case of its own:
+        no struct literal is ever ARRAY-typed in the first place."""
         arg_ir = []
         arg_values = []
         for arg in args:
             arg_type = type_of(arg)
             if arg_type.kind == TypeKind.ARRAY:
-                addr_result = self._ir_array_address(arg) if isinstance(arg, (Variable, Field, Index)) else None
-                if addr_result is not None:
-                    ir, addr_value = addr_result
-                else:
+                ir = None
+                if isinstance(arg, (Variable, Field, Index)):
+                    result = self._ir_array_address(arg)
+                    if result is not None:
+                        ir, addr_value = result
+                elif isinstance(arg, ArrayLiteral):
+                    result = self._ir_materialize_array_literal(arg)
+                    if result is not None:
+                        ir, addr_value = result
+                elif self._is_ordinary_composite_call(arg):
+                    ir, addr_value = self._ir_materialize_composite_call(arg, arg_type)
+                if ir is None:
                     addr_value = self._new_temp(Type.INT64)
                     ir = [IRRaw(self._gen_materialize_argument_temp_into(arg, arg_type, Register('rax')), dst=addr_value)]
                 arg_ir.extend(ir)
                 arg_values.append(addr_value)
             elif arg_type.kind == TypeKind.STRUCT:
-                addr_result = self._ir_struct_address(arg) if isinstance(arg, (Variable, Field, Index)) else None
-                if addr_result is not None:
-                    ir, addr_value = addr_result
-                else:
+                ir = None
+                if isinstance(arg, (Variable, Field, Index)):
+                    result = self._ir_struct_address(arg)
+                    if result is not None:
+                        ir, addr_value = result
+                elif isinstance(arg, Call) and arg.name in self.struct_registry:
+                    result = self._ir_materialize_struct_literal(arg)
+                    if result is not None:
+                        ir, addr_value = result
+                elif self._is_ordinary_composite_call(arg):
+                    ir, addr_value = self._ir_materialize_composite_call(arg, arg_type)
+                if ir is None:
                     addr_value = self._new_temp(Type.INT64)
                     ir = [IRRaw(self._gen_materialize_argument_temp_into(arg, arg_type, Register('rax')), dst=addr_value)]
                 arg_ir.extend(ir)

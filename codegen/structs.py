@@ -27,7 +27,7 @@ from codegen.assembly_ast import (
     Register,
 )
 from codegen.errors import CodegenError
-from codegen.ir import IRBinOp, IRConst, IRStore, IRLoad, IRLocalAddress
+from codegen.ir import IRBinOp, IRConst, IRStore, IRLoad, IRLocalAddress, IRCall
 from codegen.utils import type_byte_width, type_of, leaf_type, gen_protecting_dst_across
 from parser import Node, Variable, Field, Index, Call, NoneLiteral, Binary, BinaryOp
 from semantic import TypeKind, Type
@@ -360,6 +360,43 @@ class StructsMixin:
                     ir.append(IRBinOp(dst=field_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(offset, Type.INT64)))
                 ir.append(IRStore(address=field_addr, value=arg_value, value_type=field_type))
         return ir
+
+    def _ir_materialize_struct_literal(self, expr: Call):
+        """Builds (without lowering) a struct-literal Call's own
+        materialized address as real IR -- returns (ir, address), or
+        None when some field is itself out of scope for _ir_write_
+        struct_literal_into (a named/partial literal, chiefly -- see
+        its own docstring). The struct-literal counterpart to _ir_
+        materialize_array_literal in arrays_slices.py, sharing its
+        exact same skeleton (a reserved slot, or malloc when none was
+        reserved) -- see its own docstring for the full reasoning,
+        which applies here unchanged. Used wherever a struct literal
+        is passed directly as a function-call argument (`draw(Point(1,
+        2))`) -- the identical AST position _collect_argument_temps
+        has always reserved a slot for, since before this arc's own
+        addressable-base work existed; this is that reservation's
+        real-IR consumer finally catching up to it, not a new
+        reservation of its own.
+
+        No value_type ambiguity to worry about here, unlike an
+        ArrayLiteral: a struct-literal Call's own type is
+        unambiguously its own struct name, not something that can
+        resolve differently by context the way a bracketed list can
+        (ARRAY vs SLICE) -- so type_of(expr) is simply, always
+        correct, with nothing to disambiguate."""
+        struct_type = type_of(expr)
+        if id(expr) in self._argument_temp_offsets:
+            offset = self._argument_temp_offsets[id(expr)]
+            addr = self._new_temp(Type.INT64)
+            addr_ir = [IRLocalAddress(dst=addr, offset=offset)]
+        else:
+            addr = self._new_temp(Type.INT64)
+            size = type_byte_width(struct_type, self.struct_registry)
+            addr_ir = [IRCall(dst=addr, name='malloc', args=[IRConst(size, Type.INT64)])]
+        write_ir = self._ir_write_struct_literal_into(addr, expr, struct_type)
+        if write_ir is None:
+            return None
+        return addr_ir + write_ir, addr
 
     def gen_struct_value_into(self, expr: Node, dst_mem: Memory, struct_type: Type) -> list[Instruction]:
         """Stores a struct-typed expression's VALUE into dst_mem,

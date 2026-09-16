@@ -9,6 +9,9 @@ struct Line:
     Point start
     Point end
 
+def int sumPointArg(Point p):
+    return p.x + p.y
+
 def int sumArray([3]int arr):
     return arr[0] + arr[1] + arr[2]
 
@@ -56,6 +59,9 @@ def int main():
         int madePointField = makePoint(i).x
         []int madeSlice = makeArray(i)[0:2]
         int sumMadeSlice = madeSlice[0] + madeSlice[1]
-        total = (total + sumArr + sumSl + sumField + sumMade + sumForwarded + sumReturned + sumPoint + sumLine + madeArrIndexed + madePointField + sumMadeSlice) % 1000003
+        int sumLitArg = sumArray([i % 10, (i + 1) % 10, (i + 2) % 10])
+        int sumCallArg = sumArray(makeArray(i))
+        int sumStructLitArg = sumPointArg(Point(i % 11, (i + 1) % 11))
+        total = (total + sumArr + sumSl + sumField + sumMade + sumForwarded + sumReturned + sumPoint + sumLine + madeArrIndexed + madePointField + sumMadeSlice + sumLitArg + sumCallArg + sumStructLitArg) % 1000003
         i = i + 1
     return total % 256

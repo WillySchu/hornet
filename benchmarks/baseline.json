@@ -10,7 +10,7 @@
     },
     "instruction_count": 105,
     "name": "arithmetic_heavy",
-    "runtime_seconds": 0.13403097899998784
+    "runtime_seconds": 0.13331462399997918
   },
   "array_heavy": {
     "allocation": {
@@ -23,20 +23,20 @@
     },
     "instruction_count": 368,
     "name": "array_heavy",
-    "runtime_seconds": 0.05404431499999873
+    "runtime_seconds": 0.05443573100001231
   },
   "calling_convention_heavy": {
     "allocation": {
-      "allocated": 209,
-      "eligible": 228,
+      "allocated": 234,
+      "eligible": 253,
       "named_local_excluded": 5,
       "spilled": 19,
-      "total_temps": 248,
-      "unsafe_span_excluded": 15
+      "total_temps": 277,
+      "unsafe_span_excluded": 19
     },
-    "instruction_count": 1221,
+    "instruction_count": 1362,
     "name": "calling_convention_heavy",
-    "runtime_seconds": 0.2886108270000136
+    "runtime_seconds": 0.33777799400002095
   },
   "copy_heavy": {
     "allocation": {
@@ -49,7 +49,7 @@
     },
     "instruction_count": 1231,
     "name": "copy_heavy",
-    "runtime_seconds": 0.1719050670000115
+    "runtime_seconds": 0.17261917799999082
   },
   "loop_accumulator": {
     "allocation": {
@@ -62,7 +62,7 @@
     },
     "instruction_count": 47,
     "name": "loop_accumulator",
-    "runtime_seconds": 0.06926826099999062
+    "runtime_seconds": 0.06930863100001261
   },
   "recursive_fibonacci": {
     "allocation": {
@@ -75,7 +75,7 @@
     },
     "instruction_count": 76,
     "name": "recursive_fibonacci",
-    "runtime_seconds": 0.05633992200000648
+    "runtime_seconds": 0.05817862899999682
   },
   "string_heavy": {
     "allocation": {
@@ -88,7 +88,7 @@
     },
     "instruction_count": 120,
     "name": "string_heavy",
-    "runtime_seconds": 0.030577061999963462
+    "runtime_seconds": 0.03142154200003233
   },
   "struct_heavy": {
     "allocation": {
@@ -101,6 +101,6 @@
     },
     "instruction_count": 303,
     "name": "struct_heavy",
-    "runtime_seconds": 0.03840283499999941
+    "runtime_seconds": 0.03834863000002997
   }
 }
