@@ -7,7 +7,7 @@ branch of one of these two."""
 
 from codegen.assembly_ast import Operand, Instruction, MovQ, Imm, Mov, Memory, Register
 from codegen.errors import CodegenError
-from codegen.ir import IRRaw, IRBinOp, IRValue, IRConst, IRLoad, IRMove, IRJump, IRLabel
+from codegen.ir import IRRaw, IRBinOp, IRValue, IRConst, IRLoad, IRMove, IRJump, IRLabel, IRStaticDataAddress
 from codegen.utils import as_qword_register, type_of
 from typing import Optional
 from parser import (
@@ -311,14 +311,21 @@ class DispatchMixin:
         if isinstance(expr, BoolLiteral):
             return [], IRConst(1 if expr.value else 0, Type.BOOL)
         if isinstance(expr, StringLiteral):
-            # A single instruction (LeaQ into a static .data label --
-            # see gen_string_literal_into's own docstring), captured
-            # via IRRaw the same way every other single-instruction
-            # leaf in this arc is (a named variable's own address,
-            # ...): not a genuine computation to make inspectable,
-            # just materializing a fixed, compile-time-known location.
+            # A static .data label's own address -- IRStaticDataAddress
+            # directly, not gen_string_literal_into's own IRRaw-wrapped
+            # LeaQ: this IS exactly the leaf IRStaticDataAddress exists
+            # for (see its own docstring), just never converted until
+            # now. Registers this literal's own content for later
+            # emission the identical way gen_string_literal_into
+            # already does -- a fresh label per occurrence, even for
+            # identical content, no deduplication -- just inlined here
+            # rather than delegating to that method for what's now a
+            # two-line operation with no old-style instruction sequence
+            # left to wrap at all.
             t = self._new_temp(Type.STR)
-            return [IRRaw(self.gen_string_literal_into(expr, Register('eax')), dst=t)], t
+            label = self.new_label("str")
+            self.string_literals.append((label, expr.value))
+            return [IRStaticDataAddress(dst=t, label=label)], t
         if isinstance(expr, Variable):
             return [], self._local_temp(expr.name)
         if isinstance(expr, Index) and type_of(expr).kind not in (TypeKind.ARRAY, TypeKind.STRUCT):
