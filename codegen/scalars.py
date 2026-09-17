@@ -55,7 +55,6 @@ from semantic import Type, TypeKind
 
 
 class ScalarsMixin:
-
     def _ir_call_arguments(self, args: list) -> tuple:
         """The shared per-argument marshaling loop between _ir_call
         and _ir_composite_call -- see _ir_call's own docstring for the
@@ -263,7 +262,6 @@ class ScalarsMixin:
             )
         arg_ir, arg_values = self._ir_call_arguments(call_expr.args)
         return arg_ir + [IRCall(dst=None, name=call_expr.name, args=[dst_address] + arg_values)]
-
 
     def _ir_short_circuit(self, expr: Binary, *, short_circuit_value: int, label_prefix: str) -> tuple[list, object]:
         """Builds (without lowering) the shared IR for AND/OR --

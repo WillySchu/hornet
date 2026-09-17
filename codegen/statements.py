@@ -34,7 +34,6 @@ from semantic import TypeKind, Type, type_from_name
 
 
 class StatementsMixin:
-
     def gen_statement_ir(self, stmt: Node) -> list:
         """Builds real IR for every statement kind this compiler
         supports: Return/If/While (recursing into itself, not a
@@ -924,9 +923,6 @@ class StatementsMixin:
             IRStore(address=slot_addr, value=ptr, value_type=Type.INT64),
         ]
 
-
-
-
     def _ir_index_assign(self, stmt: IndexAssign, element_type) -> list:
         """Builds (without lowering) the scalar-element case of an
         IndexAssign -- the caller (gen_statement_ir) is responsible
@@ -1006,7 +1002,6 @@ class StatementsMixin:
         dst_ir, dst_addr = address_of(dst_expr)
         return dst_ir + self._ir_copy_into_address(dst_addr, src_expr, value_type)
 
-
     def _ir_field_assign(self, stmt: FieldAssign, field_type) -> list:
         """Builds (without lowering) the scalar-field case of a
         FieldAssign -- the caller (gen_statement_ir) is responsible
@@ -1026,8 +1021,6 @@ class StatementsMixin:
         addr_ir, addr_value = result
         value_ir, value = self.gen_expr_ir(stmt.value)
         return addr_ir + value_ir + [IRStore(address=addr_value, value=value, value_type=field_type)]
-
-
 
     def _ir_return(self, value_expr) -> list:
         """Builds (without lowering) IRReturn for a bare return
@@ -1059,7 +1052,6 @@ class StatementsMixin:
         ]
         return ir, hidden_ptr
 
-
     def _ir_if_head(self, stmt: If, then_label: str, else_label: str) -> list:
         """Builds (without lowering) the condition-and-branch IR
         landing at the given then/else labels -- the caller (gen_
@@ -1070,7 +1062,6 @@ class StatementsMixin:
             IRBranch(cond=cond_value, true_label=then_label, false_label=else_label),
             IRLabel(then_label),
         ]
-
 
     def _ir_while_head(self, stmt: While, start_label: str, body_label: str, end_label: str) -> list:
         """Builds (without lowering) the start-label/condition/branch
@@ -1083,7 +1074,6 @@ class StatementsMixin:
             IRLabel(body_label),
         ]
 
-
     def _ir_break(self) -> list:
         """Builds real IR for a bare `break`: the innermost loop's own
         end label (see loop_labels), raising CodegenError if none is
@@ -1092,7 +1082,6 @@ class StatementsMixin:
             raise CodegenError("'break' outside of a loop")
         _, end_label = self.loop_labels[-1]
         return [IRJump(end_label)]
-
 
     def _ir_continue(self) -> list:
         """Builds real IR for a bare `continue`: the innermost loop's

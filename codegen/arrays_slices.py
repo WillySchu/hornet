@@ -54,10 +54,6 @@ from semantic import TypeKind, Type
 
 
 class ArraysSlicesMixin:
-
-
-
-
     def _ir_array_address(self, expr: Node):
         """The address of an array-typed expr -- Variable is the one
         genuine leaf (a fixed, compile-time
@@ -480,7 +476,6 @@ class ArraysSlicesMixin:
 
         return base_ir + index_ir + [check, multiply, add], result
 
-
     def _ir_slice_into(self, expr: Slice):
         """Builds (without lowering) expr.array[expr.low:expr.high]'s
         resulting {ptr, len, cap} triple as real IR -- returns (ir,
@@ -665,7 +660,6 @@ class ArraysSlicesMixin:
         dst_ir, dst_addr = result
         return dst_ir + self._ir_write_slice_descriptor_into_address(dst_addr, ptr_value, len_value, cap_value)
 
-
     def gen_array_copy(self, dst_mem: Memory, src_mem: Memory, array_type: Type) -> list[Instruction]:
         """Copies array_type's worth of data from src_mem to dst_mem
         -- both arbitrary Memory operands -- via a flat sequence of
@@ -742,11 +736,6 @@ class ArraysSlicesMixin:
                 chunk_off += 1
             off += leaf_width
         return instructions
-
-
-
-
-
 
     def _ir_write_zero_value_into(self, dst_address, value_type: Type) -> list:
         """Builds (without lowering) value_type's implicit zero value
@@ -1181,7 +1170,6 @@ class ArraysSlicesMixin:
                 ir.append(IRStore(address=elem_addr, value=elem_value, value_type=element_type))
         return ir
 
-
     def _ir_array_literal_side_effects_only(self, expr: ArrayLiteral) -> list:
         """A bare array-literal statement (`[3]int[1, 2, 3]` alone,
         with no assignment) never needs its VALUE materialized
@@ -1223,15 +1211,6 @@ class ArraysSlicesMixin:
             ir.extend(elem_ir)
         return ir
 
-
-
-
-
-
-
-
-
-
     def _ir_slice_none_comparison(self, expr: Binary):
         """Builds (without lowering) `slice_expr == none` or
         `slice_expr != none` (in either operand order) as real IR --
@@ -1264,8 +1243,6 @@ class ArraysSlicesMixin:
         t_result = self._new_temp(Type.BOOL)
         check = IRBinOp(dst=t_result, op=expr.op, left=ptr, right=IRConst(0, Type.INT64))
         return base_ir + [check], t_result
-
-
 
     def _gen_raw_byte_copy(self, dst: Register, src: Register, width: int) -> list[Instruction]:
         """Copies exactly `width` bytes from the address in src to the
@@ -1402,7 +1379,6 @@ class ArraysSlicesMixin:
 
         instructions.append(MovQ(src=r_new_ptr, dst=r_ptr))
         return instructions
-
 
     def _ir_write_append_value_at(self, target_addr, value_arg: Node, element_type: Type):
         """Writes append(s, value)'s own `value` argument at an
@@ -1571,10 +1547,6 @@ class ArraysSlicesMixin:
         ir = base_ir + [check, branch] + reuse_ir + realloc_ir + [IRLabel(end_label)]
         return ir, result_ptr, result_len, result_cap
 
-
-
-
-
     def _get_bounds_check_fail_label(self, message: str) -> str:
         """Lazily creates a per-function, per-message label that every
         bounds check using this exact `message` jumps to on failure --
@@ -1664,9 +1636,6 @@ class ArraysSlicesMixin:
             return None
         base_ir, ptr, length, cap = base
         return base_ir, length
-
-
-
 
     def _gen_malloc_array(self, array_type: Type) -> list[Instruction]:
         """Calls malloc for array_type's total footprint

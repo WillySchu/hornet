@@ -37,8 +37,6 @@ _TYPEDESC_INT64 = 8
 
 
 class StringsMixin:
-
-
     def _get_or_build_type_descriptor(self, t: Type, in_progress: dict[Type, str]) -> str:
         """Returns the label of t's runtime type descriptor, building
         and registering it into self.type_descriptors if it hasn't
@@ -117,10 +115,6 @@ class StringsMixin:
 
         return label
 
-
-
-
-
     def _get_empty_str_label(self) -> str:
         """A shared, static, empty ("") string constant -- str's zero
         value. Deliberately NOT a null pointer: every string operation
@@ -132,11 +126,6 @@ class StringsMixin:
             self._empty_str_label = self.new_label("empty_str")
             self.string_literals.append((self._empty_str_label, ""))
         return self._empty_str_label
-
-
-
-
-
 
     def _ir_print_call(self, expr: Call):
         """Builds (without lowering) print(x)'s own real IR -- returns
@@ -237,8 +226,6 @@ class StringsMixin:
 
         call_ir = [IRCall(dst=None, name='hornet_print', args=[value_addr, desc_addr])]
         return value_addr_ir + desc_ir + call_ir, None
-
-
 
     def _ir_string_concat(self, expr: Binary):
         """Builds (without lowering) `left + right` (both str) as real

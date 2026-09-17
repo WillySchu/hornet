@@ -29,8 +29,6 @@ class StructsMixin:
             offset += type_byte_width(field_type, self.struct_registry)
         raise CodegenError(f"Struct '{struct_name}' has no field '{field_name}'")
 
-
-
     def _ir_struct_address(self, expr: Node) -> tuple[list, object]:
         """Builds (without lowering) the address of a struct-typed
         expr -- Variable, Field, Index, or now an ordinary composite-
@@ -100,8 +98,6 @@ class StructsMixin:
         result = self._new_temp(Type.INT64)
         add_op = IRBinOp(dst=result, op=BinaryOp.ADD, left=base_addr, right=IRConst(offset, Type.INT64))
         return base_ir + [add_op], result
-
-
 
     def _ir_write_struct_literal_into(self, dst_address, expr: Call, struct_type: Type):
         """Builds (without lowering) a struct literal's fields as real
@@ -227,7 +223,6 @@ class StructsMixin:
         if write_ir is None:
             return None
         return addr_ir + write_ir, addr
-
 
     def _check_struct_and_field_type(self, base_expr: Node, field_name: str) -> Type:
         """Returns field_name's declared type within base_expr's

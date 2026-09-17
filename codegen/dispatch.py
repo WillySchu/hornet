@@ -40,7 +40,6 @@ from semantic import Type, TypeKind
 
 
 class DispatchMixin:
-
     def gen_expr_ir(self, expr: Node) -> tuple[list, Optional[IRValue]]:
         """Builds real IR for the node kinds that have it -- a bare
         Constant/BoolLiteral (see below), a scalar Variable (see
@@ -343,7 +342,6 @@ class DispatchMixin:
                 ]
                 return ir, t
         return self._ir_binary(expr)
-
 
     def _ir_binary(self, expr: Binary) -> tuple[list, object]:
         """Builds (without lowering) the ordinary arithmetic/comparison

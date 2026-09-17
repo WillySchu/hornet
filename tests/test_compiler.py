@@ -740,7 +740,10 @@ def compile_and_run(source: str) -> subprocess.CompletedProcess:
         # assembled inline here). Unconditional, regardless of whether
         # THIS particular program happens to call print, matching
         # build_executable's own reasoning exactly.
-        runtime_cc_cmd = ["gcc", "-c", str(RUNTIME_C_PATH), "-o", str(runtime_o_path)]
+        runtime_cc_cmd = ["gcc"]
+        if HOST_IS_MACOS:
+            runtime_cc_cmd += ["-arch", "x86_64"]
+        runtime_cc_cmd += ["-c", str(RUNTIME_C_PATH), "-o", str(runtime_o_path)]
         runtime_result = subprocess.run(runtime_cc_cmd, capture_output=True, text=True)
         if runtime_result.returncode != 0:
             pytest.fail(

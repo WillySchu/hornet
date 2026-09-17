@@ -166,7 +166,10 @@ def run_one(ht_path: Path) -> dict:
         # print(), but leaving this benchmark harness's own linking
         # silently dependent on that staying true would be fragile,
         # not a deliberate scope boundary.
-        runtime_cc_cmd = ['gcc', '-c', str(RUNTIME_C_PATH), '-o', str(runtime_o_path)]
+        runtime_cc_cmd = ['gcc']
+        if HOST_IS_MACOS:
+            runtime_cc_cmd += ['-arch', 'x86_64']
+        runtime_cc_cmd += ['-c', str(RUNTIME_C_PATH), '-o', str(runtime_o_path)]
         runtime_result = subprocess.run(runtime_cc_cmd, capture_output=True, text=True)
         if runtime_result.returncode != 0:
             raise RuntimeError(f"gcc failed to compile runtime.c:\n{runtime_result.stderr}")
