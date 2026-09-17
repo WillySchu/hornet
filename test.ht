@@ -29,10 +29,6 @@ def HasArray make_ha():
 
 def int8 main():
     HasArray ha = HasArray([1,2,3,4,5])
-    # TODO(will): Fix these commented out examples.
-    #print(test(ha.values))
 
-    # TODO(will): Fix these examples.
-    #print(ha.values == make_ha().values)
-    #print(make_ha().values)
+    print(ha.values == make_ha().values)
     return 0

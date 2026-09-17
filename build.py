@@ -28,6 +28,18 @@ RUNTIME_C_PATH = REPO_ROOT / "runtime" / "runtime.c"
 
 CC = "gcc"  # matches the compiler used throughout this project's own test suite
 
+# Same convention tests/test_compiler.py's own HOST_IS_MACOS/ASM_PLATFORM
+# already use. Without -arch x86_64, gcc's own default target on an
+# Apple Silicon Mac is arm64 -- its own assembler then has no idea
+# what to do with this compiler's x86-64 AT&T-syntax output at all
+# (every register becomes an "unknown token", every `call`/`leave`
+# an "unrecognized instruction mnemonic", since none of that syntax
+# means anything as arm64). This was a real, reported bug: build.py
+# never added this flag at all, unlike every other gcc-invoking
+# harness in this repo, which already did.
+HOST_IS_MACOS = sys.platform == "darwin"
+DEFAULT_PLATFORM = "macos" if HOST_IS_MACOS else "linux"
+
 
 class BuildError(Exception):
     """Raised when any step of the build (codegen, compiling
@@ -38,6 +50,8 @@ class BuildError(Exception):
 
 
 def _run(args: list[str], step_name: str) -> None:
+    if HOST_IS_MACOS:
+        args = args[:1] + ["-arch", "x86_64"] + args[1:]
     result = subprocess.run(args, capture_output=True, text=True)
     if result.returncode != 0:
         raise BuildError(
@@ -47,10 +61,19 @@ def _run(args: list[str], step_name: str) -> None:
         )
 
 
-def build_executable(source_path: str, output_path: str, platform: str = "linux") -> None:
+def build_executable(source_path: str, output_path: str, platform: str = DEFAULT_PLATFORM) -> None:
     """Compiles `source_path` (a .ht file) and links it, together with
     a freshly-compiled runtime.c, into a single executable at
     `output_path`.
+
+    `platform` defaults to whatever this function is actually running
+    on (DEFAULT_PLATFORM), not a hardcoded choice -- it affects both
+    compile_to_asm's own symbol-naming convention (a leading
+    underscore on every external symbol, on macOS) and, via _run
+    above, the -arch flag gcc itself needs to match. Passing a
+    DIFFERENT platform than the host is still allowed (e.g. inspecting
+    macOS-shaped assembly output while developing on Linux), it just
+    won't produce a binary this host can actually run.
 
     Raises BuildError (wrapping the underlying failure's own stderr)
     if lexing/parsing/semantic analysis fails (propagated directly,
@@ -75,8 +98,8 @@ def main() -> None:
     arg_parser = argparse.ArgumentParser(description="Builds a runnable executable from a Hornet source file.")
     arg_parser.add_argument("file", type=str, help="Source file to compile.")
     arg_parser.add_argument(
-        "--platform", choices=["macos", "linux"], default="linux",
-        help="Target platform; affects symbol naming. Default: linux",
+        "--platform", choices=["macos", "linux"], default=DEFAULT_PLATFORM,
+        help=f"Target platform; affects symbol naming. Default: {DEFAULT_PLATFORM} (this host)",
     )
     arg_parser.add_argument(
         "-o", "--output", type=str, required=True,

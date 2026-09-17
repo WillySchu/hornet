@@ -59,3 +59,34 @@ def test_build_executable_raises_build_error_with_actionable_message_on_bad_runt
     message = str(exc_info.value)
     assert "compiling runtime.c" in message
     assert "gcc" in message
+
+
+def test_run_adds_arch_x86_64_flag_on_macos(monkeypatch):
+    """A real, reported bug: build.py never added -arch x86_64 at all,
+    unlike every other gcc-invoking harness in this repo (tests/
+    test_compiler.py, benchmarks/run_benchmarks.py). Without it, gcc's
+    own default target on an Apple Silicon Mac is arm64 -- its
+    assembler then rejects this compiler's x86-64 AT&T-syntax output
+    outright, every register an "unknown token", every `call`/`leave`
+    an "unrecognized instruction mnemonic". Verified here via a
+    monkeypatched HOST_IS_MACOS rather than requiring an actual macOS
+    host to run this test at all."""
+    monkeypatch.setattr(build, "HOST_IS_MACOS", True)
+    captured = []
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda args, **kwargs: captured.append(list(args)) or subprocess.CompletedProcess(args, 0, "", ""),
+    )
+    build._run(["gcc", "-c", "foo.c", "-o", "foo.o"], "test step")
+    assert captured[-1] == ["gcc", "-arch", "x86_64", "-c", "foo.c", "-o", "foo.o"]
+
+
+def test_run_omits_arch_flag_on_non_macos(monkeypatch):
+    monkeypatch.setattr(build, "HOST_IS_MACOS", False)
+    captured = []
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda args, **kwargs: captured.append(list(args)) or subprocess.CompletedProcess(args, 0, "", ""),
+    )
+    build._run(["gcc", "-c", "foo.c", "-o", "foo.o"], "test step")
+    assert captured[-1] == ["gcc", "-c", "foo.c", "-o", "foo.o"]
