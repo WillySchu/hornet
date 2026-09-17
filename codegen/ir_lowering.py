@@ -1,8 +1,8 @@
 """Lowers a list of ir.py instructions into assembly_ast.py
 Instructions -- the "instruction selection" step of this pipeline.
-v1, deliberately: every Temp gets its own permanent stack slot,
+v1, deliberately: every Temp gets its own permanent frame slot,
 assigned the first time it's referenced here (see _temp_mem; the same
-host._next_offset allocator _collect_locals/_reserve_argument_temp
+host._new_slot allocator _collect_locals/_reserve_argument_temp
 already share) -- allocating a Temp itself (_new_temp, in codegen.py)
 makes no storage decision at all. An op that combines two values
 loads them into scratch registers, then hands off to the host's own
@@ -10,16 +10,24 @@ gen_binary_op/gen_unary_op (ScalarsMixin) as this pass's own
 instruction-selection rule -- that arithmetic isn't reimplemented
 here. Real register allocation now exists (register_allocator.py) and
 hooks in at _gen_read_temp_into/_gen_write_temp_from: _temp_mem's own
-permanent-stack-slot policy remains exactly this, used as the
-fallback for whichever Temps the allocator didn't promote.
+permanent-frame-slot policy remains exactly this, used as the
+fallback for whichever Temps the allocator didn't promote -- except
+that an anonymous Temp's own slot, discovered here for the first time,
+can't be resolved to a real offset immediately the way every other
+slot in this compiler is: host._resolve_frame_layout already ran once,
+before this method's own caller (lower_ir) ever started. _temp_mem
+returns a FrameSlot placeholder for one of these instead (see its own
+docstring), and lower_function is what resolves every one of them,
+in one pass, after lower_ir returns.
 
 InstructionSelector is a standalone class, not a CodeGenerator mixin
 (it was one -- IRLoweringMixin -- until every dependency below was
 made an explicit constructor argument instead of an implicit
 assumption about whatever else happened to be mixed into a shared
 self). `host` is still held and read/written directly for two pieces
-of state -- _next_offset and _temp_offsets -- because those are
-genuinely shared with CodeGenerator's own stack-slot allocation for
+of state -- the slot registry (_new_slot/_slot_widths/_slot_labels)
+and _temp_slots/_temp_offsets -- because those are
+genuinely shared with CodeGenerator's own frame-slot allocation for
 named locals/parameters (see _temp_at_offset): fully separating them
 would mean also restructuring that side, a distinct, larger piece of
 work this doesn't attempt. Every OTHER dependency (which leaf codegen
@@ -28,7 +36,10 @@ listed here, in one place, rather than discovered by grepping for
 self. across the rest of the codebase.
 """
 
-from codegen.assembly_ast import Instruction, Register, Memory, Imm, Mov, MovQ, Cmp, Je, Jae, Ja, Jmp, Label, CallInstr, LeaQFrame, LeaQ
+from codegen.assembly_ast import (
+    Instruction, Operand, Register, Memory, FrameSlot, Imm, Mov, MovQ, Cmp, Je, Jae, Ja, Jmp, Label, CallInstr,
+    LeaQFrame, LeaQ,
+)
 from codegen.ir import (
     IRBinOp,
     IRBoundsCheck,
@@ -62,21 +73,41 @@ class InstructionSelector:
     def __init__(self, host):
         self.host = host
 
-    def _temp_mem(self, temp: Temp) -> Memory:
-        """Returns temp's Memory location, assigning it a permanent
-        stack slot the first time it's referenced (memoized in
-        host._temp_offsets) rather than at temp-creation time -- see
+    def _temp_mem(self, temp: Temp) -> Operand:
+        """Returns temp's own frame location, assigning it a fresh
+        logical slot the first time it's referenced (memoized in
+        host._temp_slots) rather than at temp-creation time -- see
         _new_temp's own docstring for why storage assignment is kept
         separate from allocating the temp itself. This is the
         fallback every Temp used to rely on unconditionally; now it's
         only reached for one that register_allocator.py didn't (or
         couldn't -- see its own module docstring) promote to a
         physical register -- see _gen_read_temp_into/_gen_write_temp_
-        from, the two places that actually decide which applies."""
-        if temp.id not in self.host._temp_offsets:
-            self.host._next_offset -= type_byte_width(temp.type, self.host.struct_registry)
-            self.host._temp_offsets[temp.id] = self.host._next_offset
-        return Memory('rbp', self.host._temp_offsets[temp.id])
+        from, the two places that actually decide which applies.
+
+        A named-local Temp (host._temp_offsets already has one,
+        assigned eagerly by _temp_at_offset when the Temp itself was
+        created) already has a real, resolved offset by this point --
+        host._resolve_frame_layout ran before any body IR was even
+        built (see gen_function_ir's own ordering) -- so that case
+        still returns an ordinary, concrete Memory directly, exactly
+        as before.
+
+        An anonymous Temp reaching here for the first time is
+        different: its own slot genuinely isn't known until THIS
+        moment, mid-lowering, well after host._resolve_frame_layout's
+        own first pass already ran. host._new_slot still hands out a
+        logical id for it, same as every other slot -- but this
+        returns a FrameSlot placeholder instead of a resolved Memory
+        (see its own docstring for why, and for _patch_frame_slots,
+        the pass that resolves it later, once lower_function calls
+        host._resolve_frame_layout a second time)."""
+        if temp.id in self.host._temp_offsets:
+            return Memory('rbp', self.host._temp_offsets[temp.id])
+        if temp.id not in self.host._temp_slots:
+            width = type_byte_width(temp.type, self.host.struct_registry)
+            self.host._temp_slots[temp.id] = self.host._new_slot(width, f"temp:{temp.id}")
+        return FrameSlot(slot=self.host._temp_slots[temp.id])
 
     def _gen_load_value(self, value: IRValue, dst: Register) -> list[Instruction]:
         """Loads an IRValue (a Temp's current value, or a compile-time

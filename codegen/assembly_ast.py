@@ -41,6 +41,38 @@ class Memory(Operand):
         return f"{self.offset}(%{self.base})"
 
 
+@dataclass
+class FrameSlot(Operand):
+    """A placeholder %rbp-relative frame slot, not yet resolved to a
+    concrete byte offset -- what codegen.py's own _temp_mem now builds
+    for any Temp register_allocator.py didn't promote to a register,
+    whose own logical slot (see codegen.py's own _new_slot) was only
+    discovered lazily, during lowering itself. Unlike every OTHER slot
+    this compiler reserves (a named local, a parameter, a compiler
+    scratch slot), all of which are known -- and already resolved to a
+    real offset via _resolve_frame_layout -- before any body IR is
+    even built (see gen_function_ir's own ordering), one of these
+    can't be resolved the moment it's created: _resolve_frame_layout
+    has already run once by the time lowering starts. Instead,
+    _patch_frame_slots is what walks the ENTIRE final instruction list
+    -- parameter marshaling and the lowered body alike -- once every
+    slot a function ever needed (reserved up front, or discovered here)
+    is finally known, replacing every one of these with an ordinary,
+    concrete Memory operand.
+
+    emit() deliberately has no implementation: reaching Emitter.py
+    with one of these still unresolved is a bug in that patch pass,
+    not something to paper over with a plausible-looking fallback."""
+    slot: int
+
+    def emit(self) -> str:
+        raise NotImplementedError(
+            f"FrameSlot(slot={self.slot}) reached emit() unresolved -- "
+            f"_patch_frame_slots should have replaced every one of "
+            f"these with a concrete Memory operand first"
+        )
+
+
 class Instruction:
     """Base class for assembly instructions.
 
