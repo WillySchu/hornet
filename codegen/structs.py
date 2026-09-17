@@ -51,10 +51,10 @@ class StructsMixin:
         needing its own, second meaning (see IRLocalAddress's own
         docstring)."""
         if isinstance(expr, Variable):
-            offset = self._local_offset(expr.name)
+            slot = self._local_slot(expr.name)
             struct_type = self._local_type(expr.name)
             slot_addr = self._new_temp(Type.INT64)
-            ir = [IRLocalAddress(dst=slot_addr, offset=offset)]
+            ir = [IRLocalAddress(dst=slot_addr, slot=slot)]
             if self._is_heap_allocated(self._local_decl_id(expr.name), struct_type):
                 addr_temp = self._new_temp(Type.INT64)
                 ir.append(IRLoad(dst=addr_temp, address=slot_addr))
@@ -211,10 +211,10 @@ class StructsMixin:
         (ARRAY vs SLICE) -- so type_of(expr) is simply, always
         correct, with nothing to disambiguate."""
         struct_type = type_of(expr)
-        if id(expr) in self._argument_temp_offsets:
-            offset = self._argument_temp_offsets[id(expr)]
+        if id(expr) in self._argument_temp_slots:
+            slot = self._argument_temp_slots[id(expr)]
             addr = self._new_temp(Type.INT64)
-            addr_ir = [IRLocalAddress(dst=addr, offset=offset)]
+            addr_ir = [IRLocalAddress(dst=addr, slot=slot)]
         else:
             addr = self._new_temp(Type.INT64)
             size = type_byte_width(struct_type, self.struct_registry)

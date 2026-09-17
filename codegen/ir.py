@@ -54,11 +54,17 @@ class Temp:
 
     `is_named_local`, set only by CodeGenerator._temp_at_offset, marks
     a Temp that backs a source-level variable rather than an anonymous
-    compiler-generated value. register_allocator.py excludes these
-    unconditionally: a named variable's memory slot can still be read
-    or written directly (via _local_offset), bypassing the Temp
-    entirely, by any not-yet-migrated construct -- promoting one to a
-    register would risk exactly that code reading a stale value."""
+    compiler-generated value. register_allocator.py excludes these by
+    default: this function's own parameter-marshaling code (still
+    plain Instructions, not real IR -- see gen_function_ir) can write
+    a scalar/str parameter's own initial value directly into its slot,
+    bypassing this Temp entirely, before register_allocator.py ever
+    runs -- promoting that Temp to a register regardless would mean
+    nothing ever actually loads the real value into it. safe_named_
+    locals (computed in lower_function) is what selectively lifts this
+    default exclusion for every OTHER named-local Temp, once that
+    hazard is confirmed absent for it specifically -- see its own
+    comment."""
     id: int
     type: Type
     is_named_local: bool = False
@@ -192,13 +198,22 @@ class IRStore:
 
 @dataclass
 class IRLocalAddress:
-    """dst = the address of the current frame's own local slot at
-    `offset` bytes from its base -- x86-64's own LeaQFrame, expressed
+    """dst = the address of the current frame's own local slot
+    identified by `slot` -- x86-64's own LeaQFrame, expressed
     architecture-agnostically: a hypothetical ARM64 lowering would
     emit whatever ITS OWN frame-relative addressing looks like, with
     zero change needed to this op, or to anything built on top of it
     (every other real IR op already references nothing x86-64-
     specific at all).
+
+    `slot` is a purely logical identifier -- see codegen.py's own
+    _new_slot -- carrying no physical byte offset of its own at all:
+    this op, and everything built on top of it, never needs to know
+    where in the frame a slot actually lives, only which slot it
+    means. _resolve_frame_layout is the one place that ever decides
+    what offset a slot gets, once every slot a function needs is
+    known; this op is deliberately never the place that decision gets
+    made, the same reason it doesn't carry a raw offset directly.
 
     Always means "the address of this slot," never "the value stored
     there," even for a slot that happens to hold a POINTER to heap-
@@ -211,13 +226,13 @@ class IRLocalAddress:
     +8/+16 IRBinOp composition for an identical example).
 
     Covers a named user variable's own slot, a compiler-reserved
-    scratch slot (_unnamed_slice_temp_offset), and the hidden-return-
-    pointer slot alike -- every one of these is "a value at a fixed,
-    compile-time-known frame offset," the same underlying concept
-    regardless of what put it there or who reserved it, so one op
-    covers all three with no special-casing."""
+    scratch slot (_unnamed_slice_temp_slot), and the hidden-return-
+    pointer slot alike -- every one of these is "a value at some
+    slot, wherever frame layout ultimately puts it," the same
+    underlying concept regardless of what put it there or who
+    reserved it, so one op covers all three with no special-casing."""
     dst: Temp
-    offset: int
+    slot: int
 
 
 @dataclass

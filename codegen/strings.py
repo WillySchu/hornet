@@ -171,7 +171,7 @@ class StringsMixin:
         Index, via _ir_slice_address) from "needs one materialized"
         (everything else), this always writes that triple into the
         SAME shared, unconditionally-reserved 24-byte
-        _unnamed_slice_temp_offset scratch slot (reserved
+        _unnamed_slice_temp_slot scratch slot (reserved
         unconditionally for every function, in gen_function_ir -- see
         its own comment) and takes THAT slot's own address -- one path
         for every shape, not two.
@@ -181,7 +181,7 @@ class StringsMixin:
         real IR at all, since a scalar has only ever needed to live in
         a Temp before now, never at a durable address. Computes the
         value via gen_expr_ir, writes it into the existing,
-        unconditionally-reserved 8-byte _print_scalar_temp_offset
+        unconditionally-reserved 8-byte _print_scalar_temp_slot
         scratch slot (reserved unconditionally for every function, in
         gen_function_ir -- see its own comment), and takes that slot's
         own address. A deliberate, narrowly-scoped exception to
@@ -209,14 +209,14 @@ class StringsMixin:
         elif arg_type.kind == TypeKind.SLICE:
             slice_ir, ptr_value, len_value, cap_value = self._ir_slice_arg(arg)
             slice_addr = self._new_temp(Type.INT64)
-            value_addr_ir = slice_ir + [IRLocalAddress(dst=slice_addr, offset=self._unnamed_slice_temp_offset)]
+            value_addr_ir = slice_ir + [IRLocalAddress(dst=slice_addr, slot=self._unnamed_slice_temp_slot)]
             value_addr_ir.extend(
                 self._ir_write_slice_descriptor_into_address(slice_addr, ptr_value, len_value, cap_value))
             value_addr = slice_addr
         else:
             expr_ir, value = self.gen_expr_ir(arg)
             scalar_addr = self._new_temp(Type.INT64)
-            value_addr_ir = expr_ir + [IRLocalAddress(dst=scalar_addr, offset=self._print_scalar_temp_offset)]
+            value_addr_ir = expr_ir + [IRLocalAddress(dst=scalar_addr, slot=self._print_scalar_temp_slot)]
             value_addr_ir.append(IRStore(address=scalar_addr, value=value, value_type=arg_type))
             value_addr = scalar_addr
 

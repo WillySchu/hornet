@@ -87,8 +87,17 @@ class CodeGenerator(
     def __init__(self):
         self._instruction_selector = InstructionSelector(self)
         self._label_count = 0
-        self._var_offsets: Dict[int, int] = {}  # id(VarDecl node) -> its permanent Memory offset
+        self._var_slots: Dict[int, int] = {}  # id(VarDecl node) -> its permanent logical slot
         self._next_offset = 0
+        # Fresh-id counter for logical frame slots (see _new_slot),
+        # parallel to _temp_count below -- globally unique across the
+        # whole compilation, the same convention Temp.id already uses,
+        # even though a slot's own physical offset is only ever
+        # meaningful within the one function that reserved it.
+        self._slot_count = 0
+        self._slot_widths: Dict[int, int] = {}  # slot id -> its own byte width; reset per function
+        self._slot_labels: Dict[int, str] = {}  # slot id -> a debug label; reset per function
+        self._slot_offsets: Dict[int, int] = {}  # slot id -> its final, physical offset; see _resolve_frame_layout
         # IR temps (see ir.py): _temp_count is a fresh-id counter for
         # _new_temp, mirroring _label_count. _temp_offsets maps a
         # Temp's id to its permanent stack slot -- populated lazily by
@@ -97,22 +106,33 @@ class CodeGenerator(
         # _new_temp's own docstring for why that split matters.
         self._temp_count = 0
         self._temp_offsets: Dict[int, int] = {}
-        # Legacy access tracking: every offset _local_offset has ever
-        # been asked to resolve, for the CURRENT function (reset in
-        # gen_function, alongside _next_offset -- these are frame-
-        # relative, so a raw offset value means nothing across a
-        # function boundary). A named-local Temp is normally excluded
-        # from register allocation unconditionally, since old-style
-        # code can still read its memory slot directly, bypassing the
-        # Temp -- but that's only a real hazard for a variable old-
-        # style code actually touches. _local_offset is the one
-        # chokepoint every such access goes through (the IR-native
-        # path resolves a variable via _local_temp instead, which
-        # never touches this), so this set is an exact, by-
-        # construction record of which variables genuinely need to
-        # stay memory-resident -- see register_allocator.py's own
-        # eligible_intervals for how gen_function turns this into the
-        # safe_named_locals it passes in.
+        # Legacy access tracking: every offset written to directly, by
+        # this function's own parameter-marshaling code (see gen_
+        # function_ir's own scalar/str parameter cases below), bypassing
+        # the Temp mechanism entirely. Reset in gen_function_ir,
+        # alongside _next_offset -- these are frame-relative, so a raw
+        # offset value means nothing across a function boundary.
+        #
+        # Used to also be populated by _local_offset, on the theory
+        # that old-style code might read a variable's memory directly,
+        # bypassing its own Temp -- moot now that old-style code is
+        # gone entirely (confirmed directly: a composite-typed
+        # variable's own named-local Temp, the only kind _local_offset
+        # -- now _local_slot -- ever concerned itself with, never
+        # appears as an operand anywhere in the IR this compiler
+        # builds today, so excluding it from register allocation was
+        # already excluding something that could never have been
+        # eligible in the first place). Parameter marshaling is a
+        # narrower but still genuine reason this needs to exist: it
+        # writes a scalar/str parameter's own initial value directly
+        # into its permanent slot, never through _gen_write_temp_from,
+        # since register_allocator.py's own decision for that Temp
+        # isn't made yet at that point in the pipeline -- if that
+        # Temp were later allocated a register anyway, nothing would
+        # ever actually load the real parameter value into it. This
+        # will have nothing left to track once parameter marshaling
+        # itself is migrated off plain Instructions the same way
+        # everything else in this arc has been.
         self._escaped_offsets: set[int] = set()
         # False from the start of gen_function until this function's
         # OWN allocate_registers call has returned -- see ir_lowering.
@@ -127,7 +147,7 @@ class CodeGenerator(
         # ir_lowering.py's _gen_read_temp_into/_gen_write_temp_from,
         # the only two places that consult it.
         self._register_assignment: Dict[int, str] = {}
-        self.scopes: List[Dict[str, tuple]] = []  # name -> (offset, Type), generation-time
+        self.scopes: List[Dict[str, tuple]] = []  # name -> (slot, Type), generation-time
         self.loop_labels: List[tuple] = []  # stack of (start_label, end_label), innermost last
         self.string_literals: List[tuple] = []  # (label, content) pairs
         self.type_descriptors: List[tuple] = []  # (label, fields) pairs
@@ -159,12 +179,12 @@ class CodeGenerator(
         self._static_string_labels = {}
         # Set fresh at the start of every gen_function call, to either
         # None (this function's return type isn't an array) or the
-        # %rbp offset of the stack slot holding the hidden output
-        # pointer the caller passed in. Declared here too, defensively,
+        # Logical slot of the hidden output pointer the caller passed
+        # in, if this function has one. Declared here too, defensively,
         # so referencing it before any function has been generated
         # fails with a clear AttributeError rather than silently
         # reading a stale value from a previous instance.
-        self._hidden_return_ptr_offset = None
+        self._hidden_return_ptr_slot = None
         # This function's own DECLARED return type -- needed by
         # gen_statement_ir's own Return case specifically to
         # disambiguate an ArrayLiteral return value's own dispatch
@@ -224,6 +244,63 @@ class CodeGenerator(
         self._temp_offsets[temp_id] = offset
         return Temp(id=temp_id, type=t, is_named_local=True)
 
+    def _new_slot(self, width: int, label: str) -> int:
+        """Allocates a fresh, logical frame-slot identifier -- the
+        _new_temp of frame slots, but for IRLocalAddress's own `slot`
+        field rather than a virtual register. Carries no physical
+        offset of its own at all yet: every caller here used to
+        compute `self._next_offset -= width` and use the result
+        directly (as an offset, immediately) -- now it records the
+        slot's own width and a human-readable label (for debugging;
+        never read by anything else) and returns an opaque id instead,
+        deferring the actual offset decision to _resolve_frame_layout.
+
+        Order matters here: _resolve_frame_layout assigns offsets in
+        the exact order slots were created in (self._slot_widths is a
+        plain dict, so insertion order is preserved), reproducing
+        today's own running-counter layout exactly. Every caller below
+        that used to reserve a slot with `self._next_offset -= width`
+        directly now calls this instead, in the identical order those
+        subtractions used to happen in."""
+        slot_id = self._slot_count
+        self._slot_count += 1
+        self._slot_widths[slot_id] = width
+        self._slot_labels[slot_id] = label
+        return slot_id
+
+    def _resolve_frame_layout(self) -> None:
+        """Assigns a final, physical %rbp-relative byte offset to
+        every logical slot _new_slot has handed out so far for the
+        CURRENT function, in the exact order they were created --
+        reproducing today's own "self._next_offset -= width" running-
+        counter assignment exactly, just as one explicit step instead
+        of scattered across every individual reservation site. Stores
+        the result in self._slot_offsets (slot id -> offset) for
+        gen_function_ir's own parameter-marshaling code and ir_
+        lowering.py's own IRLocalAddress case to read from, and leaves
+        self._next_offset at its own final value here -- Phase C
+        (_temp_mem, still lazily assigning offsets of its own directly,
+        during lowering, not through this mechanism yet) keeps counting
+        down from exactly where this left it, unchanged.
+
+        Called once per function, right after every up-front
+        reservation (scratch slots, parameters, locals, argument-
+        temps) is done, before any body IR is built -- so by the time
+        gen_statement_ir's own walk ever constructs an IRLocalAddress,
+        every slot it could reference already has a real offset
+        sitting in self._slot_offsets, ready for ir_lowering.py to read
+        directly. This is deliberately NOT yet the same as deciding
+        layout once, after the ENTIRE function (including whatever
+        Phase C discovers) is built -- that's a separate, later step;
+        this one only changes how a slot's identity is carried
+        (a logical id, not a raw offset baked in at construction time),
+        not yet when its own offset gets decided."""
+        next_offset = 0
+        for slot_id, width in self._slot_widths.items():
+            next_offset -= width
+            self._slot_offsets[slot_id] = next_offset
+        self._next_offset = next_offset
+
     def generate(self, program: Program) -> AsmProgram:
         # getattr, not direct attribute access: Program.struct_registry
         # is stamped on by semantic.analyze(), not a field the
@@ -251,7 +328,7 @@ class CodeGenerator(
         # see lower_function's own docstring for why this can't yet be
         # two separate whole-program passes (build every IRFunction,
         # THEN lower all of them): a lot of per-function state gen_
-        # function_ir sets on self (_hidden_return_ptr_offset, _next_
+        # function_ir sets on self (_hidden_return_ptr_slot, _next_
         # offset, and others) gets reset by the NEXT function's own
         # gen_function_ir call, and lower_function still depends on
         # the CURRENT function's own values of it. Calling both here,
@@ -291,9 +368,12 @@ class CodeGenerator(
         its own, not to change its behavior."""
         # Fresh allocator state per function -- offsets are relative to
         # *this* function's own %rbp.
-        self._var_offsets = {}
-        self._argument_temp_offsets = {}  # id(ArrayLiteral or Call) -> its permanent slot; see _collect_argument_temps
+        self._var_slots = {}
+        self._argument_temp_slots = {}  # id(ArrayLiteral or Call) -> its permanent logical slot; see _collect_argument_temps
         self._next_offset = 0
+        self._slot_widths = {}
+        self._slot_labels = {}
+        self._slot_offsets = {}
         self._escaped_offsets = set()
         self._allocation_finalized = False
         # No declared return type means Type.VOID, the same internal-
@@ -332,12 +412,11 @@ class CodeGenerator(
         # straight out of another free (`return otherFn()`): the same
         # address just gets
         # passed one level deeper, with no intermediate copy.
-        self._hidden_return_ptr_offset = None
+        self._hidden_return_ptr_slot = None
         self._current_return_type = return_type
         arg_shift = 0
         if return_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
-            self._next_offset -= 8
-            self._hidden_return_ptr_offset = self._next_offset
+            self._hidden_return_ptr_slot = self._new_slot(8, "hidden_return_ptr")
             arg_shift = 1
 
         # A second, 24-byte slot -- reserved unconditionally for EVERY
@@ -350,8 +429,7 @@ class CodeGenerator(
         # nesting, since each materialization is fully consumed before
         # any subsequent one can write to it again -- the same way a
         # call stack's frames nest.
-        self._next_offset -= 24
-        self._unnamed_slice_temp_offset = self._next_offset
+        self._unnamed_slice_temp_slot = self._new_slot(24, "unnamed_slice_temp")
 
         # A third, small (8-byte) scratch slot -- also reserved
         # unconditionally -- used by _ir_print_call to materialize
@@ -363,8 +441,7 @@ class CodeGenerator(
         # need (and can't safely share) a slot like this: those can be
         # arbitrarily large, so print requires a Variable or Index for
         # them instead.
-        self._next_offset -= 8
-        self._print_scalar_temp_offset = self._next_offset
+        self._print_scalar_temp_slot = self._new_slot(8, "print_scalar_temp")
 
         # One extra, purely internal temp slot per parameter, used to
         # stash its incoming register value(s) immediately, before any
@@ -373,11 +450,10 @@ class CodeGenerator(
         # directly out of its own argument register. 24 bytes for a
         # slice parameter (ptr, len, AND cap each need stashing), 8 for
         # everything else.
-        param_temp_offsets = []
-        for p_type in param_types:
+        param_temp_slots = []
+        for i, p_type in enumerate(param_types):
             width = 24 if p_type.kind == TypeKind.SLICE else 8
-            self._next_offset -= width
-            param_temp_offsets.append(self._next_offset)
+            param_temp_slots.append(self._new_slot(width, f"param_stash:{fn.params[i].name}"))
 
         self._collect_params(fn.params)
         self._collect_locals(fn.body)
@@ -388,8 +464,15 @@ class CodeGenerator(
         # anywhere in this function's body, however deeply nested, and
         # reserves each its own permanent stack slot up front, sized to
         # fit. See _collect_argument_temps for why this can't reuse the
-        # single-shared-slot trick _unnamed_slice_temp_offset relies on.
+        # single-shared-slot trick _unnamed_slice_temp_slot relies on.
         self._collect_argument_temps(fn.body)
+        # Every slot this function will ever need, up front, is now
+        # known -- assign each its own final, physical offset in one
+        # shot (see _resolve_frame_layout's own docstring). Everything
+        # from here on (parameter marshaling below, and the body's own
+        # IR, built further down) reads a slot's own offset out of
+        # self._slot_offsets rather than deciding one itself.
+        self._resolve_frame_layout()
         self.scopes = [{}]
 
         # A slice parameter needs THREE consecutive argument-register
@@ -434,8 +517,9 @@ class CodeGenerator(
         # tests with real loop/call activity.
         instructions: List[Instruction] = []
 
-        if self._hidden_return_ptr_offset is not None:
-            instructions.append(MovQ(src=Register('rdi'), dst=Memory('rbp', self._hidden_return_ptr_offset)))
+        if self._hidden_return_ptr_slot is not None:
+            instructions.append(
+                MovQ(src=Register('rdi'), dst=Memory('rbp', self._slot_offsets[self._hidden_return_ptr_slot])))
 
         # Parameters arrive in registers per the SysV ABI (shifted one
         # position later if this function itself returns an array or
@@ -444,7 +528,7 @@ class CodeGenerator(
         # register in turn:
         #
         # FIRST, every incoming register is stashed into its own
-        # temporary slot (param_temp_offsets, reserved above) via a
+        # temporary slot (param_temp_slots, reserved above) via a
         # plain %rbp-relative store -- these never touch %rsp, so
         # there's no stack-alignment concern regardless of parameter
         # count. A slice parameter stashes THREE consecutive registers
@@ -470,23 +554,25 @@ class CodeGenerator(
         # failure mode entirely, since they never move %rsp.)
         reg_index = arg_shift
         for i, p_type in enumerate(param_types):
+            temp_offset = self._slot_offsets[param_temp_slots[i]]
             if p_type.kind == TypeKind.SLICE:
                 instructions.append(
-                    MovQ(src=Register(ARG_REGISTERS_64[reg_index]), dst=Memory('rbp', param_temp_offsets[i])))
+                    MovQ(src=Register(ARG_REGISTERS_64[reg_index]), dst=Memory('rbp', temp_offset)))
                 instructions.append(
-                    MovQ(src=Register(ARG_REGISTERS_64[reg_index + 1]), dst=Memory('rbp', param_temp_offsets[i] + 8)))
+                    MovQ(src=Register(ARG_REGISTERS_64[reg_index + 1]), dst=Memory('rbp', temp_offset + 8)))
                 instructions.append(
-                    MovQ(src=Register(ARG_REGISTERS_64[reg_index + 2]), dst=Memory('rbp', param_temp_offsets[i] + 16)))
+                    MovQ(src=Register(ARG_REGISTERS_64[reg_index + 2]), dst=Memory('rbp', temp_offset + 16)))
                 reg_index += 3
             else:
                 instructions.append(
-                    MovQ(src=Register(ARG_REGISTERS_64[reg_index]), dst=Memory('rbp', param_temp_offsets[i])))
+                    MovQ(src=Register(ARG_REGISTERS_64[reg_index]), dst=Memory('rbp', temp_offset)))
                 reg_index += 1
 
         for i, p in enumerate(fn.params):
-            offset = self._bind_param(p)
+            slot = self._bind_param(p)
             p_type = param_types[i]
-            temp_offset = param_temp_offsets[i]
+            offset = self._slot_offsets[slot]
+            temp_offset = self._slot_offsets[param_temp_slots[i]]
             if p_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT):
                 if self._is_heap_allocated(id(p), p_type):
                     # Needs its own, independent heap copy -- like the
@@ -587,10 +673,10 @@ class CodeGenerator(
         split existed."""
         ir = ir_fn.body
         # A named-local Temp is safe to allocate despite is_named_local
-        # (see eligible_intervals' own docstring) exactly when old-
-        # style code never touched its own variable's raw memory --
-        # i.e. its own offset was never recorded in _escaped_offsets,
-        # this function's own legacy-access record (see _local_offset).
+        # (see eligible_intervals' own docstring) exactly when this
+        # function's own parameter-marshaling code (the only remaining
+        # source of _escaped_offsets -- see its own docstring) never
+        # wrote to its own offset directly, bypassing this Temp.
         # Harmless to compute over every Temp ever created so far, not
         # just this function's own: allocate_registers below only ever
         # looks a Temp id up if it's already present in THIS function's
@@ -636,7 +722,7 @@ class CodeGenerator(
         return AsmFunction(name=ir_fn.name, instructions=ir_fn.prologue + instructions)
 
     def _collect_params(self, params: List[Param]) -> None:
-        """Gives each parameter its own permanent stack slot, exactly
+        """Gives each parameter its own logical frame slot, exactly
         like _collect_locals does for VarDecls (same node-identity
         keying) -- kept as a separate method since Param and VarDecl
         are different AST node types, not because parameters need
@@ -647,27 +733,29 @@ class CodeGenerator(
         parameter over _STACK_ARRAY_LIMIT_BYTES, which only needs 8
         bytes here: its slot holds a pointer to a heap block
         gen_function's parameter loop allocates, not the array's data
-        directly. Called after gen_function has already reserved the
-        hidden-return-pointer slot, if this function needs one --
-        _next_offset just keeps counting down from wherever it already
-        is."""
+        directly. Called after gen_function_ir has already reserved
+        the hidden-return-pointer slot, if this function needs one --
+        _new_slot's own creation-order guarantee is what keeps this
+        placed right after it, matching today's own layout exactly."""
         for p in params:
             p_type = type_from_name(p.type, self.struct_registry, self.type_alias_registry)
             width = 8 if self._is_heap_allocated(id(p), p_type) else type_byte_width(p_type, self.struct_registry)
-            self._next_offset -= width
-            self._var_offsets[id(p)] = self._next_offset
+            self._var_slots[id(p)] = self._new_slot(width, f"param:{p.name}")
 
     def _bind_param(self, p: Param) -> int:
         """The Param counterpart to _bind_local -- registers `p`'s name
         and declared type (as a real semantic.Type, via type_from_name,
         not the raw parser-level string/ArrayTypeExpr), plus id(p)
-        itself, in the current scope, pointing at the permanent offset
+        itself, in the current scope, pointing at the logical slot
         _collect_params already assigned it. Also creates `p`'s own
-        Temp (see _bind_local's own docstring for why)."""
-        offset = self._var_offsets[id(p)]
+        Temp (see _bind_local's own docstring for why), anchored at
+        this slot's own physical offset -- already resolved, since
+        _resolve_frame_layout has already run by the time this method
+        is ever called (see gen_function_ir's own ordering)."""
+        slot = self._var_slots[id(p)]
         p_type = type_from_name(p.type, self.struct_registry, self.type_alias_registry)
-        self.scopes[-1][p.name] = (offset, p_type, id(p), self._temp_at_offset(p_type, offset))
-        return offset
+        self.scopes[-1][p.name] = (slot, p_type, id(p), self._temp_at_offset(p_type, self._slot_offsets[slot]))
+        return slot
 
     def _collect_locals(self, statements: List[Node]) -> None:
         """Recursively walks `statements`, including into every If's
@@ -694,8 +782,7 @@ class CodeGenerator(
                 var_type = type_from_name(stmt.var_type, self.struct_registry, self.type_alias_registry)
                 width = 8 if self._is_heap_allocated(
                     id(stmt), var_type) else type_byte_width(var_type, self.struct_registry)
-                self._next_offset -= width
-                self._var_offsets[id(stmt)] = self._next_offset
+                self._var_slots[id(stmt)] = self._new_slot(width, f"local:{stmt.name}")
             elif isinstance(stmt, If):
                 self._collect_locals(stmt.then_body)
                 if stmt.else_body is not None:
@@ -877,10 +964,10 @@ class CodeGenerator(
         # nothing further to recurse into.
 
     def _reserve_argument_temp(self, expr: Node, t: Type) -> None:
-        """Reserves a permanent stack slot for `expr` -- an ArrayLiteral,
+        """Reserves a logical frame slot for `expr` -- an ArrayLiteral,
         a struct literal, or an ordinary array/struct-returning Call
         used directly as a function-call argument -- keyed by id(expr)
-        exactly like _var_offsets keys a VarDecl/Param, just for a
+        exactly like _var_slots keys a VarDecl/Param, just for a
         synthetic, unnamed "declaration" with no actual source-level
         variable.
 
@@ -902,8 +989,7 @@ class CodeGenerator(
         if is_heap_allocated(t, self.struct_registry):
             return
         width = type_byte_width(t, self.struct_registry)
-        self._next_offset -= width
-        self._argument_temp_offsets[id(expr)] = self._next_offset
+        self._argument_temp_slots[id(expr)] = self._new_slot(width, "argument_temp")
 
     def _frame_size(self) -> int:
         # Total bytes used by locals and parameters, rounded up to a
@@ -926,10 +1012,12 @@ class CodeGenerator(
         """Registers `stmt`'s name -- its declared type, needed by
         _local_type, and id(stmt) itself, needed by _local_decl_id --
         in the current (innermost) generation-time scope, pointing at
-        the permanent offset _collect_locals already assigned this
-        exact VarDecl node, and returns that offset. Also creates
+        the logical slot _collect_locals already assigned this exact
+        VarDecl node, and returns that slot. Also creates
         `stmt`'s own Temp (see _local_temp), pointed at that same
-        offset via _temp_at_offset rather than a freshly-carved one --
+        slot's own physical offset via _temp_at_offset (already
+        resolved by _resolve_frame_layout by the time this runs)
+        rather than a freshly-carved one --
         this is what lets a scalar VarDecl-with-initializer or Assign
         (see gen_statement_ir) target this variable with a genuine
         IRMove, and every later read of it (see gen_expr_ir's own
@@ -943,29 +1031,36 @@ class CodeGenerator(
         arrays_slices.py/structs.py reads or writes through a Temp;
         they address this variable's slot directly, exactly as
         before."""
-        offset = self._var_offsets[id(stmt)]
+        slot = self._var_slots[id(stmt)]
         var_type = type_from_name(stmt.var_type, self.struct_registry, self.type_alias_registry)
-        self.scopes[-1][stmt.name] = (offset, var_type, id(stmt), self._temp_at_offset(var_type, offset))
-        return offset
+        self.scopes[-1][stmt.name] = (slot, var_type, id(stmt), self._temp_at_offset(var_type, self._slot_offsets[slot]))
+        return slot
 
-    def _local_offset(self, name: str) -> int:
-        """Resolves `name` to its own permanent Memory offset -- see
-        _escaped_offsets' own docstring for why every call here is
-        recorded: this is the one chokepoint every old-style read or
-        write of a variable's raw memory location goes through, so
-        recording each result is what lets register_allocator.py know
-        which named-local Temps are genuinely safe to allocate."""
+    def _local_slot(self, name: str) -> int:
+        """Resolves `name` to its own logical frame slot -- for a
+        composite-typed (array/struct/slice) variable's own address,
+        the only case this is ever called for (see _ir_array_address/
+        _ir_struct_address/_ir_slice_address/_ir_indexable_base, its
+        four live callers). Used to also record every call here into
+        _escaped_offsets, on the theory that old-style code might read
+        this variable's memory directly, bypassing its own Temp --
+        dropped entirely now that old-style code is gone: confirmed
+        directly that a composite-typed variable's own named-local
+        Temp never appears as an operand anywhere in the IR this
+        compiler builds (every read/write of one goes through
+        IRLocalAddress instead, which references this slot directly,
+        never the Temp), so excluding it from register allocation was
+        already excluding something that could never have been
+        eligible in the first place."""
         for scope in reversed(self.scopes):
             if name in scope:
-                offset = scope[name][0]
-                self._escaped_offsets.add(offset)
-                return offset
+                return scope[name][0]
         raise CodegenError(f"Reference to undeclared variable '{name}'")
 
     def _local_type(self, name: str) -> Type:
-        """Used specifically where a Variable's *offset* is also being
+        """Used specifically where a Variable's *slot* is also being
         looked up right alongside it (see _ir_array_address's own
-        Variable case) -- both come from the same (offset, Type,
+        Variable case) -- both come from the same (slot, Type,
         decl_id, Temp) tuple
         in the same scope-stack entry, which codegen has to maintain
         regardless of type_of's existence, since resolved_type has no
@@ -985,8 +1080,8 @@ class CodeGenerator(
 
     def _local_decl_id(self, name: str) -> int:
         """Returns id(the VarDecl or Param node) that `name` currently
-        resolves to -- the third element of the same (offset, Type,
-        decl_id, Temp) tuple _local_offset/_local_type/_local_temp
+        resolves to -- the third element of the same (slot, Type,
+        decl_id, Temp) tuple _local_slot/_local_type/_local_temp
         read the others of, kept in the SAME scope-stack lookup
         (rather than a separate, parallel name-to-id table)
         specifically so this respects shadowing correctly: Hornet

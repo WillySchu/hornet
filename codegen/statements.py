@@ -370,8 +370,9 @@ class StatementsMixin:
                     # scalar kind), which doesn't apply here at all --
                     # a named scalar variable already has its own
                     # Temp in real IR, never an address, the same
-                    # reason _local_offset (an old-style-only concept)
-                    # has no part in this either.
+                    # reason _local_slot (only ever used for a
+                    # composite-typed variable's own address) has no
+                    # part in this either.
                     #
                     # str is the one scalar kind whose own zero value
                     # isn't a raw IRConst(0, ...): it's the address of
@@ -397,7 +398,7 @@ class StatementsMixin:
                     var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE)
                     and isinstance(stmt.init, (Variable, Field, Index))
             ):
-                offset = self._bind_local(stmt)
+                slot = self._bind_local(stmt)
                 ir = []
                 # A slice variable is never heap-allocated (see gen_
                 # assign's own heap-allocation check, scoped to ARRAY/
@@ -414,7 +415,7 @@ class StatementsMixin:
                     # ever tries to read an address out of this slot --
                     # otherwise it would read whatever pointer-sized
                     # garbage was already sitting there.
-                    ir.extend(self._ir_malloc_and_store(var_type, offset))
+                    ir.extend(self._ir_malloc_and_store(var_type, slot))
                 return ir + self._ir_copy_assign(Variable(name=stmt.name), stmt.init, var_type)
             # A slice-typed initializer that's a bare `none` -- _ir_
             # nil_slice's own all-zero triple, matching this
@@ -503,10 +504,10 @@ class StatementsMixin:
                     and (isinstance(stmt.init, Call)
                          and stmt.init.name != 'append'
                          and stmt.init.name not in self.struct_registry)):
-                offset = self._bind_local(stmt)
+                slot = self._bind_local(stmt)
                 ir = []
                 if var_type.kind != TypeKind.SLICE and self._is_heap_allocated(id(stmt), var_type):
-                    ir.extend(self._ir_malloc_and_store(var_type, offset))
+                    ir.extend(self._ir_malloc_and_store(var_type, slot))
                 address_fn = {
                     TypeKind.ARRAY: self._ir_array_address,
                     TypeKind.STRUCT: self._ir_struct_address,
@@ -543,10 +544,10 @@ class StatementsMixin:
                     var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT)
                     and (isinstance(stmt.init, ArrayLiteral)
                          or (isinstance(stmt.init, Call) and stmt.init.name in self.struct_registry))):
-                offset = self._bind_local(stmt)
+                slot = self._bind_local(stmt)
                 ir = []
                 if self._is_heap_allocated(id(stmt), var_type):
-                    ir.extend(self._ir_malloc_and_store(var_type, offset))
+                    ir.extend(self._ir_malloc_and_store(var_type, slot))
                 address_fn = self._ir_array_address if var_type.kind == TypeKind.ARRAY else self._ir_struct_address
                 dst_ir, dst_address = address_fn(Variable(name=stmt.name))
                 ir.extend(dst_ir)
@@ -581,10 +582,10 @@ class StatementsMixin:
             # made BEFORE this variable's own address is ever
             # computed.
             if var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and stmt.init is None:
-                offset = self._bind_local(stmt)
+                slot = self._bind_local(stmt)
                 ir = []
                 if self._is_heap_allocated(id(stmt), var_type):
-                    ir.extend(self._ir_malloc_and_store(var_type, offset))
+                    ir.extend(self._ir_malloc_and_store(var_type, slot))
                 address_fn = self._ir_array_address if var_type.kind == TypeKind.ARRAY else self._ir_struct_address
                 dst_ir, dst_address = address_fn(Variable(name=stmt.name))
                 ir.extend(dst_ir)
@@ -893,7 +894,7 @@ class StatementsMixin:
             f"silently defer to anymore."
         )
 
-    def _ir_malloc_and_store(self, var_type, offset: int) -> list:
+    def _ir_malloc_and_store(self, var_type, slot: int) -> list:
         """Builds (without lowering) a heap-allocated local's own
         fresh backing allocation as real IR: an ordinary IRCall to
         malloc -- IRCall's own lowering is already fully generic over
@@ -919,7 +920,7 @@ class StatementsMixin:
         slot_addr = self._new_temp(Type.INT64)
         return [
             IRCall(dst=ptr, name='malloc', args=[IRConst(size, Type.INT64)]),
-            IRLocalAddress(dst=slot_addr, offset=offset),
+            IRLocalAddress(dst=slot_addr, slot=slot),
             IRStore(address=slot_addr, value=ptr, value_type=Type.INT64),
         ]
 
@@ -1047,7 +1048,7 @@ class StatementsMixin:
         slot_addr = self._new_temp(Type.INT64)
         hidden_ptr = self._new_temp(Type.INT64)
         ir = [
-            IRLocalAddress(dst=slot_addr, offset=self._hidden_return_ptr_offset),
+            IRLocalAddress(dst=slot_addr, slot=self._hidden_return_ptr_slot),
             IRLoad(dst=hidden_ptr, address=slot_addr),
         ]
         return ir, hidden_ptr

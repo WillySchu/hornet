@@ -71,10 +71,10 @@ class ArraysSlicesMixin:
         bare ArrayLiteral has its own, separate real-IR handling
         elsewhere, e.g. _ir_materialize_array_literal)."""
         if isinstance(expr, Variable):
-            offset = self._local_offset(expr.name)
+            slot = self._local_slot(expr.name)
             array_type = self._local_type(expr.name)
             slot_addr = self._new_temp(Type.INT64)
-            ir = [IRLocalAddress(dst=slot_addr, offset=offset)]
+            ir = [IRLocalAddress(dst=slot_addr, slot=slot)]
             if self._is_heap_allocated(self._local_decl_id(expr.name), array_type):
                 addr_temp = self._new_temp(Type.INT64)
                 ir.append(IRLoad(dst=addr_temp, address=slot_addr))
@@ -105,9 +105,9 @@ class ArraysSlicesMixin:
         slice-returning function call) -- both genuinely out of scope
         for now, real, separate follow-up work."""
         if isinstance(expr, Variable):
-            offset = self._local_offset(expr.name)
+            slot = self._local_slot(expr.name)
             addr_temp = self._new_temp(Type.INT64)
-            return [IRLocalAddress(dst=addr_temp, offset=offset)], addr_temp
+            return [IRLocalAddress(dst=addr_temp, slot=slot)], addr_temp
         if isinstance(expr, Index):
             return self._ir_index_address(expr)
         if isinstance(expr, Field):
@@ -142,10 +142,10 @@ class ArraysSlicesMixin:
         call's own destination would be -- the result is written
         through it via the ordinary hidden-pointer convention, with
         no new IR concept needed at all."""
-        if id(call_expr) in self._argument_temp_offsets:
-            offset = self._argument_temp_offsets[id(call_expr)]
+        if id(call_expr) in self._argument_temp_slots:
+            slot = self._argument_temp_slots[id(call_expr)]
             addr = self._new_temp(Type.INT64)
-            addr_ir = [IRLocalAddress(dst=addr, offset=offset)]
+            addr_ir = [IRLocalAddress(dst=addr, slot=slot)]
         else:
             addr = self._new_temp(Type.INT64)
             size = type_byte_width(value_type, self.struct_registry)
@@ -191,10 +191,10 @@ class ArraysSlicesMixin:
         this needs, with no destination-type ambiguity possible here
         at all (there IS no destination at this position)."""
         array_type = type_of(expr)
-        if id(expr) in self._argument_temp_offsets:
-            offset = self._argument_temp_offsets[id(expr)]
+        if id(expr) in self._argument_temp_slots:
+            slot = self._argument_temp_slots[id(expr)]
             addr = self._new_temp(Type.INT64)
-            addr_ir = [IRLocalAddress(dst=addr, offset=offset)]
+            addr_ir = [IRLocalAddress(dst=addr, slot=slot)]
         else:
             addr = self._new_temp(Type.INT64)
             size = type_byte_width(array_type, self.struct_registry)
@@ -330,7 +330,7 @@ class ArraysSlicesMixin:
             return addr_ir, addr_value, size_const, size_const
         if base_type.kind == TypeKind.SLICE:
             if isinstance(expr, Variable):
-                offset = self._local_offset(expr.name)
+                slot = self._local_slot(expr.name)
                 descriptor_addr = self._new_temp(Type.INT64)
                 ptr_temp = self._new_temp(Type.INT64)
                 len_addr = self._new_temp(Type.INT64)
@@ -338,7 +338,7 @@ class ArraysSlicesMixin:
                 cap_addr = self._new_temp(Type.INT64)
                 cap_temp = self._new_temp(Type.INT)
                 ir = [
-                    IRLocalAddress(dst=descriptor_addr, offset=offset),
+                    IRLocalAddress(dst=descriptor_addr, slot=slot),
                     IRLoad(dst=ptr_temp, address=descriptor_addr),
                     IRBinOp(dst=len_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(8, Type.INT64)),
                     IRLoad(dst=len_temp, address=len_addr),

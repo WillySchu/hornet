@@ -281,8 +281,13 @@ class InstructionSelector:
                 # captured (register or spill slot) is the identical,
                 # already-architecture-agnostic _gen_write_temp_from
                 # every other op already uses. A hypothetical ARM64
-                # lowering changes exactly this one line.
-                out.append(LeaQFrame(offset=instr.offset, dst=Register('rax')))
+                # lowering changes exactly this one line. instr.slot is
+                # a purely logical identifier (see IRLocalAddress's own
+                # docstring) -- self.host._slot_offsets is where _
+                # resolve_frame_layout already recorded its own final,
+                # physical offset, by the time any body IR is ever
+                # lowered (see gen_function_ir's own ordering).
+                out.append(LeaQFrame(offset=self.host._slot_offsets[instr.slot], dst=Register('rax')))
                 out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
             elif isinstance(instr, IRStaticDataAddress):
                 # Same shape as IRLocalAddress, one line swapped: LeaQ

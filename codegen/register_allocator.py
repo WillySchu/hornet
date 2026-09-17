@@ -2,11 +2,11 @@
 
 Only two kinds of Temp are excluded from allocation, both for
 correctness, not performance: a named-variable Temp
-(Temp.is_named_local -- see its own docstring) whose own variable was
-ever touched by old-style code -- since that code reads or writes its
-memory slot directly, bypassing the Temp entirely -- unless legacy
-access tracking (see CodeGenerator._escaped_offsets) has established
-it never was, in which case it's exempt from THIS exclusion
+(Temp.is_named_local -- see its own docstring) by default, unless
+legacy access tracking (see CodeGenerator._escaped_offsets) has
+established this specific one's own variable was never written to
+directly by this function's own parameter-marshaling code, bypassing
+the Temp entirely -- in which case it's exempt from THIS exclusion
 specifically (see eligible_intervals' own docstring for what
 safe_named_locals does and doesn't change); and any Temp that needs
 to SURVIVE THROUGH an IRCall it doesn't own (see
@@ -267,11 +267,12 @@ def eligible_intervals(ir: list, intervals: dict, safe_named_locals: frozenset =
     Temps and any Temp SURVIVING THROUGH an IRCall it doesn't own are
     excluded unconditionally, not just usually.
 
-    `safe_named_locals` (a set of Temp ids, from gen_function -- see
-    its own docstring for how it's computed from legacy access
+    `safe_named_locals` (a set of Temp ids, from lower_function -- see
+    its own comment for how it's computed from legacy access
     tracking) lifts the named-local exclusion specifically, not the
     hazard check below it: a named-local Temp whose own variable was
-    never touched by old-style code is only exempt from the "its
+    never written to directly by this function's own parameter-
+    marshaling code is only exempt from the "its
     memory slot might be read behind its back" reasoning -- it still
     needs to survive an IRCall it doesn't own like anything else, so
     it falls through to exactly the same _is_hazard check every other
