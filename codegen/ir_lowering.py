@@ -109,25 +109,33 @@ class InstructionSelector:
         more such caller, not a gap in it.
 
         A named-local Temp falling back to memory HERE, before host.
-        _allocation_finalized is set (see its own docstring), is
-        itself a legacy-access hazard, not just the ordinary safe
-        case: several old-style codegen methods (gen_binary_into
-        among them) build a small, self-contained IR fragment and
-        lower it immediately, via this same method, well before this
-        function's own whole-body allocate_registers call has run --
-        at that point host._register_assignment is still empty for
-        THIS function, so any named-local Temp referenced from inside
-        one of those fragments falls back to memory unconditionally,
-        regardless of what the real, whole-function allocation
-        decision later turns out to be. A named-local's own Temp
-        identity is shared and reused across every reference to that
-        variable, unlike an anonymous Temp (always confined to the
-        one IR-building-and-lowering call that created it), so this
-        is the one case where an earlier, premature memory fallback
-        can go stale the moment the real decision is made -- caught
-        empirically (`arr[i + 1] = 42` reading a stale i from memory
-        after i's own Temp was allocated a register elsewhere), not by
-        reasoning about this method in isolation."""
+        _allocation_finalized is set (see its own docstring), used to
+        be a real, live legacy-access hazard, not just the ordinary
+        safe case: several old-style codegen methods (gen_binary_into
+        among them) used to build a small, self-contained IR fragment
+        and lower it immediately, via this same method, well before
+        this function's own whole-body allocate_registers call had
+        run -- at that point host._register_assignment was still
+        empty for THIS function, so any named-local Temp referenced
+        from inside one of those fragments fell back to memory
+        unconditionally, regardless of what the real, whole-function
+        allocation decision later turned out to be. A named-local's
+        own Temp identity is shared and reused across every reference
+        to that variable, unlike an anonymous Temp (always confined to
+        the one IR-building-and-lowering call that created it), so
+        this was the one case where an earlier, premature memory
+        fallback could go stale the moment the real decision was made
+        -- caught empirically (`arr[i + 1] = 42` reading a stale i from
+        memory after i's own Temp was allocated a register elsewhere),
+        not by reasoning about this method in isolation. This guard
+        remains in place even though lower_ir now has exactly one
+        caller (lower_function, always after allocate_registers has
+        already run -- see codegen.py's own gen_function_ir/lower_
+        function split), which means the scenario it exists for is, as
+        far as this arc's own audits can tell, no longer reachable at
+        all: removing a still-correct defensive check that costs
+        nothing to keep is a different, separately-considered decision
+        from deleting code that's provably, permanently dead."""
         reg_name = self.host._register_assignment.get(temp.id)
         if reg_name is not None:
             src = Register(reg_name)
@@ -227,7 +235,8 @@ class InstructionSelector:
                 # there is one, then the ordinary epilogue either way.
                 # Never used for an array/slice/struct return -- those
                 # write through the hidden output pointer instead (see
-                # gen_return), a mechanism this doesn't touch.
+                # gen_statement_ir's own Return case), a mechanism
+                # this doesn't touch.
                 if instr.value is not None:
                     out.extend(self._gen_load_value(instr.value, Register('eax')))
                 out.extend(self.host._gen_epilogue())

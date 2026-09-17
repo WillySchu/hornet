@@ -332,7 +332,7 @@ class EscapeAnalyzer:
                 return None, slot_id
         elif isinstance(value_expr, Call) and value_expr.name == 'append':
             # append's first argument might reuse ITS OWN backing
-            # storage (the reuse path -- see gen_append_call_into), so
+            # storage (the reuse path -- see _ir_append_call), so
             # whatever that argument resolves to is this call's
             # contribution too. Recursing here means append's first
             # argument gets the same treatment any other slice-valued

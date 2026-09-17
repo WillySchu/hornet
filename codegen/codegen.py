@@ -143,21 +143,7 @@ class CodeGenerator(
         # type_from_name just does a single dict lookup with this,
         # never a recursive re-resolution of an alias's own target.
         self.type_alias_registry: Dict[str, Type] = {}
-        # Lazily created, then cached and reused for the rest of this
-        # compilation -- see gen_print_call_into for why these
-        # specifically get a small dedicated cache rather than
-        # following string_literals' usual "every occurrence gets its
-        # own label, no dedup" policy.
-        self._true_str_label = None
-        self._false_str_label = None
-        self._comma_space_label = None  # ", " -- the print machinery's own element/field separator
-        self._colon_space_label = None  # ": " -- between a struct field's own name and its value
         self._empty_str_label = None  # "" -- str's own zero value; see _get_empty_str_label
-        # Set the first time gen_print_call_into actually runs; checked
-        # in generate() to decide whether hornet_stringify needs to be
-        # added to the program's function list at all -- a program that
-        # never calls print() shouldn't pay for it.
-        self._print_used = False
         # Lazily created, but with different lifetimes from each other:
         # the fail labels are reset per function (gen_function); the
         # message labels, like the print-related ones above, are cached
@@ -281,8 +267,6 @@ class CodeGenerator(
             ir_fn = self.gen_function_ir(fn)
             ir_functions.append(ir_fn)
             asm_functions.append(self.lower_function(ir_fn))
-        if self._print_used:
-            asm_functions.append(self.build_stringify_function())
         # No consumer reads this yet -- see IRProgram's own docstring
         # for why it's built and kept anyway.
         self.ir_program = IRProgram(
@@ -342,10 +326,11 @@ class CodeGenerator(
         # A slice-typed return uses this SAME mechanism, not a separate
         # one -- a slice's {ptr, len, cap} descriptor is 24 bytes, too
         # wide for any register-return shape this compiler has
-        # precedent for, so gen_return's Slice case is structurally
-        # identical to its Array one. This is also what makes
-        # forwarding one slice-returning call's result straight out of
-        # another free (`return otherFn()`): the same address just gets
+        # precedent for, so a Return's Slice case (see gen_statement_
+        # ir) is structurally identical to its Array one. This is also
+        # what makes forwarding one slice-returning call's result
+        # straight out of another free (`return otherFn()`): the same
+        # address just gets
         # passed one level deeper, with no intermediate copy.
         self._hidden_return_ptr_offset = None
         self._current_return_type = return_type
@@ -356,23 +341,22 @@ class CodeGenerator(
             arg_shift = 1
 
         # A second, 24-byte slot -- reserved unconditionally for EVERY
-        # function -- used by gen_indexable_base_into to materialize an
-        # unnamed Slice or slice-returning Call expression's descriptor
-        # when it's used directly as the base of a `[...]` chain (e.g.
-        # `arr[:][0]`), rather than requiring it be assigned to a named
-        # variable first, and by gen_expr_stmt for a bare Slice-
-        # expression statement. Reusing a single shared slot is safe
-        # even under arbitrarily deep nesting, since each
-        # materialization is fully consumed before any subsequent one
-        # can write to it again -- the same way a call stack's frames
-        # nest.
+        # function -- used by _ir_print_call to materialize a slice-
+        # typed print() argument's own {ptr, len, cap} triple (an
+        # existing slice Variable/Field/Index, or a freshly-produced
+        # one -- a Slice production, append, an ordinary Call) so
+        # hornet_print always has a real address to read from. Reusing
+        # a single shared slot is safe even under arbitrarily deep
+        # nesting, since each materialization is fully consumed before
+        # any subsequent one can write to it again -- the same way a
+        # call stack's frames nest.
         self._next_offset -= 24
         self._unnamed_slice_temp_offset = self._next_offset
 
         # A third, small (8-byte) scratch slot -- also reserved
-        # unconditionally -- used by gen_print_call_into to materialize
+        # unconditionally -- used by _ir_print_call to materialize
         # a non-Variable int/bool/str argument (e.g. `print(x + 1)`) so
-        # hornet_stringify always has a real address to read from, the
+        # hornet_print always has a real address to read from, the
         # same "one shared slot, safe because each use is fully
         # consumed before the next can start" reasoning as the unnamed-
         # slice slot above. Array/slice/struct print arguments don't
@@ -381,15 +365,6 @@ class CodeGenerator(
         # them instead.
         self._next_offset -= 8
         self._print_scalar_temp_offset = self._next_offset
-
-        # A fourth scratch slot (24 bytes) -- the {ptr, len, cap}
-        # triple gen_print_call_into's growable buffer lives in.
-        # Reserved unconditionally for the same reason: a print()
-        # call's buffer setup needs somewhere real to live, and reusing
-        # one shared slot is safe by the same non-overlapping-lifetime
-        # argument.
-        self._next_offset -= 24
-        self._print_buf_state_temp_offset = self._next_offset
 
         # One extra, purely internal temp slot per parameter, used to
         # stash its incoming register value(s) immediately, before any
@@ -635,9 +610,10 @@ class CodeGenerator(
             # guarantee every path returns explicitly (see
             # analyze_function's always_returns skip for this case) --
             # its body can legitimately fall off the end, relying on
-            # THIS trailing epilogue rather than a gen_return-emitted
-            # one on every path. Every OTHER function never needs this:
-            # always_returns already guarantees some gen_return-emitted
+            # THIS trailing epilogue rather than an IRReturn-emitted
+            # one (see ir_lowering.py's own IRReturn case) on every
+            # path. Every OTHER function never needs this:
+            # always_returns already guarantees some IRReturn-emitted
             # epilogue executes on every path, making a trailing one
             # here permanently unreachable. Without this, a void
             # function that fell off the end would fall straight
@@ -705,9 +681,10 @@ class CodeGenerator(
         stack-allocated array local. An array whose footprint exceeds
         _STACK_ARRAY_LIMIT_BYTES only needs 8 bytes here regardless of
         its real size: its slot holds a pointer to a heap block,
-        allocated by gen_var_decl, not the array's data directly --
-        this is the one place that decision changes how much stack
-        space gets reserved. No alignment padding is added between
+        allocated via _ir_malloc_and_store (see gen_statement_ir's own
+        VarDecl case), not the array's data directly -- this is the
+        one place that decision changes how much stack space gets
+        reserved. No alignment padding is added between
         slots: x86-64 doesn't require aligned access, and %rsp's own
         16-byte alignment requirement is satisfied purely by
         _frame_size rounding the TOTAL frame size up at the end,
@@ -744,9 +721,8 @@ class CodeGenerator(
         argument_temps_in_expr's own Slice case for why that position
         never reserves a slot at all here, unlike Index/Field. Neither
         of the first two is a Variable, Index, or Field, each of which
-        already has a real address via gen_array_address_into/gen_
-        struct_address_into (or their real-IR counterparts, _ir_array_
-        address/_ir_struct_address).
+        already has a real address via _ir_array_address/_ir_struct_
+        address.
 
         Not just ORDINARY function-call arguments, despite the name:
         the walk finds a qualifying argument inside ANY Call node, with
@@ -778,7 +754,9 @@ class CodeGenerator(
         argument_temp applies the same is_heap_allocated size check
         every named local/parameter goes through. A small literal or
         returning-call's result gets a real, permanent slot, read back
-        out by _gen_materialize_argument_temp_into. A large one gets NO
+        out by its own real-IR materialization case (_ir_materialize_
+        composite_call/_ir_materialize_array_literal/_ir_materialize_
+        struct_literal). A large one gets NO
         slot at all -- it's heap-allocated fresh at the point of the
         call instead, needing no space reserved in this function's
         frame: an argument-temp's pointer is read exactly once, by the
@@ -986,8 +964,9 @@ class CodeGenerator(
 
     def _local_type(self, name: str) -> Type:
         """Used specifically where a Variable's *offset* is also being
-        looked up right alongside it (see gen_expr_into's Variable case)
-        -- both come from the same (offset, Type, decl_id, Temp) tuple
+        looked up right alongside it (see _ir_array_address's own
+        Variable case) -- both come from the same (offset, Type,
+        decl_id, Temp) tuple
         in the same scope-stack entry, which codegen has to maintain
         regardless of type_of's existence, since resolved_type has no
         way to encode *which* stack slot a name refers to. This is
@@ -1055,14 +1034,14 @@ class CodeGenerator(
     def _gen_epilogue(self) -> List[Instruction]:
         """The ordinary function epilogue: restore every callee-saved
         scratch register (in reverse of the prologue's push order),
-        then leave/ret. Shared by gen_return's bare-return case (no
-        value to compute) and gen_function's trailing fall-through
-        case: both are "there's no value to compute, just exit the
-        function cleanly" situations. Leave resets %rsp straight to
-        %rbp, which was captured before the callee-saved registers were
-        pushed in the prologue, so anything pushed after that point has
-        to be popped explicitly first or it's silently discarded rather
-        than restored."""
+        then leave/ret. Shared by IRReturn's own bare-return lowering
+        (see ir_lowering.py -- no value to compute) and lower_function's
+        own trailing fall-through case: both are "there's no value to
+        compute, just exit the function cleanly" situations. Leave
+        resets %rsp straight to %rbp, which was captured before the
+        callee-saved registers were pushed in the prologue, so
+        anything pushed after that point has to be popped explicitly
+        first or it's silently discarded rather than restored."""
         instructions = []
         for reg in reversed(CALLEE_SAVED_SCRATCH_REGISTERS):
             instructions.append(Pop(Register(reg)))

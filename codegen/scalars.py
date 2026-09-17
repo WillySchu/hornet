@@ -55,27 +55,6 @@ from semantic import Type, TypeKind
 
 
 class ScalarsMixin:
-    def gen_call_into(self, expr: Call, dst: Operand) -> list[Instruction]:
-        """`name(arg1, arg2, ...)`: evaluates and passes every argument
-        (see _ir_call for how -- scalar and array/struct arguments are
-        real IR; a slice argument still falls back to the old
-        _gen_call_arguments_into mechanism, for the whole call), then
-        calls the function. IRCall's dst is None for a void call, or a
-        fresh Temp for a scalar-returning one, read into `dst`
-        afterward.
-
-        Never reached for a callee that returns an array or slice --
-        see gen_array_call_into and gen_slice_call_into, which share a
-        hidden-pointer return convention that doesn't fit a single
-        generic `dst`."""
-        if dst != Register('eax'):
-            raise CodegenError(f"Call codegen requires dst == %eax, got: {dst!r}")
-
-        ir, t_result = self._ir_call(expr)
-        instructions = self._instruction_selector.lower_ir(ir)
-        if t_result is not None:
-            instructions.extend(self._instruction_selector._gen_read_temp_into(t_result, dst))
-        return instructions
 
     def _ir_call_arguments(self, args: list) -> tuple:
         """The shared per-argument marshaling loop between _ir_call
@@ -285,45 +264,23 @@ class ScalarsMixin:
         arg_ir, arg_values = self._ir_call_arguments(call_expr.args)
         return arg_ir + [IRCall(dst=None, name=call_expr.name, args=[dst_address] + arg_values)]
 
-    def gen_short_circuit(
-            self, expr: Binary,
-            dst: Operand, *,
-            short_circuit_value: int,
-            label_prefix: str) -> list[Instruction]:
-        """Shared codegen for AND and OR -- mirror images of each
-        other: each evaluates its left side, tests it against 0, and
-        jumps past the right side entirely (never emitting the
-        instructions that would compute it) if that test already
-        decides the answer. Only if it doesn't -- left was truthy for
-        AND, falsy for OR -- does the right side get evaluated, and
-        that result decides the answer instead.
-
-          AND: short_circuit_value=0 -- left (or then right) false
-               makes the whole thing false without evaluating further.
-          OR:  short_circuit_value=1 -- left (or then right) true
-               makes the whole thing true without evaluating further.
-
-        This is what makes `0 and (1 / 0)` return 0 instead of
-        crashing: the division is real code sitting in the binary, but
-        control flow jumps clean over it.
-
-        Built as a small IR fragment: both left and right feed an
-        IRBranch on their own truthiness, sharing one `short` label
-        whichever one triggers it (`continue` picks between "go
-        evaluate right" for left, or "use the canonical fallthrough
-        value" for right -- the only difference between the two)."""
-        if not isinstance(dst, Register):
-            raise CodegenError(f"Binary codegen requires a register destination, got: {dst!r}")
-
-        ir, t_result = self._ir_short_circuit(expr, short_circuit_value=short_circuit_value, label_prefix=label_prefix)
-        instructions = self._instruction_selector.lower_ir(ir)
-        instructions.extend(self._gen_read_scalar_into(self._instruction_selector._temp_mem(t_result), Type.BOOL, dst))
-        return instructions
 
     def _ir_short_circuit(self, expr: Binary, *, short_circuit_value: int, label_prefix: str) -> tuple[list, object]:
-        """Builds (without lowering) gen_short_circuit's own IR --
-        see its docstring for the shared-label branch structure.
-        Returns (ir, t_result)."""
+        """Builds (without lowering) the shared IR for AND/OR --
+        mirror images of each other: each evaluates its left side and
+        branches on it, jumping past the right side entirely (never
+        emitting the IR that would compute it) if that alone already
+        decides the answer -- AND with short_circuit_value=0 (left
+        false makes the whole thing false without evaluating further),
+        OR with short_circuit_value=1 (left true makes the whole thing
+        true). This is what makes `0 and (1 / 0)` return 0 instead of
+        crashing: the division is real IR, built and lowered like any
+        other, but control flow jumps clean over it. Both left and
+        right feed an IRBranch on their own truthiness, sharing one
+        `short` label whichever one triggers it (`targets` below picks
+        between "go evaluate right" for left, or "use the canonical
+        fallthrough value" for right -- the only difference between
+        the two). Returns (ir, t_result)."""
         fallthrough_value = 1 - short_circuit_value
         rhs_label = self.new_label(f"{label_prefix}_rhs")
         short_label = self.new_label(f"{label_prefix}_short")
@@ -390,7 +347,8 @@ class ScalarsMixin:
                 # idivq divides %rdx:%rax by its operand, so the
                 # dividend (dst64, left) must be in %rax and the
                 # divisor (src64, right) in a register -- both
-                # guaranteed by how gen_binary_into calls this.
+                # guaranteed by how ir_lowering.py's own IRBinOp case
+                # calls this.
                 if dst64 != Register('rax'):
                     raise CodegenError("Division currently requires its destination to be %rax")
                 return [Cqto(), IDivQ(src64)]
@@ -428,7 +386,7 @@ class ScalarsMixin:
             # idivl divides %edx:%eax by its operand, so the dividend
             # (`dst`, left) must be in %eax and the divisor (`src`,
             # right) in a register -- both guaranteed by how
-            # gen_binary_into calls this.
+            # ir_lowering.py's own IRBinOp case calls this.
             if dst != Register('eax'):
                 raise CodegenError("Division currently requires its destination to be %eax")
             return [Cdq(), IDiv(src)]
@@ -447,7 +405,8 @@ class ScalarsMixin:
         if op == BinaryOp.BITWISE_XOR:
             return [Xor(src=src, dst=dst)]
         if op == BinaryOp.SHIFT_LEFT:
-            # `src` (== %ecx, per gen_binary_into) is never referenced
+            # `src` (== %ecx, per ir_lowering.py's own IRBinOp case) is
+            # never referenced
             # here -- ShiftLeft hardcodes %cl as its count operand,
             # the only register x86 allows there, and %ecx is already
             # where the right-hand operand ends up.
@@ -507,9 +466,9 @@ class ScalarsMixin:
     def gen_cast_narrowing_into(self, target_type: Type, dst: Register) -> list[Instruction]:
         """The actual work behind an explicit `TYPE(expr)` cast:
         re-narrows `dst`'s value to correctly represent target_type,
-        given that gen_expr_into has already computed the source
-        expression into it (already correctly widened if the source
-        was int8/uint8-typed -- see _gen_read_scalar_into).
+        given that ir_lowering.py's own IRCast case has already loaded
+        the source expression into it (already correctly widened if the
+        source was int8/uint8-typed -- see _gen_read_scalar_into).
 
         A target of int needs NOTHING further: the source's already-
         widened 32-bit value already IS a valid int.
@@ -599,8 +558,9 @@ class ScalarsMixin:
         int64 needs a full 8-byte store (MovQ, of src's 64-bit VIEW) --
         CALLERS are responsible for having already computed the value
         into that same 64-bit view before reaching this method (every
-        gen_expr_into case that can produce an int64 result does this),
-        not just src's low 32 bits: an ordinary 4-byte Mov here would
+        real-IR case that can produce an int64 result already does
+        this, via the appropriate 64-bit register view), not just
+        src's low 32 bits: an ordinary 4-byte Mov here would
         write only the low half, and reading src's 64-bit view when
         only the low 32 bits were computed would write whatever stale
         garbage occupied the register's high bits.

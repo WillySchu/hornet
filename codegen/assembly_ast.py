@@ -137,7 +137,7 @@ class CmpQ(Instruction):
     """64-bit compare (`cmpq`) -- the CmpQ counterpart to Cmp (`cmpl`,
     32-bit), for the one case that needs it: checking a slice
     descriptor's own 64-bit `ptr` field against 0 (see
-    gen_slice_none_comparison_into). Every OTHER comparison in this
+    _ir_slice_none_comparison). Every OTHER comparison in this
     language compares 32-bit int/bool values, for which Cmp's cmpl is
     exactly right -- but a pointer is a full 64-bit value, and
     comparing only its low 32 bits against zero could, in principle
@@ -251,7 +251,7 @@ class Add(Instruction):
 @dataclass
 class AddQ(Instruction):
     """64-bit dst += src (`addq`). Used only for the length arithmetic
-    in gen_string_concat_into (`len(left) + len(right) + 1`) -- string
+    in _ir_string_concat (`len(left) + len(right) + 1`) -- string
     lengths come back from `strlen` as a full 64-bit size_t, so this
     needs to be the 64-bit add, not Add's 32-bit `addl`."""
     src: Operand
@@ -324,8 +324,9 @@ class IDiv(Instruction):
     """Divides the 64-bit %edx:%eax pair by `operand` (signed). Quotient
     ends up in %eax, remainder in %edx. `operand` must be a register or
     memory location -- x86 doesn't support an immediate divisor for
-    idiv, which is why gen_binary_into always routes the right-hand side
-    through the %ecx scratch register rather than leaving it as an Imm.
+    idiv, which is why ir_lowering.py's own IRBinOp case always routes
+    the right-hand side through the %ecx scratch register rather than
+    leaving it as an Imm.
 
     This is also what MODULO reuses -- see gen_binary_op's MODULO case
     -- since idiv computes the quotient *and* remainder in one
@@ -478,10 +479,10 @@ class ShiftLeft(Instruction):
     -- so, unlike And/Or/Xor above, this doesn't take a general `src`
     field at all; %cl is hardcoded, since architecturally nothing else
     could ever go there. This lines up for free with how every other
-    binary operator already works: gen_binary_into always evaluates the
-    right-hand operand into %ecx before calling gen_binary_op, so the
-    shift count is already sitting in the one register x86 requires by
-    the time this instruction is emitted."""
+    binary operator already works: ir_lowering.py's own IRBinOp case
+    always evaluates the right-hand operand into %ecx before calling
+    gen_binary_op, so the shift count is already sitting in the one
+    register x86 requires by the time this instruction is emitted."""
     dst: Operand
     mnemonic = "shll"
 
@@ -564,7 +565,7 @@ class LeaQ(Instruction):
     once position-independent executables are in the picture (the
     default for `gcc`-produced binaries on both Linux and macOS), so
     this is what every string literal's address gets loaded with (see
-    gen_string_literal_into)."""
+    gen_expr_ir's own StringLiteral case)."""
     label: str
     dst: Register
     mnemonic = "leaq"
@@ -728,7 +729,7 @@ class Jae(Instruction):
     checking a single comparison: `cmpl $size, %index; jae fail_label`
     correctly catches BOTH index >= size and index < 0 at once, since
     a negative int, reinterpreted unsigned, becomes a huge positive
-    number -- see gen_index_address_into."""
+    number -- see _ir_index_address."""
     target: str
     mnemonic = "jae"
 
@@ -741,7 +742,7 @@ class Ja(Instruction):
     """Jump to `target` if the last Cmp found dst > src (STRICTLY
     greater), using an UNSIGNED interpretation -- the strict-
     inequality counterpart to Jae, needed for slice bounds checking
-    specifically (see gen_slice_into): `low == length` and
+    specifically (see _ir_slice_into): `low == length` and
     `high == length` are both VALID slice bounds (`arr[5:5]` on a
     5-element array is a valid, empty-slice-producing expression),
     unlike ordinary indexing, where an index equal to the array's own
@@ -804,8 +805,9 @@ class AsmProgram:
     functions: list[AsmFunction] = field(default_factory=list)
     # (label, content) pairs for every string literal anywhere in the
     # program, collected across all functions during generation (see
-    # CodeGenerator.gen_string_literal_into). These aren't tied to any
-    # one function's frame -- they're static, immutable data -- so they
+    # CodeGenerator.gen_expr_ir's own StringLiteral case). These
+    # aren't tied to any one function's frame -- they're static,
+    # immutable data -- so they
     # live at the AsmProgram level and get emitted once, in a shared
     # `.data` block, by Emitter (see its emit()).
     string_literals: list[tuple] = field(default_factory=list)

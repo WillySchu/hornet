@@ -41,7 +41,6 @@ with no remaining exception.
 from dataclasses import dataclass, field
 from typing import Optional, Union
 
-from codegen.assembly_ast import Instruction
 from parser import BinaryOp, UnaryOp
 from semantic import Type
 
@@ -179,7 +178,7 @@ class IRStore:
     location -- the DECLARED type of the destination, deliberately
     not necessarily value.type: an untyped literal or expression
     flowing into a differently (but compatibly) typed slot can
-    disagree, the same reason gen_index_assign/gen_field_assign
+    disagree, the same reason _ir_index_assign/_ir_field_assign
     already use the element's/field's own declared type rather than
     the value's for exactly this decision. IRMove doesn't need this
     same explicit field only because its own destination is a Temp,
@@ -273,7 +272,7 @@ class IRCopy:
 class IRBoundsCheck:
     """Traps (via the same shared, already-existing per-function/per-
     message panic label _get_bounds_check_fail_label already manages
-    -- see gen_index_address_into's own docstring for the full "why"
+    -- see _ir_index_address's own docstring for the full "why"
     of the check itself) if `index`, treated as unsigned, is >=
     `length` -- catching a negative index and a too-large one in the
     identical single check the old-style bounds check already does,
@@ -299,7 +298,7 @@ class IRSliceBoundsCheck:
     """Traps (via the same shared per-function/per-message panic
     label mechanism IRBoundsCheck's own lowering uses, just its own
     "slice bounds out of range" message rather than "array index out
-    of bounds" -- see gen_slice_into's own docstring for the full
+    of bounds" -- see _ir_slice_into's own docstring for the full
     "why" of the check itself) if `value`, treated as unsigned, is
     strictly greater than `bound`.
 
@@ -478,16 +477,19 @@ class IRProgram:
     aren't tied to any one function's frame, so they live here rather
     than being duplicated per function.
 
-    Deliberately excludes anything built by generate() that ISN'T
-    real IR: chiefly, the print-stringify helper function old-style
-    code used to conditionally add to AsmProgram's own function list
-    (see generate()'s own _print_used check) -- inert now (nothing
-    ever sets _print_used to True anymore, since print() itself
-    migrated to a real IRCall against the runtime -- see ir.py's own
-    module docstring), so this omission is currently never even
-    exercised, but it would stay correct even if that dead branch were
-    ever revived: that helper is hand-built AsmFunction directly, with
-    no IRFunction of its own to include here.
+    Used to also deliberately exclude the print-stringify helper
+    function old-style code conditionally added to AsmProgram's own
+    function list -- that gate (generate()'s own `if self._print_used`
+    check) and the hand-built AsmFunction it guarded (build_
+    stringify_function) have both been removed entirely since, as part
+    of this same arc's old-style dead-code cleanup (see this module's
+    own top docstring): nothing ever set _print_used to True once
+    print() itself migrated to a real IRCall against the runtime, so
+    the branch was already permanently unreachable before it was
+    deleted. Worth noting for history, since it's exactly the shape of
+    thing this object is FOR excluding -- generate() building
+    something that was never real IR at all -- even though there's
+    nothing left to exclude here anymore.
 
     No consumer of this object exists yet -- generate() builds and
     keeps it (see self.ir_program) purely so it exists as a real,

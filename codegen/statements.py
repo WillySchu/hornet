@@ -4,7 +4,6 @@ uninitialized declaration gets its type's real zero value rather than
 leaving memory untouched, and the label-pair shape (start/end, or
 else/end) every branching or looping construct here builds on."""
 
-from codegen.assembly_ast import Instruction, MovQ, Register, Memory, Imm, Push, Pop, Mov, Jmp, LeaQ, MovB
 from codegen.errors import CodegenError
 from codegen.ir import (
     IRReturn, IRBranch, IRLabel, IRJump, IRMove, IRStore, IRCopy, IRConst, IRLoad, IRLocalAddress, IRCall,
@@ -35,34 +34,13 @@ from semantic import TypeKind, Type, type_from_name
 
 
 class StatementsMixin:
-    def gen_statement(self, stmt: Node) -> list[Instruction]:
-        if isinstance(stmt, VarDecl):
-            return self.gen_var_decl(stmt)
-        if isinstance(stmt, Assign):
-            return self.gen_assign(stmt)
-        if isinstance(stmt, IndexAssign):
-            return self.gen_index_assign(stmt)
-        if isinstance(stmt, FieldAssign):
-            return self.gen_field_assign(stmt)
-        if isinstance(stmt, Return):
-            return self.gen_return(stmt)
-        if isinstance(stmt, If):
-            return self.gen_if(stmt)
-        if isinstance(stmt, While):
-            return self.gen_while(stmt)
-        if isinstance(stmt, Break):
-            return self.gen_break(stmt)
-        if isinstance(stmt, Continue):
-            return self.gen_continue(stmt)
-        if isinstance(stmt, ExprStmt):
-            return self.gen_expr_stmt(stmt)
-        raise CodegenError(f"No codegen rule for statement: {stmt!r}")
 
     def gen_statement_ir(self, stmt: Node) -> list:
-        """The IR-native counterpart to gen_statement: builds real IR
-        for Return/If/While (recursing into itself, not gen_statement,
-        for If/While bodies -- so nested control flow stays real IR
-        all the way down), a scalar VarDecl-with-initializer, Assign,
+        """Builds real IR for every statement kind this compiler
+        supports: Return/If/While (recursing into itself, not a
+        separate old-style dispatcher, for If/While bodies -- so
+        nested control flow stays real IR all the way down), a scalar
+        VarDecl-with-initializer, Assign,
         IndexAssign, or FieldAssign (an IRMove into a variable's own
         persistent Temp, or an IRStore through an address -- see
         _ir_index_assign/_ir_field_assign -- for the latter two), and
@@ -136,15 +114,17 @@ class StatementsMixin:
         recursion, the same shape address computation's own Field/
         Index handling already relies on elsewhere in this arc.
 
-        Break and Continue are real IR too (_ir_break/_ir_continue --
-        an exact, zero-behavioral-difference IRJump-for-Jmp swap, see
-        their own docstrings), as is an ArrayLiteral- or Slice-valued
-        ExprStmt (_ir_array_literal_side_effects_only/_ir_slice_into,
-        evaluating for side effects/the bounds check alone, with
-        nothing ever materialized or read back -- see gen_expr_stmt's
-        own docstring for exactly why an ArrayLiteral in particular
-        needs this narrower treatment rather than an ordinary
-        gen_expr_ir call).
+        Break and Continue are real IR too (_ir_break/_ir_continue),
+        as is an ArrayLiteral- or Slice-valued ExprStmt (_ir_array_
+        literal_side_effects_only/_ir_slice_into, evaluating for side
+        effects/the bounds check alone, with nothing ever materialized
+        or read back) -- both need this narrower treatment rather than
+        an ordinary gen_expr_ir call, since neither shape produces a
+        single value gen_expr_ir's own generic machinery could handle:
+        an ArrayLiteral/Slice used as a bare statement has no
+        destination to write into and no scalar result to discard,
+        just whatever side effects evaluating its own elements/bounds
+        might have.
 
         A slice-typed VarDecl/Assign/IndexAssign/FieldAssign/Return
         whose own value is a bare `none` is real IR too, via _ir_nil_
@@ -367,10 +347,11 @@ class StatementsMixin:
             # _bind_local) and write into that Temp directly, either
             # the initializer's own IR result or -- no initializer --
             # this type's own zero value. An array/struct/slice-typed
-            # VarDecl (initialized or not) falls to the catch-all
-            # below WITHOUT binding here -- gen_var_decl does its own
-            # single _bind_local call, and binding twice would just
-            # orphan a Temp id, harmlessly but pointlessly.
+            # VarDecl (initialized or not) falls through to the more
+            # specific cases below WITHOUT binding here -- each of
+            # those does its own single _bind_local call once its own
+            # shape is confirmed to apply, and binding twice would
+            # just orphan a Temp id, harmlessly but pointlessly.
             var_type = type_from_name(stmt.var_type, self.struct_registry, self.type_alias_registry)
             if not isinstance(stmt.init, NoneLiteral) and var_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
                 self._bind_local(stmt)
@@ -430,8 +411,7 @@ class StatementsMixin:
                     # destination is BRAND NEW -- its slot holds
                     # nothing yet, heap-allocated or not. A heap-
                     # allocated one needs its own fresh backing
-                    # allocation made here, exactly like gen_var_decl's
-                    # own identical branch does, BEFORE _ir_copy_assign
+                    # allocation made here, BEFORE _ir_copy_assign
                     # ever tries to read an address out of this slot --
                     # otherwise it would read whatever pointer-sized
                     # garbage was already sitting there.
@@ -554,11 +534,12 @@ class StatementsMixin:
             # regardless of outcome, though: _bind_local's own Temp
             # always points at this VarDecl's own pre-computed,
             # permanent offset (see its own docstring), so a second
-            # _bind_local call from gen_var_decl's own old-style
-            # fallback, if this one fails, resolves to the identical
-            # underlying storage location, not a different one -- the
-            # same "orphans a Temp id, harmlessly" waste already
-            # accepted elsewhere in this arc, not a genuine hazard.
+            # _bind_local call, from whatever later case (if any) ends
+            # up actually handling this VarDecl if this one's own
+            # shape doesn't apply, resolves to the identical underlying
+            # storage location, not a different one -- the same
+            # "orphans a Temp id, harmlessly" waste already accepted
+            # elsewhere in this arc, not a genuine hazard.
             if (
                     var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT)
                     and (isinstance(stmt.init, ArrayLiteral)
@@ -696,11 +677,10 @@ class StatementsMixin:
                 if write_ir is not None:
                     return dst_ir + write_ir
         elif isinstance(stmt, IndexAssign):
-            # Same scope boundary as gen_index_assign itself. ARRAY
-            # never occurs here at all (IndexAssign's own grammar
-            # can't produce an array-typed element -- see gen_field_
-            # assign's own docstring for the contrast with
-            # FieldAssign, which can).
+            # ARRAY never occurs here at all -- IndexAssign's own
+            # grammar can't produce an array-typed element (unlike
+            # FieldAssign, whose own case below explains the
+            # contrast).
             element_type = type_of(stmt.array).element_type
             if element_type.kind not in (TypeKind.SLICE, TypeKind.STRUCT):
                 return self._ir_index_assign(stmt, element_type)
@@ -854,12 +834,13 @@ class StatementsMixin:
         elif isinstance(stmt, ExprStmt) and isinstance(stmt.expr, NoneLiteral):
             # A REAL BUG, found and fixed here: a bare `none` used to
             # crash (CodegenError, "Cannot compute 'none' via gen_expr_
-            # into"), since gen_expr_ir's own catch-all delegates to
-            # gen_expr_into for anything it doesn't already have a
-            # case for -- but gen_expr_into itself defensively REJECTS
-            # none rather than handling it (its own docstring's claim
-            # that this fallback "covers" every shape gen_expr_into
-            # rejects was simply wrong for this one). A bare `none`
+            # into"), since gen_expr_ir's own catch-all used to
+            # delegate to the old-style gen_expr_into for anything it
+            # didn't already have a case for -- but gen_expr_into
+            # itself defensively REJECTED none rather than handling it
+            # (its own docstring's claim that this fallback "covers"
+            # every shape gen_expr_into rejects was simply wrong for
+            # this one). A bare `none`
             # has no side effect of any kind -- it's a pure literal,
             # nothing to compute or discard -- so the correct real-IR
             # treatment is zero instructions, the same as a bare
@@ -889,7 +870,7 @@ class StatementsMixin:
             # returning ordinary Call used directly as a bare statement
             # (`makeArray()` alone on a line, its own result entirely
             # discarded) used to crash the identical way `none` did --
-            # gen_expr_into defensively rejects a composite-returning
+            # gen_expr_into defensively rejected a composite-returning
             # Call too (it can't fit the hidden-pointer convention's
             # own result into a single register). The call's own side
             # effect still needs to happen, so this materializes it via
@@ -943,145 +924,14 @@ class StatementsMixin:
             IRStore(address=slot_addr, value=ptr, value_type=Type.INT64),
         ]
 
-    def gen_var_decl(self, stmt: VarDecl) -> list[Instruction]:
-        # _collect_locals already reserved this VarDecl's slot;
-        # _bind_local just makes its name resolvable in the current
-        # scope and returns where to store the initializer, if there
-        # is one. `int a` with no initializer gets its type's implicit
-        # zero value (see _gen_zero_value_into) rather than genuinely
-        # uninitialized memory -- the same holds for a heap-allocated
-        # array/struct's malloc'd memory below: always written through,
-        # never left as raw malloc garbage.
-        offset = self._bind_local(stmt)
-        var_type = self._local_type(stmt.name)
-        if self._is_heap_allocated(id(stmt), var_type):
-            # A fresh backing allocation, made exactly once here at
-            # declaration time (see gen_assign's array case for why a
-            # later assignment reuses this allocation instead of
-            # mallocing again). %rax still holds the pointer right
-            # after storing it into the slot, so it's safe to use
-            # directly as the initializer's destination.
-            instructions = self._gen_malloc_array(var_type)
-            instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
-            if stmt.init is not None:
-                if var_type.kind == TypeKind.STRUCT:
-                    instructions.extend(self.gen_struct_value_into(stmt.init, Memory('rax', 0), var_type))
-                else:
-                    instructions.extend(self.gen_array_value_into(stmt.init, Memory('rax', 0), var_type))
-            else:
-                instructions.extend(self._gen_zero_value_into(var_type, Memory('rax', 0)))
-            return instructions
-        if stmt.init is None:
-            # A no-initializer variable's zero value is always written
-            # directly to its permanent slot, never through _gen_write_
-            # temp_from -- same reasoning as the parameter-initialization
-            # case in gen_function's own prologue loop (see its own
-            # comment for why this is recorded rather than migrated).
-            self._escaped_offsets.add(offset)
-            return self._gen_zero_value_into(var_type, Memory('rbp', offset))
-        if isinstance(stmt.init, NoneLiteral):
-            # none's resolved type (Type.NONE) never equals var_type --
-            # semantic.py's _types_compatible is what lets this
-            # declaration through despite that -- so this needs
-            # var_type, the TARGET type, passed explicitly, rather than
-            # going through _gen_store's ordinary dispatch, which only
-            # needs the value expression since every other kind of
-            # value's resolved type already matches what's being stored.
-            return self.gen_none_into(Memory('rbp', offset), var_type)
-        if isinstance(stmt.init, ArrayLiteral) and var_type.kind == TypeKind.SLICE:
-            # `[]int s = [1, 2, 3]` -- an untyped array literal used
-            # directly as a slice's initializer, treated like the
-            # general, explicitly-typed form (`[]int s = []int[1, 2,
-            # 3]`): construct a new, heap-allocated backing array and
-            # produce a descriptor for the whole thing. Needed here
-            # separately because stmt.init's resolved type
-            # (Type(ARRAY,...)) never equals var_type (Type(SLICE,...)),
-            # so _gen_store's ordinary dispatch, which trusts the
-            # value's own resolved type, would never route this to
-            # slice-producing codegen on its own.
-            instructions = self.gen_array_literal_heap_alloc_into(stmt.init)
-            instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
-            instructions.append(MovQ(src=Imm(len(stmt.init.elements)), dst=Memory('rbp', offset + 8)))
-            return instructions
-        return self._gen_store(offset, stmt.init)
 
-    def gen_assign(self, stmt: Assign) -> list[Instruction]:
-        offset = self._local_offset(stmt.name)
-        if isinstance(stmt.value, NoneLiteral):
-            # See gen_var_decl's identical case above: needs the
-            # TARGET type (the variable's declared type), not
-            # stmt.value's resolved type (Type.NONE).
-            var_type = self._local_type(stmt.name)
-            return self.gen_none_into(Memory('rbp', offset), var_type)
-        var_type = self._local_type(stmt.name)
-        if isinstance(stmt.value, ArrayLiteral) and var_type.kind == TypeKind.SLICE:
-            # See gen_var_decl's identical case for the full reasoning
-            # -- unlike an array's own Assign below, this always
-            # mallocs a FRESH allocation rather than reusing an
-            # existing one: an assigned-to slice variable might
-            # currently point at a different array (or none at all) of
-            # a different size, so there's no existing allocation here
-            # that could be safe to reuse in place.
-            instructions = self.gen_array_literal_heap_alloc_into(stmt.value)
-            instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
-            instructions.append(MovQ(src=Imm(len(stmt.value.elements)), dst=Memory('rbp', offset + 8)))
-            return instructions
-        value_type = type_of(stmt.value)
-        if value_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and self._is_heap_allocated(
-                self._local_decl_id(stmt.name), value_type):
-            # Reuses the EXISTING allocation from this variable's
-            # declaration -- a fixed-size array's (or struct's) own
-            # footprint never changes across its lifetime, so there's
-            # nothing to reallocate, only to load the existing pointer
-            # and write the new value through it.
-            instructions = [MovQ(src=Memory('rbp', offset), dst=Register('rax'))]
-            if value_type.kind == TypeKind.STRUCT:
-                instructions.extend(self.gen_struct_value_into(stmt.value, Memory('rax', 0), value_type))
-            else:
-                instructions.extend(self.gen_array_value_into(stmt.value, Memory('rax', 0), value_type))
-            return instructions
-        return self._gen_store(offset, stmt.value)
 
-    def gen_index_assign(self, stmt: IndexAssign) -> list[Instruction]:
-        """`array[index] = value` -- computes the target element's
-        address (via gen_index_address_into, which includes the
-        runtime bounds check). A SLICE element (`rows[i] = someSlice`)
-        needs its own 24-byte descriptor write via gen_slice_value_
-        into, which already protects an arbitrary dst_mem.base
-        internally, so this can hand it Memory('rax', 0) directly
-        without its own push/pop dance. The scalar case is built as
-        IR -- see _ir_index_assign, which is also what actually
-        decides the store's width from the element's own DECLARED
-        type, not stmt.value's.
-
-        Deliberately NOT stmt.value's resolved type: an untyped array
-        literal flowing into a SLICE-typed element (`rows[0] = [9, 9,
-        9]`) has its resolved type set to the ARRAY it actually builds,
-        not the slice it's being treated as -- dispatching on the
-        VALUE's type would miss this case and fall through to the
-        scalar path below (the same bug-class already fixed in
-        gen_var_decl/gen_assign, just at a third call site).
-
-        An ARRAY-typed element (`matrix[i] = other_row`) isn't
-        reachable here: IndexAssign's grammar only ever produces a
-        single leaf-level element write.
-        """
-        base_type = type_of(stmt.array)
-        element_type = base_type.element_type
-        addr_reg = Register('rax')
-        instructions = self.gen_index_address_into(Index(array=stmt.array, index=stmt.index), addr_reg)
-        if element_type.kind == TypeKind.SLICE:
-            instructions.extend(self.gen_slice_value_into(stmt.value, Memory('rax', 0)))
-            return instructions
-        if element_type.kind == TypeKind.STRUCT:
-            return instructions + self.gen_struct_value_into(stmt.value, Memory('rax', 0), element_type)
-        return self._instruction_selector.lower_ir(self._ir_index_assign(stmt, element_type))
 
     def _ir_index_assign(self, stmt: IndexAssign, element_type) -> list:
-        """Builds (without lowering) the scalar-element case of
-        gen_index_assign -- the caller (gen_index_assign or
-        gen_statement_ir) is responsible for already having ruled out
-        SLICE/STRUCT. Captures the address via _ir_index_address
+        """Builds (without lowering) the scalar-element case of an
+        IndexAssign -- the caller (gen_statement_ir) is responsible
+        for already having ruled out SLICE/STRUCT. Captures the
+        address via _ir_index_address
         directly (confirmed, exhaustively, to never return None for
         any reachable shape of expr.array's own base -- the old-style
         _or_fallback wrapper this used to go through has since been
@@ -1133,11 +983,12 @@ class StatementsMixin:
         the same way, then IRCopy between them).
 
         Dispatches on value_type.kind, not on dst_expr/src_expr's own
-        shape: SLICE has no old-style equivalent to fall back to at
-        all (a slice's own address is only ever computed inline,
-        inside gen_slice_value_into's own Variable/Index/Field cases,
-        never as a standalone reusable method) -- so all three kinds
-        go through the real-IR builders uniformly here, not a mix.
+        shape: SLICE had no old-style equivalent to fall back to at
+        all (a slice's own address was only ever computed inline,
+        inside the old-style gen_slice_value_into's own Variable/
+        Index/Field cases, never as a standalone reusable method) --
+        so all three kinds go through the real-IR builders uniformly
+        here, not a mix.
 
         Callers are responsible for already having confirmed src_expr
         is a Variable/Field/Index -- an ArrayLiteral, a struct-literal
@@ -1155,51 +1006,12 @@ class StatementsMixin:
         dst_ir, dst_addr = address_of(dst_expr)
         return dst_ir + self._ir_copy_into_address(dst_addr, src_expr, value_type)
 
-    def gen_field_assign(self, stmt: FieldAssign) -> list[Instruction]:
-        """`base.name = value` -- mirrors gen_index_assign one level
-        over: computes the target field's address (via
-        gen_field_address_into). The scalar case is built as IR -- see
-        _ir_field_assign, which is also what actually decides the
-        store's width from the field's own DECLARED type, not
-        stmt.value's -- for the same reason gen_index_assign uses the
-        element's declared type.
-
-        A STRUCT-typed field (`s.inner = otherInner`) is handled via
-        gen_struct_value_into's flat copy, since a field write of a
-        whole struct value is exactly as much "copy N bytes" as any
-        other struct value production. An array-typed field (`s.arr =
-        otherArr`) works the same way via gen_array_value_into --
-        unlike IndexAssign, FieldAssign's grammar CAN produce this
-        shape (a struct field can itself be a whole array), so this
-        needs a real case for it.
-
-        A NoneLiteral value flowing into a slice-typed field
-        (`s.values = none`) needs the identical short-circuit gen_var_
-        decl/gen_assign already have, checked BEFORE the SLICE
-        dispatch: none's resolved type (Type.NONE) never equals the
-        field's declared type, so gen_slice_value_into's ordinary
-        dispatch has no case for it. This was a real gap found by
-        testing: FieldAssign wasn't a reachable path for a slice-typed
-        value until slice-typed fields existed at all."""
-        field_type = self._check_struct_and_field_type(stmt.base, stmt.name)
-        addr_reg = Register('rax')
-        instructions = self.gen_field_address_into(stmt, addr_reg)
-        if field_type.kind == TypeKind.SLICE:
-            if isinstance(stmt.value, NoneLiteral):
-                return instructions + self.gen_none_into(Memory('rax', 0), field_type)
-            instructions.extend(self.gen_slice_value_into(stmt.value, Memory('rax', 0)))
-            return instructions
-        if field_type.kind == TypeKind.STRUCT:
-            return instructions + self.gen_struct_value_into(stmt.value, Memory('rax', 0), field_type)
-        if field_type.kind == TypeKind.ARRAY:
-            return instructions + self.gen_array_value_into(stmt.value, Memory('rax', 0), field_type)
-        return self._instruction_selector.lower_ir(self._ir_field_assign(stmt, field_type))
 
     def _ir_field_assign(self, stmt: FieldAssign, field_type) -> list:
-        """Builds (without lowering) the scalar-field case of
-        gen_field_assign -- the caller (gen_field_assign or
-        gen_statement_ir) is responsible for already having ruled out
-        SLICE/STRUCT/ARRAY (and the slice-typed NoneLiteral case).
+        """Builds (without lowering) the scalar-field case of a
+        FieldAssign -- the caller (gen_statement_ir) is responsible
+        for already having ruled out SLICE/STRUCT/ARRAY (and the
+        slice-typed NoneLiteral case).
         Same shape as _ir_index_assign one level over: captures the
         address via _ir_field_address (real IR, confirmed exhaustively
         to always succeed for a reachable base -- raises CodegenError
@@ -1215,117 +1027,13 @@ class StatementsMixin:
         value_ir, value = self.gen_expr_ir(stmt.value)
         return addr_ir + value_ir + [IRStore(address=addr_value, value=value, value_type=field_type)]
 
-    def _gen_store(self, offset: int, value_expr: Node) -> list[Instruction]:
-        """Shared by VarDecl-with-initializer and Assign: both are just
-        "compute this expression, then write the result into that
-        variable's slot". Which store instruction depends on the
-        value's type: an array or struct can't fit in a single
-        register, so each is dispatched to gen_array_value_into or
-        gen_struct_value_into separately; a slice is a fixed-size
-        24-byte descriptor, dispatched to gen_slice_value_into the same
-        way; a str is an 8-byte pointer sitting in %rax and needs
-        `movq`; int/bool/int8/uint8 all compute the same way (via
-        gen_expr_into, oblivious to which of the four it actually is)
-        and then write out via _gen_write_scalar_from, the one place
-        that distinguishes a narrow 1-byte store (int8/uint8) from an
-        ordinary 4-byte one -- only this call site needs to ask "which
-        width, or which entirely different mechanism, am I storing"."""
-        value_type = type_of(value_expr)
-        if value_type.kind == TypeKind.ARRAY:
-            return self.gen_array_value_into(value_expr, Memory('rbp', offset), value_type)
-        if value_type.kind == TypeKind.SLICE:
-            return self.gen_slice_value_into(value_expr, Memory('rbp', offset))
-        if value_type.kind == TypeKind.STRUCT:
-            return self.gen_struct_value_into(value_expr, Memory('rbp', offset), value_type)
-        instructions = self.gen_expr_into(value_expr, Register('eax'))
-        if value_type == Type.STR:
-            instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
-        else:
-            instructions.extend(self._gen_write_scalar_from(Register('eax'), value_type, Memory('rbp', offset)))
-        return instructions
 
-    def gen_return(self, stmt: Return) -> list[Instruction]:
-        # A bare `return` (no value -- valid exactly when this function
-        # has no declared return type) needs nothing computed, just
-        # the ordinary epilogue -- IRReturn with no value, same as the
-        # scalar case below minus the load.
-        if stmt.value is None:
-            return self._instruction_selector.lower_ir(self._ir_return(None))
-
-        if isinstance(stmt.value, NoneLiteral):
-            # none's resolved type (Type.NONE) never equals SLICE --
-            # semantic.py's _types_compatible is what lets `return
-            # none` through despite that, and already guarantees it's
-            # only valid when this function's declared return type IS
-            # a slice. Written directly (not via gen_none_into, which
-            # needs a real target_type to check against, not readily
-            # available here) through the hidden return pointer, like
-            # every other slice-typed return value.
-            ptr_reg = Register('rax')
-            instructions = [MovQ(src=Memory('rbp', self._hidden_return_ptr_offset), dst=ptr_reg)]
-            instructions.append(MovQ(src=Imm(0), dst=Memory('rax', 0)))
-            instructions.append(MovQ(src=Imm(0), dst=Memory('rax', 8)))
-            instructions.append(MovQ(src=Imm(0), dst=Memory('rax', 16)))
-            instructions.extend(self._gen_epilogue())
-            return instructions
-
-        # An array- OR slice-typed return writes directly through the
-        # hidden pointer this function received instead of ever
-        # putting anything in %eax/%rax -- nothing reads a return
-        # value that way for an array- or slice-returning call.
-        # Loading the pointer back out of its slot and handing it to
-        # gen_array_value_into/gen_slice_value_into as an ordinary
-        # Memory destination is also what makes `return bar()`
-        # (forwarding another array/slice-returning call's result)
-        # free: the Call case just passes that same address one level
-        # deeper, with no intermediate copy ever materialized.
-        #
-        # Real IR now instead, for the Call-forwarding case (via _ir_
-        # composite_call), a Variable/Field/Index value (via _ir_copy_
-        # into_address), and an array literal or positional struct
-        # literal (via _ir_write_array_literal_into/_ir_write_struct_
-        # literal_into) alike -- including a NESTED composite element/
-        # field within either, via _ir_write_composite_value_into,
-        # which those two now call back into for their own composite
-        # elements/fields, mutually recursively. A named/partial
-        # (kwargs) struct literal, or `return none`, still reach this
-        # old-style path. See gen_statement_ir's own Return case,
-        # which reads the identical hidden_return_ptr_offset via an
-        # ordinary address-as-a-Temp leaf (_ir_hidden_return_ptr),
-        # then reuses whichever real-IR builder applies, rather than
-        # calling this method at all.
-        value_type = type_of(stmt.value)
-        if value_type.kind == TypeKind.ARRAY:
-            ptr_reg = Register('rax')
-            instructions = [MovQ(src=Memory('rbp', self._hidden_return_ptr_offset), dst=ptr_reg)]
-            instructions.extend(self.gen_array_value_into(stmt.value, Memory('rax', 0), value_type))
-        elif value_type.kind == TypeKind.SLICE:
-            ptr_reg = Register('rax')
-            instructions = [MovQ(src=Memory('rbp', self._hidden_return_ptr_offset), dst=ptr_reg)]
-            instructions.extend(self.gen_slice_value_into(stmt.value, Memory('rax', 0)))
-        elif value_type.kind == TypeKind.STRUCT:
-            # Same hidden-pointer mechanism -- unchanged for struct:
-            # gen_struct_value_into already knows how to write into an
-            # arbitrary Memory destination, so `return bar()` is
-            # exactly as free here as it is for arrays and slices.
-            ptr_reg = Register('rax')
-            instructions = [MovQ(src=Memory('rbp', self._hidden_return_ptr_offset), dst=ptr_reg)]
-            instructions.extend(self.gen_struct_value_into(stmt.value, Memory('rax', 0), value_type))
-        else:
-            # A scalar return: build its IR (see _ir_return) and lower
-            # it -- which loads the value into %eax (or %rax, per its
-            # type) and emits the ordinary epilogue. None of the
-            # epilogue touches %eax/%rax/%rdx, so this is unaffected by
-            # whatever those registers held during the body.
-            return self._instruction_selector.lower_ir(self._ir_return(stmt.value))
-        instructions.extend(self._gen_epilogue())
-        return instructions
 
     def _ir_return(self, value_expr) -> list:
         """Builds (without lowering) IRReturn for a bare return
-        (value_expr=None) or a scalar return -- the two cases
-        gen_return doesn't route through the hidden-pointer
-        convention."""
+        (value_expr=None) or a scalar return -- the two cases gen_
+        statement_ir's own Return case doesn't route through the
+        hidden-pointer convention."""
         if value_expr is None:
             return [IRReturn(value=None)]
         ir, value = self.gen_expr_ir(value_expr)
@@ -1351,273 +1059,49 @@ class StatementsMixin:
         ]
         return ir, hidden_ptr
 
-    def gen_if(self, stmt: If) -> list[Instruction]:
-        """Computes the condition into a Temp and branches on it via
-        IRBranch:
-
-            <condition>          ; -> t_cond
-            branch t_cond, .then, .else
-        .then:
-            <then_body>
-            jump .end
-        .else:
-            <else_body>          ; only emitted if else_body is present
-        .end:
-
-        (lower_ir's own IRBranch rule always emits both jumps, so the
-        actual assembly has one redundant jmp right before .then -- no
-        peephole yet.)
-
-        then_body and else_body each get their own pushed/popped scope
-        (see _push_scope), matching semantic.py's independent-branch
-        scoping -- and since an elif is just a nested If inside
-        else_body, gen_statement's ordinary recursion handles a whole
-        elif/else chain of any length with no extra logic here.
-        """
-        then_label = self.new_label("if_then")
-        else_label = self.new_label("if_else")
-        end_label = self.new_label("if_end")
-
-        instructions = self._instruction_selector.lower_ir(self._ir_if_head(stmt, then_label, else_label))
-
-        self._push_scope()
-        for s in stmt.then_body:
-            instructions.extend(self.gen_statement(s))
-        self._pop_scope()
-
-        instructions.extend(self._instruction_selector.lower_ir([IRJump(end_label), IRLabel(else_label)]))
-        if stmt.else_body is not None:
-            self._push_scope()
-            for s in stmt.else_body:
-                instructions.extend(self.gen_statement(s))
-            self._pop_scope()
-        instructions.extend(self._instruction_selector.lower_ir([IRLabel(end_label)]))
-        return instructions
 
     def _ir_if_head(self, stmt: If, then_label: str, else_label: str) -> list:
         """Builds (without lowering) the condition-and-branch IR
-        landing at the given then/else labels -- the caller (gen_if)
-        is responsible for the bodies and the trailing jump/labels
-        around them, since those still go through gen_statement, not
-        native IR."""
+        landing at the given then/else labels -- the caller (gen_
+        statement_ir's own If case) is responsible for the bodies and
+        the trailing jump/labels around them."""
         cond_ir, cond_value = self.gen_expr_ir(stmt.condition)
         return cond_ir + [
             IRBranch(cond=cond_value, true_label=then_label, false_label=else_label),
             IRLabel(then_label),
         ]
 
-    def gen_while(self, stmt: While) -> list[Instruction]:
-        """Computes the condition, re-checked before every iteration
-        (including the first), with the body sitting between the
-        start label (break/continue's own re-check target) and the
-        end label (loop exit):
-
-        .start:
-            <condition>          ; -> t_cond
-            branch t_cond, .body, .end
-        .body:
-            <body>
-            jump .start
-        .end:
-
-        Both labels get pushed onto self.loop_labels for the body's
-        duration, so any Break/Continue inside it -- including nested
-        inside an If -- finds its way back via gen_break/gen_continue
-        with no need to know where inside the body it is. Popped again
-        once the body's done, so a Break/Continue after this while
-        can't resolve to this loop's labels.
-
-        The body gets its own pushed/popped scope, same as an If's
-        then/else bodies, even though the same physical stack slots
-        are reused on every iteration -- this is purely about name
-        resolution during codegen, not anything that happens at
-        runtime.
-        """
-        start_label = self.new_label("while_start")
-        body_label = self.new_label("while_body")
-        end_label = self.new_label("while_end")
-
-        instructions = self._instruction_selector.lower_ir(
-            self._ir_while_head(stmt, start_label, body_label, end_label))
-
-        self.loop_labels.append((start_label, end_label))
-        self._push_scope()
-        for s in stmt.body:
-            instructions.extend(self.gen_statement(s))
-        self._pop_scope()
-        self.loop_labels.pop()
-
-        instructions.extend(self._instruction_selector.lower_ir([IRJump(start_label), IRLabel(end_label)]))
-        return instructions
 
     def _ir_while_head(self, stmt: While, start_label: str, body_label: str, end_label: str) -> list:
         """Builds (without lowering) the start-label/condition/branch
-        IR landing at the given body label -- the caller (gen_while)
-        is responsible for the body and the trailing jump/end-label
-        around it, since those still go through gen_statement, not
-        native IR."""
+        IR landing at the given body label -- the caller (gen_
+        statement_ir's own While case) is responsible for the body and
+        the trailing jump/end-label around it."""
         cond_ir, cond_value = self.gen_expr_ir(stmt.condition)
         return [IRLabel(start_label)] + cond_ir + [
             IRBranch(cond=cond_value, true_label=body_label, false_label=end_label),
             IRLabel(body_label),
         ]
 
-    def gen_break(self, stmt: Break) -> list[Instruction]:
-        # semantic.py already guarantees this only appears inside a
-        # loop; this check exists so codegen doesn't trust semantic
-        # analysis unconditionally, the same defensive posture
-        # _local_offset takes.
-        #
-        # Real IR now instead -- see _ir_break, an exact one-line swap
-        # (IRJump instead of Jmp; IRJump's own lowering already emits
-        # exactly this same Jmp, see its own docstring). This old-
-        # style path is still reached from gen_statement, the old-
-        # style statement dispatch.
-        if not self.loop_labels:
-            raise CodegenError("'break' outside of a loop")
-        _, end_label = self.loop_labels[-1]
-        return [Jmp(end_label)]
 
     def _ir_break(self) -> list:
-        """The real-IR counterpart to gen_break: identical loop-label
-        lookup and the identical defensive check, just IRJump instead
-        of a raw Jmp -- IRJump's own lowering already emits exactly
-        that same Jmp (see codegen/ir.py's own docstring), so this is
-        a direct, zero-behavioral-difference swap, not a translation
-        needing any new reasoning."""
+        """Builds real IR for a bare `break`: the innermost loop's own
+        end label (see loop_labels), raising CodegenError if none is
+        currently open -- an ordinary IRJump to it."""
         if not self.loop_labels:
             raise CodegenError("'break' outside of a loop")
         _, end_label = self.loop_labels[-1]
         return [IRJump(end_label)]
 
-    def gen_continue(self, stmt: Continue) -> list[Instruction]:
-        # Real IR now instead -- see _ir_continue, the identical one-
-        # line swap _ir_break's own docstring describes. This old-
-        # style path is still reached from gen_statement.
-        if not self.loop_labels:
-            raise CodegenError("'continue' outside of a loop")
-        start_label, _ = self.loop_labels[-1]
-        return [Jmp(start_label)]
 
     def _ir_continue(self) -> list:
-        """The real-IR counterpart to gen_continue -- see _ir_break's
-        own docstring for why this is a direct, zero-behavioral-
-        difference swap."""
+        """Builds real IR for a bare `continue`: the innermost loop's
+        own start label (see loop_labels), raising CodegenError if
+        none is currently open -- an ordinary IRJump to it."""
         if not self.loop_labels:
             raise CodegenError("'continue' outside of a loop")
         start_label, _ = self.loop_labels[-1]
         return [IRJump(start_label)]
 
-    def gen_expr_stmt(self, stmt: ExprStmt) -> list[Instruction]:
-        # Evaluated the same way as any other expression, into %eax --
-        # just with nothing done with the result afterward. Still real
-        # instructions that really run (a standalone `1 / 0` genuinely
-        # crashes).
-        #
-        # An ArrayLiteral is the one exception: it can't be computed
-        # via gen_expr_into at all (doesn't fit in a single register),
-        # and unlike a VarDecl/Assign's use of one, a bare literal
-        # statement has no destination to write the resulting array
-        # into -- but it doesn't need one, since nothing ever reads the
-        # array as a whole. See gen_array_literal_side_effects_only for
-        # the resulting approach: evaluate each element for whatever
-        # side effects it might have, without materializing a real
-        # array in memory.
-        if isinstance(stmt.expr, ArrayLiteral):
-            return self.gen_array_literal_side_effects_only(stmt.expr)
-        # A Slice expression is the analogous exception for slices --
-        # a 24-byte descriptor doesn't fit in a register either -- but
-        # unlike ArrayLiteral, this doesn't need its own narrower path:
-        # gen_slice_into already computes fully correctly into any
-        # Memory destination, including a genuine runtime bounds check
-        # (an out-of-range bound still aborts here), so this just
-        # reuses the same per-function scratch slot gen_indexable_
-        # base_into's Slice-base case already uses
-        # (_unnamed_slice_temp_offset) and discards the result. Covers
-        # both a bare slice LITERAL statement and an ordinary bare
-        # slice of an existing array or slice (`arr[:]` alone,
-        # pointless but not an error) with the same code path.
-        if isinstance(stmt.expr, Slice):
-            return self.gen_slice_into(stmt.expr, Memory('rbp', self._unnamed_slice_temp_offset))
-        return self.gen_expr_into(stmt.expr, Register('eax'))
 
-    def _gen_zero_value_into(self, t: Type, dst_mem: Memory) -> list[Instruction]:
-        """Writes t's implicit zero value into dst_mem -- what a `T x`
-        VarDecl with no initializer gets, instead of genuinely
-        uninitialized memory. Dispatches by kind:
-          - int/bool/int8/uint8: an ordinary 0 -- a plain 4-byte write
-            for int/bool, a 1-byte one (MovB) for int8/uint8, matching
-            each type's genuine storage width.
-          - str: the address of a single shared, static empty-string
-            constant (_get_empty_str_label) -- never a null pointer
-            (see that method for why a null zero value would be an
-            active hazard).
-          - slice: none's {ptr: 0, len: 0, cap: 0} descriptor, reusing
-            gen_none_into as-is -- a zero-value slice and a none-valued
-            one are, by design, the identical representation.
-          - array: delegated to _gen_zero_array_into, which further
-            dispatches on the array's leaf type.
-          - struct: every field, flattened via _flatten_struct_fields
-            the same way struct equality flattens them for comparison,
-            recursing back into this method for each field's type.
-
-        dst_mem.base is protected via push/pop across EVERY field's
-        zero-fill, when it isn't 'rbp': the array case computes a fresh
-        address via _gen_address_of_memory_into with dst_mem.base
-        itself as the destination register in some call shapes, which
-        can overwrite dst_mem.base's physical register in place.
-        Without protecting it, a struct with an array-typed field
-        followed by any other field would silently compute that later
-        field's address from garbage instead of the struct's real base
-        -- the same register-collision failure mode
-        _gen_struct_fields_equality_at_addresses guards against for the
-        identical reason. Applied unconditionally, even for the
-        scalar/slice cases that don't strictly need it.
-
-        Real IR now instead, for a no-initializer array/struct VarDecl
-        (see gen_statement_ir's own VarDecl case) and an omitted field
-        in a named/partial struct literal (see _ir_write_struct_
-        literal_into) alike -- see _ir_write_zero_value_into, which
-        needs none of this method's own careful fixed-register
-        (%r10/%r12/%r13/...) protection across a recursive call, or
-        three separately hand-written array-leaf loop variants: every
-        Temp its own array-leaf loop uses is independent of whatever
-        Temps a recursive call allocates for itself, and one general-
-        purpose loop already dispatches uniformly on any leaf type,
-        rather than needing a separate flat-zero/str-address/struct-
-        recursive loop for each. This old-style path is still reached
-        from an ArrayLiteral/struct-literal-Call-valued VarDecl/
-        Assign/IndexAssign/FieldAssign (still old-style itself, so its
-        own zero-init needs -- an omitted field's own zero value, for
-        instance -- stay old-style too) and gen_var_decl's own
-        remaining callers.
-        """
-        if t.kind == TypeKind.STRUCT:
-            protect_dst = dst_mem.base != 'rbp'
-            instructions = []
-            for field_type, offset in self._flatten_struct_fields(t.struct_name):
-                field_mem = Memory(dst_mem.base, dst_mem.offset + offset)
-                if protect_dst:
-                    instructions.append(Push(Register(dst_mem.base)))
-                instructions.extend(self._gen_zero_value_into(field_type, field_mem))
-                if protect_dst:
-                    instructions.append(Pop(Register(dst_mem.base)))
-            return instructions
-        if t.kind == TypeKind.ARRAY:
-            return self._gen_zero_array_into(t, dst_mem)
-        if t.kind == TypeKind.SLICE:
-            return self.gen_none_into(dst_mem, t)
-        if t == Type.STR:
-            # Whichever of rax/rcx isn't dst_mem's own base -- a single
-            # scratch register is all this needs, computed and consumed
-            # in the same two instructions, with nothing relying on it
-            # afterward.
-            scratch = Register('rax') if dst_mem.base != 'rax' else Register('rcx')
-            return [
-                LeaQ(label=self._get_empty_str_label(), dst=scratch),
-                MovQ(src=scratch, dst=dst_mem),
-            ]
-        if t == Type.INT8 or t == Type.UINT8:
-            return [MovB(src=Imm(0), dst=dst_mem)]
-        return [Mov(src=Imm(0), dst=dst_mem)]  # int or bool
 

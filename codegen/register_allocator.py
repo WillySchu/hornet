@@ -52,15 +52,16 @@ from codegen.ir import (
 # argument role (unlike %rdi/%rsi/%rdx/%rcx/%r8/%r9) and no implicit
 # instruction-level role (unlike %rcx's shift-count, %rdx's div/mul
 # high half), and not this compiler's own universal scratch
-# convention (%rax, used throughout gen_expr_into and every old-style
-# gen_X_into method built on top of it).
-# Existing old-style code already uses all three as short-lived,
-# single-method scratch (83, 49, and 2 call sites respectively,
-# checked directly rather than assumed) -- safe to also hand out here
-# because an allocated Temp's live range never spans an IRCall
-# (see this module's own docstring), so the allocator's own use and
-# any old-style method's internal use of the same register are always
-# sequential, never concurrent.
+# convention (%rax -- used throughout what used to be gen_expr_into
+# and every old-style gen_X_into method built on top of it, before
+# that whole cluster was removed entirely as dead code; see ir.py's
+# own top docstring). Old-style code used to also use all three as
+# short-lived, single-method scratch, safe only because an allocated
+# Temp's own live range never spans an IRCall (see this module's own
+# docstring) -- with that code gone entirely now, there's no longer
+# any old-style use of these registers left to reason about sharing
+# with at all; they're simply free for the allocator's own exclusive
+# use.
 ALLOCATABLE_REGISTERS = ['r10d', 'r11d', 'r15d']
 
 
