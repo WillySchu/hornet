@@ -1,6 +1,4 @@
-
-**1. Bare VarDecl for scalars.
-
-**2. — print()**
-
-- **`print()`** — verified there's no `_ir_`-prefixed counterpart at all, anywhere. It dispatches on argument type (scalar vs. array/struct/slice each print differently) and was never touched in this entire engagement. This is a substantial, self-contained arc of its own.
+1. Move print() off IRRaw/old-style, for the reason above — this is the one I'd actually block on.
+2. Settle the IRLocalAddress/frame-layout question, since it shapes several other decisions downstream of it.
+3. Fix IRInstr's missing cases while it's getting touched anyway.
+4. Given the scale of this — it's genuinely restructuring the "AST → executable" boundary of the whole compiler — I'd want an incremental verification strategy rather than a single large rewrite: something like introducing IRProgram/IRFunction as thin aggregation objects first (built from what's already produced today), confirming the existing test suite and benchmarks stay green through that step alone, and only then progressively moving state ownership (registries, frame layout, escape data) into the new package one piece at a time.
