@@ -36,6 +36,7 @@ from lexer import lex
 from parser import Parser
 from semantic import analyze
 from codegen.emitter import Emitter
+from build import RUNTIME_C_PATH
 import codegen.codegen as codegen_module
 import codegen.register_allocator as ra_module
 
@@ -157,12 +158,23 @@ def run_one(ht_path: Path) -> dict:
 
         asm_path = Path(tmpdir) / 'program.s'
         bin_path = Path(tmpdir) / 'program'
+        runtime_o_path = Path(tmpdir) / 'runtime.o'
         asm_path.write_text(asm_text)
+
+        # Compiled fresh, unconditionally, matching build.py's own
+        # build_executable -- no current benchmark program calls
+        # print(), but leaving this benchmark harness's own linking
+        # silently dependent on that staying true would be fragile,
+        # not a deliberate scope boundary.
+        runtime_cc_cmd = ['gcc', '-c', str(RUNTIME_C_PATH), '-o', str(runtime_o_path)]
+        runtime_result = subprocess.run(runtime_cc_cmd, capture_output=True, text=True)
+        if runtime_result.returncode != 0:
+            raise RuntimeError(f"gcc failed to compile runtime.c:\n{runtime_result.stderr}")
 
         gcc_cmd = ['gcc']
         if HOST_IS_MACOS:
             gcc_cmd += ['-arch', 'x86_64']
-        gcc_cmd += [str(asm_path), '-o', str(bin_path)]
+        gcc_cmd += [str(asm_path), str(runtime_o_path), '-o', str(bin_path)]
         result = subprocess.run(gcc_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(f"gcc failed to assemble/link {ht_path.name}:\n{result.stderr}")

@@ -348,6 +348,21 @@ class DispatchMixin:
             return self._ir_load(addr_ir, addr_value, type_of(expr))
         if isinstance(expr, Binary):
             return self._ir_expr_binary(expr)
+        if isinstance(expr, Call) and expr.name == 'print':
+            # A dedicated case, not routed through _ir_call at all --
+            # print isn't an ordinary function call (it always needs
+            # an address for its argument, unlike an ordinary call's
+            # own by-value/by-address split, and its second
+            # argument -- a type descriptor -- has no corresponding
+            # Hornet expression to run gen_expr_ir on at all), so it
+            # needs its own entry point the same way len's own
+            # exclusion from _ir_call already does. Never falls
+            # through to the catch-all below -- unlike len,
+            # _ir_print_call's own contract is total, matching
+            # semantic.py's own guarantee that this is always exactly
+            # one, well-formed argument by the time codegen ever sees
+            # it.
+            return self._ir_print_call(expr)
         if isinstance(expr, Call) and expr.name == 'len':
             # A dedicated case, not routed through _ir_call at all --
             # len isn't an ordinary function call (no calling

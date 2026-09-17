@@ -654,6 +654,7 @@ from typing import Optional
 import pytest
 
 from codegen.codegen import CodegenError, generate_asm
+from build import RUNTIME_C_PATH
 from lexer import lex
 from parser import Break, Constant, Node, Parser, ParseError
 from semantic import SemanticError, analyze
@@ -726,14 +727,33 @@ def compile_and_run(source: str) -> subprocess.CompletedProcess:
         tmp = Path(tmpdir)
         asm_path = tmp / "program.s"
         bin_path = tmp / "program"
+        runtime_o_path = tmp / "runtime.o"
 
         asm = generate_asm(ast, platform=ASM_PLATFORM)
         asm_path.write_text(asm)
 
+        # Compiled fresh, unconditionally, the same way build.py's own
+        # build_executable does -- print() now compiles to an ordinary
+        # `call hornet_print`, an external symbol this .s file no
+        # longer defines itself (unlike the old hand-built
+        # hornet_stringify, once appended to AsmProgram.functions and
+        # assembled inline here). Unconditional, regardless of whether
+        # THIS particular program happens to call print, matching
+        # build_executable's own reasoning exactly.
+        runtime_cc_cmd = ["gcc", "-c", str(RUNTIME_C_PATH), "-o", str(runtime_o_path)]
+        runtime_result = subprocess.run(runtime_cc_cmd, capture_output=True, text=True)
+        if runtime_result.returncode != 0:
+            pytest.fail(
+                "gcc failed to compile runtime.c.\n"
+                f"command: {' '.join(runtime_cc_cmd)}\n"
+                f"--- gcc stdout ---\n{runtime_result.stdout}\n"
+                f"--- gcc stderr ---\n{runtime_result.stderr}\n"
+            )
+
         gcc_cmd = ["gcc"]
         if HOST_IS_MACOS:
             gcc_cmd += ["-arch", "x86_64"]
-        gcc_cmd += [str(asm_path), "-o", str(bin_path)]
+        gcc_cmd += [str(asm_path), str(runtime_o_path), "-o", str(bin_path)]
 
         result = subprocess.run(gcc_cmd, capture_output=True, text=True)
         if result.returncode != 0:
@@ -15910,14 +15930,18 @@ class TestPrintStructs:
             "Point(x: 1, y: 2)\nPoint(x: 3, y: 4)\n",
         )
 
-    def test_struct_returning_call_as_direct_print_argument_not_supported(self):
-        """A real, deliberate gap matching the same restriction array/
-        slice printing already has (see TestPrintArraysAndSlices):
-        print's struct-typed argument must be a Variable, Field, or
-        Index -- an expression with no address of its own to print
-        through (here, a struct-returning function call) is rejected
-        rather than silently copied into a throwaway scratch slot."""
-        source = (
+    def test_struct_returning_call_as_direct_print_argument(self):
+        """Used to be a real, deliberate gap: print's struct-typed
+        argument was restricted to a Variable, Field, or Index --
+        gen_print_call_into's own old-style implementation had no way
+        to materialize an address for anything else. Now real IR
+        (_ir_print_call, via _ir_composite_operand_address -- the
+        same method equality already reuses) closes it for free,
+        matching what print's array/slice-typed argument already
+        supported (see test_array_returning_call_as_direct_print_
+        argument/test_slice_returning_call_as_direct_print_argument
+        just above)."""
+        assert_program_stdout(
             "struct Point:\n"
             "    int x\n"
             "    int y\n"
@@ -15930,12 +15954,9 @@ class TestPrintStructs:
             "\n"
             "def int main():\n"
             "    print(makePoint())\n"
-            "    return 0\n"
+            "    return 0\n",
+            "Point(x: 1, y: 2)\n",
         )
-        ast = _parse(source)
-        analyze(ast)
-        with pytest.raises(CodegenError, match="assign it to a variable first"):
-            generate_asm(ast, platform=ASM_PLATFORM)
 
 
 # ---------------------------------------------------------------------------

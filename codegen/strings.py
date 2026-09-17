@@ -44,7 +44,7 @@ from codegen.assembly_ast import (
 )
 from codegen.errors import CodegenError
 from codegen.utils import as_byte_register, type_byte_width, type_of, as_qword_register, COMPARISON_CONDITION_CODES
-from codegen.ir import IRBinOp, IRConst, IRCall
+from codegen.ir import IRBinOp, IRConst, IRCall, IRStaticDataAddress, IRLocalAddress, IRStore
 from parser import Call, Variable, Field, Index, StringLiteral, Binary, Node, BinaryOp
 from semantic import Type, TypeKind
 
@@ -877,6 +877,107 @@ class StringsMixin:
         instructions.append(Leave())
         instructions.append(Ret())
         return AsmFunction(name='hornet_stringify', instructions=instructions)
+
+    def _ir_print_call(self, expr: Call):
+        """Builds (without lowering) print(x)'s own real IR -- returns
+        (ir, None), a void call, matching _ir_call's own contract for
+        one.
+
+        Unlike an ordinary function call (_ir_call/_ir_call_arguments),
+        which passes a scalar BY VALUE and a composite by address,
+        this always computes an ADDRESS for x, regardless of its own
+        type: hornet_print's own signature is uniformly `void
+        hornet_print(void *value_addr, const unsigned char
+        *type_desc)`, and hornet_stringify (called internally, not by
+        this compiler at all anymore) dereferences that address at
+        whatever width its own type descriptor says to. This is why
+        print needs its own dedicated entry point rather than
+        routing through _ir_call the way an ordinary call does --
+        the same reason _ir_len_call has always needed one, and
+        exactly why gen_expr_ir's own dispatch has always excluded
+        'print' from the ordinary-Call case (`expr.name not in
+        ('print', 'len')`), even before this method existed to fill
+        that gap with real IR.
+
+        ARRAY/STRUCT-typed x: reuses _ir_composite_operand_address
+        completely unchanged -- confirmed directly that the shapes it
+        already covers (Variable/Field/Index, a bare ArrayLiteral,
+        an ordinary composite-returning Call) are EXACTLY what
+        semantic.py restricts print's own argument to as well: a
+        struct-literal Call (`print(Point(1, 2))`), the one shape
+        that method doesn't cover, is rejected as print's own
+        argument the same way it's rejected as an equality operand;
+        an ordinary composite-returning Call (`print(makePoint())`)
+        is allowed in both places. Raises CodegenError, via that
+        method's own contract, on the None it would otherwise return
+        for a shape genuinely out of scope -- moot in practice,
+        for the identical reason it's already moot at every other
+        caller of that method.
+
+        SLICE-typed x: _ir_slice_arg already unifies every reachable
+        slice-typed shape -- an existing Variable/Field/Index, or a
+        freshly-produced value (a Slice production, append, an
+        ordinary Call) -- into one {ptr, len, cap} triple. Rather than
+        separately handling "already has an address" (Variable/Field/
+        Index, via _ir_slice_address) from "needs one materialized"
+        (everything else), this always writes that triple into the
+        SAME shared, unconditionally-reserved 24-byte
+        _unnamed_slice_temp_offset scratch slot _ir_indexable_base's
+        own Variable-slice leaf and _ir_slice_arg's own old-style
+        fallback already use, and takes THAT slot's own address --
+        one path for every shape, not two.
+
+        Otherwise, a scalar (int/bool/str/int8/uint8/int64): the one
+        shape with no existing "address of this value" concept in
+        real IR at all, since a scalar has only ever needed to live in
+        a Temp before now, never at a durable address. Computes the
+        value via gen_expr_ir, writes it into the existing,
+        unconditionally-reserved 8-byte _print_scalar_temp_offset
+        scratch slot (the same slot gen_print_call_into's own
+        old-style version already reserved this for -- see its own
+        docstring), and takes that slot's own address. A deliberate,
+        narrowly-scoped exception to keeping IR conceptual rather than
+        physical: there's no way around a real address here, since
+        hornet_print is a genuine C-ABI boundary this compiler's own
+        output has to cross.
+
+        The type descriptor lookup/build itself (_get_or_build_type_
+        descriptor) is unchanged -- already a pure, compile-time
+        operation, feeding this new call site exactly as it always fed
+        the old one."""
+        arg = expr.args[0]
+        arg_type = type_of(arg)
+
+        if arg_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT):
+            result = self._ir_composite_operand_address(arg, arg_type)
+            if result is None:
+                raise CodegenError(
+                    f"_ir_composite_operand_address returned None for print()'s own "
+                    f"ARRAY/STRUCT-typed argument ({arg!r}) -- expected to always "
+                    f"succeed, since semantic.py already restricts print's own "
+                    f"argument to exactly the shapes that method covers"
+                )
+            value_addr_ir, value_addr = result
+        elif arg_type.kind == TypeKind.SLICE:
+            slice_ir, ptr_value, len_value, cap_value = self._ir_slice_arg(arg)
+            slice_addr = self._new_temp(Type.INT64)
+            value_addr_ir = slice_ir + [IRLocalAddress(dst=slice_addr, offset=self._unnamed_slice_temp_offset)]
+            value_addr_ir.extend(
+                self._ir_write_slice_descriptor_into_address(slice_addr, ptr_value, len_value, cap_value))
+            value_addr = slice_addr
+        else:
+            expr_ir, value = self.gen_expr_ir(arg)
+            scalar_addr = self._new_temp(Type.INT64)
+            value_addr_ir = expr_ir + [IRLocalAddress(dst=scalar_addr, offset=self._print_scalar_temp_offset)]
+            value_addr_ir.append(IRStore(address=scalar_addr, value=value, value_type=arg_type))
+            value_addr = scalar_addr
+
+        desc_label = self._get_or_build_type_descriptor(arg_type, {})
+        desc_addr = self._new_temp(Type.INT64)
+        desc_ir = [IRStaticDataAddress(dst=desc_addr, label=desc_label)]
+
+        call_ir = [IRCall(dst=None, name='hornet_print', args=[value_addr, desc_addr])]
+        return value_addr_ir + desc_ir + call_ir, None
 
     def gen_print_call_into(self, expr: Call, dst: Operand) -> list[Instruction]:
         """`print(x)`: dispatches on x's *compile-time* type -- known
