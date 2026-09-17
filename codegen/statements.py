@@ -733,7 +733,13 @@ class StatementsMixin:
                     and stmt.value.name in self.struct_registry
             ):
                 dst_expr = Index(array=stmt.array, index=stmt.index)
-                dst_ir, dst_address = self._ir_struct_address(dst_expr)
+                result = self._ir_struct_address(dst_expr)
+                if result is None:
+                    raise CodegenError(
+                        f"_ir_struct_address returned None for an IndexAssign's own "
+                        f"STRUCT-typed destination ({dst_expr!r}) -- expected to "
+                        f"always succeed for a reachable base")
+                dst_ir, dst_address = result
                 write_ir = self._ir_write_struct_literal_into(dst_address, stmt.value, element_type)
                 if write_ir is not None:
                     return dst_ir + write_ir
@@ -1050,7 +1056,12 @@ class StatementsMixin:
         value's own IR (already works, via gen_expr_ir), then IRStores
         it through the address, at the ELEMENT's own declared width --
         not necessarily the value's own, per IRStore's own docstring."""
-        addr_ir, addr_value = self._ir_index_address(Index(array=stmt.array, index=stmt.index))
+        result = self._ir_index_address(Index(array=stmt.array, index=stmt.index))
+        if result is None:
+            raise CodegenError(
+                f"_ir_index_address returned None for a scalar-element IndexAssign "
+                f"({stmt!r}) -- expected to always succeed for a reachable base")
+        addr_ir, addr_value = result
         value_ir, value = self.gen_expr_ir(stmt.value)
         return addr_ir + value_ir + [IRStore(address=addr_value, value=value, value_type=element_type)]
 
@@ -1157,12 +1168,17 @@ class StatementsMixin:
         gen_statement_ir) is responsible for already having ruled out
         SLICE/STRUCT/ARRAY (and the slice-typed NoneLiteral case).
         Same shape as _ir_index_assign one level over: captures the
-        address via _ir_field_address (real IR -- a struct-typed
-        base's own shape is always Variable/Field/Index, never
-        needing a fallback the way an array/slice base can; see its
-        own docstring), builds the value's own IR, then IRStores it
-        through the address at the FIELD's own declared width."""
-        addr_ir, addr_value = self._ir_field_address(Field(base=stmt.base, name=stmt.name))
+        address via _ir_field_address (real IR, confirmed exhaustively
+        to always succeed for a reachable base -- raises CodegenError
+        explicitly on a None here rather than leaving addr_ir/
+        addr_value unbound), builds the value's own IR, then IRStores
+        it through the address at the FIELD's own declared width."""
+        result = self._ir_field_address(Field(base=stmt.base, name=stmt.name))
+        if result is None:
+            raise CodegenError(
+                f"_ir_field_address returned None for a scalar-typed FieldAssign "
+                f"({stmt!r}) -- expected to always succeed for a reachable base")
+        addr_ir, addr_value = result
         value_ir, value = self.gen_expr_ir(stmt.value)
         return addr_ir + value_ir + [IRStore(address=addr_value, value=value, value_type=field_type)]
 

@@ -154,7 +154,13 @@ class StructsMixin:
                 f"non-struct type {base_type}"
             )
         offset = self._field_offset(base_type.struct_name, expr.name)
-        base_ir, base_addr = self._ir_struct_address(expr.base)
+        result = self._ir_struct_address(expr.base)
+        if result is None:
+            raise CodegenError(
+                f"_ir_struct_address returned None for a Field's own STRUCT-typed "
+                f"base ({expr.base!r}) -- expected to always succeed for a "
+                f"reachable base")
+        base_ir, base_addr = result
         if offset == 0:
             return base_ir, base_addr
         result = self._new_temp(Type.INT64)

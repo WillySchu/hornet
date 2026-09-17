@@ -91,21 +91,38 @@ class ScalarsMixin:
         can still return None for an Index/Field whose own BASE is out
         of scope, so this checks for that explicitly rather than
         assuming success); a bare bracketed-list literal (_ir_
-        materialize_array_literal); an ordinary composite-returning
-        Call (_ir_materialize_composite_call); anything else (there
-        isn't one -- every ARRAY-typed expression is one of these
-        three shapes) falls back to the old-style, IRRaw-wrapped
-        _gen_materialize_argument_temp_into, which only remains
-        reachable at all when one of the real-IR attempts above
-        returns None for its own, deeper reason (an out-of-scope
-        nested element, for instance).
+        materialize_array_literal, which can also still return None
+        for its own, deeper reason -- some element out of scope); an
+        ordinary composite-returning Call (_ir_materialize_composite_
+        call, which never returns None). Every ARRAY-typed expression
+        is one of these three shapes -- an unmatched fourth shape, or
+        either of the two genuinely-still-possible None returns above,
+        raises CodegenError explicitly rather than either silently
+        leaving ir/addr_value unbound (an old-style, IRRaw-wrapped
+        fallback used to catch exactly this here, since removed once
+        every shape this arc's own tests exercise was confirmed to
+        never need it) or -- worse -- proceeding with a stale value
+        from a previous loop iteration.
 
-        STRUCT-typed argument: identical shape, just Variable/Field/
-        Index via _ir_struct_address, a struct-literal Call (name
-        found in self.struct_registry) via _ir_materialize_struct_
-        literal, then an ordinary composite-returning Call via _ir_
-        materialize_composite_call again -- the same three exhaustive
-        shapes, one level over.
+        STRUCT-typed argument: identical shape (including the same
+        explicit CodegenError on an unmatched shape or either
+        genuinely-still-possible None), just Variable/Field/Index via
+        _ir_struct_address, a struct-literal Call (name found in
+        self.struct_registry) via _ir_materialize_struct_literal, then
+        an ordinary composite-returning Call via _ir_materialize_
+        composite_call again -- the same three exhaustive shapes, one
+        level over.
+
+        This function-scoped, not loop-scoped, matters: ir/addr_value
+        are plain local variables, reused across every argument in
+        args, not fresh per iteration. Silently leaving them unbound
+        on a first ARRAY/STRUCT argument crashes (Python's own
+        UnboundLocalError) -- but leaving them unbound on a SECOND one,
+        after an earlier argument already assigned them successfully,
+        would silently reuse that EARLIER argument's own address for
+        this one instead, duplicating it into arg_values rather than
+        crashing at all. The explicit CodegenError above closes that
+        silent-duplication risk too, not just the unclear-crash one.
 
         Both of _ir_materialize_array_literal/_ir_materialize_struct_
         literal are new here -- reusing a reservation _collect_
@@ -122,31 +139,63 @@ class ScalarsMixin:
             if arg_type.kind == TypeKind.ARRAY:
                 if isinstance(arg, (Variable, Field, Index)):
                     result = self._ir_array_address(arg)
-                    if result is not None:
-                        ir, addr_value = result
+                    if result is None:
+                        raise CodegenError(
+                            f"_ir_array_address returned None for an ARRAY-typed "
+                            f"Variable/Field/Index argument ({arg!r}) -- expected to "
+                            f"always succeed for this shape")
+                    ir, addr_value = result
                 elif isinstance(arg, ArrayLiteral):
                     result = self._ir_materialize_array_literal(arg)
-                    if result is not None:
-                        ir, addr_value = result
+                    if result is None:
+                        raise CodegenError(
+                            f"_ir_materialize_array_literal returned None for an "
+                            f"ARRAY-typed literal argument ({arg!r}) -- some element "
+                            f"is out of scope for real IR, with no old-style fallback "
+                            f"remaining to catch it")
+                    ir, addr_value = result
                 elif self._is_ordinary_composite_call(arg):
                     ir, addr_value = self._ir_materialize_composite_call(arg, arg_type)
+                else:
+                    raise CodegenError(
+                        f"No codegen rule for an ARRAY-typed call argument of shape "
+                        f"{type(arg).__name__}: {arg!r}")
                 arg_ir.extend(ir)
                 arg_values.append(addr_value)
             elif arg_type.kind == TypeKind.STRUCT:
                 if isinstance(arg, (Variable, Field, Index)):
                     result = self._ir_struct_address(arg)
-                    if result is not None:
-                        ir, addr_value = result
+                    if result is None:
+                        raise CodegenError(
+                            f"_ir_struct_address returned None for a STRUCT-typed "
+                            f"Variable/Field/Index argument ({arg!r}) -- expected to "
+                            f"always succeed for this shape")
+                    ir, addr_value = result
                 elif isinstance(arg, Call) and arg.name in self.struct_registry:
                     result = self._ir_materialize_struct_literal(arg)
-                    if result is not None:
-                        ir, addr_value = result
+                    if result is None:
+                        raise CodegenError(
+                            f"_ir_materialize_struct_literal returned None for a "
+                            f"STRUCT-typed literal argument ({arg!r}) -- some field "
+                            f"is out of scope for real IR, with no old-style fallback "
+                            f"remaining to catch it")
+                    ir, addr_value = result
                 elif self._is_ordinary_composite_call(arg):
                     ir, addr_value = self._ir_materialize_composite_call(arg, arg_type)
+                else:
+                    raise CodegenError(
+                        f"No codegen rule for a STRUCT-typed call argument of shape "
+                        f"{type(arg).__name__}: {arg!r}")
                 arg_ir.extend(ir)
                 arg_values.append(addr_value)
             elif arg_type.kind == TypeKind.SLICE or isinstance(arg, NoneLiteral):
-                ir, ptr_value, len_value, cap_value = self._ir_slice_arg(arg)
+                result = self._ir_slice_arg(arg)
+                if result is None:
+                    raise CodegenError(
+                        f"_ir_slice_arg returned None for a SLICE-typed call "
+                        f"argument ({arg!r}) -- expected to always succeed for any "
+                        f"reachable shape")
+                ir, ptr_value, len_value, cap_value = result
                 arg_ir.extend(ir)
                 arg_values.extend([ptr_value, len_value, cap_value])
             else:

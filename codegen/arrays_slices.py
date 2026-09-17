@@ -1095,7 +1095,14 @@ class ArraysSlicesMixin:
         slice value via _ir_slice_into -- see its own docstring, and
         gen_statement_ir's own VarDecl/Assign/IndexAssign/FieldAssign
         cases for where the two are glued together."""
-        dst_ir, dst_addr = self._ir_slice_address(dst_expr)
+        result = self._ir_slice_address(dst_expr)
+        if result is None:
+            raise CodegenError(
+                f"_ir_slice_address returned None for a slice-descriptor write's "
+                f"own destination ({dst_expr!r}) -- expected to always succeed, "
+                f"since an assignment's own destination is always a Variable/"
+                f"Field/Index, never a Slice production or Call")
+        dst_ir, dst_addr = result
         return dst_ir + self._ir_write_slice_descriptor_into_address(dst_addr, ptr_value, len_value, cap_value)
 
     def gen_slice_value_into(self, expr: Node, dst_mem: Memory) -> list[Instruction]:
@@ -2563,8 +2570,14 @@ class ArraysSlicesMixin:
         """Builds (without lowering) `slice_expr == none` or
         `slice_expr != none` (in either operand order) as real IR --
         returns (ir, value), or None when slice_expr's own base is
-        out of scope (see _ir_indexable_base's own docstring) -- an
-        ArrayLiteral, or a Call, when slice_expr is slice-typed.
+        out of scope (see _ir_indexable_base's own docstring) -- moot
+        in practice, confirmed exhaustively: every reachable slice-
+        typed base shape (Variable/Field/Index/ArrayLiteral/ordinary-
+        Call/append/Slice) already succeeds through _ir_indexable_
+        base. The caller (gen_expr_ir) raises CodegenError explicitly
+        on a None here rather than silently propagating it further up
+        the call chain, where it would eventually surface as an
+        unrelated TypeError somewhere else entirely.
 
         Reuses _ir_indexable_base for the slice's own address,
         discarding length/cap -- the same "keep one of three, discard

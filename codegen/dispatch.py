@@ -331,10 +331,20 @@ class DispatchMixin:
         if isinstance(expr, Variable):
             return [], self._local_temp(expr.name)
         if isinstance(expr, Index) and type_of(expr).kind not in (TypeKind.ARRAY, TypeKind.STRUCT):
-            addr_ir, addr_value = self._ir_index_address(expr)
+            result = self._ir_index_address(expr)
+            if result is None:
+                raise CodegenError(
+                    f"_ir_index_address returned None for a scalar-typed Index read "
+                    f"({expr!r}) -- expected to always succeed for a reachable base")
+            addr_ir, addr_value = result
             return self._ir_load(addr_ir, addr_value, type_of(expr))
         if isinstance(expr, Field) and type_of(expr).kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
-            addr_ir, addr_value = self._ir_field_address(expr)
+            result = self._ir_field_address(expr)
+            if result is None:
+                raise CodegenError(
+                    f"_ir_field_address returned None for a scalar-typed Field read "
+                    f"({expr!r}) -- expected to always succeed for a reachable base")
+            addr_ir, addr_value = result
             return self._ir_load(addr_ir, addr_value, type_of(expr))
         if isinstance(expr, Binary):
             return self._ir_expr_binary(expr)
@@ -447,10 +457,12 @@ class DispatchMixin:
     def _ir_expr_binary(self, expr: Binary) -> tuple[list, IRValue]:
         """The IR-native counterpart to gen_binary_into's own three-way
         dispatch: short-circuit AND/OR (already real IR, via
-        _ir_short_circuit), slice-vs-none comparison (real IR now too,
-        for a Variable/Field/Index/Slice base -- see _ir_slice_none_
-        comparison; an ArrayLiteral or slice-typed Call base still
-        falls back), string concat/compare (also real IR now, via
+        _ir_short_circuit), slice-vs-none comparison (real IR too, for
+        every reachable slice-typed base shape, confirmed
+        exhaustively -- see _ir_slice_none_comparison's own docstring;
+        a None here, genuinely never observed, raises CodegenError
+        rather than silently propagating further up the call chain),
+        string concat/compare (also real IR now, via
         _ir_string_concat/_ir_string_compare -- composed entirely from
         ordinary IRCall/IRBinOp, since IRCall's own lowering is
         already generic over any callee name, external C library
@@ -461,7 +473,12 @@ class DispatchMixin:
         see _ir_composite_operand_address/_ir_composite_equal; a
         struct-literal Call is the one shape genuinely still out of
         scope here, moot in practice since semantic.py already rejects
-        it as a Binary operand outright, not just here), or the
+        it as a Binary operand outright, not just here -- so once this
+        branch is entered at all, i.e. type_of(expr.left).kind is
+        ARRAY/STRUCT, both operands' own addresses are expected to
+        always resolve; a CodegenError, not a silent fall-through to
+        the ordinary scalar case just below, is what a None here now
+        gets), or the
         ordinary arithmetic/comparison case (already real IR, via
         _ir_binary)."""
         if expr.op == BinaryOp.AND:
@@ -475,26 +492,41 @@ class DispatchMixin:
                 return self._ir_string_compare(expr)
         if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
             if type_of(expr.left).kind == TypeKind.SLICE or type_of(expr.right).kind == TypeKind.SLICE:
-                return self._ir_slice_none_comparison(expr)
+                result = self._ir_slice_none_comparison(expr)
+                if result is None:
+                    raise CodegenError(
+                        f"_ir_slice_none_comparison returned None for a slice-vs-"
+                        f"none comparison ({expr.left!r} {expr.op} {expr.right!r}) "
+                        f"-- expected to always succeed for a reachable slice-typed "
+                        f"base, with no old-style fallback remaining to catch it")
+                return result
             if type_of(expr.left).kind in (TypeKind.ARRAY, TypeKind.STRUCT):
                 value_type = type_of(expr.left)
                 left_result = self._ir_composite_operand_address(expr.left, value_type)
                 right_result = self._ir_composite_operand_address(expr.right, value_type)
-                if left_result is not None and right_result is not None:
-                    left_ir, left_addr = left_result
-                    right_ir, right_addr = right_result
-                    mismatch_label = self.new_label("eq_mismatch")
-                    done_label = self.new_label("eq_done")
-                    cmp_ir = self._ir_composite_equal(left_addr, right_addr, value_type, mismatch_label)
-                    t = self._new_temp(Type.BOOL)
-                    ir = left_ir + right_ir + cmp_ir + [
-                        IRMove(dst=t, src=IRConst(1 if expr.op == BinaryOp.EQUAL else 0, Type.BOOL)),
-                        IRJump(done_label),
-                        IRLabel(mismatch_label),
-                        IRMove(dst=t, src=IRConst(0 if expr.op == BinaryOp.EQUAL else 1, Type.BOOL)),
-                        IRLabel(done_label),
-                    ]
-                    return ir, t
+                if left_result is None or right_result is None:
+                    raise CodegenError(
+                        f"_ir_composite_operand_address returned None for an "
+                        f"ARRAY/STRUCT equality operand ({expr.left!r} or "
+                        f"{expr.right!r}) -- expected to always succeed once "
+                        f"type_of(expr.left).kind is ARRAY/STRUCT at all, since a "
+                        f"struct-literal Call (the one shape it doesn't cover) is "
+                        f"already rejected as a Binary operand by semantic.py before "
+                        f"codegen ever runs")
+                left_ir, left_addr = left_result
+                right_ir, right_addr = right_result
+                mismatch_label = self.new_label("eq_mismatch")
+                done_label = self.new_label("eq_done")
+                cmp_ir = self._ir_composite_equal(left_addr, right_addr, value_type, mismatch_label)
+                t = self._new_temp(Type.BOOL)
+                ir = left_ir + right_ir + cmp_ir + [
+                    IRMove(dst=t, src=IRConst(1 if expr.op == BinaryOp.EQUAL else 0, Type.BOOL)),
+                    IRJump(done_label),
+                    IRLabel(mismatch_label),
+                    IRMove(dst=t, src=IRConst(0 if expr.op == BinaryOp.EQUAL else 1, Type.BOOL)),
+                    IRLabel(done_label),
+                ]
+                return ir, t
         return self._ir_binary(expr)
 
     def gen_binary_into(self, expr: Binary, dst: Operand) -> list[Instruction]:
