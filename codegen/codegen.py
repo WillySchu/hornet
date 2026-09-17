@@ -34,7 +34,7 @@ from codegen.dispatch import DispatchMixin
 from codegen.emitter import Emitter
 from codegen.errors import CodegenError
 from codegen.escape_analysis import analyze_array_escapes, is_heap_allocated
-from codegen.ir import Temp
+from codegen.ir import IRFunction, Temp
 from codegen.ir_lowering import InstructionSelector
 from codegen.register_allocator import allocate_registers
 from codegen.scalars import ScalarsMixin
@@ -258,7 +258,21 @@ class CodeGenerator(
         return AsmProgram(
             functions=functions, string_literals=self.string_literals, type_descriptors=self.type_descriptors)
 
-    def gen_function(self, fn: Function) -> AsmFunction:
+    def gen_function_ir(self, fn: Function) -> IRFunction:
+        """Builds this function's own codegen artifacts up through its
+        body's real IR -- see IRFunction's own docstring for exactly
+        what's gathered here and why, and for what's deliberately NOT
+        moved onto it yet (frame layout, register assignment, the
+        epilogue). gen_function (this method's own caller, and the
+        only one) does everything past that: allocating registers over
+        this function's own body, lowering it, and assembling the
+        final AsmFunction.
+
+        Nothing about HOW any of this is computed has changed from
+        before this split existed -- every line below is identical to
+        what gen_function's own first half used to do directly; this
+        method exists so that half has a name and a return value of
+        its own, not to change its behavior."""
         # Fresh allocator state per function -- offsets are relative to
         # *this* function's own %rbp.
         self._var_offsets = {}
@@ -522,15 +536,30 @@ class CodeGenerator(
 
         self._bounds_check_fail_labels = {}  # fresh, per-function jump targets
         # Accumulated as one IR list for the whole body -- see
-        # gen_statement_ir -- and lowered exactly once here, seeing
-        # this entire function's Temps and their live ranges together,
-        # which is what allocate_registers itself needs: it can only
-        # decide which Temps are safe to keep in a register (and for
-        # how long) by looking at the whole function at once, not one
-        # already-resolved statement at a time.
+        # gen_statement_ir -- and lowered exactly once, by gen_
+        # function (this method's own caller) right after this
+        # returns, seeing this entire function's Temps and their live
+        # ranges together, which is what allocate_registers itself
+        # needs: it can only decide which Temps are safe to keep in a
+        # register (and for how long) by looking at the whole function
+        # at once, not one already-resolved statement at a time.
         ir = []
         for stmt in fn.body:
             ir.extend(self.gen_statement_ir(stmt))
+        return IRFunction(name=fn.name, body=ir, prologue=prologue, param_setup=instructions, return_type=return_type)
+
+    def gen_function(self, fn: Function) -> AsmFunction:
+        """Builds fn's own IRFunction (see gen_function_ir), then
+        allocates registers over its body, lowers it, and assembles
+        the final AsmFunction -- everything gen_function_ir's own
+        docstring says is deliberately NOT captured on IRFunction yet:
+        frame layout (_frame_size, computed only now, since lowering
+        can still grow it -- see this method's own comment below), the
+        epilogue, and the bounds-check panic block. Nothing about HOW
+        any of this is computed has changed from before this split
+        existed."""
+        ir_fn = self.gen_function_ir(fn)
+        ir = ir_fn.body
         # A named-local Temp is safe to allocate despite is_named_local
         # (see eligible_intervals' own docstring) exactly when old-
         # style code never touched its own variable's raw memory --
@@ -547,9 +576,10 @@ class CodeGenerator(
         )
         self._register_assignment = allocate_registers(ir, safe_named_locals)
         self._allocation_finalized = True
+        instructions = ir_fn.param_setup
         instructions.extend(self._instruction_selector.lower_ir(ir))
         self._register_assignment = {}  # never valid past this function's own body
-        if return_type == Type.VOID:
+        if ir_fn.return_type == Type.VOID:
             # A function with no declared return type never has to
             # guarantee every path returns explicitly (see
             # analyze_function's always_returns skip for this case) --
@@ -574,9 +604,9 @@ class CodeGenerator(
 
         frame_size = self._frame_size()
         if frame_size:
-            prologue.append(SubQ(src=Imm(frame_size), dst=Register('rsp')))
+            ir_fn.prologue.append(SubQ(src=Imm(frame_size), dst=Register('rsp')))
 
-        return AsmFunction(name=fn.name, instructions=prologue + instructions)
+        return AsmFunction(name=fn.name, instructions=ir_fn.prologue + instructions)
 
     def _collect_params(self, params: List[Param]) -> None:
         """Gives each parameter its own permanent stack slot, exactly

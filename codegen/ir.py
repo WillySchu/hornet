@@ -38,7 +38,7 @@ unused: every op below is architecture-agnostic by construction now,
 with no remaining exception.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Union
 
 from codegen.assembly_ast import Instruction
@@ -422,3 +422,47 @@ IRInstr = Union[
     IRStore,
     IRUnOp,
 ]
+
+
+@dataclass
+class IRFunction:
+    """One Hornet function's own codegen artifacts, gathered into a
+    single object by gen_function_ir -- the boundary this compiler's
+    own IR/codegen decoupling starts from.
+
+    `body` is real IR (see IRInstr above): this function's own
+    statements, built by gen_statement_ir exactly as before this
+    object existed -- nothing about HOW it's built has changed here,
+    only that it's now handed back as a field on this object rather
+    than a bare local variable named `ir`.
+
+    `prologue` and `param_setup` are still plain, old-style
+    Instructions (see assembly_ast.py), not real IR at all: the
+    callee-saved-register pushes, and the parameter-marshaling logic
+    (stashing incoming argument registers, copying or heap-promoting
+    an array/struct parameter, aliasing a slice one) were never
+    migrated to real IR, and aren't in this step's scope either. This
+    is a deliberately thin first move -- it wraps exactly what gen_
+    function already produced today, in the same order it already
+    produced it, with zero behavioral change. The point of this step
+    is splitting codegen's own "build this function's IR" phase from
+    its "lower it into a real AsmFunction" phase into two actual
+    methods (gen_function_ir / gen_function) instead of one; what each
+    phase still depends on beyond what's captured here -- frame
+    layout, register assignment, the epilogue, the bounds-check panic
+    block -- is unchanged, and remains on CodeGenerator's own instance
+    state for now, exactly as before. Progressively moving more of
+    that state onto this object instead is the follow-up this step
+    exists to make possible, not something this step attempts itself.
+
+    `return_type` is this function's own declared return type (Type.
+    VOID for a function with none) -- gen_function's own lowering half
+    needs it (to decide whether a trailing epilogue is required), and
+    it's already resolved during the build half, so it travels along
+    on this object rather than being recomputed or re-read off self
+    afterward."""
+    name: str
+    body: list = field(default_factory=list)
+    prologue: list = field(default_factory=list)
+    param_setup: list = field(default_factory=list)
+    return_type: Optional[Type] = None
