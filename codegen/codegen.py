@@ -34,7 +34,7 @@ from codegen.dispatch import DispatchMixin
 from codegen.emitter import Emitter
 from codegen.errors import CodegenError
 from codegen.escape_analysis import analyze_array_escapes, is_heap_allocated
-from codegen.ir import IRFunction, Temp
+from codegen.ir import IRFunction, IRProgram, Temp
 from codegen.ir_lowering import InstructionSelector
 from codegen.register_allocator import allocate_registers
 from codegen.scalars import ScalarsMixin
@@ -191,6 +191,14 @@ class CodeGenerator(
         # fixed: `return [1, 2, 3]` from a slice-returning function
         # used to segfault because of exactly this ambiguity.
         self._current_return_type = None
+        # Set once, at the end of generate() -- see IRProgram's own
+        # docstring for why it's built at all despite having no
+        # consumer yet. Declared here defensively, same reason as
+        # struct_registry/type_alias_registry above: referencing it
+        # before generate() has ever run fails with a clear
+        # AttributeError-from-None-access rather than one from
+        # nowhere.
+        self.ir_program: Optional[IRProgram] = None
 
     def new_label(self, prefix: str) -> str:
         """Returns a fresh, uniquely-numbered local label like
@@ -252,11 +260,35 @@ class CodeGenerator(
                 "must run before codegen (see compile_to_asm)"
             )
         self.type_alias_registry = program.type_alias_registry
-        functions = [self.gen_function(fn) for fn in program.functions]
+        # One function at a time, build-then-lower immediately, exactly
+        # as gen_function's own two calls already did internally --
+        # see lower_function's own docstring for why this can't yet be
+        # two separate whole-program passes (build every IRFunction,
+        # THEN lower all of them): a lot of per-function state gen_
+        # function_ir sets on self (_hidden_return_ptr_offset, _next_
+        # offset, and others) gets reset by the NEXT function's own
+        # gen_function_ir call, and lower_function still depends on
+        # the CURRENT function's own values of it. Calling both here,
+        # explicitly, in generate() itself -- rather than via gen_
+        # function, which still exists as a convenience wrapper around
+        # the identical two calls -- is what makes collecting every
+        # IRFunction into a real IRProgram possible at all, without
+        # changing this ordering constraint or anything about what
+        # gets computed.
+        ir_functions = []
+        asm_functions = []
+        for fn in program.functions:
+            ir_fn = self.gen_function_ir(fn)
+            ir_functions.append(ir_fn)
+            asm_functions.append(self.lower_function(ir_fn))
         if self._print_used:
-            functions.append(self.build_stringify_function())
+            asm_functions.append(self.build_stringify_function())
+        # No consumer reads this yet -- see IRProgram's own docstring
+        # for why it's built and kept anyway.
+        self.ir_program = IRProgram(
+            functions=ir_functions, string_literals=self.string_literals, type_descriptors=self.type_descriptors)
         return AsmProgram(
-            functions=functions, string_literals=self.string_literals, type_descriptors=self.type_descriptors)
+            functions=asm_functions, string_literals=self.string_literals, type_descriptors=self.type_descriptors)
 
     def gen_function_ir(self, fn: Function) -> IRFunction:
         """Builds this function's own codegen artifacts up through its
@@ -549,16 +581,35 @@ class CodeGenerator(
         return IRFunction(name=fn.name, body=ir, prologue=prologue, param_setup=instructions, return_type=return_type)
 
     def gen_function(self, fn: Function) -> AsmFunction:
-        """Builds fn's own IRFunction (see gen_function_ir), then
-        allocates registers over its body, lowers it, and assembles
-        the final AsmFunction -- everything gen_function_ir's own
-        docstring says is deliberately NOT captured on IRFunction yet:
-        frame layout (_frame_size, computed only now, since lowering
-        can still grow it -- see this method's own comment below), the
-        epilogue, and the bounds-check panic block. Nothing about HOW
-        any of this is computed has changed from before this split
-        existed."""
+        """Thin convenience wrapper: builds fn's own IRFunction, then
+        immediately lowers it -- see gen_function_ir/lower_function for
+        what each half does. generate() itself no longer goes through
+        this method at all (see its own updated body): it calls gen_
+        function_ir/lower_function itself, one function at a time, so
+        it can also collect the resulting IRFunctions into a real
+        IRProgram alongside the AsmProgram it already built. This
+        method still exists for anything that wants "just compile one
+        function end to end" without caring about the IR in between --
+        every existing test that calls compile_to_asm/generate_asm
+        goes through generate(), not this method, so it has exactly
+        one caller left: itself, from outside this class, if anything
+        ever wants it directly."""
         ir_fn = self.gen_function_ir(fn)
+        return self.lower_function(ir_fn)
+
+    def lower_function(self, ir_fn: IRFunction) -> AsmFunction:
+        """Allocates registers over ir_fn's own body, lowers it, and
+        assembles the final AsmFunction -- everything gen_function_ir's
+        own docstring says is deliberately NOT captured on IRFunction
+        yet: frame layout (_frame_size, computed only now, since
+        lowering can still grow it -- see this method's own comment
+        below), the epilogue, and the bounds-check panic block. Takes
+        only ir_fn, not the original Function AST node at all --
+        ir_fn.name already carries fn.name by construction (see gen_
+        function_ir), and nothing else here ever needed fn itself,
+        only what gen_function_ir already extracted from it. Nothing
+        about HOW any of this is computed has changed from before this
+        split existed."""
         ir = ir_fn.body
         # A named-local Temp is safe to allocate despite is_named_local
         # (see eligible_intervals' own docstring) exactly when old-
@@ -606,7 +657,7 @@ class CodeGenerator(
         if frame_size:
             ir_fn.prologue.append(SubQ(src=Imm(frame_size), dst=Register('rsp')))
 
-        return AsmFunction(name=fn.name, instructions=ir_fn.prologue + instructions)
+        return AsmFunction(name=ir_fn.name, instructions=ir_fn.prologue + instructions)
 
     def _collect_params(self, params: List[Param]) -> None:
         """Gives each parameter its own permanent stack slot, exactly

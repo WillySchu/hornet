@@ -466,3 +466,34 @@ class IRFunction:
     prologue: list = field(default_factory=list)
     param_setup: list = field(default_factory=list)
     return_type: Optional[Type] = None
+
+
+@dataclass
+class IRProgram:
+    """The whole program's own real IR: one IRFunction per Hornet
+    function that generate() actually built through gen_function_ir
+    (see IRFunction's own docstring), plus the same two pieces of
+    static, whole-program data AsmProgram itself carries one level
+    down (see assembly_ast.py) -- string_literals/type_descriptors
+    aren't tied to any one function's frame, so they live here rather
+    than being duplicated per function.
+
+    Deliberately excludes anything built by generate() that ISN'T
+    real IR: chiefly, the print-stringify helper function old-style
+    code used to conditionally add to AsmProgram's own function list
+    (see generate()'s own _print_used check) -- inert now (nothing
+    ever sets _print_used to True anymore, since print() itself
+    migrated to a real IRCall against the runtime -- see ir.py's own
+    module docstring), so this omission is currently never even
+    exercised, but it would stay correct even if that dead branch were
+    ever revived: that helper is hand-built AsmFunction directly, with
+    no IRFunction of its own to include here.
+
+    No consumer of this object exists yet -- generate() builds and
+    keeps it (see self.ir_program) purely so it exists as a real,
+    inspectable artifact for this arc's own next steps to build on,
+    the identical "make the object real before anything depends on it"
+    order IRFunction itself was introduced in."""
+    functions: list = field(default_factory=list)
+    string_literals: list = field(default_factory=list)
+    type_descriptors: list = field(default_factory=list)
