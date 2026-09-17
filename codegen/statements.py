@@ -8,6 +8,7 @@ from codegen.assembly_ast import Instruction, MovQ, Register, Memory, Imm, Push,
 from codegen.errors import CodegenError
 from codegen.ir import (
     IRRaw, IRReturn, IRBranch, IRLabel, IRJump, IRMove, IRStore, IRCopy, IRConst, IRLoad, IRLocalAddress, IRCall,
+    IRStaticDataAddress,
 )
 from codegen.utils import type_of, type_byte_width
 from parser import (
@@ -334,20 +335,50 @@ class StatementsMixin:
             ir.append(IRLabel(end_label))
             return ir
         elif isinstance(stmt, VarDecl):
-            # A scalar VarDecl WITH an initializer: bind the variable
-            # (creating its own persistent Temp -- see _bind_local),
-            # build the initializer's IR, and IRMove the result
-            # straight into that Temp. A no-initializer VarDecl (needs
-            # composite-aware zero-init) or a slice-typed one falls to
-            # the catch-all below WITHOUT binding here -- gen_var_decl
-            # does its own single _bind_local call, and binding twice
-            # would just orphan a Temp id, harmlessly but pointlessly.
+            # A scalar VarDecl, WITH or without an initializer: bind
+            # the variable (creating its own persistent Temp -- see
+            # _bind_local) and write into that Temp directly, either
+            # the initializer's own IR result or -- no initializer --
+            # this type's own zero value. An array/struct/slice-typed
+            # VarDecl (initialized or not) falls to the catch-all
+            # below WITHOUT binding here -- gen_var_decl does its own
+            # single _bind_local call, and binding twice would just
+            # orphan a Temp id, harmlessly but pointlessly.
             var_type = type_from_name(stmt.var_type, self.struct_registry, self.type_alias_registry)
-            if stmt.init is not None and not isinstance(stmt.init, NoneLiteral) and var_type.kind not in (
-                    TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
+            if not isinstance(stmt.init, NoneLiteral) and var_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
                 self._bind_local(stmt)
-                ir, value = self.gen_expr_ir(stmt.init)
-                return ir + [IRMove(dst=self._local_temp(stmt.name), src=value)]
+                if stmt.init is not None:
+                    ir, value = self.gen_expr_ir(stmt.init)
+                    return ir + [IRMove(dst=self._local_temp(stmt.name), src=value)]
+                else:
+                    # No initializer at all (`int x`, not `int x =
+                    # ...`) -- write this type's own zero value
+                    # straight into the Temp _bind_local just created,
+                    # the same "no address involved, just an ordinary
+                    # write into the variable's own Temp" shape the
+                    # WITH-an-initializer case just above uses. Never
+                    # routed through _ir_write_zero_value_into: that
+                    # method's own contract is writing THROUGH an
+                    # address (an IRStore at the end of it, for every
+                    # scalar kind), which doesn't apply here at all --
+                    # a named scalar variable already has its own
+                    # Temp in real IR, never an address, the same
+                    # reason _local_offset (an old-style-only concept)
+                    # has no part in this either.
+                    #
+                    # str is the one scalar kind whose own zero value
+                    # isn't a raw IRConst(0, ...): it's the address of
+                    # a shared, static empty-string constant, never a
+                    # null pointer (see _ir_write_zero_value_into's own
+                    # str case, which this mirrors, for why a null
+                    # zero value would be an active hazard) -- the
+                    # exact same IRStaticDataAddress leaf gen_expr_ir's
+                    # own StringLiteral case already builds, just
+                    # targeting this variable's own Temp directly
+                    # rather than a fresh one.
+                    if var_type == Type.STR:
+                        return [IRStaticDataAddress(dst=self._local_temp(stmt.name), label=self._get_empty_str_label())]
+                    return [IRMove(dst=self._local_temp(stmt.name), src=IRConst(0, var_type))]
             # An array/struct/slice-typed initializer that's itself a
             # Variable/Field/Index (an existing value with a real
             # address to copy from, not a literal or a call producing
@@ -1011,13 +1042,14 @@ class StatementsMixin:
         """Builds (without lowering) the scalar-element case of
         gen_index_assign -- the caller (gen_index_assign or
         gen_statement_ir) is responsible for already having ruled out
-        SLICE/STRUCT. Captures the address via _ir_index_address_or_
-        fallback (real IR wherever expr.array's own base allows it --
-        see its own docstring for the genuinely-deferred cases that
-        still fall back to an opaque leaf), builds the value's own IR
-        (already works, via gen_expr_ir), then IRStores it through
-        the address, at the ELEMENT's own declared width -- not
-        necessarily the value's own, per IRStore's own docstring."""
+        SLICE/STRUCT. Captures the address via _ir_index_address
+        directly (confirmed, exhaustively, to never return None for
+        any reachable shape of expr.array's own base -- the old-style
+        _or_fallback wrapper this used to go through has since been
+        removed entirely, its own fallback path dead code), builds the
+        value's own IR (already works, via gen_expr_ir), then IRStores
+        it through the address, at the ELEMENT's own declared width --
+        not necessarily the value's own, per IRStore's own docstring."""
         addr_ir, addr_value = self._ir_index_address(Index(array=stmt.array, index=stmt.index))
         value_ir, value = self.gen_expr_ir(stmt.value)
         return addr_ir + value_ir + [IRStore(address=addr_value, value=value, value_type=element_type)]

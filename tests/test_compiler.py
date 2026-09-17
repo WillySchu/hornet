@@ -15020,6 +15020,22 @@ class TestImplicitZeroValue:
             0,
         )
 
+    def test_int8_zero_value(self):
+        """No existing test exercised a local, scalar int8/uint8/
+        int64 declaration with no initializer at all -- every match
+        for this shape elsewhere in this file turned out to be a
+        struct field or an array element type instead. Genuinely new
+        coverage, not a migration: this shape was never generated as
+        real IR at all before (a TODO, not a bug -- gen_statement_ir's
+        own no-initializer scalar case simply didn't exist yet)."""
+        assert_exit_code("    int8 v\n    return int(v)", 0)
+
+    def test_uint8_zero_value(self):
+        assert_exit_code("    uint8 v\n    return int(v)", 0)
+
+    def test_int64_zero_value(self):
+        assert_exit_code("    int64 v\n    return int(v)", 0)
+
     def test_str_zero_value_prints_as_empty(self):
         assert_stdout("    str s\n    print(s)\n    return 0", "\n")
 
