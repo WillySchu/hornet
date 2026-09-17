@@ -63,6 +63,7 @@ Updates:
 - Imports.
 - Multithreading
 - `gen_array_copy` currently copies each leaf one by one, so for small leaf types (int8, etc.) this is calling many `movb` rather than a few `movq`.
+- Consider aligning struct storage rather than packing.
 - Consider adding a semantic AST with type information rather than annotating the existing AST from the parser.
 - Bounds Check Elimination.
 - Error handling.
