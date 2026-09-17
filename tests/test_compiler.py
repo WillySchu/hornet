@@ -9710,18 +9710,19 @@ class TestBareExpressionStatements:
     discarded statement -- `none` or an array/struct/slice-returning
     Call alone on a line, with no variable to receive the result.
     Regression coverage for two real bugs found auditing every
-    remaining IRRaw site in this compiler: gen_expr_ir's own catch-all
-    fallback delegates to gen_expr_into for anything it doesn't
+    remaining IRRaw site in this compiler (since removed entirely --
+    see ir.py's own module docstring): gen_expr_ir's own catch-all
+    fallback used to delegate to gen_expr_into for anything it didn't
     already have a real-IR case for, but gen_expr_into itself
-    defensively REJECTS both of these shapes (neither fits in a single
-    register) rather than handling them -- so reaching that fallback
-    with one of them crashed outright, despite gen_expr_ir's own
-    (wrong) docstring claim that it "covers" exactly these cases. The
-    actual fix routes around that fallback entirely, in gen_statement_
-    ir's own ExprStmt dispatch, for exactly these two shapes (plus
-    append, covered separately in TestAppend, for the identical
-    reason -- it's a builtin, never a compiled function, so it needs
-    its own, earlier check too)."""
+    defensively REJECTED both of these shapes (neither fits in a
+    single register) rather than handling them -- so reaching that
+    fallback with one of them crashed outright, despite gen_expr_ir's
+    own (wrong, at the time) docstring claim that it "covers" exactly
+    these cases. The actual fix routes around that fallback entirely,
+    in gen_statement_ir's own ExprStmt dispatch, for exactly these two
+    shapes (plus append, covered separately in TestAppend, for the
+    identical reason -- it's a builtin, never a compiled function, so
+    it needs its own, earlier check too)."""
 
     pytestmark = GCC_SKIP
 

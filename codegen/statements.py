@@ -7,7 +7,7 @@ else/end) every branching or looping construct here builds on."""
 from codegen.assembly_ast import Instruction, MovQ, Register, Memory, Imm, Push, Pop, Mov, Jmp, LeaQ, MovB
 from codegen.errors import CodegenError
 from codegen.ir import (
-    IRRaw, IRReturn, IRBranch, IRLabel, IRJump, IRMove, IRStore, IRCopy, IRConst, IRLoad, IRLocalAddress, IRCall,
+    IRReturn, IRBranch, IRLabel, IRJump, IRMove, IRStore, IRCopy, IRConst, IRLoad, IRLocalAddress, IRCall,
     IRStaticDataAddress,
 )
 from codegen.utils import type_of, type_byte_width
@@ -160,14 +160,16 @@ class StatementsMixin:
         identical shape; confirmed to have crashed exactly this way on
         the code before this fix, via revert-and-check.
 
-        Falls back to wrapping gen_statement itself, as a single
-        opaque IRRaw, for everything else (a Return whose value is an
-        ArrayLiteral/struct-literal Call with some field/element out of
-        scope for _ir_write_composite_value_into; a
+        Everything else still genuinely out of scope (a Return whose
+        value is an ArrayLiteral/struct-literal Call with some field/
+        element out of scope for _ir_write_composite_value_into; a
         Slice-valued ExprStmt whose own base is out of scope for _ir_
-        slice_into) -- a real, deliberate scope boundary, not an
-        oversight: those still need their own IR-native handling as a
-        follow-up.
+        slice_into) raises CodegenError explicitly now, rather than
+        falling back to old-style silently -- a real, deliberate scope
+        boundary, not an oversight: those still need their own
+        IR-native handling as a follow-up. There is no old-style
+        fallback left to defer to anymore (see ir.py's own module
+        docstring for IRRaw's own removal).
         """
         if isinstance(stmt, Return):
             is_composite_return = isinstance(stmt.value, NoneLiteral) or (
@@ -297,6 +299,31 @@ class StatementsMixin:
                 write_ir = self._ir_write_struct_literal_into(hidden_ptr, stmt.value, value_type)
                 if write_ir is not None:
                     return hidden_ptr_ir + write_ir + [IRReturn(value=None)]
+            # A composite return whose own value is a bare Slice node
+            # (`return arr[low:high]`, a genuine re-slice, or `return
+            # []int[1, 2, 3]`, which resolves to Slice(array=
+            # ArrayLiteral(...), low=None, high=None) rather than a
+            # bare ArrayLiteral at all -- a typed bracketed literal is
+            # always parsed this way, distinct from the untyped
+            # `[1, 2, 3]` case just above) -- writes through the
+            # hidden pointer via _ir_slice_into, the same {ptr, len,
+            # cap}-triple-then-write shape every other SLICE-typed
+            # composite Return case here already uses. A REAL GAP,
+            # found and fixed here: this shape had no real-IR case at
+            # all until now, unconditionally reaching this method's
+            # own old-style catch-all -- confirmed by every one of
+            # this arc's own audits having exercised print(),
+            # argument-passing, and equality for a slice-returning
+            # call's own result, but never a Return statement whose
+            # OWN value is a bare Slice node.
+            if isinstance(stmt.value, Slice):
+                hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr()
+                production = self._ir_slice_into(stmt.value)
+                if production is not None:
+                    slice_ir, ptr_value, len_value, cap_value = production
+                    write_ir = self._ir_write_slice_descriptor_into_address(
+                        hidden_ptr, ptr_value, len_value, cap_value)
+                    return hidden_ptr_ir + slice_ir + write_ir + [IRReturn(value=None)]
             # Every OTHER composite return shape (an array literal or
             # struct literal with a nested composite element/field, a
             # named/partial struct literal, or `return none`) still
@@ -878,7 +905,13 @@ class StatementsMixin:
         elif isinstance(stmt, ExprStmt):
             ir, _ = self.gen_expr_ir(stmt.expr)
             return ir
-        return [IRRaw(self.gen_statement(stmt))]
+        raise CodegenError(
+            f"No real-IR case for statement of type {type(stmt).__name__}: {stmt!r} -- "
+            f"every statement kind this arc's own tests exercise is confirmed to reach "
+            f"real IR without ever falling back here. A genuine bug if this fires, not a "
+            f"deliberate scope boundary -- there is no old-style fallback left to "
+            f"silently defer to anymore."
+        )
 
     def _ir_malloc_and_store(self, var_type, offset: int) -> list:
         """Builds (without lowering) a heap-allocated local's own

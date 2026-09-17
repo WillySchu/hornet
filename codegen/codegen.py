@@ -122,7 +122,7 @@ class CodeGenerator(
         self._allocation_finalized: bool = False
         # Populated once per function, by gen_function, from
         # register_allocator.allocate_registers -- maps a (necessarily
-        # anonymous, necessarily IRRaw/IRCall-free) Temp's id to the
+        # anonymous, necessarily IRCall-free) Temp's id to the
         # physical register it lives in instead of a memory slot. See
         # ir_lowering.py's _gen_read_temp_into/_gen_write_temp_from,
         # the only two places that consult it.

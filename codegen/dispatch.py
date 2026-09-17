@@ -8,7 +8,7 @@ branch of one of these two."""
 from codegen.assembly_ast import Operand, Instruction, MovQ, Imm, Mov, Memory, Register
 from codegen.errors import CodegenError
 from codegen.ir import (
-    IRRaw, IRBinOp, IRValue, IRConst, IRLoad, IRMove, IRJump, IRLabel, IRStaticDataAddress, IRUnOp, IRCast
+    IRBinOp, IRValue, IRConst, IRLoad, IRMove, IRJump, IRLabel, IRStaticDataAddress, IRUnOp, IRCast
 )
 from codegen.utils import as_qword_register, type_of
 from typing import Optional
@@ -264,21 +264,29 @@ class DispatchMixin:
         len_call, its own dedicated case, not routed through _ir_call
         at all -- len isn't an ordinary function call), and an
         ordinary scalar-or-void-returning Call (see _ir_call) -- and
-        falls back to wrapping gen_expr_into itself, as a single
-        opaque IRRaw, for everything else still genuinely old-style.
+        raises CodegenError explicitly for everything else, with no
+        fallback left to defer to (see ir.py's own module docstring
+        for IRRaw's own removal, once this was the last remaining
+        site).
 
-        This fallback does NOT "cover" an ArrayLiteral, Slice,
+        Every other node kind reaching here is a genuine bug, not a
+        deliberate scope boundary anymore -- see the note below on
+        exactly why ArrayLiteral/Slice/NoneLiteral/a composite-
+        returning Call never actually reach this point in practice.
+
+        This method does NOT "cover" an ArrayLiteral, Slice,
         NoneLiteral, or a composite-returning Call the way an earlier
-        version of this docstring claimed -- gen_expr_into itself
-        defensively REJECTS every one of those (they don't fit in a
-        single register), so reaching this fallback with one of them
-        crashes, it doesn't handle it. A REAL BUG, found this way: a
-        bare `none` or a bare, discarded composite-returning Call used
-        directly as a statement (`none` or `makeArray()` alone on a
-        line) used to crash outright. The actual fix lives one level
-        up, in gen_statement_ir's own ExprStmt dispatch -- explicit
+        version of this docstring claimed -- when the old-style
+        fallback still existed here, gen_expr_into itself defensively
+        REJECTED every one of those (they don't fit in a single
+        register), so reaching that fallback with one of them crashed,
+        it didn't handle it. A REAL BUG, found this way: a bare `none`
+        or a bare, discarded composite-returning Call used directly as
+        a statement (`none` or `makeArray()` alone on a line) used to
+        crash outright. The actual fix lives one level up, in
+        gen_statement_ir's own ExprStmt dispatch -- explicit
         NoneLiteral/append/ordinary-composite-Call cases there route
-        around this fallback entirely for exactly those shapes, the
+        around this method entirely for exactly those shapes, the
         same "handle it before it ever reaches the generic case" shape
         that method's own ArrayLiteral/Slice cases already used. An
         ArrayLiteral or Slice reaching this method directly (not via a
@@ -407,19 +415,22 @@ class DispatchMixin:
             src_ir, src_value = self.gen_expr_ir(expr.expr)
             t = self._new_temp(type_of(expr))
             return src_ir + [IRCast(dst=t, src=src_value)], t
-        t = self._new_temp(type_of(expr))
-        return [IRRaw(self.gen_expr_into(expr, Register('eax')), dst=t)], t
+        raise CodegenError(
+            f"No real-IR case for expression of type {type(expr).__name__}: {expr!r} -- "
+            f"every language construct this arc's own tests exercise (including every "
+            f"shape print() can take, the last remaining user of what used to be this "
+            f"method's own IRRaw-wrapped fallback) is confirmed to reach real IR without "
+            f"ever falling back here. A genuine bug if this fires, not a deliberate scope "
+            f"boundary -- there is no old-style fallback left to silently defer to anymore."
+        )
 
     def _ir_load(self, addr_ir: list, addr_value, value_type) -> tuple[list, IRValue]:
         """Shared by gen_expr_ir's Index/Field cases: given an
-        address already built as real IR -- or, when _ir_index_
-        address_or_fallback decided expr.array's own base is still
-        out of scope, an old-style gen_index_address_into call
-        captured via a single opaque IRRaw instead -- IRLoads value_
-        type's own width through it. Address computation itself is
-        now real IR wherever possible (see _ir_index_address/_ir_
-        field_address); only the genuinely-deferred cases still fall
-        back to an opaque leaf."""
+        address already built as real IR (see _ir_index_address/_ir_
+        field_address, this method's own two callers), IRLoads
+        value_type's own width through it. This method itself has no
+        fallback of any kind -- it's a pure two-instruction leaf over
+        whatever address its caller already produced."""
         t = self._new_temp(value_type)
         return addr_ir + [IRLoad(dst=t, address=addr_value)], t
 

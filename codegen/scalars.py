@@ -207,29 +207,17 @@ class ScalarsMixin:
     def _ir_call(self, expr: Call) -> tuple[list, object]:
         """Builds (without lowering) an ordinary function call's IR.
 
-        Argument marshaling is now per-argument, not per-call: each
-        argument independently tries real IR first, falling back to
-        an opaque, IRRaw-wrapped materialization only for THAT one
-        argument when out of scope -- never forcing the whole call
-        back to old-style just because one argument isn't real-IR-
-        capable yet, unlike this method's own earlier version (which
-        fell back entirely for ANY slice argument). That earlier
-        restriction existed to avoid interleaving native and opaque
-        argument placement within one call -- a genuine hazard when
-        values are placed directly into fixed argument registers as
-        they're computed, since an opaque computation running between
-        two already-placed arguments could clobber one. That hazard
-        doesn't exist here at all: every argument, real-IR or opaque
-        fallback alike, is computed into its own independent Temp
-        first, and IRCall's own lowering is what places all of them
-        into argument registers, together, immediately before the
-        call -- the same "a Temp's home is independent of what
-        computed it" property this whole arc has relied on
-        repeatedly. Mixing native and opaque arguments freely is safe
-        for the identical reason IRCall's own lowering already never
-        needs a push/pop dance between arguments (see its own
-        comment): nothing a Temp could be assigned to overlaps an
-        argument register until IRCall's own lowering runs.
+        Argument marshaling is per-argument, not per-call: each
+        argument's own shape (scalar, array/struct address, or a
+        slice's own {ptr, len, cap} triple) is computed independently
+        into its own Temp(s) first, and IRCall's own lowering is what
+        places all of them into argument registers, together,
+        immediately before the call -- the same "a Temp's home is
+        independent of what computed it" property this whole arc has
+        relied on repeatedly. This is also what makes IRCall's own
+        lowering never need a push/pop dance between arguments (see
+        its own comment): nothing a Temp could be assigned to overlaps
+        an argument register until IRCall's own lowering runs.
 
         See _ir_call_arguments for the actual per-argument dispatch
         (shared with _ir_composite_call, for a composite-returning

@@ -16,7 +16,7 @@ For each program, `run_benchmarks.py`:
   compiling the program: how many total, how many were eligible for
   allocation, how many actually got a register vs. spilled to memory,
   and *why* the ineligible ones were excluded (backs a named variable,
-  vs. its live range spans an `IRRaw`/`IRCall` -- see
+  vs. its live range spans an `IRCall` -- see
   `register_allocator.py`'s own module docstring for what those two
   exclusions mean and why they exist).
 - **Wall-clock runtime** -- the minimum of several runs of the actual
@@ -69,10 +69,15 @@ suite came out of for the full reasoning, but briefly:
   excluded from allocation today regardless of anything else (see
   `Temp.is_named_local`'s own docstring for why).
 - `array_heavy.ht`, `struct_heavy.ht`, `string_heavy.ht` -- each
-  exercises a feature area that's still entirely `IRRaw`-wrapped old-
-  style codegen, essentially untouched by the allocator at all. These
-  exist as the "how much of a real program is the allocator currently
-  blind to" control group, as much as anything else.
+  exercises a feature area that used to be entirely `IRRaw`-wrapped
+  old-style codegen, essentially untouched by the allocator at all,
+  back when these three were first added. That's no longer true --
+  array/struct/string operations have since migrated to real IR along
+  with everything else (see ir.py's own module docstring), so these
+  now exercise the allocator like any other program; they're kept
+  around for their own historical instruction-count/runtime trend
+  lines, not as a "how much is the allocator blind to" control group
+  anymore.
 
 Every program's expected result was checked against an independent,
 pure-Python reference computation, not just accepted from a first

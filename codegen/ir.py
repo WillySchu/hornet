@@ -22,16 +22,20 @@ future optimization pass), implicit fallthrough would silently break;
 an explicit terminator can't. IRBranch always carries both target
 labels for the same reason.
 
-IRRaw is the escape hatch that makes incremental, construct-by-
-construct migration possible: it splices in a not-yet-migrated
-gen_X_into method's existing output verbatim. By convention, those
-instructions leave their result in Register('eax') (or its 64-bit
-view, for int64) -- if `dst` is given, lower_ir appends one store from
-there into dst's slot. IRRaw is self-eliminating: once a construct
-builds real IR instead, nothing constructs one for it again. Unlike
-every other op in this file, IRRaw is NOT architecture-agnostic by
-nature -- it's a deliberate, temporary exception to this file's own
-goal, not a counterexample to it.
+IRRaw used to be the escape hatch that made incremental,
+construct-by-construct migration possible: it spliced in a not-yet-
+migrated gen_X_into method's existing output verbatim, and was
+deliberately, explicitly documented as NOT architecture-agnostic --
+a temporary exception to this file's own goal, not a counterexample
+to it. It was also self-eliminating by design: once a construct built
+real IR instead, nothing constructed one for it again. That
+prediction played out completely -- print() (calling the runtime's
+own hornet_print) was the last remaining construct still routing
+through it, and once that migrated, IRRaw had zero remaining call
+sites anywhere, confirmed directly by re-running this arc's own full
+audit. It has been removed entirely as a result, not just left
+unused: every op below is architecture-agnostic by construction now,
+with no remaining exception.
 """
 
 from dataclasses import dataclass
@@ -368,8 +372,8 @@ class IRSliceGrow:
     function call that's free to clobber any caller-saved register --
     including %r10d/%r11d, two of this compiler's own three allocator-
     pool registers -- so a Temp allocated to the pool cannot safely
-    survive across it, the same reasoning that already makes IRCall/
-    IRRaw unsafe positions."""
+    survive across it, the same reasoning that already makes IRCall
+    an unsafe position."""
     dst_ptr: Temp
     dst_cap: Temp
     ptr: IRValue
@@ -399,44 +403,21 @@ class IRBranch:
     false_label: str
 
 
-@dataclass
-class IRRaw:
-    """Splices `instructions` -- real assembly_ast.py Instructions,
-    exactly as an existing gen_X_into method already returns them --
-    in verbatim. If `dst` is given, those instructions are assumed (by
-    the caller's own construction) to leave their result in
-    Register('eax') or its 64-bit view, and lower_ir appends a store
-    from there into dst's slot.
-
-    Every IRRaw is, by construction, architecture-specific: it embeds
-    literal x86-64 AT&T instructions in what's otherwise meant to be
-    an architecture-agnostic IR, so retargeting to a different
-    architecture would need every remaining IRRaw site individually
-    reimplemented by hand, not just a new lowering pass. Two leaf
-    shapes that used to route through here -- a named local's own
-    frame-relative address, and a static data label's address -- no
-    longer do, having migrated to IRLocalAddress/IRStaticDataAddress
-    (see their own docstrings); IRRaw remains the right tool for
-    everything else not yet decomposed into real IR ops, chiefly
-    whole, still-unmigrated statement/expression fallbacks and the
-    handful of leaves wrapping genuinely unmigrated, potentially-
-    arbitrary logic (array/struct equality, argument-materialization
-    fallbacks, and similar)."""
-    instructions: list[Instruction]
-    dst: Optional[Temp] = None
-
-
 IRInstr = Union[
     IRBinOp,
+    IRBoundsCheck,
     IRBranch,
     IRCall,
+    IRCast,
+    IRCopy,
     IRJump,
     IRLabel,
     IRLoad,
     IRLocalAddress,
     IRMove,
-    IRRaw,
     IRReturn,
+    IRSliceBoundsCheck,
+    IRSliceGrow,
     IRStaticDataAddress,
     IRStore,
     IRUnOp,

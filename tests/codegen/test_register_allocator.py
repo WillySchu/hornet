@@ -3,7 +3,7 @@ dataflow (build_cfg/compute_liveness) -- the linear-scan algorithm
 itself is tested separately, in test_register_allocator.py."""
 
 from semantic import Type
-from codegen.ir import Temp, IRConst, IRMove, IRBinOp, IRUnOp, IRLabel, IRJump, IRBranch, IRReturn, IRRaw, IRCall, IRLoad, IRStore, IRCopy, IRBoundsCheck
+from codegen.ir import Temp, IRConst, IRMove, IRBinOp, IRUnOp, IRLabel, IRJump, IRBranch, IRReturn, IRCall, IRLoad, IRStore, IRCopy, IRBoundsCheck
 from codegen.register_allocator import (
     build_cfg,
     compute_liveness,
@@ -206,20 +206,6 @@ def test_liveness_loop_carried_variable_spans_the_back_edge():
     assert t(0) in live_in[end_block]
 
 
-def test_liveness_irraw_dst_counts_as_a_definition():
-    """IRRaw never reads a Temp (see this module's own docstring), but
-    its own `dst`, when present, is a real definition -- confirmed
-    here so a later read of it correctly shows nothing live-in before
-    the IRRaw runs."""
-    ir = [
-        IRRaw(instructions=[], dst=t(0)),
-        IRReturn(value=t(0)),
-    ]
-    blocks = build_cfg(ir)
-    live_in, live_out = compute_liveness(blocks)
-    assert t(0) not in live_in[0]
-
-
 def test_liveness_ircall_args_and_dst():
     ir = [
         IRCall(dst=t(0), name='foo', args=[t(1)]),
@@ -365,12 +351,12 @@ def test_eligible_intervals_includes_named_local_in_safe_set():
 def test_eligible_intervals_safe_named_local_still_subject_to_other_hazards():
     """Being in safe_named_locals lifts ONLY the named-local exclusion
     -- a Temp that's ALSO exempted from that but genuinely survives
-    through an IRRaw/IRCall it doesn't own is still excluded for that
+    through an IRCall it doesn't own is still excluded for that
     separate reason, exactly like any other Temp would be."""
     named = Temp(id=0, type=Type.INT, is_named_local=True)
     ir = [
         IRMove(dst=named, src=IRConst(1, Type.INT)),   # 0: named defined
-        IRRaw(instructions=[], dst=t(1)),               # 1: unrelated, opaque -- named must survive through it
+        IRCall(dst=t(1), name='foo', args=[]),          # 1: unrelated, opaque -- named must survive through it
         IRBinOp(dst=t(2), op=BinaryOp.ADD, left=named, right=t(1)),  # 2: named finally used
     ]
     intervals = {0: _interval(named, 0, 2)}
@@ -393,16 +379,6 @@ def test_eligible_intervals_safe_set_is_specific_to_the_temp_id():
     assert 1 not in result
 
 
-def test_eligible_intervals_excludes_span_across_irraw():
-    ir = [
-        IRMove(dst=t(0), src=IRConst(1, Type.INT)),   # 0: t(0) defined
-        IRRaw(instructions=[], dst=t(1)),              # 1: opaque -- could clobber anything
-        IRBinOp(dst=t(2), op=BinaryOp.ADD, left=t(0), right=t(1)),  # 2: t(0) finally used
-    ]
-    intervals = {0: _interval(t(0), 0, 2)}
-    assert eligible_intervals(ir, intervals) == {}
-
-
 def test_eligible_intervals_excludes_span_across_ircall():
     ir = [
         IRMove(dst=t(0), src=IRConst(1, Type.INT)),
@@ -414,7 +390,7 @@ def test_eligible_intervals_excludes_span_across_ircall():
 
 
 def test_eligible_intervals_includes_temp_surviving_across_an_ircopy():
-    """Unlike IRRaw/IRCall, IRCopy is deliberately NOT in unsafe_
+    """Unlike IRCall, IRCopy is deliberately NOT in unsafe_
     positions at all: its own lowering is pinned to %r9/%r8 (the
     address registers) plus whatever gen_array_copy's own scratch pick
     resolves to given those two bases -- never one of register_
@@ -518,42 +494,19 @@ def test_eligible_intervals_includes_pure_temp_arithmetic():
     assert set(result.keys()) == {0, 1}
 
 
-def test_eligible_intervals_includes_temp_defined_by_its_own_irraw():
-    """A Temp's OWN defining IRRaw isn't a hazard to itself -- only
+def test_eligible_intervals_includes_temp_defined_by_its_own_ircall():
+    """A Temp's OWN defining IRCall isn't a hazard to itself -- only
     surviving THROUGH one it doesn't own is (see eligible_intervals'
     own docstring). This is exactly the address-Temp pattern
-    _ir_index_assign/_ir_load use: capture an address via IRRaw,
-    consume it immediately with the very next instruction. Regression
-    test for a real off-by-one this module shipped with initially."""
-    ir = [
-        IRRaw(instructions=[], dst=t(0)),  # 0: t(0) defined BY this IRRaw
-        IRBinOp(dst=t(1), op=BinaryOp.ADD, left=t(0), right=IRConst(1, Type.INT)),  # 1: used right after
-    ]
-    intervals = {0: _interval(t(0), 0, 1)}
-    assert 0 in eligible_intervals(ir, intervals)
-
-
-def test_eligible_intervals_includes_temp_defined_by_its_own_ircall():
-    """Same as the IRRaw case above, for IRCall's own dst."""
+    _ir_index_assign/_ir_load rely on: capture an address, consume it
+    immediately with the very next instruction. Regression test for a
+    real off-by-one this module shipped with initially."""
     ir = [
         IRCall(dst=t(0), name='foo', args=[]),  # 0: t(0) defined BY this call
         IRBinOp(dst=t(1), op=BinaryOp.ADD, left=t(0), right=IRConst(1, Type.INT)),  # 1: used right after
     ]
     intervals = {0: _interval(t(0), 0, 1)}
     assert 0 in eligible_intervals(ir, intervals)
-
-
-def test_eligible_intervals_still_excludes_a_temp_surviving_through_an_unowned_irraw():
-    """The fix above must not overcorrect: a Temp defined BEFORE an
-    IRRaw it doesn't own, and used AFTER it, is still genuinely
-    unsafe."""
-    ir = [
-        IRMove(dst=t(0), src=IRConst(1, Type.INT)),   # 0: t(0) defined here
-        IRRaw(instructions=[], dst=t(1)),              # 1: an unrelated, opaque op
-        IRBinOp(dst=t(2), op=BinaryOp.ADD, left=t(0), right=t(1)),  # 2: t(0) used here, AFTER the IRRaw
-    ]
-    intervals = {0: _interval(t(0), 0, 2)}
-    assert eligible_intervals(ir, intervals) == {}
 
 
 # -- linear_scan ---------------------------------------------------------------

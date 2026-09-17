@@ -749,7 +749,7 @@ class ArraysSlicesMixin:
         No push/pop protection is needed around evaluating expr.index,
         unlike the old-style version: base_addr/length_value are
         already safely stored in their own Temp homes (register or
-        memory, via the allocator) the moment their own IRRaw/leaf
+        memory, via the allocator) the moment _ir_indexable_base
         finishes, before expr.index (which could itself be arbitrarily
         complex, even a call) ever runs -- the same "a Temp's home is
         independent of what computed it" property that already made
@@ -1389,12 +1389,15 @@ class ArraysSlicesMixin:
         itself another unnamed slice.
 
         Real IR now instead, for a Variable/Field/Index/Slice argument
-        (or a bare `none`) -- see _ir_slice_arg, which reuses this
-        method's own materialization step only for a slice-returning
-        Call argument (chiefly), reading the three fields back out via
-        ordinary IRRaw leaves rather than fixed registers; this old-
-        style path is still reached from _gen_call_arguments_into, for
-        a composite-returning call's own ordinary arguments."""
+        (or a bare `none`) -- see _ir_slice_arg, which delegates
+        entirely to _ir_indexable_base for a slice-returning Call
+        argument (chiefly), the same real-IR base every other slice
+        shape here already resolves through. This method itself (the
+        old-style gen_slice_arg_into) is no longer reached for this at
+        all -- including for a composite-returning call's own
+        ordinary arguments, which now go through _ir_call_arguments
+        directly too, the identical per-argument dispatch _ir_call
+        itself uses (see _ir_composite_call's own docstring)."""
         if isinstance(expr, NoneLiteral):
             return [
                 MovQ(src=Imm(0), dst=ptr_dst),
@@ -1599,10 +1602,10 @@ class ArraysSlicesMixin:
           - str: the address of a single shared, static empty-string
             constant (_get_empty_str_label) -- never a null pointer,
             for the exact reason _gen_zero_value_into's own docstring
-            gives (a null zero value would be an active hazard). A
-            single-instruction leaf (LeaQ), IRRaw-wrapped and captured
-            into a Temp, the same pattern gen_string_literal_into's
-            own real-IR counterpart already uses.
+            gives (a null zero value would be an active hazard). An
+            ordinary IRStaticDataAddress captured into a Temp, the
+            same real-IR leaf gen_string_literal_into's own
+            counterpart already uses.
           - int/bool/int8/uint8: an ordinary IRConst(0, value_type),
             written via IRStore at value_type's own declared width."""
         if value_type.kind == TypeKind.SLICE:

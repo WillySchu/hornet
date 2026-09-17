@@ -42,7 +42,6 @@ from codegen.ir import (
     IRLoad,
     IRLocalAddress,
     IRMove,
-    IRRaw,
     IRReturn,
     IRSliceBoundsCheck,
     IRSliceGrow,
@@ -168,11 +167,7 @@ class InstructionSelector:
         Instructions -- every op ir.py defines now has a rule here."""
         out: list[Instruction] = []
         for instr in instructions:
-            if isinstance(instr, IRRaw):
-                out.extend(instr.instructions)
-                if instr.dst is not None:
-                    out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
-            elif isinstance(instr, IRMove):
+            if isinstance(instr, IRMove):
                 out.extend(self._gen_load_value(instr.src, Register('eax')))
                 out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
             elif isinstance(instr, IRBinOp):
@@ -210,16 +205,17 @@ class InstructionSelector:
                 out.append(Je(instr.false_label))
                 out.append(Jmp(instr.true_label))
             elif isinstance(instr, IRCall):
-                # `args` is empty for a call with any slice argument
-                # (see _ir_call's own docstring for why) -- marshaled
-                # entirely through the pre-existing calling-convention
-                # code, spliced in as an IRRaw immediately before this
-                # op runs, in that case. Otherwise, each one is placed
-                # directly into its own argument register, in any
-                # order: no push/pop dance needed, since nothing a
-                # Temp could ever be assigned to (memory, or the
-                # allocator's own pool) overlaps an argument register,
-                # so placing one can never clobber another's source.
+                # Every argument -- scalar, an address for array/
+                # struct, or a slice's own {ptr, len, cap} triple --
+                # already arrives here as one or more ordinary,
+                # independent Temps (see _ir_call_arguments's own
+                # docstring for how each shape gets there); this loop
+                # places each one directly into its own argument
+                # register, in any order: no push/pop dance needed,
+                # since nothing a Temp could ever be assigned to
+                # (memory, or the allocator's own pool) overlaps an
+                # argument register, so placing one can never clobber
+                # another's source.
                 for i, arg_value in enumerate(instr.args):
                     out.extend(self._gen_load_value(arg_value, Register(ARG_REGISTERS_32[i])))
                 out.append(CallInstr(instr.name))

@@ -9,7 +9,7 @@ access tracking (see CodeGenerator._escaped_offsets) has established
 it never was, in which case it's exempt from THIS exclusion
 specifically (see eligible_intervals' own docstring for what
 safe_named_locals does and doesn't change); and any Temp that needs
-to SURVIVE THROUGH an IRRaw or IRCall it doesn't own (see
+to SURVIVE THROUGH an IRCall it doesn't own (see
 eligible_intervals' own docstring for why being defined BY one is a
 different, safe case), because neither the caller-saved registers
 (which a call definitely clobbers) nor the existing callee-saved ones
@@ -36,7 +36,6 @@ from codegen.ir import (
     IRLoad,
     IRLocalAddress,
     IRMove,
-    IRRaw,
     IRReturn,
     IRSliceBoundsCheck,
     IRSliceGrow,
@@ -53,11 +52,12 @@ from codegen.ir import (
 # argument role (unlike %rdi/%rsi/%rdx/%rcx/%r8/%r9) and no implicit
 # instruction-level role (unlike %rcx's shift-count, %rdx's div/mul
 # high half), and not this compiler's own universal scratch
-# convention (%rax, used throughout gen_expr_into and every IRRaw).
+# convention (%rax, used throughout gen_expr_into and every old-style
+# gen_X_into method built on top of it).
 # Existing old-style code already uses all three as short-lived,
 # single-method scratch (83, 49, and 2 call sites respectively,
 # checked directly rather than assumed) -- safe to also hand out here
-# because an allocated Temp's live range never spans an IRRaw/IRCall
+# because an allocated Temp's live range never spans an IRCall
 # (see this module's own docstring), so the allocator's own use and
 # any old-style method's internal use of the same register are always
 # sequential, never concurrent.
@@ -135,9 +135,7 @@ def build_cfg(ir: list) -> list[BasicBlock]:
 
 
 def _reads(instr) -> set:
-    """The Temps `instr` reads as input -- never includes IRRaw's own
-    `instructions`, which are already-lowered and never reference a
-    Temp at all (see this module's own docstring)."""
+    """The Temps `instr` reads as input."""
     if isinstance(instr, IRMove):
         return {instr.src} if isinstance(instr.src, Temp) else set()
     if isinstance(instr, IRCast):
@@ -168,12 +166,10 @@ def _reads(instr) -> set:
 
 
 def _writes(instr) -> set:
-    """The Temps `instr` defines. IRRaw's own `dst`, when present,
-    counts here even though it's set from outside the wrapped
-    instructions -- see IRRaw's own docstring."""
+    """The Temps `instr` defines."""
     if isinstance(instr, (IRMove, IRBinOp, IRUnOp, IRLoad, IRLocalAddress, IRStaticDataAddress, IRCast)):
         return {instr.dst}
-    if isinstance(instr, (IRCall, IRRaw)):
+    if isinstance(instr, IRCall):
         return {instr.dst} if instr.dst is not None else set()
     if isinstance(instr, IRSliceGrow):
         return {instr.dst_ptr, instr.dst_cap}
@@ -267,8 +263,8 @@ def compute_live_intervals(blocks: list[BasicBlock], live_in: list, live_out: li
 def eligible_intervals(ir: list, intervals: dict, safe_named_locals: frozenset = frozenset()) -> dict:
     """Filters out every interval that can't be safely register-
     allocated -- see this module's own docstring for why named-local
-    Temps and any Temp SURVIVING THROUGH an IRRaw/IRCall it doesn't
-    own are excluded unconditionally, not just usually.
+    Temps and any Temp SURVIVING THROUGH an IRCall it doesn't own are
+    excluded unconditionally, not just usually.
 
     `safe_named_locals` (a set of Temp ids, from gen_function -- see
     its own docstring for how it's computed from legacy access
@@ -276,17 +272,17 @@ def eligible_intervals(ir: list, intervals: dict, safe_named_locals: frozenset =
     hazard check below it: a named-local Temp whose own variable was
     never touched by old-style code is only exempt from the "its
     memory slot might be read behind its back" reasoning -- it still
-    needs to survive an IRRaw/IRCall it doesn't own like anything
-    else, so it falls through to exactly the same _is_hazard check
-    every other Temp goes through, not an automatic pass.
+    needs to survive an IRCall it doesn't own like anything else, so
+    it falls through to exactly the same _is_hazard check every other
+    Temp goes through, not an automatic pass.
 
     Two boundary cases are deliberately safe, not excluded, even
     though they touch an unsafe position -- see _is_hazard for the
     precise reasoning behind each:
 
-      pos == interval.start: this Temp's own def, via IRRaw/IRCall's
-      dst -- that same op can't put it at risk, only one running
-      strictly after its definition can.
+      pos == interval.start: this Temp's own def, via IRCall's dst --
+      that same op can't put it at risk, only one running strictly
+      after its definition can.
 
       pos == interval.end, when ir[pos] is an IRCall and this Temp is
       one of ITS OWN args: the read that places it into an argument
@@ -305,7 +301,7 @@ def eligible_intervals(ir: list, intervals: dict, safe_named_locals: frozenset =
     no other register touched at all -- exactly as safe as an
     ordinary IRBinOp/IRMove, and there's no reason to treat it any
     more conservatively just because of what it used to be."""
-    unsafe_positions = [i for i, instr in enumerate(ir) if isinstance(instr, (IRRaw, IRCall, IRSliceGrow))]
+    unsafe_positions = [i for i, instr in enumerate(ir) if isinstance(instr, (IRCall, IRSliceGrow))]
     result = {}
     for tid, interval in intervals.items():
         if interval.temp.is_named_local and tid not in safe_named_locals:

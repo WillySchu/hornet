@@ -212,7 +212,7 @@ def format_report(results: dict) -> str:
         "alloc/spill: of those eligible, how many got a register vs. fell "
         "back to a memory slot. named/unsafe: excluded because they back "
         "a named variable, or because their live range spans an "
-        "IRRaw/IRCall, respectively."
+        "IRCall."
     )
     return '\n'.join(lines)
 
