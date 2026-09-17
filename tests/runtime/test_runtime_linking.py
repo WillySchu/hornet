@@ -1,7 +1,7 @@
 """Confirms runtime.c and a separate C caller (test_linked_separately.c)
 can be compiled as independent object files and linked together
 correctly -- the actual cross-translation-unit path build.py's own
-final link step relies on, as opposed to test_runtime_isolated.py's
+final link step relies on, as opposed to test_runtime_isolated.c's
 own #include-based white-box testing of runtime.c's internals.
 
 Also confirms hornet_print's own symbol visibility is exactly what's
