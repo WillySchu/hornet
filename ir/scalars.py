@@ -10,7 +10,7 @@ internally which actual width to operate on."""
 from codegen.calling_convention import total_arg_slots
 from codegen.errors import CodegenError
 from ir.ir import IRBranch, IRJump, IRLabel, IRMove, IRConst, IRCall
-from codegen.utils import type_of
+from ir.utils import type_of
 from parser import Call, Binary, Variable, Field, Index, NoneLiteral, ArrayLiteral
 from semantic import Type, TypeKind
 

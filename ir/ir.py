@@ -52,26 +52,26 @@ class Temp:
     for convenience, not part of identity, so this stays a safe dict
     key without needing Type's own equality involved at all).
 
-    `is_named_local`, set only by IdAllocator.temp_at_offset, marks
-    a Temp that backs a source-level variable rather than an anonymous
-    compiler-generated value. register_allocator.py excludes these by
-    default, via safe_named_locals (computed in lower_function) --
+    Used to also carry is_named_local, marking a Temp that backs a
+    source-level variable (set only by IdAllocator.temp_at_offset)
+    rather than an anonymous compiler-generated value:
+    register_allocator.py excluded these from allocation by default,
     historically because old-style code, and later parameter
     marshaling, could write to a named local's own slot directly,
     bypassing this Temp entirely, which would make promoting it to a
     register unsafe (nothing would ever load the real value into it).
-    Neither hazard exists anymore: old-style code is gone, and
-    parameter marshaling migrated to real IR (see _ir_param_setup),
-    so every named-local Temp is read/written exclusively through
-    itself now, the identical discipline every other Temp already
-    follows. safe_named_locals' own exclusion set (_escaped_offsets)
-    is confirmed empty in every case this compiler can produce today
-    -- kept as a real, general mechanism rather than deleted outright,
-    since removing it is a distinct decision from confirming it
-    currently does nothing (see its own comment)."""
+    Both hazards are gone now (old-style code removed entirely;
+    parameter marshaling migrated to real IR -- see _ir_param_setup),
+    confirmed directly rather than assumed (see this arc's own
+    removal of legacy access tracking, CodeGenerator._escaped_
+    offsets, once its own exclusion set was confirmed permanently
+    empty), so every named-local Temp is read/written exclusively
+    through itself now, the identical discipline every other Temp
+    already follows -- with nothing left to mark or exclude, this
+    field, and the machinery built on it, were removed entirely
+    rather than kept as permanently-inert scaffolding."""
     id: int
     type: Type
-    is_named_local: bool = False
 
     def __hash__(self):
         return hash(self.id)

@@ -12,7 +12,7 @@ marshals its own arguments through _ir_call_arguments instead (see
 scalars.py), which these two methods had no remaining callers left to
 serve."""
 
-from codegen.utils import type_of
+from ir.utils import type_of
 from parser import Node, NoneLiteral
 from semantic import TypeKind
 

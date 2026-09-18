@@ -9,7 +9,7 @@ from ir.ir import (
     IRReturn, IRBranch, IRLabel, IRJump, IRMove, IRStore, IRCopy, IRConst, IRLoad, IRLocalAddress, IRCall,
     IRFunction, IRStaticDataAddress,
 )
-from codegen.utils import type_of, type_byte_width
+from ir.utils import type_of, type_byte_width
 from parser import (
     ArrayLiteral,
     Assign,

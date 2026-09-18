@@ -52,23 +52,23 @@ EXECUTION_TIMEOUT = 30
 HOST_IS_MACOS = sys.platform == 'darwin'
 ASM_PLATFORM = 'macos' if HOST_IS_MACOS else 'linux'
 
-STAT_KEYS = ('total_temps', 'named_local_excluded', 'unsafe_span_excluded', 'eligible', 'allocated', 'spilled')
+STAT_KEYS = ('total_temps', 'unsafe_span_excluded', 'eligible', 'allocated', 'spilled')
 
 
 def _instrumented_generate(program):
-    """Runs CodeGenerator.generate, capturing the (ir, assignment,
-    safe_named_locals) triple from every allocate_registers call made
-    along the way -- one per function -- without touching any
-    production code at all: this wraps the module-level reference gen_
-    function actually calls, exactly like the ad hoc verification
-    scripts used earlier in this project's own development did, just
-    kept around properly this time instead of being thrown away."""
+    """Runs CodeGenerator.generate, capturing the (ir, assignment)
+    pair from every allocate_registers call made along the way -- one
+    per function -- without touching any production code at all: this
+    wraps the module-level reference gen_function actually calls,
+    exactly like the ad hoc verification scripts used earlier in this
+    project's own development did, just kept around properly this
+    time instead of being thrown away."""
     captured = []
     original = ra_module.allocate_registers
 
-    def wrapper(ir, safe_named_locals=frozenset()):
-        assignment = original(ir, safe_named_locals)
-        captured.append((list(ir), dict(assignment), safe_named_locals))
+    def wrapper(ir):
+        assignment = original(ir)
+        captured.append((list(ir), dict(assignment)))
         return assignment
 
     codegen_module.allocate_registers = wrapper
@@ -80,26 +80,18 @@ def _instrumented_generate(program):
     return asm_program, captured
 
 
-def _allocation_stats(ir: list, assignment: dict, safe_named_locals: frozenset = frozenset()) -> dict:
+def _allocation_stats(ir: list, assignment: dict) -> dict:
     """Re-derives the same breakdown eligible_intervals itself
     computes, plus WHY each excluded Temp was excluded -- something
     the production code has no reason to track, since it only needs
-    the final yes/no, not the reason. named_local_excluded now counts
-    only named-local Temps NOT in safe_named_locals -- one whose own
-    variable was never touched by old-style code (see legacy access
-    tracking, CodeGenerator._escaped_offsets) is eligible exactly like
-    any other Temp, not excluded by construction."""
+    the final yes/no, not the reason."""
     blocks = ra_module.build_cfg(ir)
     live_in, live_out = ra_module.compute_liveness(blocks)
     intervals = ra_module.compute_live_intervals(blocks, live_in, live_out)
-    eligible = ra_module.eligible_intervals(ir, intervals, safe_named_locals)
-    named_local = sum(
-        1 for tid, iv in intervals.items() if iv.temp.is_named_local and tid not in safe_named_locals
-    )
-    unsafe_span = len(intervals) - named_local - len(eligible)
+    eligible = ra_module.eligible_intervals(ir, intervals)
+    unsafe_span = len(intervals) - len(eligible)
     return {
         'total_temps': len(intervals),
-        'named_local_excluded': named_local,
         'unsafe_span_excluded': unsafe_span,
         'eligible': len(eligible),
         'allocated': len(assignment),
@@ -185,7 +177,7 @@ def run_one(ht_path: Path) -> dict:
             raise RuntimeError(f"gcc failed to assemble/link {ht_path.name}:\n{result.stderr}")
 
         per_function_stats = [
-            _allocation_stats(ir, assignment, safe_named_locals) for ir, assignment, safe_named_locals in captured
+            _allocation_stats(ir, assignment) for ir, assignment in captured
         ]
         elapsed = _time_binary(bin_path)
 
@@ -200,7 +192,7 @@ def run_one(ht_path: Path) -> dict:
 def format_report(results: dict) -> str:
     header = (
         f"{'benchmark':<22} {'instrs':>8} {'time(ms)':>10} "
-        f"{'temps':>7} {'elig':>6} {'alloc':>6} {'spill':>6} {'named':>7} {'unsafe':>7}"
+        f"{'temps':>7} {'elig':>6} {'alloc':>6} {'spill':>6} {'unsafe':>7}"
     )
     lines = [header, '-' * len(header)]
     for name, r in sorted(results.items()):
@@ -208,16 +200,15 @@ def format_report(results: dict) -> str:
         lines.append(
             f"{name:<22} {r['instruction_count']:>8} {r['runtime_seconds'] * 1000:>10.1f} "
             f"{a['total_temps']:>7} {a['eligible']:>6} {a['allocated']:>6} {a['spilled']:>6} "
-            f"{a['named_local_excluded']:>7} {a['unsafe_span_excluded']:>7}"
+            f"{a['unsafe_span_excluded']:>7}"
         )
     lines.append('')
     lines.append(
         "temps: total Temps created. elig: eligible for allocation (see "
-        "register_allocator.py's own docstring for the two exclusions). "
+        "register_allocator.py's own docstring for the one exclusion). "
         "alloc/spill: of those eligible, how many got a register vs. fell "
-        "back to a memory slot. named/unsafe: excluded because they back "
-        "a named variable, or because their live range spans an "
-        "IRCall."
+        "back to a memory slot. unsafe: excluded because their live range "
+        "spans an IRCall."
     )
     return '\n'.join(lines)
 

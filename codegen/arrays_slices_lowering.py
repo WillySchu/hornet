@@ -44,7 +44,8 @@ from codegen.assembly_ast import (
     Register,
     ShiftRightArithmetic,
 )
-from codegen.utils import type_byte_width, leaf_type, as_byte_register
+from ir.utils import type_byte_width, leaf_type
+from codegen.utils import as_byte_register
 from semantic import Type
 
 

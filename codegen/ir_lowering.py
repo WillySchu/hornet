@@ -82,7 +82,8 @@ from ir.ir import (
     IRValue,
     Temp,
 )
-from codegen.utils import as_qword_register, type_byte_width, ARG_REGISTERS_32, ARG_REGISTERS_64
+from ir.utils import type_byte_width
+from codegen.utils import as_qword_register, ARG_REGISTERS_32, ARG_REGISTERS_64
 from semantic import Type
 
 
@@ -166,36 +167,7 @@ class InstructionSelector:
         falling through to a plain 4-byte Mov for everything else --
         which would truncate a pointer. Every existing caller of that
         method already special-cases str itself first; this is one
-        more such caller, not a gap in it.
-
-        A named-local Temp falling back to memory HERE, before host.
-        _allocation_finalized is set (see its own docstring), used to
-        be a real, live legacy-access hazard, not just the ordinary
-        safe case: several old-style codegen methods (gen_binary_into
-        among them) used to build a small, self-contained IR fragment
-        and lower it immediately, via this same method, well before
-        this function's own whole-body allocate_registers call had
-        run -- at that point host._register_assignment was still
-        empty for THIS function, so any named-local Temp referenced
-        from inside one of those fragments fell back to memory
-        unconditionally, regardless of what the real, whole-function
-        allocation decision later turned out to be. A named-local's
-        own Temp identity is shared and reused across every reference
-        to that variable, unlike an anonymous Temp (always confined to
-        the one IR-building-and-lowering call that created it), so
-        this was the one case where an earlier, premature memory
-        fallback could go stale the moment the real decision was made
-        -- caught empirically (`arr[i + 1] = 42` reading a stale i from
-        memory after i's own Temp was allocated a register elsewhere),
-        not by reasoning about this method in isolation. This guard
-        remains in place even though lower_ir now has exactly one
-        caller (lower_function, always after allocate_registers has
-        already run -- see codegen.py's own gen_function_ir/lower_
-        function split), which means the scenario it exists for is, as
-        far as this arc's own audits can tell, no longer reachable at
-        all: removing a still-correct defensive check that costs
-        nothing to keep is a different, separately-considered decision
-        from deleting code that's provably, permanently dead."""
+        more such caller, not a gap in it."""
         reg_name = self.host._register_assignment.get(temp.id)
         if reg_name is not None:
             src = Register(reg_name)
@@ -205,16 +177,13 @@ class InstructionSelector:
             if src == dst:
                 return []
             return [MovQ(src=src, dst=dst)] if wide else [Mov(src=src, dst=dst)]
-        if temp.is_named_local and not self.host._allocation_finalized:
-            self.host._escaped_offsets.add(self.host.ir_program.ids._temp_offsets[temp.id])
         if temp.type == Type.STR:
             return [MovQ(src=self._temp_mem(temp), dst=as_qword_register(dst))]
         return self.host._gen_read_scalar_into(self._temp_mem(temp), temp.type, dst)
 
     def _gen_write_temp_from(self, src: Register, temp: Temp) -> list[Instruction]:
         """The write-side counterpart to _gen_read_temp_into -- same
-        register-assignment check, same str special case, same legacy-
-        access recording for the same reasons."""
+        register-assignment check, same str special case."""
         reg_name = self.host._register_assignment.get(temp.id)
         if reg_name is not None:
             dst = Register(reg_name)
@@ -224,8 +193,6 @@ class InstructionSelector:
             if src == dst:
                 return []
             return [MovQ(src=src, dst=dst)] if wide else [Mov(src=src, dst=dst)]
-        if temp.is_named_local and not self.host._allocation_finalized:
-            self.host._escaped_offsets.add(self.host.ir_program.ids._temp_offsets[temp.id])
         if temp.type == Type.STR:
             return [MovQ(src=as_qword_register(src), dst=self._temp_mem(temp))]
         return self.host._gen_write_scalar_from(src, temp.type, self._temp_mem(temp))

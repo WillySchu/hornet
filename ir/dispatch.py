@@ -19,7 +19,7 @@ from codegen.errors import CodegenError
 from ir.ir import (
     IRBinOp, IRValue, IRConst, IRLoad, IRMove, IRJump, IRLabel, IRStaticDataAddress, IRUnOp, IRCast
 )
-from codegen.utils import type_of
+from ir.utils import type_of
 from typing import Optional
 from parser import (
     ArrayLiteral,

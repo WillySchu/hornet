@@ -28,7 +28,7 @@ from ir.ir import (
     IRStaticDataAddress,
     IRStore, Temp,
 )
-from codegen.utils import type_of, type_byte_width
+from ir.utils import type_of, type_byte_width
 from parser import Node, ArrayLiteral, Call, Field, Index, Slice, Variable, NoneLiteral, Binary, BinaryOp
 from semantic import TypeKind, Type
 

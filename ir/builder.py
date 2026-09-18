@@ -35,7 +35,7 @@ from typing import List, Optional
 
 from codegen.errors import CodegenError
 from codegen.escape_analysis import analyze_array_escapes, is_heap_allocated
-from codegen.utils import type_byte_width, type_of
+from ir.utils import type_byte_width, type_of
 from ir.ir import (
     IRBranch, IRCall, IRConst, IRCopy, IRFunction, IRJump, IRLocalAddress, IRReadArgument, IRReturn, IRStore, Temp,
 )
@@ -374,9 +374,10 @@ class IRFunctionBuilder(
                 # register_allocator.py treats it exactly like any
                 # other Temp-producing op from here on: no more
                 # writing directly into memory, bypassing the Temp,
-                # the way this used to (see _escaped_offsets' own
-                # docstring for why that mattered before, and why it
-                # no longer applies to a parameter at all now).
+                # the way this used to (see Temp's own docstring for
+                # the legacy-access hazard that used to make this
+                # matter, and why it no longer applies to a parameter
+                # at all now).
                 self._bind_param(p, ir_fn)
                 ir.append(IRReadArgument(dst=self._local_temp(p.name), index=reg_index))
                 reg_index += 1

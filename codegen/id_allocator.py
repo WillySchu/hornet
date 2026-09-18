@@ -84,8 +84,7 @@ class IdAllocator:
         runs, so there's no lazy decision left to make, and reusing
         that slot -- rather than allocating a second, redundant one --
         is what lets every read and write of that variable, for the
-        rest of the function, share one Temp identity. is_named_local
-        marks it as such -- see Temp's own docstring for why.
+        rest of the function, share one Temp identity.
 
         Stores the SLOT here, not a resolved physical offset -- unlike
         an eager version of this method used to. Every slot in this
@@ -99,7 +98,7 @@ class IdAllocator:
         temp_id = self._temp_count
         self._temp_count += 1
         self._temp_offsets[temp_id] = slot
-        return Temp(id=temp_id, type=t, is_named_local=True)
+        return Temp(id=temp_id, type=t)
 
     def new_slot(self, width: int, label: str, ir_fn: IRFunction) -> int:
         """Allocates a fresh, logical frame-slot identifier -- the

@@ -1,24 +1,28 @@
 """Register allocation over the IR (see ir.py) -- v1, linear scan.
 
-Only two kinds of Temp are excluded from allocation, both for
-correctness, not performance: a named-variable Temp
-(Temp.is_named_local -- see its own docstring) by default, unless
-legacy access tracking (see CodeGenerator._escaped_offsets) has
-established this specific one's own variable was never written to
-directly by this function's own parameter-marshaling code, bypassing
-the Temp entirely -- in which case it's exempt from THIS exclusion
-specifically (see eligible_intervals' own docstring for what
-safe_named_locals does and doesn't change); and any Temp that needs
-to SURVIVE THROUGH an IRCall it doesn't own (see
-eligible_intervals' own docstring for why being defined BY one is a
-different, safe case), because neither the caller-saved registers
-(which a call definitely clobbers) nor the existing callee-saved ones
-(already used internally, for unrelated purposes, by old-style
-string/append code) can be trusted to carry a value across an opaque
-block untouched. Everything else here -- basic blocks, liveness,
-linear scan itself -- is standard and unsurprising; the interesting
-decisions are those two exclusions and the register pool choice (see
-ALLOCATABLE_REGISTERS below), not the algorithm.
+Only one kind of Temp is excluded from allocation, for correctness,
+not performance: any Temp that needs to SURVIVE THROUGH an IRCall it
+doesn't own (see eligible_intervals' own docstring for why being
+defined BY one is a different, safe case), because neither the
+caller-saved registers (which a call definitely clobbers) nor the
+existing callee-saved ones (already used internally, for unrelated
+purposes, by old-style string/append code) can be trusted to carry a
+value across an opaque block untouched. Everything else here -- basic
+blocks, liveness, linear scan itself -- is standard and unsurprising;
+the interesting decisions are this one exclusion and the register pool
+choice (see ALLOCATABLE_REGISTERS below), not the algorithm.
+
+Used to also unconditionally exclude a named-variable Temp (Temp.
+is_named_local -- see its own docstring for why that field no longer
+exists at all), unless legacy access tracking established this
+specific one's own variable was never written to directly by this
+function's own parameter-marshaling code, bypassing the Temp entirely.
+That hazard -- old-style code, and later parameter marshaling, writing
+straight to a named local's own memory slot -- is gone entirely now
+(parameter marshaling migrated to real IR; see _ir_param_setup), so
+every named-local Temp is read/written exclusively through itself, the
+identical discipline every other Temp already follows, and needs no
+exclusion of its own anymore.
 """
 
 from dataclasses import dataclass, field
@@ -261,22 +265,11 @@ def compute_live_intervals(blocks: list[BasicBlock], live_in: list, live_out: li
     return {tid: LiveInterval(temp=entry[0], start=entry[1], end=entry[2]) for tid, entry in bounds.items()}
 
 
-def eligible_intervals(ir: list, intervals: dict, safe_named_locals: frozenset = frozenset()) -> dict:
+def eligible_intervals(ir: list, intervals: dict) -> dict:
     """Filters out every interval that can't be safely register-
-    allocated -- see this module's own docstring for why named-local
-    Temps and any Temp SURVIVING THROUGH an IRCall it doesn't own are
-    excluded unconditionally, not just usually.
-
-    `safe_named_locals` (a set of Temp ids, from lower_function -- see
-    its own comment for how it's computed from legacy access
-    tracking) lifts the named-local exclusion specifically, not the
-    hazard check below it: a named-local Temp whose own variable was
-    never written to directly by this function's own parameter-
-    marshaling code is only exempt from the "its
-    memory slot might be read behind its back" reasoning -- it still
-    needs to survive an IRCall it doesn't own like anything else, so
-    it falls through to exactly the same _is_hazard check every other
-    Temp goes through, not an automatic pass.
+    allocated -- see this module's own docstring for why any Temp
+    SURVIVING THROUGH an IRCall it doesn't own is excluded
+    unconditionally, not just usually.
 
     Two boundary cases are deliberately safe, not excluded, even
     though they touch an unsafe position -- see _is_hazard for the
@@ -306,8 +299,6 @@ def eligible_intervals(ir: list, intervals: dict, safe_named_locals: frozenset =
     unsafe_positions = [i for i, instr in enumerate(ir) if isinstance(instr, (IRCall, IRSliceGrow))]
     result = {}
     for tid, interval in intervals.items():
-        if interval.temp.is_named_local and tid not in safe_named_locals:
-            continue
         if any(_is_hazard(interval, pos, ir) for pos in unsafe_positions):
             continue
         result[tid] = interval
@@ -393,15 +384,13 @@ def linear_scan(intervals: dict, available_registers: list[str] = ALLOCATABLE_RE
     return assignment
 
 
-def allocate_registers(ir: list, safe_named_locals: frozenset = frozenset()) -> dict:
+def allocate_registers(ir: list) -> dict:
     """The whole pipeline, run over one function's own accumulated IR:
     build the CFG, compute liveness, derive live intervals, filter to
     what's actually eligible, and run linear scan over the result.
-    `safe_named_locals` is passed straight through to eligible_
-    intervals -- see its own docstring for what it means. Returns
-    temp.id -> register name, exactly like linear_scan itself."""
+    Returns temp.id -> register name, exactly like linear_scan itself."""
     blocks = build_cfg(ir)
     live_in, live_out = compute_liveness(blocks)
     intervals = compute_live_intervals(blocks, live_in, live_out)
-    eligible = eligible_intervals(ir, intervals, safe_named_locals)
+    eligible = eligible_intervals(ir, intervals)
     return linear_scan(eligible)

@@ -53,7 +53,7 @@ from ir.program_builder import build_ir_program
 from codegen.ir_lowering import InstructionSelector
 from codegen.register_allocator import allocate_registers
 from codegen.scalars_lowering import ScalarsLoweringMixin
-from parser import Function, Program
+from parser import Function, Parser, Program
 
 
 # ---------------------------------------------------------------------------
@@ -63,46 +63,11 @@ from parser import Function, Program
 class CodeGenerator(
         ArraysSlicesLoweringMixin,
         ScalarsLoweringMixin):
-    """Walks the source IR and produces an equivalent AsmProgram."""
+    """Walks the IR and produces an equivalent AsmProgram."""
 
     def __init__(self):
         self._next_offset = 0
         self._slot_offsets: Dict[int, int] = {}  # slot id -> its final, physical offset; see _resolve_frame_layout
-        # Legacy access tracking: every offset written to directly, by
-        # this function's own parameter-marshaling code (see gen_
-        # function_ir's own scalar/str parameter cases below), bypassing
-        # the Temp mechanism entirely. Reset in lower_function,
-        # alongside _allocation_finalized -- these are frame-relative,
-        # so a raw offset value means nothing across a function
-        # boundary.
-        #
-        # Used to also be populated by _local_offset, on the theory
-        # that old-style code might read a variable's memory directly,
-        # bypassing its own Temp -- moot now that old-style code is
-        # gone entirely (confirmed directly: a composite-typed
-        # variable's own named-local Temp, the only kind _local_offset
-        # -- now _local_slot -- ever concerned itself with, never
-        # appears as an operand anywhere in the IR this compiler
-        # builds today, so excluding it from register allocation was
-        # already excluding something that could never have been
-        # eligible in the first place). Parameter marshaling is a
-        # narrower but still genuine reason this needs to exist: it
-        # writes a scalar/str parameter's own initial value directly
-        # into its permanent slot, never through _gen_write_temp_from,
-        # since register_allocator.py's own decision for that Temp
-        # isn't made yet at that point in the pipeline -- if that
-        # Temp were later allocated a register anyway, nothing would
-        # ever actually load the real parameter value into it. This
-        # will have nothing left to track once parameter marshaling
-        # itself is migrated off plain Instructions the same way
-        # everything else in this arc has been.
-        self._escaped_offsets: set[int] = set()
-        # False from the start of lower_function until this function's
-        # OWN allocate_registers call has returned -- see ir_lowering.
-        # py's _gen_read_temp_into/_gen_write_temp_from for why a
-        # named-local Temp's memory fallback needs to know this, not
-        # just whether register_allocator.py assigned it a register.
-        self._allocation_finalized: bool = False
         # Populated once per function, by lower_function, from
         # register_allocator.allocate_registers -- maps a (necessarily
         # anonymous, necessarily IRCall-free) Temp's id to the
@@ -285,53 +250,35 @@ class CodeGenerator(
         of this is computed has changed from before this split
         existed.
 
-        Resets self._bounds_check_fail_labels/_slot_offsets/_escaped_
-        offsets/_allocation_finalized here, not in gen_function_ir:
-        found as a real bug for the first of these -- this state is
-        written and read ENTIRELY during lowering (_get_bounds_check_
-        fail_label/_gen_bounds_check_panic_block, both in arrays_
-        slices_lowering.py, never touched anywhere during the build
-        phase at all), so resetting it in gen_function_ir only ever
-        worked by historical accident, back when build and lower ran
-        back-to-back for the same function -- generate() building
-        every IRFunction first, THEN lowering all of them, breaks that
-        accident: every function's own build call would reset this
-        before ANY function's own lower_function call ever ran,
-        leaving two different functions' own lower_function calls
-        sharing the same, never-reset dict in between, each thinking
-        it owns whichever fail label the OTHER one already claimed --
-        caught by a real duplicate-symbol assembler error, two
-        different functions each emitting a `.Lbounds_check_fail_0:`
-        label of their own. The other three moved here for the
-        identical reason, once building stopped needing a
-        CodeGenerator at all (see ir.builder's own module docstring):
-        building never read any of them, only reset them, so there was
-        never a genuine reason for the build phase to touch them in
+        Resets self._bounds_check_fail_labels/_slot_offsets here, not
+        in gen_function_ir: found as a real bug for the first of
+        these -- this state is written and read ENTIRELY during
+        lowering (_get_bounds_check_fail_label/_gen_bounds_check_
+        panic_block, both in arrays_slices_lowering.py, never touched
+        anywhere during the build phase at all), so resetting it in
+        gen_function_ir only ever worked by historical accident, back
+        when build and lower ran back-to-back for the same function --
+        generate() building every IRFunction first, THEN lowering all
+        of them, breaks that accident: every function's own build call
+        would reset this before ANY function's own lower_function call
+        ever ran, leaving two different functions' own lower_function
+        calls sharing the same, never-reset dict in between, each
+        thinking it owns whichever fail label the OTHER one already
+        claimed -- caught by a real duplicate-symbol assembler error,
+        two different functions each emitting a
+        `.Lbounds_check_fail_0:` label of their own. _slot_offsets
+        moved here for the identical reason, once building stopped
+        needing a CodeGenerator at all (see ir.builder's own module
+        docstring): building never read it, only reset it, so there
+        was never a genuine reason for the build phase to touch it in
         the first place, just historical accident again. Resetting
         state where it's actually used, not wherever it historically
         happened to line up, is the general fix."""
         self.ir_program = ir_program
         self._bounds_check_fail_labels = {}
         self._slot_offsets = {}
-        self._escaped_offsets = set()
-        self._allocation_finalized = False
         ir = ir_fn.body
-        # A named-local Temp is safe to allocate despite is_named_local
-        # (see eligible_intervals' own docstring) exactly when this
-        # function's own parameter-marshaling code (the only remaining
-        # source of _escaped_offsets -- see its own docstring) never
-        # wrote to its own offset directly, bypassing this Temp.
-        # Harmless to compute over every Temp ever created so far, not
-        # just this function's own: allocate_registers below only ever
-        # looks a Temp id up if it's already present in THIS function's
-        # own intervals, so an unrelated, earlier function's Temp id
-        # appearing here too changes nothing.
-        safe_named_locals = frozenset(
-            temp_id for temp_id, offset in ir_program.ids._temp_offsets.items()
-            if offset not in self._escaped_offsets
-        )
-        self._register_assignment = allocate_registers(ir, safe_named_locals)
-        self._allocation_finalized = True
+        self._register_assignment = allocate_registers(ir)
         instructions = []
         # A fresh InstructionSelector per function, not the single,
         # whole-compilation-lifetime one this used to be: _temp_mem's

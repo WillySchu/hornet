@@ -30,7 +30,7 @@ from parser import (
     While,
 )
 from semantic import type_from_name, Type, TypeKind, StructInfo
-from codegen.utils import type_byte_width
+from ir.utils import type_byte_width
 
 
 # Fixed, hardcoded threshold for size-based stack safety. Any array-typed local
