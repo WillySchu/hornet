@@ -55,16 +55,20 @@ class Temp:
     `is_named_local`, set only by CodeGenerator._temp_at_offset, marks
     a Temp that backs a source-level variable rather than an anonymous
     compiler-generated value. register_allocator.py excludes these by
-    default: this function's own parameter-marshaling code (still
-    plain Instructions, not real IR -- see gen_function_ir) can write
-    a scalar/str parameter's own initial value directly into its slot,
-    bypassing this Temp entirely, before register_allocator.py ever
-    runs -- promoting that Temp to a register regardless would mean
-    nothing ever actually loads the real value into it. safe_named_
-    locals (computed in lower_function) is what selectively lifts this
-    default exclusion for every OTHER named-local Temp, once that
-    hazard is confirmed absent for it specifically -- see its own
-    comment."""
+    default, via safe_named_locals (computed in lower_function) --
+    historically because old-style code, and later parameter
+    marshaling, could write to a named local's own slot directly,
+    bypassing this Temp entirely, which would make promoting it to a
+    register unsafe (nothing would ever load the real value into it).
+    Neither hazard exists anymore: old-style code is gone, and
+    parameter marshaling migrated to real IR (see _ir_param_setup),
+    so every named-local Temp is read/written exclusively through
+    itself now, the identical discipline every other Temp already
+    follows. safe_named_locals' own exclusion set (_escaped_offsets)
+    is confirmed empty in every case this compiler can produce today
+    -- kept as a real, general mechanism rather than deleted outright,
+    since removing it is a distinct decision from confirming it
+    currently does nothing (see its own comment)."""
     id: int
     type: Type
     is_named_local: bool = False

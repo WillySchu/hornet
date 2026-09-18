@@ -44,21 +44,25 @@ class Memory(Operand):
 @dataclass
 class FrameSlot(Operand):
     """A placeholder %rbp-relative frame slot, not yet resolved to a
-    concrete byte offset -- what codegen.py's own _temp_mem now builds
-    for any Temp register_allocator.py didn't promote to a register,
-    whose own logical slot (see codegen.py's own _new_slot) was only
-    discovered lazily, during lowering itself. Unlike every OTHER slot
-    this compiler reserves (a named local, a parameter, a compiler
-    scratch slot), all of which are known -- and already resolved to a
-    real offset via _resolve_frame_layout -- before any body IR is
-    even built (see gen_function_ir's own ordering), one of these
-    can't be resolved the moment it's created: _resolve_frame_layout
-    has already run once by the time lowering starts. Instead,
-    _patch_frame_slots is what walks the ENTIRE final instruction list
-    -- parameter marshaling and the lowered body alike -- once every
-    slot a function ever needed (reserved up front, or discovered here)
-    is finally known, replacing every one of these with an ordinary,
-    concrete Memory operand.
+    concrete byte offset -- what codegen.py's own _temp_mem builds for
+    any Temp register_allocator.py didn't promote to a register,
+    whether it's a named-local one (its own logical slot already
+    assigned by _bind_local/_bind_param, back when the Temp itself was
+    created) or an anonymous one discovered here for the first time,
+    lazily, during lowering (its own logical slot handed out fresh, by
+    codegen.py's own _new_slot). Every slot this compiler reserves --
+    a named local, a parameter, a compiler scratch slot, or one of
+    these -- is resolved to a real, physical offset the identical way
+    now: once, by _resolve_frame_layout, after EVERY slot a function
+    will ever need, including whatever this discovers mid-lowering, is
+    known. Nothing anywhere in this compiler ever reads a slot's own
+    offset before that single call has run.
+
+    _patch_frame_slots is what walks the ENTIRE final instruction
+    list, once _resolve_frame_layout has run, replacing every one of
+    these with an ordinary, concrete Memory operand -- see LeaQFrame's
+    own placeholder, LeaQFrameSlot, for the identical idea applied to
+    an instruction whose own field can't hold an Operand at all.
 
     emit() deliberately has no implementation: reaching Emitter.py
     with one of these still unresolved is a bug in that patch pass,
@@ -621,6 +625,43 @@ class LeaQFrame(Instruction):
 
     def operands(self) -> list[str]:
         return [f"{self.offset}(%rbp)", self.dst.emit()]
+
+
+@dataclass
+class LeaQFrameSlot(Instruction):
+    """A placeholder for LeaQFrame, not yet resolved to a concrete
+    byte offset -- what ir_lowering.py's own IRLocalAddress case
+    builds now, in place of an immediately-resolved LeaQFrame, since
+    a slot's own final offset (see codegen.py's own _resolve_frame_
+    layout) isn't decided until AFTER every slot this function ever
+    needs -- named locals, parameters, scratch slots, AND whatever
+    _temp_mem discovers lazily during lowering itself -- is known,
+    which is later than when this instruction is built.
+
+    Distinct from FrameSlot (an Operand, substituted directly into a
+    Mov/MovQ's own src/dst field) for a structural reason, not a
+    stylistic one: LeaQFrame's own `offset` is a plain int baked into
+    the `leaq` instruction's own encoding, not a separate Operand at
+    all, so there's no field a FrameSlot could be substituted into
+    without lying about its own declared type. This placeholder
+    instead stands in for the WHOLE instruction -- _patch_frame_slots
+    replaces it outright with an equivalent, concrete LeaQFrame, once
+    self._slot_offsets covers this slot, rather than patching a field
+    within it the way a FrameSlot does.
+
+    emit() deliberately has no implementation, for the identical
+    reason FrameSlot's own doesn't: reaching Emitter.py with one of
+    these still unresolved is a bug in that patch pass, not something
+    to paper over with a plausible-looking fallback."""
+    slot: int
+    dst: Register
+
+    def emit(self) -> str:
+        raise NotImplementedError(
+            f"LeaQFrameSlot(slot={self.slot}) reached emit() unresolved -- "
+            f"_patch_frame_slots should have replaced this whole "
+            f"instruction with a concrete LeaQFrame first"
+        )
 
 
 @dataclass

@@ -22,6 +22,8 @@ from codegen.assembly_ast import (
     FrameSlot,
     Imm,
     Instruction,
+    LeaQFrame,
+    LeaQFrameSlot,
     Leave,
     Memory,
     MovQ,
@@ -237,9 +239,9 @@ class CodeGenerator(
         self._temp_count += 1
         return Temp(id=temp_id, type=t)
 
-    def _temp_at_offset(self, t: Type, offset: int) -> Temp:
+    def _temp_at_offset(self, t: Type, slot: int) -> Temp:
         """Allocates a fresh virtual register that already has a
-        known home -- `offset`, not a freshly-carved one -- registered
+        known home -- `slot`, not a freshly-carved one -- registered
         immediately rather than left for _temp_mem to decide lazily.
         Used exactly once per named scalar local/parameter (see
         _bind_local/_bind_param): a variable's own slot is already
@@ -248,10 +250,20 @@ class CodeGenerator(
         that slot -- rather than allocating a second, redundant one --
         is what lets every read and write of that variable, for the
         rest of the function, share one Temp identity. is_named_local
-        marks it as such -- see Temp's own docstring for why."""
+        marks it as such -- see Temp's own docstring for why.
+
+        Stores the SLOT here, not a resolved physical offset -- unlike
+        an eager version of this method used to. Every slot in this
+        compiler, named-local or otherwise, gets its own final offset
+        decided the identical way now: once, by _resolve_frame_layout,
+        after every slot a function will ever need (including whatever
+        _temp_mem discovers lazily, mid-lowering) is known. _temp_mem's
+        own "named-local" branch is what reads self._temp_offsets back
+        out, returning a FrameSlot placeholder for _patch_frame_slots
+        to resolve later, exactly like any other slot."""
         temp_id = self._temp_count
         self._temp_count += 1
-        self._temp_offsets[temp_id] = offset
+        self._temp_offsets[temp_id] = slot
         return Temp(id=temp_id, type=t, is_named_local=True)
 
     def _new_slot(self, width: int, label: str) -> int:
@@ -280,45 +292,35 @@ class CodeGenerator(
 
     def _resolve_frame_layout(self) -> None:
         """Assigns a final, physical %rbp-relative byte offset to
-        every logical slot _new_slot has handed out so far for the
-        CURRENT function, in the exact order they were created --
-        reproducing what used to be a single, uninterrupted
-        "self._next_offset -= width" running counter, just computed as
-        one explicit step instead of scattered across every individual
-        reservation site. Stores the result in self._slot_offsets
-        (slot id -> offset) for gen_function_ir's own parameter-
-        marshaling code and ir_lowering.py's own IRLocalAddress case to
-        read from, and leaves self._next_offset at its own final value
-        here too, for whichever caller needs it next.
+        every logical slot _new_slot has handed out for the CURRENT
+        function, in the exact order they were created -- reproducing
+        what used to be a single, uninterrupted "self._next_offset -=
+        width" running counter, just computed as one explicit step
+        instead of scattered across every individual reservation site.
+        Stores the result in self._slot_offsets (slot id -> offset),
+        and leaves self._next_offset at its own final value too, for
+        _frame_size to read.
 
-        Called TWICE per function, by two different callers, not once:
-        first by gen_function_ir, right after every up-front
-        reservation (scratch slots, parameters, locals, argument-
-        temps) is done, before any body IR is built -- so by the time
-        gen_statement_ir's own walk ever constructs an IRLocalAddress,
-        every slot it could reference already has a real offset
-        sitting in self._slot_offsets. Then again by lower_function,
-        right after lower_ir returns -- by which point _temp_mem may
-        have called self._new_slot some more, lazily, for anonymous
-        Temps register_allocator.py didn't promote to a register (see
-        its own docstring), slots the first call couldn't have known
-        about yet. Safe to simply call again, not just harmless:
-        self._slot_widths is the SAME insertion-ordered dict both
-        times, just with more entries appended before the second call
-        -- so every slot the first call already resolved gets the
-        identical offset back (same width, same position, same
-        starting point), and only the newly-appended ones get a real
-        offset for the first time. This IS what "deciding layout once,
-        after the entire function (including whatever Phase C
-        discovers) is built" would look like, functionally -- what's
-        still deliberately NOT true yet is that IRLocalAddress waits
-        for that second call before it's ever resolved: the first
-        call's own result is already used immediately, by parameter
-        marshaling and by ir_lowering.py's IRLocalAddress case alike,
-        well before lower_ir (and therefore the second call) ever
-        runs. Only _temp_mem's own FrameSlot placeholders (see
-        _patch_frame_slots, right below) actually wait for the second
-        call to mean anything."""
+        Called exactly once per function, by lower_function, right
+        after lower_ir returns -- by which point EVERY slot this
+        function will ever need is known: the up-front ones (scratch
+        slots, parameters, locals, argument-temps), reserved before any
+        body IR was built, AND whatever _temp_mem discovered lazily,
+        mid-lowering, for anonymous Temps register_allocator.py didn't
+        promote to a register (see its own docstring). This IS what
+        "deciding layout once, after the entire function -- including
+        whatever lowering itself discovers -- is fully built" means:
+        nothing anywhere in this compiler ever reads a slot's own
+        physical offset before this single call resolves it. gen_
+        function_ir's own build phase -- including a named local's own
+        Temp (_bind_local/_bind_param, via _temp_at_offset) and every
+        IRLocalAddress the body's own statements construct -- only
+        ever carries a slot's own LOGICAL id around, never its offset;
+        ir_lowering.py's own IRLocalAddress case builds a LeaQFrameSlot
+        placeholder rather than a resolved LeaQFrame for the identical
+        reason _temp_mem builds a FrameSlot rather than a resolved
+        Memory for an anonymous Temp -- both wait for _patch_frame_
+        slots, right below, to resolve them, once this call has run."""
         next_offset = 0
         for slot_id, width in self._slot_widths.items():
             next_offset -= width
@@ -326,29 +328,52 @@ class CodeGenerator(
         self._next_offset = next_offset
 
     def _patch_frame_slots(self, instructions: List[Instruction]) -> None:
-        """Walks every instruction in `instructions`, replacing any
-        FrameSlot operand (see its own docstring) with the equivalent,
-        concrete Memory('rbp', ...) operand, now that self._slot_
-        offsets covers every slot this function ever needed -- named
-        locals, parameters, and compiler scratch slots (resolved
-        before body IR was even built), AND whatever _temp_mem
-        discovered lazily during lowering itself (resolved by the
-        second _resolve_frame_layout call, immediately before this
-        runs) -- all at once. Mutates each instruction in place (these
-        are ordinary, non-frozen dataclasses) rather than rebuilding
-        the list; safe to run over parameter-marshaling instructions
-        too, even though none of them ever contain a FrameSlot in
-        practice (they're built from an already-resolved offset
-        directly, from the very first _resolve_frame_layout call) --
-        this doesn't need to know that in advance, since a plain field-
-        by-field scan that finds nothing to replace is just a no-op.
+        """Walks every instruction in `instructions`, resolving every
+        remaining reference to a logical slot into its own concrete,
+        physical one, now that self._slot_offsets covers every slot
+        this function will ever need -- named locals, parameters,
+        compiler scratch slots, AND whatever _temp_mem discovered
+        lazily during lowering itself -- all at once, resolved
+        together by the single _resolve_frame_layout call immediately
+        before this runs.
+
+        Two different shapes of "not yet resolved" exist, needing two
+        different kinds of replacement here:
+
+        A FrameSlot (see its own docstring) is an Operand, substituted
+        directly into whatever field held it -- typically a Mov/MovQ's
+        own src or dst -- with an equivalent, concrete Memory('rbp',
+        ...) operand. Found via a plain, generic field-by-field scan
+        (dataclasses.fields), not by checking specific instruction
+        shapes: whatever field happens to hold one gets replaced, and a
+        field that never does is simply never touched.
+
+        A LeaQFrameSlot (see its own docstring) is not an Operand at
+        all -- it stands in for a WHOLE instruction, since LeaQFrame's
+        own `offset` field is a plain int, with nowhere a FrameSlot
+        could be substituted into without lying about its own declared
+        type. This is resolved by replacing the WHOLE instruction, in
+        place in the list, with an equivalent, concrete LeaQFrame.
+
+        Mutates in place (an ordinary FrameSlot substitution) or
+        replaces in place (a LeaQFrameSlot's own whole-instruction
+        substitution) rather than rebuilding the list. Safe to run
+        over parameter-marshaling instructions too, even though none of
+        them ever contain either shape in practice (a parameter's own
+        addressing goes through ordinary real IR now, resolved the
+        identical way as everything else in body) -- this doesn't need
+        to know that in advance, since a scan that finds nothing to
+        replace is just a no-op.
 
         Never needs to look inside the prologue, the epilogue, or the
         bounds-check panic block: none of those ever reference a frame
         slot of any kind (the prologue itself is built entirely after
         this runs, as a local variable in lower_function -- see its
         own ordering)."""
-        for instr in instructions:
+        for i, instr in enumerate(instructions):
+            if isinstance(instr, LeaQFrameSlot):
+                instructions[i] = LeaQFrame(offset=self._slot_offsets[instr.slot], dst=instr.dst)
+                continue
             for f in dataclasses.fields(instr):
                 value = getattr(instr, f.name)
                 if isinstance(value, FrameSlot):
@@ -507,13 +532,6 @@ class CodeGenerator(
         # fit. See _collect_argument_temps for why this can't reuse the
         # single-shared-slot trick _unnamed_slice_temp_slot relies on.
         self._collect_argument_temps(fn.body)
-        # Every slot this function will ever need, up front, is now
-        # known -- assign each its own final, physical offset in one
-        # shot (see _resolve_frame_layout's own docstring). Everything
-        # from here on (parameter marshaling below, and the body's own
-        # IR, built further down) reads a slot's own offset out of
-        # self._slot_offsets rather than deciding one itself.
-        self._resolve_frame_layout()
         self.scopes = [{}]
 
         # A slice parameter needs THREE consecutive argument-register
@@ -739,18 +757,13 @@ class CodeGenerator(
         self._allocation_finalized = True
         instructions = []
         instructions.extend(self._instruction_selector.lower_ir(ir))
-        # Every slot this function will EVER need is now known --
-        # named locals/parameters/scratch slots/argument-temps
-        # (already resolved once, before any body IR was built -- see
-        # gen_function_ir's own ordering), plus whatever anonymous
-        # Temps lower_ir just discovered, lazily, via _temp_mem, and
-        # left as unresolved FrameSlot placeholders (see its own
-        # docstring). Calling this again is safe and correct, not
-        # merely harmless: self._slot_widths is the SAME insertion-
-        # ordered dict as before, just with more entries appended
-        # since the first call, so every slot already resolved gets
-        # the identical offset back, and only the newly-appended ones
-        # get a real offset for the first time.
+        # Every slot this function will EVER need is now known -- named
+        # locals, parameters, scratch slots, and argument-temps, alike
+        # with whatever anonymous Temps lower_ir just discovered,
+        # lazily, via _temp_mem. None of them were resolved before
+        # this point -- see _resolve_frame_layout's own docstring for
+        # why this single call is the only place any of them ever get
+        # a real, physical offset at all.
         self._resolve_frame_layout()
         self._patch_frame_slots(instructions)
         self._register_assignment = {}  # never valid past this function's own body
@@ -829,12 +842,13 @@ class CodeGenerator(
         itself, in the current scope, pointing at the logical slot
         _collect_params already assigned it. Also creates `p`'s own
         Temp (see _bind_local's own docstring for why), anchored at
-        this slot's own physical offset -- already resolved, since
-        _resolve_frame_layout has already run by the time this method
-        is ever called (see gen_function_ir's own ordering)."""
+        that SAME logical slot -- not yet a resolved offset at all:
+        _resolve_frame_layout doesn't run until lower_function, well
+        after this method (and every other piece of this function's
+        own body IR) is done being built."""
         slot = self._var_slots[id(p)]
         p_type = type_from_name(p.type, self.struct_registry, self.type_alias_registry)
-        self.scopes[-1][p.name] = (slot, p_type, id(p), self._temp_at_offset(p_type, self._slot_offsets[slot]))
+        self.scopes[-1][p.name] = (slot, p_type, id(p), self._temp_at_offset(p_type, slot))
         return slot
 
     def _collect_locals(self, statements: List[Node]) -> None:
@@ -1095,9 +1109,11 @@ class CodeGenerator(
         the logical slot _collect_locals already assigned this exact
         VarDecl node, and returns that slot. Also creates
         `stmt`'s own Temp (see _local_temp), pointed at that same
-        slot's own physical offset via _temp_at_offset (already
-        resolved by _resolve_frame_layout by the time this runs)
-        rather than a freshly-carved one --
+        logical slot via _temp_at_offset -- not yet a resolved offset
+        at all: _resolve_frame_layout doesn't run until lower_function,
+        well after this VarDecl (and every other one in this function's
+        own body) is done being built -- rather than a freshly-carved
+        one --
         this is what lets a scalar VarDecl-with-initializer or Assign
         (see gen_statement_ir) target this variable with a genuine
         IRMove, and every later read of it (see gen_expr_ir's own
@@ -1113,7 +1129,7 @@ class CodeGenerator(
         before."""
         slot = self._var_slots[id(stmt)]
         var_type = type_from_name(stmt.var_type, self.struct_registry, self.type_alias_registry)
-        self.scopes[-1][stmt.name] = (slot, var_type, id(stmt), self._temp_at_offset(var_type, self._slot_offsets[slot]))
+        self.scopes[-1][stmt.name] = (slot, var_type, id(stmt), self._temp_at_offset(var_type, slot))
         return slot
 
     def _local_slot(self, name: str) -> int:

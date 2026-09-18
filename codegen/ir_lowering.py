@@ -38,7 +38,7 @@ self. across the rest of the codebase.
 
 from codegen.assembly_ast import (
     Instruction, Operand, Register, Memory, FrameSlot, Imm, Mov, MovQ, Cmp, Je, Jae, Ja, Jmp, Label, CallInstr,
-    LeaQFrame, LeaQ,
+    LeaQFrame, LeaQFrameSlot, LeaQ,
 )
 from codegen.ir import (
     IRBinOp,
@@ -88,23 +88,26 @@ class InstructionSelector:
 
         A named-local Temp (host._temp_offsets already has one,
         assigned eagerly by _temp_at_offset when the Temp itself was
-        created) already has a real, resolved offset by this point --
-        host._resolve_frame_layout ran before any body IR was even
-        built (see gen_function_ir's own ordering) -- so that case
-        still returns an ordinary, concrete Memory directly, exactly
-        as before.
+        created) carries its own logical SLOT there, not a resolved
+        offset -- host._resolve_frame_layout doesn't run until lower_
+        function, well after every named-local Temp in this function
+        is already created. So this returns a FrameSlot placeholder
+        here too, exactly like the anonymous case right below --
+        there's no longer a real distinction between the two once
+        both wait for the identical, single resolution.
 
-        An anonymous Temp reaching here for the first time is
-        different: its own slot genuinely isn't known until THIS
-        moment, mid-lowering, well after host._resolve_frame_layout's
-        own first pass already ran. host._new_slot still hands out a
-        logical id for it, same as every other slot -- but this
-        returns a FrameSlot placeholder instead of a resolved Memory
-        (see its own docstring for why, and for _patch_frame_slots,
-        the pass that resolves it later, once lower_function calls
-        host._resolve_frame_layout a second time)."""
+        An anonymous Temp reaching here for the first time needs a
+        fresh logical slot handed out on the spot (host._new_slot,
+        same as every other slot in this compiler) rather than reading
+        one host._bind_local/_bind_param already assigned -- its own
+        slot genuinely isn't known until THIS moment, mid-lowering,
+        potentially well after every up-front reservation. Either way,
+        _patch_frame_slots is what resolves the FrameSlot this returns,
+        once host._resolve_frame_layout's one call -- covering every
+        slot this function ever needed, named-local and anonymous
+        alike -- has run."""
         if temp.id in self.host._temp_offsets:
-            return Memory('rbp', self.host._temp_offsets[temp.id])
+            return FrameSlot(slot=self.host._temp_offsets[temp.id])
         if temp.id not in self.host._temp_slots:
             width = type_byte_width(temp.type, self.host.struct_registry)
             self.host._temp_slots[temp.id] = self.host._new_slot(width, f"temp:{temp.id}")
@@ -325,11 +328,16 @@ class InstructionSelector:
                 # every other op already uses. A hypothetical ARM64
                 # lowering changes exactly this one line. instr.slot is
                 # a purely logical identifier (see IRLocalAddress's own
-                # docstring) -- self.host._slot_offsets is where _
-                # resolve_frame_layout already recorded its own final,
-                # physical offset, by the time any body IR is ever
-                # lowered (see gen_function_ir's own ordering).
-                out.append(LeaQFrame(offset=self.host._slot_offsets[instr.slot], dst=Register('rax')))
+                # docstring) -- not yet resolved to a physical offset
+                # at all: self.host._resolve_frame_layout's own one
+                # call doesn't run until lower_function, well after
+                # this line executes, so LeaQFrameSlot (not an
+                # immediately-resolved LeaQFrame) is what stands in
+                # here, exactly like FrameSlot does for an ordinary
+                # Memory operand -- see its own docstring for why
+                # LeaQFrame's own `offset` field needs a DIFFERENT
+                # placeholder shape than FrameSlot's.
+                out.append(LeaQFrameSlot(slot=instr.slot, dst=Register('rax')))
                 out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
             elif isinstance(instr, IRStaticDataAddress):
                 # Same shape as IRLocalAddress, one line swapped: LeaQ
