@@ -52,7 +52,7 @@ class Temp:
     for convenience, not part of identity, so this stays a safe dict
     key without needing Type's own equality involved at all).
 
-    `is_named_local`, set only by CodeGenerator._temp_at_offset, marks
+    `is_named_local`, set only by IdAllocator.temp_at_offset, marks
     a Temp that backs a source-level variable rather than an anonymous
     compiler-generated value. register_allocator.py excludes these by
     default, via safe_named_locals (computed in lower_function) --
@@ -254,8 +254,8 @@ class IRLocalAddress:
     (every other real IR op already references nothing x86-64-
     specific at all).
 
-    `slot` is a purely logical identifier -- see codegen.py's own
-    _new_slot -- carrying no physical byte offset of its own at all:
+    `slot` is a purely logical identifier -- see IdAllocator's own
+    new_slot -- carrying no physical byte offset of its own at all:
     this op, and everything built on top of it, never needs to know
     where in the frame a slot actually lives, only which slot it
     means. _resolve_frame_layout is the one place that ever decides
@@ -528,7 +528,7 @@ class IRFunction:
     afterward.
 
     `slot_widths`/`slot_labels` are this function's own logical-slot
-    registry (see codegen.py's own _new_slot): every slot a name/id ->
+    registry (see IdAllocator's own new_slot): every slot a name/id ->
     (byte width, debug label) pair, in the exact order each was
     created. Used to live on CodeGenerator's own self, reset at the
     start of every gen_function_ir call -- which meant it could only
@@ -538,10 +538,10 @@ class IRFunction:
     lets generate() build every function's own IRFunction completely,
     independent of the others, before lowering any of them: each
     carries its own slot registry with it, genuinely surviving from
-    _new_slot's own first call (during gen_function_ir) through to
+    new_slot's own first call (during gen_function_ir) through to
     _resolve_frame_layout's own single call (during lower_function),
     no matter how many OTHER functions get built or lowered in
-    between. Passed explicitly wherever it's needed (_new_slot,
+    between. Passed explicitly wherever it's needed (new_slot,
     _collect_params, _collect_locals, _reserve_argument_temp, _resolve_
     frame_layout, and ir_lowering.py's own InstructionSelector, which
     holds the ir_fn it was constructed for as a genuine field) rather

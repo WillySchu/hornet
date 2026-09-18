@@ -53,10 +53,10 @@ class StructsMixin:
         if isinstance(expr, Variable):
             slot = self._local_slot(expr.name)
             struct_type = self._local_type(expr.name)
-            slot_addr = self._new_temp(Type.INT64)
+            slot_addr = self.ids.new_temp(Type.INT64)
             ir = [IRLocalAddress(dst=slot_addr, slot=slot)]
             if self._is_heap_allocated(self._local_decl_id(expr.name), struct_type):
-                addr_temp = self._new_temp(Type.INT64)
+                addr_temp = self.ids.new_temp(Type.INT64)
                 ir.append(IRLoad(dst=addr_temp, address=slot_addr))
                 return ir, addr_temp
             return ir, slot_addr
@@ -95,7 +95,7 @@ class StructsMixin:
         base_ir, base_addr = result
         if offset == 0:
             return base_ir, base_addr
-        result = self._new_temp(Type.INT64)
+        result = self.ids.new_temp(Type.INT64)
         add_op = IRBinOp(dst=result, op=BinaryOp.ADD, left=base_addr, right=IRConst(offset, Type.INT64))
         return base_ir + [add_op], result
 
@@ -160,7 +160,7 @@ class StructsMixin:
                 if offset == 0:
                     field_addr = dst_address
                 else:
-                    field_addr = self._new_temp(Type.INT64)
+                    field_addr = self.ids.new_temp(Type.INT64)
                     ir.append(
                         IRBinOp(dst=field_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(offset, Type.INT64)))
                 ir.extend(self._ir_write_zero_value_into(field_addr, field_type))
@@ -168,7 +168,7 @@ class StructsMixin:
                 if offset == 0:
                     field_addr = dst_address
                 else:
-                    field_addr = self._new_temp(Type.INT64)
+                    field_addr = self.ids.new_temp(Type.INT64)
                     ir.append(
                         IRBinOp(dst=field_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(offset, Type.INT64)))
                 field_ir = self._ir_write_composite_value_into(field_addr, arg_expr, field_type)
@@ -181,7 +181,7 @@ class StructsMixin:
                 if offset == 0:
                     field_addr = dst_address
                 else:
-                    field_addr = self._new_temp(Type.INT64)
+                    field_addr = self.ids.new_temp(Type.INT64)
                     ir.append(
                         IRBinOp(dst=field_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(offset, Type.INT64)))
                 ir.append(IRStore(address=field_addr, value=arg_value, value_type=field_type))
@@ -213,10 +213,10 @@ class StructsMixin:
         struct_type = type_of(expr)
         if id(expr) in self._argument_temp_slots:
             slot = self._argument_temp_slots[id(expr)]
-            addr = self._new_temp(Type.INT64)
+            addr = self.ids.new_temp(Type.INT64)
             addr_ir = [IRLocalAddress(dst=addr, slot=slot)]
         else:
-            addr = self._new_temp(Type.INT64)
+            addr = self.ids.new_temp(Type.INT64)
             size = type_byte_width(struct_type, self.struct_registry)
             addr_ir = [IRCall(dst=addr, name='malloc', args=[IRConst(size, Type.INT64)])]
         write_ir = self._ir_write_struct_literal_into(addr, expr, struct_type)

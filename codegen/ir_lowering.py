@@ -2,9 +2,9 @@
 Instructions -- the "instruction selection" step of this pipeline.
 v1, deliberately: every Temp gets its own permanent frame slot,
 assigned the first time it's referenced here (see _temp_mem; the same
-host._new_slot allocator _collect_locals/_reserve_argument_temp
-already share) -- allocating a Temp itself (_new_temp, in codegen.py)
-makes no storage decision at all. An op that combines two values
+host.ids.new_slot allocator _collect_locals/_reserve_argument_temp
+already share) -- allocating a Temp itself (host.ids.new_temp) makes
+no storage decision at all. An op that combines two values
 loads them into scratch registers, then hands off to the host's own
 gen_binary_op/gen_unary_op (ScalarsMixin) as this pass's own
 instruction-selection rule -- that arithmetic isn't reimplemented
@@ -27,7 +27,7 @@ assumption about whatever else happened to be mixed into a shared
 self). Constructed fresh per function's own lowering now (see lower_
 function's own comment), not once for the whole compilation: `ir_fn`
 is a genuine field, set once at construction, needed by _temp_mem's
-own call to host._new_slot (see IRFunction's own docstring for why
+own call to host.ids.new_slot (see IRFunction's own docstring for why
 its slot registry lives there rather than on host at all now). `host`
 is still held and read/written directly for one remaining piece of
 state -- _temp_slots/_temp_offsets -- because Temp ids are globally
@@ -76,7 +76,7 @@ class InstructionSelector:
     used for. Constructed fresh per function's own lowering (see
     lower_function's own comment), not once for the whole compilation
     -- `ir_fn` is a genuine field here, set once at construction and
-    never repointed, needed by _temp_mem's own call to host._new_slot
+    never repointed, needed by _temp_mem's own call to host.ids.new_slot
     (see IRFunction's own docstring for why that's a parameter now
     rather than implicit self state on host)."""
 
@@ -107,7 +107,7 @@ class InstructionSelector:
         both wait for the identical, single resolution.
 
         An anonymous Temp reaching here for the first time needs a
-        fresh logical slot handed out on the spot (host._new_slot,
+        fresh logical slot handed out on the spot (host.ids.new_slot,
         same as every other slot in this compiler) rather than reading
         one host._bind_local/_bind_param already assigned -- its own
         slot genuinely isn't known until THIS moment, mid-lowering,
@@ -116,12 +116,12 @@ class InstructionSelector:
         once host._resolve_frame_layout's one call -- covering every
         slot this function ever needed, named-local and anonymous
         alike -- has run."""
-        if temp.id in self.host._temp_offsets:
-            return FrameSlot(slot=self.host._temp_offsets[temp.id])
-        if temp.id not in self.host._temp_slots:
+        if temp.id in self.host.ids._temp_offsets:
+            return FrameSlot(slot=self.host.ids._temp_offsets[temp.id])
+        if temp.id not in self.host.ids._temp_slots:
             width = type_byte_width(temp.type, self.host.struct_registry)
-            self.host._temp_slots[temp.id] = self.host._new_slot(width, f"temp:{temp.id}", self.ir_fn)
-        return FrameSlot(slot=self.host._temp_slots[temp.id])
+            self.host.ids._temp_slots[temp.id] = self.host.ids.new_slot(width, f"temp:{temp.id}", self.ir_fn)
+        return FrameSlot(slot=self.host.ids._temp_slots[temp.id])
 
     def _gen_load_value(self, value: IRValue, dst: Register) -> list[Instruction]:
         """Loads an IRValue (a Temp's current value, or a compile-time
@@ -191,7 +191,7 @@ class InstructionSelector:
                 return []
             return [MovQ(src=src, dst=dst)] if wide else [Mov(src=src, dst=dst)]
         if temp.is_named_local and not self.host._allocation_finalized:
-            self.host._escaped_offsets.add(self.host._temp_offsets[temp.id])
+            self.host._escaped_offsets.add(self.host.ids._temp_offsets[temp.id])
         if temp.type == Type.STR:
             return [MovQ(src=self._temp_mem(temp), dst=as_qword_register(dst))]
         return self.host._gen_read_scalar_into(self._temp_mem(temp), temp.type, dst)
@@ -210,7 +210,7 @@ class InstructionSelector:
                 return []
             return [MovQ(src=src, dst=dst)] if wide else [Mov(src=src, dst=dst)]
         if temp.is_named_local and not self.host._allocation_finalized:
-            self.host._escaped_offsets.add(self.host._temp_offsets[temp.id])
+            self.host._escaped_offsets.add(self.host.ids._temp_offsets[temp.id])
         if temp.type == Type.STR:
             return [MovQ(src=as_qword_register(src), dst=self._temp_mem(temp))]
         return self.host._gen_write_scalar_from(src, temp.type, self._temp_mem(temp))

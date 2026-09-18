@@ -309,9 +309,9 @@ class StatementsMixin:
             # falls through to the old-style catch-all below -- a
             # real, deliberate scope boundary, not an oversight.
         elif isinstance(stmt, If):
-            then_label = self.new_label("if_then")
-            else_label = self.new_label("if_else")
-            end_label = self.new_label("if_end")
+            then_label = self.ids.new_label("if_then")
+            else_label = self.ids.new_label("if_else")
+            end_label = self.ids.new_label("if_end")
             ir = self._ir_if_head(stmt, then_label, else_label)
             self._push_scope()
             for s in stmt.then_body:
@@ -327,9 +327,9 @@ class StatementsMixin:
             ir.append(IRLabel(end_label))
             return ir
         elif isinstance(stmt, While):
-            start_label = self.new_label("while_start")
-            body_label = self.new_label("while_body")
-            end_label = self.new_label("while_end")
+            start_label = self.ids.new_label("while_start")
+            body_label = self.ids.new_label("while_body")
+            end_label = self.ids.new_label("while_end")
             ir = self._ir_while_head(stmt, start_label, body_label, end_label)
             self.loop_labels.append((start_label, end_label))
             self._push_scope()
@@ -916,8 +916,8 @@ class StatementsMixin:
         producing shape (Variable/Field/Index copy, Slice production,
         append, an ordinary composite-returning call)."""
         size = type_byte_width(var_type, self.struct_registry)
-        ptr = self._new_temp(Type.INT64)
-        slot_addr = self._new_temp(Type.INT64)
+        ptr = self.ids.new_temp(Type.INT64)
+        slot_addr = self.ids.new_temp(Type.INT64)
         return [
             IRCall(dst=ptr, name='malloc', args=[IRConst(size, Type.INT64)]),
             IRLocalAddress(dst=slot_addr, slot=slot),
@@ -1048,8 +1048,8 @@ class StatementsMixin:
         `ir_fn` is threaded through purely to reach ir_fn.hidden_
         return_ptr_slot -- see IRFunction's own docstring for why
         that's explicit now rather than implicit self state."""
-        slot_addr = self._new_temp(Type.INT64)
-        hidden_ptr = self._new_temp(Type.INT64)
+        slot_addr = self.ids.new_temp(Type.INT64)
+        hidden_ptr = self.ids.new_temp(Type.INT64)
         ir = [
             IRLocalAddress(dst=slot_addr, slot=ir_fn.hidden_return_ptr_slot),
             IRLoad(dst=hidden_ptr, address=slot_addr),

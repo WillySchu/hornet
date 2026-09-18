@@ -216,7 +216,7 @@ class ScalarsMixin:
                 f"implemented)"
             )
         result_type = type_of(expr)
-        t_result = None if result_type == Type.VOID else self._new_temp(result_type)
+        t_result = None if result_type == Type.VOID else self.ids.new_temp(result_type)
         arg_ir, arg_values = self._ir_call_arguments(expr.args)
         ir = arg_ir + [IRCall(dst=t_result, name=expr.name, args=arg_values)]
         return ir, t_result
@@ -281,10 +281,10 @@ class ScalarsMixin:
         fallthrough value" for right -- the only difference between
         the two). Returns (ir, t_result)."""
         fallthrough_value = 1 - short_circuit_value
-        rhs_label = self.new_label(f"{label_prefix}_rhs")
-        short_label = self.new_label(f"{label_prefix}_short")
-        fallthrough_label = self.new_label(f"{label_prefix}_fallthrough")
-        end_label = self.new_label(f"{label_prefix}_end")
+        rhs_label = self.ids.new_label(f"{label_prefix}_rhs")
+        short_label = self.ids.new_label(f"{label_prefix}_short")
+        fallthrough_label = self.ids.new_label(f"{label_prefix}_fallthrough")
+        end_label = self.ids.new_label(f"{label_prefix}_end")
 
         def targets(continue_label: str) -> tuple[str, str]:
             # (true_target, false_target): whichever outcome matches
@@ -294,7 +294,7 @@ class ScalarsMixin:
                 return short_label, continue_label
             return continue_label, short_label
 
-        t_result = self._new_temp(Type.BOOL)
+        t_result = self.ids.new_temp(Type.BOOL)
         left_true, left_false = targets(rhs_label)
         right_true, right_false = targets(fallthrough_label)
 

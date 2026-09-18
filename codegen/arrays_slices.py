@@ -73,10 +73,10 @@ class ArraysSlicesMixin:
         if isinstance(expr, Variable):
             slot = self._local_slot(expr.name)
             array_type = self._local_type(expr.name)
-            slot_addr = self._new_temp(Type.INT64)
+            slot_addr = self.ids.new_temp(Type.INT64)
             ir = [IRLocalAddress(dst=slot_addr, slot=slot)]
             if self._is_heap_allocated(self._local_decl_id(expr.name), array_type):
-                addr_temp = self._new_temp(Type.INT64)
+                addr_temp = self.ids.new_temp(Type.INT64)
                 ir.append(IRLoad(dst=addr_temp, address=slot_addr))
                 return ir, addr_temp
             return ir, slot_addr
@@ -106,7 +106,7 @@ class ArraysSlicesMixin:
         for now, real, separate follow-up work."""
         if isinstance(expr, Variable):
             slot = self._local_slot(expr.name)
-            addr_temp = self._new_temp(Type.INT64)
+            addr_temp = self.ids.new_temp(Type.INT64)
             return [IRLocalAddress(dst=addr_temp, slot=slot)], addr_temp
         if isinstance(expr, Index):
             return self._ir_index_address(expr)
@@ -144,10 +144,10 @@ class ArraysSlicesMixin:
         no new IR concept needed at all."""
         if id(call_expr) in self._argument_temp_slots:
             slot = self._argument_temp_slots[id(call_expr)]
-            addr = self._new_temp(Type.INT64)
+            addr = self.ids.new_temp(Type.INT64)
             addr_ir = [IRLocalAddress(dst=addr, slot=slot)]
         else:
-            addr = self._new_temp(Type.INT64)
+            addr = self.ids.new_temp(Type.INT64)
             size = type_byte_width(value_type, self.struct_registry)
             addr_ir = [IRCall(dst=addr, name='malloc', args=[IRConst(size, Type.INT64)])]
         call_ir = self._ir_composite_call(addr, call_expr, value_type)
@@ -193,10 +193,10 @@ class ArraysSlicesMixin:
         array_type = type_of(expr)
         if id(expr) in self._argument_temp_slots:
             slot = self._argument_temp_slots[id(expr)]
-            addr = self._new_temp(Type.INT64)
+            addr = self.ids.new_temp(Type.INT64)
             addr_ir = [IRLocalAddress(dst=addr, slot=slot)]
         else:
-            addr = self._new_temp(Type.INT64)
+            addr = self.ids.new_temp(Type.INT64)
             size = type_byte_width(array_type, self.struct_registry)
             addr_ir = [IRCall(dst=addr, name='malloc', args=[IRConst(size, Type.INT64)])]
         write_ir = self._ir_write_array_literal_into(addr, expr, array_type)
@@ -331,12 +331,12 @@ class ArraysSlicesMixin:
         if base_type.kind == TypeKind.SLICE:
             if isinstance(expr, Variable):
                 slot = self._local_slot(expr.name)
-                descriptor_addr = self._new_temp(Type.INT64)
-                ptr_temp = self._new_temp(Type.INT64)
-                len_addr = self._new_temp(Type.INT64)
-                len_temp = self._new_temp(Type.INT)
-                cap_addr = self._new_temp(Type.INT64)
-                cap_temp = self._new_temp(Type.INT)
+                descriptor_addr = self.ids.new_temp(Type.INT64)
+                ptr_temp = self.ids.new_temp(Type.INT64)
+                len_addr = self.ids.new_temp(Type.INT64)
+                len_temp = self.ids.new_temp(Type.INT)
+                cap_addr = self.ids.new_temp(Type.INT64)
+                cap_temp = self.ids.new_temp(Type.INT)
                 ir = [
                     IRLocalAddress(dst=descriptor_addr, slot=slot),
                     IRLoad(dst=ptr_temp, address=descriptor_addr),
@@ -351,11 +351,11 @@ class ArraysSlicesMixin:
                 if addr_result is None:
                     return None
                 addr_ir, descriptor_addr = addr_result
-                ptr_temp = self._new_temp(Type.INT64)
-                len_addr = self._new_temp(Type.INT64)
-                len_temp = self._new_temp(Type.INT)
-                cap_addr = self._new_temp(Type.INT64)
-                cap_temp = self._new_temp(Type.INT)
+                ptr_temp = self.ids.new_temp(Type.INT64)
+                len_addr = self.ids.new_temp(Type.INT64)
+                len_temp = self.ids.new_temp(Type.INT)
+                cap_addr = self.ids.new_temp(Type.INT64)
+                cap_temp = self.ids.new_temp(Type.INT)
                 ir = addr_ir + [
                     IRLoad(dst=ptr_temp, address=descriptor_addr),
                     IRBinOp(dst=len_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(8, Type.INT64)),
@@ -368,11 +368,11 @@ class ArraysSlicesMixin:
                 return self._ir_append_call(expr)
             if self._is_ordinary_composite_call(expr):
                 addr_ir, descriptor_addr = self._ir_materialize_composite_call(expr, base_type)
-                ptr_temp = self._new_temp(Type.INT64)
-                len_addr = self._new_temp(Type.INT64)
-                len_temp = self._new_temp(Type.INT)
-                cap_addr = self._new_temp(Type.INT64)
-                cap_temp = self._new_temp(Type.INT)
+                ptr_temp = self.ids.new_temp(Type.INT64)
+                len_addr = self.ids.new_temp(Type.INT64)
+                len_temp = self.ids.new_temp(Type.INT)
+                cap_addr = self.ids.new_temp(Type.INT64)
+                cap_temp = self.ids.new_temp(Type.INT)
                 ir = addr_ir + [
                     IRLoad(dst=ptr_temp, address=descriptor_addr),
                     IRBinOp(dst=len_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(8, Type.INT64)),
@@ -401,9 +401,9 @@ class ArraysSlicesMixin:
         factored out here specifically so all of them build the
         IDENTICAL triple from one place, rather than each duplicating
         this same three-IRMove sequence independently."""
-        ptr = self._new_temp(Type.INT64)
-        length = self._new_temp(Type.INT)
-        cap = self._new_temp(Type.INT)
+        ptr = self.ids.new_temp(Type.INT64)
+        length = self.ids.new_temp(Type.INT)
+        cap = self.ids.new_temp(Type.INT)
         ir = [
             IRMove(dst=ptr, src=IRConst(0, Type.INT64)),
             IRMove(dst=length, src=IRConst(0, Type.INT)),
@@ -467,11 +467,11 @@ class ArraysSlicesMixin:
         index_ir, index_value = self.gen_expr_ir(expr.index)
         check = IRBoundsCheck(index=index_value, length=length_value)
 
-        offset_temp = self._new_temp(Type.INT)
+        offset_temp = self.ids.new_temp(Type.INT)
         multiply = IRBinOp(
             dst=offset_temp, op=BinaryOp.MULTIPLY, left=index_value, right=IRConst(element_stride, Type.INT))
 
-        result = self._new_temp(Type.INT64)
+        result = self.ids.new_temp(Type.INT64)
         add = IRBinOp(dst=result, op=BinaryOp.ADD, left=base_addr, right=offset_temp)
 
         return base_ir + index_ir + [check, multiply, add], result
@@ -530,10 +530,10 @@ class ArraysSlicesMixin:
             IRSliceBoundsCheck(value=low_value, bound=high_value),
         ]
 
-        new_cap = self._new_temp(Type.INT)
-        new_len = self._new_temp(Type.INT)
-        offset_temp = self._new_temp(Type.INT)
-        ptr = self._new_temp(Type.INT64)
+        new_cap = self.ids.new_temp(Type.INT)
+        new_len = self.ids.new_temp(Type.INT)
+        offset_temp = self.ids.new_temp(Type.INT)
+        ptr = self.ids.new_temp(Type.INT64)
         arithmetic = [
             IRBinOp(dst=new_cap, op=BinaryOp.SUBTRACT, left=cap_value, right=low_value),
             IRBinOp(dst=new_len, op=BinaryOp.SUBTRACT, left=high_value, right=low_value),
@@ -614,7 +614,7 @@ class ArraysSlicesMixin:
         array_type = type_of(expr)
         count = len(expr.elements)
         size = max(1, type_byte_width(array_type, self.struct_registry))
-        ptr = self._new_temp(Type.INT64)
+        ptr = self.ids.new_temp(Type.INT64)
         malloc_ir = [IRCall(dst=ptr, name='malloc', args=[IRConst(size, Type.INT64)])]
         write_ir = self._ir_write_array_literal_into(ptr, expr, array_type)
         if write_ir is None:
@@ -631,8 +631,8 @@ class ArraysSlicesMixin:
         IRStores. The +8/+16 offsets are themselves computed via
         ordinary IRBinOp, the same address-as-a-Temp pattern used
         everywhere else in this file."""
-        len_addr = self._new_temp(Type.INT64)
-        cap_addr = self._new_temp(Type.INT64)
+        len_addr = self.ids.new_temp(Type.INT64)
+        cap_addr = self.ids.new_temp(Type.INT64)
         return [
             IRStore(address=dst_address, value=ptr_value, value_type=Type.INT64),
             IRBinOp(dst=len_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(8, Type.INT64)),
@@ -793,7 +793,7 @@ class ArraysSlicesMixin:
                 if offset == 0:
                     field_addr = dst_address
                 else:
-                    field_addr = self._new_temp(Type.INT64)
+                    field_addr = self.ids.new_temp(Type.INT64)
                     ir.append(
                         IRBinOp(dst=field_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(offset, Type.INT64)))
                 ir.extend(self._ir_write_zero_value_into(field_addr, field_type))
@@ -801,7 +801,7 @@ class ArraysSlicesMixin:
         if value_type.kind == TypeKind.ARRAY:
             return self._ir_zero_array_loop(dst_address, value_type.element_type, value_type.size)
         if value_type == Type.STR:
-            addr_temp = self._new_temp(Type.STR)
+            addr_temp = self.ids.new_temp(Type.STR)
             ir = [
                 IRStaticDataAddress(dst=addr_temp, label=self._get_empty_str_label()),
                 IRStore(address=dst_address, value=addr_temp, value_type=Type.STR)
@@ -852,11 +852,11 @@ class ArraysSlicesMixin:
         it, made possible by Temps replacing fixed registers
         entirely."""
         element_width = type_byte_width(element_type, self.struct_registry)
-        i = self._new_temp(Type.INT)
-        start_label = self.new_label("zero_array_start")
-        body_label = self.new_label("zero_array_body")
-        end_label = self.new_label("zero_array_end")
-        cond = self._new_temp(Type.BOOL)
+        i = self.ids.new_temp(Type.INT)
+        start_label = self.ids.new_label("zero_array_start")
+        body_label = self.ids.new_label("zero_array_body")
+        end_label = self.ids.new_label("zero_array_end")
+        cond = self.ids.new_temp(Type.BOOL)
         ir = [
             IRMove(dst=i, src=IRConst(0, Type.INT)),
             IRLabel(start_label),
@@ -864,12 +864,12 @@ class ArraysSlicesMixin:
             IRBranch(cond=cond, true_label=body_label, false_label=end_label),
             IRLabel(body_label),
         ]
-        offset_temp = self._new_temp(Type.INT)
+        offset_temp = self.ids.new_temp(Type.INT)
         ir.append(IRBinOp(dst=offset_temp, op=BinaryOp.MULTIPLY, left=i, right=IRConst(element_width, Type.INT)))
-        elem_addr = self._new_temp(Type.INT64)
+        elem_addr = self.ids.new_temp(Type.INT64)
         ir.append(IRBinOp(dst=elem_addr, op=BinaryOp.ADD, left=dst_address, right=offset_temp))
         ir.extend(self._ir_write_zero_value_into(elem_addr, element_type))
-        next_i = self._new_temp(Type.INT)
+        next_i = self.ids.new_temp(Type.INT)
         ir.append(IRBinOp(dst=next_i, op=BinaryOp.ADD, left=i, right=IRConst(1, Type.INT)))
         ir.append(IRMove(dst=i, src=next_i))
         ir.append(IRJump(start_label))
@@ -921,11 +921,11 @@ class ArraysSlicesMixin:
         if value_type.kind == TypeKind.ARRAY:
             element_type = value_type.element_type
             element_width = type_byte_width(element_type, self.struct_registry)
-            i = self._new_temp(Type.INT)
-            start_label = self.new_label("eq_array_start")
-            body_label = self.new_label("eq_array_body")
-            end_label = self.new_label("eq_array_end")
-            cond = self._new_temp(Type.BOOL)
+            i = self.ids.new_temp(Type.INT)
+            start_label = self.ids.new_label("eq_array_start")
+            body_label = self.ids.new_label("eq_array_body")
+            end_label = self.ids.new_label("eq_array_end")
+            cond = self.ids.new_temp(Type.BOOL)
             ir = [
                 IRMove(dst=i, src=IRConst(0, Type.INT)),
                 IRLabel(start_label),
@@ -933,14 +933,14 @@ class ArraysSlicesMixin:
                 IRBranch(cond=cond, true_label=body_label, false_label=end_label),
                 IRLabel(body_label),
             ]
-            offset_temp = self._new_temp(Type.INT)
+            offset_temp = self.ids.new_temp(Type.INT)
             ir.append(IRBinOp(dst=offset_temp, op=BinaryOp.MULTIPLY, left=i, right=IRConst(element_width, Type.INT)))
-            left_elem_addr = self._new_temp(Type.INT64)
+            left_elem_addr = self.ids.new_temp(Type.INT64)
             ir.append(IRBinOp(dst=left_elem_addr, op=BinaryOp.ADD, left=left_addr, right=offset_temp))
-            right_elem_addr = self._new_temp(Type.INT64)
+            right_elem_addr = self.ids.new_temp(Type.INT64)
             ir.append(IRBinOp(dst=right_elem_addr, op=BinaryOp.ADD, left=right_addr, right=offset_temp))
             ir.extend(self._ir_composite_equal(left_elem_addr, right_elem_addr, element_type, mismatch_label))
-            next_i = self._new_temp(Type.INT)
+            next_i = self.ids.new_temp(Type.INT)
             ir.append(IRBinOp(dst=next_i, op=BinaryOp.ADD, left=i, right=IRConst(1, Type.INT)))
             ir.append(IRMove(dst=i, src=next_i))
             ir.append(IRJump(start_label))
@@ -955,13 +955,13 @@ class ArraysSlicesMixin:
                     left_field_addr = left_addr
                     right_field_addr = right_addr
                 else:
-                    left_field_addr = self._new_temp(Type.INT64)
+                    left_field_addr = self.ids.new_temp(Type.INT64)
                     ir.append(
                         IRBinOp(
                             dst=left_field_addr, op=BinaryOp.ADD, left=left_addr, right=IRConst(offset, Type.INT64),
                         ),
                     )
-                    right_field_addr = self._new_temp(Type.INT64)
+                    right_field_addr = self.ids.new_temp(Type.INT64)
                     ir.append(
                         IRBinOp(
                             dst=right_field_addr, op=BinaryOp.ADD, left=right_addr, right=IRConst(offset, Type.INT64),
@@ -969,12 +969,12 @@ class ArraysSlicesMixin:
                     )
                 ir.extend(self._ir_composite_equal(left_field_addr, right_field_addr, field_type, mismatch_label))
             return ir
-        continue_label = self.new_label("eq_continue")
+        continue_label = self.ids.new_label("eq_continue")
         if value_type == Type.STR:
-            left_val = self._new_temp(Type.STR)
-            right_val = self._new_temp(Type.STR)
-            cmp_result = self._new_temp(Type.INT)
-            mismatch_cond = self._new_temp(Type.BOOL)
+            left_val = self.ids.new_temp(Type.STR)
+            right_val = self.ids.new_temp(Type.STR)
+            cmp_result = self.ids.new_temp(Type.INT)
+            mismatch_cond = self.ids.new_temp(Type.BOOL)
             return [
                 IRLoad(dst=left_val, address=left_addr),
                 IRLoad(dst=right_val, address=right_addr),
@@ -986,9 +986,9 @@ class ArraysSlicesMixin:
         # int, bool, int8, uint8 -- an ordinary, width-aware
         # load-and-compare (see this method's own docstring for why
         # this is the actual bug fix, not just a translation).
-        left_val = self._new_temp(value_type)
-        right_val = self._new_temp(value_type)
-        mismatch_cond = self._new_temp(Type.BOOL)
+        left_val = self.ids.new_temp(value_type)
+        right_val = self.ids.new_temp(value_type)
+        mismatch_cond = self.ids.new_temp(Type.BOOL)
         return [
             IRLoad(dst=left_val, address=left_addr),
             IRLoad(dst=right_val, address=right_addr),
@@ -1139,7 +1139,7 @@ class ArraysSlicesMixin:
                 if i == 0:
                     elem_addr = dst_address
                 else:
-                    elem_addr = self._new_temp(Type.INT64)
+                    elem_addr = self.ids.new_temp(Type.INT64)
                     ir.append(
                         IRBinOp(
                             dst=elem_addr,
@@ -1158,7 +1158,7 @@ class ArraysSlicesMixin:
                 if i == 0:
                     elem_addr = dst_address
                 else:
-                    elem_addr = self._new_temp(Type.INT64)
+                    elem_addr = self.ids.new_temp(Type.INT64)
                     ir.append(
                         IRBinOp(
                             dst=elem_addr,
@@ -1240,7 +1240,7 @@ class ArraysSlicesMixin:
         if base is None:
             return None
         base_ir, ptr, length, cap = base
-        t_result = self._new_temp(Type.BOOL)
+        t_result = self.ids.new_temp(Type.BOOL)
         check = IRBinOp(dst=t_result, op=expr.op, left=ptr, right=IRConst(0, Type.INT64))
         return base_ir + [check], t_result
 
@@ -1293,9 +1293,9 @@ class ArraysSlicesMixin:
         extracted here specifically so both apply the IDENTICAL
         growth rule without duplicating this arithmetic twice."""
         instructions = []
-        zero_label = self.new_label("append_cap_zero")
-        quarter_label = self.new_label("append_cap_quarter")
-        growth_done_label = self.new_label("append_growth_done")
+        zero_label = self.ids.new_label("append_cap_zero")
+        quarter_label = self.ids.new_label("append_cap_quarter")
+        growth_done_label = self.ids.new_label("append_growth_done")
 
         instructions.append(Cmp(src=Imm(0), dst=r_cap_32))
         instructions.append(Je(zero_label))
@@ -1359,8 +1359,8 @@ class ArraysSlicesMixin:
         # into the NEW one (r_new_ptr), via an ordinary, generic byte
         # copy -- a genuine RUNTIME loop since len is a runtime value
         # here.
-        loop_start_label = self.new_label("slice_grow_copy_loop")
-        loop_done_label = self.new_label("slice_grow_copy_done")
+        loop_start_label = self.ids.new_label("slice_grow_copy_loop")
+        loop_done_label = self.ids.new_label("slice_grow_copy_done")
         i_32 = Register('r9d')
         instructions.append(Mov(src=Imm(0), dst=i_32))
         instructions.append(Label(loop_start_label))
@@ -1467,9 +1467,9 @@ class ArraysSlicesMixin:
         element_width = type_byte_width(element_type, self.struct_registry)
 
         if isinstance(slice_arg, NoneLiteral):
-            ptr = self._new_temp(Type.INT64)
-            length = self._new_temp(Type.INT)
-            cap = self._new_temp(Type.INT)
+            ptr = self.ids.new_temp(Type.INT64)
+            length = self.ids.new_temp(Type.INT)
+            cap = self.ids.new_temp(Type.INT)
             base_ir = [
                 IRMove(dst=ptr, src=IRConst(0, Type.INT64)),
                 IRMove(dst=length, src=IRConst(0, Type.INT)),
@@ -1481,23 +1481,23 @@ class ArraysSlicesMixin:
                 return None
             base_ir, ptr, length, cap = base
 
-        result_ptr = self._new_temp(Type.INT64)
-        result_len = self._new_temp(Type.INT)
-        result_cap = self._new_temp(Type.INT)
+        result_ptr = self.ids.new_temp(Type.INT64)
+        result_len = self.ids.new_temp(Type.INT)
+        result_cap = self.ids.new_temp(Type.INT)
 
-        reuse_label = self.new_label("ir_append_reuse")
-        realloc_label = self.new_label("ir_append_realloc")
-        end_label = self.new_label("ir_append_end")
+        reuse_label = self.ids.new_label("ir_append_reuse")
+        realloc_label = self.ids.new_label("ir_append_realloc")
+        end_label = self.ids.new_label("ir_append_end")
 
-        needs_realloc = self._new_temp(Type.BOOL)
+        needs_realloc = self.ids.new_temp(Type.BOOL)
         check = IRBinOp(dst=needs_realloc, op=BinaryOp.GREATER_THAN_OR_EQUAL, left=length, right=cap)
         branch = IRBranch(cond=needs_realloc, true_label=realloc_label, false_label=reuse_label)
 
         # REUSE path (length < cap): write directly into the existing
         # backing at its own next-free slot.
-        offset_temp = self._new_temp(Type.INT)
-        reuse_target_addr = self._new_temp(Type.INT64)
-        new_len = self._new_temp(Type.INT)
+        offset_temp = self.ids.new_temp(Type.INT)
+        reuse_target_addr = self.ids.new_temp(Type.INT64)
+        new_len = self.ids.new_temp(Type.INT)
         reuse_write_ir = self._ir_write_append_value_at(reuse_target_addr, value_arg, element_type)
         if reuse_write_ir is None:
             return None
@@ -1518,16 +1518,16 @@ class ArraysSlicesMixin:
         # write the new value into the newly-available slot, at the
         # same offset (length * element_width) the REUSE path's own
         # slot would have been at, just within the fresh backing.
-        grow_ptr = self._new_temp(Type.INT64)
-        grow_cap = self._new_temp(Type.INT)
+        grow_ptr = self.ids.new_temp(Type.INT64)
+        grow_cap = self.ids.new_temp(Type.INT)
         grow = IRSliceGrow(
             dst_ptr=grow_ptr, dst_cap=grow_cap,
             ptr=ptr, length=length, cap=cap,
             element_width=element_width,
         )
-        realloc_offset_temp = self._new_temp(Type.INT)
-        realloc_target_addr = self._new_temp(Type.INT64)
-        realloc_new_len = self._new_temp(Type.INT)
+        realloc_offset_temp = self.ids.new_temp(Type.INT)
+        realloc_target_addr = self.ids.new_temp(Type.INT64)
+        realloc_new_len = self.ids.new_temp(Type.INT)
         realloc_write_ir = self._ir_write_append_value_at(realloc_target_addr, value_arg, element_type)
         if realloc_write_ir is None:
             return None
@@ -1560,7 +1560,7 @@ class ArraysSlicesMixin:
         LOCAL jump targets, meaningless outside the function they're
         generated for."""
         if message not in self._bounds_check_fail_labels:
-            self._bounds_check_fail_labels[message] = self.new_label("bounds_check_fail")
+            self._bounds_check_fail_labels[message] = self.ids.new_label("bounds_check_fail")
         return self._bounds_check_fail_labels[message]
 
     def _get_bounds_check_message_label(self, message: str) -> str:
@@ -1569,7 +1569,7 @@ class ArraysSlicesMixin:
         plain static string, safely shared by every function that
         needs it) a label for this exact `message` string."""
         if message not in self._bounds_check_message_labels:
-            label = self.new_label("bounds_msg")
+            label = self.ids.new_label("bounds_msg")
             self._bounds_check_message_labels[message] = label
             self.string_literals.append((label, message))
         return self._bounds_check_message_labels[message]
