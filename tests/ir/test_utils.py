@@ -14,6 +14,7 @@ import semantic
 from codegen.errors import CodegenError
 from ir.utils import leaf_type, type_byte_width, type_of
 
+
 def test_type_byte_width_int():
     t = semantic.Type(kind=semantic.TypeKind.INT)
     assert 4 == type_byte_width(t, {})
