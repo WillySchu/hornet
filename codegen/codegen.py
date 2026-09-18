@@ -90,7 +90,6 @@ class CodeGenerator(
 
     def __init__(self):
         self._label_count = 0
-        self._var_slots: Dict[int, int] = {}  # id(VarDecl node) -> its permanent logical slot
         self._next_offset = 0
         # Fresh-id counter for logical frame slots (see _new_slot),
         # parallel to _temp_count below -- globally unique across the
@@ -187,26 +186,6 @@ class CodeGenerator(
         # caches above, for the punctuation/prefix pieces printing an
         # array or slice needs.
         self._static_string_labels = {}
-        # Set fresh at the start of every gen_function call, to either
-        # None (this function's return type isn't an array) or the
-        # Logical slot of the hidden output pointer the caller passed
-        # in, if this function has one. Declared here too, defensively,
-        # so referencing it before any function has been generated
-        # fails with a clear AttributeError rather than silently
-        # reading a stale value from a previous instance.
-        self._hidden_return_ptr_slot = None
-        # This function's own DECLARED return type -- needed by
-        # gen_statement_ir's own Return case specifically to
-        # disambiguate an ArrayLiteral return value's own dispatch
-        # (ARRAY vs SLICE): type_of(stmt.value) is unusable for this,
-        # since semantic.py always annotates an ArrayLiteral node by
-        # its own literal shape ("N elements of type X"), regardless
-        # of what the surrounding context (here, this function's own
-        # signature) resolves the overall expression to. See gen_
-        # statement_ir's own Return/ArrayLiteral case for the bug this
-        # fixed: `return [1, 2, 3]` from a slice-returning function
-        # used to segfault because of exactly this ambiguity.
-        self._current_return_type = None
         # Set once, at the end of generate() -- see IRProgram's own
         # docstring for why it's built at all despite having no
         # consumer yet. Declared here defensively, same reason as
@@ -445,7 +424,6 @@ class CodeGenerator(
         its own, not to change its behavior."""
         # Fresh allocator state per function -- offsets are relative to
         # *this* function's own %rbp.
-        self._var_slots = {}
         self._argument_temp_slots = {}  # id(ArrayLiteral or Call) -> its permanent logical slot; see _collect_argument_temps
         self._next_offset = 0
         self._slot_offsets = {}
@@ -455,15 +433,21 @@ class CodeGenerator(
         # it used to be built up from local variables -- ir_fn.slot_
         # widths/slot_labels need somewhere to live from _new_slot's
         # own very first call onward (see IRFunction's own docstring
-        # for why self can't be that place anymore), and body/return_
-        # type are simply assigned onto it once they're known, right
-        # before this method's own return, exactly where they used to
-        # be passed into IRFunction's own constructor instead.
+        # for why self can't be that place anymore), and body is
+        # simply assigned onto it once it's known, right before this
+        # method's own return.
         ir_fn = IRFunction(name=fn.name)
         # No declared return type means Type.VOID, the same internal-
-        # only sentinel semantic.py's analyze_function uses.
-        return_type = Type.VOID if fn.return_type is None else type_from_name(
+        # only sentinel semantic.py's analyze_function uses. Assigned
+        # onto ir_fn immediately, not at this method's own end the way
+        # body is -- _ir_hidden_return_ptr (see gen_statement_ir's own
+        # Return case) needs to read this back well before this method
+        # returns (see IRFunction's own docstring for why that's a
+        # small, contained move, unlike scopes/_escaping_array_ids/
+        # _argument_temp_slots).
+        ir_fn.return_type = Type.VOID if fn.return_type is None else type_from_name(
             fn.return_type, self.struct_registry, self.type_alias_registry)
+        return_type = ir_fn.return_type
         param_types = [type_from_name(p.type, self.struct_registry, self.type_alias_registry) for p in fn.params]
 
         # Which of this function's array declarations need to be heap-
@@ -496,11 +480,9 @@ class CodeGenerator(
         # straight out of another free (`return otherFn()`): the same
         # address just gets
         # passed one level deeper, with no intermediate copy.
-        self._hidden_return_ptr_slot = None
-        self._current_return_type = return_type
         arg_shift = 0
         if return_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
-            self._hidden_return_ptr_slot = self._new_slot(8, "hidden_return_ptr", ir_fn)
+            ir_fn.hidden_return_ptr_slot = self._new_slot(8, "hidden_return_ptr", ir_fn)
             arg_shift = 1
 
         # A second, 24-byte slot -- reserved unconditionally for EVERY
@@ -570,7 +552,7 @@ class CodeGenerator(
         # across an IRCall it doesn't own" protection already covers
         # this for free, the same way it already covers everything
         # else.
-        param_setup_ir = self._ir_param_setup(fn, param_types, arg_shift)
+        param_setup_ir = self._ir_param_setup(fn, param_types, arg_shift, ir_fn)
 
         # Accumulated as one IR list for the whole body -- see
         # gen_statement_ir -- and lowered exactly once, by gen_
@@ -582,12 +564,12 @@ class CodeGenerator(
         # at once, not one already-resolved statement at a time.
         statement_ir = []
         for stmt in fn.body:
-            statement_ir.extend(self.gen_statement_ir(stmt))
+            statement_ir.extend(self.gen_statement_ir(stmt, ir_fn))
         ir_fn.body = param_setup_ir + statement_ir
         ir_fn.return_type = return_type
         return ir_fn
 
-    def _ir_param_setup(self, fn: Function, param_types: List[Type], arg_shift: int) -> list:
+    def _ir_param_setup(self, fn: Function, param_types: List[Type], arg_shift: int, ir_fn: IRFunction) -> list:
         """Builds (without lowering) this function's own real
         parameters -- AND its own hidden return pointer, if it has one
         (always argument slot 0 when present -- see arg_shift's own
@@ -650,7 +632,7 @@ class CodeGenerator(
         ir = []
         reg_index = arg_shift
         hidden_ptr = None
-        if self._hidden_return_ptr_slot is not None:
+        if ir_fn.hidden_return_ptr_slot is not None:
             hidden_ptr = self._new_temp(Type.INT64)
             ir.append(IRReadArgument(dst=hidden_ptr, index=0))
         captured = []
@@ -681,26 +663,26 @@ class CodeGenerator(
                 # the way this used to (see _escaped_offsets' own
                 # docstring for why that mattered before, and why it
                 # no longer applies to a parameter at all now).
-                self._bind_param(p)
+                self._bind_param(p, ir_fn)
                 ir.append(IRReadArgument(dst=self._local_temp(p.name), index=reg_index))
                 reg_index += 1
                 captured.append(None)
 
         if hidden_ptr is not None:
             hidden_ptr_addr = self._new_temp(Type.INT64)
-            ir.append(IRLocalAddress(dst=hidden_ptr_addr, slot=self._hidden_return_ptr_slot))
+            ir.append(IRLocalAddress(dst=hidden_ptr_addr, slot=ir_fn.hidden_return_ptr_slot))
             ir.append(IRStore(address=hidden_ptr_addr, value=hidden_ptr, value_type=Type.INT64))
 
         for p, p_type, cap in zip(fn.params, param_types, captured):
             if p_type.kind == TypeKind.SLICE:
                 ptr_value, len_value, cap_value = cap
-                slot = self._bind_param(p)
+                slot = self._bind_param(p, ir_fn)
                 param_addr = self._new_temp(Type.INT64)
                 ir.append(IRLocalAddress(dst=param_addr, slot=slot))
                 ir.extend(self._ir_write_slice_descriptor_into_address(param_addr, ptr_value, len_value, cap_value))
             elif p_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT):
                 caller_ptr = cap
-                slot = self._bind_param(p)
+                slot = self._bind_param(p, ir_fn)
                 param_addr = self._new_temp(Type.INT64)
                 ir.append(IRLocalAddress(dst=param_addr, slot=slot))
                 if self._is_heap_allocated(id(p), p_type):
@@ -877,9 +859,9 @@ class CodeGenerator(
         for p in params:
             p_type = type_from_name(p.type, self.struct_registry, self.type_alias_registry)
             width = 8 if self._is_heap_allocated(id(p), p_type) else type_byte_width(p_type, self.struct_registry)
-            self._var_slots[id(p)] = self._new_slot(width, f"param:{p.name}", ir_fn)
+            ir_fn.var_slots[id(p)] = self._new_slot(width, f"param:{p.name}", ir_fn)
 
-    def _bind_param(self, p: Param) -> int:
+    def _bind_param(self, p: Param, ir_fn: IRFunction) -> int:
         """The Param counterpart to _bind_local -- registers `p`'s name
         and declared type (as a real semantic.Type, via type_from_name,
         not the raw parser-level string/ArrayTypeExpr), plus id(p)
@@ -890,7 +872,7 @@ class CodeGenerator(
         _resolve_frame_layout doesn't run until lower_function, well
         after this method (and every other piece of this function's
         own body IR) is done being built."""
-        slot = self._var_slots[id(p)]
+        slot = ir_fn.var_slots[id(p)]
         p_type = type_from_name(p.type, self.struct_registry, self.type_alias_registry)
         self.scopes[-1][p.name] = (slot, p_type, id(p), self._temp_at_offset(p_type, slot))
         return slot
@@ -923,7 +905,7 @@ class CodeGenerator(
                 var_type = type_from_name(stmt.var_type, self.struct_registry, self.type_alias_registry)
                 width = 8 if self._is_heap_allocated(
                     id(stmt), var_type) else type_byte_width(var_type, self.struct_registry)
-                self._var_slots[id(stmt)] = self._new_slot(width, f"local:{stmt.name}", ir_fn)
+                ir_fn.var_slots[id(stmt)] = self._new_slot(width, f"local:{stmt.name}", ir_fn)
             elif isinstance(stmt, If):
                 self._collect_locals(stmt.then_body, ir_fn)
                 if stmt.else_body is not None:
@@ -1149,7 +1131,7 @@ class CodeGenerator(
     def _pop_scope(self) -> None:
         self.scopes.pop()
 
-    def _bind_local(self, stmt: VarDecl) -> int:
+    def _bind_local(self, stmt: VarDecl, ir_fn: IRFunction) -> int:
         """Registers `stmt`'s name -- its declared type, needed by
         _local_type, and id(stmt) itself, needed by _local_decl_id --
         in the current (innermost) generation-time scope, pointing at
@@ -1174,7 +1156,7 @@ class CodeGenerator(
         arrays_slices.py/structs.py reads or writes through a Temp;
         they address this variable's slot directly, exactly as
         before."""
-        slot = self._var_slots[id(stmt)]
+        slot = ir_fn.var_slots[id(stmt)]
         var_type = type_from_name(stmt.var_type, self.struct_registry, self.type_alias_registry)
         self.scopes[-1][stmt.name] = (slot, var_type, id(stmt), self._temp_at_offset(var_type, slot))
         return slot

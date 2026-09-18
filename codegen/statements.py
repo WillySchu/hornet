@@ -7,7 +7,7 @@ else/end) every branching or looping construct here builds on."""
 from codegen.errors import CodegenError
 from codegen.ir import (
     IRReturn, IRBranch, IRLabel, IRJump, IRMove, IRStore, IRCopy, IRConst, IRLoad, IRLocalAddress, IRCall,
-    IRStaticDataAddress,
+    IRFunction, IRStaticDataAddress,
 )
 from codegen.utils import type_of, type_byte_width
 from parser import (
@@ -34,7 +34,7 @@ from semantic import TypeKind, Type, type_from_name
 
 
 class StatementsMixin:
-    def gen_statement_ir(self, stmt: Node) -> list:
+    def gen_statement_ir(self, stmt: Node, ir_fn: IRFunction) -> list:
         """Builds real IR for every statement kind this compiler
         supports: Return/If/While (recursing into itself, not a
         separate old-style dispatcher, for If/While bodies -- so
@@ -167,7 +167,7 @@ class StatementsMixin:
             # now; previously fell through to this method's own
             # shared, final old-style fallback.
             if isinstance(stmt.value, NoneLiteral):
-                hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr()
+                hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr(ir_fn)
                 nil_ir, ptr_value, len_value, cap_value = self._ir_nil_slice()
                 write_ir = self._ir_write_slice_descriptor_into_address(hidden_ptr, ptr_value, len_value, cap_value)
                 return hidden_ptr_ir + nil_ir + write_ir + [IRReturn(value=None)]
@@ -194,7 +194,7 @@ class StatementsMixin:
                     and stmt.value.name not in self.struct_registry
             ):
                 value_type = type_of(stmt.value)
-                hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr()
+                hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr(ir_fn)
                 call_ir = self._ir_composite_call(hidden_ptr, stmt.value, value_type)
                 return hidden_ptr_ir + call_ir + [IRReturn(value=None)]
             # A composite return whose own value is a Variable/Field/
@@ -209,7 +209,7 @@ class StatementsMixin:
             # it was obtained).
             if isinstance(stmt.value, (Variable, Field, Index)):
                 value_type = type_of(stmt.value)
-                hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr()
+                hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr(ir_fn)
                 copy_ir = self._ir_copy_into_address(hidden_ptr, stmt.value, value_type)
                 return hidden_ptr_ir + copy_ir + [IRReturn(value=None)]
             # A composite return whose own value is an array literal,
@@ -243,7 +243,7 @@ class StatementsMixin:
             # own extent. See _ir_slice_literal's own docstring for
             # the SLICE case's own, now-correct treatment just below.
             if isinstance(stmt.value, ArrayLiteral):
-                # Dispatches on self._current_return_type (this
+                # Dispatches on ir_fn.return_type (this
                 # function's own DECLARED return type), NOT type_of(
                 # stmt.value): the latter is always ARRAY-kind for an
                 # ArrayLiteral, correctly sized to its own element
@@ -259,13 +259,13 @@ class StatementsMixin:
                 # addressed the array's own backing, when a SLICE
                 # return's hidden pointer actually addresses a three-
                 # field descriptor slot instead.
-                if self._current_return_type.kind == TypeKind.ARRAY:
-                    hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr()
-                    write_ir = self._ir_write_array_literal_into(hidden_ptr, stmt.value, self._current_return_type)
+                if ir_fn.return_type.kind == TypeKind.ARRAY:
+                    hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr(ir_fn)
+                    write_ir = self._ir_write_array_literal_into(hidden_ptr, stmt.value, ir_fn.return_type)
                     if write_ir is not None:
                         return hidden_ptr_ir + write_ir + [IRReturn(value=None)]
-                elif self._current_return_type.kind == TypeKind.SLICE:
-                    hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr()
+                elif ir_fn.return_type.kind == TypeKind.SLICE:
+                    hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr(ir_fn)
                     production = self._ir_slice_literal(stmt.value)
                     if production is not None:
                         slice_ir, ptr_value, len_value, cap_value = production
@@ -274,7 +274,7 @@ class StatementsMixin:
                         return hidden_ptr_ir + slice_ir + write_ir + [IRReturn(value=None)]
             if isinstance(stmt.value, Call) and stmt.value.name in self.struct_registry:
                 value_type = type_of(stmt.value)
-                hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr()
+                hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr(ir_fn)
                 write_ir = self._ir_write_struct_literal_into(hidden_ptr, stmt.value, value_type)
                 if write_ir is not None:
                     return hidden_ptr_ir + write_ir + [IRReturn(value=None)]
@@ -296,7 +296,7 @@ class StatementsMixin:
             # call's own result, but never a Return statement whose
             # OWN value is a bare Slice node.
             if isinstance(stmt.value, Slice):
-                hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr()
+                hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr(ir_fn)
                 production = self._ir_slice_into(stmt.value)
                 if production is not None:
                     slice_ir, ptr_value, len_value, cap_value = production
@@ -315,14 +315,14 @@ class StatementsMixin:
             ir = self._ir_if_head(stmt, then_label, else_label)
             self._push_scope()
             for s in stmt.then_body:
-                ir.extend(self.gen_statement_ir(s))
+                ir.extend(self.gen_statement_ir(s, ir_fn))
             self._pop_scope()
             ir.append(IRJump(end_label))
             ir.append(IRLabel(else_label))
             if stmt.else_body is not None:
                 self._push_scope()
                 for s in stmt.else_body:
-                    ir.extend(self.gen_statement_ir(s))
+                    ir.extend(self.gen_statement_ir(s, ir_fn))
                 self._pop_scope()
             ir.append(IRLabel(end_label))
             return ir
@@ -334,7 +334,7 @@ class StatementsMixin:
             self.loop_labels.append((start_label, end_label))
             self._push_scope()
             for s in stmt.body:
-                ir.extend(self.gen_statement_ir(s))
+                ir.extend(self.gen_statement_ir(s, ir_fn))
             self._pop_scope()
             self.loop_labels.pop()
             ir.append(IRJump(start_label))
@@ -353,7 +353,7 @@ class StatementsMixin:
             # just orphan a Temp id, harmlessly but pointlessly.
             var_type = type_from_name(stmt.var_type, self.struct_registry, self.type_alias_registry)
             if not isinstance(stmt.init, NoneLiteral) and var_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
-                self._bind_local(stmt)
+                self._bind_local(stmt, ir_fn)
                 if stmt.init is not None:
                     ir, value = self.gen_expr_ir(stmt.init)
                     return ir + [IRMove(dst=self._local_temp(stmt.name), src=value)]
@@ -398,7 +398,7 @@ class StatementsMixin:
                     var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE)
                     and isinstance(stmt.init, (Variable, Field, Index))
             ):
-                slot = self._bind_local(stmt)
+                slot = self._bind_local(stmt, ir_fn)
                 ir = []
                 # A slice variable is never heap-allocated (see gen_
                 # assign's own heap-allocation check, scoped to ARRAY/
@@ -428,7 +428,7 @@ class StatementsMixin:
             # outright, confirmed directly).
             if var_type.kind == TypeKind.SLICE and isinstance(stmt.init, NoneLiteral):
                 nil_ir, ptr_value, len_value, cap_value = self._ir_nil_slice()
-                self._bind_local(stmt)
+                self._bind_local(stmt, ir_fn)
                 return nil_ir + self._ir_write_slice_descriptor(
                     Variable(name=stmt.name), ptr_value, len_value, cap_value)
             # A slice-typed initializer that's itself a Slice
@@ -445,7 +445,7 @@ class StatementsMixin:
                 production = self._ir_slice_into(stmt.init)
                 if production is not None:
                     slice_ir, ptr_value, len_value, cap_value = production
-                    self._bind_local(stmt)
+                    self._bind_local(stmt, ir_fn)
                     return slice_ir + self._ir_write_slice_descriptor(
                         Variable(name=stmt.name), ptr_value, len_value, cap_value)
             # A slice-typed initializer that's a bare bracketed-list
@@ -464,7 +464,7 @@ class StatementsMixin:
                 production = self._ir_slice_literal(stmt.init)
                 if production is not None:
                     slice_ir, ptr_value, len_value, cap_value = production
-                    self._bind_local(stmt)
+                    self._bind_local(stmt, ir_fn)
                     return slice_ir + self._ir_write_slice_descriptor(
                         Variable(name=stmt.name), ptr_value, len_value, cap_value)
             # A slice-typed initializer that's a call to the append
@@ -482,7 +482,7 @@ class StatementsMixin:
                 production = self._ir_append_call(stmt.init)
                 if production is not None:
                     append_ir, ptr_value, len_value, cap_value = production
-                    self._bind_local(stmt)
+                    self._bind_local(stmt, ir_fn)
                     return append_ir + self._ir_write_slice_descriptor(
                         Variable(name=stmt.name), ptr_value, len_value, cap_value)
             # An array/struct/slice-typed initializer that's an
@@ -504,7 +504,7 @@ class StatementsMixin:
                     and (isinstance(stmt.init, Call)
                          and stmt.init.name != 'append'
                          and stmt.init.name not in self.struct_registry)):
-                slot = self._bind_local(stmt)
+                slot = self._bind_local(stmt, ir_fn)
                 ir = []
                 if var_type.kind != TypeKind.SLICE and self._is_heap_allocated(id(stmt), var_type):
                     ir.extend(self._ir_malloc_and_store(var_type, slot))
@@ -544,7 +544,7 @@ class StatementsMixin:
                     var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT)
                     and (isinstance(stmt.init, ArrayLiteral)
                          or (isinstance(stmt.init, Call) and stmt.init.name in self.struct_registry))):
-                slot = self._bind_local(stmt)
+                slot = self._bind_local(stmt, ir_fn)
                 ir = []
                 if self._is_heap_allocated(id(stmt), var_type):
                     ir.extend(self._ir_malloc_and_store(var_type, slot))
@@ -567,7 +567,7 @@ class StatementsMixin:
             # result -- a slice's own zero value is uniquely trivial
             # among the three, with nothing to recurse into at all.
             if var_type.kind == TypeKind.SLICE and stmt.init is None:
-                self._bind_local(stmt)
+                self._bind_local(stmt, ir_fn)
                 zero_ptr = IRConst(0, Type.INT64)
                 zero_int = IRConst(0, Type.INT)
                 return self._ir_write_slice_descriptor(Variable(name=stmt.name), zero_ptr, zero_int, zero_int)
@@ -582,7 +582,7 @@ class StatementsMixin:
             # made BEFORE this variable's own address is ever
             # computed.
             if var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and stmt.init is None:
-                slot = self._bind_local(stmt)
+                slot = self._bind_local(stmt, ir_fn)
                 ir = []
                 if self._is_heap_allocated(id(stmt), var_type):
                     ir.extend(self._ir_malloc_and_store(var_type, slot))
@@ -1033,22 +1033,25 @@ class StatementsMixin:
         ir, value = self.gen_expr_ir(value_expr)
         return ir + [IRReturn(value=value)]
 
-    def _ir_hidden_return_ptr(self) -> tuple:
+    def _ir_hidden_return_ptr(self, ir_fn: IRFunction) -> tuple:
         """Reads the current function's own received hidden return
         pointer (for a composite-returning function, passed by ITS
         OWN caller, at this function's own fixed, known hidden_
-        return_ptr_offset) -- returns (ir, address). IRLocalAddress
+        return_ptr_slot) -- returns (ir, address). IRLocalAddress
         for the slot's own address, then an ordinary IRLoad reading
         the pointer stored there (IRLocalAddress always means "the
         address of this slot," never "the value stored there" --
         see its own docstring). Shared by every gen_statement_ir
         Return case that forwards into it (an ordinary function call,
         or a Variable/Field/Index value) -- neither cares how the
-        address was obtained, only that it's an ordinary IRValue."""
+        address was obtained, only that it's an ordinary IRValue.
+        `ir_fn` is threaded through purely to reach ir_fn.hidden_
+        return_ptr_slot -- see IRFunction's own docstring for why
+        that's explicit now rather than implicit self state."""
         slot_addr = self._new_temp(Type.INT64)
         hidden_ptr = self._new_temp(Type.INT64)
         ir = [
-            IRLocalAddress(dst=slot_addr, slot=self._hidden_return_ptr_slot),
+            IRLocalAddress(dst=slot_addr, slot=ir_fn.hidden_return_ptr_slot),
             IRLoad(dst=hidden_ptr, address=slot_addr),
         ]
         return ir, hidden_ptr

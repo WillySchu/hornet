@@ -547,12 +547,40 @@ class IRFunction:
     holds the ir_fn it was constructed for as a genuine field) rather
     than read implicitly off self, the same reason IRLocalAddress
     itself carries a slot id explicitly rather than assuming ambient
-    knowledge of which function is "current." """
+    knowledge of which function is "current."
+
+    `hidden_return_ptr_slot`/`var_slots` are two more pieces of gen_
+    function_ir's own per-function state that used to live on self,
+    for the identical reason and with the identical risk the slot
+    registry itself had (see above) -- moved here alongside it. Both
+    are read only from gen_statement_ir's own top-level Return/VarDecl
+    cases (via _ir_hidden_return_ptr/_bind_local), never from gen_
+    expr_ir or anything it calls, which is what makes this a small,
+    contained move: gen_statement_ir needed `self` threaded through
+    its own recursive If/While calls either way, and that's as far as
+    either of these ever needs to reach. return_type (above) already
+    covers what a separate `_current_return_type` used to duplicate --
+    _ir_hidden_return_ptr reads THIS field directly now, once gen_
+    function_ir assigns it early enough (right after computing it,
+    not at this method's own end) for that to work.
+
+    `scopes`, `_argument_temp_slots`, and `_escaping_array_ids` are
+    the ones that deliberately did NOT make this same move, despite
+    being reset alongside these on self today: each is read from deep
+    inside gen_expr_ir's own call tree (_local_slot/_is_heap_allocated/
+    _ir_materialize_composite_call and friends, called from arrays_
+    slices.py, structs.py, scalars.py, and dispatch.py alike) --
+    threading a context explicitly that deep would mean touching
+    gen_expr_ir's own 27 call sites across 6 files, not a handful in
+    one method. That's a distinctly bigger, separately-scoped piece of
+    work, not attempted here."""
     name: str
     body: list = field(default_factory=list)
     return_type: Optional[Type] = None
     slot_widths: dict = field(default_factory=dict)
     slot_labels: dict = field(default_factory=dict)
+    hidden_return_ptr_slot: Optional[int] = None
+    var_slots: dict = field(default_factory=dict)
 
 
 @dataclass
