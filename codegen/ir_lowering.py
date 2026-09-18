@@ -131,12 +131,12 @@ class InstructionSelector:
         once host._resolve_frame_layout's one call -- covering every
         slot this function ever needed, named-local and anonymous
         alike -- has run."""
-        if temp.id in self.host.ids._temp_offsets:
-            return FrameSlot(slot=self.host.ids._temp_offsets[temp.id])
-        if temp.id not in self.host.ids._temp_slots:
-            width = type_byte_width(temp.type, self.host.struct_registry)
-            self.host.ids._temp_slots[temp.id] = self.host.ids.new_slot(width, f"temp:{temp.id}", self.ir_fn)
-        return FrameSlot(slot=self.host.ids._temp_slots[temp.id])
+        if temp.id in self.host.ir_program.ids._temp_offsets:
+            return FrameSlot(slot=self.host.ir_program.ids._temp_offsets[temp.id])
+        if temp.id not in self.host.ir_program.ids._temp_slots:
+            width = type_byte_width(temp.type, self.host.ir_program.struct_registry)
+            self.host.ir_program.ids._temp_slots[temp.id] = self.host.ir_program.ids.new_slot(width, f"temp:{temp.id}", self.ir_fn)
+        return FrameSlot(slot=self.host.ir_program.ids._temp_slots[temp.id])
 
     def _gen_load_value(self, value: IRValue, dst: Register) -> list[Instruction]:
         """Loads an IRValue (a Temp's current value, or a compile-time
@@ -206,7 +206,7 @@ class InstructionSelector:
                 return []
             return [MovQ(src=src, dst=dst)] if wide else [Mov(src=src, dst=dst)]
         if temp.is_named_local and not self.host._allocation_finalized:
-            self.host._escaped_offsets.add(self.host.ids._temp_offsets[temp.id])
+            self.host._escaped_offsets.add(self.host.ir_program.ids._temp_offsets[temp.id])
         if temp.type == Type.STR:
             return [MovQ(src=self._temp_mem(temp), dst=as_qword_register(dst))]
         return self.host._gen_read_scalar_into(self._temp_mem(temp), temp.type, dst)
@@ -225,7 +225,7 @@ class InstructionSelector:
                 return []
             return [MovQ(src=src, dst=dst)] if wide else [Mov(src=src, dst=dst)]
         if temp.is_named_local and not self.host._allocation_finalized:
-            self.host._escaped_offsets.add(self.host.ids._temp_offsets[temp.id])
+            self.host._escaped_offsets.add(self.host.ir_program.ids._temp_offsets[temp.id])
         if temp.type == Type.STR:
             return [MovQ(src=as_qword_register(src), dst=self._temp_mem(temp))]
         return self.host._gen_write_scalar_from(src, temp.type, self._temp_mem(temp))

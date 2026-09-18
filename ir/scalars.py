@@ -47,7 +47,7 @@ class ScalarsMixin:
         explicit CodegenError on an unmatched shape or either
         genuinely-still-possible None), just Variable/Field/Index via
         _ir_struct_address, a struct-literal Call (name found in
-        self.host.struct_registry) via _ir_materialize_struct_literal, then
+        self.ir_program.struct_registry) via _ir_materialize_struct_literal, then
         an ordinary composite-returning Call via _ir_materialize_
         composite_call again -- the same three exhaustive shapes, one
         level over.
@@ -110,7 +110,7 @@ class ScalarsMixin:
                             f"Variable/Field/Index argument ({arg!r}) -- expected to "
                             f"always succeed for this shape")
                     ir, addr_value = result
-                elif isinstance(arg, Call) and arg.name in self.host.struct_registry:
+                elif isinstance(arg, Call) and arg.name in self.ir_program.struct_registry:
                     result = self._ir_materialize_struct_literal(arg)
                     if result is None:
                         raise CodegenError(
@@ -176,7 +176,7 @@ class ScalarsMixin:
                 f"implemented)"
             )
         result_type = type_of(expr)
-        t_result = None if result_type == Type.VOID else self.host.ids.new_temp(result_type)
+        t_result = None if result_type == Type.VOID else self.ir_program.ids.new_temp(result_type)
         arg_ir, arg_values = self._ir_call_arguments(expr.args)
         ir = arg_ir + [IRCall(dst=t_result, name=expr.name, args=arg_values)]
         return ir, t_result
@@ -241,10 +241,10 @@ class ScalarsMixin:
         fallthrough value" for right -- the only difference between
         the two). Returns (ir, t_result)."""
         fallthrough_value = 1 - short_circuit_value
-        rhs_label = self.host.ids.new_label(f"{label_prefix}_rhs")
-        short_label = self.host.ids.new_label(f"{label_prefix}_short")
-        fallthrough_label = self.host.ids.new_label(f"{label_prefix}_fallthrough")
-        end_label = self.host.ids.new_label(f"{label_prefix}_end")
+        rhs_label = self.ir_program.ids.new_label(f"{label_prefix}_rhs")
+        short_label = self.ir_program.ids.new_label(f"{label_prefix}_short")
+        fallthrough_label = self.ir_program.ids.new_label(f"{label_prefix}_fallthrough")
+        end_label = self.ir_program.ids.new_label(f"{label_prefix}_end")
 
         def targets(continue_label: str) -> tuple[str, str]:
             # (true_target, false_target): whichever outcome matches
@@ -254,7 +254,7 @@ class ScalarsMixin:
                 return short_label, continue_label
             return continue_label, short_label
 
-        t_result = self.host.ids.new_temp(Type.BOOL)
+        t_result = self.ir_program.ids.new_temp(Type.BOOL)
         left_true, left_false = targets(rhs_label)
         right_true, right_false = targets(fallthrough_label)
 

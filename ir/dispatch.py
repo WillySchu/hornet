@@ -120,9 +120,9 @@ class DispatchMixin:
             # rather than delegating to that method for what's now a
             # two-line operation with no old-style instruction sequence
             # left to wrap at all.
-            t = self.host.ids.new_temp(Type.STR)
-            label = self.host.ids.new_label("str")
-            self.host.string_literals.append((label, expr.value))
+            t = self.ir_program.ids.new_temp(Type.STR)
+            label = self.ir_program.ids.new_label("str")
+            self.ir_program.string_literals.append((label, expr.value))
             return [IRStaticDataAddress(dst=t, label=label)], t
         if isinstance(expr, Variable):
             return [], self._local_temp(expr.name)
@@ -189,7 +189,7 @@ class DispatchMixin:
             # no different from any other nested expression in this
             # arc.
             operand_ir, operand_value = self.gen_expr_ir(expr.operand)
-            t = self.host.ids.new_temp(type_of(expr))
+            t = self.ir_program.ids.new_temp(type_of(expr))
             return operand_ir + [IRUnOp(dst=t, op=expr.op, operand=operand_value)], t
         if isinstance(expr, Cast):
             # IRCast is new -- see its own docstring for why an
@@ -201,7 +201,7 @@ class DispatchMixin:
             # it" shape IRUnOp's own lowering already uses for gen_
             # unary_op.
             src_ir, src_value = self.gen_expr_ir(expr.expr)
-            t = self.host.ids.new_temp(type_of(expr))
+            t = self.ir_program.ids.new_temp(type_of(expr))
             return src_ir + [IRCast(dst=t, src=src_value)], t
         raise CodegenError(
             f"No real-IR case for expression of type {type(expr).__name__}: {expr!r} -- "
@@ -219,7 +219,7 @@ class DispatchMixin:
         value_type's own width through it. This method itself has no
         fallback of any kind -- it's a pure two-instruction leaf over
         whatever address its caller already produced."""
-        t = self.host.ids.new_temp(value_type)
+        t = self.ir_program.ids.new_temp(value_type)
         return addr_ir + [IRLoad(dst=t, address=addr_value)], t
 
     def _ir_composite_operand_address(self, expr: Node, value_type: Type):
@@ -329,10 +329,10 @@ class DispatchMixin:
                         f"codegen ever runs")
                 left_ir, left_addr = left_result
                 right_ir, right_addr = right_result
-                mismatch_label = self.host.ids.new_label("eq_mismatch")
-                done_label = self.host.ids.new_label("eq_done")
+                mismatch_label = self.ir_program.ids.new_label("eq_mismatch")
+                done_label = self.ir_program.ids.new_label("eq_done")
                 cmp_ir = self._ir_composite_equal(left_addr, right_addr, value_type, mismatch_label)
-                t = self.host.ids.new_temp(Type.BOOL)
+                t = self.ir_program.ids.new_temp(Type.BOOL)
                 ir = left_ir + right_ir + cmp_ir + [
                     IRMove(dst=t, src=IRConst(1 if expr.op == BinaryOp.EQUAL else 0, Type.BOOL)),
                     IRJump(done_label),
@@ -354,7 +354,7 @@ class DispatchMixin:
         (ir, t_result)."""
         left_ir, left_value = self.gen_expr_ir(expr.left)
         right_ir, right_value = self.gen_expr_ir(expr.right)
-        t_result = self.host.ids.new_temp(type_of(expr))
+        t_result = self.ir_program.ids.new_temp(type_of(expr))
         ir = left_ir + right_ir + [
             IRBinOp(dst=t_result, op=expr.op, left=left_value, right=right_value),
         ]

@@ -23,10 +23,10 @@ class StructsMixin:
         padding or alignment is inserted between fields -- x86-64
         doesn't require aligned access."""
         offset = 0
-        for name, field_type in self.host.struct_registry[struct_name].fields.items():
+        for name, field_type in self.ir_program.struct_registry[struct_name].fields.items():
             if name == field_name:
                 return offset
-            offset += type_byte_width(field_type, self.host.struct_registry)
+            offset += type_byte_width(field_type, self.ir_program.struct_registry)
         raise CodegenError(f"Struct '{struct_name}' has no field '{field_name}'")
 
     def _ir_struct_address(self, expr: Node) -> tuple[list, object]:
@@ -53,10 +53,10 @@ class StructsMixin:
         if isinstance(expr, Variable):
             slot = self._local_slot(expr.name)
             struct_type = self._local_type(expr.name)
-            slot_addr = self.host.ids.new_temp(Type.INT64)
+            slot_addr = self.ir_program.ids.new_temp(Type.INT64)
             ir = [IRLocalAddress(dst=slot_addr, slot=slot)]
             if self._is_heap_allocated(self._local_decl_id(expr.name), struct_type):
-                addr_temp = self.host.ids.new_temp(Type.INT64)
+                addr_temp = self.ir_program.ids.new_temp(Type.INT64)
                 ir.append(IRLoad(dst=addr_temp, address=slot_addr))
                 return ir, addr_temp
             return ir, slot_addr
@@ -95,7 +95,7 @@ class StructsMixin:
         base_ir, base_addr = result
         if offset == 0:
             return base_ir, base_addr
-        result = self.host.ids.new_temp(Type.INT64)
+        result = self.ir_program.ids.new_temp(Type.INT64)
         add_op = IRBinOp(dst=result, op=BinaryOp.ADD, left=base_addr, right=IRConst(offset, Type.INT64))
         return base_ir + [add_op], result
 
@@ -137,7 +137,7 @@ class StructsMixin:
         back (returns None) -- see _ir_write_array_literal_into's own
         docstring for why any IR already built for earlier fields
         being discarded is harmless, not a partial-write risk."""
-        struct_info = self.host.struct_registry[struct_type.struct_name]
+        struct_info = self.ir_program.struct_registry[struct_type.struct_name]
         field_items = list(struct_info.fields.items())
         if expr.kwargs is not None:
             provided = dict(expr.kwargs)
@@ -160,7 +160,7 @@ class StructsMixin:
                 if offset == 0:
                     field_addr = dst_address
                 else:
-                    field_addr = self.host.ids.new_temp(Type.INT64)
+                    field_addr = self.ir_program.ids.new_temp(Type.INT64)
                     ir.append(
                         IRBinOp(dst=field_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(offset, Type.INT64)))
                 ir.extend(self._ir_write_zero_value_into(field_addr, field_type))
@@ -168,7 +168,7 @@ class StructsMixin:
                 if offset == 0:
                     field_addr = dst_address
                 else:
-                    field_addr = self.host.ids.new_temp(Type.INT64)
+                    field_addr = self.ir_program.ids.new_temp(Type.INT64)
                     ir.append(
                         IRBinOp(dst=field_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(offset, Type.INT64)))
                 field_ir = self._ir_write_composite_value_into(field_addr, arg_expr, field_type)
@@ -181,7 +181,7 @@ class StructsMixin:
                 if offset == 0:
                     field_addr = dst_address
                 else:
-                    field_addr = self.host.ids.new_temp(Type.INT64)
+                    field_addr = self.ir_program.ids.new_temp(Type.INT64)
                     ir.append(
                         IRBinOp(dst=field_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(offset, Type.INT64)))
                 ir.append(IRStore(address=field_addr, value=arg_value, value_type=field_type))
@@ -213,11 +213,11 @@ class StructsMixin:
         struct_type = type_of(expr)
         if id(expr) in self._argument_temp_slots:
             slot = self._argument_temp_slots[id(expr)]
-            addr = self.host.ids.new_temp(Type.INT64)
+            addr = self.ir_program.ids.new_temp(Type.INT64)
             addr_ir = [IRLocalAddress(dst=addr, slot=slot)]
         else:
-            addr = self.host.ids.new_temp(Type.INT64)
-            size = type_byte_width(struct_type, self.host.struct_registry)
+            addr = self.ir_program.ids.new_temp(Type.INT64)
+            size = type_byte_width(struct_type, self.ir_program.struct_registry)
             addr_ir = [IRCall(dst=addr, name='malloc', args=[IRConst(size, Type.INT64)])]
         write_ir = self._ir_write_struct_literal_into(addr, expr, struct_type)
         if write_ir is None:
@@ -229,7 +229,7 @@ class StructsMixin:
         struct type. Doesn't raise on an invalid access -- already
         validated by semantic.py before codegen runs."""
         base_type = type_of(base_expr)
-        return self.host.struct_registry[base_type.struct_name].fields[field_name]
+        return self.ir_program.struct_registry[base_type.struct_name].fields[field_name]
 
 
 

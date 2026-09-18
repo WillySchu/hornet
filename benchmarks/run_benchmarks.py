@@ -37,6 +37,7 @@ from parser import Parser
 from semantic import analyze
 from codegen.emitter import Emitter
 from build import RUNTIME_C_PATH
+from ir.program_builder import build_ir_program
 import codegen.codegen as codegen_module
 import codegen.register_allocator as ra_module
 
@@ -72,7 +73,8 @@ def _instrumented_generate(program):
 
     codegen_module.allocate_registers = wrapper
     try:
-        asm_program = codegen_module.CodeGenerator().generate(program)
+        ir_program = build_ir_program(program)
+        asm_program = codegen_module.CodeGenerator().generate(ir_program)
     finally:
         codegen_module.allocate_registers = original
     return asm_program, captured

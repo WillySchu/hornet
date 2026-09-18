@@ -2574,9 +2574,10 @@ class TestTypeAnnotation:
     def test_codegen_without_semantic_analysis_raises_clear_error(self):
         """codegen invoked on an AST that skipped semantic.analyze()
         (so Program itself has no struct_registry, stamped on only by
-        analyze's own struct-collection pass -- see IRProgramBuilder.
-        build's own defensive check, the first thing generate() does
-        via it) must fail with a clear, actionable CodegenError --
+        analyze's own struct-collection pass -- see build_ir_program's
+        own defensive check, the first thing generate_asm/compile_to_
+        asm does via it) must fail with a clear, actionable
+        CodegenError --
         matching _type_of's and _local_offset's own established
         posture -- rather than a bare AttributeError or, worse,
         silently wrong codegen."""

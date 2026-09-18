@@ -1,20 +1,26 @@
 """Composes CodeGenerator from the two lowering-side mixins
 (arrays_slices_lowering, scalars_lowering -- see their own module
-docstrings) and owns everything that spans the whole compilation: the
-AST-to-AsmProgram entry point, per-function frame layout (locals,
-parameters, escape analysis, and every function's own set of
+docstrings) and owns everything that's specific to LOWERING an
+already-built IRProgram into an AsmProgram: per-function frame layout
+(locals, parameters, escape analysis, and every function's own set of
 unconditionally-reserved scratch slots), the prologue/epilogue --
-including the callee-saved register save/restore now required since
+including the callee-saved register save/restore required since
 Hornet functions can call each other and each other's string/print/
 array machinery -- and the CLI wrappers that chain lexing, parsing,
-semantic analysis, and codegen together.
+semantic analysis, IR building, and lowering together.
 
 Building a function's own real IR (arrays_slices, scalars, structs,
 strings, statements, dispatch -- what used to be mixed directly into
-this class) is ir.builder.IRFunctionBuilder's job now, constructed
-fresh per function from generate()/gen_function; building the whole
-program's IR from every function's own is ir.program_builder.
-IRProgramBuilder's -- see their own module docstrings for why.
+this class) is ir.builder.IRFunctionBuilder's job now; building the
+whole program's IR from every function's own is ir.program_builder.
+build_ir_program's -- see their own module docstrings for why, and for
+why neither needs a CodeGenerator at all. generate() itself now takes
+an already-built IRProgram directly, rather than building one from a
+Program AST the way it used to: building and lowering are genuinely
+separate steps a caller can run independently now, with a real seam in
+between for whatever IR-to-IR transform (optimization passes,
+eventually) wants to sit there -- see compile_to_asm's own body for
+the shape this takes.
 """
 
 
@@ -42,16 +48,16 @@ from codegen.assembly_ast import (
 )
 from codegen.calling_convention import CALLEE_SAVED_SCRATCH_REGISTERS
 from codegen.emitter import Emitter
-from codegen.id_allocator import IdAllocator
+from codegen.errors import CodegenError
 from ir.ir import IRFunction, IRProgram
 from ir.builder import IRFunctionBuilder
-from ir.program_builder import IRProgramBuilder
+from ir.program_builder import build_ir_program
 from codegen.ir_lowering import InstructionSelector
 from codegen.register_allocator import allocate_registers
 from codegen.scalars_lowering import ScalarsLoweringMixin
 from lexer import lex
 from parser import Function, Parser, Program
-from semantic import analyze, Type, StructInfo
+from semantic import analyze, Type
 
 
 # ---------------------------------------------------------------------------
@@ -65,15 +71,15 @@ class CodeGenerator(
     produces an equivalent AsmProgram."""
 
     def __init__(self):
-        self.ids = IdAllocator()
         self._next_offset = 0
         self._slot_offsets: Dict[int, int] = {}  # slot id -> its final, physical offset; see _resolve_frame_layout
         # Legacy access tracking: every offset written to directly, by
         # this function's own parameter-marshaling code (see gen_
         # function_ir's own scalar/str parameter cases below), bypassing
-        # the Temp mechanism entirely. Reset in gen_function_ir,
-        # alongside _next_offset -- these are frame-relative, so a raw
-        # offset value means nothing across a function boundary.
+        # the Temp mechanism entirely. Reset in lower_function,
+        # alongside _allocation_finalized -- these are frame-relative,
+        # so a raw offset value means nothing across a function
+        # boundary.
         #
         # Used to also be populated by _local_offset, on the theory
         # that old-style code might read a variable's memory directly,
@@ -96,53 +102,31 @@ class CodeGenerator(
         # itself is migrated off plain Instructions the same way
         # everything else in this arc has been.
         self._escaped_offsets: set[int] = set()
-        # False from the start of gen_function until this function's
+        # False from the start of lower_function until this function's
         # OWN allocate_registers call has returned -- see ir_lowering.
         # py's _gen_read_temp_into/_gen_write_temp_from for why a
         # named-local Temp's memory fallback needs to know this, not
         # just whether register_allocator.py assigned it a register.
         self._allocation_finalized: bool = False
-        # Populated once per function, by gen_function, from
+        # Populated once per function, by lower_function, from
         # register_allocator.allocate_registers -- maps a (necessarily
         # anonymous, necessarily IRCall-free) Temp's id to the
         # physical register it lives in instead of a memory slot. See
         # ir_lowering.py's _gen_read_temp_into/_gen_write_temp_from,
         # the only two places that consult it.
         self._register_assignment: Dict[int, str] = {}
-        self.string_literals: List[tuple] = []  # (label, content) pairs
-        self.type_descriptors: List[tuple] = []  # (label, fields) pairs
-        # Set once, at the very start of generate(), from
-        # Program.struct_registry (stashed there by semantic.analyze).
-        # Declared here defensively (an empty dict, not left unset) so
-        # a bug that calls a method needing this before generate() runs
-        # fails with a clear "unknown struct" error rather than an
-        # AttributeError from nowhere.
-        self.struct_registry: Dict[str, StructInfo] = {}
-        # Set the same way, from Program.type_alias_registry. Every
-        # entry is already a fully-resolved Type by this point --
-        # type_from_name just does a single dict lookup with this,
-        # never a recursive re-resolution of an alias's own target.
-        self.type_alias_registry: Dict[str, Type] = {}
-        self._empty_str_label = None  # "" -- str's own zero value; see _get_empty_str_label
         # Lazily created, but with different lifetimes from each other:
-        # the fail labels are reset per function (gen_function_ir); the
-        # message labels, like the print-related ones above, are cached
-        # for the whole compilation. Both are dicts keyed by message
-        # text, since a function can trigger more than one distinct
-        # bounds-check message.
+        # the fail labels are reset per function (lower_function); the
+        # message labels are cached for the whole compilation. Both
+        # are dicts keyed by message text, since a function can
+        # trigger more than one distinct bounds-check message.
         self._bounds_check_fail_labels = {}
         self._bounds_check_message_labels = {}
-        # Set once, by generate() (via IRProgramBuilder -- see its own
-        # module docstring for why it's built at all despite having no
-        # consumer yet), before lowering runs rather than after: its
-        # own string_literals/type_descriptors are the same list
-        # objects lowering still appends to (see arrays_slices_
-        # lowering.py's own _get_bounds_check_message_label), so this
-        # object already reflects everything by the time anyone reads
-        # it once generate() itself has returned, regardless of when
-        # it was constructed. Declared here defensively, same reason
-        # as struct_registry/type_alias_registry above: referencing it
-        # before generate() has ever run fails with a clear
+        # Set by generate()/gen_function/lower_function, from whatever
+        # IRProgram the caller passes in -- never built here (see this
+        # module's own updated docstring for why). Declared here
+        # defensively (None, not left unset) so a bug that reads this
+        # before any of those has ever run fails with a clear
         # AttributeError-from-None-access rather than one from
         # nowhere.
         self.ir_program: Optional[IRProgram] = None
@@ -241,79 +225,101 @@ class CodeGenerator(
                 if isinstance(value, FrameSlot):
                     setattr(instr, f.name, Memory('rbp', self._slot_offsets[value.slot]))
 
-    def generate(self, program: Program) -> AsmProgram:
-        """Two genuinely separate passes: build (see IRProgramBuilder's
-        own module docstring for why that's its own step now, not
-        inline here), then lower every function in the result. This
-        split was blocked, until this arc's own earlier work, by a
-        small piece of per-function state (the slot registry -- see
-        IRFunction's own docstring) that used to live on self, reset
-        by the NEXT function's own build call before the CURRENT one's
-        own lower_function call ever ran -- moot now that building
-        happens on its own IRFunctionBuilder instance, fresh per
-        function, rather than sharing self with lowering the way it
-        used to."""
-        self.ir_program = IRProgramBuilder(self).build(program)
-        asm_functions = [self.lower_function(ir_fn) for ir_fn in self.ir_program.functions]
+    def generate(self, ir_program: IRProgram) -> AsmProgram:
+        """Purely a lowering step now: takes an already-built
+        IRProgram (see ir.program_builder's own module docstring for
+        why building it is a genuinely separate call, not something
+        this method does itself anymore) and lowers every function in
+        it. Two genuinely separate passes even within that: every
+        function's own IRFunction already exists, complete, before ANY
+        of them is lowered -- nothing here interleaves building and
+        lowering the way old-style code once had to."""
+        self.ir_program = ir_program
+        asm_functions = [self.lower_function(ir_fn, ir_program) for ir_fn in ir_program.functions]
         return AsmProgram(
-            functions=asm_functions, string_literals=self.string_literals, type_descriptors=self.type_descriptors)
+            functions=asm_functions,
+            string_literals=ir_program.string_literals,
+            type_descriptors=ir_program.type_descriptors,
+        )
 
-    def gen_function(self, fn: Function) -> AsmFunction:
+    def gen_function(self, fn: Function, ir_program: IRProgram) -> AsmFunction:
         """Thin convenience wrapper: builds fn's own IRFunction, then
         immediately lowers it -- see gen_function_ir/lower_function for
-        what each half does. generate() itself no longer goes through
-        this method at all (see its own updated body): it builds every
-        function's own IRFunction FIRST, into a real IRProgram (via
-        IRProgramBuilder), then lowers all of them in a second,
-        separate pass into the AsmProgram it returns. This method
-        still does both, back to back, for one function at a time,
-        since that's still a perfectly correct way to compile a single
+        what each half does. Takes ir_program explicitly, same as
+        lower_function does, rather than building its own: this
+        function alone has no Program AST to build one from (only fn,
+        a single Function), so the caller must already have one -- via
+        ir.program_builder.build_ir_program, or hand-built directly,
+        with at least struct_registry/type_alias_registry/ids set to
+        whatever fn's own body needs. generate() itself no longer goes
+        through this method at all (see its own updated body): it
+        lowers every function in an already-built IRProgram in one
+        pass, into the AsmProgram it returns. This method still builds
+        and lowers, back to back, for one function at a time, since
+        that's still a perfectly correct way to compile a single
         function end to end (nothing about gen_function_ir/lower_
-        function's own contract requires the whole-program build-then-
-        lower split generate() now uses) -- it exists for anything
-        that wants exactly that, without caring about the IR in
-        between. Every existing test that calls compile_to_asm/
-        generate_asm goes through generate(), not this method, so it
-        has exactly one caller left: itself, from outside this class,
-        if anything ever wants it directly."""
-        ir_fn = IRFunctionBuilder(self).gen_function_ir(fn)
-        return self.lower_function(ir_fn)
+        function's own contract requires the whole-program shape
+        generate() now uses) -- it exists for anything that wants
+        exactly that, without caring about the IR in between. Every
+        existing test that calls compile_to_asm/generate_asm goes
+        through generate(), not this method, so it has exactly one
+        caller left: itself, from outside this class, if anything ever
+        wants it directly."""
+        ir_fn = IRFunctionBuilder(ir_program).gen_function_ir(fn)
+        return self.lower_function(ir_fn, ir_program)
 
-    def lower_function(self, ir_fn: IRFunction) -> AsmFunction:
+    def lower_function(self, ir_fn: IRFunction, ir_program: IRProgram) -> AsmFunction:
         """Allocates registers over ir_fn's own body, lowers it, and
         assembles the final AsmFunction -- everything gen_function_ir's
         own docstring says is deliberately NOT captured on IRFunction
         yet: frame layout (_frame_size, computed only now, since
         lowering can still grow it -- see this method's own comment
         below), the epilogue, and the bounds-check panic block. Takes
-        only ir_fn, not the original Function AST node at all --
-        ir_fn.name already carries fn.name by construction (see gen_
-        function_ir), and nothing else here ever needed fn itself,
-        only what gen_function_ir already extracted from it. Nothing
-        about HOW any of this is computed has changed from before this
-        split existed.
+        ir_program too, not just ir_fn: struct_registry/ids -- read
+        below and by InstructionSelector/the lowering mixins, via
+        self.ir_program -- live there now, not on self (see this
+        module's own updated docstring), and ir_fn's own IRProgram is
+        generally a DIFFERENT object than whatever's currently on self
+        if this is being called standalone (see gen_function), so it
+        can't be assumed to already be self.ir_program the way it
+        would be if generate() were this method's only caller. Does
+        not take the original Function AST node at all -- ir_fn.name
+        already carries fn.name by construction (see gen_function_ir),
+        and nothing else here ever needed fn itself, only what gen_
+        function_ir already extracted from it. Nothing about HOW any
+        of this is computed has changed from before this split
+        existed.
 
-        Resets self._bounds_check_fail_labels here, not in gen_
-        function_ir: found as a real bug -- this state is written and
-        read ENTIRELY during lowering (_get_bounds_check_fail_label/
-        _gen_bounds_check_panic_block, both in arrays_slices.py, never
-        touched anywhere during the build phase at all), so resetting
-        it in gen_function_ir only ever worked by historical accident,
-        back when build and lower ran back-to-back for the same
-        function -- generate() building every IRFunction first, THEN
-        lowering all of them, breaks that accident: every function's
-        own build call would reset this before ANY function's own
-        lower_function call ever ran, leaving two different functions'
-        own lower_function calls sharing the same, never-reset dict in
-        between, each thinking it owns whichever fail label the OTHER
-        one already claimed -- caught by a real duplicate-symbol
-        assembler error, two different functions each emitting a
-        `.Lbounds_check_fail_0:` label of their own. Resetting state
-        where it's actually used, not wherever it historically
-        happened to line up, is the general fix -- see gen_function_ir
-        itself for confirmation nothing else it resets is read outside
-        that one build call."""
+        Resets self._bounds_check_fail_labels/_slot_offsets/_escaped_
+        offsets/_allocation_finalized here, not in gen_function_ir:
+        found as a real bug for the first of these -- this state is
+        written and read ENTIRELY during lowering (_get_bounds_check_
+        fail_label/_gen_bounds_check_panic_block, both in arrays_
+        slices_lowering.py, never touched anywhere during the build
+        phase at all), so resetting it in gen_function_ir only ever
+        worked by historical accident, back when build and lower ran
+        back-to-back for the same function -- generate() building
+        every IRFunction first, THEN lowering all of them, breaks that
+        accident: every function's own build call would reset this
+        before ANY function's own lower_function call ever ran,
+        leaving two different functions' own lower_function calls
+        sharing the same, never-reset dict in between, each thinking
+        it owns whichever fail label the OTHER one already claimed --
+        caught by a real duplicate-symbol assembler error, two
+        different functions each emitting a `.Lbounds_check_fail_0:`
+        label of their own. The other three moved here for the
+        identical reason, once building stopped needing a
+        CodeGenerator at all (see ir.builder's own module docstring):
+        building never read any of them, only reset them, so there was
+        never a genuine reason for the build phase to touch them in
+        the first place, just historical accident again. Resetting
+        state where it's actually used, not wherever it historically
+        happened to line up, is the general fix."""
+        self.ir_program = ir_program
         self._bounds_check_fail_labels = {}
+        self._slot_offsets = {}
+        self._escaped_offsets = set()
+        self._allocation_finalized = False
         ir = ir_fn.body
         # A named-local Temp is safe to allocate despite is_named_local
         # (see eligible_intervals' own docstring) exactly when this
@@ -326,7 +332,7 @@ class CodeGenerator(
         # own intervals, so an unrelated, earlier function's Temp id
         # appearing here too changes nothing.
         safe_named_locals = frozenset(
-            temp_id for temp_id, offset in self.ids._temp_offsets.items()
+            temp_id for temp_id, offset in ir_program.ids._temp_offsets.items()
             if offset not in self._escaped_offsets
         )
         self._register_assignment = allocate_registers(ir, safe_named_locals)
@@ -434,7 +440,15 @@ class CodeGenerator(
 # ---------------------------------------------------------------------------
 
 def generate_asm(program: Program, platform: str = 'macos') -> str:
-    asm_program = CodeGenerator().generate(program)
+    """Build, then lower -- two genuinely separate calls now, not one
+    (see codegen.py's own module docstring, and ir.program_builder's):
+    build_ir_program needs nothing from CodeGenerator at all, so this
+    is exactly where a future IR-to-IR transform (an optimization
+    pass, say) would run, given ir_program and returning a
+    (presumably different) IRProgram of its own, right between these
+    two lines."""
+    ir_program = build_ir_program(program)
+    asm_program = CodeGenerator().generate(ir_program)
     return Emitter(platform=platform).emit(asm_program)
 
 

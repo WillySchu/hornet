@@ -91,8 +91,8 @@ class ArraysSlicesLoweringMixin:
             (r64, r32) for r64, r32 in [('rax', 'eax'), ('rcx', 'ecx'), ('rdx', 'edx')]
             if r64 not in used_bases
         )
-        leaf_width = type_byte_width(leaf, self.struct_registry)
-        total = type_byte_width(array_type, self.struct_registry)
+        leaf_width = type_byte_width(leaf, self.ir_program.struct_registry)
+        total = type_byte_width(array_type, self.ir_program.struct_registry)
         instructions = []
         off = 0
         while off < total:
@@ -175,9 +175,9 @@ class ArraysSlicesLoweringMixin:
         extracted here specifically so both apply the IDENTICAL
         growth rule without duplicating this arithmetic twice."""
         instructions = []
-        zero_label = self.ids.new_label("append_cap_zero")
-        quarter_label = self.ids.new_label("append_cap_quarter")
-        growth_done_label = self.ids.new_label("append_growth_done")
+        zero_label = self.ir_program.ids.new_label("append_cap_zero")
+        quarter_label = self.ir_program.ids.new_label("append_cap_quarter")
+        growth_done_label = self.ir_program.ids.new_label("append_growth_done")
 
         instructions.append(Cmp(src=Imm(0), dst=r_cap_32))
         instructions.append(Je(zero_label))
@@ -241,8 +241,8 @@ class ArraysSlicesLoweringMixin:
         # into the NEW one (r_new_ptr), via an ordinary, generic byte
         # copy -- a genuine RUNTIME loop since len is a runtime value
         # here.
-        loop_start_label = self.ids.new_label("slice_grow_copy_loop")
-        loop_done_label = self.ids.new_label("slice_grow_copy_done")
+        loop_start_label = self.ir_program.ids.new_label("slice_grow_copy_loop")
+        loop_done_label = self.ir_program.ids.new_label("slice_grow_copy_done")
         i_32 = Register('r9d')
         instructions.append(Mov(src=Imm(0), dst=i_32))
         instructions.append(Label(loop_start_label))
@@ -275,7 +275,7 @@ class ArraysSlicesLoweringMixin:
         LOCAL jump targets, meaningless outside the function they're
         generated for."""
         if message not in self._bounds_check_fail_labels:
-            self._bounds_check_fail_labels[message] = self.ids.new_label("bounds_check_fail")
+            self._bounds_check_fail_labels[message] = self.ir_program.ids.new_label("bounds_check_fail")
         return self._bounds_check_fail_labels[message]
 
     def _get_bounds_check_message_label(self, message: str) -> str:
@@ -284,9 +284,9 @@ class ArraysSlicesLoweringMixin:
         plain static string, safely shared by every function that
         needs it) a label for this exact `message` string."""
         if message not in self._bounds_check_message_labels:
-            label = self.ids.new_label("bounds_msg")
+            label = self.ir_program.ids.new_label("bounds_msg")
             self._bounds_check_message_labels[message] = label
-            self.string_literals.append((label, message))
+            self.ir_program.string_literals.append((label, message))
         return self._bounds_check_message_labels[message]
 
     def _gen_bounds_check_panic_block(self) -> list[Instruction]:

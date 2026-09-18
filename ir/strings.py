@@ -39,7 +39,7 @@ _TYPEDESC_INT64 = 8
 class StringsMixin:
     def _get_or_build_type_descriptor(self, t: Type, in_progress: dict[Type, str]) -> str:
         """Returns the label of t's runtime type descriptor, building
-        and registering it into self.host.type_descriptors if it hasn't
+        and registering it into self.ir_program.type_descriptors if it hasn't
         already been built WITHIN THIS ONE CALL (in_progress, keyed on
         t -- Type is frozen, so it's already a safe, correct dict key).
 
@@ -69,47 +69,47 @@ class StringsMixin:
         """
         if t in in_progress:
             return in_progress[t]
-        label = self.host.ids.new_label("typedesc")
+        label = self.ir_program.ids.new_label("typedesc")
         in_progress[t] = label
 
         if t.kind == TypeKind.INT:
-            self.host.type_descriptors.append((label, [_TYPEDESC_INT]))
+            self.ir_program.type_descriptors.append((label, [_TYPEDESC_INT]))
         elif t == Type.INT8:
-            self.host.type_descriptors.append((label, [_TYPEDESC_INT8]))
+            self.ir_program.type_descriptors.append((label, [_TYPEDESC_INT8]))
         elif t == Type.UINT8:
-            self.host.type_descriptors.append((label, [_TYPEDESC_UINT8]))
+            self.ir_program.type_descriptors.append((label, [_TYPEDESC_UINT8]))
         elif t == Type.INT64:
-            self.host.type_descriptors.append((label, [_TYPEDESC_INT64]))
+            self.ir_program.type_descriptors.append((label, [_TYPEDESC_INT64]))
         elif t.kind == TypeKind.BOOL:
-            self.host.type_descriptors.append((label, [_TYPEDESC_BOOL]))
+            self.ir_program.type_descriptors.append((label, [_TYPEDESC_BOOL]))
         elif t.kind == TypeKind.STR:
-            self.host.type_descriptors.append((label, [_TYPEDESC_STR]))
+            self.ir_program.type_descriptors.append((label, [_TYPEDESC_STR]))
         elif t.kind == TypeKind.ARRAY:
-            name_label = self.host.ids.new_label("typedesc_name")
-            self.host.string_literals.append((name_label, str(t)))
+            name_label = self.ir_program.ids.new_label("typedesc_name")
+            self.ir_program.string_literals.append((name_label, str(t)))
             elem_label = self._get_or_build_type_descriptor(t.element_type, in_progress)
-            elem_width = type_byte_width(t.element_type, self.host.struct_registry)
-            self.host.type_descriptors.append((label, [_TYPEDESC_ARRAY, name_label, elem_label, t.size, elem_width]))
+            elem_width = type_byte_width(t.element_type, self.ir_program.struct_registry)
+            self.ir_program.type_descriptors.append((label, [_TYPEDESC_ARRAY, name_label, elem_label, t.size, elem_width]))
         elif t.kind == TypeKind.SLICE:
-            name_label = self.host.ids.new_label("typedesc_name")
-            self.host.string_literals.append((name_label, str(t)))
+            name_label = self.ir_program.ids.new_label("typedesc_name")
+            self.ir_program.string_literals.append((name_label, str(t)))
             elem_label = self._get_or_build_type_descriptor(t.element_type, in_progress)
-            elem_width = type_byte_width(t.element_type, self.host.struct_registry)
-            self.host.type_descriptors.append((label, [_TYPEDESC_SLICE, name_label, elem_label, elem_width]))
+            elem_width = type_byte_width(t.element_type, self.ir_program.struct_registry)
+            self.ir_program.type_descriptors.append((label, [_TYPEDESC_SLICE, name_label, elem_label, elem_width]))
         elif t.kind == TypeKind.STRUCT:
-            name_label = self.host.ids.new_label("typedesc_name")
-            self.host.string_literals.append((name_label, str(t)))
-            struct_info = self.host.struct_registry[t.struct_name]
+            name_label = self.ir_program.ids.new_label("typedesc_name")
+            self.ir_program.string_literals.append((name_label, str(t)))
+            struct_info = self.ir_program.struct_registry[t.struct_name]
             field_fields: list = []
             field_count = 0
             for field_name, field_type in struct_info.fields.items():
-                field_name_label = self.host.ids.new_label("typedesc_fname")
-                self.host.string_literals.append((field_name_label, field_name))
+                field_name_label = self.ir_program.ids.new_label("typedesc_fname")
+                self.ir_program.string_literals.append((field_name_label, field_name))
                 field_type_label = self._get_or_build_type_descriptor(field_type, in_progress)
                 field_offset = self._field_offset(t.struct_name, field_name)
                 field_fields.extend([field_name_label, field_type_label, field_offset])
                 field_count += 1
-            self.host.type_descriptors.append((label, [_TYPEDESC_STRUCT, name_label, field_count] + field_fields))
+            self.ir_program.type_descriptors.append((label, [_TYPEDESC_STRUCT, name_label, field_count] + field_fields))
         else:
             raise CodegenError(f"No type descriptor rule for: {t}")
 
@@ -122,10 +122,10 @@ class StringsMixin:
         check, so a zero-initialized str has to point at a real, valid
         (if empty) C string -- a null pointer would segfault the
         instant anything touched it."""
-        if self.host._empty_str_label is None:
-            self.host._empty_str_label = self.host.ids.new_label("empty_str")
-            self.host.string_literals.append((self.host._empty_str_label, ""))
-        return self.host._empty_str_label
+        if self.ir_program._empty_str_label is None:
+            self.ir_program._empty_str_label = self.ir_program.ids.new_label("empty_str")
+            self.ir_program.string_literals.append((self.ir_program._empty_str_label, ""))
+        return self.ir_program._empty_str_label
 
     def _ir_print_call(self, expr: Call):
         """Builds (without lowering) print(x)'s own real IR -- returns
@@ -208,20 +208,20 @@ class StringsMixin:
             value_addr_ir, value_addr = result
         elif arg_type.kind == TypeKind.SLICE:
             slice_ir, ptr_value, len_value, cap_value = self._ir_slice_arg(arg)
-            slice_addr = self.host.ids.new_temp(Type.INT64)
+            slice_addr = self.ir_program.ids.new_temp(Type.INT64)
             value_addr_ir = slice_ir + [IRLocalAddress(dst=slice_addr, slot=self._unnamed_slice_temp_slot)]
             value_addr_ir.extend(
                 self._ir_write_slice_descriptor_into_address(slice_addr, ptr_value, len_value, cap_value))
             value_addr = slice_addr
         else:
             expr_ir, value = self.gen_expr_ir(arg)
-            scalar_addr = self.host.ids.new_temp(Type.INT64)
+            scalar_addr = self.ir_program.ids.new_temp(Type.INT64)
             value_addr_ir = expr_ir + [IRLocalAddress(dst=scalar_addr, slot=self._print_scalar_temp_slot)]
             value_addr_ir.append(IRStore(address=scalar_addr, value=value, value_type=arg_type))
             value_addr = scalar_addr
 
         desc_label = self._get_or_build_type_descriptor(arg_type, {})
-        desc_addr = self.host.ids.new_temp(Type.INT64)
+        desc_addr = self.ir_program.ids.new_temp(Type.INT64)
         desc_ir = [IRStaticDataAddress(dst=desc_addr, label=desc_label)]
 
         call_ir = [IRCall(dst=None, name='hornet_print', args=[value_addr, desc_addr])]
@@ -263,11 +263,11 @@ class StringsMixin:
         left_ir, left_value = self.gen_expr_ir(expr.left)
         right_ir, right_value = self.gen_expr_ir(expr.right)
 
-        len_left = self.host.ids.new_temp(Type.INT64)
-        len_right = self.host.ids.new_temp(Type.INT64)
-        total_len = self.host.ids.new_temp(Type.INT64)
-        plus_one = self.host.ids.new_temp(Type.INT64)
-        new_buf = self.host.ids.new_temp(Type.STR)
+        len_left = self.ir_program.ids.new_temp(Type.INT64)
+        len_right = self.ir_program.ids.new_temp(Type.INT64)
+        total_len = self.ir_program.ids.new_temp(Type.INT64)
+        plus_one = self.ir_program.ids.new_temp(Type.INT64)
+        new_buf = self.ir_program.ids.new_temp(Type.STR)
 
         ir = left_ir + right_ir + [
             IRCall(dst=len_left, name='strlen', args=[left_value]),
@@ -317,8 +317,8 @@ class StringsMixin:
         left_ir, left_value = self.gen_expr_ir(expr.left)
         right_ir, right_value = self.gen_expr_ir(expr.right)
 
-        cmp_result = self.host.ids.new_temp(Type.INT)
-        t_result = self.host.ids.new_temp(Type.BOOL)
+        cmp_result = self.ir_program.ids.new_temp(Type.INT)
+        t_result = self.ir_program.ids.new_temp(Type.BOOL)
 
         ir = left_ir + right_ir + [IRCall(dst=cmp_result, name='strcmp', args=[left_value, right_value])]
         ir += self._ir_free_if_fresh_concat(expr.left, left_value)

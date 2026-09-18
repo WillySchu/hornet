@@ -1,7 +1,8 @@
 """Tests for IRFunction/IRProgram (see ir/ir.py) -- the thin
 aggregation objects introduced by this compiler's own IR/codegen
-decoupling work, and generate()'s own population of self.ir_program
-alongside the AsmProgram it already returns.
+decoupling work, build_ir_program's own construction of a complete
+IRProgram, and generate()'s own population of self.ir_program from
+whatever IRProgram it's given.
 
 No consumer of self.ir_program exists yet (see IRProgram's own
 docstring for why it's built anyway) -- these tests exist specifically
@@ -19,6 +20,7 @@ import semantic
 from lexer import lex
 from codegen.codegen import CodeGenerator
 from ir.ir import IRFunction, IRInstr, IRProgram
+from ir.program_builder import build_ir_program
 
 
 def _parse_and_analyze(source: str):
@@ -42,8 +44,9 @@ def test_generate_populates_ir_program():
         "def int main():\n"
         "    return add(1, 2)\n"
     )
+    ir_program = build_ir_program(ast)
     gen = CodeGenerator()
-    gen.generate(ast)
+    gen.generate(ir_program)
     assert isinstance(gen.ir_program, IRProgram)
     assert [fn.name for fn in gen.ir_program.functions] == ['add', 'main']
     assert all(isinstance(fn, IRFunction) for fn in gen.ir_program.functions)
@@ -64,8 +67,9 @@ def test_ir_function_body_is_nonempty_for_a_nontrivial_function():
         "    int y = 2\n"
         "    return x + y\n"
     )
+    ir_program = build_ir_program(ast)
     gen = CodeGenerator()
-    gen.generate(ast)
+    gen.generate(ir_program)
     main_fn = gen.ir_program.functions[0]
     assert main_fn.name == 'main'
     assert len(main_fn.body) > 0
@@ -96,8 +100,9 @@ def test_ir_function_body_contains_only_real_ir_ops():
         "        total = total - 1\n"
         "    return total\n"
     )
+    ir_program = build_ir_program(ast)
     gen = CodeGenerator()
-    gen.generate(ast)
+    gen.generate(ir_program)
     for fn in gen.ir_program.functions:
         for instr in fn.body:
             assert isinstance(instr, _IR_INSTR_TYPES), (
@@ -116,8 +121,9 @@ def test_ir_program_shares_string_and_typedesc_data_with_asm_program():
         "    print(s)\n"
         "    return 0\n"
     )
+    ir_program = build_ir_program(ast)
     gen = CodeGenerator()
-    asm_program = gen.generate(ast)
+    asm_program = gen.generate(ir_program)
     assert gen.ir_program.string_literals == asm_program.string_literals
     assert gen.ir_program.type_descriptors == asm_program.type_descriptors
     assert len(gen.ir_program.string_literals) > 0
@@ -127,8 +133,7 @@ def test_ir_program_carries_struct_and_type_alias_registries():
     """struct_registry/type_alias_registry are copied onto IRProgram
     too (see its own docstring for why a self-contained artifact needs
     them, not just string_literals/type_descriptors), matching
-    Program's own registries exactly -- the same ones CodeGenerator
-    itself still keeps for lowering's own use."""
+    Program's own registries exactly."""
     ast = _parse_and_analyze(
         "struct Point:\n"
         "    int x\n"
@@ -140,12 +145,21 @@ def test_ir_program_carries_struct_and_type_alias_registries():
         "    Point p = Point(1, 2)\n"
         "    return p.x\n"
     )
-    gen = CodeGenerator()
-    gen.generate(ast)
-    assert gen.ir_program.struct_registry == ast.struct_registry
-    assert gen.ir_program.type_alias_registry == ast.type_alias_registry
-    assert 'Point' in gen.ir_program.struct_registry
-    assert 'Coord' in gen.ir_program.type_alias_registry
+    ir_program = build_ir_program(ast)
+    assert ir_program.struct_registry == ast.struct_registry
+    assert ir_program.type_alias_registry == ast.type_alias_registry
+    assert 'Point' in ir_program.struct_registry
+    assert 'Coord' in ir_program.type_alias_registry
+
+
+def test_ir_program_carries_its_own_ids():
+    """ids (an IdAllocator) is the third piece of IRProgram's own
+    self-containment, alongside the two registries above -- see its
+    own docstring for why building needs a live one, not just a
+    default placeholder."""
+    ast = _parse_and_analyze("def int main():\n    return 1\n")
+    ir_program = build_ir_program(ast)
+    assert ir_program.ids is not None
 
 
 def test_gen_function_wrapper_matches_generate_output():
@@ -153,19 +167,24 @@ def test_gen_function_wrapper_matches_generate_output():
     wrapper) must still produce an AsmFunction identical to what
     generate() itself produces for the same function -- confirmed
     directly since generate() no longer calls gen_function at all
-    (see its own updated body)."""
+    (see its own updated body). Two SEPARATE IRProgram instances, one
+    per pathway (matching how gen_a/gen_b were already separate
+    CodeGenerator instances, each with its own independent
+    IdAllocator, before this test's own last rewrite) -- sharing one
+    would let whichever pathway runs first mint a label the other
+    then can't, turning a real match into a false mismatch."""
     ast = _parse_and_analyze(
         "def int main():\n"
         "    int x = 5\n"
         "    return x * 2\n"
     )
+    ir_program_a = build_ir_program(ast)
     gen_a = CodeGenerator()
-    gen_a.struct_registry = ast.struct_registry
-    gen_a.type_alias_registry = ast.type_alias_registry
-    via_wrapper = gen_a.gen_function(ast.functions[0])
+    via_wrapper = gen_a.gen_function(ast.functions[0], ir_program_a)
 
+    ir_program_b = build_ir_program(ast)
     gen_b = CodeGenerator()
-    asm_program = gen_b.generate(ast)
+    asm_program = gen_b.generate(ir_program_b)
     via_generate = asm_program.functions[0]
 
     assert via_wrapper == via_generate

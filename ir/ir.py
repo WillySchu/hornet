@@ -594,8 +594,8 @@ class IRProgram:
     than being duplicated per function.
 
     struct_registry/type_alias_registry (name -> StructInfo/Type,
-    stamped onto Program by semantic.analyze() -- see IRProgramBuilder.
-    build's own defensive check) are copied here too, for the same
+    stamped onto Program by semantic.analyze() -- see build_ir_
+    program's own defensive check) are copied here too, for the same
     reason: an IRLocalAddress/IRStructAddress referencing a struct
     field, or any type this IR's own Temps carry, is only fully
     interpretable alongside the registries that gave those names and
@@ -603,11 +603,22 @@ class IRProgram:
     be IR that LOOKS self-contained but silently depends on whatever
     CodeGenerator instance happened to build it still being alive and
     unchanged -- exactly the kind of hidden coupling this whole arc has
-    been removing one piece at a time. CodeGenerator itself still keeps
-    its own copies too (self.struct_registry/self.type_alias_registry),
-    since lowering reads them from there, not from this object -- see
-    IRProgramBuilder's own module docstring for why that split still
-    holds even though both copies now exist.
+    been removing one piece at a time.
+
+    ids/_empty_str_label complete that same self-containment: ids (an
+    IdAllocator -- see its own module docstring) is THE single, live
+    counter every Temp/label/slot this program's own build, and
+    everything downstream of it (lowering, and eventually whatever
+    optimization passes run in between), draws from -- never a fresh
+    one, since two different counters each handing out their own
+    "slot 0" would collide. No typed default here (unlike every field
+    above): IdAllocator lives in codegen/, and codegen/id_allocator.py
+    itself imports IRFunction/Temp from this same module, so importing
+    IdAllocator back in here would be circular. build_ir_program
+    constructs the one real instance and passes it in explicitly;
+    `None` is purely a placeholder for code that hasn't gone through a
+    real build yet, the same defensive-default reasoning CodeGenerator
+    itself uses for struct_registry and the rest.
 
     Used to also deliberately exclude the print-stringify helper
     function old-style code conditionally added to AsmProgram's own
@@ -633,3 +644,5 @@ class IRProgram:
     type_descriptors: list = field(default_factory=list)
     struct_registry: dict = field(default_factory=dict)
     type_alias_registry: dict = field(default_factory=dict)
+    ids: object = None
+    _empty_str_label: object = None

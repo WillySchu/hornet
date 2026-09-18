@@ -191,7 +191,7 @@ class StatementsMixin:
             if (
                     isinstance(stmt.value, Call)
                     and stmt.value.name != 'append'
-                    and stmt.value.name not in self.host.struct_registry
+                    and stmt.value.name not in self.ir_program.struct_registry
             ):
                 value_type = type_of(stmt.value)
                 hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr(ir_fn)
@@ -272,7 +272,7 @@ class StatementsMixin:
                         write_ir = self._ir_write_slice_descriptor_into_address(
                             hidden_ptr, ptr_value, len_value, cap_value)
                         return hidden_ptr_ir + slice_ir + write_ir + [IRReturn(value=None)]
-            if isinstance(stmt.value, Call) and stmt.value.name in self.host.struct_registry:
+            if isinstance(stmt.value, Call) and stmt.value.name in self.ir_program.struct_registry:
                 value_type = type_of(stmt.value)
                 hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr(ir_fn)
                 write_ir = self._ir_write_struct_literal_into(hidden_ptr, stmt.value, value_type)
@@ -309,9 +309,9 @@ class StatementsMixin:
             # falls through to the old-style catch-all below -- a
             # real, deliberate scope boundary, not an oversight.
         elif isinstance(stmt, If):
-            then_label = self.host.ids.new_label("if_then")
-            else_label = self.host.ids.new_label("if_else")
-            end_label = self.host.ids.new_label("if_end")
+            then_label = self.ir_program.ids.new_label("if_then")
+            else_label = self.ir_program.ids.new_label("if_else")
+            end_label = self.ir_program.ids.new_label("if_end")
             ir = self._ir_if_head(stmt, then_label, else_label)
             self._push_scope()
             for s in stmt.then_body:
@@ -327,9 +327,9 @@ class StatementsMixin:
             ir.append(IRLabel(end_label))
             return ir
         elif isinstance(stmt, While):
-            start_label = self.host.ids.new_label("while_start")
-            body_label = self.host.ids.new_label("while_body")
-            end_label = self.host.ids.new_label("while_end")
+            start_label = self.ir_program.ids.new_label("while_start")
+            body_label = self.ir_program.ids.new_label("while_body")
+            end_label = self.ir_program.ids.new_label("while_end")
             ir = self._ir_while_head(stmt, start_label, body_label, end_label)
             self.loop_labels.append((start_label, end_label))
             self._push_scope()
@@ -351,7 +351,7 @@ class StatementsMixin:
             # those does its own single _bind_local call once its own
             # shape is confirmed to apply, and binding twice would
             # just orphan a Temp id, harmlessly but pointlessly.
-            var_type = type_from_name(stmt.var_type, self.host.struct_registry, self.host.type_alias_registry)
+            var_type = type_from_name(stmt.var_type, self.ir_program.struct_registry, self.ir_program.type_alias_registry)
             if not isinstance(stmt.init, NoneLiteral) and var_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
                 self._bind_local(stmt, ir_fn)
                 if stmt.init is not None:
@@ -503,7 +503,7 @@ class StatementsMixin:
                     var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE)
                     and (isinstance(stmt.init, Call)
                          and stmt.init.name != 'append'
-                         and stmt.init.name not in self.host.struct_registry)):
+                         and stmt.init.name not in self.ir_program.struct_registry)):
                 slot = self._bind_local(stmt, ir_fn)
                 ir = []
                 if var_type.kind != TypeKind.SLICE and self._is_heap_allocated(id(stmt), var_type):
@@ -543,7 +543,7 @@ class StatementsMixin:
             if (
                     var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT)
                     and (isinstance(stmt.init, ArrayLiteral)
-                         or (isinstance(stmt.init, Call) and stmt.init.name in self.host.struct_registry))):
+                         or (isinstance(stmt.init, Call) and stmt.init.name in self.ir_program.struct_registry))):
                 slot = self._bind_local(stmt, ir_fn)
                 ir = []
                 if self._is_heap_allocated(id(stmt), var_type):
@@ -651,7 +651,7 @@ class StatementsMixin:
                     var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE)
                     and (isinstance(stmt.value, Call)
                          and stmt.value.name != 'append'
-                         and stmt.value.name not in self.host.struct_registry)
+                         and stmt.value.name not in self.ir_program.struct_registry)
             ):
                 dst_ir, dst_address = {
                     TypeKind.ARRAY: self._ir_array_address,
@@ -665,7 +665,7 @@ class StatementsMixin:
             if (
                     var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT)
                     and (isinstance(stmt.value, ArrayLiteral)
-                         or (isinstance(stmt.value, Call) and stmt.value.name in self.host.struct_registry))
+                         or (isinstance(stmt.value, Call) and stmt.value.name in self.ir_program.struct_registry))
             ):
                 address_fn = self._ir_array_address if var_type.kind == TypeKind.ARRAY else self._ir_struct_address
                 dst_ir, dst_address = address_fn(Variable(name=stmt.name))
@@ -723,7 +723,7 @@ class StatementsMixin:
                     element_type.kind in (TypeKind.STRUCT, TypeKind.SLICE)
                     and (isinstance(stmt.value, Call)
                          and stmt.value.name != 'append'
-                         and stmt.value.name not in self.host.struct_registry)
+                         and stmt.value.name not in self.ir_program.struct_registry)
             ):
                 dst_expr = Index(array=stmt.array, index=stmt.index)
                 address_fn = self._ir_struct_address if element_type.kind == TypeKind.STRUCT else self._ir_slice_address
@@ -737,7 +737,7 @@ class StatementsMixin:
             if (
                     element_type.kind == TypeKind.STRUCT
                     and isinstance(stmt.value, Call)
-                    and stmt.value.name in self.host.struct_registry
+                    and stmt.value.name in self.ir_program.struct_registry
             ):
                 dst_expr = Index(array=stmt.array, index=stmt.index)
                 result = self._ir_struct_address(dst_expr)
@@ -789,7 +789,7 @@ class StatementsMixin:
                     field_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE)
                     and (isinstance(stmt.value, Call)
                          and stmt.value.name != 'append'
-                         and stmt.value.name not in self.host.struct_registry)
+                         and stmt.value.name not in self.ir_program.struct_registry)
             ):
                 dst_expr = Field(base=stmt.base, name=stmt.name)
                 address_fn = {
@@ -808,7 +808,7 @@ class StatementsMixin:
                     field_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT)
                     and (isinstance(stmt.value, ArrayLiteral)
                          or (isinstance(stmt.value, Call)
-                         and stmt.value.name in self.host.struct_registry))
+                         and stmt.value.name in self.ir_program.struct_registry))
             ):
                 dst_expr = Field(base=stmt.base, name=stmt.name)
                 address_fn = self._ir_array_address if field_type.kind == TypeKind.ARRAY else self._ir_struct_address
@@ -915,9 +915,9 @@ class StatementsMixin:
         gen_statement_ir's own VarDecl case, one per fresh-value-
         producing shape (Variable/Field/Index copy, Slice production,
         append, an ordinary composite-returning call)."""
-        size = type_byte_width(var_type, self.host.struct_registry)
-        ptr = self.host.ids.new_temp(Type.INT64)
-        slot_addr = self.host.ids.new_temp(Type.INT64)
+        size = type_byte_width(var_type, self.ir_program.struct_registry)
+        ptr = self.ir_program.ids.new_temp(Type.INT64)
+        slot_addr = self.ir_program.ids.new_temp(Type.INT64)
         return [
             IRCall(dst=ptr, name='malloc', args=[IRConst(size, Type.INT64)]),
             IRLocalAddress(dst=slot_addr, slot=slot),
@@ -1048,8 +1048,8 @@ class StatementsMixin:
         `ir_fn` is threaded through purely to reach ir_fn.hidden_
         return_ptr_slot -- see IRFunction's own docstring for why
         that's explicit now rather than implicit self state."""
-        slot_addr = self.host.ids.new_temp(Type.INT64)
-        hidden_ptr = self.host.ids.new_temp(Type.INT64)
+        slot_addr = self.ir_program.ids.new_temp(Type.INT64)
+        hidden_ptr = self.ir_program.ids.new_temp(Type.INT64)
         ir = [
             IRLocalAddress(dst=slot_addr, slot=ir_fn.hidden_return_ptr_slot),
             IRLoad(dst=hidden_ptr, address=slot_addr),

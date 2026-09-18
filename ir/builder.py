@@ -3,11 +3,16 @@ gen_function_ir/gen_statement_ir/gen_expr_ir and the rest of this
 arc's own IR-building mixins (arrays_slices, scalars, structs,
 strings, statements, dispatch -- see their own module docstrings) used
 to do as methods directly on CodeGenerator. Constructed fresh per
-function, exactly like ir_lowering.py's own InstructionSelector is for
-lowering: `host` (the CodeGenerator instance) is a genuine field, set
-once at construction, used to reach whole-program state this class
-doesn't own itself (host.struct_registry, host.ids, host.string_
-literals, and the rest -- see each mixin's own docstring for which).
+function: `ir_program` is a genuine field, set once at construction,
+used to reach whole-program state this class doesn't own itself
+(ir_program.struct_registry, ir_program.ids, ir_program.string_
+literals, and the rest -- see each mixin's own docstring for which,
+and IRProgram's own docstring for why it holds them). No CodeGenerator
+involved at all, unlike this arc's own earlier shape: building a
+function's own IR needs nothing lowering-specific (frame layout,
+register assignment), so nothing here ever needed one -- see ir.
+program_builder's own module docstring for the build/lower split this
+enables.
 
 scopes -- and everything else gen_function_ir used to reset at the top
 of every call (loop_labels, _argument_temp_slots, _escaping_array_ids,
@@ -73,8 +78,8 @@ class IRFunctionBuilder(
     used for, and why scopes/loop_labels live here as genuine fields
     rather than on host."""
 
-    def __init__(self, host):
-        self.host = host
+    def __init__(self, ir_program):
+        self.ir_program = ir_program
         self.loop_labels: List[tuple] = []  # stack of (start_label, end_label), innermost last
 
     def gen_function_ir(self, fn: Function) -> IRFunction:
@@ -92,13 +97,9 @@ class IRFunctionBuilder(
         what gen_function's own first half used to do directly; this
         method exists so that half has a name and a return value of
         its own, not to change its behavior."""
-        # Fresh allocator state per function -- offsets are relative to
-        # *this* function's own %rbp.
-        self._argument_temp_slots = {}  # id(ArrayLiteral or Call) -> its permanent logical slot; see _collect_argument_temps
-        self.host._next_offset = 0
-        self.host._slot_offsets = {}
-        self.host._escaped_offsets = set()
-        self.host._allocation_finalized = False
+        # id(ArrayLiteral or Call) -> its permanent logical slot,
+        # fresh per function; see _collect_argument_temps.
+        self._argument_temp_slots = {}
         # Constructed here, early, rather than at the very end the way
         # it used to be built up from local variables -- ir_fn.slot_
         # widths/slot_labels need somewhere to live from _new_slot's
@@ -116,9 +117,9 @@ class IRFunctionBuilder(
         # small, contained move, unlike scopes/_escaping_array_ids/
         # _argument_temp_slots).
         ir_fn.return_type = Type.VOID if fn.return_type is None else type_from_name(
-            fn.return_type, self.host.struct_registry, self.host.type_alias_registry)
+            fn.return_type, self.ir_program.struct_registry, self.ir_program.type_alias_registry)
         return_type = ir_fn.return_type
-        param_types = [type_from_name(p.type, self.host.struct_registry, self.host.type_alias_registry) for p in fn.params]
+        param_types = [type_from_name(p.type, self.ir_program.struct_registry, self.ir_program.type_alias_registry) for p in fn.params]
 
         # Which of this function's array declarations need to be heap-
         # allocated because a slice backed by them might outlive this
@@ -128,7 +129,7 @@ class IRFunctionBuilder(
         # decide how much stack space each declaration's slot takes (8
         # bytes for a heap pointer vs. the array's full width).
         self._escaping_array_ids = analyze_array_escapes(
-            fn, param_types, self.host.struct_registry, self.host.type_alias_registry)
+            fn, param_types, self.ir_program.struct_registry, self.ir_program.type_alias_registry)
 
         # An array- OR slice-typed return needs a hidden pointer -- the
         # caller passes the address to write the result into, as an
@@ -152,7 +153,7 @@ class IRFunctionBuilder(
         # passed one level deeper, with no intermediate copy.
         arg_shift = 0
         if return_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
-            ir_fn.hidden_return_ptr_slot = self.host.ids.new_slot(8, "hidden_return_ptr", ir_fn)
+            ir_fn.hidden_return_ptr_slot = self.ir_program.ids.new_slot(8, "hidden_return_ptr", ir_fn)
             arg_shift = 1
 
         # A second, 24-byte slot -- reserved unconditionally for EVERY
@@ -165,7 +166,7 @@ class IRFunctionBuilder(
         # nesting, since each materialization is fully consumed before
         # any subsequent one can write to it again -- the same way a
         # call stack's frames nest.
-        self._unnamed_slice_temp_slot = self.host.ids.new_slot(24, "unnamed_slice_temp", ir_fn)
+        self._unnamed_slice_temp_slot = self.ir_program.ids.new_slot(24, "unnamed_slice_temp", ir_fn)
 
         # A third, small (8-byte) scratch slot -- also reserved
         # unconditionally -- used by _ir_print_call to materialize
@@ -177,7 +178,7 @@ class IRFunctionBuilder(
         # need (and can't safely share) a slot like this: those can be
         # arbitrarily large, so print requires a Variable or Index for
         # them instead.
-        self._print_scalar_temp_slot = self.host.ids.new_slot(8, "print_scalar_temp", ir_fn)
+        self._print_scalar_temp_slot = self.ir_program.ids.new_slot(8, "print_scalar_temp", ir_fn)
 
         self._collect_params(fn.params, ir_fn)
         self._collect_locals(fn.body, ir_fn)
@@ -303,21 +304,21 @@ class IRFunctionBuilder(
         reg_index = arg_shift
         hidden_ptr = None
         if ir_fn.hidden_return_ptr_slot is not None:
-            hidden_ptr = self.host.ids.new_temp(Type.INT64)
+            hidden_ptr = self.ir_program.ids.new_temp(Type.INT64)
             ir.append(IRReadArgument(dst=hidden_ptr, index=0))
         captured = []
         for p, p_type in zip(fn.params, param_types):
             if p_type.kind == TypeKind.SLICE:
-                ptr_value = self.host.ids.new_temp(Type.INT64)
-                len_value = self.host.ids.new_temp(Type.INT)
-                cap_value = self.host.ids.new_temp(Type.INT)
+                ptr_value = self.ir_program.ids.new_temp(Type.INT64)
+                len_value = self.ir_program.ids.new_temp(Type.INT)
+                cap_value = self.ir_program.ids.new_temp(Type.INT)
                 ir.append(IRReadArgument(dst=ptr_value, index=reg_index))
                 ir.append(IRReadArgument(dst=len_value, index=reg_index + 1))
                 ir.append(IRReadArgument(dst=cap_value, index=reg_index + 2))
                 reg_index += 3
                 captured.append((ptr_value, len_value, cap_value))
             elif p_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT):
-                caller_ptr = self.host.ids.new_temp(Type.INT64)
+                caller_ptr = self.ir_program.ids.new_temp(Type.INT64)
                 ir.append(IRReadArgument(dst=caller_ptr, index=reg_index))
                 reg_index += 1
                 captured.append(caller_ptr)
@@ -339,7 +340,7 @@ class IRFunctionBuilder(
                 captured.append(None)
 
         if hidden_ptr is not None:
-            hidden_ptr_addr = self.host.ids.new_temp(Type.INT64)
+            hidden_ptr_addr = self.ir_program.ids.new_temp(Type.INT64)
             ir.append(IRLocalAddress(dst=hidden_ptr_addr, slot=ir_fn.hidden_return_ptr_slot))
             ir.append(IRStore(address=hidden_ptr_addr, value=hidden_ptr, value_type=Type.INT64))
 
@@ -347,17 +348,17 @@ class IRFunctionBuilder(
             if p_type.kind == TypeKind.SLICE:
                 ptr_value, len_value, cap_value = cap
                 slot = self._bind_param(p, ir_fn)
-                param_addr = self.host.ids.new_temp(Type.INT64)
+                param_addr = self.ir_program.ids.new_temp(Type.INT64)
                 ir.append(IRLocalAddress(dst=param_addr, slot=slot))
                 ir.extend(self._ir_write_slice_descriptor_into_address(param_addr, ptr_value, len_value, cap_value))
             elif p_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT):
                 caller_ptr = cap
                 slot = self._bind_param(p, ir_fn)
-                param_addr = self.host.ids.new_temp(Type.INT64)
+                param_addr = self.ir_program.ids.new_temp(Type.INT64)
                 ir.append(IRLocalAddress(dst=param_addr, slot=slot))
                 if self._is_heap_allocated(id(p), p_type):
-                    size = type_byte_width(p_type, self.host.struct_registry)
-                    new_ptr = self.host.ids.new_temp(Type.INT64)
+                    size = type_byte_width(p_type, self.ir_program.struct_registry)
+                    new_ptr = self.ir_program.ids.new_temp(Type.INT64)
                     ir.append(IRCall(dst=new_ptr, name='malloc', args=[IRConst(size, Type.INT64)]))
                     ir.append(IRStore(address=param_addr, value=new_ptr, value_type=Type.INT64))
                     ir.append(IRCopy(dst_address=new_ptr, src_address=caller_ptr, value_type=p_type))
@@ -387,9 +388,9 @@ class IRFunctionBuilder(
         IRFunction's own docstring for why that's explicit now rather
         than implicit self state."""
         for p in params:
-            p_type = type_from_name(p.type, self.host.struct_registry, self.host.type_alias_registry)
-            width = 8 if self._is_heap_allocated(id(p), p_type) else type_byte_width(p_type, self.host.struct_registry)
-            ir_fn.var_slots[id(p)] = self.host.ids.new_slot(width, f"param:{p.name}", ir_fn)
+            p_type = type_from_name(p.type, self.ir_program.struct_registry, self.ir_program.type_alias_registry)
+            width = 8 if self._is_heap_allocated(id(p), p_type) else type_byte_width(p_type, self.ir_program.struct_registry)
+            ir_fn.var_slots[id(p)] = self.ir_program.ids.new_slot(width, f"param:{p.name}", ir_fn)
 
     def _bind_param(self, p: Param, ir_fn: IRFunction) -> int:
         """The Param counterpart to _bind_local -- registers `p`'s name
@@ -403,8 +404,8 @@ class IRFunctionBuilder(
         after this method (and every other piece of this function's
         own body IR) is done being built."""
         slot = ir_fn.var_slots[id(p)]
-        p_type = type_from_name(p.type, self.host.struct_registry, self.host.type_alias_registry)
-        self.scopes[-1][p.name] = (slot, p_type, id(p), self.host.ids.temp_at_offset(p_type, slot))
+        p_type = type_from_name(p.type, self.ir_program.struct_registry, self.ir_program.type_alias_registry)
+        self.scopes[-1][p.name] = (slot, p_type, id(p), self.ir_program.ids.temp_at_offset(p_type, slot))
         return slot
 
     def _collect_locals(self, statements: List[Node], ir_fn: IRFunction) -> None:
@@ -432,10 +433,10 @@ class IRFunctionBuilder(
         for why that's explicit now rather than implicit self state."""
         for stmt in statements:
             if isinstance(stmt, VarDecl):
-                var_type = type_from_name(stmt.var_type, self.host.struct_registry, self.host.type_alias_registry)
+                var_type = type_from_name(stmt.var_type, self.ir_program.struct_registry, self.ir_program.type_alias_registry)
                 width = 8 if self._is_heap_allocated(
-                    id(stmt), var_type) else type_byte_width(var_type, self.host.struct_registry)
-                ir_fn.var_slots[id(stmt)] = self.host.ids.new_slot(width, f"local:{stmt.name}", ir_fn)
+                    id(stmt), var_type) else type_byte_width(var_type, self.ir_program.struct_registry)
+                ir_fn.var_slots[id(stmt)] = self.ir_program.ids.new_slot(width, f"local:{stmt.name}", ir_fn)
             elif isinstance(stmt, If):
                 self._collect_locals(stmt.then_body, ir_fn)
                 if stmt.else_body is not None:
@@ -548,7 +549,7 @@ class IRFunctionBuilder(
         'append' that was never compiled), matching the identical
         exclusion this arc has applied everywhere else a composite-
         returning Call is distinguished from these two shapes."""
-        return isinstance(expr, Call) and expr.name != 'append' and expr.name not in self.host.struct_registry
+        return isinstance(expr, Call) and expr.name != 'append' and expr.name not in self.ir_program.struct_registry
 
     def _collect_argument_temps_in_expr(self, expr: Optional[Node], ir_fn: IRFunction) -> None:
         """The general expression-tree walk _collect_argument_temps
@@ -639,10 +640,10 @@ class IRFunctionBuilder(
         the caller, it flows into the callee as a whole value copied on
         entry -- so only the plain size check ever applies, via
         is_heap_allocated directly."""
-        if is_heap_allocated(t, self.host.struct_registry):
+        if is_heap_allocated(t, self.ir_program.struct_registry):
             return
-        width = type_byte_width(t, self.host.struct_registry)
-        self._argument_temp_slots[id(expr)] = self.host.ids.new_slot(width, "argument_temp", ir_fn)
+        width = type_byte_width(t, self.ir_program.struct_registry)
+        self._argument_temp_slots[id(expr)] = self.ir_program.ids.new_slot(width, "argument_temp", ir_fn)
 
 
     def _push_scope(self) -> None:
@@ -677,8 +678,8 @@ class IRFunctionBuilder(
         they address this variable's slot directly, exactly as
         before."""
         slot = ir_fn.var_slots[id(stmt)]
-        var_type = type_from_name(stmt.var_type, self.host.struct_registry, self.host.type_alias_registry)
-        self.scopes[-1][stmt.name] = (slot, var_type, id(stmt), self.host.ids.temp_at_offset(var_type, slot))
+        var_type = type_from_name(stmt.var_type, self.ir_program.struct_registry, self.ir_program.type_alias_registry)
+        self.scopes[-1][stmt.name] = (slot, var_type, id(stmt), self.ir_program.ids.temp_at_offset(var_type, slot))
         return slot
 
     def _local_slot(self, name: str) -> int:
@@ -769,5 +770,5 @@ class IRFunctionBuilder(
         sufficient. This is the actual decision point every call site
         that used to call is_heap_allocated directly now goes through
         instead, each passing whichever decl_id it has on hand."""
-        return is_heap_allocated(t, self.host.struct_registry) or decl_id in self._escaping_array_ids
+        return is_heap_allocated(t, self.ir_program.struct_registry) or decl_id in self._escaping_array_ids
 
