@@ -68,3 +68,5 @@ Updates:
 - GC...
 - Free memory `malloc`ed by string concatenation.
 - Explore graph coloring algorithm for register allocation (Chaitin-Briggs).
+- Consider renaming CodeGenerator to something like X86Backend.
+- Target different architectures?
