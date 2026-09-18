@@ -25,7 +25,7 @@ it matters. Ids are never reused and never renumbered."""
 
 from typing import Dict
 
-from ir import IRFunction, Temp
+from ir.ir import IRFunction, Temp
 from semantic import Type
 
 

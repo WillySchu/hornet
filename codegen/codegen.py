@@ -12,8 +12,9 @@ semantic analysis, and codegen together.
 Building a function's own real IR (arrays_slices, scalars, structs,
 strings, statements, dispatch -- what used to be mixed directly into
 this class) is ir.builder.IRFunctionBuilder's job now, constructed
-fresh per function from generate()/gen_function -- see its own module
-docstring for why.
+fresh per function from generate()/gen_function; building the whole
+program's IR from every function's own is ir.program_builder.
+IRProgramBuilder's -- see their own module docstrings for why.
 """
 
 
@@ -41,10 +42,10 @@ from codegen.assembly_ast import (
 )
 from codegen.calling_convention import CALLEE_SAVED_SCRATCH_REGISTERS
 from codegen.emitter import Emitter
-from codegen.errors import CodegenError
 from codegen.id_allocator import IdAllocator
-from ir import IRFunction, IRProgram
+from ir.ir import IRFunction, IRProgram
 from ir.builder import IRFunctionBuilder
+from ir.program_builder import IRProgramBuilder
 from codegen.ir_lowering import InstructionSelector
 from codegen.register_allocator import allocate_registers
 from codegen.scalars_lowering import ScalarsLoweringMixin
@@ -131,10 +132,16 @@ class CodeGenerator(
         # bounds-check message.
         self._bounds_check_fail_labels = {}
         self._bounds_check_message_labels = {}
-        # Set once, at the end of generate() -- see IRProgram's own
-        # docstring for why it's built at all despite having no
-        # consumer yet. Declared here defensively, same reason as
-        # struct_registry/type_alias_registry above: referencing it
+        # Set once, by generate() (via IRProgramBuilder -- see its own
+        # module docstring for why it's built at all despite having no
+        # consumer yet), before lowering runs rather than after: its
+        # own string_literals/type_descriptors are the same list
+        # objects lowering still appends to (see arrays_slices_
+        # lowering.py's own _get_bounds_check_message_label), so this
+        # object already reflects everything by the time anyone reads
+        # it once generate() itself has returned, regardless of when
+        # it was constructed. Declared here defensively, same reason
+        # as struct_registry/type_alias_registry above: referencing it
         # before generate() has ever run fails with a clear
         # AttributeError-from-None-access rather than one from
         # nowhere.
@@ -235,51 +242,19 @@ class CodeGenerator(
                     setattr(instr, f.name, Memory('rbp', self._slot_offsets[value.slot]))
 
     def generate(self, program: Program) -> AsmProgram:
-        # getattr, not direct attribute access: Program.struct_registry
-        # is stamped on by semantic.analyze(), not a field the
-        # dataclass itself declares -- an AST that skipped analyze()
-        # entirely simply won't have it. Matching type_of's own "has no
-        # resolved type" defensive check one level up: fail with a
-        # clear, actionable CodegenError right here, at the very first
-        # thing generate() does, rather than a bare AttributeError from
-        # whatever the first struct-registry lookup happens to be.
-        if not hasattr(program, 'struct_registry'):
-            raise CodegenError(
-                "Program has no struct registry -- semantic.analyze() "
-                "must run before codegen (see compile_to_asm)"
-            )
-        self.struct_registry = program.struct_registry
-        # Same defensive check, same reason, one registry over.
-        if not hasattr(program, 'type_alias_registry'):
-            raise CodegenError(
-                "Program has no type alias registry -- semantic.analyze() "
-                "must run before codegen (see compile_to_asm)"
-            )
-        self.type_alias_registry = program.type_alias_registry
-        # Two genuinely separate passes now, not one interleaved loop:
-        # every function's own IRFunction is built completely before
-        # ANY of them is lowered. This was blocked, until now, by a
-        # small piece of per-function state (the slot registry -- see
-        # IRFunction's own docstring) that used to live on self, reset
-        # by the NEXT function's own gen_function_ir call before the
-        # CURRENT one's own lower_function call ever ran. Every OTHER
-        # piece of per-function state gen_function_ir used to set on
-        # self this same way (scopes, the hidden-return-pointer slot,
-        # escape-analysis results, and the rest) never needed to
-        # survive past that same call in the first place -- confirmed
-        # directly, not assumed, back when all of it still lived here.
-        # Now it's a genuine field on its own IRFunctionBuilder
-        # instance (see its own module docstring), constructed fresh
-        # right here for each function in turn, so the same guarantee
-        # holds structurally instead of by discipline: a fresh
-        # instance simply has nothing left over from any other
-        # function to leak.
-        ir_functions = [IRFunctionBuilder(self).gen_function_ir(fn) for fn in program.functions]
-        asm_functions = [self.lower_function(ir_fn) for ir_fn in ir_functions]
-        # No consumer reads this yet -- see IRProgram's own docstring
-        # for why it's built and kept anyway.
-        self.ir_program = IRProgram(
-            functions=ir_functions, string_literals=self.string_literals, type_descriptors=self.type_descriptors)
+        """Two genuinely separate passes: build (see IRProgramBuilder's
+        own module docstring for why that's its own step now, not
+        inline here), then lower every function in the result. This
+        split was blocked, until this arc's own earlier work, by a
+        small piece of per-function state (the slot registry -- see
+        IRFunction's own docstring) that used to live on self, reset
+        by the NEXT function's own build call before the CURRENT one's
+        own lower_function call ever ran -- moot now that building
+        happens on its own IRFunctionBuilder instance, fresh per
+        function, rather than sharing self with lowering the way it
+        used to."""
+        self.ir_program = IRProgramBuilder(self).build(program)
+        asm_functions = [self.lower_function(ir_fn) for ir_fn in self.ir_program.functions]
         return AsmProgram(
             functions=asm_functions, string_literals=self.string_literals, type_descriptors=self.type_descriptors)
 
@@ -288,19 +263,19 @@ class CodeGenerator(
         immediately lowers it -- see gen_function_ir/lower_function for
         what each half does. generate() itself no longer goes through
         this method at all (see its own updated body): it builds every
-        function's own IRFunction FIRST, in one pass, then lowers all
-        of them in a second, separate pass -- collecting the results
-        into a real IRProgram alongside the AsmProgram it already
-        built. This method still does both, back to back, for one
-        function at a time, since that's still a perfectly correct way
-        to compile a single function end to end (nothing about
-        gen_function_ir/lower_function's own contract requires the
-        whole-program build-then-lower split generate() now uses) --
-        it exists for anything that wants exactly that, without caring
-        about the IR in between. Every existing test that calls
-        compile_to_asm/generate_asm goes through generate(), not this
-        method, so it has exactly one caller left: itself, from outside
-        this class, if anything ever wants it directly."""
+        function's own IRFunction FIRST, into a real IRProgram (via
+        IRProgramBuilder), then lowers all of them in a second,
+        separate pass into the AsmProgram it returns. This method
+        still does both, back to back, for one function at a time,
+        since that's still a perfectly correct way to compile a single
+        function end to end (nothing about gen_function_ir/lower_
+        function's own contract requires the whole-program build-then-
+        lower split generate() now uses) -- it exists for anything
+        that wants exactly that, without caring about the IR in
+        between. Every existing test that calls compile_to_asm/
+        generate_asm goes through generate(), not this method, so it
+        has exactly one caller left: itself, from outside this class,
+        if anything ever wants it directly."""
         ir_fn = IRFunctionBuilder(self).gen_function_ir(fn)
         return self.lower_function(ir_fn)
 

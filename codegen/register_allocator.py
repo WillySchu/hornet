@@ -24,7 +24,7 @@ ALLOCATABLE_REGISTERS below), not the algorithm.
 from dataclasses import dataclass, field
 from typing import Optional
 
-from ir import (
+from ir.ir import (
     IRBinOp,
     IRBoundsCheck,
     IRBranch,

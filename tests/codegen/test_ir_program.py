@@ -1,4 +1,4 @@
-"""Tests for IRFunction/IRProgram (see ir/__init__.py) -- the thin
+"""Tests for IRFunction/IRProgram (see ir/ir.py) -- the thin
 aggregation objects introduced by this compiler's own IR/codegen
 decoupling work, and generate()'s own population of self.ir_program
 alongside the AsmProgram it already returns.
@@ -18,7 +18,7 @@ import parser
 import semantic
 from lexer import lex
 from codegen.codegen import CodeGenerator
-from ir import IRFunction, IRInstr, IRProgram
+from ir.ir import IRFunction, IRInstr, IRProgram
 
 
 def _parse_and_analyze(source: str):

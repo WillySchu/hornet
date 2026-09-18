@@ -16,7 +16,7 @@ old-style dead-code cleanup this was folded into)."""
 
 from codegen.errors import CodegenError
 from codegen.utils import type_byte_width, type_of
-from ir import IRBinOp, IRConst, IRCall, IRStaticDataAddress, IRLocalAddress, IRStore
+from ir.ir import IRBinOp, IRConst, IRCall, IRStaticDataAddress, IRLocalAddress, IRStore
 from parser import Call, Binary, Node, BinaryOp
 from semantic import Type, TypeKind
 

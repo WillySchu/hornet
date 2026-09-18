@@ -5,7 +5,7 @@ leaving memory untouched, and the label-pair shape (start/end, or
 else/end) every branching or looping construct here builds on."""
 
 from codegen.errors import CodegenError
-from ir import (
+from ir.ir import (
     IRReturn, IRBranch, IRLabel, IRJump, IRMove, IRStore, IRCopy, IRConst, IRLoad, IRLocalAddress, IRCall,
     IRFunction, IRStaticDataAddress,
 )

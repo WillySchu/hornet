@@ -31,7 +31,7 @@ from typing import List, Optional
 from codegen.errors import CodegenError
 from codegen.escape_analysis import analyze_array_escapes, is_heap_allocated
 from codegen.utils import type_byte_width, type_of
-from ir import IRCall, IRConst, IRCopy, IRFunction, IRLocalAddress, IRReadArgument, IRStore, Temp
+from ir.ir import IRCall, IRConst, IRCopy, IRFunction, IRLocalAddress, IRReadArgument, IRStore, Temp
 from ir.arrays_slices import ArraysSlicesMixin
 from ir.dispatch import DispatchMixin
 from ir.scalars import ScalarsMixin

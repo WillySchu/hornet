@@ -41,10 +41,25 @@ codebase.
 """
 
 from codegen.assembly_ast import (
-    Instruction, Operand, Register, Memory, FrameSlot, Imm, Mov, MovQ, Cmp, Je, Jae, Ja, Jmp, Label, CallInstr,
-    LeaQFrame, LeaQFrameSlot, LeaQ,
+    CallInstr,
+    Cmp,
+    FrameSlot,
+    Imm,
+    Instruction,
+    Ja,
+    Jae,
+    Je,
+    Jmp,
+    Label,
+    LeaQ,
+    LeaQFrameSlot,
+    Memory,
+    Mov,
+    MovQ,
+    Operand,
+    Register,
 )
-from ir import (
+from ir.ir import (
     IRBinOp,
     IRBoundsCheck,
     IRBranch,

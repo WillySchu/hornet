@@ -653,7 +653,8 @@ from typing import Optional
 
 import pytest
 
-from codegen.codegen import CodegenError, generate_asm
+from codegen.codegen import generate_asm
+from codegen.errors import CodegenError
 from build import RUNTIME_C_PATH
 from lexer import lex
 from parser import Break, Constant, Node, Parser, ParseError
@@ -2573,11 +2574,12 @@ class TestTypeAnnotation:
     def test_codegen_without_semantic_analysis_raises_clear_error(self):
         """codegen invoked on an AST that skipped semantic.analyze()
         (so Program itself has no struct_registry, stamped on only by
-        analyze's own struct-collection pass -- see generate()'s own
-        defensive check, the first thing it does) must fail with a
-        clear, actionable CodegenError -- matching _type_of's and
-        _local_offset's own established posture -- rather than a bare
-        AttributeError or, worse, silently wrong codegen."""
+        analyze's own struct-collection pass -- see IRProgramBuilder.
+        build's own defensive check, the first thing generate() does
+        via it) must fail with a clear, actionable CodegenError --
+        matching _type_of's and _local_offset's own established
+        posture -- rather than a bare AttributeError or, worse,
+        silently wrong codegen."""
         ast = _parse("def int main():\n    return 1 + 2\n")
         # Deliberately not calling analyze(ast) here.
         with pytest.raises(CodegenError, match="no struct registry"):
