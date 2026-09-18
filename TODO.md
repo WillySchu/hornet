@@ -18,6 +18,7 @@ Documentation:
 
 Updates:
 - Constant Folding / Identity Reduction optimization pass.
+- Move codegen.generate\_asm into compile.py.
 - Decouple desugaring from semantic analysis.
 - Cleanup remaining IR/backend coupling.
 - FFI
