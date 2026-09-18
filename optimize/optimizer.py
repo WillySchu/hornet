@@ -1,15 +1,16 @@
 """optimize(ir_program) is the one entrypoint this whole package
 exposes -- see generate_asm's own body (codegen/codegen.py) for the
 seam it runs in, right between build_ir_program and CodeGenerator().
-generate: building needs nothing from lowering, and now, symmetrically,
-optimizing needs nothing from either -- just the IRProgram itself.
+generate: building needs nothing from lowering, and optimizing needs
+nothing from either -- just the IRProgram itself.
 
 A plain function, not a class: there's no state a composing entrypoint
 would need to hold across the passes it runs (each pass here is
 itself a plain, stateless function taking one IRFunction -- see
-constant_folding.py's own fold_constants), the identical reasoning
-that turned ir.program_builder's own IRProgramBuilder into a plain
-build_ir_program function once IT lost its own reason to be a class.
+constant_folding.py's own fold_constants and identity_reduction.py's
+own reduce_identities), the identical reasoning that turned ir.
+program_builder's own IRProgramBuilder into a plain build_ir_program
+function once IT lost its own reason to be a class.
 
 Mutates every function in ir_program.functions in place and returns
 the same object, rather than building a new IRProgram -- matching how
@@ -19,19 +20,33 @@ returning the identical object rather than a new one costs nothing
 while keeping `ir_program = optimize(ir_program)` and a bare
 `optimize(ir_program)` equally correct for a caller to write.
 
-One pass today. Adding a second (identity reduction, say) means
-importing its own module's own entrypoint here and calling it
-alongside fold_constants for each function -- in whatever order makes
-each pass see the other's own output where that matters (constant
-folding before identity reduction lets `x + (2 + 3)` reduce in one
-optimize() call rather than needing two), not necessarily the order
-listed."""
+The order fold_constants/reduce_identities run in genuinely doesn't
+matter, for either pass over the other: neither one propagates a
+computed value INTO a later instruction's own operand -- `int y = (2 +
+3) + 1` builds as two separate IRBinOps, the second one's own left
+operand a Temp referencing the first one's own dst, never the constant
+5 itself, regardless of whether the first has already been folded to
+an IRMove by the time the second runs (see constant_folding.py's own
+docstring for why an IRMove into the SAME Temp, not deletion-plus-use-
+rewriting, is what makes this safe in the first place -- the flip side
+is that nothing here ever rewrites a Temp reference into the constant
+it happens to currently evaluate to). The two passes only ever
+interact within a SINGLE instruction, where an op can qualify for
+both (`5 + 0` is both fully constant and has an identity operand) --
+and there, both independently compute the identical correct
+replacement, so whichever runs first simply leaves nothing for the
+second to do. Real constant PROPAGATION across instructions -- letting
+that second IRBinOp actually see 5 instead of a Temp -- would be a
+genuinely different, more involved pass than either of these, not a
+consequence of running both in some particular order."""
 
 from ir.ir import IRProgram
 from optimize.constant_folding import fold_constants
+from optimize.identity_reduction import reduce_identities
 
 
 def optimize(ir_program: IRProgram) -> IRProgram:
     for ir_fn in ir_program.functions:
         fold_constants(ir_fn)
+        reduce_identities(ir_fn)
     return ir_program
