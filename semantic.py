@@ -196,6 +196,7 @@ from enum import auto, Enum
 from typing import Dict, List, Optional, Set, Tuple
 
 from lexer import lex
+from desugar import mangle_method_name
 from parser import (
     ArrayLiteral,
     ArrayTypeExpr,
@@ -559,18 +560,22 @@ class SemanticAnalyzer:
 
     def _collect_methods(self, program: Program) -> Dict[Tuple[str, str], Tuple[List[Type], Type, str]]:
         """For every struct's methods: reject a duplicate name on the
-        SAME struct (fine across different structs), synthesize an
-        ordinary Function (receiver becomes a typed first Param) and
-        append it to program.functions in place.
-
-        The synthesized name is `StructName.methodName` -- '.' can't
-        appear in a Hornet IDENTIFIER, so it structurally can't
-        collide with any free function, another struct's method, or a
-        builtin; no explicit collision check needed.
+        SAME struct (fine across different structs), independently
+        re-deriving the identical mangled name desugar_methods already
+        gave this method's own synthesized Function (see mangle_
+        method_name, shared by both so they can never disagree).
 
         Returns a (struct_name, method_name) -> (param types excluding
         the receiver, return type, mangled name) lookup for check_
-        call's _check_method_call to resolve and rewrite a call site."""
+        call's _check_method_call to resolve and rewrite a call site.
+        The synthesized Function itself -- and program.functions
+        already containing it -- is desugar_methods' own job, run
+        before semantic.analyze() is ever called (see its own module
+        docstring for why this can't happen here, or any later than
+        here): resolving each method's own parameter/return types into
+        real Type objects, which desugar_methods has no struct
+        registry available to do yet, is this method's own reason to
+        exist independently of it."""
         methods: Dict[Tuple[str, str], Tuple[List[Type], Type, str]] = {}
         for sd in program.structs:
             seen_names: Set[str] = set()
@@ -581,17 +586,9 @@ class SemanticAnalyzer:
                         f"struct '{sd.name}'"
                     )
                 seen_names.add(md.name)
-                mangled_name = f"{sd.name}.{md.name}"
                 param_types = [type_from_name(p.type, self.structs, self.type_aliases) for p in md.params]
                 return_type = Type.VOID if md.return_type is None else type_from_name(md.return_type, self.structs, self.type_aliases)
-                methods[(sd.name, md.name)] = (param_types, return_type, mangled_name)
-                receiver_param = Param(name=md.receiver_name, type=sd.name)
-                program.functions.append(Function(
-                    name=mangled_name,
-                    return_type=md.return_type,
-                    params=[receiver_param] + md.params,
-                    body=md.body,
-                ))
+                methods[(sd.name, md.name)] = (param_types, return_type, mangle_method_name(sd.name, md.name))
         return methods
 
     def _collect_type_aliases(self, alias_defs: List[TypeAlias], structs: Dict[str, StructInfo]) -> Dict[str, Type]:

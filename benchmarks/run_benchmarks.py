@@ -34,6 +34,7 @@ sys.path.insert(0, str(ROOT))
 
 from lexer import lex
 from parser import Parser
+from desugar import desugar_methods
 from semantic import analyze
 from codegen.emitter import Emitter
 from build import RUNTIME_C_PATH
@@ -147,6 +148,7 @@ def run_one(ht_path: Path) -> dict:
         src_path.write_text(source)
         tokens = lex(str(src_path))
         program = Parser(tokens).parse_program()
+        desugar_methods(program)
         analyze(program)
 
         asm_program, captured = _instrumented_generate(program)

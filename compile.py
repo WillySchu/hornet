@@ -3,6 +3,7 @@
 import argparse
 
 from codegen.codegen import generate_asm
+from desugar import desugar_methods
 from lexer import lex
 from parser import Parser
 from semantic import analyze
@@ -27,6 +28,7 @@ def main():
 def compile_to_asm(source: str, platform: str = 'macos') -> str:
     tokens = lex(source)
     ast = Parser(tokens).parse_program()
+    desugar_methods(ast)  # must run before analyze() -- see its own module docstring for why
     analyze(ast)  # raises SemanticError before any code is generated
     return generate_asm(ast, platform=platform)
 

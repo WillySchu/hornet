@@ -16,6 +16,7 @@ import tempfile
 from pathlib import Path
 from typing import get_args
 
+import desugar
 import parser
 import semantic
 from lexer import lex
@@ -30,6 +31,7 @@ def _parse_and_analyze(source: str):
         src_path.write_text(source)
         tokens = lex(str(src_path))
         ast = parser.Parser(tokens).parse_program()
+        desugar.desugar_methods(ast)
         semantic.analyze(ast)
         return ast
 

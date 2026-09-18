@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
+import desugar
 import parser
 import semantic
 import codegen.escape_analysis as ea
@@ -16,6 +17,7 @@ def parse_and_analyze(source: str) -> parser.Program:
         src_path.write_text(source)
         tokens = lex(str(src_path))
         ast = parser.Parser(tokens).parse_program()
+        desugar.desugar_methods(ast)
         semantic.analyze(ast)
         return ast
 
@@ -31,6 +33,7 @@ def parse_expression(source: str) -> parser.Node:
 
 def _analyze(fn: parser.Function):
     program = parser.Program(functions=[fn], structs=[])
+    desugar.desugar_methods(program)
     semantic.analyze(program)
 
 

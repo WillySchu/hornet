@@ -656,9 +656,23 @@ import pytest
 from codegen.codegen import generate_asm
 from codegen.errors import CodegenError
 from build import RUNTIME_C_PATH
+from desugar import desugar_methods
 from lexer import lex
 from parser import Break, Constant, Node, Parser, ParseError
-from semantic import SemanticError, analyze
+from semantic import SemanticError, analyze as _semantic_analyze
+
+
+def analyze(program):
+    """Test-only convenience wrapper: runs desugar_methods before
+    semantic analysis, matching compile_to_asm's own real pipeline
+    shape (see its own module docstring, desugar.py, for why desugaring
+    has to run first) -- so every one of this file's own ~90 existing
+    `analyze(ast)` call sites keeps working unchanged, rather than
+    needing desugar_methods threaded through individually at each one.
+    """
+    desugar_methods(program)
+    _semantic_analyze(program)
+
 
 
 GCC_AVAILABLE = shutil.which("gcc") is not None

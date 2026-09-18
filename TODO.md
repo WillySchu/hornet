@@ -17,7 +17,6 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
-- Decouple desugaring from semantic analysis.
 - Cleanup remaining IR/backend coupling.
 - FFI
 - Separate the runtime code from codegen.
