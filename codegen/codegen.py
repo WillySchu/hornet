@@ -50,6 +50,7 @@ from codegen.emitter import Emitter
 from ir.ir import IRFunction, IRProgram
 from ir.builder import IRFunctionBuilder
 from ir.program_builder import build_ir_program
+from optimize.optimizer import optimize
 from codegen.ir_lowering import InstructionSelector
 from codegen.register_allocator import allocate_registers
 from codegen.scalars_lowering import ScalarsLoweringMixin
@@ -351,13 +352,12 @@ class CodeGenerator(
 # ---------------------------------------------------------------------------
 
 def generate_asm(program: Program, platform: str = 'macos') -> str:
-    """Build, then lower -- two genuinely separate calls now, not one
-    (see codegen.py's own module docstring, and ir.program_builder's):
-    build_ir_program needs nothing from CodeGenerator at all, so this
-    is exactly where a future IR-to-IR transform (an optimization
-    pass, say) would run, given ir_program and returning a
-    (presumably different) IRProgram of its own, right between these
-    two lines."""
+    """Build, optimize, then lower -- three genuinely separate calls
+    now (see codegen.py's own module docstring, and ir.program_
+    builder's/optimize.optimizer's own): build_ir_program needs
+    nothing from CodeGenerator, and optimize needs nothing from either
+    build_ir_program or CodeGenerator -- just the IRProgram itself."""
     ir_program = build_ir_program(program)
+    ir_program = optimize(ir_program)
     asm_program = CodeGenerator().generate(ir_program)
     return Emitter(platform=platform).emit(asm_program)

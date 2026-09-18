@@ -38,6 +38,7 @@ from semantic import analyze
 from codegen.emitter import Emitter
 from build import RUNTIME_C_PATH
 from ir.program_builder import build_ir_program
+from optimize.optimizer import optimize
 import codegen.codegen as codegen_module
 import codegen.register_allocator as ra_module
 
@@ -74,6 +75,7 @@ def _instrumented_generate(program):
     codegen_module.allocate_registers = wrapper
     try:
         ir_program = build_ir_program(program)
+        ir_program = optimize(ir_program)
         asm_program = codegen_module.CodeGenerator().generate(ir_program)
     finally:
         codegen_module.allocate_registers = original

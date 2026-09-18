@@ -17,8 +17,7 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
-- Constant Folding / Identity Reduction optimization pass.
-- Move codegen.generate\_asm into compile.py.
+- Identity Reduction optimization pass.
 - Decouple desugaring from semantic analysis.
 - Cleanup remaining IR/backend coupling.
 - FFI
