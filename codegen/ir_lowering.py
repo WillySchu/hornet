@@ -14,26 +14,30 @@ permanent-frame-slot policy remains exactly this, used as the
 fallback for whichever Temps the allocator didn't promote -- except
 that an anonymous Temp's own slot, discovered here for the first time,
 can't be resolved to a real offset immediately the way every other
-slot in this compiler is: host._resolve_frame_layout already ran once,
-before this method's own caller (lower_ir) ever started. _temp_mem
-returns a FrameSlot placeholder for one of these instead (see its own
-docstring), and lower_function is what resolves every one of them,
-in one pass, after lower_ir returns.
+slot in this compiler is: host._resolve_frame_layout doesn't run until
+lower_function, well after lower_ir (this method's own caller) is
+done. _temp_mem returns a FrameSlot placeholder for one of these
+instead (see its own docstring), and lower_function is what resolves
+every one of them, in one pass, after lower_ir returns.
 
 InstructionSelector is a standalone class, not a CodeGenerator mixin
 (it was one -- IRLoweringMixin -- until every dependency below was
 made an explicit constructor argument instead of an implicit
 assumption about whatever else happened to be mixed into a shared
-self). `host` is still held and read/written directly for two pieces
-of state -- the slot registry (_new_slot/_slot_widths/_slot_labels)
-and _temp_slots/_temp_offsets -- because those are
-genuinely shared with CodeGenerator's own frame-slot allocation for
-named locals/parameters (see _temp_at_offset): fully separating them
-would mean also restructuring that side, a distinct, larger piece of
-work this doesn't attempt. Every OTHER dependency (which leaf codegen
-methods get called, which read-only program-level data is needed) is
-listed here, in one place, rather than discovered by grepping for
-self. across the rest of the codebase.
+self). Constructed fresh per function's own lowering now (see lower_
+function's own comment), not once for the whole compilation: `ir_fn`
+is a genuine field, set once at construction, needed by _temp_mem's
+own call to host._new_slot (see IRFunction's own docstring for why
+its slot registry lives there rather than on host at all now). `host`
+is still held and read/written directly for one remaining piece of
+state -- _temp_slots/_temp_offsets -- because Temp ids are globally
+unique across the whole compilation (never reset per function the way
+ir_fn's own slot registry used to need to be), so leaving this on host
+is harmless, not a shortcut standing in for a fix still owed. Every
+OTHER dependency (which leaf codegen methods get called, which read-
+only program-level data is needed) is listed here, in one place,
+rather than discovered by grepping for self. across the rest of the
+codebase.
 """
 
 from codegen.assembly_ast import (
@@ -69,10 +73,16 @@ from semantic import Type
 
 class InstructionSelector:
     """See this module's own docstring for what `host` is and isn't
-    used for."""
+    used for. Constructed fresh per function's own lowering (see
+    lower_function's own comment), not once for the whole compilation
+    -- `ir_fn` is a genuine field here, set once at construction and
+    never repointed, needed by _temp_mem's own call to host._new_slot
+    (see IRFunction's own docstring for why that's a parameter now
+    rather than implicit self state on host)."""
 
-    def __init__(self, host):
+    def __init__(self, host, ir_fn):
         self.host = host
+        self.ir_fn = ir_fn
 
     def _temp_mem(self, temp: Temp) -> Operand:
         """Returns temp's own frame location, assigning it a fresh
@@ -110,7 +120,7 @@ class InstructionSelector:
             return FrameSlot(slot=self.host._temp_offsets[temp.id])
         if temp.id not in self.host._temp_slots:
             width = type_byte_width(temp.type, self.host.struct_registry)
-            self.host._temp_slots[temp.id] = self.host._new_slot(width, f"temp:{temp.id}")
+            self.host._temp_slots[temp.id] = self.host._new_slot(width, f"temp:{temp.id}", self.ir_fn)
         return FrameSlot(slot=self.host._temp_slots[temp.id])
 
     def _gen_load_value(self, value: IRValue, dst: Register) -> list[Instruction]:

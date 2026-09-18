@@ -525,10 +525,34 @@ class IRFunction:
     needs it (to decide whether a trailing epilogue is required), and
     it's already resolved during the build half, so it travels along
     on this object rather than being recomputed or re-read off self
-    afterward."""
+    afterward.
+
+    `slot_widths`/`slot_labels` are this function's own logical-slot
+    registry (see codegen.py's own _new_slot): every slot a name/id ->
+    (byte width, debug label) pair, in the exact order each was
+    created. Used to live on CodeGenerator's own self, reset at the
+    start of every gen_function_ir call -- which meant it could only
+    ever be trusted for the ONE function currently being built or
+    lowered, since building the NEXT function would silently wipe out
+    a not-yet-lowered one's own registry. Living here instead is what
+    lets generate() build every function's own IRFunction completely,
+    independent of the others, before lowering any of them: each
+    carries its own slot registry with it, genuinely surviving from
+    _new_slot's own first call (during gen_function_ir) through to
+    _resolve_frame_layout's own single call (during lower_function),
+    no matter how many OTHER functions get built or lowered in
+    between. Passed explicitly wherever it's needed (_new_slot,
+    _collect_params, _collect_locals, _reserve_argument_temp, _resolve_
+    frame_layout, and ir_lowering.py's own InstructionSelector, which
+    holds the ir_fn it was constructed for as a genuine field) rather
+    than read implicitly off self, the same reason IRLocalAddress
+    itself carries a slot id explicitly rather than assuming ambient
+    knowledge of which function is "current." """
     name: str
     body: list = field(default_factory=list)
     return_type: Optional[Type] = None
+    slot_widths: dict = field(default_factory=dict)
+    slot_labels: dict = field(default_factory=dict)
 
 
 @dataclass

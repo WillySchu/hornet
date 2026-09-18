@@ -89,7 +89,6 @@ class CodeGenerator(
     produces an equivalent AsmProgram."""
 
     def __init__(self):
-        self._instruction_selector = InstructionSelector(self)
         self._label_count = 0
         self._var_slots: Dict[int, int] = {}  # id(VarDecl node) -> its permanent logical slot
         self._next_offset = 0
@@ -99,14 +98,13 @@ class CodeGenerator(
         # even though a slot's own physical offset is only ever
         # meaningful within the one function that reserved it.
         self._slot_count = 0
-        self._slot_widths: Dict[int, int] = {}  # slot id -> its own byte width; reset per function
-        self._slot_labels: Dict[int, str] = {}  # slot id -> a debug label; reset per function
         self._slot_offsets: Dict[int, int] = {}  # slot id -> its final, physical offset; see _resolve_frame_layout
         # IR temps (see ir.py): _temp_count is a fresh-id counter for
         # _new_temp, mirroring _label_count. _temp_offsets maps a
-        # NAMED-local Temp's id to its permanent, already-resolved
-        # physical offset (set eagerly by _temp_at_offset, when the
-        # Temp itself is created). _temp_slots maps an ANONYMOUS
+        # NAMED-local Temp's id to its own logical slot (set by _temp_
+        # at_offset, when the Temp itself is created -- not a resolved
+        # physical offset at all; see its own docstring). _temp_slots
+        # maps an ANONYMOUS
         # Temp's id to its own logical slot instead -- populated
         # lazily by ir_lowering.py's _temp_mem, the first time a Temp
         # is actually referenced during lowering, not when it's
@@ -177,7 +175,7 @@ class CodeGenerator(
         self.type_alias_registry: Dict[str, Type] = {}
         self._empty_str_label = None  # "" -- str's own zero value; see _get_empty_str_label
         # Lazily created, but with different lifetimes from each other:
-        # the fail labels are reset per function (gen_function); the
+        # the fail labels are reset per function (gen_function_ir); the
         # message labels, like the print-related ones above, are cached
         # for the whole compilation. Both are dicts keyed by message
         # text, since a function can trigger more than one distinct
@@ -266,7 +264,7 @@ class CodeGenerator(
         self._temp_offsets[temp_id] = slot
         return Temp(id=temp_id, type=t, is_named_local=True)
 
-    def _new_slot(self, width: int, label: str) -> int:
+    def _new_slot(self, width: int, label: str, ir_fn: IRFunction) -> int:
         """Allocates a fresh, logical frame-slot identifier -- the
         _new_temp of frame slots, but for IRLocalAddress's own `slot`
         field rather than a virtual register. Carries no physical
@@ -274,11 +272,13 @@ class CodeGenerator(
         compute `self._next_offset -= width` and use the result
         directly (as an offset, immediately) -- now it records the
         slot's own width and a human-readable label (for debugging;
-        never read by anything else) and returns an opaque id instead,
-        deferring the actual offset decision to _resolve_frame_layout.
+        never read by anything else) onto `ir_fn` itself, not self
+        (see IRFunction's own docstring for why), and returns an
+        opaque id instead, deferring the actual offset decision to
+        _resolve_frame_layout.
 
         Order matters here: _resolve_frame_layout assigns offsets in
-        the exact order slots were created in (self._slot_widths is a
+        the exact order slots were created in (ir_fn.slot_widths is a
         plain dict, so insertion order is preserved), reproducing
         today's own running-counter layout exactly. Every caller below
         that used to reserve a slot with `self._next_offset -= width`
@@ -286,20 +286,25 @@ class CodeGenerator(
         subtractions used to happen in."""
         slot_id = self._slot_count
         self._slot_count += 1
-        self._slot_widths[slot_id] = width
-        self._slot_labels[slot_id] = label
+        ir_fn.slot_widths[slot_id] = width
+        ir_fn.slot_labels[slot_id] = label
         return slot_id
 
-    def _resolve_frame_layout(self) -> None:
+    def _resolve_frame_layout(self, ir_fn: IRFunction) -> None:
         """Assigns a final, physical %rbp-relative byte offset to
-        every logical slot _new_slot has handed out for the CURRENT
-        function, in the exact order they were created -- reproducing
-        what used to be a single, uninterrupted "self._next_offset -=
-        width" running counter, just computed as one explicit step
-        instead of scattered across every individual reservation site.
-        Stores the result in self._slot_offsets (slot id -> offset),
-        and leaves self._next_offset at its own final value too, for
-        _frame_size to read.
+        every logical slot _new_slot has handed out for `ir_fn`, in
+        the exact order they were created -- reproducing what used to
+        be a single, uninterrupted "self._next_offset -= width"
+        running counter, just computed as one explicit step instead of
+        scattered across every individual reservation site. Stores the
+        result in self._slot_offsets (slot id -> offset), and leaves
+        self._next_offset at its own final value too, for _frame_size
+        to read -- both stay on self, unlike ir_fn.slot_widths/slot_
+        labels, since neither is ever read outside the ONE lower_
+        function call that computes them (see IRFunction's own
+        docstring for the distinction: what must survive across
+        function boundaries lives on ir_fn; what's purely local to one
+        call is fine staying on self).
 
         Called exactly once per function, by lower_function, right
         after lower_ir returns -- by which point EVERY slot this
@@ -322,7 +327,7 @@ class CodeGenerator(
         Memory for an anonymous Temp -- both wait for _patch_frame_
         slots, right below, to resolve them, once this call has run."""
         next_offset = 0
-        for slot_id, width in self._slot_widths.items():
+        for slot_id, width in ir_fn.slot_widths.items():
             next_offset -= width
             self._slot_offsets[slot_id] = next_offset
         self._next_offset = next_offset
@@ -401,27 +406,21 @@ class CodeGenerator(
                 "must run before codegen (see compile_to_asm)"
             )
         self.type_alias_registry = program.type_alias_registry
-        # One function at a time, build-then-lower immediately, exactly
-        # as gen_function's own two calls already did internally --
-        # see lower_function's own docstring for why this can't yet be
-        # two separate whole-program passes (build every IRFunction,
-        # THEN lower all of them): a lot of per-function state gen_
-        # function_ir sets on self (_hidden_return_ptr_slot, _next_
-        # offset, and others) gets reset by the NEXT function's own
-        # gen_function_ir call, and lower_function still depends on
-        # the CURRENT function's own values of it. Calling both here,
-        # explicitly, in generate() itself -- rather than via gen_
-        # function, which still exists as a convenience wrapper around
-        # the identical two calls -- is what makes collecting every
-        # IRFunction into a real IRProgram possible at all, without
-        # changing this ordering constraint or anything about what
-        # gets computed.
-        ir_functions = []
-        asm_functions = []
-        for fn in program.functions:
-            ir_fn = self.gen_function_ir(fn)
-            ir_functions.append(ir_fn)
-            asm_functions.append(self.lower_function(ir_fn))
+        # Two genuinely separate passes now, not one interleaved loop:
+        # every function's own IRFunction is built completely before
+        # ANY of them is lowered. This was blocked, until now, by a
+        # small piece of per-function state (the slot registry -- see
+        # IRFunction's own docstring) that used to live on self, reset
+        # by the NEXT function's own gen_function_ir call before the
+        # CURRENT one's own lower_function call ever ran. Every OTHER
+        # piece of state gen_function_ir sets on self (scopes, the
+        # hidden-return-pointer slot, escape-analysis results, and
+        # the rest) never needed to survive past that same call in the
+        # first place -- confirmed directly, not assumed: none of it
+        # is ever read anywhere lower_function's own call tree
+        # (ir_lowering.py, register_allocator.py) touches.
+        ir_functions = [self.gen_function_ir(fn) for fn in program.functions]
+        asm_functions = [self.lower_function(ir_fn) for ir_fn in ir_functions]
         # No consumer reads this yet -- see IRProgram's own docstring
         # for why it's built and kept anyway.
         self.ir_program = IRProgram(
@@ -449,11 +448,18 @@ class CodeGenerator(
         self._var_slots = {}
         self._argument_temp_slots = {}  # id(ArrayLiteral or Call) -> its permanent logical slot; see _collect_argument_temps
         self._next_offset = 0
-        self._slot_widths = {}
-        self._slot_labels = {}
         self._slot_offsets = {}
         self._escaped_offsets = set()
         self._allocation_finalized = False
+        # Constructed here, early, rather than at the very end the way
+        # it used to be built up from local variables -- ir_fn.slot_
+        # widths/slot_labels need somewhere to live from _new_slot's
+        # own very first call onward (see IRFunction's own docstring
+        # for why self can't be that place anymore), and body/return_
+        # type are simply assigned onto it once they're known, right
+        # before this method's own return, exactly where they used to
+        # be passed into IRFunction's own constructor instead.
+        ir_fn = IRFunction(name=fn.name)
         # No declared return type means Type.VOID, the same internal-
         # only sentinel semantic.py's analyze_function uses.
         return_type = Type.VOID if fn.return_type is None else type_from_name(
@@ -494,7 +500,7 @@ class CodeGenerator(
         self._current_return_type = return_type
         arg_shift = 0
         if return_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
-            self._hidden_return_ptr_slot = self._new_slot(8, "hidden_return_ptr")
+            self._hidden_return_ptr_slot = self._new_slot(8, "hidden_return_ptr", ir_fn)
             arg_shift = 1
 
         # A second, 24-byte slot -- reserved unconditionally for EVERY
@@ -507,7 +513,7 @@ class CodeGenerator(
         # nesting, since each materialization is fully consumed before
         # any subsequent one can write to it again -- the same way a
         # call stack's frames nest.
-        self._unnamed_slice_temp_slot = self._new_slot(24, "unnamed_slice_temp")
+        self._unnamed_slice_temp_slot = self._new_slot(24, "unnamed_slice_temp", ir_fn)
 
         # A third, small (8-byte) scratch slot -- also reserved
         # unconditionally -- used by _ir_print_call to materialize
@@ -519,10 +525,10 @@ class CodeGenerator(
         # need (and can't safely share) a slot like this: those can be
         # arbitrarily large, so print requires a Variable or Index for
         # them instead.
-        self._print_scalar_temp_slot = self._new_slot(8, "print_scalar_temp")
+        self._print_scalar_temp_slot = self._new_slot(8, "print_scalar_temp", ir_fn)
 
-        self._collect_params(fn.params)
-        self._collect_locals(fn.body)
+        self._collect_params(fn.params, ir_fn)
+        self._collect_locals(fn.body, ir_fn)
         # A THIRD pre-pass, alongside the two above: finds every array-
         # or struct-typed function-call argument that has no address of
         # its own -- an ArrayLiteral, a struct literal, or an ordinary
@@ -531,7 +537,7 @@ class CodeGenerator(
         # reserves each its own permanent stack slot up front, sized to
         # fit. See _collect_argument_temps for why this can't reuse the
         # single-shared-slot trick _unnamed_slice_temp_slot relies on.
-        self._collect_argument_temps(fn.body)
+        self._collect_argument_temps(fn.body, ir_fn)
         self.scopes = [{}]
 
         # A slice parameter needs THREE consecutive argument-register
@@ -566,7 +572,6 @@ class CodeGenerator(
         # else.
         param_setup_ir = self._ir_param_setup(fn, param_types, arg_shift)
 
-        self._bounds_check_fail_labels = {}  # fresh, per-function jump targets
         # Accumulated as one IR list for the whole body -- see
         # gen_statement_ir -- and lowered exactly once, by gen_
         # function (this method's own caller) right after this
@@ -578,8 +583,9 @@ class CodeGenerator(
         statement_ir = []
         for stmt in fn.body:
             statement_ir.extend(self.gen_statement_ir(stmt))
-        body = param_setup_ir + statement_ir
-        return IRFunction(name=fn.name, body=body, return_type=return_type)
+        ir_fn.body = param_setup_ir + statement_ir
+        ir_fn.return_type = return_type
+        return ir_fn
 
     def _ir_param_setup(self, fn: Function, param_types: List[Type], arg_shift: int) -> list:
         """Builds (without lowering) this function's own real
@@ -712,16 +718,20 @@ class CodeGenerator(
         """Thin convenience wrapper: builds fn's own IRFunction, then
         immediately lowers it -- see gen_function_ir/lower_function for
         what each half does. generate() itself no longer goes through
-        this method at all (see its own updated body): it calls gen_
-        function_ir/lower_function itself, one function at a time, so
-        it can also collect the resulting IRFunctions into a real
-        IRProgram alongside the AsmProgram it already built. This
-        method still exists for anything that wants "just compile one
-        function end to end" without caring about the IR in between --
-        every existing test that calls compile_to_asm/generate_asm
-        goes through generate(), not this method, so it has exactly
-        one caller left: itself, from outside this class, if anything
-        ever wants it directly."""
+        this method at all (see its own updated body): it builds every
+        function's own IRFunction FIRST, in one pass, then lowers all
+        of them in a second, separate pass -- collecting the results
+        into a real IRProgram alongside the AsmProgram it already
+        built. This method still does both, back to back, for one
+        function at a time, since that's still a perfectly correct way
+        to compile a single function end to end (nothing about
+        gen_function_ir/lower_function's own contract requires the
+        whole-program build-then-lower split generate() now uses) --
+        it exists for anything that wants exactly that, without caring
+        about the IR in between. Every existing test that calls
+        compile_to_asm/generate_asm goes through generate(), not this
+        method, so it has exactly one caller left: itself, from outside
+        this class, if anything ever wants it directly."""
         ir_fn = self.gen_function_ir(fn)
         return self.lower_function(ir_fn)
 
@@ -737,7 +747,29 @@ class CodeGenerator(
         function_ir), and nothing else here ever needed fn itself,
         only what gen_function_ir already extracted from it. Nothing
         about HOW any of this is computed has changed from before this
-        split existed."""
+        split existed.
+
+        Resets self._bounds_check_fail_labels here, not in gen_
+        function_ir: found as a real bug -- this state is written and
+        read ENTIRELY during lowering (_get_bounds_check_fail_label/
+        _gen_bounds_check_panic_block, both in arrays_slices.py, never
+        touched anywhere during the build phase at all), so resetting
+        it in gen_function_ir only ever worked by historical accident,
+        back when build and lower ran back-to-back for the same
+        function -- generate() building every IRFunction first, THEN
+        lowering all of them, breaks that accident: every function's
+        own build call would reset this before ANY function's own
+        lower_function call ever ran, leaving two different functions'
+        own lower_function calls sharing the same, never-reset dict in
+        between, each thinking it owns whichever fail label the OTHER
+        one already claimed -- caught by a real duplicate-symbol
+        assembler error, two different functions each emitting a
+        `.Lbounds_check_fail_0:` label of their own. Resetting state
+        where it's actually used, not wherever it historically
+        happened to line up, is the general fix -- see gen_function_ir
+        itself for confirmation nothing else it resets is read outside
+        that one build call."""
+        self._bounds_check_fail_labels = {}
         ir = ir_fn.body
         # A named-local Temp is safe to allocate despite is_named_local
         # (see eligible_intervals' own docstring) exactly when this
@@ -756,7 +788,16 @@ class CodeGenerator(
         self._register_assignment = allocate_registers(ir, safe_named_locals)
         self._allocation_finalized = True
         instructions = []
-        instructions.extend(self._instruction_selector.lower_ir(ir))
+        # A fresh InstructionSelector per function, not the single,
+        # whole-compilation-lifetime one this used to be: _temp_mem's
+        # own call to _new_slot needs ir_fn to write onto (see
+        # IRFunction's own docstring), and constructing this object
+        # fresh, right here, is what lets it hold ir_fn as a genuine,
+        # honest field -- set once, at construction, for this one
+        # function's own lowering, never repointed at a DIFFERENT
+        # function's own ir_fn the way a shared, whole-lifetime
+        # attribute on self would risk.
+        instructions.extend(InstructionSelector(self, ir_fn).lower_ir(ir))
         # Every slot this function will EVER need is now known -- named
         # locals, parameters, scratch slots, and argument-temps, alike
         # with whatever anonymous Temps lower_ir just discovered,
@@ -764,7 +805,7 @@ class CodeGenerator(
         # this point -- see _resolve_frame_layout's own docstring for
         # why this single call is the only place any of them ever get
         # a real, physical offset at all.
-        self._resolve_frame_layout()
+        self._resolve_frame_layout(ir_fn)
         self._patch_frame_slots(instructions)
         self._register_assignment = {}  # never valid past this function's own body
         if ir_fn.return_type == Type.VOID:
@@ -814,7 +855,7 @@ class CodeGenerator(
 
         return AsmFunction(name=ir_fn.name, instructions=prologue + instructions)
 
-    def _collect_params(self, params: List[Param]) -> None:
+    def _collect_params(self, params: List[Param], ir_fn: IRFunction) -> None:
         """Gives each parameter its own logical frame slot, exactly
         like _collect_locals does for VarDecls (same node-identity
         keying) -- kept as a separate method since Param and VarDecl
@@ -829,11 +870,14 @@ class CodeGenerator(
         directly. Called after gen_function_ir has already reserved
         the hidden-return-pointer slot, if this function needs one --
         _new_slot's own creation-order guarantee is what keeps this
-        placed right after it, matching today's own layout exactly."""
+        placed right after it, matching today's own layout exactly.
+        `ir_fn` is threaded through purely to hand to _new_slot -- see
+        IRFunction's own docstring for why that's explicit now rather
+        than implicit self state."""
         for p in params:
             p_type = type_from_name(p.type, self.struct_registry, self.type_alias_registry)
             width = 8 if self._is_heap_allocated(id(p), p_type) else type_byte_width(p_type, self.struct_registry)
-            self._var_slots[id(p)] = self._new_slot(width, f"param:{p.name}")
+            self._var_slots[id(p)] = self._new_slot(width, f"param:{p.name}", ir_fn)
 
     def _bind_param(self, p: Param) -> int:
         """The Param counterpart to _bind_local -- registers `p`'s name
@@ -851,7 +895,7 @@ class CodeGenerator(
         self.scopes[-1][p.name] = (slot, p_type, id(p), self._temp_at_offset(p_type, slot))
         return slot
 
-    def _collect_locals(self, statements: List[Node]) -> None:
+    def _collect_locals(self, statements: List[Node], ir_fn: IRFunction) -> None:
         """Recursively walks `statements`, including into every If's
         then_body/else_body and every While's body, and gives each
         VarDecl found its own permanent stack slot, keyed by the AST
@@ -870,21 +914,24 @@ class CodeGenerator(
         slots: x86-64 doesn't require aligned access, and %rsp's own
         16-byte alignment requirement is satisfied purely by
         _frame_size rounding the TOTAL frame size up at the end,
-        regardless of how the space within it is subdivided."""
+        regardless of how the space within it is subdivided. `ir_fn`
+        is threaded through purely to hand to _new_slot, including on
+        every recursive call here -- see IRFunction's own docstring
+        for why that's explicit now rather than implicit self state."""
         for stmt in statements:
             if isinstance(stmt, VarDecl):
                 var_type = type_from_name(stmt.var_type, self.struct_registry, self.type_alias_registry)
                 width = 8 if self._is_heap_allocated(
                     id(stmt), var_type) else type_byte_width(var_type, self.struct_registry)
-                self._var_slots[id(stmt)] = self._new_slot(width, f"local:{stmt.name}")
+                self._var_slots[id(stmt)] = self._new_slot(width, f"local:{stmt.name}", ir_fn)
             elif isinstance(stmt, If):
-                self._collect_locals(stmt.then_body)
+                self._collect_locals(stmt.then_body, ir_fn)
                 if stmt.else_body is not None:
-                    self._collect_locals(stmt.else_body)
+                    self._collect_locals(stmt.else_body, ir_fn)
             elif isinstance(stmt, While):
-                self._collect_locals(stmt.body)
+                self._collect_locals(stmt.body, ir_fn)
 
-    def _collect_argument_temps(self, statements: List[Node]) -> None:
+    def _collect_argument_temps(self, statements: List[Node], ir_fn: IRFunction) -> None:
         """Recursively walks `statements` -- including into every If's
         then_body/else_body and every While's body, like
         _collect_locals -- looking for THREE kinds of array-/struct-
@@ -953,29 +1000,29 @@ class CodeGenerator(
         for stmt in statements:
             if isinstance(stmt, VarDecl):
                 if stmt.init is not None:
-                    self._collect_argument_temps_in_expr(stmt.init)
+                    self._collect_argument_temps_in_expr(stmt.init, ir_fn)
             elif isinstance(stmt, Assign):
-                self._collect_argument_temps_in_expr(stmt.value)
+                self._collect_argument_temps_in_expr(stmt.value, ir_fn)
             elif isinstance(stmt, IndexAssign):
-                self._collect_argument_temps_in_expr(stmt.array)
-                self._collect_argument_temps_in_expr(stmt.index)
-                self._collect_argument_temps_in_expr(stmt.value)
+                self._collect_argument_temps_in_expr(stmt.array, ir_fn)
+                self._collect_argument_temps_in_expr(stmt.index, ir_fn)
+                self._collect_argument_temps_in_expr(stmt.value, ir_fn)
             elif isinstance(stmt, FieldAssign):
-                self._collect_argument_temps_in_expr(stmt.base)
-                self._collect_argument_temps_in_expr(stmt.value)
+                self._collect_argument_temps_in_expr(stmt.base, ir_fn)
+                self._collect_argument_temps_in_expr(stmt.value, ir_fn)
             elif isinstance(stmt, Return):
                 if stmt.value is not None:
-                    self._collect_argument_temps_in_expr(stmt.value)
+                    self._collect_argument_temps_in_expr(stmt.value, ir_fn)
             elif isinstance(stmt, If):
-                self._collect_argument_temps_in_expr(stmt.condition)
-                self._collect_argument_temps(stmt.then_body)
+                self._collect_argument_temps_in_expr(stmt.condition, ir_fn)
+                self._collect_argument_temps(stmt.then_body, ir_fn)
                 if stmt.else_body is not None:
-                    self._collect_argument_temps(stmt.else_body)
+                    self._collect_argument_temps(stmt.else_body, ir_fn)
             elif isinstance(stmt, While):
-                self._collect_argument_temps_in_expr(stmt.condition)
-                self._collect_argument_temps(stmt.body)
+                self._collect_argument_temps_in_expr(stmt.condition, ir_fn)
+                self._collect_argument_temps(stmt.body, ir_fn)
             elif isinstance(stmt, ExprStmt):
-                self._collect_argument_temps_in_expr(stmt.expr)
+                self._collect_argument_temps_in_expr(stmt.expr, ir_fn)
             # Break/Continue carry no expressions at all.
 
     def _is_ordinary_composite_call(self, expr: Node) -> bool:
@@ -991,7 +1038,7 @@ class CodeGenerator(
         returning Call is distinguished from these two shapes."""
         return isinstance(expr, Call) and expr.name != 'append' and expr.name not in self.struct_registry
 
-    def _collect_argument_temps_in_expr(self, expr: Optional[Node]) -> None:
+    def _collect_argument_temps_in_expr(self, expr: Optional[Node], ir_fn: IRFunction) -> None:
         """The general expression-tree walk _collect_argument_temps
         needs but _collect_locals never did -- recurses into every
         expression node that can contain another expression (Binary,
@@ -1011,31 +1058,31 @@ class CodeGenerator(
             return
         if isinstance(expr, Call):
             for arg in expr.args:
-                self._collect_argument_temps_in_expr(arg)
+                self._collect_argument_temps_in_expr(arg, ir_fn)
                 arg_type = type_of(arg)
                 if arg_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and not isinstance(arg, (Variable, Index, Field)):
-                    self._reserve_argument_temp(arg, arg_type)
+                    self._reserve_argument_temp(arg, arg_type, ir_fn)
         elif isinstance(expr, Binary):
-            self._collect_argument_temps_in_expr(expr.left)
-            self._collect_argument_temps_in_expr(expr.right)
+            self._collect_argument_temps_in_expr(expr.left, ir_fn)
+            self._collect_argument_temps_in_expr(expr.right, ir_fn)
         elif isinstance(expr, Unary):
-            self._collect_argument_temps_in_expr(expr.operand)
+            self._collect_argument_temps_in_expr(expr.operand, ir_fn)
         elif isinstance(expr, Index):
-            self._collect_argument_temps_in_expr(expr.array)
-            self._collect_argument_temps_in_expr(expr.index)
+            self._collect_argument_temps_in_expr(expr.array, ir_fn)
+            self._collect_argument_temps_in_expr(expr.index, ir_fn)
             array_type = type_of(expr.array)
             if array_type.kind in (TypeKind.ARRAY, TypeKind.SLICE) and (
                     self._is_ordinary_composite_call(expr.array) or isinstance(expr.array, ArrayLiteral)):
-                self._reserve_argument_temp(expr.array, array_type)
+                self._reserve_argument_temp(expr.array, array_type, ir_fn)
         elif isinstance(expr, Field):
-            self._collect_argument_temps_in_expr(expr.base)
+            self._collect_argument_temps_in_expr(expr.base, ir_fn)
             base_type = type_of(expr.base)
             if base_type.kind == TypeKind.STRUCT and self._is_ordinary_composite_call(expr.base):
-                self._reserve_argument_temp(expr.base, base_type)
+                self._reserve_argument_temp(expr.base, base_type, ir_fn)
         elif isinstance(expr, Slice):
-            self._collect_argument_temps_in_expr(expr.array)
-            self._collect_argument_temps_in_expr(expr.low)
-            self._collect_argument_temps_in_expr(expr.high)
+            self._collect_argument_temps_in_expr(expr.array, ir_fn)
+            self._collect_argument_temps_in_expr(expr.low, ir_fn)
+            self._collect_argument_temps_in_expr(expr.high, ir_fn)
             # Deliberately NEVER reserves a slot here, unlike the
             # Index/Field cases just above: a slice PRODUCED from this
             # base escapes -- its own ptr aliases whatever backs the
@@ -1053,11 +1100,11 @@ class CodeGenerator(
             # exactly what tells it to malloc instead of using a slot.
         elif isinstance(expr, ArrayLiteral):
             for element in expr.elements:
-                self._collect_argument_temps_in_expr(element)
+                self._collect_argument_temps_in_expr(element, ir_fn)
         # Constant/BoolLiteral/StringLiteral/NoneLiteral/Variable: leaves,
         # nothing further to recurse into.
 
-    def _reserve_argument_temp(self, expr: Node, t: Type) -> None:
+    def _reserve_argument_temp(self, expr: Node, t: Type, ir_fn: IRFunction) -> None:
         """Reserves a logical frame slot for `expr` -- an ArrayLiteral,
         a struct literal, or an ordinary array/struct-returning Call
         used directly as a function-call argument -- keyed by id(expr)
@@ -1083,7 +1130,7 @@ class CodeGenerator(
         if is_heap_allocated(t, self.struct_registry):
             return
         width = type_byte_width(t, self.struct_registry)
-        self._argument_temp_slots[id(expr)] = self._new_slot(width, "argument_temp")
+        self._argument_temp_slots[id(expr)] = self._new_slot(width, "argument_temp", ir_fn)
 
     def _frame_size(self) -> int:
         # Total bytes used by locals and parameters, rounded up to a
