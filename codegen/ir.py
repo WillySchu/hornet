@@ -145,6 +145,50 @@ class IRCall:
 
 
 @dataclass
+class IRReadArgument:
+    """dst = whatever value the SysV calling convention placed in
+    argument slot `index` (0-based, matching codegen/utils.py's own
+    ARG_REGISTERS_64/32 indexing) when THIS function was called -- the
+    one place real IR ever needs to know a specific physical
+    register's own identity, since that's a fact about the calling
+    convention itself, not about the program. Every other real-IR op
+    is already free of this; this one exists specifically so gen_
+    function_ir's own parameter-reading logic doesn't have to build
+    plain Instructions directly to get one.
+
+    `index` counts every argument SLOT the ABI reserves for THIS
+    function, not source-level parameters: a slice-typed parameter
+    consumes three consecutive indices (ptr, len, cap), and a hidden
+    array/slice/struct return pointer, when this function has one, is
+    always index 0, shifting every real parameter's own index by one
+    -- the identical arg_shift accounting gen_function_ir already does
+    today, just fed into this instead of an argument register name
+    directly.
+
+    dst's own declared type decides whether this reads the 32- or
+    64-bit view of that slot's own register (INT64/STR wide, every
+    other scalar type narrow) -- never a narrowing or widening
+    read/write of any kind, since the value already arrived correctly
+    represented for dst's own type: the caller's own IRCall lowering
+    already placed it there via the identical, ordinary register-to-
+    register move every OTHER Temp-to-Temp copy in this compiler
+    relies on (see ir_lowering.py's own IRCall case), which never
+    narrows either -- a value is only ever narrowed/widened when it
+    crosses a MEMORY boundary (see _gen_read_scalar_into/_gen_write_
+    scalar_from's own docstrings), never between two registers already
+    holding it correctly. This is exactly what removes the need for
+    this compiler to treat a parameter's own arrival specially at all:
+    once it's an ordinary Temp from this op onward, every general
+    mechanism that already exists for any other Temp -- register
+    allocation, and specifically surviving live across an IRCall it
+    doesn't own (see register_allocator.py's own module docstring) --
+    applies to it unconditionally, with nothing parameter-specific left
+    to reimplement."""
+    dst: Temp
+    index: int
+
+
+@dataclass
 class IRReturn:
     """return value. value is None for a bare return."""
     value: Optional[IRValue]
@@ -429,6 +473,7 @@ IRInstr = Union[
     IRLoad,
     IRLocalAddress,
     IRMove,
+    IRReadArgument,
     IRReturn,
     IRSliceBoundsCheck,
     IRSliceGrow,
@@ -445,29 +490,28 @@ class IRFunction:
     own IR/codegen decoupling starts from.
 
     `body` is real IR (see IRInstr above): this function's own
-    statements, built by gen_statement_ir exactly as before this
-    object existed -- nothing about HOW it's built has changed here,
-    only that it's now handed back as a field on this object rather
-    than a bare local variable named `ir`.
+    parameters (see _ir_param_setup) AND its own statements (see gen_
+    statement_ir), concatenated into one list, in that order. Used to
+    be two separate things -- a hidden `param_setup` field, still
+    plain old-style Instructions, sitting alongside this one -- until
+    parameter marshaling itself migrated to real IR (see _ir_param_
+    setup's own docstring for why that migration also deleted the old
+    two-pass "stash every argument register, then process" structure
+    entirely, not just changed its representation): once a parameter's
+    own value is an ordinary Temp from the moment it arrives (via
+    IRReadArgument), nothing distinguishes it from any statement's own
+    Temp at all, so there's no reason left to keep them in separate
+    lists, lowered separately, either.
 
-    `prologue` and `param_setup` are still plain, old-style
-    Instructions (see assembly_ast.py), not real IR at all: the
-    callee-saved-register pushes, and the parameter-marshaling logic
-    (stashing incoming argument registers, copying or heap-promoting
-    an array/struct parameter, aliasing a slice one) were never
-    migrated to real IR, and aren't in this step's scope either. This
-    is a deliberately thin first move -- it wraps exactly what gen_
-    function already produced today, in the same order it already
-    produced it, with zero behavioral change. The point of this step
-    is splitting codegen's own "build this function's IR" phase from
-    its "lower it into a real AsmFunction" phase into two actual
-    methods (gen_function_ir / gen_function) instead of one; what each
-    phase still depends on beyond what's captured here -- frame
-    layout, register assignment, the epilogue, the bounds-check panic
-    block -- is unchanged, and remains on CodeGenerator's own instance
-    state for now, exactly as before. Progressively moving more of
-    that state onto this object instead is the follow-up this step
-    exists to make possible, not something this step attempts itself.
+    `prologue` is still plain, old-style Instructions (see assembly_
+    ast.py), not real IR at all, and deliberately stays that way: the
+    callee-saved-register pushes and the frame-pointer setup have zero
+    dependence on program semantics -- the identical shape for every
+    function, parameterized only by frame_size (itself only known once
+    body is fully lowered) -- so there's no VarDecl-shaped decision
+    hiding in there for real IR to ever represent. This is pure
+    calling-convention bookkeeping, the one piece of this pipeline
+    real IR was never meant to describe at all.
 
     `return_type` is this function's own declared return type (Type.
     VOID for a function with none) -- gen_function's own lowering half
@@ -478,7 +522,6 @@ class IRFunction:
     name: str
     body: list = field(default_factory=list)
     prologue: list = field(default_factory=list)
-    param_setup: list = field(default_factory=list)
     return_type: Optional[Type] = None
 
 

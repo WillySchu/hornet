@@ -53,6 +53,7 @@ from codegen.ir import (
     IRLoad,
     IRLocalAddress,
     IRMove,
+    IRReadArgument,
     IRReturn,
     IRSliceBoundsCheck,
     IRSliceGrow,
@@ -62,7 +63,7 @@ from codegen.ir import (
     IRValue,
     Temp,
 )
-from codegen.utils import as_qword_register, type_byte_width, ARG_REGISTERS_32
+from codegen.utils import as_qword_register, type_byte_width, ARG_REGISTERS_32, ARG_REGISTERS_64
 from semantic import Type
 
 
@@ -260,6 +261,16 @@ class InstructionSelector:
                 out.append(CallInstr(instr.name))
                 if instr.dst is not None:
                     out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
+            elif isinstance(instr, IRReadArgument):
+                # A plain register-to-register copy -- see IRReadArgument's
+                # own docstring for why this never narrows or widens:
+                # the value already arrived correctly represented for
+                # dst's own type, the same invariant every OTHER
+                # Temp-to-Temp copy in this compiler already relies on.
+                wide = instr.dst.type in (Type.INT64, Type.STR)
+                src = Register((ARG_REGISTERS_64 if wide else ARG_REGISTERS_32)[instr.index])
+                out.append(MovQ(src=src, dst=Register('rax')) if wide else Mov(src=src, dst=Register('eax')))
+                out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
             elif isinstance(instr, IRReturn):
                 # The one terminator that leaves the function entirely
                 # rather than jumping to a label. Load the value if

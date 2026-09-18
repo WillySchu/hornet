@@ -36,7 +36,7 @@ from codegen.dispatch import DispatchMixin
 from codegen.emitter import Emitter
 from codegen.errors import CodegenError
 from codegen.escape_analysis import analyze_array_escapes, is_heap_allocated
-from codegen.ir import IRFunction, IRProgram, Temp
+from codegen.ir import IRCall, IRConst, IRCopy, IRFunction, IRLocalAddress, IRProgram, IRReadArgument, IRStore, Temp
 from codegen.ir_lowering import InstructionSelector
 from codegen.register_allocator import allocate_registers
 from codegen.scalars import ScalarsMixin
@@ -496,18 +496,6 @@ class CodeGenerator(
         # them instead.
         self._print_scalar_temp_slot = self._new_slot(8, "print_scalar_temp")
 
-        # One extra, purely internal temp slot per parameter, used to
-        # stash its incoming register value(s) immediately, before any
-        # parameter is processed -- see the loop below for why this has
-        # to happen up front rather than processing each parameter
-        # directly out of its own argument register. 24 bytes for a
-        # slice parameter (ptr, len, AND cap each need stashing), 8 for
-        # everything else.
-        param_temp_slots = []
-        for i, p_type in enumerate(param_types):
-            width = 24 if p_type.kind == TypeKind.SLICE else 8
-            param_temp_slots.append(self._new_slot(width, f"param_stash:{fn.params[i].name}"))
-
         self._collect_params(fn.params)
         self._collect_locals(fn.body)
         # A THIRD pre-pass, alongside the two above: finds every array-
@@ -556,129 +544,19 @@ class CodeGenerator(
         for reg in CALLEE_SAVED_SCRATCH_REGISTERS:
             prologue.append(Push(Register(reg)))
 
-        # Kept SEPARATE from the prologue above (rather than one list)
-        # because _new_temp (ir_lowering.py) can still reserve MORE
-        # stack slots while this body is generated -- unlike locals/
-        # params/argument-temps, which are all reserved by an up-front
-        # pre-pass. _frame_size() is computed only once this is fully
-        # built, so the `subq` below always covers every slot this
-        # function ends up using. Found necessary by a real bug:
-        # computing frame_size before the body left every IR temp's
-        # slot sitting past the allocated frame -- silently corrupted
-        # by anything else touching that memory (a nested call,
-        # another loop iteration), which is why it only surfaced in
-        # tests with real loop/call activity.
-        instructions: List[Instruction] = []
-
-        if self._hidden_return_ptr_slot is not None:
-            instructions.append(
-                MovQ(src=Register('rdi'), dst=Memory('rbp', self._slot_offsets[self._hidden_return_ptr_slot])))
-
-        # Parameters arrive in registers per the SysV ABI (shifted one
-        # position later if this function itself returns an array or
-        # slice -- see arg_shift above). Handled in two passes rather
-        # than reading each one directly out of its own argument
-        # register in turn:
-        #
-        # FIRST, every incoming register is stashed into its own
-        # temporary slot (param_temp_slots, reserved above) via a
-        # plain %rbp-relative store -- these never touch %rsp, so
-        # there's no stack-alignment concern regardless of parameter
-        # count. A slice parameter stashes THREE consecutive registers
-        # into its own 24-byte temp slot, advancing the running
-        # register-index counter by 3.
-        #
-        # SECOND, each parameter is processed using its safely-stashed
-        # value(s) rather than its original argument register(s). This
-        # two-pass structure exists specifically because a heap-
-        # allocated array parameter needs its own malloc call to build
-        # an independent copy -- and malloc, like any real call, can
-        # clobber every caller-saved register, including OTHER, not-
-        # yet-processed parameters' incoming values still sitting in
-        # their argument registers. Stashing everything first, before
-        # any malloc call can run, avoids that regardless of which
-        # parameters (if any) end up needing one. (An earlier version
-        # tried protecting registers with ordinary push/pop instead --
-        # which works for a single value, but breaks down here: popping
-        # one parameter's value immediately before processing it leaves
-        # a DIFFERENT number of not-yet-popped values on the stack ahead
-        # of each parameter's malloc call, misaligning %rsp for roughly
-        # half of them. Plain %rbp-relative stores sidestep that
-        # failure mode entirely, since they never move %rsp.)
-        reg_index = arg_shift
-        for i, p_type in enumerate(param_types):
-            temp_offset = self._slot_offsets[param_temp_slots[i]]
-            if p_type.kind == TypeKind.SLICE:
-                instructions.append(
-                    MovQ(src=Register(ARG_REGISTERS_64[reg_index]), dst=Memory('rbp', temp_offset)))
-                instructions.append(
-                    MovQ(src=Register(ARG_REGISTERS_64[reg_index + 1]), dst=Memory('rbp', temp_offset + 8)))
-                instructions.append(
-                    MovQ(src=Register(ARG_REGISTERS_64[reg_index + 2]), dst=Memory('rbp', temp_offset + 16)))
-                reg_index += 3
-            else:
-                instructions.append(
-                    MovQ(src=Register(ARG_REGISTERS_64[reg_index]), dst=Memory('rbp', temp_offset)))
-                reg_index += 1
-
-        for i, p in enumerate(fn.params):
-            slot = self._bind_param(p)
-            p_type = param_types[i]
-            offset = self._slot_offsets[slot]
-            temp_offset = self._slot_offsets[param_temp_slots[i]]
-            if p_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT):
-                if self._is_heap_allocated(id(p), p_type):
-                    # Needs its own, independent heap copy -- like the
-                    # stack-allocated case below, just backed by
-                    # malloc'd memory -- to preserve value semantics:
-                    # mutating this parameter must never affect the
-                    # caller's own array or struct. %rbx holds the
-                    # caller's pointer across the malloc call: it's
-                    # callee-saved, so malloc is obligated to preserve
-                    # it.
-                    instructions.append(MovQ(src=Memory('rbp', temp_offset), dst=Register('rbx')))
-                    instructions.extend(self._gen_malloc_array(p_type))
-                    instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
-                    instructions.append(MovQ(src=Register('rax'), dst=Register('r10')))
-                    instructions.extend(self.gen_array_copy(Memory('r10', 0), Memory('rbx', 0), p_type))
-                else:
-                    instructions.append(MovQ(src=Memory('rbp', temp_offset), dst=Register('rbx')))
-                    instructions.extend(self.gen_array_copy(Memory('rbp', offset), Memory('rbx', 0), p_type))
-            elif p_type.kind == TypeKind.SLICE:
-                # A slice parameter is never heap-promoted or copied
-                # the way an array is -- it's just an alias, so this
-                # only needs to copy the three already-stashed values
-                # into its own permanent slot; no malloc, no is_heap_
-                # allocated check. The underlying array it points to
-                # (if any) is already guaranteed to outlive this call:
-                # analyze_array_escapes treats passing a slice as an
-                # argument to a user-defined call as escaping, so
-                # whatever backs it in the CALLER is already heap-
-                # allocated by the time this function starts.
-                instructions.append(MovQ(src=Memory('rbp', temp_offset), dst=Register('rax')))
-                instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
-                instructions.append(MovQ(src=Memory('rbp', temp_offset + 8), dst=Register('rax')))
-                instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset + 8)))
-                instructions.append(MovQ(src=Memory('rbp', temp_offset + 16), dst=Register('rax')))
-                instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset + 16)))
-            elif p_type == Type.STR:
-                # A parameter's initial value is always established via
-                # a direct write to its permanent slot, never through
-                # _gen_write_temp_from -- register_allocator.py's own
-                # decision for this Temp isn't even made yet at this
-                # point in gen_function (it depends on the whole
-                # function's body, built below). Recording this here,
-                # not migrating it to go through the Temp itself,
-                # keeps this fix scoped to tracking, not to teaching
-                # parameter initialization to be allocator-aware -- a
-                # real, separate piece of follow-up work, not this one.
-                self._escaped_offsets.add(offset)
-                instructions.append(MovQ(src=Memory('rbp', temp_offset), dst=Register('rax')))
-                instructions.append(MovQ(src=Register('rax'), dst=Memory('rbp', offset)))
-            else:
-                self._escaped_offsets.add(offset)  # see the STR case just above for why
-                instructions.extend(self._gen_read_scalar_into(Memory('rbp', temp_offset), p_type, Register('eax')))
-                instructions.extend(self._gen_write_scalar_from(Register('eax'), p_type, Memory('rbp', offset)))
+        # Every parameter's own initial value -- and, first, the
+        # hidden return pointer's own, if this function has one -- is
+        # read straight into an ordinary Temp (via IRReadArgument) and
+        # processed from there, exactly like a VarDecl's own
+        # initializer -- see _ir_param_setup's own docstring for why
+        # the old two-pass "stash everything, then process" structure
+        # (and its own %rbx-specific trick for a heap-allocated
+        # parameter's own pointer) is entirely unnecessary now:
+        # register_allocator.py's own general "a Temp surviving live
+        # across an IRCall it doesn't own" protection already covers
+        # this for free, the same way it already covers everything
+        # else.
+        param_setup_ir = self._ir_param_setup(fn, param_types, arg_shift)
 
         self._bounds_check_fail_labels = {}  # fresh, per-function jump targets
         # Accumulated as one IR list for the whole body -- see
@@ -689,10 +567,138 @@ class CodeGenerator(
         # needs: it can only decide which Temps are safe to keep in a
         # register (and for how long) by looking at the whole function
         # at once, not one already-resolved statement at a time.
-        ir = []
+        statement_ir = []
         for stmt in fn.body:
-            ir.extend(self.gen_statement_ir(stmt))
-        return IRFunction(name=fn.name, body=ir, prologue=prologue, param_setup=instructions, return_type=return_type)
+            statement_ir.extend(self.gen_statement_ir(stmt))
+        body = param_setup_ir + statement_ir
+        return IRFunction(name=fn.name, body=body, prologue=prologue, return_type=return_type)
+
+    def _ir_param_setup(self, fn: Function, param_types: List[Type], arg_shift: int) -> list:
+        """Builds (without lowering) this function's own real
+        parameters -- AND its own hidden return pointer, if it has one
+        (always argument slot 0 when present -- see arg_shift's own
+        comment above) -- as real IR, in two passes.
+
+        FIRST, every argument slot -- the hidden return pointer's own,
+        if present, then every parameter's -- is read into its own
+        fresh Temp via IRReadArgument, as ONE uninterrupted block,
+        nothing else running in between. This is the one piece of the
+        old two-pass "stash everything, then process" structure that's
+        still genuinely necessary, for a DIFFERENT reason than the
+        original: a physical argument register holds nothing register_
+        allocator.py can protect until IRReadArgument actually captures
+        it into a Temp -- an ORDINARY scratch-register-using op (an
+        IRBinOp computing a field offset for an EARLIER parameter's own
+        slice-descriptor write, or IRStore's own %r9d scratch when
+        writing the hidden pointer into its own slot, say) can clobber
+        a LATER parameter's own still-unread argument register just as
+        easily as an IRCall can, since neither is a Temp yet at that
+        point. Found as two real, separate bugs, both fixed the same
+        way: two slice parameters, the second one's own values
+        silently corrupted by the first one's own descriptor-writing
+        arithmetic (which uses %rcx as ordinary scratch -- exactly
+        argument slot 3's own register); and a hidden-return-pointer
+        function with 5 scalar parameters, the fifth one's own value
+        silently corrupted by the hidden pointer's own IRStore (which
+        uses %r9d as scratch -- exactly argument slot 5's own
+        register, the one holding this function's own fifth
+        parameter). Reading every argument first, as one uninterrupted
+        block, before any processing begins, avoids both regardless of
+        how many parameters there are or what any of them need.
+        IRReadArgument's own lowering itself only ever uses %eax/%rax
+        as scratch -- never any of the six SysV argument registers --
+        so this pass is safe internally, for the identical reason.
+
+        SECOND, each parameter is processed using its own Temp(s) from
+        the first pass -- exactly like a VarDecl's own initializer
+        would be, via whichever existing real-IR building block
+        already matches its shape (IRCopy for a stack-allocated array/
+        struct's own value copy, an ordinary IRCall to malloc plus
+        IRCopy for a heap-allocated one, _ir_write_slice_descriptor_
+        into_address for a slice's own three-value alias) -- and,
+        FIRST, before any of them, the hidden return pointer, if
+        present, is written into its own slot the identical way, via
+        IRLocalAddress and an ordinary IRStore. A scalar or str
+        parameter has nothing left to do here at all: the first pass's
+        own IRReadArgument already targeted its permanent Temp
+        directly.
+
+        Once a value is safely captured into a Temp at all (by the
+        first pass), register_allocator.py's own ordinary live-range
+        tracking -- including surviving live across an IRCall it
+        doesn't own (see its own module docstring) -- covers
+        everything from there exactly like any other Temp in this
+        compiler, with nothing parameter-specific left to reimplement.
+        This is what makes the old %rbx-specific trick for holding a
+        heap-allocated parameter's own caller-pointer across its own
+        malloc call entirely unnecessary: caller_ptr below is an
+        ordinary Temp by the time any malloc call could ever run."""
+        ir = []
+        reg_index = arg_shift
+        hidden_ptr = None
+        if self._hidden_return_ptr_slot is not None:
+            hidden_ptr = self._new_temp(Type.INT64)
+            ir.append(IRReadArgument(dst=hidden_ptr, index=0))
+        captured = []
+        for p, p_type in zip(fn.params, param_types):
+            if p_type.kind == TypeKind.SLICE:
+                ptr_value = self._new_temp(Type.INT64)
+                len_value = self._new_temp(Type.INT)
+                cap_value = self._new_temp(Type.INT)
+                ir.append(IRReadArgument(dst=ptr_value, index=reg_index))
+                ir.append(IRReadArgument(dst=len_value, index=reg_index + 1))
+                ir.append(IRReadArgument(dst=cap_value, index=reg_index + 2))
+                reg_index += 3
+                captured.append((ptr_value, len_value, cap_value))
+            elif p_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT):
+                caller_ptr = self._new_temp(Type.INT64)
+                ir.append(IRReadArgument(dst=caller_ptr, index=reg_index))
+                reg_index += 1
+                captured.append(caller_ptr)
+            else:
+                # str and every other scalar type alike: IRReadArgument
+                # targets this parameter's own permanent Temp directly
+                # -- _bind_param creates it, anchored at this
+                # parameter's own resolved slot -- so the second pass
+                # below has nothing left to do at all for this one.
+                # register_allocator.py treats it exactly like any
+                # other Temp-producing op from here on: no more
+                # writing directly into memory, bypassing the Temp,
+                # the way this used to (see _escaped_offsets' own
+                # docstring for why that mattered before, and why it
+                # no longer applies to a parameter at all now).
+                self._bind_param(p)
+                ir.append(IRReadArgument(dst=self._local_temp(p.name), index=reg_index))
+                reg_index += 1
+                captured.append(None)
+
+        if hidden_ptr is not None:
+            hidden_ptr_addr = self._new_temp(Type.INT64)
+            ir.append(IRLocalAddress(dst=hidden_ptr_addr, slot=self._hidden_return_ptr_slot))
+            ir.append(IRStore(address=hidden_ptr_addr, value=hidden_ptr, value_type=Type.INT64))
+
+        for p, p_type, cap in zip(fn.params, param_types, captured):
+            if p_type.kind == TypeKind.SLICE:
+                ptr_value, len_value, cap_value = cap
+                slot = self._bind_param(p)
+                param_addr = self._new_temp(Type.INT64)
+                ir.append(IRLocalAddress(dst=param_addr, slot=slot))
+                ir.extend(self._ir_write_slice_descriptor_into_address(param_addr, ptr_value, len_value, cap_value))
+            elif p_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT):
+                caller_ptr = cap
+                slot = self._bind_param(p)
+                param_addr = self._new_temp(Type.INT64)
+                ir.append(IRLocalAddress(dst=param_addr, slot=slot))
+                if self._is_heap_allocated(id(p), p_type):
+                    size = type_byte_width(p_type, self.struct_registry)
+                    new_ptr = self._new_temp(Type.INT64)
+                    ir.append(IRCall(dst=new_ptr, name='malloc', args=[IRConst(size, Type.INT64)]))
+                    ir.append(IRStore(address=param_addr, value=new_ptr, value_type=Type.INT64))
+                    ir.append(IRCopy(dst_address=new_ptr, src_address=caller_ptr, value_type=p_type))
+                else:
+                    ir.append(IRCopy(dst_address=param_addr, src_address=caller_ptr, value_type=p_type))
+            # scalar/str: the first pass already did everything.
+        return ir
 
     def gen_function(self, fn: Function) -> AsmFunction:
         """Thin convenience wrapper: builds fn's own IRFunction, then
@@ -741,7 +747,7 @@ class CodeGenerator(
         )
         self._register_assignment = allocate_registers(ir, safe_named_locals)
         self._allocation_finalized = True
-        instructions = ir_fn.param_setup
+        instructions = []
         instructions.extend(self._instruction_selector.lower_ir(ir))
         # Every slot this function will EVER need is now known --
         # named locals/parameters/scratch slots/argument-temps
