@@ -4,6 +4,7 @@ compiled runtime.c into a single, runnable executable -- the piece of
 the toolchain that didn't exist at all before runtime.c did (see
 build.py's own module docstring).
 """
+
 import shutil
 import subprocess
 import tempfile

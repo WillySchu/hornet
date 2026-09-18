@@ -24,7 +24,6 @@ the shape this takes.
 """
 
 
-import argparse
 import dataclasses
 from typing import Dict, List, Optional
 
@@ -48,16 +47,13 @@ from codegen.assembly_ast import (
 )
 from codegen.calling_convention import CALLEE_SAVED_SCRATCH_REGISTERS
 from codegen.emitter import Emitter
-from codegen.errors import CodegenError
 from ir.ir import IRFunction, IRProgram
 from ir.builder import IRFunctionBuilder
 from ir.program_builder import build_ir_program
 from codegen.ir_lowering import InstructionSelector
 from codegen.register_allocator import allocate_registers
 from codegen.scalars_lowering import ScalarsLoweringMixin
-from lexer import lex
-from parser import Function, Parser, Program
-from semantic import analyze
+from parser import Function, Program
 
 
 # ---------------------------------------------------------------------------
@@ -67,8 +63,7 @@ from semantic import analyze
 class CodeGenerator(
         ArraysSlicesLoweringMixin,
         ScalarsLoweringMixin):
-    """Walks the source AST (Program/Function/Return/Constant/...) and
-    produces an equivalent AsmProgram."""
+    """Walks the source IR and produces an equivalent AsmProgram."""
 
     def __init__(self):
         self._next_offset = 0
@@ -445,35 +440,3 @@ def generate_asm(program: Program, platform: str = 'macos') -> str:
     ir_program = build_ir_program(program)
     asm_program = CodeGenerator().generate(ir_program)
     return Emitter(platform=platform).emit(asm_program)
-
-
-def compile_to_asm(filename: str, platform: str = 'macos') -> str:
-    tokens = lex(filename)
-    ast = Parser(tokens).parse_program()
-    analyze(ast)  # raises SemanticError before any code is generated
-    return generate_asm(ast, platform=platform)
-
-
-def main():
-    arg_parser = argparse.ArgumentParser(description='Assembly generator')
-    arg_parser.add_argument('file', type=str, help='Source file to compile.')
-    arg_parser.add_argument(
-        '--platform', choices=['macos', 'linux'], default='macos',
-        help="Target platform; affects symbol naming. Default: macos",
-    )
-    arg_parser.add_argument(
-        '-o', '--output', type=str, default=None,
-        help='Write assembly to this file instead of stdout.',
-    )
-    args = arg_parser.parse_args()
-
-    asm = compile_to_asm(args.file, platform=args.platform)
-    if args.output:
-        with open(args.output, 'w') as f:
-            f.write(asm)
-    else:
-        print(asm, end='')
-
-
-if __name__ == '__main__':
-    main()

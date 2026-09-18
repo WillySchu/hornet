@@ -14,6 +14,7 @@ file). Bringing in a real C runtime means there are now genuinely two
 separate compilation units that need to be produced and linked
 together, not one.
 """
+
 import argparse
 import os
 import subprocess
@@ -21,7 +22,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from codegen.codegen import compile_to_asm
+from compile import compile_to_asm
 
 REPO_ROOT = Path(__file__).resolve().parent
 RUNTIME_C_PATH = REPO_ROOT / "runtime" / "runtime.c"

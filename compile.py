@@ -2,7 +2,10 @@
 
 import argparse
 
-from codegen.codegen import compile_to_asm
+from codegen.codegen import generate_asm
+from lexer import lex
+from parser import Parser
+from semantic import analyze
 
 
 def main():
@@ -13,12 +16,19 @@ def main():
 
     args = parser.parse_args()
 
-    asm = compile_to_asm(args.file, platform=args.platform)
+    asm = compile_to_asm(args.file, args.platform)
     if args.output:
         with open(args.output, 'w') as f:
             f.write(asm)
     else:
         print(asm, end='')
+
+
+def compile_to_asm(source: str, platform: str = 'macos') -> str:
+    tokens = lex(source)
+    ast = Parser(tokens).parse_program()
+    analyze(ast)  # raises SemanticError before any code is generated
+    return generate_asm(ast, platform=platform)
 
 
 if __name__ == '__main__':
