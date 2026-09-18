@@ -19,7 +19,6 @@ Documentation:
 Updates:
 - Finish IR.
 - Constant Folding / Identity Reduction optimization pass.
-- Consider if scopes, \_argument\_temp\_slots, and \_escaping\_array\_ids should move off of self.
 - Decouple desugaring from semantic analysis.
 - FFI
 - Separate the runtime code from codegen.
