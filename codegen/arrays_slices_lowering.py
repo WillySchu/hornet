@@ -15,12 +15,14 @@ _get_bounds_check_message_label), are the complete set: nothing here
 is ever reached from gen_expr_ir/gen_statement_ir or anything they
 call.
 
-Still mixed into CodeGenerator alongside ArraysSlicesMixin itself, so
-nothing about how these are called changes yet -- this split exists to
-make a later, larger move (relocating everything in arrays_slices.py
-that IS real IR-building into its own package, entirely separate from
-codegen) mechanical rather than requiring this same categorization
-work to happen at the same time as that move."""
+Mixed into CodeGenerator alongside ScalarsLoweringMixin now, not
+ArraysSlicesMixin anymore: that split was step one of a larger move,
+since completed -- ArraysSlicesMixin (and every other IR-building
+mixin) now lives in ir.builder.IRFunctionBuilder, in its own package
+entirely separate from codegen (see its own module docstring). This
+file staying behind on CodeGenerator, split out
+early specifically so that later move could be mechanical, is exactly
+what let it be."""
 
 from codegen.assembly_ast import (
     Add,

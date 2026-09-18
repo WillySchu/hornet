@@ -14,10 +14,10 @@ other three) decide internally which actual width to operate on.
 
 Split out of scalars.py, which used to hold these alongside the real-
 IR-building methods that produce the Temps/values these ultimately
-lower -- still mixed into CodeGenerator alongside ScalarsMixin itself,
-so nothing about how these are called changes yet; see arrays_slices_
-lowering.py's own module docstring for why this split exists as its
-own step, ahead of a larger move."""
+lower -- mixed into CodeGenerator alongside ArraysSlicesLoweringMixin
+now, not ScalarsMixin anymore: see its own module docstring for where
+that (and every other IR-building mixin) moved to instead, once this
+file's early split made the move mechanical."""
 
 from codegen.assembly_ast import (
     Add,
