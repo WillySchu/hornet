@@ -16,6 +16,7 @@ import dataclasses
 from typing import Dict, List, Optional
 
 from codegen.arrays_slices import ArraysSlicesMixin
+from codegen.arrays_slices_lowering import ArraysSlicesLoweringMixin
 from codegen.assembly_ast import (
     AsmFunction,
     AsmProgram,
@@ -43,6 +44,7 @@ from codegen.ir import IRCall, IRConst, IRCopy, IRFunction, IRLocalAddress, IRPr
 from codegen.ir_lowering import InstructionSelector
 from codegen.register_allocator import allocate_registers
 from codegen.scalars import ScalarsMixin
+from codegen.scalars_lowering import ScalarsLoweringMixin
 from codegen.statements import StatementsMixin
 from codegen.strings import StringsMixin
 from codegen.structs import StructsMixin
@@ -80,8 +82,10 @@ from semantic import analyze, type_from_name, Type, TypeKind, StructInfo
 
 class CodeGenerator(
         ArraysSlicesMixin,
+        ArraysSlicesLoweringMixin,
         DispatchMixin,
         ScalarsMixin,
+        ScalarsLoweringMixin,
         StatementsMixin,
         StringsMixin,
         StructsMixin):

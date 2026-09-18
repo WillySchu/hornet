@@ -6,7 +6,7 @@ host.ids.new_slot allocator _collect_locals/_reserve_argument_temp
 already share) -- allocating a Temp itself (host.ids.new_temp) makes
 no storage decision at all. An op that combines two values
 loads them into scratch registers, then hands off to the host's own
-gen_binary_op/gen_unary_op (ScalarsMixin) as this pass's own
+gen_binary_op/gen_unary_op (ScalarsLoweringMixin) as this pass's own
 instruction-selection rule -- that arithmetic isn't reimplemented
 here. Real register allocation now exists (register_allocator.py) and
 hooks in at _gen_read_temp_into/_gen_write_temp_from: _temp_mem's own
@@ -147,7 +147,7 @@ class InstructionSelector:
         already happens to BE `dst`, no instruction at all). Otherwise,
         falls back to reading its memory slot: str needs its own case
         (a full 8-byte pointer read via MovQ) since host._gen_read_
-        scalar_into (ScalarsMixin) only special-cases int8/uint8/int64,
+        scalar_into (ScalarsLoweringMixin) only special-cases int8/uint8/int64,
         falling through to a plain 4-byte Mov for everything else --
         which would truncate a pointer. Every existing caller of that
         method already special-cases str itself first; this is one
