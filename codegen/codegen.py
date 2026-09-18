@@ -40,7 +40,7 @@ from codegen.emitter import Emitter
 from codegen.errors import CodegenError
 from codegen.escape_analysis import analyze_array_escapes, is_heap_allocated
 from codegen.id_allocator import IdAllocator
-from codegen.ir import IRCall, IRConst, IRCopy, IRFunction, IRLocalAddress, IRProgram, IRReadArgument, IRStore, Temp
+from ir import IRCall, IRConst, IRCopy, IRFunction, IRLocalAddress, IRProgram, IRReadArgument, IRStore, Temp
 from codegen.ir_lowering import InstructionSelector
 from codegen.register_allocator import allocate_registers
 from codegen.scalars import ScalarsMixin

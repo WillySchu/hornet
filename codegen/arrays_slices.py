@@ -12,7 +12,7 @@ of size."""
 from typing import Union
 
 from codegen.errors import CodegenError
-from codegen.ir import (
+from ir import (
     IRBinOp,
     IRBoundsCheck,
     IRBranch,

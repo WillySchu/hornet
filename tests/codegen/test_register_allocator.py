@@ -3,7 +3,7 @@ dataflow (build_cfg/compute_liveness) -- the linear-scan algorithm
 itself is tested separately, in test_register_allocator.py."""
 
 from semantic import Type
-from codegen.ir import Temp, IRConst, IRMove, IRBinOp, IRUnOp, IRLabel, IRJump, IRBranch, IRReturn, IRCall, IRLoad, IRStore, IRCopy, IRBoundsCheck
+from ir import Temp, IRConst, IRMove, IRBinOp, IRUnOp, IRLabel, IRJump, IRBranch, IRReturn, IRCall, IRLoad, IRStore, IRCopy, IRBoundsCheck
 from codegen.register_allocator import (
     build_cfg,
     compute_liveness,

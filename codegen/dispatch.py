@@ -16,7 +16,7 @@ which shapes those are, and why the ones that aren't are provably
 unreachable rather than merely untested)."""
 
 from codegen.errors import CodegenError
-from codegen.ir import (
+from ir import (
     IRBinOp, IRValue, IRConst, IRLoad, IRMove, IRJump, IRLabel, IRStaticDataAddress, IRUnOp, IRCast
 )
 from codegen.utils import type_of

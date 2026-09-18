@@ -10,7 +10,7 @@ into nested structs and delegating array-typed fields back to
 arrays_slices.py."""
 
 from codegen.errors import CodegenError
-from codegen.ir import IRBinOp, IRConst, IRStore, IRLoad, IRLocalAddress, IRCall
+from ir import IRBinOp, IRConst, IRStore, IRLoad, IRLocalAddress, IRCall
 from codegen.utils import type_byte_width, type_of
 from parser import Node, Variable, Field, Index, Call, BinaryOp
 from semantic import TypeKind, Type

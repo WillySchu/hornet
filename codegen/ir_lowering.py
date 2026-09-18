@@ -44,7 +44,7 @@ from codegen.assembly_ast import (
     Instruction, Operand, Register, Memory, FrameSlot, Imm, Mov, MovQ, Cmp, Je, Jae, Ja, Jmp, Label, CallInstr,
     LeaQFrame, LeaQFrameSlot, LeaQ,
 )
-from codegen.ir import (
+from ir import (
     IRBinOp,
     IRBoundsCheck,
     IRBranch,
