@@ -1049,45 +1049,6 @@ Assembly AST
 x86-64 assembly
 ```
 
-The major compiler components are:
-
-```text
-lexer.py
-    Converts source text into tokens, including INDENT/DEDENT
-    tokens for block structure.
-
-parser.py
-    Converts tokens into the Hornet AST.
-
-semantic.py
-    Resolves names, types, structs, aliases, methods, and
-    validates expressions and statements.
-
-codegen/
-    Contains the native code generator and backend.
-
-codegen/ir.py
-    Defines the compiler's intermediate representation.
-
-codegen/ir_lowering.py
-    Lowers IR into the assembly representation.
-
-codegen/register_allocator.py
-    Performs register allocation for IR temporaries.
-
-codegen/arrays_slices.py
-    Array and slice code generation.
-
-codegen/structs.py
-    Struct code generation.
-
-codegen/calling_convention.py
-    x86-64 calling convention handling.
-
-codegen/emitter.py
-    Emits textual assembly.
-```
-
 The compiler performs semantic analysis before code generation. Invalid names and type mismatches therefore produce compiler errors rather than being discovered accidentally during assembly generation.
 
 ---
