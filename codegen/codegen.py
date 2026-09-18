@@ -345,9 +345,9 @@ class CodeGenerator(
 
         Never needs to look inside the prologue, the epilogue, or the
         bounds-check panic block: none of those ever reference a frame
-        slot of any kind (the prologue's own SubQ is appended to a
-        SEPARATE list, ir_fn.prologue, only after this already ran;
-        see lower_function's own ordering)."""
+        slot of any kind (the prologue itself is built entirely after
+        this runs, as a local variable in lower_function -- see its
+        own ordering)."""
         for instr in instructions:
             for f in dataclasses.fields(instr):
                 value = getattr(instr, f.name)
@@ -534,16 +534,6 @@ class CodeGenerator(
                 "aren't implemented)"
             )
 
-        prologue: List[Instruction] = [
-            Push(Register('rbp')),
-            MovQ(src=Register('rsp'), dst=Register('rbp')),
-        ]
-        # Save every callee-saved scratch register unconditionally, not
-        # just in functions that happen to do string work themselves --
-        # required now that functions can call each other.
-        for reg in CALLEE_SAVED_SCRATCH_REGISTERS:
-            prologue.append(Push(Register(reg)))
-
         # Every parameter's own initial value -- and, first, the
         # hidden return pointer's own, if this function has one -- is
         # read straight into an ordinary Temp (via IRReadArgument) and
@@ -571,7 +561,7 @@ class CodeGenerator(
         for stmt in fn.body:
             statement_ir.extend(self.gen_statement_ir(stmt))
         body = param_setup_ir + statement_ir
-        return IRFunction(name=fn.name, body=body, prologue=prologue, return_type=return_type)
+        return IRFunction(name=fn.name, body=body, return_type=return_type)
 
     def _ir_param_setup(self, fn: Function, param_types: List[Type], arg_shift: int) -> list:
         """Builds (without lowering) this function's own real
@@ -788,11 +778,28 @@ class CodeGenerator(
             instructions.extend(self._gen_epilogue())
         instructions.extend(self._gen_bounds_check_panic_block())
 
+        # Built here, not in gen_function_ir, since this needs nothing
+        # from that build phase at all: identical for every function
+        # regardless of what it computes, parameterized only by
+        # frame_size -- itself only known now, once body is fully
+        # lowered -- so there was never a real reason for the build
+        # phase to hand this back as part of IRFunction in the first
+        # place.
+        prologue: List[Instruction] = [
+            Push(Register('rbp')),
+            MovQ(src=Register('rsp'), dst=Register('rbp')),
+        ]
+        # Save every callee-saved scratch register unconditionally, not
+        # just in functions that happen to do string work themselves --
+        # required now that functions can call each other.
+        for reg in CALLEE_SAVED_SCRATCH_REGISTERS:
+            prologue.append(Push(Register(reg)))
+
         frame_size = self._frame_size()
         if frame_size:
-            ir_fn.prologue.append(SubQ(src=Imm(frame_size), dst=Register('rsp')))
+            prologue.append(SubQ(src=Imm(frame_size), dst=Register('rsp')))
 
-        return AsmFunction(name=ir_fn.name, instructions=ir_fn.prologue + instructions)
+        return AsmFunction(name=ir_fn.name, instructions=prologue + instructions)
 
     def _collect_params(self, params: List[Param]) -> None:
         """Gives each parameter its own logical frame slot, exactly

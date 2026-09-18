@@ -503,15 +503,18 @@ class IRFunction:
     Temp at all, so there's no reason left to keep them in separate
     lists, lowered separately, either.
 
-    `prologue` is still plain, old-style Instructions (see assembly_
-    ast.py), not real IR at all, and deliberately stays that way: the
-    callee-saved-register pushes and the frame-pointer setup have zero
-    dependence on program semantics -- the identical shape for every
-    function, parameterized only by frame_size (itself only known once
-    body is fully lowered) -- so there's no VarDecl-shaped decision
-    hiding in there for real IR to ever represent. This is pure
-    calling-convention bookkeeping, the one piece of this pipeline
-    real IR was never meant to describe at all.
+    Used to also carry a `prologue` field -- the callee-saved-register
+    pushes and the frame-pointer setup, still plain old-style
+    Instructions, not real IR -- removed entirely once it became clear
+    it never belonged on this object at all: unlike body, prologue has
+    zero dependence on program semantics -- the identical shape for
+    every function, parameterized only by frame_size, which isn't even
+    known until body is fully lowered anyway -- so there's no VarDecl-
+    shaped decision in it for gen_function_ir's own build phase to ever
+    have a reason to compute early. lower_function builds it directly
+    now, in one place, right where frame_size itself already becomes
+    known, rather than gen_function_ir handing back a piece of pure
+    calling-convention bookkeeping it never actually needed to touch.
 
     `return_type` is this function's own declared return type (Type.
     VOID for a function with none) -- gen_function's own lowering half
@@ -521,7 +524,6 @@ class IRFunction:
     afterward."""
     name: str
     body: list = field(default_factory=list)
-    prologue: list = field(default_factory=list)
     return_type: Optional[Type] = None
 
 
