@@ -11,6 +11,7 @@ test only checks a compiled program's own runtime behavior, which
 would stay green even if self.ir_program were silently wrong or never
 populated at all.
 """
+
 import tempfile
 from pathlib import Path
 from typing import get_args
@@ -160,31 +161,3 @@ def test_ir_program_carries_its_own_ids():
     ast = _parse_and_analyze("def int main():\n    return 1\n")
     ir_program = build_ir_program(ast)
     assert ir_program.ids is not None
-
-
-def test_gen_function_wrapper_matches_generate_output():
-    """gen_function (the thin gen_function_ir + lower_function
-    wrapper) must still produce an AsmFunction identical to what
-    generate() itself produces for the same function -- confirmed
-    directly since generate() no longer calls gen_function at all
-    (see its own updated body). Two SEPARATE IRProgram instances, one
-    per pathway (matching how gen_a/gen_b were already separate
-    CodeGenerator instances, each with its own independent
-    IdAllocator, before this test's own last rewrite) -- sharing one
-    would let whichever pathway runs first mint a label the other
-    then can't, turning a real match into a false mismatch."""
-    ast = _parse_and_analyze(
-        "def int main():\n"
-        "    int x = 5\n"
-        "    return x * 2\n"
-    )
-    ir_program_a = build_ir_program(ast)
-    gen_a = CodeGenerator()
-    via_wrapper = gen_a.gen_function(ast.functions[0], ir_program_a)
-
-    ir_program_b = build_ir_program(ast)
-    gen_b = CodeGenerator()
-    asm_program = gen_b.generate(ir_program_b)
-    via_generate = asm_program.functions[0]
-
-    assert via_wrapper == via_generate

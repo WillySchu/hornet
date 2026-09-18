@@ -202,32 +202,6 @@ class CodeGenerator(
             type_descriptors=ir_program.type_descriptors,
         )
 
-    def gen_function(self, fn: Function, ir_program: IRProgram) -> AsmFunction:
-        """Thin convenience wrapper: builds fn's own IRFunction, then
-        immediately lowers it -- see gen_function_ir/lower_function for
-        what each half does. Takes ir_program explicitly, same as
-        lower_function does, rather than building its own: this
-        function alone has no Program AST to build one from (only fn,
-        a single Function), so the caller must already have one -- via
-        ir.program_builder.build_ir_program, or hand-built directly,
-        with at least struct_registry/type_alias_registry/ids set to
-        whatever fn's own body needs. generate() itself no longer goes
-        through this method at all (see its own updated body): it
-        lowers every function in an already-built IRProgram in one
-        pass, into the AsmProgram it returns. This method still builds
-        and lowers, back to back, for one function at a time, since
-        that's still a perfectly correct way to compile a single
-        function end to end (nothing about gen_function_ir/lower_
-        function's own contract requires the whole-program shape
-        generate() now uses) -- it exists for anything that wants
-        exactly that, without caring about the IR in between. Every
-        existing test that calls compile_to_asm/generate_asm goes
-        through generate(), not this method, so it has exactly one
-        caller left: itself, from outside this class, if anything ever
-        wants it directly."""
-        ir_fn = IRFunctionBuilder(ir_program).gen_function_ir(fn)
-        return self.lower_function(ir_fn, ir_program)
-
     def lower_function(self, ir_fn: IRFunction, ir_program: IRProgram) -> AsmFunction:
         """Allocates registers over ir_fn's own body, lowers it, and
         assembles the final AsmFunction -- everything gen_function_ir's
