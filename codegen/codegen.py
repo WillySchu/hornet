@@ -33,7 +33,7 @@ from codegen.assembly_ast import (
     Ret,
     SubQ,
 )
-from codegen.calling_convention import CALLEE_SAVED_SCRATCH_REGISTERS, CallingConventionMixin
+from codegen.calling_convention import CALLEE_SAVED_SCRATCH_REGISTERS
 from codegen.dispatch import DispatchMixin
 from codegen.emitter import Emitter
 from codegen.errors import CodegenError
@@ -45,7 +45,7 @@ from codegen.scalars import ScalarsMixin
 from codegen.statements import StatementsMixin
 from codegen.strings import StringsMixin
 from codegen.structs import StructsMixin
-from codegen.utils import type_byte_width, type_of, ARG_REGISTERS_64
+from codegen.utils import type_byte_width, type_of
 from lexer import lex
 from parser import (
     ArrayLiteral,
@@ -79,7 +79,6 @@ from semantic import analyze, type_from_name, Type, TypeKind, StructInfo
 
 class CodeGenerator(
         ArraysSlicesMixin,
-        CallingConventionMixin,
         DispatchMixin,
         ScalarsMixin,
         StatementsMixin,

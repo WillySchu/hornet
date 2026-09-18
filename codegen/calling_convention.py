@@ -25,18 +25,15 @@ from semantic import TypeKind
 CALLEE_SAVED_SCRATCH_REGISTERS = ['rbx', 'r12', 'r13', 'r14']
 
 
-class CallingConventionMixin:
-
-    def _total_arg_slots(self, args: list[Node]) -> int:
-        """Total argument-register slots `args` will need: 3 per
-        slice-typed (or `none`) argument, 1 for everything else.
-        `none` is checked via isinstance rather than its resolved
-        type, since Type.NONE != SLICE; semantic.py guarantees `none`
-        only ever appears where a slice is expected, so this is safe.
-        Used by every call-codegen entry point's "too many arguments"
-        check."""
-        return sum(
-            3 if type_of(a).kind == TypeKind.SLICE or isinstance(a, NoneLiteral) else 1
-            for a in args
-        )
-
+def total_arg_slots(args: list[Node]) -> int:
+    """Total argument-register slots `args` will need: 3 per
+    slice-typed (or `none`) argument, 1 for everything else.
+    `none` is checked via isinstance rather than its resolved
+    type, since Type.NONE != SLICE; semantic.py guarantees `none`
+    only ever appears where a slice is expected, so this is safe.
+    Used by every call-codegen entry point's "too many arguments"
+    check."""
+    return sum(
+        3 if type_of(a).kind == TypeKind.SLICE or isinstance(a, NoneLiteral) else 1
+        for a in args
+    )

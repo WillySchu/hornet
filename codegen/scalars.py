@@ -7,6 +7,7 @@ caller passes a value's ordinary 32-bit-named register, and these
 (along with gen_binary_op/gen_unary_op/gen_cast_narrowing_into) decide
 internally which actual width to operate on."""
 
+from codegen.calling_convention import total_arg_slots
 from codegen.assembly_ast import (
     Add,
     AddQ,
@@ -205,7 +206,7 @@ class ScalarsMixin:
 
         Returns (ir, t_result), t_result being None for a void call.
         """
-        total_slots = self._total_arg_slots(expr.args)
+        total_slots = total_arg_slots(expr.args)
         if total_slots > 6:
             raise CodegenError(
                 f"Call to '{expr.name}' needs {total_slots} argument "
@@ -250,7 +251,7 @@ class ScalarsMixin:
         _ir_call itself uses), then prepends dst_address as the
         actual first argument value -- nothing about that loop needs
         to know a hidden pointer is involved at all."""
-        total_slots = 1 + self._total_arg_slots(call_expr.args)
+        total_slots = 1 + total_arg_slots(call_expr.args)
         if total_slots > 6:
             raise CodegenError(
                 f"Call to '{call_expr.name}' needs {total_slots} argument "
