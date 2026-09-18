@@ -123,6 +123,31 @@ def test_ir_program_shares_string_and_typedesc_data_with_asm_program():
     assert len(gen.ir_program.string_literals) > 0
 
 
+def test_ir_program_carries_struct_and_type_alias_registries():
+    """struct_registry/type_alias_registry are copied onto IRProgram
+    too (see its own docstring for why a self-contained artifact needs
+    them, not just string_literals/type_descriptors), matching
+    Program's own registries exactly -- the same ones CodeGenerator
+    itself still keeps for lowering's own use."""
+    ast = _parse_and_analyze(
+        "struct Point:\n"
+        "    int x\n"
+        "    int y\n"
+        "\n"
+        "type Coord = Point\n"
+        "\n"
+        "def int main():\n"
+        "    Point p = Point(1, 2)\n"
+        "    return p.x\n"
+    )
+    gen = CodeGenerator()
+    gen.generate(ast)
+    assert gen.ir_program.struct_registry == ast.struct_registry
+    assert gen.ir_program.type_alias_registry == ast.type_alias_registry
+    assert 'Point' in gen.ir_program.struct_registry
+    assert 'Coord' in gen.ir_program.type_alias_registry
+
+
 def test_gen_function_wrapper_matches_generate_output():
     """gen_function (the thin gen_function_ir + lower_function
     wrapper) must still produce an AsmFunction identical to what

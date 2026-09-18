@@ -593,6 +593,22 @@ class IRProgram:
     aren't tied to any one function's frame, so they live here rather
     than being duplicated per function.
 
+    struct_registry/type_alias_registry (name -> StructInfo/Type,
+    stamped onto Program by semantic.analyze() -- see IRProgramBuilder.
+    build's own defensive check) are copied here too, for the same
+    reason: an IRLocalAddress/IRStructAddress referencing a struct
+    field, or any type this IR's own Temps carry, is only fully
+    interpretable alongside the registries that gave those names and
+    types meaning in the first place. Without them, this object would
+    be IR that LOOKS self-contained but silently depends on whatever
+    CodeGenerator instance happened to build it still being alive and
+    unchanged -- exactly the kind of hidden coupling this whole arc has
+    been removing one piece at a time. CodeGenerator itself still keeps
+    its own copies too (self.struct_registry/self.type_alias_registry),
+    since lowering reads them from there, not from this object -- see
+    IRProgramBuilder's own module docstring for why that split still
+    holds even though both copies now exist.
+
     Used to also deliberately exclude the print-stringify helper
     function old-style code conditionally added to AsmProgram's own
     function list -- that gate (generate()'s own `if self._print_used`
@@ -615,3 +631,5 @@ class IRProgram:
     functions: list = field(default_factory=list)
     string_literals: list = field(default_factory=list)
     type_descriptors: list = field(default_factory=list)
+    struct_registry: dict = field(default_factory=dict)
+    type_alias_registry: dict = field(default_factory=dict)
