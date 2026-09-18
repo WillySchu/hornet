@@ -324,6 +324,21 @@ class StatementsMixin:
                 for s in stmt.else_body:
                     ir.extend(self.gen_statement_ir(s, ir_fn))
                 self._pop_scope()
+            # Symmetric with the then-branch's own IRJump(end_label)
+            # right above, for the identical reason: without this, an
+            # else-less If (else_body is None -- two labels back to
+            # back, nothing between them) or an else body whose last
+            # statement isn't already a jump/branch/return both fall
+            # straight through into end_label, rather than reaching it
+            # via an explicit terminator -- the same implicit-
+            # fallthrough gap _ir_while_head's own docstring explains,
+            # just this op's own version of it. Possibly redundant
+            # when the else body already ends in a real terminator on
+            # every path (an unconditional return, say) -- exactly as
+            # harmless as the then-branch's own identical jump already
+            # is in that same situation, an unreachable op costing a
+            # few bytes, not a correctness concern.
+            ir.append(IRJump(end_label))
             ir.append(IRLabel(end_label))
             return ir
         elif isinstance(stmt, While):
@@ -1071,9 +1086,23 @@ class StatementsMixin:
         """Builds (without lowering) the start-label/condition/branch
         IR landing at the given body label -- the caller (gen_
         statement_ir's own While case) is responsible for the body and
-        the trailing jump/end-label around it."""
+        the trailing jump/end-label around it.
+
+        Opens with an explicit IRJump(start_label), not just IRLabel
+        (start_label) directly: whatever precedes a While in the same
+        block has no reason to already end in a terminator (an
+        ordinary VarDecl or Assign right before a loop, say), so
+        without this jump, entering the loop's own condition check for
+        the very first time would rely on falling out of that
+        preceding op into this label -- exactly the implicit
+        fallthrough ir.ir's own module docstring says never to rely
+        on. The jump is redundant at the assembly level once lowered
+        (a jump straight to the next instruction) -- exactly what
+        TODO.md's own "IRBranch peephole optimization to skip
+        redundant unconditional jumps" item would clean up, not a
+        reason to leave the gap open until then."""
         cond_ir, cond_value = self.gen_expr_ir(stmt.condition)
-        return [IRLabel(start_label)] + cond_ir + [
+        return [IRJump(start_label), IRLabel(start_label)] + cond_ir + [
             IRBranch(cond=cond_value, true_label=body_label, false_label=end_label),
             IRLabel(body_label),
         ]

@@ -271,6 +271,7 @@ class ScalarsMixin:
             IRJump(end_label),
             IRLabel(short_label),
             IRMove(dst=t_result, src=IRConst(short_circuit_value, Type.BOOL)),
+            IRJump(end_label),
             IRLabel(end_label),
         ]
         return ir, t_result

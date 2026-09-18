@@ -762,6 +762,7 @@ class ArraysSlicesMixin:
         cond = self.ir_program.ids.new_temp(Type.BOOL)
         ir = [
             IRMove(dst=i, src=IRConst(0, Type.INT)),
+            IRJump(start_label),
             IRLabel(start_label),
             IRBinOp(dst=cond, op=BinaryOp.LESS_THAN, left=i, right=IRConst(count, Type.INT)),
             IRBranch(cond=cond, true_label=body_label, false_label=end_label),
@@ -831,6 +832,7 @@ class ArraysSlicesMixin:
             cond = self.ir_program.ids.new_temp(Type.BOOL)
             ir = [
                 IRMove(dst=i, src=IRConst(0, Type.INT)),
+                IRJump(start_label),
                 IRLabel(start_label),
                 IRBinOp(dst=cond, op=BinaryOp.LESS_THAN, left=i, right=IRConst(value_type.size, Type.INT)),
                 IRBranch(cond=cond, true_label=body_label, false_label=end_label),

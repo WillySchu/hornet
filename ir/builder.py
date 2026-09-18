@@ -36,7 +36,9 @@ from typing import List, Optional
 from codegen.errors import CodegenError
 from codegen.escape_analysis import analyze_array_escapes, is_heap_allocated
 from codegen.utils import type_byte_width, type_of
-from ir.ir import IRCall, IRConst, IRCopy, IRFunction, IRLocalAddress, IRReadArgument, IRStore, Temp
+from ir.ir import (
+    IRBranch, IRCall, IRConst, IRCopy, IRFunction, IRJump, IRLocalAddress, IRReadArgument, IRReturn, IRStore, Temp,
+)
 from ir.arrays_slices import ArraysSlicesMixin
 from ir.dispatch import DispatchMixin
 from ir.scalars import ScalarsMixin
@@ -238,6 +240,47 @@ class IRFunctionBuilder(
             statement_ir.extend(self.gen_statement_ir(stmt, ir_fn))
         ir_fn.body = param_setup_ir + statement_ir
         ir_fn.return_type = return_type
+        if not ir_fn.body or not isinstance(ir_fn.body[-1], (IRBranch, IRJump, IRReturn)):
+            # Two genuinely different reasons this can be true, both
+            # closed the identical way:
+            #
+            # A function with no declared return type never has to
+            # guarantee every path returns explicitly (see
+            # analyze_function's own always_returns skip for this
+            # case), so unlike every other function, this one's own
+            # body can genuinely fall off the end with no IRReturn
+            # anywhere on some path -- an ordinary VarDecl or Assign,
+            # say, as the very last real statement.
+            #
+            # Every OTHER function DOES have that guarantee -- but
+            # guaranteeing a RETURN happens somewhere on every path is
+            # not the same as guaranteeing body's own last op is one:
+            # an If/While as the very last statement builds its own
+            # trailing IRLabel (if_end/while_end) as its own last op,
+            # regardless of whether every branch inside it already
+            # returns -- that label is only ever REACHED by jumping
+            # into it from inside, never by falling out the bottom of
+            # the function, but it still needs SOME terminator
+            # syntactically following it, the identical reason
+            # _ir_while_head's own leading IRJump exists: the IR itself
+            # has to be structurally valid regardless of which paths
+            # are reachable at runtime, not just whichever paths this
+            # particular check happens to reason about.
+            #
+            # Appended unconditionally rather than only where actually
+            # reachable -- there's no cheap way to know a given path
+            # doesn't need this without effectively re-running always_
+            # returns, and an extra, unreachable IRReturn (whatever
+            # this function's own real return type -- ir_lowering.py's
+            # own IRReturn case tolerates a None value regardless,
+            # loading nothing before the epilogue either way) costs
+            # nothing but a few bytes once lowered. Closes the last way
+            # this compiler's own real IR could still fall off the end
+            # of a function with no terminator at all -- see ir.verify's
+            # own module docstring for why every other such gap (this
+            # one's own sibling cases, if/while's own interior labels)
+            # was closed the identical way.
+            ir_fn.body.append(IRReturn(value=None))
         return ir_fn
 
     def _ir_param_setup(self, fn: Function, param_types: List[Type], arg_shift: int, ir_fn: IRFunction) -> list:

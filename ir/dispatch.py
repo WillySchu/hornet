@@ -338,6 +338,7 @@ class DispatchMixin:
                     IRJump(done_label),
                     IRLabel(mismatch_label),
                     IRMove(dst=t, src=IRConst(0 if expr.op == BinaryOp.EQUAL else 1, Type.BOOL)),
+                    IRJump(done_label),
                     IRLabel(done_label),
                 ]
                 return ir, t

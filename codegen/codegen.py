@@ -57,7 +57,7 @@ from codegen.register_allocator import allocate_registers
 from codegen.scalars_lowering import ScalarsLoweringMixin
 from lexer import lex
 from parser import Function, Parser, Program
-from semantic import analyze, Type
+from semantic import analyze
 
 
 # ---------------------------------------------------------------------------
@@ -358,28 +358,19 @@ class CodeGenerator(
         self._resolve_frame_layout(ir_fn)
         self._patch_frame_slots(instructions)
         self._register_assignment = {}  # never valid past this function's own body
-        if ir_fn.return_type == Type.VOID:
-            # A function with no declared return type never has to
-            # guarantee every path returns explicitly (see
-            # analyze_function's always_returns skip for this case) --
-            # its body can legitimately fall off the end, relying on
-            # THIS trailing epilogue rather than an IRReturn-emitted
-            # one (see ir_lowering.py's own IRReturn case) on every
-            # path. Every OTHER function never needs this:
-            # always_returns already guarantees some IRReturn-emitted
-            # epilogue executes on every path, making a trailing one
-            # here permanently unreachable. Without this, a void
-            # function that fell off the end would fall straight
-            # through into whatever comes next in the generated
-            # assembly -- the bounds-check panic block, or the next
-            # function's prologue -- a real, silent crash.
-            #
-            # Appended unconditionally, even when this body already
-            # returns explicitly on every path: there's no cheap way to
-            # know that without effectively re-running always_returns,
-            # and an extra, unreachable epilogue costs nothing but a
-            # few bytes.
-            instructions.extend(self._gen_epilogue())
+        # A void function's own body used to be allowed to fall off
+        # the end with no IRReturn on some path, relying on a trailing
+        # epilogue appended right here for exactly that case (see
+        # ir_lowering.py's own IRReturn case for the epilogue every
+        # OTHER path already gets this same way). gen_function_ir now
+        # appends an explicit, real IRReturn(None) to the end of every
+        # void function's own body unconditionally (see its own
+        # docstring), closing that gap at the IR level instead --
+        # ir_lowering.py's own IRReturn case already emits the
+        # identical epilogue this used to append directly, making this
+        # permanently redundant, the same "always_returns already
+        # guarantees it" reasoning that already applied to every other
+        # function.
         instructions.extend(self._gen_bounds_check_panic_block())
 
         # Built here, not in gen_function_ir, since this needs nothing
@@ -419,14 +410,18 @@ class CodeGenerator(
     def _gen_epilogue(self) -> List[Instruction]:
         """The ordinary function epilogue: restore every callee-saved
         scratch register (in reverse of the prologue's push order),
-        then leave/ret. Shared by IRReturn's own bare-return lowering
-        (see ir_lowering.py -- no value to compute) and lower_function's
-        own trailing fall-through case: both are "there's no value to
-        compute, just exit the function cleanly" situations. Leave
-        resets %rsp straight to %rbp, which was captured before the
-        callee-saved registers were pushed in the prologue, so
-        anything pushed after that point has to be popped explicitly
-        first or it's silently discarded rather than restored."""
+        then leave/ret. Called from exactly one place now -- IRReturn's
+        own lowering (see ir_lowering.py), on every return this
+        compiler's own IR ever produces, bare or with a value alike:
+        gen_function_ir guarantees every function's own body ends in a
+        real IRReturn somewhere reachable, void or not (see its own
+        docstring), so there's no separate "fell off the end with no
+        IRReturn at all" case left for anything else to handle
+        anymore. Leave resets %rsp straight to %rbp, which was
+        captured before the callee-saved registers were pushed in the
+        prologue, so anything pushed after that point has to be popped
+        explicitly first or it's silently discarded rather than
+        restored."""
         instructions = []
         for reg in reversed(CALLEE_SAVED_SCRATCH_REGISTERS):
             instructions.append(Pop(Register(reg)))
