@@ -30,59 +30,57 @@ Hornet source files use the `.ht` extension.
 The compiler currently requires:
 
 * Python 3
-* An x86-64 assembler and C compiler/linker (`as` and `gcc`)
+* `gcc` for building runnable executables
 * Linux or macOS for the generated native code
 
-The compiler itself is written in Python and has no third-party runtime dependency.
+The compiler itself is written in Python and has no third-party Python dependencies.
 
-## Compiling a Program
+The runnable executable also includes the small native Hornet runtime in `runtime/runtime.c`.
 
-From the `compiler` directory:
+## Building and Running a Program
 
-```bash
-python3 compile.py program.ht
-```
-
-By default, this writes assembly to standard output.
-
-To write the generated assembly to a file:
+The recommended way to build a runnable executable is:
 
 ```bash
-python3 compile.py program.ht -o program.s
+python3 build.py program.ht -o program
+./program
 ```
+
+`build.py` compiles the Hornet source, compiles the bundled runtime, and links both into a native executable.
 
 The target platform can be selected explicitly:
 
 ```bash
-python3 compile.py program.ht --platform linux -o program.s
+python3 build.py program.ht --platform linux -o program
 ```
 
 or:
 
 ```bash
-python3 compile.py program.ht --platform macos -o program.s
+python3 build.py program.ht --platform macos -o program
 ```
 
-The compiler currently defaults to the Linux target when invoked through `compile.py`.
+By default, `build.py` selects the platform of the host on which it is running. The generated binary must target the host architecture and platform to be runnable locally.
 
-## Building the Executable
+## Generating Assembly
 
-The compiler produces assembly rather than an executable directly. On Linux, the generated assembly can be assembled and linked with:
+`compile.py` is useful when you want to inspect or further process the compiler's generated assembly:
 
 ```bash
 python3 compile.py program.ht --platform linux -o program.s
-as -o program.o program.s
-gcc -o program program.o
-./program
 ```
 
-The exit status of the program is available from the shell:
+Without `-o`, the assembly is written to standard output:
 
 ```bash
-echo $?
+python3 compile.py program.ht --platform linux
 ```
 
-The repository also contains `test.sh`, which demonstrates the basic assemble/link/run workflow.
+`compile.py` generates the assembly produced by the compiler, but does not compile or link the bundled runtime. Use `build.py` when you want a runnable executable.
+
+If you assemble and link the generated assembly manually, you must also compile and link `runtime/runtime.c` because runtime operations such as `print` are implemented there.
+
+The repository also contains `test.sh`, a small helper that builds and runs a `.ht` program by invoking `build.py`.
 
 ---
 
@@ -324,7 +322,7 @@ Hornet supports fixed-size arrays.
 
 The type includes the array's size:
 
-```hornet
+```text
 [3]int
 [10]bool
 [4]str
@@ -956,12 +954,10 @@ def int main():
     return 0
 ```
 
-Compile and run:
+Build and run:
 
 ```bash
-python3 compile.py fib.ht --platform linux -o fib.s
-as -o fib.o fib.s
-gcc -o fib fib.o
+python3 build.py fib.ht -o fib
 ./fib
 ```
 
@@ -994,6 +990,13 @@ def int main():
     return 0
 ```
 
+Build and run with:
+
+```bash
+python3 build.py structs.ht -o structs
+./structs
+```
+
 ---
 
 # Complete Example: FizzBuzz
@@ -1022,7 +1025,7 @@ def int main():
 
 # Compiler Architecture
 
-The compiler is organized as a series of stages:
+The compiler is organized into distinct frontend, IR, optimization, backend, and runtime components:
 
 ```text
 Hornet source
@@ -1031,40 +1034,110 @@ Hornet source
    Lexer
      │
      ▼
+   Parser
+     │
+     ▼
     AST
+     │
+     ▼
+ Desugaring
      │
      ▼
 Semantic analysis
      │
      ▼
-Intermediate representation
+ IRProgram
      │
      ▼
-Register allocation / lowering
+ IR optimization
+     │
+     ▼
+x86-64 backend
+     │
+     ├── register allocation
+     ├── frame layout
+     ├── instruction selection
+     └── assembly emission
      │
      ▼
 Assembly AST
      │
      ▼
 x86-64 assembly
+     │
+     ├─────────────────────┐
+     ▼                     ▼
+Hornet runtime         native linker
+                            │
+                            ▼
+                       executable
 ```
 
-The compiler performs semantic analysis before code generation. Invalid names and type mismatches therefore produce compiler errors rather than being discovered accidentally during assembly generation.
+The frontend builds a complete `IRProgram` before the x86-64 backend begins lowering it. This keeps the intermediate representation independent of the assembly representation and provides a natural boundary for future IR-to-IR optimization passes.
+
+The backend is responsible for machine-specific concerns such as register allocation, stack-frame layout, the x86-64 calling convention, and instruction selection.
+
+The runtime is compiled separately from the generated Hornet assembly and linked into the final executable. Runtime operations are invoked through the same native calling machinery used for other external functions.
+
+---
+
+# Runtime
+
+Hornet executables are linked with a small native runtime located in `runtime/runtime.c`.
+
+The runtime currently provides implementations for operations including:
+
+* `print`
+* Runtime error reporting via `hornet_panic`
+* Slice backing-storage growth via `hornet_slice_grow`
+
+The runtime's printing implementation understands Hornet's type descriptors and can recursively format arrays, slices, structs, strings, and scalar values.
+
+The compiler is responsible for language-level decisions such as type checking, aggregate layout, address calculation, and bounds-check generation. The runtime handles the implementation of selected operations that are more naturally expressed as native runtime algorithms.
+
+The runtime is intentionally small. Not every use of libc is wrapped in a Hornet-specific runtime function; generic platform primitives such as `memcpy` remain ordinary implementation details where appropriate.
+
+---
+
+# Project Structure
+
+```text
+lexer.py          Lexical analysis
+parser.py         AST construction
+desugar.py        AST desugaring
+semantic.py       Semantic analysis and type checking
+
+ir/               Intermediate representation and IR construction
+optimize/         IR optimization passes
+
+codegen/          x86-64 backend and assembly representation
+runtime/          Native Hornet runtime
+
+tests/            Compiler and runtime tests
+benchmarks/       Performance benchmarks
+hornet-vim/       Vim syntax and indentation support
+
+compile.py        Compiler entry point for generating assembly
+build.py          Builds a runnable executable, including the runtime
+```
+
+The compiler frontend and IR builder do not depend on x86-64 assembly details. The `codegen/` package handles the architecture-specific lowering from IR to the assembly AST.
 
 ---
 
 # Testing
 
-The compiler has an extensive test suite covering the lexer, parser, semantic analyzer, code generator, escape analysis, and register allocator.
+The compiler has an extensive automated test suite covering the lexer, parser, semantic analyzer, IR construction and verification, optimization passes, backend, escape analysis, register allocator, runtime, and end-to-end executable builds.
 
-Run the tests with:
+Run the tests from the repository root with:
 
 ```bash
-cd compiler
 pytest
 ```
 
 The integration tests compile Hornet programs and, where appropriate, assemble and execute the resulting native programs.
+
+Runtime tests also exercise `runtime/runtime.c` independently of the Hornet compiler, as well as testing the actual separate-compilation/linking path used by `build.py`.
 
 Individual feature examples are also kept under:
 
@@ -1078,7 +1151,21 @@ and use the `.ht` extension.
 
 # Current Status
 
-Hornet is an experimental language and compiler. The implementation is functional, but the language and compiler architecture are still evolving.
+Hornet is an experimental but functional statically typed language and native compiler.
+
+The compiler currently provides:
+
+* A lexer, parser, desugaring phase, and semantic analyzer
+* A standalone, architecture-agnostic intermediate representation
+* IR verification and initial optimization passes
+* An x86-64 native backend
+* Register allocation and native calling-convention support
+* Fixed-size arrays, slices, and nominal structs
+* A separate C runtime for selected language/runtime operations
+* Native executable builds on x86-64 Linux and macOS
+* An extensive automated test suite covering the frontend, IR, backend, runtime, and generated programs
+
+The language and compiler are still evolving, and the public language/API surface should be considered experimental.
 
 Some notable features that are **not yet implemented** include:
 
@@ -1096,7 +1183,7 @@ Some notable features that are **not yet implemented** include:
 * Bounds-check elimination
 * More advanced compiler optimization
 
-The compiler also currently targets x86-64 Linux and macOS rather than being architecture-independent.
+The compiler also currently targets x86-64 Linux and macOS rather than being architecture-independent at the native backend level.
 
 ---
 
@@ -1104,8 +1191,8 @@ The compiler also currently targets x86-64 Linux and macOS rather than being arc
 
 The longer-term direction of the project includes:
 
-* Completing the intermediate representation and moving more code generation through it
-* Improving optimization
+* Cleaning up the remaining IR/backend coupling and continuing to simplify backend state
+* Improving and expanding IR optimization
 * Bounds-check elimination
 * More sophisticated register allocation
 * Pointers and foreign-function interfaces
@@ -1114,6 +1201,7 @@ The longer-term direction of the project includes:
 * Sum types and pattern matching
 * Concurrency
 * Automatic memory management
+* Expanding the runtime where language-level runtime behavior warrants it
 
-Hornet's implementation is intentionally incremental: new language features are added with corresponding lexer, parser, semantic-analysis, code-generation, and integration tests rather than relying solely on isolated parser tests.
+Hornet's implementation is intentionally incremental: new language features are added with corresponding lexer, parser, semantic-analysis, IR, backend, runtime, and integration tests rather than relying solely on isolated parser tests.
 
