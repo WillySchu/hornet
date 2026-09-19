@@ -4,10 +4,10 @@ correctly -- the actual cross-translation-unit path build.py's own
 final link step relies on, as opposed to test_runtime_isolated.c's
 own #include-based white-box testing of runtime.c's internals.
 
-Also confirms hornet_print's own symbol visibility is exactly what's
-intended: the one external entry point a future compiler call site
-will call, with everything else (hornet_stringify, the buffer
-helpers) kept internal.
+Also confirms hornet_print/hornet_panic's own symbol visibility is
+exactly what's intended: the two external entry points a compiler
+call site actually calls, with everything else (hornet_stringify, the
+buffer helpers) kept internal.
 """
 import shutil
 import subprocess
@@ -55,11 +55,12 @@ def test_runtime_and_caller_link_and_run_correctly():
         assert result.stdout == "42\n"
 
 
-def test_hornet_print_is_the_only_external_symbol():
-    """hornet_print is the one function meant to be called from
-    outside this file; hornet_stringify and every buffer/read helper
-    are internal implementation details (static linkage) that
-    shouldn't leak into whatever links against this object file."""
+def test_hornet_print_and_panic_are_the_only_external_symbols():
+    """hornet_print/hornet_panic are the two functions meant to be
+    called from outside this file; hornet_stringify and every buffer/
+    read helper are internal implementation details (static linkage)
+    that shouldn't leak into whatever links against this object
+    file."""
     with tempfile.TemporaryDirectory() as tmpdir:
         runtime_o = f"{tmpdir}/runtime.o"
         arch_flags = ["-arch", "x86_64"] if HOST_IS_MACOS else []
@@ -74,7 +75,9 @@ def test_hornet_print_is_the_only_external_symbol():
         # macOS's Mach-O convention mangles every external C symbol
         # with a leading underscore (see Emitter's own symbol()
         # method) -- nm reports that mangled name here directly, so
-        # the expected name needs the identical leading underscore on
-        # macOS, not just when Hornet-generated code refers to it.
-        expected_name = "_hornet_print" if HOST_IS_MACOS else "hornet_print"
-        assert external_symbols == [expected_name]
+        # the expected names need the identical leading underscore on
+        # macOS, not just when Hornet-generated code refers to them.
+        expected_names = (
+            ["_hornet_panic", "_hornet_print"] if HOST_IS_MACOS else ["hornet_panic", "hornet_print"]
+        )
+        assert sorted(external_symbols) == expected_names

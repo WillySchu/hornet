@@ -294,33 +294,32 @@ class ArraysSlicesLoweringMixin:
         """Appended once at the end of a function's instructions (see
         gen_function) for every distinct message that function's
         bounds checks actually used -- none at all if it never
-        triggered any. Each block prints its message, then calls
-        abort() (SIGABRT) rather than a plain exit() -- an out-of-
-        bounds access is a genuine program bug, not a normal
-        termination condition, the same "abnormal termination"
-        character division by zero's hardware-trapped SIGFPE already
-        has. Never reached via ordinary fall-through from the
-        function's body -- every return already leaves via
-        `leave; ret`, and abort() itself never returns -- so appending
-        these at the very end is always safe.
+        triggered any. Each block calls hornet_panic(msg) (see
+        runtime.c), which prints the message then aborts (SIGABRT)
+        rather than a plain exit() -- an out-of-bounds access is a
+        genuine program bug, not a normal termination condition, the
+        same "abnormal termination" character division by zero's
+        hardware-trapped SIGFPE already has. Never reached via
+        ordinary fall-through from the function's body -- every return
+        already leaves via `leave; ret`, and hornet_panic itself never
+        returns (it ends in abort()) -- so appending these at the very
+        end is always safe.
 
-        Explicitly calls fflush(NULL) between puts() and abort() --
-        found necessary by testing: abort() terminates via a raw
-        signal, bypassing the normal exit() path that would otherwise
-        flush libc's buffered stdio. Without this, the message prints
-        reliably when stdout is line-buffered (an interactive
-        terminal) but is silently LOST whenever stdout is redirected
-        or piped -- the case for most non-interactively run programs.
-        """
+        This used to be six inline instructions here (leaq, three
+        libc calls, a mov) -- puts()/fflush(NULL)/abort() by hand, the
+        SAME sequence hornet_panic now performs once, in C, on the
+        OTHER side of this single call -- moved out for the identical
+        reason hornet_print's own hand-rolled stringify assembly was:
+        this compiler generates the sequence once per distinct message
+        per function, not once at all, so a single `call` here in
+        place of six repeated instructions is a real size win too, not
+        just a cleanup."""
         instructions = []
         for message, fail_label in self._bounds_check_fail_labels.items():
             msg_label = self._get_bounds_check_message_label(message)
             instructions.extend([
                 Label(fail_label),
                 LeaQ(label=msg_label, dst=Register('rdi')),
-                CallInstr('puts'),
-                Mov(src=Imm(0), dst=Register('edi')),
-                CallInstr('fflush'),
-                CallInstr('abort'),
+                CallInstr('hornet_panic'),
             ])
         return instructions

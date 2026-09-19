@@ -304,3 +304,23 @@ void hornet_print(void *value_addr, const unsigned char *type_desc) {
     write(1, buf.ptr, (size_t)buf.len);
     free(buf.ptr);
 }
+
+// The single entry point the compiler's own bounds-check codegen
+// calls on failure: prints `msg`, then aborts (SIGABRT) rather than a
+// plain exit() -- an out-of-bounds access is a genuine program bug,
+// not a normal termination condition, the same "abnormal termination"
+// character division by zero's hardware-trapped SIGFPE already has.
+// Never returns.
+//
+// Explicitly calls fflush(NULL) between puts() and abort() -- found
+// necessary by testing: abort() terminates via a raw signal, bypassing
+// the normal exit() path that would otherwise flush libc's own
+// buffered stdio. Without this, the message prints reliably when
+// stdout is line-buffered (an interactive terminal) but is silently
+// LOST whenever stdout is redirected or piped -- the case for most
+// non-interactively run programs.
+void hornet_panic(const char *msg) {
+    puts(msg);
+    fflush(NULL);
+    abort();
+}
