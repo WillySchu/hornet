@@ -12127,6 +12127,66 @@ class TestSemanticErrors:
         )
         analyze(ast)  # should not raise
 
+    # -- error messages carry a real source position ---------------------
+    # One test per raise SITE this file's SemanticError threads a node
+    # through in a genuinely different way (a statement, an expression,
+    # a top-level declaration) -- not one per message, since every site
+    # already gets the SAME mechanism (see test_semantic.py's own direct
+    # tests of SemanticError itself). These confirm that mechanism is
+    # actually wired correctly end-to-end, against real line numbers a
+    # person reading the source would count by hand.
+
+    def test_type_mismatch_reports_the_expressions_own_line_and_column(self):
+        ast = _parse(
+            "def int main():\n"      # line 1
+            "    bool b = true\n"    # line 2
+            "    int x = b + 1\n"    # line 3 -- 'b' (the Binary's own position) at column 13
+            "    return x\n"
+        )
+        with pytest.raises(SemanticError, match=re.escape("at line 3, column 13")):
+            analyze(ast)
+
+    def test_undeclared_variable_reports_the_reference_site(self):
+        ast = _parse(
+            "def int main():\n"   # line 1
+            "    return nope\n"   # line 2 -- 'nope' at column 12
+        )
+        with pytest.raises(SemanticError, match=re.escape("at line 2, column 12")):
+            analyze(ast)
+
+    def test_double_declaration_reports_the_second_declarations_own_line(self):
+        ast = _parse(
+            "def int main():\n"    # line 1
+            "    int a = 1\n"      # line 2 -- the first, unproblematic declaration
+            "    int a = 2\n"      # line 3 -- the redeclaration itself, 'int' at column 5
+            "    return a\n"
+        )
+        with pytest.raises(SemanticError, match=re.escape("at line 3, column 5")):
+            analyze(ast)
+
+    def test_break_outside_loop_reports_the_break_itself(self):
+        ast = _parse(
+            "def int main():\n"  # line 1
+            "    break\n"        # line 2 -- 'break' at column 5
+            "    return 0\n"
+        )
+        with pytest.raises(SemanticError, match=re.escape("at line 2, column 5")):
+            analyze(ast)
+
+    def test_duplicate_struct_reports_the_second_structs_own_line(self):
+        ast = _parse(
+            "struct A:\n"           # line 1 -- the first, unproblematic declaration
+            "    int x\n"
+            "\n"
+            "struct A:\n"           # line 4 -- the redeclaration itself, 'struct' at column 1
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n"
+        )
+        with pytest.raises(SemanticError, match=re.escape("at line 4, column 1")):
+            analyze(ast)
+
 
 # ---------------------------------------------------------------------------
 # Single-line comments: `#` to end of line. Purely a lexer-level feature --

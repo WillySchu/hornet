@@ -54,10 +54,17 @@ def desugar_methods(program: Program) -> None:
     it."""
     for sd in program.structs:
         for md in sd.methods:
-            receiver_param = Param(name=md.receiver_name, type=sd.name)
+            # Neither the synthesized receiver Param nor the Function
+            # itself has a token of its own -- both take the MethodDef's
+            # own position, so a semantic error blamed on either (e.g. a
+            # duplicate-method-name check) still points somewhere real
+            # in the source; every statement in body already carries its
+            # own real position from parsing, untouched here.
+            receiver_param = Param(name=md.receiver_name, type=sd.name, line=md.line, col=md.col)
             program.functions.append(Function(
                 name=mangle_method_name(sd.name, md.name),
                 return_type=md.return_type,
                 params=[receiver_param] + md.params,
                 body=md.body,
+                line=md.line, col=md.col,
             ))

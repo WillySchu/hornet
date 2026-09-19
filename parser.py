@@ -175,7 +175,7 @@ def _pretty_node(node: 'Node', indent: int) -> str:
     recursively rendered the same way -- only when it doesn't fit
     within _PRETTY_MAX_WIDTH."""
     class_name = type(node).__name__
-    field_names = [f.name for f in fields(node) if f.name != 'resolved_type']
+    field_names = [f.name for f in fields(node) if f.name not in ('resolved_type', 'line', 'col')]
     if not field_names:
         return f"{class_name}()"
 
@@ -189,6 +189,7 @@ def _pretty_node(node: 'Node', indent: int) -> str:
     return f"{class_name}(\n{inner},\n{_PRETTY_INDENT * indent})"
 
 
+@dataclass
 class Node:
     """Base class for all AST nodes.
 
@@ -204,7 +205,19 @@ class Node:
     semantic analysis runs (so printing it would be pure noise for the
     common case of inspecting a freshly parsed tree), and once set,
     anything that needs it reads it directly off the node instead.
-    """
+
+    `line`/`col` are 1-indexed, matching Token's own (see lexer.py),
+    and mark where the construct STARTS (e.g. a Binary's own position
+    is its left operand's, not the operator's) -- consistent enough
+    to point an error at the right neighborhood, though not an exact
+    span. kw_only with a 0 ("unset") default so every subclass's own
+    required fields are unaffected, and excluded from equality/repr:
+    an AST built by hand (in a test, or by desugar.py) without a real
+    token still compares equal to a parsed one, and doesn't clutter a
+    repr-based message with position noise semantic.py's own error
+    text already states explicitly (see SemanticError's own format)."""
+    line: int = field(default=0, kw_only=True, compare=False, repr=False)
+    col: int = field(default=0, kw_only=True, compare=False, repr=False)
 
     def pretty(self) -> str:
         return _pretty_node(self, indent=0)
@@ -868,6 +881,7 @@ class Parser:
     # -- grammar rules ----------------------------------------------------
 
     def parse_program(self) -> Program:
+        start_tok = self.current()
         functions = []
         structs = []
         type_aliases = []
@@ -880,7 +894,10 @@ class Parser:
             else:
                 functions.append(self.parse_function())
             self.skip_newlines()
-        return Program(functions=functions, structs=structs, type_aliases=type_aliases)
+        return Program(
+            functions=functions, structs=structs, type_aliases=type_aliases,
+            line=start_tok.line, col=start_tok.col,
+        )
 
     def parse_type_alias(self) -> TypeAlias:
         """`type Name = TargetType` -- a single-line, top-level
@@ -890,12 +907,12 @@ class Parser:
         TargetType reuses parse_type() directly -- see TypeAlias's own
         docstring for why the parser accepts more here than semantic.py
         currently allows."""
-        self.expect(TokenType.TYPE, "Expected 'type' to start a type alias")
+        start_tok = self.expect(TokenType.TYPE, "Expected 'type' to start a type alias")
         name_tok = self.expect(TokenType.IDENTIFIER, "Expected a name for this type alias")
         self.expect(TokenType.ASSIGN, "Expected '=' in a type alias declaration")
         target_type = self.parse_type()
         self.expect(TokenType.NEWLINE, "Expected a newline after a type alias declaration")
-        return TypeAlias(name=name_tok.val, target_type=target_type)
+        return TypeAlias(name=name_tok.val, target_type=target_type, line=start_tok.line, col=start_tok.col)
 
     def parse_struct_def(self) -> StructDef:
         """`struct Name: <field-or-method>+` -- header line then an
@@ -905,7 +922,7 @@ class Parser:
         unambiguous with one token of lookahead, delegated to parse_
         method_def -- see StructDef's own docstring for why fields and
         methods can freely interleave."""
-        self.expect(TokenType.STRUCT, "Expected 'struct'")
+        start_tok = self.expect(TokenType.STRUCT, "Expected 'struct'")
         name_tok = self.expect(TokenType.IDENTIFIER, "Expected a struct name")
         self.expect(TokenType.COLON, "Expected ':' to start the struct body")
         self.expect(TokenType.NEWLINE, "Expected a newline after ':'")
@@ -918,17 +935,21 @@ class Parser:
             if self.check(TokenType.DEF):
                 methods.append(self.parse_method_def())
             else:
+                field_start_tok = self.current()
                 field_type = self.parse_type()
                 field_name_tok = self.expect(TokenType.IDENTIFIER, "Expected a field name")
                 self.expect(TokenType.NEWLINE, "Expected a newline after a field declaration")
-                fields.append(StructField(name=field_name_tok.val, field_type=field_type))
+                fields.append(StructField(
+                    name=field_name_tok.val, field_type=field_type,
+                    line=field_start_tok.line, col=field_start_tok.col,
+                ))
             self.skip_newlines()
         self.expect(TokenType.DEDENT, "Expected a dedent to end the struct body")
         if not fields:
             raise ParseError(
                 f"Expected at least one field in struct '{name_tok.val}'"
             )
-        return StructDef(name=name_tok.val, fields=fields, methods=methods)
+        return StructDef(name=name_tok.val, fields=fields, methods=methods, line=start_tok.line, col=start_tok.col)
 
     def _check_starts_with_return_type(self) -> bool:
         """True if the current position starts an optional return type
@@ -947,7 +968,7 @@ class Parser:
         )
 
     def parse_function(self) -> Function:
-        self.expect(TokenType.DEF, "Expected 'def' to start a function definition")
+        start_tok = self.expect(TokenType.DEF, "Expected 'def' to start a function definition")
         return_type = self.parse_type() if self._check_starts_with_return_type() else None
         name_tok = self.expect(TokenType.IDENTIFIER, "Expected a function name")
         self.expect(TokenType.OPEN_PAREN, "Expected '(' after function name")
@@ -957,7 +978,10 @@ class Parser:
         self.expect(TokenType.NEWLINE, "Expected a newline after ':'")
 
         body = self.parse_block()
-        return Function(name=name_tok.val, return_type=return_type, params=params, body=body)
+        return Function(
+            name=name_tok.val, return_type=return_type, params=params, body=body,
+            line=start_tok.line, col=start_tok.col,
+        )
 
     def parse_method_def(self) -> MethodDef:
         """`def [type] name(receiver, param2, ...):` -- mirrors parse_
@@ -965,7 +989,7 @@ class Parser:
         bare untyped IDENTIFIER (a method requires exactly one -- see
         MethodDef's own docstring). Every later parameter is ordinary
         Param syntax."""
-        self.expect(TokenType.DEF, "Expected 'def' to start a method definition")
+        start_tok = self.expect(TokenType.DEF, "Expected 'def' to start a method definition")
         return_type = self.parse_type() if self._check_starts_with_return_type() else None
         name_tok = self.expect(TokenType.IDENTIFIER, "Expected a method name")
         self.expect(TokenType.OPEN_PAREN, "Expected '(' after method name")
@@ -978,7 +1002,10 @@ class Parser:
         self.expect(TokenType.NEWLINE, "Expected a newline after ':'")
 
         body = self.parse_block()
-        return MethodDef(receiver_name=receiver_tok.val, name=name_tok.val, return_type=return_type, params=params, body=body)
+        return MethodDef(
+            receiver_name=receiver_tok.val, name=name_tok.val, return_type=return_type, params=params, body=body,
+            line=start_tok.line, col=start_tok.col,
+        )
 
     def parse_params(self) -> List[Param]:
         """Comma-separated `type IDENTIFIER` entries, stopping without
@@ -993,9 +1020,10 @@ class Parser:
         return params
 
     def parse_param(self) -> Param:
+        start_tok = self.current()
         param_type = self.parse_type()
         name_tok = self.expect(TokenType.IDENTIFIER, "Expected a parameter name")
-        return Param(name=name_tok.val, type=param_type)
+        return Param(name=name_tok.val, type=param_type, line=start_tok.line, col=start_tok.col)
 
     def parse_type(self) -> Union[str, ArrayTypeExpr, SliceTypeExpr]:
         # A type keyword ('int'/'bool'/'str'/...), OR '[' NUMBER ']'
@@ -1009,11 +1037,11 @@ class Parser:
         # NUMBER -- validated here, unlike most validation in this
         # file, since a size is closer to syntax than an expression.
         if self.check(TokenType.OPEN_BRACKET):
-            self.advance()
+            open_tok = self.advance()
             if self.check(TokenType.CLOSE_BRACKET):
                 self.advance()
                 element_type = self.parse_type()
-                return SliceTypeExpr(element_type=element_type)
+                return SliceTypeExpr(element_type=element_type, line=open_tok.line, col=open_tok.col)
             size_tok = self.expect(
                 TokenType.NUMBER,
                 "Expected an array size (a positive integer literal), or ']' for a slice type",
@@ -1031,7 +1059,7 @@ class Parser:
                 )
             self.expect(TokenType.CLOSE_BRACKET, "Expected ']' after array size")
             element_type = self.parse_type()
-            return ArrayTypeExpr(size=size, element_type=element_type)
+            return ArrayTypeExpr(size=size, element_type=element_type, line=open_tok.line, col=open_tok.col)
         if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR):
             return self.advance().val
         if self.check(TokenType.IDENTIFIER):
@@ -1093,11 +1121,12 @@ class Parser:
             # typed_literal), is safe here because every statement
             # starting with one of these tokens already required a
             # full type before typed literals existed.
+            start_tok = self.current()
             parsed_type = self.parse_type()
             if isinstance(parsed_type, (ArrayTypeExpr, SliceTypeExpr)) and self.check(TokenType.OPEN_BRACKET):
                 literal = self._parse_bracketed_literal(parsed_type)
-                return ExprStmt(expr=literal)
-            return self.parse_var_decl(var_type=parsed_type)
+                return ExprStmt(expr=literal, line=start_tok.line, col=start_tok.col)
+            return self.parse_var_decl(var_type=parsed_type, start_tok=start_tok)
         if self.check(TokenType.RETURN):
             return self.parse_return()
         if self.check(TokenType.IF):
@@ -1115,43 +1144,46 @@ class Parser:
             # IDENTIFIER alone is ambiguous with a variable reference,
             # call, or field access, so the second token is needed
             # before parse_type() is called at all.
+            start_tok = self.current()
             parsed_type = self.parse_type()
-            return self.parse_var_decl(var_type=parsed_type)
+            return self.parse_var_decl(var_type=parsed_type, start_tok=start_tok)
         if self.check(TokenType.IDENTIFIER) and self.peek(1).type in _ASSIGNMENT_TOKENS:
             return self.parse_assign()
         return self.parse_expr_stmt_or_assign()
 
     def parse_while(self) -> While:
-        self.expect(TokenType.WHILE, "Expected 'while'")
+        start_tok = self.expect(TokenType.WHILE, "Expected 'while'")
         condition = self.parse_expression()
         self.expect(TokenType.COLON, "Expected ':' to start the while body")
         self.expect(TokenType.NEWLINE, "Expected a newline after ':'")
         body = self.parse_block()
-        return While(condition=condition, body=body)
+        return While(condition=condition, body=body, line=start_tok.line, col=start_tok.col)
 
     def parse_break(self) -> Break:
-        self.expect(TokenType.BREAK, "Expected 'break'")
-        return Break()
+        tok = self.expect(TokenType.BREAK, "Expected 'break'")
+        return Break(line=tok.line, col=tok.col)
 
     def parse_continue(self) -> Continue:
-        self.expect(TokenType.CONTINUE, "Expected 'continue'")
-        return Continue()
+        tok = self.expect(TokenType.CONTINUE, "Expected 'continue'")
+        return Continue(line=tok.line, col=tok.col)
 
     def parse_if(self) -> If:
-        self.expect(TokenType.IF, "Expected 'if'")
-        return self._parse_if_body()
+        start_tok = self.expect(TokenType.IF, "Expected 'if'")
+        return self._parse_if_body(start_tok)
 
     def parse_elif_as_if(self) -> If:
         # See If's docstring: an elif is parsed as an ordinary If, just
         # nested one level inside the enclosing if's else_body.
-        self.expect(TokenType.ELIF, "Expected 'elif'")
-        return self._parse_if_body()
+        start_tok = self.expect(TokenType.ELIF, "Expected 'elif'")
+        return self._parse_if_body(start_tok)
 
-    def _parse_if_body(self) -> If:
+    def _parse_if_body(self, start_tok: Token) -> If:
         """Shared by parse_if/parse_elif_as_if -- both are `KEYWORD
         expression ':' NEWLINE block`, differing only in which keyword
-        the caller already consumed. Recurses into parse_elif_as_if
-        for an arbitrarily long elif chain, plus an optional else.
+        the caller already consumed (and passes in, as start_tok, so
+        the resulting If is positioned at 'if'/'elif' either way).
+        Recurses into parse_elif_as_if for an arbitrarily long elif
+        chain, plus an optional else.
         """
         condition = self.parse_expression()
         self.expect(TokenType.COLON, "Expected ':' to start the if body")
@@ -1167,21 +1199,31 @@ class Parser:
             self.expect(TokenType.NEWLINE, "Expected a newline after ':'")
             else_body = self.parse_block()
 
-        return If(condition=condition, then_body=then_body, else_body=else_body)
+        return If(condition=condition, then_body=then_body, else_body=else_body, line=start_tok.line, col=start_tok.col)
 
-    def parse_var_decl(self, var_type: Optional[Union[str, 'ArrayTypeExpr', 'SliceTypeExpr']] = None) -> VarDecl:
+    def parse_var_decl(
+        self,
+        var_type: Optional[Union[str, 'ArrayTypeExpr', 'SliceTypeExpr']] = None,
+        start_tok: Optional[Token] = None,
+    ) -> VarDecl:
         """`type NAME` or `type NAME = <expr>`. `var_type`, when
         already supplied, is a type parse_statement already parsed
         before realizing this is a declaration rather than a bare,
         fully-typed array-literal statement -- passed in rather than
-        parsed twice."""
+        parsed twice. `start_tok` likewise: once the caller has already
+        consumed the type, self.current() no longer points at this
+        declaration's start, so the caller passes the token it captured
+        before parsing that type. Only self-derived (from self.current())
+        when both are omitted, i.e. a direct, standalone call."""
+        if start_tok is None:
+            start_tok = self.current()
         if var_type is None:
             var_type = self.parse_type()
         name_tok = self.expect(TokenType.IDENTIFIER, "Expected a variable name")
         init = None
         if self.match(TokenType.ASSIGN):
             init = self.parse_expression()
-        return VarDecl(name=name_tok.val, var_type=var_type, init=init)
+        return VarDecl(name=name_tok.val, var_type=var_type, init=init, line=start_tok.line, col=start_tok.col)
 
     def parse_assign(self) -> Assign:
         """`a = <expr>` or a compound form (`a += <expr>`, etc),
@@ -1194,22 +1236,25 @@ class Parser:
         value = self.parse_expression()
 
         if op_tok.type == TokenType.ASSIGN:
-            return Assign(name=name_tok.val, value=value)
+            return Assign(name=name_tok.val, value=value, line=name_tok.line, col=name_tok.col)
 
         binary_op = _COMPOUND_ASSIGN_OPS[op_tok.type]
-        desugared_value = Binary(op=binary_op, left=Variable(name=name_tok.val), right=value)
-        return Assign(name=name_tok.val, value=desugared_value)
+        desugared_value = Binary(
+            op=binary_op, left=Variable(name=name_tok.val, line=name_tok.line, col=name_tok.col), right=value,
+            line=name_tok.line, col=name_tok.col,
+        )
+        return Assign(name=name_tok.val, value=desugared_value, line=name_tok.line, col=name_tok.col)
 
     def parse_return(self) -> Return:
         """`return <expr>` or a bare `return`. A NEWLINE immediately
         after 'return' unambiguously signals the bare form: every
         statement is NEWLINE-terminated and no expression can start
         with one, so this never needs to look further ahead."""
-        self.expect(TokenType.RETURN)
+        start_tok = self.expect(TokenType.RETURN)
         if self.check(TokenType.NEWLINE):
-            return Return(value=None)
+            return Return(value=None, line=start_tok.line, col=start_tok.col)
         value = self.parse_expression()
-        return Return(value=value)
+        return Return(value=value, line=start_tok.line, col=start_tok.col)
 
     def parse_expr_stmt_or_assign(self) -> Node:
         """Handles three shapes that can't be told apart by one token
@@ -1230,11 +1275,11 @@ class Parser:
             if isinstance(expr, Index):
                 self.advance()
                 value = self.parse_expression()
-                return IndexAssign(array=expr.array, index=expr.index, value=value)
+                return IndexAssign(array=expr.array, index=expr.index, value=value, line=expr.line, col=expr.col)
             if isinstance(expr, Field):
                 self.advance()
                 value = self.parse_expression()
-                return FieldAssign(base=expr.base, name=expr.name, value=value)
+                return FieldAssign(base=expr.base, name=expr.name, value=value, line=expr.line, col=expr.col)
             tok = self.current()
             raise ParseError(
                 f"Left-hand side of '=' is not assignable "
@@ -1248,7 +1293,7 @@ class Parser:
                 f"is not supported yet -- write it as a plain '=' instead "
                 f"at line {tok.line}, column {tok.col}"
             )
-        return ExprStmt(expr=expr)
+        return ExprStmt(expr=expr, line=expr.line, col=expr.col)
 
     def parse_expression(self) -> Node:
         return self.parse_binary()
@@ -1281,7 +1326,7 @@ class Parser:
                 else op_info.precedence
             )
             right = self.parse_binary(next_min_prec)
-            left = Binary(op=op_info.op, left=left, right=right)
+            left = Binary(op=op_info.op, left=left, right=right, line=left.line, col=left.col)
         return left
 
     def parse_unary(self) -> Node:
@@ -1290,7 +1335,7 @@ class Parser:
             # Recurse on parse_unary (not parse_primary) so operators
             # chain: `~-2` is COMPLEMENT applied to (NEGATE applied to 2).
             operand = self.parse_unary()
-            return Unary(op=_UNARY_OPS[op_tok.type], operand=operand)
+            return Unary(op=_UNARY_OPS[op_tok.type], operand=operand, line=op_tok.line, col=op_tok.col)
         return self.parse_postfix()
 
     def parse_postfix(self) -> Node:
@@ -1314,9 +1359,9 @@ class Parser:
                 if self.match(TokenType.OPEN_PAREN):
                     args = self.parse_positional_call_args()
                     self.expect(TokenType.CLOSE_PAREN, "Expected ')' after method call arguments")
-                    expr = Call(name=name_tok.val, args=args, receiver=expr)
+                    expr = Call(name=name_tok.val, args=args, receiver=expr, line=expr.line, col=expr.col)
                 else:
-                    expr = Field(base=expr, name=name_tok.val)
+                    expr = Field(base=expr, name=name_tok.val, line=expr.line, col=expr.col)
             else:
                 self.advance()
                 expr = self.parse_index_or_slice(expr)
@@ -1351,32 +1396,32 @@ class Parser:
             self.advance()
             high = None if self.check(TokenType.CLOSE_BRACKET) else self.parse_expression()
             self.expect(TokenType.CLOSE_BRACKET, "Expected ']' to close a slice expression")
-            return Slice(array=array_expr, low=None, high=high)
+            return Slice(array=array_expr, low=None, high=high, line=array_expr.line, col=array_expr.col)
 
         first = self.parse_expression()
 
         if self.match(TokenType.COLON):
             high = None if self.check(TokenType.CLOSE_BRACKET) else self.parse_expression()
             self.expect(TokenType.CLOSE_BRACKET, "Expected ']' to close a slice expression")
-            return Slice(array=array_expr, low=first, high=high)
+            return Slice(array=array_expr, low=first, high=high, line=array_expr.line, col=array_expr.col)
 
         self.expect(TokenType.CLOSE_BRACKET, "Expected ']' after array index")
-        return Index(array=array_expr, index=first)
+        return Index(array=array_expr, index=first, line=array_expr.line, col=array_expr.col)
 
     def parse_primary(self) -> Node:
         if self.check(TokenType.NUMBER):
             tok = self.advance()
             value = float(tok.val) if '.' in tok.val else int(tok.val)
-            return Constant(value=value)
+            return Constant(value=value, line=tok.line, col=tok.col)
         if self.check(TokenType.TRUE, TokenType.FALSE):
             tok = self.advance()
-            return BoolLiteral(value=(tok.type == TokenType.TRUE))
+            return BoolLiteral(value=(tok.type == TokenType.TRUE), line=tok.line, col=tok.col)
         if self.check(TokenType.NONE):
-            self.advance()
-            return NoneLiteral()
+            tok = self.advance()
+            return NoneLiteral(line=tok.line, col=tok.col)
         if self.check(TokenType.STRING):
             tok = self.advance()
-            return StringLiteral(value=_unescape_string_literal(tok.val))
+            return StringLiteral(value=_unescape_string_literal(tok.val), line=tok.line, col=tok.col)
         if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR) and self.peek(1).type == TokenType.OPEN_PAREN:
             return self.parse_cast()
         if self._looks_like_typed_literal():
@@ -1390,7 +1435,7 @@ class Parser:
             if self.peek(1).type == TokenType.OPEN_PAREN:
                 return self.parse_call()
             tok = self.advance()
-            return Variable(name=tok.val)
+            return Variable(name=tok.val, line=tok.line, col=tok.col)
         if self.match(TokenType.OPEN_PAREN):
             expr = self.parse_expression()
             self.expect(TokenType.CLOSE_PAREN, "Expected ')' to close grouped expression")
@@ -1451,8 +1496,9 @@ class Parser:
             array_literal.type_expr = ArrayTypeExpr(
                 size=len(array_literal.elements),
                 element_type=parsed_type.element_type,
+                line=parsed_type.line, col=parsed_type.col,
             )
-            return Slice(array=array_literal, low=None, high=None)
+            return Slice(array=array_literal, low=None, high=None, line=parsed_type.line, col=parsed_type.col)
         return self.parse_array_literal(type_expr=parsed_type)
 
     def parse_array_literal(self, type_expr: Optional['ArrayTypeExpr'] = None) -> ArrayLiteral:
@@ -1462,14 +1508,14 @@ class Parser:
         just recurses back into this method via parse_expression, with
         type_expr staying None (only the outermost literal is ever
         preceded by an explicit type)."""
-        self.expect(TokenType.OPEN_BRACKET)
+        open_tok = self.expect(TokenType.OPEN_BRACKET)
         elements = []
         if not self.check(TokenType.CLOSE_BRACKET):
             elements.append(self.parse_expression())
             while self.match(TokenType.COMMA):
                 elements.append(self.parse_expression())
         self.expect(TokenType.CLOSE_BRACKET, "Expected ']' to close array literal")
-        return ArrayLiteral(elements=elements, type_expr=type_expr)
+        return ArrayLiteral(elements=elements, type_expr=type_expr, line=open_tok.line, col=open_tok.col)
 
     def parse_call(self) -> Call:
         """`name(arg1, arg2, ...)` or `name(f1=v1, f2=v2, ...)` -- see
@@ -1516,7 +1562,7 @@ class Parser:
                 if not self.match(TokenType.COMMA):
                     break
         self.expect(TokenType.CLOSE_PAREN, "Expected ')' to close a call's argument list")
-        return Call(name=name_tok.val, args=args, kwargs=kwargs)
+        return Call(name=name_tok.val, args=args, kwargs=kwargs, line=name_tok.line, col=name_tok.col)
 
     def parse_cast(self) -> Cast:
         """`TYPE(expr)` -- see Cast's own docstring. The caller (parse_
@@ -1527,7 +1573,7 @@ class Parser:
         self.expect(TokenType.OPEN_PAREN, "Expected '(' to start a cast's argument")
         expr = self.parse_expression()
         self.expect(TokenType.CLOSE_PAREN, "Expected ')' to close a cast's argument")
-        return Cast(target_type=type_tok.val, expr=expr)
+        return Cast(target_type=type_tok.val, expr=expr, line=type_tok.line, col=type_tok.col)
 
 
 # ---------------------------------------------------------------------------

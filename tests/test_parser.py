@@ -2328,3 +2328,245 @@ def test_parse_assign_compound_shift_right():
 # TODO(will): Test parse_array_literal
 
 # TODO(will): Test parse_call
+
+# ---------------------------------------------------------------------------
+# Source positions (Node.line/col) -- one test per position-derivation
+# strategy parser.py uses, not per node type (many node types share the
+# same strategy): a "start token" the method itself captured, or a
+# position propagated from an already-parsed child. Real line/col
+# values (not all 1s) are used throughout so a test can't pass by
+# accident from every position defaulting to the same number.
+# ---------------------------------------------------------------------------
+
+def test_position_constant_is_its_own_token():
+    tokens = [
+        lexer.Token(lexer.TokenType.NUMBER, '7', 3, 10),
+        lexer.Token(lexer.TokenType.EOF, '', 3, 11),
+    ]
+    result = parser.Parser(tokens).parse_primary()
+    assert (result.line, result.col) == (3, 10)
+
+
+def test_position_variable_is_its_own_token():
+    tokens = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'x', 5, 2),
+        lexer.Token(lexer.TokenType.EOF, '', 5, 3),
+    ]
+    result = parser.Parser(tokens).parse_primary()
+    assert (result.line, result.col) == (5, 2)
+
+
+def test_position_unary_is_its_operator_token():
+    tokens = [
+        lexer.Token(lexer.TokenType.MINUS, '-', 2, 8),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 2, 9),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 10),
+    ]
+    result = parser.Parser(tokens).parse_unary()
+    assert (result.line, result.col) == (2, 8)
+
+
+def test_position_binary_is_left_operands_not_operators():
+    """`a + b`, with the left operand deliberately placed on an
+    earlier line than '+' -- proves the Binary node takes its
+    position from the left operand, not from wherever the operator
+    or the whole expression happens to sit."""
+    tokens = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 1, 1),
+        lexer.Token(lexer.TokenType.PLUS, '+', 2, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'b', 2, 3),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 4),
+    ]
+    result = parser.Parser(tokens).parse_binary()
+    assert (result.line, result.col) == (1, 1)
+
+
+def test_position_binary_chain_keeps_the_original_leftmost_operand():
+    """`a - b - c` -- left-associative, so this is (a - b) - c; both
+    the inner and outer Binary should still report a's position, not
+    the intermediate (a - b) result's own (nonexistent) token."""
+    tokens = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 4, 4),
+        lexer.Token(lexer.TokenType.MINUS, '-', 4, 6),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'b', 4, 8),
+        lexer.Token(lexer.TokenType.MINUS, '-', 4, 10),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'c', 4, 12),
+        lexer.Token(lexer.TokenType.EOF, '', 4, 13),
+    ]
+    result = parser.Parser(tokens).parse_binary()
+    assert (result.line, result.col) == (4, 4)
+
+
+def test_position_postfix_chain_is_the_base_not_the_dot_or_bracket():
+    """`a.b[0]` -- both the Field and the outer Index should point at
+    `a`, not at '.' or '['."""
+    tokens = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 6, 1),
+        lexer.Token(lexer.TokenType.DOT, '.', 6, 2),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'b', 6, 3),
+        lexer.Token(lexer.TokenType.OPEN_BRACKET, '[', 6, 4),
+        lexer.Token(lexer.TokenType.NUMBER, '0', 6, 5),
+        lexer.Token(lexer.TokenType.CLOSE_BRACKET, ']', 6, 6),
+        lexer.Token(lexer.TokenType.EOF, '', 6, 7),
+    ]
+    result = parser.Parser(tokens).parse_postfix()
+    assert isinstance(result, parser.Index)
+    assert (result.line, result.col) == (6, 1)
+    assert (result.array.line, result.array.col) == (6, 1)  # the Field
+
+
+def test_position_array_literal_is_its_open_bracket():
+    tokens = [
+        lexer.Token(lexer.TokenType.OPEN_BRACKET, '[', 7, 9),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 7, 10),
+        lexer.Token(lexer.TokenType.CLOSE_BRACKET, ']', 7, 11),
+        lexer.Token(lexer.TokenType.EOF, '', 7, 12),
+    ]
+    result = parser.Parser(tokens).parse_array_literal()
+    assert (result.line, result.col) == (7, 9)
+
+
+def test_position_call_is_its_name_token():
+    tokens = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'foo', 8, 3),
+        lexer.Token(lexer.TokenType.OPEN_PAREN, '(', 8, 6),
+        lexer.Token(lexer.TokenType.CLOSE_PAREN, ')', 8, 7),
+        lexer.Token(lexer.TokenType.EOF, '', 8, 8),
+    ]
+    result = parser.Parser(tokens).parse_call()
+    assert (result.line, result.col) == (8, 3)
+
+
+def test_position_var_decl_is_its_type_token():
+    tokens = [
+        lexer.Token(lexer.TokenType.INT, 'int', 9, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'x', 9, 5),
+        lexer.Token(lexer.TokenType.EOF, '', 9, 6),
+    ]
+    result = parser.Parser(tokens).parse_var_decl()
+    assert (result.line, result.col) == (9, 1)
+
+
+def test_position_var_decl_via_parse_statement_struct_typed_branch():
+    """The OTHER path into parse_var_decl -- parse_statement's own
+    two-identifier lookahead already parsed the type before calling
+    parse_var_decl, so this exercises the start_tok handoff between
+    them, not parse_var_decl's own self.current() fallback."""
+    tokens = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Point', 10, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'p', 10, 7),
+        lexer.Token(lexer.TokenType.EOF, '', 10, 8),
+    ]
+    result = parser.Parser(tokens).parse_statement()
+    assert isinstance(result, parser.VarDecl)
+    assert (result.line, result.col) == (10, 1)
+
+
+def test_position_assign_is_its_name_token():
+    tokens = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'x', 11, 5),
+        lexer.Token(lexer.TokenType.ASSIGN, '=', 11, 7),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 11, 9),
+        lexer.Token(lexer.TokenType.EOF, '', 11, 10),
+    ]
+    result = parser.Parser(tokens).parse_assign()
+    assert (result.line, result.col) == (11, 5)
+
+
+def test_position_compound_assign_desugared_binary_matches_name_token():
+    """`x += 1` desugars to Assign(Binary(...)) -- both the outer
+    Assign and the synthesized Binary/Variable should take x's own
+    position, not the operator's."""
+    tokens = [
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'x', 12, 5),
+        lexer.Token(lexer.TokenType.PLUS_ASSIGN, '+=', 12, 7),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 12, 10),
+        lexer.Token(lexer.TokenType.EOF, '', 12, 11),
+    ]
+    result = parser.Parser(tokens).parse_assign()
+    assert (result.line, result.col) == (12, 5)
+    assert (result.value.line, result.value.col) == (12, 5)  # the desugared Binary
+
+
+def test_position_return_is_its_keyword_token():
+    tokens = [
+        lexer.Token(lexer.TokenType.RETURN, 'return', 13, 5),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 13, 12),
+        lexer.Token(lexer.TokenType.EOF, '', 13, 13),
+    ]
+    result = parser.Parser(tokens).parse_return()
+    assert (result.line, result.col) == (13, 5)
+
+
+def test_position_if_is_its_keyword_token_not_the_condition():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 14, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 14, 4),
+        lexer.Token(lexer.TokenType.COLON, ':', 14, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 14, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 15, 1),
+        lexer.Token(lexer.TokenType.RETURN, 'return', 15, 5),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 15, 12),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 15, 13),
+        lexer.Token(lexer.TokenType.DEDENT, '', 16, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 16, 1),
+    ]
+    result = parser.Parser(tokens).parse_if()
+    assert (result.line, result.col) == (14, 1)
+
+
+def test_position_while_is_its_keyword_token():
+    tokens = [
+        lexer.Token(lexer.TokenType.WHILE, 'while', 17, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 17, 7),
+        lexer.Token(lexer.TokenType.COLON, ':', 17, 11),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 17, 12),
+        lexer.Token(lexer.TokenType.INDENT, '', 18, 1),
+        lexer.Token(lexer.TokenType.BREAK, 'break', 18, 5),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 18, 10),
+        lexer.Token(lexer.TokenType.DEDENT, '', 19, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 19, 1),
+    ]
+    result = parser.Parser(tokens).parse_while()
+    assert (result.line, result.col) == (17, 1)
+
+
+def test_position_break_and_continue_are_their_own_token():
+    break_tokens = [
+        lexer.Token(lexer.TokenType.BREAK, 'break', 20, 5),
+        lexer.Token(lexer.TokenType.EOF, '', 20, 10),
+    ]
+    assert (parser.Parser(break_tokens).parse_break().line,
+            parser.Parser(break_tokens).parse_break().col) == (20, 5)
+
+    continue_tokens = [
+        lexer.Token(lexer.TokenType.CONTINUE, 'continue', 21, 5),
+        lexer.Token(lexer.TokenType.EOF, '', 21, 13),
+    ]
+    assert (parser.Parser(continue_tokens).parse_continue().line,
+            parser.Parser(continue_tokens).parse_continue().col) == (21, 5)
+
+
+def test_position_function_is_its_def_token():
+    tokens = TEST_TOKENS  # `def int main(): ...` -- def is at (1, 1)
+    result = parser.Parser(tokens).parse_function()
+    assert (result.line, result.col) == (1, 1)
+
+
+def test_position_param_is_its_type_token():
+    tokens = [
+        lexer.Token(lexer.TokenType.INT, 'int', 22, 10),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 22, 14),
+        lexer.Token(lexer.TokenType.EOF, '', 22, 15),
+    ]
+    result = parser.Parser(tokens).parse_param()
+    assert (result.line, result.col) == (22, 10)
+
+
+def test_position_new_node_defaults_to_zero_when_built_by_hand():
+    """A node built directly (as every OTHER test in this file does,
+    and as a hand-written AST fixture elsewhere would) has no real
+    token behind it -- line/col default to 0 rather than some
+    misleading guess."""
+    node = parser.Constant(value=1)
+    assert (node.line, node.col) == (0, 0)

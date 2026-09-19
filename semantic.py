@@ -184,10 +184,11 @@ ERROR REPORTING
 -----------------
 Raises SemanticError on the *first* problem and stops, matching
 ParseError/CodegenError elsewhere in this pipeline, rather than
-collecting every error. Neither AST nodes nor this pass track source
-positions (only Tokens do, transiently, during parsing), so messages
-name the offending variable/operator/type as specifically as possible
-without a line/column, the same limitation CodegenError has.
+collecting every error. Every AST node carries the line/column of its
+own start token (Node.line/col, set once during parsing -- see
+parser.py), so SemanticError can name a real source position, not just
+the offending variable/operator/type -- see SemanticError's own
+docstring for how.
 """
 
 import argparse
@@ -341,7 +342,7 @@ class StructInfo:
     fields: Dict[str, Type]
 
 
-def type_from_name(type_expr, structs: Dict[str, StructInfo], aliases: Dict[str, Type]) -> Type:
+def type_from_name(type_expr, structs: Dict[str, StructInfo], aliases: Dict[str, Type], node: Optional[Node] = None) -> Type:
     """Converts a parsed type expression (VarDecl.var_type/Function.
     return_type/Param.type/StructField.field_type) into a Type.
     `type_expr` is a plain str (scalar, struct name, or alias name), an
@@ -358,14 +359,20 @@ def type_from_name(type_expr, structs: Dict[str, StructInfo], aliases: Dict[str,
     signatures) -- resolving either is a single dict lookup, never a
     recursive re-resolution.
 
+    `node`, purely for error attribution (see SemanticError's own
+    docstring), is the declaration OWNING type_expr (a Param, VarDecl,
+    Function, ...) -- type_expr itself is often a bare string with no
+    position of its own, so this is threaded through unchanged rather
+    than re-derived at each recursive call.
+
     Only fails for a program that isn't syntactically valid, or
     references an undeclared struct/alias name -- parse_type() already
     restricts everything else at parse time."""
     if isinstance(type_expr, ArrayTypeExpr):
-        element = type_from_name(type_expr.element_type, structs, aliases)
+        element = type_from_name(type_expr.element_type, structs, aliases, node)
         return Type(TypeKind.ARRAY, element_type=element, size=type_expr.size)
     if isinstance(type_expr, SliceTypeExpr):
-        element = type_from_name(type_expr.element_type, structs, aliases)
+        element = type_from_name(type_expr.element_type, structs, aliases, node)
         return Type(TypeKind.SLICE, element_type=element)
     if type_expr in _TYPE_NAMES:
         return _TYPE_NAMES[type_expr]
@@ -373,7 +380,7 @@ def type_from_name(type_expr, structs: Dict[str, StructInfo], aliases: Dict[str,
         return aliases[type_expr]
     if type_expr in structs:
         return Type(TypeKind.STRUCT, struct_name=type_expr)
-    raise SemanticError(f"Unknown type '{type_expr}'")
+    raise SemanticError(f"Unknown type '{type_expr}'", node)
 
 
 def always_returns(statements: List[Node]) -> bool:
@@ -437,7 +444,20 @@ _BUILTIN_FUNCTION_NAMES = {'print', 'len', 'append'}
 
 class SemanticError(Exception):
     """Raised on the first semantic problem found: an undeclared or
-    re-declared variable, or a type mismatch anywhere in the program."""
+    re-declared variable, or a type mismatch anywhere in the program.
+
+    `node`, when given, is the AST node most responsible for the
+    problem -- its position is appended once, here, the same way
+    ParseError's own messages already end ("at line L, column C"),
+    rather than repeated at every one of this file's ~80 raise sites.
+    Silently omitted for a node with no real position (line and col
+    both still 0 -- e.g. one built by hand in a test, with no actual
+    token behind it) instead of printing a misleading "line 0, column
+    0"."""
+    def __init__(self, message: str, node: Optional[Node] = None):
+        if node is not None and (node.line or node.col):
+            message = f"{message} at line {node.line}, column {node.col}"
+        super().__init__(message)
 
 
 # ---------------------------------------------------------------------------
@@ -528,7 +548,8 @@ class SemanticAnalyzer:
             if fn.name in _BUILTIN_FUNCTION_NAMES:
                 raise SemanticError(
                     f"'{fn.name}' is a builtin and can't be redefined as "
-                    f"a function"
+                    f"a function",
+                    fn,
                 )
             if fn.name in self.structs:
                 raise SemanticError(
@@ -536,19 +557,21 @@ class SemanticAnalyzer:
                     f"same name -- struct and function names share one "
                     f"namespace and can never be the same, since "
                     f"'{fn.name}(...)' would otherwise be ambiguous "
-                    f"between a call and a struct literal"
+                    f"between a call and a struct literal",
+                    fn,
                 )
             if fn.name in self.type_aliases:
                 raise SemanticError(
                     f"Function '{fn.name}' collides with a type alias "
                     f"of the same name -- function and type-alias "
                     f"names share one namespace and can never be the "
-                    f"same"
+                    f"same",
+                    fn,
                 )
             if fn.name in self.functions:
-                raise SemanticError(f"Function '{fn.name}' is already declared")
-            param_types = [type_from_name(p.type, self.structs, self.type_aliases) for p in fn.params]
-            return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.structs, self.type_aliases)
+                raise SemanticError(f"Function '{fn.name}' is already declared", fn)
+            param_types = [type_from_name(p.type, self.structs, self.type_aliases, p) for p in fn.params]
+            return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.structs, self.type_aliases, fn)
             self.functions[fn.name] = (param_types, return_type)
 
         # 5. Check each function's own body, including every
@@ -583,11 +606,12 @@ class SemanticAnalyzer:
                 if md.name in seen_names:
                     raise SemanticError(
                         f"Method '{md.name}' is already declared on "
-                        f"struct '{sd.name}'"
+                        f"struct '{sd.name}'",
+                        md,
                     )
                 seen_names.add(md.name)
-                param_types = [type_from_name(p.type, self.structs, self.type_aliases) for p in md.params]
-                return_type = Type.VOID if md.return_type is None else type_from_name(md.return_type, self.structs, self.type_aliases)
+                param_types = [type_from_name(p.type, self.structs, self.type_aliases, p) for p in md.params]
+                return_type = Type.VOID if md.return_type is None else type_from_name(md.return_type, self.structs, self.type_aliases, md)
                 methods[(sd.name, md.name)] = (param_types, return_type, mangle_method_name(sd.name, md.name))
         return methods
 
@@ -631,16 +655,18 @@ class SemanticAnalyzer:
             if ad.name in _BUILTIN_FUNCTION_NAMES:
                 raise SemanticError(
                     f"'{ad.name}' is a builtin and can't be used as a "
-                    f"type alias name"
+                    f"type alias name",
+                    ad,
                 )
             if ad.name in structs:
                 raise SemanticError(
                     f"Type alias '{ad.name}' collides with a struct of "
                     f"the same name -- struct and type-alias names "
-                    f"share one namespace and can never be the same"
+                    f"share one namespace and can never be the same",
+                    ad,
                 )
             if ad.name in seen:
-                raise SemanticError(f"Type alias '{ad.name}' is already declared")
+                raise SemanticError(f"Type alias '{ad.name}' is already declared", ad)
             seen[ad.name] = ad
 
         resolved: Dict[str, Type] = {}
@@ -652,19 +678,25 @@ class SemanticAnalyzer:
             if name in resolving:
                 raise SemanticError(
                     f"Type alias '{name}' is defined in terms of "
-                    f"itself (a cycle)"
+                    f"itself (a cycle)",
+                    seen[name],
                 )
             resolving.add(name)
-            result = resolve_target(seen[name].target_type)
+            result = resolve_target(seen[name].target_type, seen[name])
             resolving.discard(name)
             resolved[name] = result
             return result
 
-        def resolve_target(target) -> Type:
+        def resolve_target(target, alias_node: TypeAlias) -> Type:
+            """`alias_node` is threaded through purely for error
+            attribution -- a bare name has no position of its own, so
+            an "unknown type" here is blamed on the alias declaration
+            containing it, however deep target's own array/slice
+            nesting goes."""
             if isinstance(target, ArrayTypeExpr):
-                return Type(TypeKind.ARRAY, element_type=resolve_target(target.element_type), size=target.size)
+                return Type(TypeKind.ARRAY, element_type=resolve_target(target.element_type, alias_node), size=target.size)
             if isinstance(target, SliceTypeExpr):
-                return Type(TypeKind.SLICE, element_type=resolve_target(target.element_type))
+                return Type(TypeKind.SLICE, element_type=resolve_target(target.element_type, alias_node))
             # target is a bare name from here on -- int/bool/str, an
             # alias (possibly not yet resolved -- recurse into resolve
             # itself, which is what makes forward references and cycle
@@ -678,7 +710,8 @@ class SemanticAnalyzer:
             raise SemanticError(
                 f"Unknown type '{target}' in a type alias's own target "
                 f"-- expected int, bool, str, a struct name, or "
-                f"another type alias"
+                f"another type alias",
+                alias_node,
             )
 
         for ad in alias_defs:
@@ -704,10 +737,11 @@ class SemanticAnalyzer:
             if sd.name in _BUILTIN_FUNCTION_NAMES:
                 raise SemanticError(
                     f"'{sd.name}' is a builtin and can't be used as a "
-                    f"struct name"
+                    f"struct name",
+                    sd,
                 )
             if sd.name in registry:
-                raise SemanticError(f"Struct '{sd.name}' is already declared")
+                raise SemanticError(f"Struct '{sd.name}' is already declared", sd)
             registry[sd.name] = None
         return registry
 
@@ -732,17 +766,19 @@ class SemanticAnalyzer:
             for f in sd.fields:
                 if f.name in fields:
                     raise SemanticError(
-                        f"Field '{f.name}' is already declared in struct '{sd.name}'"
+                        f"Field '{f.name}' is already declared in struct '{sd.name}'",
+                        f,
                     )
-                fields[f.name] = type_from_name(f.field_type, registry, self.type_aliases)
+                fields[f.name] = type_from_name(f.field_type, registry, self.type_aliases, f)
             registry[sd.name] = StructInfo(name=sd.name, fields=fields)
 
+        by_name = {sd.name: sd for sd in struct_defs}
         for sd in struct_defs:
-            self._check_struct_contains(sd.name, registry, path=[])
+            self._check_struct_contains(sd.name, registry, path=[], by_name=by_name)
 
         return registry
 
-    def _check_struct_contains(self, name: str, registry: Dict[str, StructInfo], path: List[str]) -> None:
+    def _check_struct_contains(self, name: str, registry: Dict[str, StructInfo], path: List[str], by_name: Dict[str, StructDef]) -> None:
         """DFS over the struct-containment graph -- X has an edge to Y
         if X has a field of type Y, directly or through any depth of
         array wrapping (an array embeds its element inline, N times
@@ -755,18 +791,23 @@ class SemanticAnalyzer:
 
         `path` is the visited chain, for a readable error message --
         struct counts are small enough that this doesn't need
-        memoization against already-explored, cycle-free structs."""
+        memoization against already-explored, cycle-free structs.
+        `by_name` is only for error attribution -- StructInfo (registry's
+        own value type) has no position of its own, so the original
+        StructDef is looked up separately, by whichever name closes
+        the cycle."""
         if name in path:
             cycle = ' -> '.join(path + [name])
             raise SemanticError(
                 f"Struct '{name}' cannot contain itself, directly or "
-                f"transitively: {cycle}"
+                f"transitively: {cycle}",
+                by_name[name],
             )
         info = registry[name]
         for field_type in info.fields.values():
             contained = self._directly_embedded_struct_name(field_type)
             if contained is not None:
-                self._check_struct_contains(contained, registry, path + [name])
+                self._check_struct_contains(contained, registry, path + [name], by_name)
 
     @staticmethod
     def _directly_embedded_struct_name(field_type: Type) -> Optional[str]:
@@ -786,8 +827,8 @@ class SemanticAnalyzer:
         # name checking for free (`def int f(int a, int a):` collides in
         # this same scope exactly like `int a` twice in a row would).
         for p in fn.params:
-            self._declare(p.name, type_from_name(p.type, self.structs, self.type_aliases))
-        return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.structs, self.type_aliases)
+            self._declare(p.name, type_from_name(p.type, self.structs, self.type_aliases, p), p)
+        return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.structs, self.type_aliases, fn)
         for stmt in fn.body:
             self.analyze_statement(stmt, return_type)
         # Checked last, after every statement is individually known
@@ -799,7 +840,8 @@ class SemanticAnalyzer:
         if return_type != Type.VOID and not always_returns(fn.body):
             raise SemanticError(
                 f"Function '{fn.name}' (declared to return {return_type}) "
-                f"does not return a value on all code paths"
+                f"does not return a value on all code paths",
+                fn,
             )
 
     # -- scope stack ------------------------------------------------------
@@ -810,23 +852,23 @@ class SemanticAnalyzer:
     def _pop_scope(self) -> None:
         self.scopes.pop()
 
-    def _declare(self, name: str, type_: Type) -> None:
+    def _declare(self, name: str, type_: Type, node: Optional[Node] = None) -> None:
         """Adds `name` to the *current* (innermost) scope. Only checks
         that scope for a collision -- a name already declared in an
         enclosing scope is fine to shadow, it's only a re-declaration
         error if it collides with something in this same block."""
         if name in self.scopes[-1]:
-            raise SemanticError(f"Variable '{name}' is already declared in this scope")
+            raise SemanticError(f"Variable '{name}' is already declared in this scope", node)
         self.scopes[-1][name] = type_
 
-    def _lookup(self, name: str) -> Type:
+    def _lookup(self, name: str, node: Optional[Node] = None) -> Type:
         """Resolves `name` by walking outward from the innermost scope
         to the outermost, returning the type from the first (nearest
         enclosing) match."""
         for scope in reversed(self.scopes):
             if name in scope:
                 return scope[name]
-        raise SemanticError(f"Reference to undeclared variable '{name}'")
+        raise SemanticError(f"Reference to undeclared variable '{name}'", node)
 
     # -- statements ---------------------------------------------------
 
@@ -852,7 +894,7 @@ class SemanticAnalyzer:
         elif isinstance(stmt, ExprStmt):
             self._check_expr_allowing_struct_literal(stmt.expr)  # evaluated for validity; result unused
         else:
-            raise SemanticError(f"No semantic rule for statement: {stmt!r}")
+            raise SemanticError(f"No semantic rule for statement: {stmt!r}", stmt)
 
     def _types_compatible(self, value_type: Type, target_type: Type) -> bool:
         """True if a value of `value_type` can be used where
@@ -941,7 +983,8 @@ class SemanticAnalyzer:
                 if not (lo <= literal_value <= hi):
                     raise SemanticError(
                         f"{literal_value} is out of range for "
-                        f"{target_type} ({lo} to {hi})"
+                        f"{target_type} ({lo} to {hi})",
+                        expr,
                     )
                 self._annotate_literal_resolved_type(expr, target_type)
                 return target_type
@@ -1000,7 +1043,7 @@ class SemanticAnalyzer:
         return self._check_value_flowing_into(expr, target_type)
 
     def analyze_var_decl(self, stmt: VarDecl) -> None:
-        declared_type = type_from_name(stmt.var_type, self.structs, self.type_aliases)
+        declared_type = type_from_name(stmt.var_type, self.structs, self.type_aliases, stmt)
         if stmt.init is not None:
             # Checked before `stmt.name` is added to scope below, so a
             # self-referential initializer (`int a = a`) correctly fails
@@ -1009,17 +1052,19 @@ class SemanticAnalyzer:
             if not self._types_compatible(init_type, declared_type):
                 raise SemanticError(
                     f"Cannot initialize '{stmt.name}' (declared {declared_type}) "
-                    f"with a value of type {init_type}"
+                    f"with a value of type {init_type}",
+                    stmt,
                 )
-        self._declare(stmt.name, declared_type)
+        self._declare(stmt.name, declared_type, stmt)
 
     def analyze_assign(self, stmt: Assign) -> None:
-        declared_type = self._lookup(stmt.name)  # may resolve to an enclosing scope
+        declared_type = self._lookup(stmt.name, stmt)  # may resolve to an enclosing scope
         value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, declared_type)
         if not self._types_compatible(value_type, declared_type):
             raise SemanticError(
                 f"Cannot assign a value of type {value_type} to '{stmt.name}' "
-                f"(declared {declared_type})"
+                f"(declared {declared_type})",
+                stmt,
             )
 
     def analyze_index_assign(self, stmt: IndexAssign) -> None:
@@ -1035,7 +1080,8 @@ class SemanticAnalyzer:
         if not self._types_compatible(value_type, element_type):
             raise SemanticError(
                 f"Cannot assign a value of type {value_type} to an array "
-                f"element of type {element_type}"
+                f"element of type {element_type}",
+                stmt,
             )
 
     def analyze_field_assign(self, stmt: FieldAssign) -> None:
@@ -1046,7 +1092,8 @@ class SemanticAnalyzer:
         if not self._types_compatible(value_type, field_type):
             raise SemanticError(
                 f"Cannot assign a value of type {value_type} to field "
-                f"'{stmt.name}' of type {field_type}"
+                f"'{stmt.name}' of type {field_type}",
+                stmt,
             )
 
     def _check_indexable_and_index(self, base_expr: Node, index_expr: Node) -> Type:
@@ -1066,11 +1113,12 @@ class SemanticAnalyzer:
         if base_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE):
             raise SemanticError(
                 f"Cannot index into a value of type {base_type} -- "
-                f"only arrays and slices support indexing"
+                f"only arrays and slices support indexing",
+                base_expr,
             )
         index_type = self.check_expr(index_expr)
         if index_type != Type.INT:
-            raise SemanticError(f"Index must be int, got {index_type}")
+            raise SemanticError(f"Index must be int, got {index_type}", index_expr)
         return base_type.element_type
 
     def check_slice(self, expr: Slice) -> Type:
@@ -1090,16 +1138,17 @@ class SemanticAnalyzer:
         if base_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE):
             raise SemanticError(
                 f"Cannot slice a value of type {base_type} -- only "
-                f"arrays and slices support slicing"
+                f"arrays and slices support slicing",
+                expr,
             )
         if expr.low is not None:
             low_type = self.check_expr(expr.low)
             if low_type != Type.INT:
-                raise SemanticError(f"Slice low bound must be int, got {low_type}")
+                raise SemanticError(f"Slice low bound must be int, got {low_type}", expr.low)
         if expr.high is not None:
             high_type = self.check_expr(expr.high)
             if high_type != Type.INT:
-                raise SemanticError(f"Slice high bound must be int, got {high_type}")
+                raise SemanticError(f"Slice high bound must be int, got {high_type}", expr.high)
         return Type(TypeKind.SLICE, element_type=base_type.element_type)
 
     def analyze_return(self, stmt: Return, return_type: Type) -> None:
@@ -1120,7 +1169,8 @@ class SemanticAnalyzer:
             if return_type != Type.VOID:
                 raise SemanticError(
                     f"Function is declared to return {return_type}, but "
-                    f"this bare 'return' returns nothing"
+                    f"this bare 'return' returns nothing",
+                    stmt,
                 )
             return
         value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, return_type)
@@ -1128,12 +1178,14 @@ class SemanticAnalyzer:
             raise SemanticError(
                 f"Function has no declared return type and cannot "
                 f"return a value (got {value_type}) -- use a bare "
-                f"'return' instead"
+                f"'return' instead",
+                stmt,
             )
         if not self._types_compatible(value_type, return_type):
             raise SemanticError(
                 f"Function is declared to return {return_type}, but this "
-                f"'return' statement returns {value_type}"
+                f"'return' statement returns {value_type}",
+                stmt,
             )
 
     def analyze_if(self, stmt: If, return_type: Type) -> None:
@@ -1142,7 +1194,8 @@ class SemanticAnalyzer:
             raise SemanticError(
                 f"'if' condition must be bool, got {condition_type} "
                 f"(no implicit int-to-bool conversion -- try `x != 0` "
-                f"instead of `x`)"
+                f"instead of `x`)",
+                stmt.condition,
             )
 
         self._push_scope()
@@ -1166,7 +1219,8 @@ class SemanticAnalyzer:
             raise SemanticError(
                 f"'while' condition must be bool, got {condition_type} "
                 f"(no implicit int-to-bool conversion -- try `x != 0` "
-                f"instead of `x`)"
+                f"instead of `x`)",
+                stmt.condition,
             )
 
         # loop_depth, not the scope stack, is what break/continue check
@@ -1181,11 +1235,11 @@ class SemanticAnalyzer:
 
     def analyze_break(self, stmt: Break) -> None:
         if self.loop_depth == 0:
-            raise SemanticError("'break' outside of a loop")
+            raise SemanticError("'break' outside of a loop", stmt)
 
     def analyze_continue(self, stmt: Continue) -> None:
         if self.loop_depth == 0:
-            raise SemanticError("'continue' outside of a loop")
+            raise SemanticError("'continue' outside of a loop", stmt)
 
     # -- expressions ----------------------------------------------------
     # Every check_* method both validates its node and returns its Type,
@@ -1227,7 +1281,7 @@ class SemanticAnalyzer:
         elif isinstance(expr, Binary):
             result = self.check_binary(expr)
         else:
-            raise SemanticError(f"No semantic rule for expression: {expr!r}")
+            raise SemanticError(f"No semantic rule for expression: {expr!r}", expr)
         expr.resolved_type = result
         return result
 
@@ -1269,12 +1323,13 @@ class SemanticAnalyzer:
         fix, for a struct-typed element with no literal involved at
         all."""
         if expr.type_expr is not None:
-            declared_type = type_from_name(expr.type_expr, self.structs, self.type_aliases)
+            declared_type = type_from_name(expr.type_expr, self.structs, self.type_aliases, expr)
             if len(expr.elements) != declared_type.size:
                 raise SemanticError(
                     f"Array literal declares type {declared_type} (size "
                     f"{declared_type.size}), but has {len(expr.elements)} "
-                    f"element(s)"
+                    f"element(s)",
+                    expr,
                 )
             for i, element in enumerate(expr.elements, start=1):
                 element_type = self._check_value_flowing_into_allowing_struct_literal(element, declared_type.element_type)
@@ -1282,7 +1337,8 @@ class SemanticAnalyzer:
                     raise SemanticError(
                         f"Array literal declares element type "
                         f"{declared_type.element_type}, but element {i} "
-                        f"is {element_type}"
+                        f"is {element_type}",
+                        element,
                     )
             return declared_type
 
@@ -1294,19 +1350,21 @@ class SemanticAnalyzer:
                         f"Array literal's elements must all be "
                         f"{expected_element_type} (to match the "
                         f"declared element type), but element {i} "
-                        f"is {element_type}"
+                        f"is {element_type}",
+                        element,
                     )
             return Type(TypeKind.ARRAY, element_type=expected_element_type, size=len(expr.elements))
 
         if len(expr.elements) == 0:
-            raise SemanticError("Array literals must have at least one element")
+            raise SemanticError("Array literals must have at least one element", expr)
         element_types = [self._check_expr_allowing_struct_literal(e) for e in expr.elements]
         first = element_types[0]
         for i, t in enumerate(element_types[1:], start=2):
             if t != first:
                 raise SemanticError(
                     f"Array literal elements must all be the same type -- "
-                    f"element 1 is {first}, element {i} is {t}"
+                    f"element 1 is {first}, element {i} is {t}",
+                    expr.elements[i - 1],
                 )
         return Type(TypeKind.ARRAY, element_type=first, size=len(expr.elements))
 
@@ -1326,12 +1384,14 @@ class SemanticAnalyzer:
         base_type = self.check_expr(base_expr)
         if base_type.kind != TypeKind.STRUCT:
             raise SemanticError(
-                f"Cannot access field '{field_name}' on non-struct type {base_type}"
+                f"Cannot access field '{field_name}' on non-struct type {base_type}",
+                base_expr,
             )
         struct_info = self.structs[base_type.struct_name]
         if field_name not in struct_info.fields:
             raise SemanticError(
-                f"Struct '{base_type.struct_name}' has no field '{field_name}'"
+                f"Struct '{base_type.struct_name}' has no field '{field_name}'",
+                base_expr,
             )
         return struct_info.fields[field_name]
 
@@ -1378,7 +1438,8 @@ class SemanticAnalyzer:
             raise SemanticError(
                 f"Struct literal for '{expr.name}' expects "
                 f"{len(field_items)} argument(s) (one per field, in "
-                f"declaration order: {field_names}), got {len(expr.args)}"
+                f"declaration order: {field_names}), got {len(expr.args)}",
+                expr,
             )
         for i, (arg, (field_name, field_type)) in enumerate(zip(expr.args, field_items), start=1):
             arg_type = self._check_value_flowing_into_allowing_struct_literal(arg, field_type)
@@ -1386,7 +1447,8 @@ class SemanticAnalyzer:
                 raise SemanticError(
                     f"Argument {i} to struct literal '{expr.name}' "
                     f"(field '{field_name}') should be {field_type}, "
-                    f"got {arg_type}"
+                    f"got {arg_type}",
+                    arg,
                 )
         result = Type(TypeKind.STRUCT, struct_name=expr.name)
         expr.resolved_type = result
@@ -1412,12 +1474,14 @@ class SemanticAnalyzer:
             if field_name not in field_types:
                 raise SemanticError(
                     f"Struct literal for '{expr.name}' has no field "
-                    f"'{field_name}' -- valid fields are: {valid_names}"
+                    f"'{field_name}' -- valid fields are: {valid_names}",
+                    expr,
                 )
             if field_name in seen:
                 raise SemanticError(
                     f"Field '{field_name}' specified more than once in "
-                    f"struct literal for '{expr.name}'"
+                    f"struct literal for '{expr.name}'",
+                    expr,
                 )
             seen.add(field_name)
             value_type = self._check_value_flowing_into_allowing_struct_literal(value, field_types[field_name])
@@ -1425,7 +1489,8 @@ class SemanticAnalyzer:
             if not self._types_compatible(value_type, expected_type):
                 raise SemanticError(
                     f"Field '{field_name}' of struct literal '{expr.name}' "
-                    f"should be {expected_type}, got {value_type}"
+                    f"should be {expected_type}, got {value_type}",
+                    value,
                 )
         result = Type(TypeKind.STRUCT, struct_name=expr.name)
         expr.resolved_type = result
@@ -1455,20 +1520,23 @@ class SemanticAnalyzer:
         if receiver_type.kind != TypeKind.STRUCT:
             raise SemanticError(
                 f"Cannot call method '{expr.name}' on a value of type "
-                f"{receiver_type} -- methods are only defined on structs"
+                f"{receiver_type} -- methods are only defined on structs",
+                expr.receiver,
             )
         key = (receiver_type.struct_name, expr.name)
         if key not in self.methods:
             raise SemanticError(
                 f"Struct '{receiver_type.struct_name}' has no method "
-                f"'{expr.name}'"
+                f"'{expr.name}'",
+                expr,
             )
         param_types, return_type, mangled_name = self.methods[key]
         if len(expr.args) != len(param_types):
             raise SemanticError(
                 f"Method '{expr.name}' on '{receiver_type.struct_name}' "
                 f"expects {len(param_types)} argument(s), got "
-                f"{len(expr.args)}"
+                f"{len(expr.args)}",
+                expr,
             )
         for i, (arg, expected_type) in enumerate(zip(expr.args, param_types), start=1):
             actual_type = self._check_value_flowing_into_allowing_struct_literal(arg, expected_type)
@@ -1476,7 +1544,8 @@ class SemanticAnalyzer:
                 raise SemanticError(
                     f"Argument {i} to method '{expr.name}' on "
                     f"'{receiver_type.struct_name}' should be "
-                    f"{expected_type}, got {actual_type}"
+                    f"{expected_type}, got {actual_type}",
+                    arg,
                 )
         expr.args = [expr.receiver] + expr.args
         expr.name = mangled_name
@@ -1501,7 +1570,8 @@ class SemanticAnalyzer:
                 f"FieldAssign's own field, or a bare statement -- not "
                 f"most other kinds of expressions (a Binary operand, a "
                 f"Field-access base, ...); assign it to a variable "
-                f"first if you need it in one of those positions"
+                f"first if you need it in one of those positions",
+                expr,
             )
         if expr.kwargs is not None:
             # Named arguments parse into the same shape a named struct
@@ -1510,7 +1580,8 @@ class SemanticAnalyzer:
             # Named construction is scoped to struct literals only.
             raise SemanticError(
                 f"'{expr.name}(...)' uses named arguments, which are "
-                f"only supported for struct literals, not function calls"
+                f"only supported for struct literals, not function calls",
+                expr,
             )
         if expr.name == 'print':
             return self.check_print_call(expr)
@@ -1519,13 +1590,14 @@ class SemanticAnalyzer:
         if expr.name == 'append':
             return self.check_append_call(expr)
         if expr.name not in self.functions:
-            raise SemanticError(f"Call to undeclared function '{expr.name}'")
+            raise SemanticError(f"Call to undeclared function '{expr.name}'", expr)
         param_types, return_type = self.functions[expr.name]
 
         if len(expr.args) != len(param_types):
             raise SemanticError(
                 f"Function '{expr.name}' expects {len(param_types)} "
-                f"argument(s), got {len(expr.args)}"
+                f"argument(s), got {len(expr.args)}",
+                expr,
             )
         for i, (arg, expected_type) in enumerate(zip(expr.args, param_types), start=1):
             # _check_value_flowing_into_allowing_struct_literal, not
@@ -1538,7 +1610,8 @@ class SemanticAnalyzer:
             if not self._types_compatible(actual_type, expected_type):
                 raise SemanticError(
                     f"Argument {i} to '{expr.name}' should be "
-                    f"{expected_type}, got {actual_type}"
+                    f"{expected_type}, got {actual_type}",
+                    arg,
                 )
         return return_type
 
@@ -1559,19 +1632,22 @@ class SemanticAnalyzer:
         as any other void call's leftover register value."""
         if len(expr.args) != 1:
             raise SemanticError(
-                f"'print' expects exactly 1 argument, got {len(expr.args)}"
+                f"'print' expects exactly 1 argument, got {len(expr.args)}",
+                expr,
             )
         arg_type = self.check_expr(expr.args[0])
         if arg_type == Type.VOID:
             raise SemanticError(
                 "'print' cannot be called with the result of a function "
-                "that has no declared return type -- there's no value there to print"
+                "that has no declared return type -- there's no value there to print",
+                expr.args[0],
             )
         if arg_type == Type.NONE:
             raise SemanticError(
                 "'print' cannot be called with a bare 'none' -- store it "
                 "in a slice-typed variable first (e.g. `[]int s = none`), "
-                "then print that"
+                "then print that",
+                expr.args[0],
             )
         return Type.VOID
 
@@ -1591,16 +1667,19 @@ class SemanticAnalyzer:
         VOID, so `len(x)` works as an ordinary expression."""
         if len(expr.args) != 1:
             raise SemanticError(
-                f"'len' expects exactly 1 argument, got {len(expr.args)}"
+                f"'len' expects exactly 1 argument, got {len(expr.args)}",
+                expr,
             )
         arg_type = self.check_expr(expr.args[0])
         if arg_type == Type.STR:
             raise SemanticError(
-                "'len' does not support str arguments yet"
+                "'len' does not support str arguments yet",
+                expr.args[0],
             )
         if arg_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE):
             raise SemanticError(
-                f"'len' requires an array or slice argument, got {arg_type}"
+                f"'len' requires an array or slice argument, got {arg_type}",
+                expr.args[0],
             )
         return Type.INT
 
@@ -1625,21 +1704,24 @@ class SemanticAnalyzer:
         """
         if len(expr.args) != 2:
             raise SemanticError(
-                f"'append' expects exactly 2 arguments, got {len(expr.args)}"
+                f"'append' expects exactly 2 arguments, got {len(expr.args)}",
+                expr,
             )
         slice_arg, value_arg = expr.args
         slice_type = self.check_expr(slice_arg)
         if slice_type.kind != TypeKind.SLICE:
             raise SemanticError(
                 f"'append' requires a slice as its first argument, "
-                f"got {slice_type}"
+                f"got {slice_type}",
+                slice_arg,
             )
         value_type = self._check_value_flowing_into_allowing_struct_literal(value_arg, slice_type.element_type)
         if not self._types_compatible(value_type, slice_type.element_type):
             raise SemanticError(
                 f"'append' cannot append a value of type {value_type} "
                 f"to a {slice_type} (element type "
-                f"{slice_type.element_type})"
+                f"{slice_type.element_type})",
+                value_arg,
             )
         return slice_type
 
@@ -1647,12 +1729,13 @@ class SemanticAnalyzer:
         if isinstance(expr.value, float) and not expr.value.is_integer():
             raise SemanticError(
                 f"'{expr.value}' is not a whole number -- this language has "
-                f"no floating-point type; only int and bool exist"
+                f"no floating-point type; only int and bool exist",
+                expr,
             )
         return Type.INT
 
     def check_variable(self, expr: Variable) -> Type:
-        return self._lookup(expr.name)
+        return self._lookup(expr.name, expr)
 
     def check_unary(self, expr: Unary) -> Type:
         operand_type = self.check_expr(expr.operand)
@@ -1660,7 +1743,8 @@ class SemanticAnalyzer:
             if operand_type not in _INTEGER_TYPES:
                 raise SemanticError(
                     f"'{expr.op.symbol()}' requires an int, int8, "
-                    f"uint8, or int64 operand, got {operand_type}"
+                    f"uint8, or int64 operand, got {operand_type}",
+                    expr,
                 )
             # Stays the operand's own type -- -int8 is int8, not
             # promoted to int -- exactly the same "narrow stays
@@ -1672,10 +1756,11 @@ class SemanticAnalyzer:
                 raise SemanticError(
                     f"'not' requires a bool operand, got {operand_type} "
                     f"(no implicit int-to-bool conversion -- try "
-                    f"`not (x == 0)` instead of `not x`)"
+                    f"`not (x == 0)` instead of `not x`)",
+                    expr,
                 )
             return Type.BOOL
-        raise SemanticError(f"No semantic rule for unary operator: {expr.op}")
+        raise SemanticError(f"No semantic rule for unary operator: {expr.op}", expr)
 
     def check_cast(self, expr: Cast) -> Type:
         """`TYPE(expr)` -- an explicit numeric cast. Resolves target_
@@ -1700,13 +1785,14 @@ class SemanticAnalyzer:
         feature). A cast always produces exactly the type it names,
         unlike arithmetic (where int8 stays int8) -- there's no
         operand-dependent result to derive."""
-        target_type = type_from_name(expr.target_type, self.structs, self.type_aliases)
+        target_type = type_from_name(expr.target_type, self.structs, self.type_aliases, expr)
         source_type = self.check_expr(expr.expr)
         if target_type not in _INTEGER_TYPES or source_type not in _INTEGER_TYPES:
             raise SemanticError(
                 f"Cannot cast {source_type} to {target_type} -- casting "
                 f"is only supported between int, int8, uint8, and int64 "
-                f"right now"
+                f"right now",
+                expr,
             )
         return target_type
 
@@ -1755,17 +1841,18 @@ class SemanticAnalyzer:
             raise SemanticError(
                 f"'+' requires two operands of the same integer type "
                 f"(int, int8, uint8, or int64) or two str operands, "
-                f"got {left_type} and {right_type}"
+                f"got {left_type} and {right_type}",
+                expr,
             )
 
         if op in _INT_ONLY_BINARY_OPS:
             # Stays whichever integer type both operands were -- int8
             # + int8 is int8, never promoted to int (unlike C's own
             # integer-promotion rules).
-            return self._require_same_integer_type(left_type, right_type, op)
+            return self._require_same_integer_type(left_type, right_type, op, expr)
 
         if op in _ORDERING_OPS:
-            self._require_same_integer_type(left_type, right_type, op)
+            self._require_same_integer_type(left_type, right_type, op, expr)
             return Type.BOOL
 
         if op in _EQUALITY_OPS:
@@ -1791,14 +1878,16 @@ class SemanticAnalyzer:
                     raise SemanticError(
                         f"Cannot compare {left_type} to {right_type} with "
                         f"'{op.symbol()}' -- arrays must have the same "
-                        f"length and element type"
+                        f"length and element type",
+                        expr,
                     )
                 if not self._is_comparable_type(left_type):
                     raise SemanticError(
                         f"'{op.symbol()}' does not support {left_type} "
                         f"operands -- array equality isn't defined yet "
                         f"when the elements are (or contain) a slice, "
-                        f"which has no '==' defined for it yet"
+                        f"which has no '==' defined for it yet",
+                        expr,
                     )
                 return Type.BOOL
 
@@ -1812,7 +1901,8 @@ class SemanticAnalyzer:
                     raise SemanticError(
                         f"Cannot compare {left_type} to {right_type} with "
                         f"'{op.symbol()}' -- structs must be the exact "
-                        f"same type"
+                        f"same type",
+                        expr,
                     )
                 if not self._is_comparable_type(left_type):
                     raise SemanticError(
@@ -1820,7 +1910,8 @@ class SemanticAnalyzer:
                         f"operands -- struct equality isn't defined yet "
                         f"when a field (directly, or nested inside "
                         f"another struct or an array field) is a slice, "
-                        f"which has no '==' defined for it yet"
+                        f"which has no '==' defined for it yet",
+                        expr,
                     )
                 return Type.BOOL
 
@@ -1845,40 +1936,46 @@ class SemanticAnalyzer:
             if left_type.kind in (TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE) or right_type.kind in (TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE):
                 raise SemanticError(
                     f"'{op.symbol()}' does not support slice, void, or "
-                    f"none operands, except comparing a slice to none"
+                    f"none operands, except comparing a slice to none",
+                    expr,
                 )
             if left_type != right_type:
                 raise SemanticError(
                     f"Cannot compare {left_type} to {right_type} with "
-                    f"'{op.symbol()}' -- both sides must be the same type"
+                    f"'{op.symbol()}' -- both sides must be the same type",
+                    expr,
                 )
             return Type.BOOL
 
         if op in _LOGICAL_OPS:
-            self._require_type(left_type, Type.BOOL, op)
-            self._require_type(right_type, Type.BOOL, op)
+            self._require_type(left_type, Type.BOOL, op, expr)
+            self._require_type(right_type, Type.BOOL, op, expr)
             return Type.BOOL
 
-        raise SemanticError(f"No semantic rule for binary operator: {op}")
+        raise SemanticError(f"No semantic rule for binary operator: {op}", expr)
 
-    def _require_type(self, actual: Type, expected: Type, op) -> None:
+    def _require_type(self, actual: Type, expected: Type, op, node: Optional[Node] = None) -> None:
         if actual != expected:
             raise SemanticError(
-                f"'{op.symbol()}' requires {expected} operands, got {actual}"
+                f"'{op.symbol()}' requires {expected} operands, got {actual}",
+                node,
             )
 
-    def _require_same_integer_type(self, left_type: Type, right_type: Type, op) -> Type:
+    def _require_same_integer_type(self, left_type: Type, right_type: Type, op, node: Optional[Node] = None) -> Type:
         """Requires left_type and right_type to be the exact SAME
         integer type -- never a mix, even between two different-but-
         both-integer types (`int8 + uint8` is rejected like `bool +
         int` already is). Returns that shared type as the operator's
         own result -- used directly by check_binary's _INT_ONLY_
-        BINARY_OPS and ordering-operator cases."""
+        BINARY_OPS and ordering-operator cases. `node`, as everywhere
+        else in this file, is purely for error attribution -- passed
+        through unchanged from check_binary's own Binary node."""
         if left_type not in _INTEGER_TYPES or left_type != right_type:
             raise SemanticError(
                 f"'{op.symbol()}' requires two operands of the same "
                 f"integer type (int, int8, uint8, or int64), got "
-                f"{left_type} and {right_type}"
+                f"{left_type} and {right_type}",
+                node,
             )
         return left_type
 

@@ -75,3 +75,29 @@ def test_type_from_name_unknown():
 # TODO(will): Test always_returns
 
 # TODO(will): Test SemanticAnalyzer
+
+
+# ---------------------------------------------------------------------------
+# SemanticError's own node -> "at line L, column C" formatting (the
+# mechanism every one of this file's ~80 raise sites relies on --
+# tested once here, directly, rather than per call site).
+# ---------------------------------------------------------------------------
+
+def test_semantic_error_without_a_node_has_a_plain_message():
+    err = semantic.SemanticError("something went wrong")
+    assert str(err) == "something went wrong"
+
+
+def test_semantic_error_with_a_positioned_node_appends_location():
+    node = parser.Constant(value=1, line=4, col=9)
+    err = semantic.SemanticError("something went wrong", node)
+    assert str(err) == "something went wrong at line 4, column 9"
+
+
+def test_semantic_error_with_an_unset_node_has_a_plain_message():
+    """A node with no real token behind it (line=col=0, the default
+    for one built by hand) must not print a misleading "line 0,
+    column 0" -- silently falls back to the plain message instead."""
+    node = parser.Constant(value=1)  # line/col both default to 0
+    err = semantic.SemanticError("something went wrong", node)
+    assert str(err) == "something went wrong"
