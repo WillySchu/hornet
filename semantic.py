@@ -850,7 +850,7 @@ class SemanticAnalyzer:
         elif isinstance(stmt, Continue):
             self.analyze_continue(stmt)
         elif isinstance(stmt, ExprStmt):
-            self.check_expr(stmt.expr)  # evaluated for validity; result unused
+            self._check_expr_allowing_struct_literal(stmt.expr)  # evaluated for validity; result unused
         else:
             raise SemanticError(f"No semantic rule for statement: {stmt!r}")
 
@@ -1497,12 +1497,11 @@ class SemanticAnalyzer:
                 f"allowed as a variable's initializer, a plain "
                 f"assignment's value, a direct function-call argument, "
                 f"a direct return value, an array literal's own "
-                f"element, an IndexAssign's own element, or a "
-                f"FieldAssign's own field -- not as a bare statement, "
-                f"or most other kinds of expressions (a "
-                f"Binary operand, a Field-access base, ...); assign it "
-                f"to a variable first if you need it in one of those "
-                f"positions"
+                f"element, an IndexAssign's own element, a "
+                f"FieldAssign's own field, or a bare statement -- not "
+                f"most other kinds of expressions (a Binary operand, a "
+                f"Field-access base, ...); assign it to a variable "
+                f"first if you need it in one of those positions"
             )
         if expr.kwargs is not None:
             # Named arguments parse into the same shape a named struct

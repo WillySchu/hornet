@@ -898,6 +898,32 @@ class StatementsMixin:
             # case, reused here unchanged, with the result never read.
             ir, _ = self._ir_materialize_composite_call(stmt.expr, type_of(stmt.expr))
             return ir
+        elif isinstance(stmt, ExprStmt) and isinstance(stmt.expr, Call) and stmt.expr.name in self.ir_program.struct_registry:
+            # A struct literal used directly as a bare statement
+            # (`Point(1, 2)` alone on a line) -- semantic.py's own
+            # once-blanket rejection of a struct literal as a bare
+            # statement is gone now, so this needs its own real-IR
+            # case, the identical reasoning as the ordinary-composite-
+            # Call case just above but for the one shape _is_ordinary_
+            # composite_call always excludes (construction, not an
+            # ordinary call: see its own docstring). _ir_materialize_
+            # composite_call itself doesn't apply here -- it writes
+            # through _ir_composite_call, which calls call_expr.name
+            # as an ordinary function, not what a struct name's own
+            # construction needs -- so this goes through _ir_
+            # materialize_struct_literal instead, its own struct-
+            # literal counterpart, with the resulting address simply
+            # discarded exactly the same way.
+            result = self._ir_materialize_struct_literal(stmt.expr)
+            if result is None:
+                raise CodegenError(
+                    f"_ir_materialize_struct_literal returned None for a struct "
+                    f"literal used as a bare statement ({stmt.expr!r}) -- some "
+                    f"field is out of scope for real IR, with no old-style "
+                    f"fallback remaining to catch it"
+                )
+            ir, _ = result
+            return ir
         elif isinstance(stmt, ExprStmt):
             ir, _ = self.gen_expr_ir(stmt.expr)
             return ir

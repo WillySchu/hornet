@@ -491,23 +491,28 @@ class IRFunctionBuilder(
     def _collect_argument_temps(self, statements: List[Node], ir_fn: IRFunction) -> None:
         """Recursively walks `statements` -- including into every If's
         then_body/else_body and every While's body, like
-        _collect_locals -- looking for THREE kinds of array-/struct-
+        _collect_locals -- looking for FOUR kinds of array-/struct-
         typed expression with no address of its own: a function-call
         argument (an ArrayLiteral, a struct literal, or an ordinary
         array/struct-returning Call used DIRECTLY as an argument), an
         ordinary composite-returning Call sitting directly at an
         Index.array/Field.base position (`makeArray()[i]`,
-        `makePoint().x`), and a bare bracketed-list literal sitting
+        `makePoint().x`), a bare bracketed-list literal sitting
         directly at an Index.array position (`[1, 2, 3][i]`) -- NOT a
         Slice.array position, for any of these three, and no Field.
         base equivalent for the third (a struct literal at a Field.
         base position, `Point(1,2).x`, is already rejected outright by
-        semantic.py, wherever it would appear) -- see _collect_
-        argument_temps_in_expr's own Slice case for why that position
-        never reserves a slot at all here, unlike Index/Field. Neither
-        of the first two is a Variable, Index, or Field, each of which
-        already has a real address via _ir_array_address/_ir_struct_
-        address.
+        semantic.py, wherever it would appear) -- and a struct literal
+        used directly as a bare ExprStmt (`Point(1, 2)` alone on a
+        line), reserved on the way back up from this method's own
+        ExprStmt case rather than inside _collect_argument_temps_in_
+        expr, since it's the top-level statement shape itself that
+        qualifies here, not something found by recursing into one --
+        see _collect_argument_temps_in_expr's own Slice case for why
+        that position never reserves a slot at all here, unlike
+        Index/Field. None of the first three is a Variable, Index, or
+        Field, each of which already has a real address via _ir_
+        array_address/_ir_struct_address.
 
         Not just ORDINARY function-call arguments, despite the name:
         the walk finds a qualifying argument inside ANY Call node, with
@@ -580,6 +585,16 @@ class IRFunctionBuilder(
                 self._collect_argument_temps(stmt.body, ir_fn)
             elif isinstance(stmt, ExprStmt):
                 self._collect_argument_temps_in_expr(stmt.expr, ir_fn)
+                if isinstance(stmt.expr, Call) and stmt.expr.name in self.ir_program.struct_registry:
+                    # A struct literal used directly as a bare
+                    # statement (`Point(1, 2)` alone) has no address of
+                    # its own to write through, same as one used as an
+                    # ordinary function-call argument -- reserved here
+                    # on the way back up, after the recursion just
+                    # above has already handled anything nested inside
+                    # its own field values, matching the Call case in
+                    # _collect_argument_temps_in_expr's own docstring.
+                    self._reserve_argument_temp(stmt.expr, type_of(stmt.expr), ir_fn)
             # Break/Continue carry no expressions at all.
 
     def _is_ordinary_composite_call(self, expr: Node) -> bool:

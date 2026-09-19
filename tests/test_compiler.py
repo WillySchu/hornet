@@ -13800,15 +13800,25 @@ class TestStructLiterals:
             99,
         )
 
-    def test_struct_literal_as_bare_statement_is_rejected(self):
-        assert_program_semantic_error(
+    def test_struct_literal_as_bare_statement(self):
+        """A struct literal used directly as a bare statement, its own
+        result entirely discarded -- proves each field's own value
+        still runs for its own side effect, exactly like a bare
+        array-literal statement already does (see test_bare_statement_
+        with_side_effecting_element)."""
+        assert_program_stdout(
             "struct Point:\n"
             "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int se():\n"
+            "    print(99)\n"
+            "    return 1\n"
             "\n"
             "def int main():\n"
-            "    Point(1)\n"
+            "    Point(se(), 2)\n"
             "    return 0\n",
-            match="only allowed as a variable's initializer",
+            "99\n",
         )
 
     def test_struct_and_function_name_collision_is_rejected(self):
