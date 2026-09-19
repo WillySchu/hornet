@@ -374,8 +374,38 @@ class InstructionSelector:
                     Register('rbx'), Register('r12d'), Register('r13'), Register('r13d'),
                     instr.element_width,
                 ))
-                out.extend(self._gen_write_temp_from(Register('ebx'), instr.dst_ptr))
-                out.extend(self._gen_write_temp_from(Register('r13d'), instr.dst_cap))
+                # dst_ptr/dst_cap are written out of the SAME fixed
+                # registers (%ebx/%r13d) their own sources just used
+                # above -- harmless while the general allocator could
+                # never land a Temp on those specific registers, but a
+                # real, confirmed bug (see codegen/register_allocator.
+                # py's own ALLOCATABLE_REGISTERS comment for the full
+                # incident) once it can: writing dst_ptr first
+                # silently clobbers the not-yet-read new_cap value
+                # whenever dst_ptr itself gets assigned %r13d, since
+                # %ebx -> %r13d is exactly the move that overwrites
+                # it. The reverse (dst_cap assigned %ebx) never needs
+                # reordering -- a move only READS its source, so
+                # writing dst_ptr out of %ebx first can't destroy the
+                # value dst_cap's own write later puts there. Only a
+                # genuine swap (dst_ptr on %r13d AND dst_cap on %ebx,
+                # each sitting on the other's needed source) needs an
+                # actual temporary -- %r12 is always free for it here
+                # regardless of which case applies, since length is
+                # already dead the moment the call above returns (see
+                # _gen_slice_grow_into's own docstring).
+                dst_ptr_reg = self.host._register_assignment.get(instr.dst_ptr.id)
+                dst_cap_reg = self.host._register_assignment.get(instr.dst_cap.id)
+                if dst_ptr_reg == 'r13d' and dst_cap_reg == 'ebx':
+                    out.append(MovQ(src=Register('rbx'), dst=Register('r12')))
+                    out.extend(self._gen_write_temp_from(Register('r13d'), instr.dst_cap))
+                    out.extend(self._gen_write_temp_from(Register('r12d'), instr.dst_ptr))
+                elif dst_ptr_reg == 'r13d':
+                    out.extend(self._gen_write_temp_from(Register('r13d'), instr.dst_cap))
+                    out.extend(self._gen_write_temp_from(Register('ebx'), instr.dst_ptr))
+                else:
+                    out.extend(self._gen_write_temp_from(Register('ebx'), instr.dst_ptr))
+                    out.extend(self._gen_write_temp_from(Register('r13d'), instr.dst_cap))
             else:
                 raise NotImplementedError(f"lower_ir has no rule for: {instr!r}")
         return out

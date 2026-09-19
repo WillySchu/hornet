@@ -585,17 +585,15 @@ def test_linear_scan_never_assigns_the_same_register_to_two_live_intervals():
 
 
 # -- ALLOCATABLE_REGISTERS pool size --------------------------------------
-# Regression coverage for widening the pool from 3 to 4 (r10d/r11d/r15d
-# plus r14d -- see this module's own comment above ALLOCATABLE_
-# REGISTERS for why r14d specifically, and why ebx/r12d/r13d are
-# deliberately NOT included despite also being callee-saved: including
-# them produced real, reproducible, ASLR-dependent segfaults on
-# append-heavy programs, not yet root-caused). Pins the exact set, not
-# just the count, so an accidental reorder, duplicate, or silent
-# reintroduction of ebx/r12d/r13d is caught too.
+# Regression coverage for the full pool: 3 -> 4 (adding r14d) -> 7
+# (adding ebx/r12d/r13d back once the real bug they exposed -- see
+# this module's own comment above ALLOCATABLE_REGISTERS, and tests/
+# codegen/test_ir_lowering.py for the fix itself -- was found and
+# fixed rather than just avoided. Pins the exact set, not just the
+# count, so an accidental reorder or duplicate is caught too.
 
-def test_allocatable_registers_is_the_widened_four_register_pool():
-    assert ALLOCATABLE_REGISTERS == ['r10d', 'r11d', 'r15d', 'r14d']
+def test_allocatable_registers_is_the_widened_seven_register_pool():
+    assert ALLOCATABLE_REGISTERS == ['r10d', 'r11d', 'r15d', 'ebx', 'r12d', 'r13d', 'r14d']
 
 
 def test_allocate_registers_no_longer_spills_four_simultaneously_live_temps():

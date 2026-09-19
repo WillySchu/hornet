@@ -37,39 +37,45 @@ from ir.ir import (
     Temp,
 )
 
-# %r10d, %r11d, %r15d, %r14d (the ordinary 32-bit-named form, matching
-# every other register this codebase passes around by default --
-# widened via as_qword_register when a Temp's type needs it). None of
-# the four has a SysV argument role (unlike %rdi/%rsi/%rdx/%rcx/%r8/
-# %r9), an implicit instruction-level role (unlike %rcx's shift-count,
-# %rdx's div/mul high half), or this compiler's own universal scratch
-# convention (%rax).
+# %r10d, %r11d, %r15d, %ebx, %r12d, %r13d, %r14d (the ordinary 32-bit-
+# named form, matching every other register this codebase passes
+# around by default -- widened via as_qword_register when a Temp's
+# type needs it). None of the seven has a SysV argument role (unlike
+# %rdi/%rsi/%rdx/%rcx/%r8/%r9), an implicit instruction-level role
+# (unlike %rcx's shift-count, %rdx's div/mul high half), or this
+# compiler's own universal scratch convention (%rax).
 #
 # The first three (%r10d/%r11d/%r15d) are caller-saved and otherwise
-# completely unclaimed. %r14d is callee-saved and, unlike %ebx/%r12d/
-# %r13d (see below), entirely unused elsewhere in codegen -- and every
-# function's prologue/epilogue already saves and restores it (and
-# %ebx/%r12d/%r13d) UNCONDITIONALLY (CALLEE_SAVED_SCRATCH_REGISTERS,
-# calling_convention.py) regardless of whether this pool ever assigns
-# it, so admitting it here adds no new save/restore cost, only spends
-# a cost already being paid.
+# completely unclaimed. The other four are callee-saved, and every
+# function's prologue/epilogue already saves and restores all four
+# UNCONDITIONALLY (CALLEE_SAVED_SCRATCH_REGISTERS, calling_convention.
+# py) -- so admitting them here adds no new save/restore cost, only
+# spends a cost already being paid. %r14d is entirely unused elsewhere
+# in codegen; %ebx/%r12d/%r13d are used, but only as fixed scratch
+# inside IRSliceGrow's own lowering (ir_lowering.py, for ptr/length/
+# cap around the malloc/realloc call append needs).
 #
-# %ebx/%r12d/%r13d are DELIBERATELY EXCLUDED, despite being callee-
-# saved too and despite eligible_intervals already treating IRSliceGrow
-# (which uses them as fixed scratch -- see ir_lowering.py, for ptr/
-# length/cap around the malloc/realloc call append needs) as an unsafe
-# position exactly like IRCall. Including them was tried and reverted:
-# it produces real, reproducible, ASLR-dependent segfaults (confirmed
-# by running the SAME compiled binary repeatedly, and by the failure
-# disappearing entirely with ASLR disabled) whenever a program uses
-# append heavily, e.g. benchmarks/programs/copy_heavy.ht -- so there is
-# a genuine, currently unidentified correctness gap in how eligible_
-# intervals/IRSliceGrow's own lowering interact for these three
-# specifically, not yet root-caused. %r14d was verified clean under
-# the same stress test (many repeated runs of the same binary, with
-# and without ASLR) and is safe to keep. Do not add %ebx/%r12d/%r13d
-# back to this pool without first finding and fixing that gap.
-ALLOCATABLE_REGISTERS = ['r10d', 'r11d', 'r15d', 'r14d']
+# %ebx/%r12d/%r13d were EXCLUDED for a while: including them produced
+# real, reproducible, ASLR-dependent segfaults on append-heavy
+# programs (e.g. benchmarks/programs/copy_heavy.ht) -- eligible_
+# intervals already treats IRSliceGrow as an unsafe position exactly
+# like IRCall, which correctly keeps any Temp ALIVE ACROSS it off
+# these registers, but that check has nothing to say about IRSliceGrow
+# DEFINING two Temps at once (dst_ptr and dst_cap) through those same
+# fixed registers. If the general allocator assigns dst_ptr itself to
+# %r13d, writing it out (from %ebx) before dst_cap is read back out of
+# %r13d clobbers the not-yet-consumed new_cap value with the new
+# pointer instead -- confirmed to be the actual mechanism (root-
+# caused with gdb against a real core dump, not just inferred) and
+# fixed at the lowering level: see ir_lowering.py's own IRSliceGrow
+# case, which now reorders (or, for the one case that's a genuine
+# swap rather than a simple ordering fix, uses %r12 as a temporary --
+# always free there, since length is already dead by that point) to
+# never read a destination register after something has already
+# overwritten it. Re-verified clean afterward against the same stress
+# test that originally found this (many repeated runs of the same
+# binary, with and without ASLR, across every benchmark program).
+ALLOCATABLE_REGISTERS = ['r10d', 'r11d', 'r15d', 'ebx', 'r12d', 'r13d', 'r14d']
 
 
 @dataclass
