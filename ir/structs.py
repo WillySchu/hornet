@@ -11,7 +11,7 @@ arrays_slices.py."""
 
 from ir.errors import IRError
 from ir.ir import IRBinOp, IRConst, IRStore, IRLoad, IRLocalAddress, IRCall
-from ir.utils import type_byte_width, type_of
+from ir.utils import COMPOSITE_KINDS, type_byte_width, type_of
 from parser import Node, Variable, Field, Index, Call, BinaryOp
 from semantic import TypeKind, Type
 
@@ -129,7 +129,7 @@ class StructsMixin:
                     ir.append(
                         IRBinOp(dst=field_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(offset, Type.INT64)))
                 ir.extend(self._ir_write_zero_value_into(field_addr, field_type))
-            elif field_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
+            elif field_type.kind in COMPOSITE_KINDS:
                 if offset == 0:
                     field_addr = dst_address
                 else:

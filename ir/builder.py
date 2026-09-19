@@ -23,7 +23,7 @@ from typing import List, Optional
 
 from codegen.escape_analysis import analyze_array_escapes, is_heap_allocated
 from ir.errors import IRError
-from ir.utils import type_byte_width, type_of
+from ir.utils import COMPOSITE_KINDS, type_byte_width, type_of
 from ir.ir import (
     IRBranch, IRCall, IRConst, IRCopy, IRFunction, IRJump, IRLocalAddress, IRReadArgument, IRReturn, IRStore, Temp,
 )
@@ -102,7 +102,7 @@ class IRFunctionBuilder(
         # its own save/restore discipline and would break the
         # callee-saved-register prologue's even-push-count alignment.
         arg_shift = 0
-        if return_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
+        if return_type.kind in COMPOSITE_KINDS:
             ir_fn.hidden_return_ptr_slot = self.ir_program.ids.new_slot(8, "hidden_return_ptr", ir_fn)
             arg_shift = 1
 

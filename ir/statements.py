@@ -20,7 +20,7 @@ from ir.ir import (
     IRStaticDataAddress,
     IRStore,
 )
-from ir.utils import type_of, type_byte_width
+from ir.utils import COMPOSITE_KINDS, type_of, type_byte_width
 from parser import (
     ArrayLiteral,
     Assign,
@@ -95,7 +95,7 @@ class StatementsMixin:
         raises IRError explicitly."""
         if isinstance(stmt, Return):
             is_composite_return = isinstance(stmt.value, NoneLiteral) or (
-                stmt.value is not None and type_of(stmt.value).kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT)
+                stmt.value is not None and type_of(stmt.value).kind in COMPOSITE_KINDS
             )
             if not is_composite_return:
                 return self._ir_return(stmt.value)
@@ -250,7 +250,7 @@ class StatementsMixin:
             # shape is confirmed to apply, and binding twice would
             # just orphan a Temp id, harmlessly but pointlessly.
             var_type = type_from_name(stmt.var_type, self.ir_program.struct_registry, self.ir_program.type_alias_registry)
-            if not isinstance(stmt.init, NoneLiteral) and var_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
+            if not isinstance(stmt.init, NoneLiteral) and var_type.kind not in COMPOSITE_KINDS:
                 self._bind_local(stmt, ir_fn)
                 if stmt.init is not None:
                     ir, value = self.gen_expr_ir(stmt.init)
@@ -276,7 +276,7 @@ class StatementsMixin:
             # Variable/Field/Index (an existing value with a real
             # address to copy from) -- see _ir_copy_assign.
             if (
-                    var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE)
+                    var_type.kind in COMPOSITE_KINDS
                     and isinstance(stmt.init, (Variable, Field, Index))
             ):
                 slot = self._bind_local(stmt, ir_fn)
@@ -356,7 +356,7 @@ class StatementsMixin:
             # step the Variable/Field/Index case above needs: this
             # destination is BRAND NEW.
             if (
-                    var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE)
+                    var_type.kind in COMPOSITE_KINDS
                     and (isinstance(stmt.init, Call)
                          and stmt.init.name != 'append'
                          and stmt.init.name not in self.ir_program.struct_registry)):
@@ -446,7 +446,7 @@ class StatementsMixin:
             # check is needed the way VarDecl's own case above needs
             # one.
             var_type = self._local_type(stmt.name)
-            if var_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
+            if var_type.kind not in COMPOSITE_KINDS:
                 ir, value = self.gen_expr_ir(stmt.value)
                 return ir + [IRMove(dst=self._local_temp(stmt.name), src=value)]
             # Same Variable/Field/Index-shaped copy as VarDecl's own
@@ -456,7 +456,7 @@ class StatementsMixin:
             # an existing array/struct one already has its own real
             # allocation from declaration time, reused in place.
             if (
-                    var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE)
+                    var_type.kind in COMPOSITE_KINDS
                     and isinstance(stmt.value, (Variable, Field, Index))
             ):
                 return self._ir_copy_assign(Variable(name=stmt.name), stmt.value, var_type)
@@ -494,7 +494,7 @@ class StatementsMixin:
             # Same ordinary-function-call case as VarDecl's own --
             # append already handled, more specifically, just above.
             if (
-                    var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE)
+                    var_type.kind in COMPOSITE_KINDS
                     and (isinstance(stmt.value, Call)
                          and stmt.value.name != 'append'
                          and stmt.value.name not in self.ir_program.struct_registry)
@@ -593,10 +593,10 @@ class StatementsMixin:
             # Same idea one level over -- FieldAssign's grammar can
             # ALSO produce an ARRAY-typed field (unlike IndexAssign).
             field_type = self._check_struct_and_field_type(stmt.base, stmt.name)
-            if field_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
+            if field_type.kind not in COMPOSITE_KINDS:
                 return self._ir_field_assign(stmt, field_type)
             if (
-                    field_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE)
+                    field_type.kind in COMPOSITE_KINDS
                     and isinstance(stmt.value, (Variable, Field, Index))
             ):
                 dst_expr = Field(base=stmt.base, name=stmt.name)
@@ -625,7 +625,7 @@ class StatementsMixin:
                     dst_expr = Field(base=stmt.base, name=stmt.name)
                     return append_ir + self._ir_write_slice_descriptor(dst_expr, ptr_value, len_value, cap_value)
             if (
-                    field_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SLICE)
+                    field_type.kind in COMPOSITE_KINDS
                     and (isinstance(stmt.value, Call)
                          and stmt.value.name != 'append'
                          and stmt.value.name not in self.ir_program.struct_registry)
@@ -690,7 +690,7 @@ class StatementsMixin:
                 return append_ir
         elif (
                 isinstance(stmt, ExprStmt)
-                and type_of(stmt.expr).kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT)
+                and type_of(stmt.expr).kind in COMPOSITE_KINDS
                 and self._is_ordinary_composite_call(stmt.expr)
         ):
             # An array/struct/slice-returning ordinary Call used

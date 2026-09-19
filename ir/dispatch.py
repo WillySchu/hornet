@@ -10,7 +10,7 @@ from ir.errors import IRError
 from ir.ir import (
     IRBinOp, IRValue, IRConst, IRLoad, IRMove, IRJump, IRLabel, IRStaticDataAddress, IRUnOp, IRCast
 )
-from ir.utils import type_of
+from ir.utils import COMPOSITE_KINDS, type_of
 from typing import Optional
 from parser import (
     ArrayLiteral,
@@ -83,7 +83,7 @@ class DispatchMixin:
                     f"({expr!r}) -- expected to always succeed for a reachable base")
             addr_ir, addr_value = result
             return self._ir_load(addr_ir, addr_value, type_of(expr))
-        if isinstance(expr, Field) and type_of(expr).kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
+        if isinstance(expr, Field) and type_of(expr).kind not in COMPOSITE_KINDS:
             result = self._ir_field_address(expr)
             if result is None:
                 raise IRError(
@@ -108,8 +108,7 @@ class DispatchMixin:
             result = self._ir_len_call(expr)
             if result is not None:
                 return result
-        if isinstance(expr, Call) and expr.name not in ('print', 'len') and type_of(expr).kind not in (
-                TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
+        if isinstance(expr, Call) and expr.name not in ('print', 'len') and type_of(expr).kind not in COMPOSITE_KINDS:
             return self._ir_call(expr)
         if isinstance(expr, Unary):
             # Recursing into expr.operand FIRST is what makes a

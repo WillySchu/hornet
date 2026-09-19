@@ -28,7 +28,7 @@ from ir.ir import (
     IRStaticDataAddress,
     IRStore, Temp,
 )
-from ir.utils import type_of, type_byte_width
+from ir.utils import COMPOSITE_KINDS, type_of, type_byte_width
 from parser import Node, ArrayLiteral, Call, Field, Index, Slice, Variable, NoneLiteral, Binary, BinaryOp
 from semantic import TypeKind, Type
 
@@ -774,7 +774,7 @@ class ArraysSlicesMixin:
         element_width = type_byte_width(element_type, self.ir_program.struct_registry)
         ir = []
         for i, elem_expr in enumerate(expr.elements):
-            if element_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
+            if element_type.kind in COMPOSITE_KINDS:
                 if i == 0:
                     elem_addr = dst_address
                 else:
@@ -831,7 +831,7 @@ class ArraysSlicesMixin:
                 ir.extend(self._ir_array_literal_side_effects_only(element))
                 continue
             element_type = type_of(element)
-            if element_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
+            if element_type.kind in COMPOSITE_KINDS:
                 raise IRError(
                     f"A bare array-literal statement can't have a "
                     f"{type(element).__name__} element of type "
@@ -889,7 +889,7 @@ class ArraysSlicesMixin:
         across both branches, but never double-EXECUTES it at runtime
         -- exactly one of the two branches ever runs for a given
         call."""
-        if element_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
+        if element_type.kind in COMPOSITE_KINDS:
             return self._ir_write_composite_value_into(target_addr, value_arg, element_type)
         value_ir, value = self.gen_expr_ir(value_arg)
         return value_ir + [IRStore(address=target_addr, value=value, value_type=element_type)]

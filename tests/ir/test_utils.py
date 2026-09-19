@@ -12,7 +12,7 @@ import pytest
 import parser
 import semantic
 from ir.errors import IRError
-from ir.utils import leaf_type, type_byte_width, type_of
+from ir.utils import COMPOSITE_KINDS, leaf_type, type_byte_width, type_of
 
 
 def test_type_byte_width_int():
@@ -261,3 +261,12 @@ def test_type_of_array():
         resolved_type=array_type
     )
     assert array_type == type_of(node)
+
+
+def test_composite_kinds_is_exactly_array_slice_struct():
+    """Pinned exactly, not just checked for a subset/superset: every
+    call site that switched to this shared constant (ir/statements.py,
+    ir/arrays_slices.py, ir/builder.py, ir/dispatch.py, ir/structs.py)
+    relies on it meaning precisely "composite, address-based value
+    type" -- no more, no less."""
+    assert COMPOSITE_KINDS == {semantic.TypeKind.ARRAY, semantic.TypeKind.SLICE, semantic.TypeKind.STRUCT}

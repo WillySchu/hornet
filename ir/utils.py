@@ -10,6 +10,21 @@ from semantic import Type, TypeKind, StructInfo
 
 from ir.errors import IRError
 
+# Every composite (non-scalar, address-based) value type this
+# compiler has: assigned/passed/returned by copying the whole value
+# through an address rather than living directly in one Temp the way
+# int/bool/str/int8/uint8/int64 do -- see e.g. VarDecl/Assign/
+# FieldAssign's own composite-value branches in ir/statements.py, all
+# of which dispatch on exactly this set. Shared here so a future
+# composite kind (a sum type, say) is a one-line addition instead of
+# an audit of every call site below -- NOT a stand-in for every other
+# (ARRAY, STRUCT) or (ARRAY, SLICE) pairing elsewhere in this codebase,
+# several of which mean something narrower (which two kinds share a
+# bare literal syntax with its own address function; which two are
+# passed as a single pointer argument in the calling convention) and
+# would be wrong to fold into this one.
+COMPOSITE_KINDS = {TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT}
+
 
 def type_byte_width(t: Type, structs: dict[str, StructInfo]) -> int:
     """Total bytes needed to store a value of type `t`: 1 for
