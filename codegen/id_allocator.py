@@ -78,23 +78,21 @@ class IdAllocator:
         """Allocates a fresh virtual register that already has a
         known home -- `slot`, not a freshly-carved one -- registered
         immediately rather than left for _temp_mem to decide lazily.
-        Used exactly once per named scalar local/parameter (see
-        _bind_local/_bind_param): a variable's own slot is already
-        fixed by _collect_locals/_collect_params before this ever
-        runs, so there's no lazy decision left to make, and reusing
-        that slot -- rather than allocating a second, redundant one --
-        is what lets every read and write of that variable, for the
-        rest of the function, share one Temp identity.
+        Used exactly once per named scalar local/parameter: a
+        variable's own slot is already fixed by _collect_locals/
+        _collect_params before this ever runs, and reusing that slot
+        -- rather than allocating a second, redundant one -- is what
+        lets every read and write of that variable, for the rest of
+        the function, share one Temp identity.
 
-        Stores the SLOT here, not a resolved physical offset -- unlike
-        an eager version of this method used to. Every slot in this
-        compiler, named-local or otherwise, gets its own final offset
-        decided the identical way now: once, by _resolve_frame_layout,
-        after every slot a function will ever need (including whatever
-        _temp_mem discovers lazily, mid-lowering) is known. _temp_mem's
-        own "named-local" branch is what reads self._temp_offsets back
-        out, returning a FrameSlot placeholder for _patch_frame_slots
-        to resolve later, exactly like any other slot."""
+        Stores the SLOT here, not a resolved physical offset. Every
+        slot in this compiler, named-local or otherwise, gets its own
+        final offset decided the same way: once, by _resolve_frame_
+        layout, after every slot a function will ever need (including
+        whatever _temp_mem discovers lazily, mid-lowering) is known.
+        _temp_mem's own "named-local" branch reads self._temp_offsets
+        back out, returning a FrameSlot placeholder for _patch_frame_
+        slots to resolve later, exactly like any other slot."""
         temp_id = self._temp_count
         self._temp_count += 1
         self._temp_offsets[temp_id] = slot
@@ -104,22 +102,14 @@ class IdAllocator:
         """Allocates a fresh, logical frame-slot identifier -- the
         new_temp of frame slots, but for IRLocalAddress's own `slot`
         field rather than a virtual register. Carries no physical
-        offset of its own at all yet: every caller here used to
-        compute `self._next_offset -= width` and use the result
-        directly (as an offset, immediately) -- now it records the
-        slot's own width and a human-readable label (for debugging;
-        never read by anything else) onto `ir_fn` itself, not here
-        (see IRFunction's own docstring for why), and returns an
-        opaque id instead, deferring the actual offset decision to
+        offset of its own yet: records the slot's own width and a
+        human-readable label (for debugging) onto `ir_fn` itself, and
+        returns an opaque id, deferring the actual offset decision to
         _resolve_frame_layout.
 
         Order matters here: _resolve_frame_layout assigns offsets in
         the exact order slots were created in (ir_fn.slot_widths is a
-        plain dict, so insertion order is preserved), reproducing
-        today's own running-counter layout exactly. Every caller below
-        that used to reserve a slot with `self._next_offset -= width`
-        directly now calls this instead, in the identical order those
-        subtractions used to happen in."""
+        plain dict, so insertion order is preserved)."""
         slot_id = self._slot_count
         self._slot_count += 1
         ir_fn.slot_widths[slot_id] = width

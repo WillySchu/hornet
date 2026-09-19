@@ -1,23 +1,15 @@
 """The instruction-selection half of scalar codegen -- gen_binary_op/
 gen_unary_op/gen_cast_narrowing_into/_gen_read_scalar_into/_gen_write_
 scalar_from are ir_lowering.py's own five direct entry points into
-this file (confirmed via its own dependency list), each taking
-already-decided registers or memory locations and building plain
-assembly_ast Instructions directly -- none of the five ever calls back
-into real IR or anything that builds it. _gen_read_scalar_into/_gen_
-write_scalar_from are the one choke point every scalar memory access
-in this compiler goes through, so int8/uint8 being genuinely 1 byte
-and int64 genuinely 8 only ever needed teaching to these two methods,
-not rediscovered at each read/write site: every caller passes a
-value's ordinary 32-bit-named register, and these (along with the
-other three) decide internally which actual width to operate on.
-
-Split out of scalars.py, which used to hold these alongside the real-
-IR-building methods that produce the Temps/values these ultimately
-lower -- mixed into CodeGenerator alongside ArraysSlicesLoweringMixin
-now, not ScalarsMixin anymore: see its own module docstring for where
-that (and every other IR-building mixin) moved to instead, once this
-file's early split made the move mechanical."""
+this file, each taking already-decided registers or memory locations
+and building plain assembly_ast Instructions directly -- none of the
+five ever calls back into real IR or anything that builds it. _gen_
+read_scalar_into/_gen_write_scalar_from are the one choke point every
+scalar memory access in this compiler goes through, so int8/uint8
+being genuinely 1 byte and int64 genuinely 8 only ever needed teaching
+to these two methods: every caller passes a value's ordinary 32-bit-
+named register, and these (along with the other three) decide
+internally which actual width to operate on."""
 
 from codegen.assembly_ast import (
     Add,

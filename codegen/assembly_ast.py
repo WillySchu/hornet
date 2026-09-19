@@ -27,13 +27,10 @@ class Register(Operand):
 @dataclass
 class Memory(Operand):
     """A memory operand: `offset(%base)`, e.g. `-4(%rbp)`. This is how
-    every local variable is stored -- see the module docstring's LOCAL
-    VARIABLES section -- with `base` almost always 'rbp'. It's also
-    reused, with a DIFFERENT base, for reading/writing through a
-    computed address held in some other register (e.g. Memory('rbx',
-    0) for the address an array index computed) -- see the ARRAYS
-    section for why array copying/addressing needed this generality
-    that scalar locals never did."""
+    every local variable is stored, with `base` almost always 'rbp'.
+    It's also reused, with a DIFFERENT base, for reading/writing
+    through a computed address held in some other register (e.g.
+    Memory('rbx', 0) for the address an array index computed)."""
     base: str    # e.g. 'rbp', or another register holding a computed address
     offset: int  # bytes from `base`; locals live at negative offsets
 
@@ -399,19 +396,18 @@ class Div(Instruction):
     Cdq, which would inject a sign bit into a value this instruction is
     about to treat as having none.
 
-    Exists specifically for converting an int's own MAGNITUDE to
-    decimal digits (see the print machinery's own int-to-string
-    conversion) without ever risking a signed-overflow trap: negating
-    INT_MIN in ordinary 32-bit two's complement doesn't actually change
-    its bit pattern at all (there's no positive counterpart to negate
-    to), but that SAME bit pattern, read as unsigned rather than
-    signed, correctly represents INT_MIN's own magnitude
-    (2147483648) -- a value that doesn't fit in a signed 32-bit int at
-    all, but fits an unsigned one perfectly. Dividing that magnitude
-    with Div rather than IDiv is what lets the digit-extraction loop
-    stay in ordinary 32-bit arithmetic throughout, with no need for a
-    64-bit widening step anywhere, while still handling every int
-    value -- including this one specific edge case -- correctly."""
+    Built for converting an int's own MAGNITUDE to decimal digits
+    without ever risking a signed-overflow trap: negating INT_MIN in
+    ordinary 32-bit two's complement doesn't actually change its bit
+    pattern at all (there's no positive counterpart to negate to), but
+    that SAME bit pattern, read as unsigned rather than signed,
+    correctly represents INT_MIN's own magnitude (2147483648) -- a
+    value that doesn't fit in a signed 32-bit int at all, but fits an
+    unsigned one perfectly. Currently unused: the int-to-string
+    conversion this was built for now lives in runtime.c, in C,
+    which sidesteps this problem differently (via a wider intermediate
+    type) -- kept here as it's still a correct, self-contained
+    primitive."""
     operand: Operand
     mnemonic = "divl"
 
@@ -616,9 +612,8 @@ class LeaQFrame(Instruction):
     `dst` -- `leaq offset(%rbp), dst`. Distinct from LeaQ (which is
     RIP-relative, for static data like string literals): this is
     relative to the CURRENT function's own frame, and is how an
-    array-typed local's address is obtained -- see the ARRAYS section
-    for why arrays need their own address computed at all, unlike a
-    scalar local, which is always read/written directly by offset."""
+    array-typed local's address is obtained, unlike a scalar local,
+    which is always read/written directly by offset."""
     offset: int
     dst: Register
     mnemonic = "leaq"
@@ -699,9 +694,8 @@ class CallInstr(Instruction):
 @dataclass
 class MovQ(Instruction):
     """64-bit mov (`movq`). Used for frame-pointer setup (`movq %rsp,
-    %rbp`) and for anything genuinely 64-bit -- which, as of `str`, now
-    includes string pointers (see codegen.py's LOCAL VARIABLES and
-    STRINGS sections). int/bool still exclusively use the 32-bit Mov
+    %rbp`) and for anything genuinely 64-bit, including string
+    pointers. int/bool still exclusively use the 32-bit Mov
     (`movl`)."""
     src: Operand
     dst: Operand
@@ -713,10 +707,10 @@ class MovQ(Instruction):
 
 @dataclass
 class MovB(Instruction):
-    """8-bit mov (`movb`). Needed the first time this compiler ever
-    copies a single BYTE to or from memory, as opposed to a 4-byte
-    int/bool or an 8-byte pointer/qword -- see the print-buffer growth
-    machinery this exists for. Both operands must already be 8-bit
+    """8-bit mov (`movb`). Used for int8/uint8's own truncating scalar
+    store, and for the trailing 1-to-3-byte remainder of gen_array_
+    copy's own chunked copy, as opposed to a 4-byte int/bool or an
+    8-byte pointer/qword. Both operands must already be 8-bit
     themselves (an 8-bit register alias, e.g. Register('al') via
     as_byte_register, an Imm, or a byte-addressed Memory location) --
     unlike Mov/MovQ, there's no separate 8-bit General-purpose register
@@ -836,13 +830,11 @@ class Jle(Instruction):
     """Jump to `target` if the last Cmp found dst <= src, using a
     SIGNED interpretation -- unlike Jae/Ja, which are unsigned
     (array/slice lengths and indices, where a negative value needs to
-    be caught by reinterpreting it as huge). Needed for the print
-    buffer's own bulk-append growth check (see gen_buffer_append_
-    bytes_into): comparing `needed` against `cap`, both ordinary,
-    already-validated non-negative ints where a signed comparison is
-    the natural, and here equivalent, choice -- matching how every
-    ordinary int comparison elsewhere in this file (_COMPARISON_
-    CONDITION_CODES) is already signed by default."""
+    be caught by reinterpreting it as huge). Built for a buffer's own
+    bulk-append growth check (comparing `needed` against `cap`, both
+    ordinary, already-validated non-negative ints where a signed
+    comparison is the natural, and here equivalent, choice). Currently
+    unused: that buffer-growth logic now lives in runtime.c, in C."""
     target: str
     mnemonic = "jle"
 
@@ -878,17 +870,17 @@ class AsmProgram:
     functions: list[AsmFunction] = field(default_factory=list)
     # (label, content) pairs for every string literal anywhere in the
     # program, collected across all functions during generation (see
-    # CodeGenerator.gen_expr_ir's own StringLiteral case). These
+    # ir/dispatch.py's own gen_expr_ir, its StringLiteral case). These
     # aren't tied to any one function's frame -- they're static,
-    # immutable data -- so they
-    # live at the AsmProgram level and get emitted once, in a shared
-    # `.data` block, by Emitter (see its emit()).
+    # immutable data -- so they live at the AsmProgram level and get
+    # emitted once, in a shared `.data` block, by Emitter (see its
+    # emit()).
     string_literals: list[tuple] = field(default_factory=list)
     # (label, fields) pairs for every runtime type descriptor built for
-    # the print machinery (see CodeGenerator._get_or_build_type_
-    # descriptor) -- the first place this compiler has ever needed any
-    # runtime type information at all, since every other type-driven
-    # decision anywhere else happens entirely at compile time. Each
+    # print (see ir/strings.py's own _get_or_build_type_descriptor) --
+    # the first place this compiler has ever needed any runtime type
+    # information at all, since every other type-driven decision
+    # anywhere else happens entirely at compile time. Each
     # `fields` entry is a flat list of ints (emitted as a literal
     # `.quad N`) and label-name strings (emitted as `.quad label`, a
     # perfectly ordinary assembler/linker relocation -- the same

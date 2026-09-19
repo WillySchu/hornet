@@ -5,25 +5,12 @@ not performance: any Temp that needs to SURVIVE THROUGH an IRCall it
 doesn't own (see eligible_intervals' own docstring for why being
 defined BY one is a different, safe case), because neither the
 caller-saved registers (which a call definitely clobbers) nor the
-existing callee-saved ones (already used internally, for unrelated
-purposes, by old-style string/append code) can be trusted to carry a
-value across an opaque block untouched. Everything else here -- basic
-blocks, liveness, linear scan itself -- is standard and unsurprising;
-the interesting decisions are this one exclusion and the register pool
-choice (see ALLOCATABLE_REGISTERS below), not the algorithm.
-
-Used to also unconditionally exclude a named-variable Temp (Temp.
-is_named_local -- see its own docstring for why that field no longer
-exists at all), unless legacy access tracking established this
-specific one's own variable was never written to directly by this
-function's own parameter-marshaling code, bypassing the Temp entirely.
-That hazard -- old-style code, and later parameter marshaling, writing
-straight to a named local's own memory slot -- is gone entirely now
-(parameter marshaling migrated to real IR; see _ir_param_setup), so
-every named-local Temp is read/written exclusively through itself, the
-identical discipline every other Temp already follows, and needs no
-exclusion of its own anymore.
-"""
+callee-saved ones (already used internally, for unrelated purposes,
+by string/append codegen) can be trusted to carry a value across an
+opaque block untouched. Everything else here -- basic blocks,
+liveness, linear scan itself -- is standard and unsurprising; the
+interesting decisions are this one exclusion and the register pool
+choice (see ALLOCATABLE_REGISTERS below), not the algorithm."""
 
 from dataclasses import dataclass, field
 from typing import Optional
@@ -51,21 +38,12 @@ from ir.ir import (
 
 # %r10d, %r11d, %r15d (the ordinary 32-bit-named form, matching every
 # other register this codebase passes around by default -- widened via
-# as_qword_register when a Temp's type needs it, exactly like %eax/
-# %ecx already are): caller-saved, general-purpose, with no SysV
-# argument role (unlike %rdi/%rsi/%rdx/%rcx/%r8/%r9) and no implicit
-# instruction-level role (unlike %rcx's shift-count, %rdx's div/mul
-# high half), and not this compiler's own universal scratch
-# convention (%rax -- used throughout what used to be gen_expr_into
-# and every old-style gen_X_into method built on top of it, before
-# that whole cluster was removed entirely as dead code; see ir.py's
-# own top docstring). Old-style code used to also use all three as
-# short-lived, single-method scratch, safe only because an allocated
-# Temp's own live range never spans an IRCall (see this module's own
-# docstring) -- with that code gone entirely now, there's no longer
-# any old-style use of these registers left to reason about sharing
-# with at all; they're simply free for the allocator's own exclusive
-# use.
+# as_qword_register when a Temp's type needs it): caller-saved,
+# general-purpose, with no SysV argument role (unlike %rdi/%rsi/%rdx/
+# %rcx/%r8/%r9) and no implicit instruction-level role (unlike %rcx's
+# shift-count, %rdx's div/mul high half), and not this compiler's own
+# universal scratch convention (%rax) -- simply free for the
+# allocator's own exclusive use.
 ALLOCATABLE_REGISTERS = ['r10d', 'r11d', 'r15d']
 
 
@@ -289,13 +267,9 @@ def eligible_intervals(ir: list, intervals: dict) -> dict:
     regardless of which op it is.
 
     IRLocalAddress/IRStaticDataAddress are deliberately absent from
-    the unsafe set below, unlike the raw LeaQFrame/LeaQ leaves they
-    replaced (formerly spliced in via IRRaw, and so formerly unsafe
-    by nothing more than that wrapping): each writes only its own
-    dst, from a fixed, compile-time-known frame offset or label, with
-    no other register touched at all -- exactly as safe as an
-    ordinary IRBinOp/IRMove, and there's no reason to treat it any
-    more conservatively just because of what it used to be."""
+    the unsafe set below: each writes only its own dst, from a fixed,
+    compile-time-known frame offset or label, with no other register
+    touched at all -- exactly as safe as an ordinary IRBinOp/IRMove."""
     unsafe_positions = [i for i, instr in enumerate(ir) if isinstance(instr, (IRCall, IRSliceGrow))]
     result = {}
     for tid, interval in intervals.items():
@@ -319,12 +293,7 @@ def _is_hazard(interval: LiveInterval, pos: int, ir: list) -> bool:
     Temp's own true last position, never an earlier one it merely
     passes through. `unsafe_positions` spans the WHOLE function, not
     just this one interval's own span, so pos > end (entirely after
-    this Temp is already dead) needs its own explicit case too --
-    falling through to the IRCall-membership check for that case,
-    rather than returning early, was a real bug this method shipped
-    with initially: conservative rather than unsafe (it could only
-    ever produce a spurious exclusion, never a wrong allocation), but
-    a real mismatch with the intended design regardless."""
+    this Temp is already dead) needs its own explicit case too."""
     if pos <= interval.start or pos > interval.end:
         return False
     if pos < interval.end:

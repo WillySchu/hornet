@@ -20,24 +20,21 @@ done. _temp_mem returns a FrameSlot placeholder for one of these
 instead (see its own docstring), and lower_function is what resolves
 every one of them, in one pass, after lower_ir returns.
 
-InstructionSelector is a standalone class, not a CodeGenerator mixin
-(it was one -- IRLoweringMixin -- until every dependency below was
-made an explicit constructor argument instead of an implicit
-assumption about whatever else happened to be mixed into a shared
-self). Constructed fresh per function's own lowering now (see lower_
-function's own comment), not once for the whole compilation: `ir_fn`
-is a genuine field, set once at construction, needed by _temp_mem's
-own call to host.ids.new_slot (see IRFunction's own docstring for why
-its slot registry lives there rather than on host at all now). `host`
-is still held and read/written directly for one remaining piece of
-state -- _temp_slots/_temp_offsets -- because Temp ids are globally
-unique across the whole compilation (never reset per function the way
-ir_fn's own slot registry used to need to be), so leaving this on host
-is harmless, not a shortcut standing in for a fix still owed. Every
-OTHER dependency (which leaf codegen methods get called, which read-
-only program-level data is needed) is listed here, in one place,
-rather than discovered by grepping for self. across the rest of the
-codebase.
+InstructionSelector is a standalone class, not a CodeGenerator mixin:
+every dependency it needs is an explicit constructor argument rather
+than an implicit assumption about whatever else happens to be mixed
+into a shared self. Constructed fresh per function's own lowering (see
+lower_function's own comment), not once for the whole compilation:
+`ir_fn` is a genuine field, set once at construction, needed by
+_temp_mem's own call to host.ids.new_slot (see IRFunction's own
+docstring for why its slot registry lives there rather than on host).
+`host` is still held and read/written directly for one remaining
+piece of state -- _temp_slots/_temp_offsets -- because Temp ids are
+globally unique across the whole compilation, so leaving this on host
+is harmless. Every OTHER dependency (which leaf codegen methods get
+called, which read-only program-level data is needed) is listed here,
+in one place, rather than discovered by grepping for self. across the
+rest of the codebase.
 """
 
 from codegen.assembly_ast import (
@@ -88,13 +85,9 @@ from semantic import Type
 
 
 class InstructionSelector:
-    """See this module's own docstring for what `host` is and isn't
-    used for. Constructed fresh per function's own lowering (see
-    lower_function's own comment), not once for the whole compilation
-    -- `ir_fn` is a genuine field here, set once at construction and
-    never repointed, needed by _temp_mem's own call to host.ids.new_slot
-    (see IRFunction's own docstring for why that's a parameter now
-    rather than implicit self state on host)."""
+    """Constructed fresh per function's own lowering (see lower_
+    function's own comment) -- see this module's own docstring for
+    what `host`/`ir_fn` are used for."""
 
     def __init__(self, host, ir_fn):
         self.host = host
@@ -103,11 +96,8 @@ class InstructionSelector:
     def _temp_mem(self, temp: Temp) -> Operand:
         """Returns temp's own frame location, assigning it a fresh
         logical slot the first time it's referenced (memoized in
-        host._temp_slots) rather than at temp-creation time -- see
-        _new_temp's own docstring for why storage assignment is kept
-        separate from allocating the temp itself. This is the
-        fallback every Temp used to rely on unconditionally; now it's
-        only reached for one that register_allocator.py didn't (or
+        host._temp_slots) rather than at temp-creation time. This is
+        the fallback for a Temp that register_allocator.py didn't (or
         couldn't -- see its own module docstring) promote to a
         physical register -- see _gen_read_temp_into/_gen_write_temp_
         from, the two places that actually decide which applies.
@@ -118,20 +108,14 @@ class InstructionSelector:
         offset -- host._resolve_frame_layout doesn't run until lower_
         function, well after every named-local Temp in this function
         is already created. So this returns a FrameSlot placeholder
-        here too, exactly like the anonymous case right below --
-        there's no longer a real distinction between the two once
-        both wait for the identical, single resolution.
+        here too, exactly like the anonymous case right below.
 
         An anonymous Temp reaching here for the first time needs a
         fresh logical slot handed out on the spot (host.ids.new_slot,
-        same as every other slot in this compiler) rather than reading
-        one host._bind_local/_bind_param already assigned -- its own
-        slot genuinely isn't known until THIS moment, mid-lowering,
-        potentially well after every up-front reservation. Either way,
-        _patch_frame_slots is what resolves the FrameSlot this returns,
-        once host._resolve_frame_layout's one call -- covering every
-        slot this function ever needed, named-local and anonymous
-        alike -- has run."""
+        same as every other slot in this compiler) -- its own slot
+        genuinely isn't known until THIS moment, mid-lowering. Either
+        way, _patch_frame_slots is what resolves the FrameSlot this
+        returns, once host._resolve_frame_layout's one call has run."""
         if temp.id in self.host.ir_program.ids._temp_offsets:
             return FrameSlot(slot=self.host.ir_program.ids._temp_offsets[temp.id])
         if temp.id not in self.host.ir_program.ids._temp_slots:
@@ -217,11 +201,9 @@ class InstructionSelector:
                 out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
             elif isinstance(instr, IRCast):
                 # Same three-step shape as IRUnOp's own lowering just
-                # above -- load, apply the one proven old-style
-                # helper unchanged, write back -- just with gen_cast_
-                # narrowing_into instead of gen_unary_op, and dst.type
-                # (not an operand's own type) as what tells it which
-                # way to (re)narrow.
+                # above -- load, apply gen_cast_narrowing_into, write
+                # back -- with dst.type (not an operand's own type) as
+                # what tells it which way to (re)narrow.
                 out.extend(self._gen_load_value(instr.src, Register('eax')))
                 out.extend(self.host.gen_cast_narrowing_into(instr.dst.type, Register('eax')))
                 out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
@@ -352,20 +334,19 @@ class InstructionSelector:
                 out.extend(self._gen_load_value(instr.src_address, Register('r8d')))
                 out.extend(self.host.gen_array_copy(Memory('r9', 0), Memory('r8', 0), instr.value_type))
             elif isinstance(instr, IRBoundsCheck):
-                # Same unsigned comparison the old-style bounds check
-                # already used (Cmp is always unsigned; the signed/
-                # unsigned distinction lives entirely in which jump
-                # follows it -- Jae here, Jge/Jg/etc for an ordinary
-                # signed BinaryOp comparison), and the identical
-                # shared, per-function/per-message fail label -- see
+                # An unsigned comparison (Cmp is always unsigned; the
+                # signed/unsigned distinction lives entirely in which
+                # jump follows it -- Jae here, Jge/Jg/etc for an
+                # ordinary signed BinaryOp comparison), and a shared,
+                # per-function/per-message fail label -- see
                 # IRBoundsCheck's own docstring for why this couldn't
                 # be an ordinary BinaryOp instead. The message itself
                 # ("array index out of bounds") is hardcoded here,
                 # not carried on the op, since indexing is the only
                 # caller. Slicing's own, different message AND
                 # comparison (`ja`, not `jae` -- see IRSliceBoundsCheck
-                # just below) is exactly the real, separate reason
-                # anticipated for not generalizing this op instead.
+                # just below) is the real reason for not generalizing
+                # this op instead.
                 out.extend(self._gen_load_value(instr.length, Register('ecx')))
                 out.extend(self._gen_load_value(instr.index, Register('eax')))
                 out.append(Cmp(src=Register('ecx'), dst=Register('eax')))
@@ -380,13 +361,12 @@ class InstructionSelector:
                 out.append(Cmp(src=Register('ecx'), dst=Register('eax')))
                 out.append(Ja(self.host._get_bounds_check_fail_label("slice bounds out of range")))
             elif isinstance(instr, IRSliceGrow):
-                # Fixed registers matching the old-style convention
-                # exactly (%rbx/%r12/%r13 for ptr/len/cap, callee-saved
-                # so they survive the malloc call inside _gen_slice_
-                # grow_into) -- this op's own contract already requires
-                # the caller (IRSliceGrow's own docstring) to have
-                # decided reallocation is needed, so no internal check
-                # happens here at all.
+                # Fixed registers (%rbx/%r12/%r13 for ptr/len/cap,
+                # callee-saved so they survive the malloc call inside
+                # _gen_slice_grow_into) -- this op's own contract
+                # already requires the caller (IRSliceGrow's own
+                # docstring) to have decided reallocation is needed,
+                # so no internal check happens here at all.
                 out.extend(self._gen_load_value(instr.ptr, Register('ebx')))
                 out.extend(self._gen_load_value(instr.length, Register('r12d')))
                 out.extend(self._gen_load_value(instr.cap, Register('r13d')))

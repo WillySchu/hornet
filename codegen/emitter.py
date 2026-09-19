@@ -35,13 +35,10 @@ class Emitter:
             lines.append("")  # blank line between functions
         if program.string_literals or program.type_descriptors:
             # Plain `.data` rather than a stricter read-only section
-            # (like ELF's `.rodata` or Mach-O's `__TEXT,__cstring`) on
-            # purpose -- `.data` is the one directive that assembles
-            # correctly, unchanged, on both this Linux sandbox and
-            # macOS's assembler, and nothing in this language ever
-            # writes back into a string literal's bytes anyway, so the
-            # extra write-protection those stricter sections would give
-            # isn't actually buying anything here.
+            # (like ELF's `.rodata` or Mach-O's `__TEXT,__cstring`) --
+            # `.data` assembles correctly, unchanged, on both this
+            # Linux sandbox and macOS's assembler, and nothing in this
+            # language ever writes back into a string literal's bytes.
             lines.append(".data")
             for label, content in program.string_literals:
                 lines.append(f"{label}:")
@@ -50,14 +47,11 @@ class Emitter:
                 # Each field is either a plain int (a kind tag, a
                 # count, a byte offset -- emitted as a literal .quad)
                 # or a label name string (a pointer to another type
-                # descriptor, or to a string literal holding a field's
-                # own name -- emitted as .quad <label>, an ordinary
-                # assembler/linker relocation that resolves correctly
-                # regardless of whether that label appears earlier or
-                # LATER in this same .data block, which is exactly
-                # what makes a self-referential struct's own
-                # descriptor -- pointing at its own, not-yet-fully-
-                # emitted label -- work at all).
+                # descriptor or a string literal -- emitted as .quad
+                # <label>, an ordinary relocation that resolves
+                # correctly regardless of whether that label appears
+                # earlier or LATER in this block -- what makes a self-
+                # referential struct's own descriptor work at all).
                 lines.append(f"{label}:")
                 for f in fields:
                     lines.append(f"    .quad {f}")

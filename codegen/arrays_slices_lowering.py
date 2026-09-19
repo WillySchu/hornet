@@ -2,26 +2,13 @@
 here takes already-decided registers or memory locations and builds
 plain assembly_ast Instructions directly, the same role gen_binary_op/
 gen_unary_op/_gen_read_scalar_into/_gen_write_scalar_from play for
-scalars (see scalars_lowering.py's own module docstring). Split out of
-arrays_slices.py, which used to hold these alongside the real-IR-
-building methods that call INTO real IR ops these ultimately lower to
-(_ir_array_address, _ir_slice_into, and the rest) -- confirmed via
-ir_lowering.py's own dependency list (gen_array_copy, _gen_slice_grow_
-into, _get_bounds_check_fail_label are its three direct entry points
-into this file; _gen_bounds_check_panic_block is lower_function's own
-direct call) that these, and the handful of purely-internal helpers
-they call (_gen_new_cap_into, _get_bounds_check_message_label), are
-the complete set: nothing here is ever reached from gen_expr_ir/gen_
-statement_ir or anything they call.
+scalars (see scalars_lowering.py's own module docstring).
 
-Mixed into CodeGenerator alongside ScalarsLoweringMixin now, not
-ArraysSlicesMixin anymore: that split was step one of a larger move,
-since completed -- ArraysSlicesMixin (and every other IR-building
-mixin) now lives in ir.builder.IRFunctionBuilder, in its own package
-entirely separate from codegen (see its own module docstring). This
-file staying behind on CodeGenerator, split out
-early specifically so that later move could be mechanical, is exactly
-what let it be."""
+Entry points reached from elsewhere: gen_array_copy, _gen_slice_grow_
+into, _get_bounds_check_fail_label (ir_lowering.py's own three direct
+calls into this file), and _gen_bounds_check_panic_block (lower_
+function's own direct call). Everything else here (_gen_new_cap_into,
+_get_bounds_check_message_label) is purely internal to those."""
 
 from codegen.assembly_ast import (
     Add,
@@ -60,12 +47,7 @@ class ArraysSlicesLoweringMixin:
         Each leaf-sized chunk is copied as a flat run of 8-byte movqs,
         then one trailing 4-byte movl if at least 4 bytes remain, then
         a trailing run of 1-byte movbs for whatever's left (0 to 3
-        bytes) -- correct for ANY leaf width, not just a multiple of 4
-        the way this used to assume. int8/uint8's 1-byte storage broke
-        that assumption (a bare int8/uint8 leaf has width 1; a struct
-        leaf containing one can land on any width at all): the old
-        two-tier version silently copied NOTHING for either shape -- a
-        real, found bug, not a hypothetical one.
+        bytes) -- correct for ANY leaf width, not just a multiple of 4.
 
         A raw, flat byte copy is always semantically identical to
         copying a value "as" whatever logical type or fields those
@@ -79,12 +61,7 @@ class ArraysSlicesLoweringMixin:
         The scratch register shuttling each chunk is picked dynamically
         to differ from BOTH src_mem's and dst_mem's own base register
         -- otherwise loading a value into it would destroy the address
-        a later iteration still needs. Found as a real bug: the old-
-        style Return handling used to pass Memory('rax', 0) as the
-        destination when writing an array through a received hidden
-        return pointer, and using %rax as scratch there destroyed
-        that address before it could even be written anywhere.
-        """
+        a later iteration still needs."""
         leaf = leaf_type(array_type)
         used_bases = {src_mem.base, dst_mem.base}
         scratch_64, scratch_32 = next(
@@ -134,13 +111,7 @@ class ArraysSlicesLoweringMixin:
         forever stays zero, so that case needs its own explicit floor.
         Uses %eax/%ecx as scratch (the shift's own fixed operand
         register); r_cap_32 itself is never one of those two, by every
-        one of this method's own callers' own convention.
-
-        Shared by _gen_realloc_and_append_one_into (the old-style,
-        fused growth-and-write path) and _gen_slice_grow_into (the
-        real-IR, growth-only path IRSliceGrow's own lowering uses) --
-        extracted here specifically so both apply the IDENTICAL
-        growth rule without duplicating this arithmetic twice."""
+        one of this method's own callers' own convention."""
         instructions = []
         zero_label = self.ir_program.ids.new_label("append_cap_zero")
         quarter_label = self.ir_program.ids.new_label("append_cap_quarter")
@@ -173,32 +144,22 @@ class ArraysSlicesLoweringMixin:
     ) -> list[Instruction]:
         """The growth-ONLY half of append -- IRSliceGrow's own
         lowering. Computes the new capacity inline first, via _gen_
-        new_cap_into (unchanged: pure arithmetic/policy, no allocation
-        or external dependency of its own, so it stays here rather
-        than moving into runtime.c alongside the actual allocation),
-        then calls hornet_slice_grow (see runtime.c) to malloc the new,
-        larger backing and copy the existing r_len_32 elements over --
-        the identical "one hand-built function, shared across every
-        call site" move hornet_print/hornet_panic already made, and
-        for the identical reason: growth, like stringify, never needs
-        to know anything about the VALUE being handled, only its own
-        byte width (see IRSliceGrow's own docstring in ir/ir.py, which
-        anticipated exactly this move when the append/growth split was
-        first designed).
+        new_cap_into (pure arithmetic/policy with no allocation of its
+        own, so it stays here rather than moving into runtime.c),
+        then calls hornet_slice_grow (see runtime.c) to malloc the
+        new, larger backing and copy the existing r_len_32 elements
+        over.
 
         Leaves r_len_32 itself untouched: growth doesn't change how
         many elements currently exist, only how much room there is.
         r_ptr is overwritten with the new backing's own address on
         return; r_cap/r_cap_32 already hold the new capacity by the
-        time the call happens, and -- being this op's own fixed,
-        callee-saved registers (%rbx/%r12/%r13, see this op's own
-        caller in ir_lowering.py) -- simply survive the call
-        unchanged, with nothing further needed to preserve them.
+        time the call happens, and -- being fixed, callee-saved
+        registers (%rbx/%r12/%r13) -- simply survive the call
+        unchanged.
 
         Assumes the caller has ALREADY determined reallocation is
-        needed -- no internal check of any kind here, the identical
-        "no internal check, caller has already decided" contract this
-        method has always had."""
+        needed -- no internal check of any kind here."""
         instructions = self._gen_new_cap_into(r_cap_32)
         # r_cap_32 (and, via the zero-extension a 32-bit write always
         # gives its own 64-bit register, r_cap itself) now holds
@@ -251,18 +212,8 @@ class ArraysSlicesLoweringMixin:
         hardware-trapped SIGFPE already has. Never reached via
         ordinary fall-through from the function's body -- every return
         already leaves via `leave; ret`, and hornet_panic itself never
-        returns (it ends in abort()) -- so appending these at the very
-        end is always safe.
-
-        This used to be six inline instructions here (leaq, three
-        libc calls, a mov) -- puts()/fflush(NULL)/abort() by hand, the
-        SAME sequence hornet_panic now performs once, in C, on the
-        OTHER side of this single call -- moved out for the identical
-        reason hornet_print's own hand-rolled stringify assembly was:
-        this compiler generates the sequence once per distinct message
-        per function, not once at all, so a single `call` here in
-        place of six repeated instructions is a real size win too, not
-        just a cleanup."""
+        returns -- so appending these at the very end is always
+        safe."""
         instructions = []
         for message, fail_label in self._bounds_check_fail_labels.items():
             msg_label = self._get_bounds_check_message_label(message)
