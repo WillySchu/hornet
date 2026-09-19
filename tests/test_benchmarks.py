@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_compiler import compile_and_run, GCC_SKIP
+from tests.test_compiler import GCC_SKIP, _compile_to_binary, _run_binary
 
 PROGRAMS_DIR = Path(__file__).parent.parent / 'benchmarks' / 'programs'
 
@@ -35,13 +35,37 @@ EXPECTED_EXIT_CODES = {
     'calling_convention_heavy': 135,  # array-typed, slice-typed, and array-typed-struct-field function arguments (the last exercising the Field-argument fix), plus composite-returning function calls including forwarding one level deep, a bare local Variable return, an all-scalar positional struct-literal return, a nested struct-literal return, a composite-returning call used directly as an addressable base (indexed, field-accessed, and sliced -- the last exercising the always-heap-allocate-for-slice-production path), and a bare ArrayLiteral, a composite-returning Call, and a struct-literal each passed directly as a function-call argument, in a hot loop
 }
 
+# How many times each benchmark's COMPILED BINARY is run before this
+# file is satisfied it's correct -- not just once. A real bug (a
+# register wrongly shared between two values that are both genuinely
+# live -- see codegen/register_allocator.py's own ALLOCATABLE_
+# REGISTERS comment) was found to produce a binary whose behavior
+# depends on ASLR: the SAME binary, never recompiled, would segfault
+# on some runs and not others, purely because the exact stack/heap
+# addresses it happened to get differed. A single run -- what this
+# file used to do -- passes that kind of bug right through; genuinely
+# recompiling N times wouldn't even exercise it, since compilation
+# itself is deterministic and the fault is in what the ALREADY-
+# COMPILED code does with whatever addresses it's handed at runtime.
+# So: compile once (that part IS deterministic, and gcc is by far the
+# expensive step), then actually run the result this many times.
+RERUNS = 10
+
 
 @GCC_SKIP
 @pytest.mark.parametrize('name', sorted(EXPECTED_EXIT_CODES))
-def test_benchmark_still_compiles_and_runs_correctly(name):
+def test_benchmark_still_compiles_and_runs_correctly(name, tmp_path):
     source = (PROGRAMS_DIR / f'{name}.ht').read_text()
-    result = compile_and_run(source)
-    assert result.returncode == EXPECTED_EXIT_CODES[name]
+    bin_path, asm = _compile_to_binary(source, tmp_path)
+    expected = EXPECTED_EXIT_CODES[name]
+    for run in range(1, RERUNS + 1):
+        result = _run_binary(bin_path, asm)
+        assert result.returncode == expected, (
+            f"{name}: run {run}/{RERUNS} of the SAME compiled binary "
+            f"returned {result.returncode}, expected {expected} -- "
+            f"other runs may still have passed, since this is exactly "
+            f"the run-to-run non-determinism RERUNS exists to catch"
+        )
 
 
 def test_every_benchmark_program_has_an_expected_exit_code():

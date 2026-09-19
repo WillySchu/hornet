@@ -720,6 +720,108 @@ def _parse(source: str):
         return Parser(tokens).parse_program()
 
 
+def _compile_to_binary(source: str, tmp: Path) -> tuple[Path, str]:
+    """Compiles `source` through the real lex -> parse -> analyze ->
+    codegen pipeline and links it with gcc into a runnable binary
+    inside `tmp` (a directory the CALLER owns and is responsible for
+    cleaning up) -- extracted from compile_and_run so a caller that
+    wants to run the SAME binary more than once (see tests/test_
+    benchmarks.py, stress-testing for run-to-run non-determinism)
+    doesn't need to recompile for each run. Returns (bin_path, asm) --
+    asm only so a caller's own execution-side error reporting can
+    still show it, matching what compile_and_run already did on a
+    hang."""
+    ast = _parse(source)
+    analyze(ast)  # every program reaching codegen in this file is expected to be well-typed
+
+    asm_path = tmp / "program.s"
+    bin_path = tmp / "program"
+    runtime_o_path = tmp / "runtime.o"
+
+    asm = generate_asm(ast, platform=ASM_PLATFORM)
+    asm_path.write_text(asm)
+
+    # Compiled fresh, unconditionally, the same way build.py's own
+    # build_executable does -- print() now compiles to an ordinary
+    # `call hornet_print`, an external symbol this .s file no
+    # longer defines itself (unlike the old hand-built
+    # hornet_stringify, once appended to AsmProgram.functions and
+    # assembled inline here). Unconditional, regardless of whether
+    # THIS particular program happens to call print, matching
+    # build_executable's own reasoning exactly.
+    runtime_cc_cmd = ["gcc"]
+    if HOST_IS_MACOS:
+        runtime_cc_cmd += ["-arch", "x86_64"]
+    runtime_cc_cmd += ["-c", str(RUNTIME_C_PATH), "-o", str(runtime_o_path)]
+    runtime_result = subprocess.run(runtime_cc_cmd, capture_output=True, text=True)
+    if runtime_result.returncode != 0:
+        pytest.fail(
+            "gcc failed to compile runtime.c.\n"
+            f"command: {' '.join(runtime_cc_cmd)}\n"
+            f"--- gcc stdout ---\n{runtime_result.stdout}\n"
+            f"--- gcc stderr ---\n{runtime_result.stderr}\n"
+        )
+
+    gcc_cmd = ["gcc"]
+    if HOST_IS_MACOS:
+        gcc_cmd += ["-arch", "x86_64"]
+    gcc_cmd += [str(asm_path), str(runtime_o_path), "-o", str(bin_path)]
+
+    result = subprocess.run(gcc_cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        # Don't just let CalledProcessError's bare "exit status 1"
+        # through -- that hides the one thing that actually explains
+        # a compile failure. Show the real diagnostic, the command,
+        # and the generated assembly so a failure here is
+        # self-diagnosing instead of needing a follow-up round trip.
+        pytest.fail(
+            "gcc failed to assemble/link the generated program.\n"
+            f"command: {' '.join(gcc_cmd)}\n"
+            f"--- gcc stdout ---\n{result.stdout}\n"
+            f"--- gcc stderr ---\n{result.stderr}\n"
+            f"--- generated assembly ---\n{asm}"
+        )
+    return bin_path, asm
+
+
+def _run_binary(bin_path: Path, asm: str) -> subprocess.CompletedProcess:
+    """Runs an already-compiled binary, subject to EXECUTION_TIMEOUT --
+    the run-side counterpart to _compile_to_binary, split out so a
+    caller that compiles once and runs many times (tests/test_
+    benchmarks.py) still gets the same timeout/OSError handling
+    compile_and_run always has, without recompiling per run."""
+    try:
+        # capture_output=True so callers can also inspect .stdout --
+        # needed now that print exists and genuinely produces
+        # observable output beyond just an exit code (see
+        # assert_program_stdout below). Every prior helper here only
+        # ever looked at .returncode, so capturing stdout/stderr as
+        # well doesn't change anything about their behavior.
+        return subprocess.run(
+            [str(bin_path)], timeout=EXECUTION_TIMEOUT,
+            capture_output=True, text=True,
+        )
+    except subprocess.TimeoutExpired:
+        # Now that while loops exist, a genuine codegen bug (e.g. a
+        # break/continue that jumps to the wrong label) could produce
+        # a real infinite loop -- without this, that would just hang
+        # the test suite forever instead of failing with a message
+        # that points at what's actually wrong.
+        pytest.fail(
+            f"Compiled program did not exit within {EXECUTION_TIMEOUT}s "
+            "-- likely an infinite loop.\n"
+            f"--- generated assembly ---\n{asm}"
+        )
+    except OSError as e:
+        if HOST_IS_MACOS:
+            pytest.fail(
+                f"Failed to execute the compiled x86_64 binary ({e}). "
+                "On Apple Silicon this usually means Rosetta 2 isn't "
+                "installed -- try `softwareupdate --install-rosetta`."
+            )
+        raise
+
+
 def compile_and_run(source: str) -> subprocess.CompletedProcess:
     """Runs `source` through the real lex -> parse -> analyze -> codegen
     pipeline, assembles and links it with gcc (using ASM_PLATFORM, the
@@ -734,91 +836,12 @@ def compile_and_run(source: str) -> subprocess.CompletedProcess:
     Uses a plain tempfile.TemporaryDirectory rather than pytest's
     tmp_path fixture so the many parametrized one-liner tests below
     don't each need to declare and thread a fixture through just to
-    call this helper.
+    call this helper. A thin wrapper around _compile_to_binary/_run_
+    binary now -- see those for why they're split out.
     """
-    ast = _parse(source)
-    analyze(ast)  # every program reaching codegen in this file is expected to be well-typed
-
     with tempfile.TemporaryDirectory() as tmpdir:
-        tmp = Path(tmpdir)
-        asm_path = tmp / "program.s"
-        bin_path = tmp / "program"
-        runtime_o_path = tmp / "runtime.o"
-
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
-        asm_path.write_text(asm)
-
-        # Compiled fresh, unconditionally, the same way build.py's own
-        # build_executable does -- print() now compiles to an ordinary
-        # `call hornet_print`, an external symbol this .s file no
-        # longer defines itself (unlike the old hand-built
-        # hornet_stringify, once appended to AsmProgram.functions and
-        # assembled inline here). Unconditional, regardless of whether
-        # THIS particular program happens to call print, matching
-        # build_executable's own reasoning exactly.
-        runtime_cc_cmd = ["gcc"]
-        if HOST_IS_MACOS:
-            runtime_cc_cmd += ["-arch", "x86_64"]
-        runtime_cc_cmd += ["-c", str(RUNTIME_C_PATH), "-o", str(runtime_o_path)]
-        runtime_result = subprocess.run(runtime_cc_cmd, capture_output=True, text=True)
-        if runtime_result.returncode != 0:
-            pytest.fail(
-                "gcc failed to compile runtime.c.\n"
-                f"command: {' '.join(runtime_cc_cmd)}\n"
-                f"--- gcc stdout ---\n{runtime_result.stdout}\n"
-                f"--- gcc stderr ---\n{runtime_result.stderr}\n"
-            )
-
-        gcc_cmd = ["gcc"]
-        if HOST_IS_MACOS:
-            gcc_cmd += ["-arch", "x86_64"]
-        gcc_cmd += [str(asm_path), str(runtime_o_path), "-o", str(bin_path)]
-
-        result = subprocess.run(gcc_cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            # Don't just let CalledProcessError's bare "exit status 1"
-            # through -- that hides the one thing that actually explains
-            # a compile failure. Show the real diagnostic, the command,
-            # and the generated assembly so a failure here is
-            # self-diagnosing instead of needing a follow-up round trip.
-            pytest.fail(
-                "gcc failed to assemble/link the generated program.\n"
-                f"command: {' '.join(gcc_cmd)}\n"
-                f"--- gcc stdout ---\n{result.stdout}\n"
-                f"--- gcc stderr ---\n{result.stderr}\n"
-                f"--- generated assembly ---\n{asm}"
-            )
-
-        try:
-            # capture_output=True so callers can also inspect .stdout --
-            # needed now that print exists and genuinely produces
-            # observable output beyond just an exit code (see
-            # assert_program_stdout below). Every prior helper here only
-            # ever looked at .returncode, so capturing stdout/stderr as
-            # well doesn't change anything about their behavior.
-            return subprocess.run(
-                [str(bin_path)], timeout=EXECUTION_TIMEOUT,
-                capture_output=True, text=True,
-            )
-        except subprocess.TimeoutExpired:
-            # Now that while loops exist, a genuine codegen bug (e.g. a
-            # break/continue that jumps to the wrong label) could produce
-            # a real infinite loop -- without this, that would just hang
-            # the test suite forever instead of failing with a message
-            # that points at what's actually wrong.
-            pytest.fail(
-                f"Compiled program did not exit within {EXECUTION_TIMEOUT}s "
-                "-- likely an infinite loop.\n"
-                f"--- generated assembly ---\n{asm}"
-            )
-        except OSError as e:
-            if HOST_IS_MACOS:
-                pytest.fail(
-                    f"Failed to execute the compiled x86_64 binary ({e}). "
-                    "On Apple Silicon this usually means Rosetta 2 isn't "
-                    "installed -- try `softwareupdate --install-rosetta`."
-                )
-            raise
+        bin_path, asm = _compile_to_binary(source, Path(tmpdir))
+        return _run_binary(bin_path, asm)
 
 
 
