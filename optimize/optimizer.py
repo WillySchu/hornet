@@ -33,6 +33,7 @@ across instructions would be a genuinely different, more involved
 pass than either of these."""
 
 from ir.ir import IRProgram
+from ir.verify import verify_program
 from optimize.constant_folding import fold_constants
 from optimize.identity_reduction import reduce_identities
 
@@ -41,4 +42,5 @@ def optimize(ir_program: IRProgram) -> IRProgram:
     for ir_fn in ir_program.functions:
         fold_constants(ir_fn)
         reduce_identities(ir_fn)
+    verify_program(ir_program)  # re-verify: a pass could have broken an invariant build_ir_program already checked
     return ir_program

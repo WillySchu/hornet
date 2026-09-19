@@ -13,6 +13,7 @@ from codegen.id_allocator import IdAllocator
 from ir.errors import IRError
 from ir.ir import IRProgram
 from ir.builder import IRFunctionBuilder
+from ir.verify import verify_program
 from parser import Program
 
 
@@ -37,4 +38,5 @@ def build_ir_program(program: Program) -> IRProgram:
         ids=IdAllocator(),
     )
     ir_program.functions = [IRFunctionBuilder(ir_program).gen_function_ir(fn) for fn in program.functions]
+    verify_program(ir_program)  # catch a builder bug here, not at the assembler
     return ir_program
