@@ -4,10 +4,10 @@ correctly -- the actual cross-translation-unit path build.py's own
 final link step relies on, as opposed to test_runtime_isolated.c's
 own #include-based white-box testing of runtime.c's internals.
 
-Also confirms hornet_print/hornet_panic's own symbol visibility is
-exactly what's intended: the two external entry points a compiler
-call site actually calls, with everything else (hornet_stringify, the
-buffer helpers) kept internal.
+Also confirms hornet_print/hornet_panic/hornet_slice_grow's own symbol
+visibility is exactly what's intended: the three external entry points
+a compiler call site actually calls, with everything else (hornet_
+stringify, the buffer helpers) kept internal.
 """
 import shutil
 import subprocess
@@ -55,12 +55,12 @@ def test_runtime_and_caller_link_and_run_correctly():
         assert result.stdout == "42\n"
 
 
-def test_hornet_print_and_panic_are_the_only_external_symbols():
-    """hornet_print/hornet_panic are the two functions meant to be
-    called from outside this file; hornet_stringify and every buffer/
-    read helper are internal implementation details (static linkage)
-    that shouldn't leak into whatever links against this object
-    file."""
+def test_hornet_runtime_entry_points_are_the_only_external_symbols():
+    """hornet_print/hornet_panic/hornet_slice_grow are the three
+    functions meant to be called from outside this file;
+    hornet_stringify and every buffer/read helper are internal
+    implementation details (static linkage) that shouldn't leak into
+    whatever links against this object file."""
     with tempfile.TemporaryDirectory() as tmpdir:
         runtime_o = f"{tmpdir}/runtime.o"
         arch_flags = ["-arch", "x86_64"] if HOST_IS_MACOS else []
@@ -78,6 +78,7 @@ def test_hornet_print_and_panic_are_the_only_external_symbols():
         # the expected names need the identical leading underscore on
         # macOS, not just when Hornet-generated code refers to them.
         expected_names = (
-            ["_hornet_panic", "_hornet_print"] if HOST_IS_MACOS else ["hornet_panic", "hornet_print"]
+            ["_hornet_panic", "_hornet_print", "_hornet_slice_grow"] if HOST_IS_MACOS
+            else ["hornet_panic", "hornet_print", "hornet_slice_grow"]
         )
         assert sorted(external_symbols) == expected_names

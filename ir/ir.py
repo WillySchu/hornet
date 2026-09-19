@@ -384,14 +384,14 @@ class IRSliceBoundsCheck:
 
 @dataclass
 class IRSliceGrow:
-    """The growth-ONLY half of append(s, value): mallocs a fresh,
-    larger backing array and copies the existing `length` elements
-    over from the old one, via an ordinary, generic byte-for-byte
-    copy loop -- correct for ANY element type (int/bool/str/array/
-    struct/slice alike), since copying an ALREADY-existing, already-
-    valid element is always just "copy element_width bytes," with no
-    type-specific construction logic needed at all. Produces the new
-    backing's own {ptr, cap} -- NOT length, and NOT the newly-
+    """The growth-ONLY half of append(s, value): grows to a fresh,
+    larger backing array (via hornet_slice_grow -- see runtime.c --
+    which mallocs the new backing and copies the existing `length`
+    elements over) -- correct for ANY element type (int/bool/str/
+    array/struct/slice alike), since copying an ALREADY-existing,
+    already-valid element is always just "copy element_width bytes,"
+    with no type-specific construction logic needed at all. Produces
+    the new backing's own {ptr, cap} -- NOT length, and NOT the newly-
     appended value itself: growth doesn't change how many elements
     currently exist, only how much room there is, and writing the
     new element is a genuinely separate concern, deliberately left to
@@ -403,7 +403,10 @@ class IRSliceGrow:
     this op itself makes no such check, unlike the old-style _gen_
     grow_and_append_one_into it shares its own growth arithmetic with
     (via _gen_new_cap_into specifically, extracted so both share the
-    identical cap-doubling rule without duplicating it).
+    identical cap-doubling rule without duplicating it -- kept as
+    plain inline arithmetic rather than moved into hornet_slice_grow
+    alongside the allocation: it's pure policy, with no allocation of
+    its own, so it stays here rather than in runtime.c).
 
     Deliberately narrower than this compiler's own former IRAppendGrow,
     which fused growth together with writing the newly-appended value,
@@ -417,23 +420,26 @@ class IRSliceGrow:
     array/slice/struct) or an ordinary IRStore (for everything else)
     completely unchanged -- the identical dispatcher every other
     "write a composite value into a known address" site in this arc
-    already uses. This split also means a future runtime-call lowering
+    already uses. This split is also what let a runtime-call lowering
     for growth specifically (mirroring hornet_stringify's own "one
     hand-built function, shared across every call site" pattern, since
     growth -- like stringify -- never needs to know anything about the
-    VALUE being handled, only its own byte width) would only ever need
-    to replace THIS op's own lowering, with zero change needed to how
-    the new value gets written afterward, for any element type.
+    VALUE being handled, only its own byte width) replace only THIS
+    op's own lowering, with zero change needed to how the new value
+    gets written afterward, for any element type -- see _gen_slice_
+    grow_into's own docstring (codegen/arrays_slices_lowering.py) for
+    that lowering itself.
 
     element_width is plain metadata, not an IRValue -- an element's
     own byte width is always known at IR-construction time.
 
     Reads ptr/length/cap; writes dst_ptr/dst_cap. Must be treated as
     an unsafe position for register allocation, unlike every other op
-    in this file: its own lowering calls malloc, an ordinary external
-    function call that's free to clobber any caller-saved register --
-    including %r10d/%r11d, two of this compiler's own three allocator-
-    pool registers -- so a Temp allocated to the pool cannot safely
+    in this file: its own lowering calls hornet_slice_grow, an
+    ordinary external function call that's free to clobber any
+    caller-saved register -- including %r10d/%r11d, two of this
+    compiler's own three allocator-pool registers -- so a Temp
+    allocated to the pool cannot safely
     survive across it, the same reasoning that already makes IRCall
     an unsafe position."""
     dst_ptr: Temp

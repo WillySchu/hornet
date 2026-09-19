@@ -10,10 +10,9 @@ ir_lowering.py's own dependency list (gen_array_copy, _gen_slice_grow_
 into, _get_bounds_check_fail_label are its three direct entry points
 into this file; _gen_bounds_check_panic_block is lower_function's own
 direct call) that these, and the handful of purely-internal helpers
-they call (_gen_raw_byte_copy, _gen_new_cap_into,
-_get_bounds_check_message_label), are the complete set: nothing here
-is ever reached from gen_expr_ir/gen_statement_ir or anything they
-call.
+they call (_gen_new_cap_into, _get_bounds_check_message_label), are
+the complete set: nothing here is ever reached from gen_expr_ir/gen_
+statement_ir or anything they call.
 
 Mixed into CodeGenerator alongside ScalarsLoweringMixin now, not
 ArraysSlicesMixin anymore: that split was step one of a larger move,
@@ -127,39 +126,6 @@ class ArraysSlicesLoweringMixin:
             off += leaf_width
         return instructions
 
-    def _gen_raw_byte_copy(self, dst: Register, src: Register, width: int) -> list[Instruction]:
-        """Copies exactly `width` bytes from the address in src to the
-        address in dst -- both hold an address directly (Memory(reg.
-        name, 0)), not an arbitrary Memory operand with its own offset,
-        unlike gen_array_copy's own dst_mem/src_mem. The identical
-        movq/movl/movb chunking gen_array_copy already uses (as many
-        8-byte movqs as fit, then one 4-byte movl if at least 4 bytes
-        remain, then a trailing run of 1-byte movbs for whatever's left
-        -- correct for any width, not just a multiple of 4), just
-        driven by a raw byte count instead of a Type -- gen_array_copy
-        itself needs a Type (for leaf_type/type_byte_width), which
-        _gen_slice_grow_into's own caller doesn't have and, by design,
-        never should: growth is deliberately type-agnostic, knowing
-        only an element's own byte width, never its shape (see
-        IRSliceGrow's own docstring for why that matters -- it's what
-        would let growth's own future lowering become a generic
-        runtime call, unlike writing a fresh value, which can't)."""
-        instructions = []
-        chunk_off = 0
-        while width - chunk_off >= 8:
-            instructions.append(MovQ(src=Memory(src.name, chunk_off), dst=Register('rax')))
-            instructions.append(MovQ(src=Register('rax'), dst=Memory(dst.name, chunk_off)))
-            chunk_off += 8
-        if width - chunk_off >= 4:
-            instructions.append(Mov(src=Memory(src.name, chunk_off), dst=Register('eax')))
-            instructions.append(Mov(src=Register('eax'), dst=Memory(dst.name, chunk_off)))
-            chunk_off += 4
-        while width - chunk_off >= 1:
-            instructions.append(MovB(src=Memory(src.name, chunk_off), dst=Register('al')))
-            instructions.append(MovB(src=Register('al'), dst=Memory(dst.name, chunk_off)))
-            chunk_off += 1
-        return instructions
-
     def _gen_new_cap_into(self, r_cap_32: Register) -> list[Instruction]:
         """Computes append's own growth rule in place, overwriting
         r_cap_32 with the new capacity: cap*2 while cap < 256, else
@@ -206,61 +172,44 @@ class ArraysSlicesLoweringMixin:
             element_width: int,
     ) -> list[Instruction]:
         """The growth-ONLY half of append -- IRSliceGrow's own
-        lowering. Mallocs a fresh, larger backing (sized via _gen_new_
-        cap_into, then multiplied by element_width) and copies the
-        existing r_len_32 elements over from r_ptr, via an ordinary,
-        generic byte-for-byte copy loop -- correct for ANY element
-        type, since copying an ALREADY-existing, already-valid element
-        is always just 'copy element_width bytes,' with no type-
-        specific construction logic needed here at all (unlike WRITING
-        a fresh element, which does need that, and is deliberately NOT
-        this method's own concern -- see IRSliceGrow's own docstring).
+        lowering. Computes the new capacity inline first, via _gen_
+        new_cap_into (unchanged: pure arithmetic/policy, no allocation
+        or external dependency of its own, so it stays here rather
+        than moving into runtime.c alongside the actual allocation),
+        then calls hornet_slice_grow (see runtime.c) to malloc the new,
+        larger backing and copy the existing r_len_32 elements over --
+        the identical "one hand-built function, shared across every
+        call site" move hornet_print/hornet_panic already made, and
+        for the identical reason: growth, like stringify, never needs
+        to know anything about the VALUE being handled, only its own
+        byte width (see IRSliceGrow's own docstring in ir/ir.py, which
+        anticipated exactly this move when the append/growth split was
+        first designed).
 
         Leaves r_len_32 itself untouched: growth doesn't change how
         many elements currently exist, only how much room there is.
         r_ptr is overwritten with the new backing's own address on
-        return; r_cap/r_cap_32 hold the new capacity.
+        return; r_cap/r_cap_32 already hold the new capacity by the
+        time the call happens, and -- being this op's own fixed,
+        callee-saved registers (%rbx/%r12/%r13, see this op's own
+        caller in ir_lowering.py) -- simply survive the call
+        unchanged, with nothing further needed to preserve them.
 
         Assumes the caller has ALREADY determined reallocation is
         needed -- no internal check of any kind here, the identical
-        "no internal check, caller has already decided" contract the
-        old-style _gen_realloc_and_append_one_into used to establish,
-        which this method's own copy loop is otherwise a direct,
-        write-free copy of."""
+        "no internal check, caller has already decided" contract this
+        method has always had."""
         instructions = self._gen_new_cap_into(r_cap_32)
         # r_cap_32 (and, via the zero-extension a 32-bit write always
         # gives its own 64-bit register, r_cap itself) now holds
         # new_cap.
 
-        instructions.append(Mov(src=r_cap_32, dst=Register('edi')))
-        instructions.append(IMul(src=Imm(element_width), dst=Register('edi')))
-        instructions.append(CallInstr('malloc'))
-        r_new_ptr = Register('r14')
-        instructions.append(MovQ(src=Register('rax'), dst=r_new_ptr))
-
-        # Copy the existing len elements from the OLD array (r_ptr)
-        # into the NEW one (r_new_ptr), via an ordinary, generic byte
-        # copy -- a genuine RUNTIME loop since len is a runtime value
-        # here.
-        loop_start_label = self.ir_program.ids.new_label("slice_grow_copy_loop")
-        loop_done_label = self.ir_program.ids.new_label("slice_grow_copy_done")
-        i_32 = Register('r9d')
-        instructions.append(Mov(src=Imm(0), dst=i_32))
-        instructions.append(Label(loop_start_label))
-        instructions.append(Cmp(src=r_len_32, dst=i_32))
-        instructions.append(Jae(loop_done_label))
-        instructions.append(Mov(src=i_32, dst=Register('r11d')))
-        instructions.append(IMul(src=Imm(element_width), dst=Register('r11d')))
-        instructions.append(MovQ(src=r_ptr, dst=Register('r10')))
-        instructions.append(AddQ(src=Register('r11'), dst=Register('r10')))
-        instructions.append(MovQ(src=r_new_ptr, dst=Register('r8')))
-        instructions.append(AddQ(src=Register('r11'), dst=Register('r8')))
-        instructions.extend(self._gen_raw_byte_copy(Register('r8'), Register('r10'), element_width))
-        instructions.append(Add(src=Imm(1), dst=i_32))
-        instructions.append(Jmp(loop_start_label))
-        instructions.append(Label(loop_done_label))
-
-        instructions.append(MovQ(src=r_new_ptr, dst=r_ptr))
+        instructions.append(MovQ(src=r_ptr, dst=Register('rdi')))
+        instructions.append(Mov(src=r_len_32, dst=Register('esi')))
+        instructions.append(Mov(src=r_cap_32, dst=Register('edx')))
+        instructions.append(Mov(src=Imm(element_width), dst=Register('ecx')))
+        instructions.append(CallInstr('hornet_slice_grow'))
+        instructions.append(MovQ(src=Register('rax'), dst=r_ptr))
         return instructions
 
     def _get_bounds_check_fail_label(self, message: str) -> str:

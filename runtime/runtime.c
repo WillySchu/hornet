@@ -324,3 +324,26 @@ void hornet_panic(const char *msg) {
     fflush(NULL);
     abort();
 }
+
+// The single entry point the compiler's own append-growth codegen
+// calls: the growth-ONLY half of append(s, value) -- mallocs a fresh
+// backing array of new_cap*element_width bytes and copies the
+// existing len*element_width bytes over from old_ptr. Writing the
+// newly-appended value itself happens as a separate step immediately
+// after this call returns, never this function's own concern (see
+// IRSliceGrow's own docstring in ir/ir.py); new_cap is likewise
+// computed by the CALLER, not here -- capacity-doubling is pure
+// policy, with no allocation of its own, so it stays in codegen
+// rather than moving in here alongside the actual allocation.
+//
+// A plain memcpy in place of the hand-rolled movq/movl/movb chunking
+// loop this used to be as inline assembly -- correct for ANY element
+// type (int/bool/str/array/struct/slice alike), since copying an
+// ALREADY-existing, already-valid element is always just "copy
+// element_width bytes," with no type-specific construction logic
+// needed. Nothing here works around a limitation C doesn't have.
+void *hornet_slice_grow(const void *old_ptr, int32_t len, int32_t new_cap, int32_t element_width) {
+    void *new_ptr = malloc((size_t)new_cap * (size_t)element_width);
+    memcpy(new_ptr, old_ptr, (size_t)len * (size_t)element_width);
+    return new_ptr;
+}
