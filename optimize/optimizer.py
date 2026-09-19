@@ -8,9 +8,7 @@ A plain function, not a class: there's no state a composing entrypoint
 would need to hold across the passes it runs (each pass here is
 itself a plain, stateless function taking one IRFunction -- see
 constant_folding.py's own fold_constants and identity_reduction.py's
-own reduce_identities), the identical reasoning that turned ir.
-program_builder's own IRProgramBuilder into a plain build_ir_program
-function once IT lost its own reason to be a class.
+own reduce_identities).
 
 Mutates every function in ir_program.functions in place and returns
 the same object, rather than building a new IRProgram -- matching how
@@ -21,24 +19,18 @@ while keeping `ir_program = optimize(ir_program)` and a bare
 `optimize(ir_program)` equally correct for a caller to write.
 
 The order fold_constants/reduce_identities run in genuinely doesn't
-matter, for either pass over the other: neither one propagates a
-computed value INTO a later instruction's own operand -- `int y = (2 +
-3) + 1` builds as two separate IRBinOps, the second one's own left
-operand a Temp referencing the first one's own dst, never the constant
-5 itself, regardless of whether the first has already been folded to
-an IRMove by the time the second runs (see constant_folding.py's own
-docstring for why an IRMove into the SAME Temp, not deletion-plus-use-
-rewriting, is what makes this safe in the first place -- the flip side
-is that nothing here ever rewrites a Temp reference into the constant
-it happens to currently evaluate to). The two passes only ever
-interact within a SINGLE instruction, where an op can qualify for
-both (`5 + 0` is both fully constant and has an identity operand) --
-and there, both independently compute the identical correct
-replacement, so whichever runs first simply leaves nothing for the
-second to do. Real constant PROPAGATION across instructions -- letting
-that second IRBinOp actually see 5 instead of a Temp -- would be a
-genuinely different, more involved pass than either of these, not a
-consequence of running both in some particular order."""
+matter: neither one propagates a computed value INTO a later
+instruction's own operand -- `int y = (2 + 3) + 1` builds as two
+separate IRBinOps, the second one's own left operand a Temp
+referencing the first one's own dst, never the constant 5 itself,
+regardless of whether the first has already been folded by the time
+the second runs. The two passes only ever interact within a SINGLE
+instruction, where an op can qualify for both (`5 + 0` is both fully
+constant and has an identity operand) -- and there, both independently
+compute the identical correct replacement, so whichever runs first
+simply leaves nothing for the second to do. Real constant PROPAGATION
+across instructions would be a genuinely different, more involved
+pass than either of these."""
 
 from ir.ir import IRProgram
 from optimize.constant_folding import fold_constants
