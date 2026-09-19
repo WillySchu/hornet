@@ -26,6 +26,8 @@ from codegen.register_allocator import (
     eligible_intervals,
     linear_scan,
     LiveInterval,
+    ALLOCATABLE_REGISTERS,
+    allocate_registers,
 )
 from parser import BinaryOp
 
@@ -536,3 +538,37 @@ def test_linear_scan_never_assigns_the_same_register_to_two_live_intervals():
             for b in assigned:
                 if a is not b:
                     assert a.end < b.start or b.end < a.start
+
+
+# -- ALLOCATABLE_REGISTERS pool size --------------------------------------
+# Regression coverage for widening the pool from 3 to 7 (r10d/r11d/r15d
+# plus the four callee-saved scratch registers ebx/r12d/r13d/r14d,
+# already saved/restored unconditionally in every prologue -- see this
+# module's own comment above ALLOCATABLE_REGISTERS for the full
+# reasoning on why that's safe). Pins the exact set, not just the
+# count, so an accidental reorder or duplicate is caught too.
+
+def test_allocatable_registers_is_the_widened_seven_register_pool():
+    assert ALLOCATABLE_REGISTERS == ['r10d', 'r11d', 'r15d', 'ebx', 'r12d', 'r13d', 'r14d']
+
+
+def test_allocate_registers_no_longer_spills_four_simultaneously_live_temps():
+    """Four purely-arithmetic Temps, all overlapping, no calls in
+    sight -- exactly the shape that had to spill one of them with the
+    old 3-register pool. All four now fit."""
+    ir = [
+        IRMove(dst=t(0), src=IRConst(1, Type.INT)),
+        IRMove(dst=t(1), src=IRConst(2, Type.INT)),
+        IRMove(dst=t(2), src=IRConst(3, Type.INT)),
+        IRMove(dst=t(3), src=IRConst(4, Type.INT)),
+        # t(4) reads all four at once, forcing them to be
+        # simultaneously live right up to this point.
+        IRBinOp(dst=t(4), op=BinaryOp.ADD, left=t(0), right=t(1)),
+        IRBinOp(dst=t(4), op=BinaryOp.ADD, left=t(4), right=t(2)),
+        IRBinOp(dst=t(4), op=BinaryOp.ADD, left=t(4), right=t(3)),
+        IRReturn(value=t(4)),
+    ]
+    result = allocate_registers(ir)
+    assert {0, 1, 2, 3} <= result.keys()
+    assigned = [result[i] for i in (0, 1, 2, 3)]
+    assert len(set(assigned)) == 4  # four genuinely distinct registers, not a spill in disguise

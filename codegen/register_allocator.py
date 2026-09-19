@@ -36,15 +36,28 @@ from ir.ir import (
     Temp,
 )
 
-# %r10d, %r11d, %r15d (the ordinary 32-bit-named form, matching every
-# other register this codebase passes around by default -- widened via
-# as_qword_register when a Temp's type needs it): caller-saved,
-# general-purpose, with no SysV argument role (unlike %rdi/%rsi/%rdx/
-# %rcx/%r8/%r9) and no implicit instruction-level role (unlike %rcx's
-# shift-count, %rdx's div/mul high half), and not this compiler's own
-# universal scratch convention (%rax) -- simply free for the
-# allocator's own exclusive use.
-ALLOCATABLE_REGISTERS = ['r10d', 'r11d', 'r15d']
+# %r10d, %r11d, %r15d, %ebx, %r12d, %r13d, %r14d (the ordinary 32-bit-
+# named form, matching every other register this codebase passes
+# around by default -- widened via as_qword_register when a Temp's
+# type needs it). None of the seven has a SysV argument role (unlike
+# %rdi/%rsi/%rdx/%rcx/%r8/%r9), an implicit instruction-level role
+# (unlike %rcx's shift-count, %rdx's div/mul high half), or this
+# compiler's own universal scratch convention (%rax).
+#
+# The first three (%r10d/%r11d/%r15d) are caller-saved and otherwise
+# completely unclaimed. The other four are callee-saved, and every
+# function's prologue/epilogue already saves and restores all four
+# UNCONDITIONALLY (CALLEE_SAVED_SCRATCH_REGISTERS, calling_convention.
+# py) -- so admitting them here adds no new save/restore cost, only
+# spends a cost already being paid. %r14d is entirely unused elsewhere
+# in codegen; %ebx/%r12d/%r13d are used, but only as fixed scratch
+# inside IRSliceGrow's own lowering (ir_lowering.py, for ptr/length/
+# cap around the malloc/realloc call append needs) -- and IRSliceGrow
+# is already one of eligible_intervals' own unsafe positions, exactly
+# like IRCall, so any Temp whose interval could actually collide with
+# that internal use is already excluded from allocation here,
+# regardless of how large this pool is.
+ALLOCATABLE_REGISTERS = ['r10d', 'r11d', 'r15d', 'ebx', 'r12d', 'r13d', 'r14d']
 
 
 @dataclass
