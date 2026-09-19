@@ -14,6 +14,7 @@ from ir.ir import (
     IRLabel,
     IRLoad,
     IRMove,
+    IRReadArgument,
     IRReturn,
     IRStore,
     IRUnOp,
@@ -301,6 +302,24 @@ def test_liveness_irboundscheck_reads_index_and_length_and_writes_nothing():
     assert t(1) in live_in[0]
 
 
+def test_liveness_irreadargument_defines_dst_and_reads_nothing():
+    """The same shape of bug test_liveness_irload_address_and_dst
+    documents (a real one this module shipped with): IRReadArgument
+    had no case in _writes at all, making a function's own parameters
+    invisible as DEFINITIONS -- see compute_live_intervals' own
+    companion test below for the concrete consequence (an interval
+    starting earlier than the parameter's true definition)."""
+    ir = [
+        IRReadArgument(dst=t(0), index=0),
+        IRReturn(value=t(0)),
+    ]
+    blocks = build_cfg(ir)
+    live_in, live_out = compute_liveness(blocks)
+    # t(0) is defined HERE, by this instruction -- not received from
+    # outside this block.
+    assert t(0) not in live_in[0]
+
+
 # -- compute_live_intervals ---------------------------------------------------
 
 def test_compute_live_intervals_tight_span_for_a_purely_local_temp():
@@ -337,6 +356,31 @@ def test_compute_live_intervals_loop_carried_spans_the_whole_loop():
     # NOT stop short partway through, which a naive scan could do.
     assert intervals[0].start == 0
     assert intervals[0].end >= 5
+
+
+def test_compute_live_intervals_irreadargument_is_the_temps_true_start():
+    """The concrete consequence of the bug test_liveness_
+    irreadargument_defines_dst_and_reads_nothing documents: with
+    IRReadArgument invisible to _writes, a parameter Temp read later
+    in the SAME block it arrives in looked like a block-level "use"
+    needing to already be live coming IN -- stretching its interval
+    back to the block's own start (index 0 here) rather than its true
+    definition (index 1). Not a correctness bug (a too-WIDE interval
+    is still safe, just needlessly pessimistic -- see this fix's own
+    commit message for the full reasoning), but a real, checkable one:
+    this assertion fails with intervals[0].start == 0 without the fix."""
+    ir = [
+        IRMove(dst=t(1), src=IRConst(99, Type.INT)),  # 0: unrelated filler, BEFORE t(0)'s own def
+        IRReadArgument(dst=t(0), index=0),             # 1: t(0)'s true definition
+        IRMove(dst=t(2), src=IRConst(1, Type.INT)),    # 2: more filler
+        IRBinOp(dst=t(3), op=BinaryOp.ADD, left=t(0), right=t(2)),  # 3: t(0)'s only use
+        IRReturn(value=t(3)),                          # 4
+    ]
+    blocks = build_cfg(ir)
+    live_in, live_out = compute_liveness(blocks)
+    intervals = compute_live_intervals(blocks, live_in, live_out)
+    assert intervals[0].start == 1
+    assert intervals[0].end == 3
 
 
 # -- eligible_intervals -------------------------------------------------------
@@ -541,15 +585,17 @@ def test_linear_scan_never_assigns_the_same_register_to_two_live_intervals():
 
 
 # -- ALLOCATABLE_REGISTERS pool size --------------------------------------
-# Regression coverage for widening the pool from 3 to 7 (r10d/r11d/r15d
-# plus the four callee-saved scratch registers ebx/r12d/r13d/r14d,
-# already saved/restored unconditionally in every prologue -- see this
-# module's own comment above ALLOCATABLE_REGISTERS for the full
-# reasoning on why that's safe). Pins the exact set, not just the
-# count, so an accidental reorder or duplicate is caught too.
+# Regression coverage for widening the pool from 3 to 4 (r10d/r11d/r15d
+# plus r14d -- see this module's own comment above ALLOCATABLE_
+# REGISTERS for why r14d specifically, and why ebx/r12d/r13d are
+# deliberately NOT included despite also being callee-saved: including
+# them produced real, reproducible, ASLR-dependent segfaults on
+# append-heavy programs, not yet root-caused). Pins the exact set, not
+# just the count, so an accidental reorder, duplicate, or silent
+# reintroduction of ebx/r12d/r13d is caught too.
 
-def test_allocatable_registers_is_the_widened_seven_register_pool():
-    assert ALLOCATABLE_REGISTERS == ['r10d', 'r11d', 'r15d', 'ebx', 'r12d', 'r13d', 'r14d']
+def test_allocatable_registers_is_the_widened_four_register_pool():
+    assert ALLOCATABLE_REGISTERS == ['r10d', 'r11d', 'r15d', 'r14d']
 
 
 def test_allocate_registers_no_longer_spills_four_simultaneously_live_temps():

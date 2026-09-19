@@ -27,6 +27,7 @@ from ir.ir import (
     IRLoad,
     IRLocalAddress,
     IRMove,
+    IRReadArgument,
     IRReturn,
     IRSliceBoundsCheck,
     IRSliceGrow,
@@ -36,28 +37,39 @@ from ir.ir import (
     Temp,
 )
 
-# %r10d, %r11d, %r15d, %ebx, %r12d, %r13d, %r14d (the ordinary 32-bit-
-# named form, matching every other register this codebase passes
-# around by default -- widened via as_qword_register when a Temp's
-# type needs it). None of the seven has a SysV argument role (unlike
-# %rdi/%rsi/%rdx/%rcx/%r8/%r9), an implicit instruction-level role
-# (unlike %rcx's shift-count, %rdx's div/mul high half), or this
-# compiler's own universal scratch convention (%rax).
+# %r10d, %r11d, %r15d, %r14d (the ordinary 32-bit-named form, matching
+# every other register this codebase passes around by default --
+# widened via as_qword_register when a Temp's type needs it). None of
+# the four has a SysV argument role (unlike %rdi/%rsi/%rdx/%rcx/%r8/
+# %r9), an implicit instruction-level role (unlike %rcx's shift-count,
+# %rdx's div/mul high half), or this compiler's own universal scratch
+# convention (%rax).
 #
 # The first three (%r10d/%r11d/%r15d) are caller-saved and otherwise
-# completely unclaimed. The other four are callee-saved, and every
-# function's prologue/epilogue already saves and restores all four
-# UNCONDITIONALLY (CALLEE_SAVED_SCRATCH_REGISTERS, calling_convention.
-# py) -- so admitting them here adds no new save/restore cost, only
-# spends a cost already being paid. %r14d is entirely unused elsewhere
-# in codegen; %ebx/%r12d/%r13d are used, but only as fixed scratch
-# inside IRSliceGrow's own lowering (ir_lowering.py, for ptr/length/
-# cap around the malloc/realloc call append needs) -- and IRSliceGrow
-# is already one of eligible_intervals' own unsafe positions, exactly
-# like IRCall, so any Temp whose interval could actually collide with
-# that internal use is already excluded from allocation here,
-# regardless of how large this pool is.
-ALLOCATABLE_REGISTERS = ['r10d', 'r11d', 'r15d', 'ebx', 'r12d', 'r13d', 'r14d']
+# completely unclaimed. %r14d is callee-saved and, unlike %ebx/%r12d/
+# %r13d (see below), entirely unused elsewhere in codegen -- and every
+# function's prologue/epilogue already saves and restores it (and
+# %ebx/%r12d/%r13d) UNCONDITIONALLY (CALLEE_SAVED_SCRATCH_REGISTERS,
+# calling_convention.py) regardless of whether this pool ever assigns
+# it, so admitting it here adds no new save/restore cost, only spends
+# a cost already being paid.
+#
+# %ebx/%r12d/%r13d are DELIBERATELY EXCLUDED, despite being callee-
+# saved too and despite eligible_intervals already treating IRSliceGrow
+# (which uses them as fixed scratch -- see ir_lowering.py, for ptr/
+# length/cap around the malloc/realloc call append needs) as an unsafe
+# position exactly like IRCall. Including them was tried and reverted:
+# it produces real, reproducible, ASLR-dependent segfaults (confirmed
+# by running the SAME compiled binary repeatedly, and by the failure
+# disappearing entirely with ASLR disabled) whenever a program uses
+# append heavily, e.g. benchmarks/programs/copy_heavy.ht -- so there is
+# a genuine, currently unidentified correctness gap in how eligible_
+# intervals/IRSliceGrow's own lowering interact for these three
+# specifically, not yet root-caused. %r14d was verified clean under
+# the same stress test (many repeated runs of the same binary, with
+# and without ASLR) and is safe to keep. Do not add %ebx/%r12d/%r13d
+# back to this pool without first finding and fixing that gap.
+ALLOCATABLE_REGISTERS = ['r10d', 'r11d', 'r15d', 'r14d']
 
 
 @dataclass
@@ -163,7 +175,7 @@ def _reads(instr) -> set:
 
 def _writes(instr) -> set:
     """The Temps `instr` defines."""
-    if isinstance(instr, (IRMove, IRBinOp, IRUnOp, IRLoad, IRLocalAddress, IRStaticDataAddress, IRCast)):
+    if isinstance(instr, (IRMove, IRBinOp, IRUnOp, IRLoad, IRLocalAddress, IRStaticDataAddress, IRCast, IRReadArgument)):
         return {instr.dst}
     if isinstance(instr, IRCall):
         return {instr.dst} if instr.dst is not None else set()
