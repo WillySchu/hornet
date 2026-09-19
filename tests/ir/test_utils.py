@@ -11,7 +11,7 @@ import pytest
 
 import parser
 import semantic
-from codegen.errors import CodegenError
+from ir.errors import IRError
 from ir.utils import leaf_type, type_byte_width, type_of
 
 
@@ -235,7 +235,7 @@ def test_type_of_no_type():
     node = parser.Constant(value=1)
 
     with pytest.raises(
-            CodegenError,
+            IRError,
             match=re.escape('Constant(value=1, resolved_type=None) has no resolved type -- semantic.analyze() must run'
                             ' before codegen (see compile_to_asm)')
     ):

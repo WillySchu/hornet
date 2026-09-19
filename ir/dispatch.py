@@ -15,7 +15,7 @@ that's actually reachable (see gen_expr_ir's own docstring for exactly
 which shapes those are, and why the ones that aren't are provably
 unreachable rather than merely untested)."""
 
-from codegen.errors import CodegenError
+from ir.errors import IRError
 from ir.ir import (
     IRBinOp, IRValue, IRConst, IRLoad, IRMove, IRJump, IRLabel, IRStaticDataAddress, IRUnOp, IRCast
 )
@@ -50,7 +50,7 @@ class DispatchMixin:
         dedicated case, not routed through _ir_call
         at all -- len isn't an ordinary function call), and an
         ordinary scalar-or-void-returning Call (see _ir_call) -- and
-        raises CodegenError explicitly for everything else, with no
+        raises IRError explicitly for everything else, with no
         fallback left to defer to (see ir.py's own module docstring
         for IRRaw's own removal, once this was the last remaining
         site).
@@ -129,7 +129,7 @@ class DispatchMixin:
         if isinstance(expr, Index) and type_of(expr).kind not in (TypeKind.ARRAY, TypeKind.STRUCT):
             result = self._ir_index_address(expr)
             if result is None:
-                raise CodegenError(
+                raise IRError(
                     f"_ir_index_address returned None for a scalar-typed Index read "
                     f"({expr!r}) -- expected to always succeed for a reachable base")
             addr_ir, addr_value = result
@@ -137,7 +137,7 @@ class DispatchMixin:
         if isinstance(expr, Field) and type_of(expr).kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
             result = self._ir_field_address(expr)
             if result is None:
-                raise CodegenError(
+                raise IRError(
                     f"_ir_field_address returned None for a scalar-typed Field read "
                     f"({expr!r}) -- expected to always succeed for a reachable base")
             addr_ir, addr_value = result
@@ -203,7 +203,7 @@ class DispatchMixin:
             src_ir, src_value = self.gen_expr_ir(expr.expr)
             t = self.ir_program.ids.new_temp(type_of(expr))
             return src_ir + [IRCast(dst=t, src=src_value)], t
-        raise CodegenError(
+        raise IRError(
             f"No real-IR case for expression of type {type(expr).__name__}: {expr!r} -- "
             f"every language construct this arc's own tests exercise (including every "
             f"shape print() can take, the last remaining user of what used to be this "
@@ -253,7 +253,7 @@ class DispatchMixin:
         A REAL BUG, found and fixed here rather than carried forward:
         `[1,2,3] == [1,2,4]` and an ordinary array/struct-returning
         call used directly as an equality operand both used to raise
-        a hard CodegenError, tracing back to the OLD-style gen_array_
+        a hard IRError, tracing back to the OLD-style gen_array_
         address_into itself -- which never handled an ArrayLiteral or
         Call operand at all. This was never supported, even old-style,
         the identical situation a composite-returning call used
@@ -274,7 +274,7 @@ class DispatchMixin:
         _ir_short_circuit), slice-vs-none comparison (real IR too, for
         every reachable slice-typed base shape, confirmed
         exhaustively -- see _ir_slice_none_comparison's own docstring;
-        a None here, genuinely never observed, raises CodegenError
+        a None here, genuinely never observed, raises IRError
         rather than silently propagating further up the call chain),
         string concat/compare (also real IR now, via
         _ir_string_concat/_ir_string_compare -- composed entirely from
@@ -290,7 +290,7 @@ class DispatchMixin:
         it as a Binary operand outright, not just here -- so once this
         branch is entered at all, i.e. type_of(expr.left).kind is
         ARRAY/STRUCT, both operands' own addresses are expected to
-        always resolve; a CodegenError, not a silent fall-through to
+        always resolve; a IRError, not a silent fall-through to
         the ordinary scalar case just below, is what a None here now
         gets), or the
         ordinary arithmetic/comparison case (already real IR, via
@@ -308,7 +308,7 @@ class DispatchMixin:
             if type_of(expr.left).kind == TypeKind.SLICE or type_of(expr.right).kind == TypeKind.SLICE:
                 result = self._ir_slice_none_comparison(expr)
                 if result is None:
-                    raise CodegenError(
+                    raise IRError(
                         f"_ir_slice_none_comparison returned None for a slice-vs-"
                         f"none comparison ({expr.left!r} {expr.op} {expr.right!r}) "
                         f"-- expected to always succeed for a reachable slice-typed "
@@ -319,7 +319,7 @@ class DispatchMixin:
                 left_result = self._ir_composite_operand_address(expr.left, value_type)
                 right_result = self._ir_composite_operand_address(expr.right, value_type)
                 if left_result is None or right_result is None:
-                    raise CodegenError(
+                    raise IRError(
                         f"_ir_composite_operand_address returned None for an "
                         f"ARRAY/STRUCT equality operand ({expr.left!r} or "
                         f"{expr.right!r}) -- expected to always succeed once "

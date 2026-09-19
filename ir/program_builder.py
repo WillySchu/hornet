@@ -24,8 +24,8 @@ this function returns, for whatever IR-to-IR transform (optimization
 passes, eventually) wants to sit between them. See compile_to_asm's
 own body for the shape this now takes."""
 
-from codegen.errors import CodegenError
 from codegen.id_allocator import IdAllocator
+from ir.errors import IRError
 from ir.ir import IRProgram
 from ir.builder import IRFunctionBuilder
 from parser import Program
@@ -34,18 +34,18 @@ from parser import Program
 def build_ir_program(program: Program) -> IRProgram:
     """The two hasattr checks match type_of's own "has no resolved
     type" defensive check one level up: fail with a clear, actionable
-    CodegenError right here rather than a bare AttributeError from
+    IRError right here rather than a bare AttributeError from
     whatever the first registry lookup happens to be, since Program.
     struct_registry/type_alias_registry are stamped on by semantic.
     analyze(), not fields the dataclass itself declares -- an AST that
     skipped analyze() entirely simply won't have them."""
     if not hasattr(program, 'struct_registry'):
-        raise CodegenError(
+        raise IRError(
             "Program has no struct registry -- semantic.analyze() "
             "must run before codegen (see compile_to_asm)"
         )
     if not hasattr(program, 'type_alias_registry'):
-        raise CodegenError(
+        raise IRError(
             "Program has no type alias registry -- semantic.analyze() "
             "must run before codegen (see compile_to_asm)"
         )

@@ -11,7 +11,7 @@ of size."""
 
 from typing import Union
 
-from codegen.errors import CodegenError
+from ir.errors import IRError
 from ir.ir import (
     IRBinOp,
     IRBoundsCheck,
@@ -130,7 +130,7 @@ class ArraysSlicesMixin:
             addr = self.ir_program.ids.new_temp(Type.INT64)
             size = type_byte_width(value_type, self.ir_program.struct_registry)
             addr_ir = [IRCall(dst=addr, name='malloc', args=[IRConst(size, Type.INT64)])]
-        call_ir = self._ir_composite_call(addr, call_expr, value_type)
+        call_ir = self._ir_composite_call(addr, call_expr)
         return addr_ir + call_ir, addr
 
     def _ir_materialize_array_literal(self, expr: ArrayLiteral):
@@ -632,7 +632,7 @@ class ArraysSlicesMixin:
         cases for where the two are glued together."""
         result = self._ir_slice_address(dst_expr)
         if result is None:
-            raise CodegenError(
+            raise IRError(
                 f"_ir_slice_address returned None for a slice-descriptor write's "
                 f"own destination ({dst_expr!r}) -- expected to always succeed, "
                 f"since an assignment's own destination is always a Variable/"
@@ -1001,7 +1001,7 @@ class ArraysSlicesMixin:
         if isinstance(value_expr, Call) and value_expr.name in self.ir_program.struct_registry:
             return self._ir_write_struct_literal_into(dst_address, value_expr, value_type)
         if isinstance(value_expr, Call):
-            return self._ir_composite_call(dst_address, value_expr, value_type)
+            return self._ir_composite_call(dst_address, value_expr)
         return None
 
     def _ir_write_array_literal_into(self, dst_address, expr: ArrayLiteral, array_type: Type):
@@ -1105,7 +1105,7 @@ class ArraysSlicesMixin:
                 continue
             element_type = type_of(element)
             if element_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
-                raise CodegenError(
+                raise IRError(
                     f"A bare array-literal statement can't have a "
                     f"{type(element).__name__} element of type "
                     f"{element_type} -- assign the literal to a "

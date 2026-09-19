@@ -1,5 +1,4 @@
-"""Scalar value production and storage -- int, int8, uint8, int64, and
-bool. _gen_read_scalar_into/_gen_write_scalar_from are the one choke
+"""Scalar value production and storage -- int, int8, uint8, int64, and bool. _gen_read_scalar_into/_gen_write_scalar_from are the one choke
 point for every scalar memory access in this compiler, so int8/uint8
 being genuinely 1 byte and int64 genuinely 8 only ever needed teaching
 to these two methods, not rediscovered at each read/write site: every
@@ -8,7 +7,7 @@ caller passes a value's ordinary 32-bit-named register, and these
 internally which actual width to operate on."""
 
 from codegen.calling_convention import total_arg_slots
-from codegen.errors import CodegenError
+from ir.errors import IRError
 from ir.ir import IRBranch, IRJump, IRLabel, IRMove, IRConst, IRCall
 from ir.utils import type_of
 from parser import Call, Binary, Variable, Field, Index, NoneLiteral, ArrayLiteral
@@ -36,7 +35,7 @@ class ScalarsMixin:
         call, which never returns None). Every ARRAY-typed expression
         is one of these three shapes -- an unmatched fourth shape, or
         either of the two genuinely-still-possible None returns above,
-        raises CodegenError explicitly rather than either silently
+        raises IRError explicitly rather than either silently
         leaving ir/addr_value unbound (an old-style, IRRaw-wrapped
         fallback used to catch exactly this here, since removed once
         every shape this arc's own tests exercise was confirmed to
@@ -44,7 +43,7 @@ class ScalarsMixin:
         from a previous loop iteration.
 
         STRUCT-typed argument: identical shape (including the same
-        explicit CodegenError on an unmatched shape or either
+        explicit IRError on an unmatched shape or either
         genuinely-still-possible None), just Variable/Field/Index via
         _ir_struct_address, a struct-literal Call (name found in
         self.ir_program.struct_registry) via _ir_materialize_struct_literal, then
@@ -60,7 +59,7 @@ class ScalarsMixin:
         after an earlier argument already assigned them successfully,
         would silently reuse that EARLIER argument's own address for
         this one instead, duplicating it into arg_values rather than
-        crashing at all. The explicit CodegenError above closes that
+        crashing at all. The explicit IRError above closes that
         silent-duplication risk too, not just the unclear-crash one.
 
         Both of _ir_materialize_array_literal/_ir_materialize_struct_
@@ -79,7 +78,7 @@ class ScalarsMixin:
                 if isinstance(arg, (Variable, Field, Index)):
                     result = self._ir_array_address(arg)
                     if result is None:
-                        raise CodegenError(
+                        raise IRError(
                             f"_ir_array_address returned None for an ARRAY-typed "
                             f"Variable/Field/Index argument ({arg!r}) -- expected to "
                             f"always succeed for this shape")
@@ -87,7 +86,7 @@ class ScalarsMixin:
                 elif isinstance(arg, ArrayLiteral):
                     result = self._ir_materialize_array_literal(arg)
                     if result is None:
-                        raise CodegenError(
+                        raise IRError(
                             f"_ir_materialize_array_literal returned None for an "
                             f"ARRAY-typed literal argument ({arg!r}) -- some element "
                             f"is out of scope for real IR, with no old-style fallback "
@@ -96,7 +95,7 @@ class ScalarsMixin:
                 elif self._is_ordinary_composite_call(arg):
                     ir, addr_value = self._ir_materialize_composite_call(arg, arg_type)
                 else:
-                    raise CodegenError(
+                    raise IRError(
                         f"No codegen rule for an ARRAY-typed call argument of shape "
                         f"{type(arg).__name__}: {arg!r}")
                 arg_ir.extend(ir)
@@ -105,7 +104,7 @@ class ScalarsMixin:
                 if isinstance(arg, (Variable, Field, Index)):
                     result = self._ir_struct_address(arg)
                     if result is None:
-                        raise CodegenError(
+                        raise IRError(
                             f"_ir_struct_address returned None for a STRUCT-typed "
                             f"Variable/Field/Index argument ({arg!r}) -- expected to "
                             f"always succeed for this shape")
@@ -113,7 +112,7 @@ class ScalarsMixin:
                 elif isinstance(arg, Call) and arg.name in self.ir_program.struct_registry:
                     result = self._ir_materialize_struct_literal(arg)
                     if result is None:
-                        raise CodegenError(
+                        raise IRError(
                             f"_ir_materialize_struct_literal returned None for a "
                             f"STRUCT-typed literal argument ({arg!r}) -- some field "
                             f"is out of scope for real IR, with no old-style fallback "
@@ -122,7 +121,7 @@ class ScalarsMixin:
                 elif self._is_ordinary_composite_call(arg):
                     ir, addr_value = self._ir_materialize_composite_call(arg, arg_type)
                 else:
-                    raise CodegenError(
+                    raise IRError(
                         f"No codegen rule for a STRUCT-typed call argument of shape "
                         f"{type(arg).__name__}: {arg!r}")
                 arg_ir.extend(ir)
@@ -130,7 +129,7 @@ class ScalarsMixin:
             elif arg_type.kind == TypeKind.SLICE or isinstance(arg, NoneLiteral):
                 result = self._ir_slice_arg(arg)
                 if result is None:
-                    raise CodegenError(
+                    raise IRError(
                         f"_ir_slice_arg returned None for a SLICE-typed call "
                         f"argument ({arg!r}) -- expected to always succeed for any "
                         f"reachable shape")
@@ -168,7 +167,7 @@ class ScalarsMixin:
         """
         total_slots = total_arg_slots(expr.args)
         if total_slots > 6:
-            raise CodegenError(
+            raise IRError(
                 f"Call to '{expr.name}' needs {total_slots} argument "
                 f"register(s) (a slice-typed argument needs 3); this "
                 f"compiler only supports up to 6 (passed via registers "
@@ -181,7 +180,7 @@ class ScalarsMixin:
         ir = arg_ir + [IRCall(dst=t_result, name=expr.name, args=arg_values)]
         return ir, t_result
 
-    def _ir_composite_call(self, dst_address, call_expr: Call, value_type: Type) -> list:
+    def _ir_composite_call(self, dst_address, call_expr: Call) -> list:
         """Builds (without lowering) a composite-returning function
         call's IR, writing its result through dst_address -- an
         ordinary INT64-typed IRValue, however the caller already has
@@ -213,7 +212,7 @@ class ScalarsMixin:
         to know a hidden pointer is involved at all."""
         total_slots = 1 + total_arg_slots(call_expr.args)
         if total_slots > 6:
-            raise CodegenError(
+            raise IRError(
                 f"Call to '{call_expr.name}' needs {total_slots} argument "
                 f"register(s) (the hidden return pointer needs its own "
                 f"slot, plus 3 for a slice-typed argument); this "

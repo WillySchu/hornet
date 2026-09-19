@@ -655,6 +655,7 @@ import pytest
 
 from codegen.codegen import generate_asm
 from codegen.errors import CodegenError
+from ir.errors import IRError
 from build import RUNTIME_C_PATH
 from desugar import desugar_methods
 from lexer import lex
@@ -2288,7 +2289,7 @@ class TestFunctions:
         )
         ast = _parse(source)
         analyze(ast)  # semantically fine -- the limit is a codegen-level one
-        with pytest.raises(CodegenError, match="only supports up to 6"):
+        with pytest.raises(IRError, match="only supports up to 6"):
             generate_asm(ast, platform=ASM_PLATFORM)
 
 
@@ -2597,7 +2598,7 @@ class TestTypeAnnotation:
         silently wrong codegen."""
         ast = _parse("def int main():\n    return 1 + 2\n")
         # Deliberately not calling analyze(ast) here.
-        with pytest.raises(CodegenError, match="no struct registry"):
+        with pytest.raises(IRError, match="no struct registry"):
             generate_asm(ast, platform=ASM_PLATFORM)
 
 
@@ -3528,7 +3529,7 @@ class TestArrays:
         )
         ast = _parse(source)
         analyze(ast)  # semantically fine -- the limit is codegen-level only
-        with pytest.raises(CodegenError, match="needs 7 argument register"):
+        with pytest.raises(IRError, match="needs 7 argument register"):
             generate_asm(ast, platform=ASM_PLATFORM)
 
     def test_array_literal_as_direct_call_argument(self):
@@ -4755,7 +4756,7 @@ class TestMethods:
         )
         ast = _parse(source)
         analyze(ast)
-        with pytest.raises(CodegenError, match="needs 7 argument register"):
+        with pytest.raises(IRError, match="needs 7 argument register"):
             generate_asm(ast, platform=ASM_PLATFORM)
 
     def test_five_explicit_params_plus_receiver_fits_exactly(self):
@@ -8060,7 +8061,7 @@ class TestTypedArrayLiterals:
         )
         ast = _parse(source)
         analyze(ast)
-        with pytest.raises(CodegenError, match="assign the literal to a variable first"):
+        with pytest.raises(IRError, match="assign the literal to a variable first"):
             generate_asm(ast, platform=ASM_PLATFORM)
 
 
@@ -9984,7 +9985,7 @@ class TestSliceParametersAndReturns:
         )
         ast = _parse(source)
         analyze(ast)  # semantically fine -- the limit is codegen-level only
-        with pytest.raises(CodegenError, match="needs 7 argument register"):
+        with pytest.raises(IRError, match="needs 7 argument register"):
             generate_asm(ast, platform=ASM_PLATFORM)
 
     def test_one_slice_and_three_scalars_are_exactly_six_slots(self):
@@ -15667,7 +15668,7 @@ class TestArraysOfStructs:
         )
         ast = _parse(source)
         analyze(ast)  # type-checks fine -- the rejection is codegen-level only
-        with pytest.raises(CodegenError, match="assign the literal to a variable first"):
+        with pytest.raises(IRError, match="assign the literal to a variable first"):
             generate_asm(ast, platform=ASM_PLATFORM)
 
     def test_single_element_array_literal_still_parses_as_untyped(self):

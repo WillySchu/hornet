@@ -4,10 +4,21 @@ uninitialized declaration gets its type's real zero value rather than
 leaving memory untouched, and the label-pair shape (start/end, or
 else/end) every branching or looping construct here builds on."""
 
-from codegen.errors import CodegenError
+from ir.errors import IRError
 from ir.ir import (
-    IRReturn, IRBranch, IRLabel, IRJump, IRMove, IRStore, IRCopy, IRConst, IRLoad, IRLocalAddress, IRCall,
-    IRFunction, IRStaticDataAddress,
+    IRBranch,
+    IRCall,
+    IRConst,
+    IRCopy,
+    IRFunction,
+    IRJump,
+    IRLabel,
+    IRLoad,
+    IRLocalAddress,
+    IRMove,
+    IRReturn,
+    IRStaticDataAddress,
+    IRStore,
 )
 from ir.utils import type_of, type_byte_width
 from parser import (
@@ -132,7 +143,7 @@ class StatementsMixin:
         typed destination can never BE `none` at all, semantic.py
         already rejects that outright, confirmed directly. A REAL BUG,
         found and fixed as part of this same step: IndexAssign's own
-        `rows[0] = none` used to raise a hard CodegenError even via
+        `rows[0] = none` used to raise a hard IRError even via
         old-style ("No codegen rule for a slice-typed value:
         NoneLiteral") -- gen_slice_value_into itself never had a
         NoneLiteral case at all, unlike gen_slice_arg_into's own
@@ -143,7 +154,7 @@ class StatementsMixin:
         value is an ArrayLiteral/struct-literal Call with some field/
         element out of scope for _ir_write_composite_value_into; a
         Slice-valued ExprStmt whose own base is out of scope for _ir_
-        slice_into) raises CodegenError explicitly now, rather than
+        slice_into) raises IRError explicitly now, rather than
         falling back to old-style silently -- a real, deliberate scope
         boundary, not an oversight: those still need their own
         IR-native handling as a follow-up. There is no old-style
@@ -193,9 +204,8 @@ class StatementsMixin:
                     and stmt.value.name != 'append'
                     and stmt.value.name not in self.ir_program.struct_registry
             ):
-                value_type = type_of(stmt.value)
                 hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr(ir_fn)
-                call_ir = self._ir_composite_call(hidden_ptr, stmt.value, value_type)
+                call_ir = self._ir_composite_call(hidden_ptr, stmt.value)
                 return hidden_ptr_ir + call_ir + [IRReturn(value=None)]
             # A composite return whose own value is a Variable/Field/
             # Index (an existing value with a real address to copy
@@ -530,7 +540,7 @@ class StatementsMixin:
                 }[var_type.kind]
                 dst_ir, dst_address = address_fn(Variable(name=stmt.name))
                 ir.extend(dst_ir)
-                return ir + self._ir_composite_call(dst_address, stmt.init, var_type)
+                return ir + self._ir_composite_call(dst_address, stmt.init)
             # An array/struct-typed initializer that's an array
             # literal or a struct literal (positional or named/
             # partial alike) -- writes directly through this
@@ -673,7 +683,7 @@ class StatementsMixin:
                     TypeKind.STRUCT: self._ir_struct_address,
                     TypeKind.SLICE: self._ir_slice_address,
                 }[var_type.kind](Variable(name=stmt.name))
-                return dst_ir + self._ir_composite_call(dst_address, stmt.value, var_type)
+                return dst_ir + self._ir_composite_call(dst_address, stmt.value)
             # Same array-literal/struct-literal case as VarDecl's own,
             # just above -- no binding concern here at all, unlike
             # VarDecl's own (the destination already exists).
@@ -706,7 +716,7 @@ class StatementsMixin:
                 dst_expr = Index(array=stmt.array, index=stmt.index)
                 return self._ir_copy_assign(dst_expr, stmt.value, element_type)
             # A REAL BUG, found and fixed here: `rows[0] = none` used
-            # to raise a hard CodegenError ("No codegen rule for a
+            # to raise a hard IRError ("No codegen rule for a
             # slice-typed value: NoneLiteral") even via old-style --
             # gen_slice_value_into itself never had a NoneLiteral case
             # at all, unlike gen_slice_arg_into's own identical shape.
@@ -743,7 +753,7 @@ class StatementsMixin:
                 dst_expr = Index(array=stmt.array, index=stmt.index)
                 address_fn = self._ir_struct_address if element_type.kind == TypeKind.STRUCT else self._ir_slice_address
                 dst_ir, dst_address = address_fn(dst_expr)
-                return dst_ir + self._ir_composite_call(dst_address, stmt.value, element_type)
+                return dst_ir + self._ir_composite_call(dst_address, stmt.value)
             # A struct-literal (positional or named/partial) value --
             # no ArrayLiteral case needed here at all, unlike VarDecl/
             # Assign/FieldAssign's own: ARRAY never occurs as an
@@ -757,7 +767,7 @@ class StatementsMixin:
                 dst_expr = Index(array=stmt.array, index=stmt.index)
                 result = self._ir_struct_address(dst_expr)
                 if result is None:
-                    raise CodegenError(
+                    raise IRError(
                         f"_ir_struct_address returned None for an IndexAssign's own "
                         f"STRUCT-typed destination ({dst_expr!r}) -- expected to "
                         f"always succeed for a reachable base")
@@ -813,7 +823,7 @@ class StatementsMixin:
                     TypeKind.SLICE: self._ir_slice_address,
                 }[field_type.kind]
                 dst_ir, dst_address = address_fn(dst_expr)
-                return dst_ir + self._ir_composite_call(dst_address, stmt.value, field_type)
+                return dst_ir + self._ir_composite_call(dst_address, stmt.value)
             # Same array-literal/struct-literal case as VarDecl/
             # Assign's own -- FieldAssign's grammar can ALSO produce
             # an array-typed field (unlike IndexAssign, per this
@@ -848,7 +858,7 @@ class StatementsMixin:
                 return slice_ir
         elif isinstance(stmt, ExprStmt) and isinstance(stmt.expr, NoneLiteral):
             # A REAL BUG, found and fixed here: a bare `none` used to
-            # crash (CodegenError, "Cannot compute 'none' via gen_expr_
+            # crash (IRError, "Cannot compute 'none' via gen_expr_
             # into"), since gen_expr_ir's own catch-all used to
             # delegate to the old-style gen_expr_into for anything it
             # didn't already have a case for -- but gen_expr_into
@@ -927,7 +937,7 @@ class StatementsMixin:
         elif isinstance(stmt, ExprStmt):
             ir, _ = self.gen_expr_ir(stmt.expr)
             return ir
-        raise CodegenError(
+        raise IRError(
             f"No real-IR case for statement of type {type(stmt).__name__}: {stmt!r} -- "
             f"every statement kind this arc's own tests exercise is confirmed to reach "
             f"real IR without ever falling back here. A genuine bug if this fires, not a "
@@ -979,7 +989,7 @@ class StatementsMixin:
         not necessarily the value's own, per IRStore's own docstring."""
         result = self._ir_index_address(Index(array=stmt.array, index=stmt.index))
         if result is None:
-            raise CodegenError(
+            raise IRError(
                 f"_ir_index_address returned None for a scalar-element IndexAssign "
                 f"({stmt!r}) -- expected to always succeed for a reachable base")
         addr_ir, addr_value = result
@@ -1051,13 +1061,13 @@ class StatementsMixin:
         slice-typed NoneLiteral case).
         Same shape as _ir_index_assign one level over: captures the
         address via _ir_field_address (real IR, confirmed exhaustively
-        to always succeed for a reachable base -- raises CodegenError
+        to always succeed for a reachable base -- raises IRError
         explicitly on a None here rather than leaving addr_ir/
         addr_value unbound), builds the value's own IR, then IRStores
         it through the address at the FIELD's own declared width."""
         result = self._ir_field_address(Field(base=stmt.base, name=stmt.name))
         if result is None:
-            raise CodegenError(
+            raise IRError(
                 f"_ir_field_address returned None for a scalar-typed FieldAssign "
                 f"({stmt!r}) -- expected to always succeed for a reachable base")
         addr_ir, addr_value = result
@@ -1135,19 +1145,19 @@ class StatementsMixin:
 
     def _ir_break(self) -> list:
         """Builds real IR for a bare `break`: the innermost loop's own
-        end label (see loop_labels), raising CodegenError if none is
+        end label (see loop_labels), raising IRError if none is
         currently open -- an ordinary IRJump to it."""
         if not self.loop_labels:
-            raise CodegenError("'break' outside of a loop")
+            raise IRError("'break' outside of a loop")
         _, end_label = self.loop_labels[-1]
         return [IRJump(end_label)]
 
     def _ir_continue(self) -> list:
         """Builds real IR for a bare `continue`: the innermost loop's
-        own start label (see loop_labels), raising CodegenError if
+        own start label (see loop_labels), raising IRError if
         none is currently open -- an ordinary IRJump to it."""
         if not self.loop_labels:
-            raise CodegenError("'continue' outside of a loop")
+            raise IRError("'continue' outside of a loop")
         start_label, _ = self.loop_labels[-1]
         return [IRJump(start_label)]
 

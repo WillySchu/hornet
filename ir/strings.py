@@ -14,9 +14,9 @@ print() migrated to the real runtime (see this file's own git history
 if that's ever useful, and ir.py's own top docstring for the broader
 old-style dead-code cleanup this was folded into)."""
 
-from codegen.errors import CodegenError
-from ir.utils import type_byte_width, type_of
+from ir.errors import IRError
 from ir.ir import IRBinOp, IRConst, IRCall, IRStaticDataAddress, IRLocalAddress, IRStore
+from ir.utils import type_byte_width, type_of
 from parser import Call, Binary, Node, BinaryOp
 from semantic import Type, TypeKind
 
@@ -111,7 +111,7 @@ class StringsMixin:
                 field_count += 1
             self.ir_program.type_descriptors.append((label, [_TYPEDESC_STRUCT, name_label, field_count] + field_fields))
         else:
-            raise CodegenError(f"No type descriptor rule for: {t}")
+            raise IRError(f"No type descriptor rule for: {t}")
 
         return label
 
@@ -157,7 +157,7 @@ class StringsMixin:
         that method doesn't cover, is rejected as print's own
         argument the same way it's rejected as an equality operand;
         an ordinary composite-returning Call (`print(makePoint())`)
-        is allowed in both places. Raises CodegenError, via that
+        is allowed in both places. Raises IRError, via that
         method's own contract, on the None it would otherwise return
         for a shape genuinely out of scope -- moot in practice,
         for the identical reason it's already moot at every other
@@ -199,7 +199,7 @@ class StringsMixin:
         if arg_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT):
             result = self._ir_composite_operand_address(arg, arg_type)
             if result is None:
-                raise CodegenError(
+                raise IRError(
                     f"_ir_composite_operand_address returned None for print()'s own "
                     f"ARRAY/STRUCT-typed argument ({arg!r}) -- expected to always "
                     f"succeed, since semantic.py already restricts print's own "

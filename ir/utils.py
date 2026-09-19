@@ -14,7 +14,7 @@ anything actually depended on the distinction."""
 from parser import Node
 from semantic import Type, TypeKind, StructInfo
 
-from codegen.errors import CodegenError
+from ir.errors import IRError
 
 
 def type_byte_width(t: Type, structs: dict[str, StructInfo]) -> int:
@@ -85,7 +85,7 @@ def type_of(expr: Node) -> Type:
     Type.INT/Type.BOOL/Type.STR directly, or inspect
     .kind/.element_type/.size for an array."""
     if expr.resolved_type is None:
-        raise CodegenError(
+        raise IRError(
             f"{expr!r} has no resolved type -- semantic.analyze() "
             f"must run before codegen (see compile_to_asm)"
         )

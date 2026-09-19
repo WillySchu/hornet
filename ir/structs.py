@@ -9,7 +9,7 @@ over; equality and zero-initialization work field by field, recursing
 into nested structs and delegating array-typed fields back to
 arrays_slices.py."""
 
-from codegen.errors import CodegenError
+from ir.errors import IRError
 from ir.ir import IRBinOp, IRConst, IRStore, IRLoad, IRLocalAddress, IRCall
 from ir.utils import type_byte_width, type_of
 from parser import Node, Variable, Field, Index, Call, BinaryOp
@@ -27,7 +27,7 @@ class StructsMixin:
             if name == field_name:
                 return offset
             offset += type_byte_width(field_type, self.ir_program.struct_registry)
-        raise CodegenError(f"Struct '{struct_name}' has no field '{field_name}'")
+        raise IRError(f"Struct '{struct_name}' has no field '{field_name}'")
 
     def _ir_struct_address(self, expr: Node) -> tuple[list, object]:
         """Builds (without lowering) the address of a struct-typed
@@ -66,7 +66,7 @@ class StructsMixin:
             return self._ir_index_address(expr)
         if self._is_ordinary_composite_call(expr):
             return self._ir_materialize_composite_call(expr, type_of(expr))
-        raise CodegenError(f"Cannot compute a struct address for: {expr!r}")
+        raise IRError(f"Cannot compute a struct address for: {expr!r}")
 
     def _ir_field_address(self, expr: Field) -> tuple[list, object]:
         """Builds (without lowering) the address of `expr.base.expr.
@@ -81,14 +81,14 @@ class StructsMixin:
         address either way."""
         base_type = type_of(expr.base)
         if base_type.kind != TypeKind.STRUCT:
-            raise CodegenError(
+            raise IRError(
                 f"Cannot access field '{expr.name}' on a value of "
                 f"non-struct type {base_type}"
             )
         offset = self._field_offset(base_type.struct_name, expr.name)
         result = self._ir_struct_address(expr.base)
         if result is None:
-            raise CodegenError(
+            raise IRError(
                 f"_ir_struct_address returned None for a Field's own STRUCT-typed "
                 f"base ({expr.base!r}) -- expected to always succeed for a "
                 f"reachable base")

@@ -2,5 +2,5 @@
 
 
 class CodegenError(Exception):
-    """Raised when the code generator encounters an AST node it doesn't
-    know how to translate yet."""
+    """Raised when the code generator encounters an IR object it doesn't know
+    how to translate."""

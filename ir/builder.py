@@ -33,8 +33,8 @@ mixin instruction-selection produces real Instructions from)."""
 
 from typing import List, Optional
 
-from codegen.errors import CodegenError
 from codegen.escape_analysis import analyze_array_escapes, is_heap_allocated
+from ir.errors import IRError
 from ir.utils import type_byte_width, type_of
 from ir.ir import (
     IRBranch, IRCall, IRConst, IRCopy, IRFunction, IRJump, IRLocalAddress, IRReadArgument, IRReturn, IRStore, Temp,
@@ -203,7 +203,7 @@ class IRFunctionBuilder(
         param_slots = sum(3 if pt.kind == TypeKind.SLICE else 1 for pt in param_types)
         total_slots = arg_shift + param_slots
         if total_slots > 6:
-            raise CodegenError(
+            raise IRError(
                 f"Function '{fn.name}' needs {total_slots} argument "
                 f"register(s) for its parameters (a slice-typed "
                 f"parameter needs 3)"
@@ -760,7 +760,7 @@ class IRFunctionBuilder(
         for scope in reversed(self.scopes):
             if name in scope:
                 return scope[name][0]
-        raise CodegenError(f"Reference to undeclared variable '{name}'")
+        raise IRError(f"Reference to undeclared variable '{name}'")
 
     def _local_type(self, name: str) -> Type:
         """Used specifically where a Variable's *slot* is also being
@@ -781,7 +781,7 @@ class IRFunctionBuilder(
         for scope in reversed(self.scopes):
             if name in scope:
                 return scope[name][1]
-        raise CodegenError(f"Reference to undeclared variable '{name}'")
+        raise IRError(f"Reference to undeclared variable '{name}'")
 
     def _local_decl_id(self, name: str) -> int:
         """Returns id(the VarDecl or Param node) that `name` currently
@@ -799,7 +799,7 @@ class IRFunctionBuilder(
         for scope in reversed(self.scopes):
             if name in scope:
                 return scope[name][2]
-        raise CodegenError(f"Reference to undeclared variable '{name}'")
+        raise IRError(f"Reference to undeclared variable '{name}'")
 
     def _local_temp(self, name: str) -> Temp:
         """Returns `name`'s own persistent Temp -- the fourth element
@@ -810,7 +810,7 @@ class IRFunctionBuilder(
         for scope in reversed(self.scopes):
             if name in scope:
                 return scope[name][3]
-        raise CodegenError(f"Reference to undeclared variable '{name}'")
+        raise IRError(f"Reference to undeclared variable '{name}'")
 
     def _is_heap_allocated(self, decl_id: int, t: Type) -> bool:
         """Whether the SPECIFIC array- or struct-typed declaration
