@@ -1,15 +1,9 @@
-"""Checks a handful of structural invariants this whole IR is already
-supposed to hold by construction (see ir.ir's own module docstring for
-the ones stated there explicitly), mechanically rather than by
-inspection. Nothing here exists today to violate them -- this is
-infrastructure for what comes NEXT: once a real IR-to-IR transform
-(an optimization pass) can rewrite ir_fn.body directly, a bug in that
-pass is free to produce IR that quietly violates one of these, with
-nothing catching it until the assembler, the linker, or a wrong answer
-at runtime does -- three of the worst possible places to learn a pass
-has a bug in it. Calling verify_function/verify_program right after a
-pass runs turns that into an immediate, specific IRVerificationError
-naming the exact function and op responsible, instead.
+"""Checks a handful of structural invariants this IR is supposed to
+hold by construction (see ir.ir's own module docstring), mechanically
+rather than by inspection -- catching a bug in an IR-to-IR transform
+(an optimization pass) as an immediate, specific IRVerificationError
+naming the exact function and op responsible, rather than a failure at
+the assembler, the linker, or a wrong answer at runtime.
 
 Checks, in the order verify_function runs them:
 - body is non-empty.
@@ -17,31 +11,26 @@ Checks, in the order verify_function runs them:
 - Every block (the run of ops between one IRLabel, or the start of
   body, and the next) ends in exactly one terminator (IRJump, IRBranch,
   IRReturn) -- no implicit fallthrough into a label or off the end of
-  body, matching ir.ir's own explicit "every block ends in exactly one
-  terminator" invariant.
+  body.
 - Every IRJump/IRBranch target names a real IRLabel in the same
   function.
 - Every IRLocalAddress.slot, and hidden_return_ptr_slot when set,
   names a real entry in slot_widths.
 - Every Temp read by some op (through any IRValue-typed field) was
   written by some op earlier in the SAME function (an IRReadArgument,
-  or any op with a dst, counts as a write) -- not a full, dominance-
-  based def-before-use analysis (this doesn't build a CFG or reason
-  about which path reaches a given op), just "defined somewhere at
-  all," which is already enough to catch the most likely mistake a
-  transform could make: deleting or renaming a Temp's own producer
-  while something else still reads it.
+  or any op with a dst, counts as a write) -- "defined somewhere at
+  all," not a dominance-based def-before-use analysis; enough to catch
+  a transform deleting or renaming a Temp's own producer while
+  something else still reads it.
 
-Deliberately NOT checked, for now: type consistency between an op and
-its own operands (e.g. IRBinOp.left/right agreeing on width) --
-correct type accounting needs its own careful pass through every op's
-own type rules, easy to get subtly wrong in a first version and worse
-than not checking at all if it produces false positives; and whether
-IRCall.name refers to a real function -- user Hornet functions and
-runtime/libc symbols (malloc, strcmp, hornet_print, ...) share this
-same field with no registry of valid names to check against today, and
-a genuinely bad name is already caught at link time regardless. Both
-are reasonable things to add later, once there's a concrete need."""
+Deliberately NOT checked: type consistency between an op and its own
+operands (IRBinOp.left/right agreeing on width, say) -- easy to get
+subtly wrong and worse than not checking at all if it produces false
+positives; and whether IRCall.name refers to a real function -- user
+Hornet functions and runtime/libc symbols (malloc, strcmp,
+hornet_print, ...) share this field with no registry of valid names to
+check against, and a bad name is already caught at link time
+regardless."""
 
 from ir.ir import (
     IRBinOp,
@@ -72,11 +61,8 @@ _TERMINATORS = (IRJump, IRBranch, IRReturn)
 
 class IRVerificationError(Exception):
     """Raised by verify_function/verify_program on the first structural
-    problem found -- see this module's own docstring for the checks
-    that can raise this, and why it's a distinct exception from
-    CodegenError: this signals a bug in the IR itself (this compiler's
-    own or a transform's), never a mistake in how the compiler was
-    invoked."""
+    problem found. Distinct from CodegenError: this signals a bug in
+    the IR itself, never a mistake in how the compiler was invoked."""
 
 
 def _op_defs(op) -> list:
@@ -128,11 +114,9 @@ def _op_uses(op) -> list:
 
 
 def verify_function(ir_fn: IRFunction) -> None:
-    """See this module's own docstring for exactly what this checks,
-    and in what order -- each check's own error message names ir_fn.
-    name and, where there's one specific op responsible, that op's own
-    repr, so a failure points straight at the actual problem rather
-    than just "somewhere in this function"."""
+    """See this module's own docstring for the checks and their order.
+    Each error names ir_fn.name and, where there's one specific op
+    responsible, that op's own repr."""
     if not ir_fn.body:
         raise IRVerificationError(f"{ir_fn.name}: empty body -- every function must end in a terminator")
 

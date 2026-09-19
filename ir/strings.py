@@ -3,16 +3,10 @@ a concatenation's malloc'd buffer -- never copied for its bytes the
 way an array or struct is. Also builds the runtime type-descriptor
 tree print() needs (_get_or_build_type_descriptor) and print()'s own
 real-IR call itself (_ir_print_call): the descriptor is walked, and
-the actual stringification happens, entirely in C now, by the
-runtime's own hornet_stringify/hornet_print (see runtime/runtime.c) --
-this file just builds the IRCall against hornet_print and the static
-descriptor data it reads. Used to also hand-build hornet_stringify
-itself, and the whole growable-buffer-append machinery underneath it,
-as literal x86-64 assembly directly in this file (build_
-stringify_function and its own helpers) -- removed entirely once
-print() migrated to the real runtime (see this file's own git history
-if that's ever useful, and ir.py's own top docstring for the broader
-old-style dead-code cleanup this was folded into)."""
+stringification happens, entirely in C, by the runtime's own hornet_
+stringify/hornet_print (see runtime/runtime.c) -- this file just
+builds the IRCall against hornet_print and the static descriptor data
+it reads."""
 
 from ir.errors import IRError
 from ir.ir import IRBinOp, IRConst, IRCall, IRStaticDataAddress, IRLocalAddress, IRStore
@@ -39,34 +33,25 @@ _TYPEDESC_INT64 = 8
 class StringsMixin:
     def _get_or_build_type_descriptor(self, t: Type, in_progress: dict[Type, str]) -> str:
         """Returns the label of t's runtime type descriptor, building
-        and registering it into self.ir_program.type_descriptors if it hasn't
-        already been built WITHIN THIS ONE CALL (in_progress, keyed on
-        t -- Type is frozen, so it's already a safe, correct dict key).
+        and registering it into self.ir_program.type_descriptors if it
+        hasn't already been built WITHIN THIS ONE CALL (in_progress,
+        keyed on t -- Type is frozen, so it's a safe dict key).
 
-        `in_progress` is scoped to a single top-level call (one fresh
-        dict per print() call site that needs a descriptor tree), not
-        a whole-program cache -- two print() calls on the same struct
-        type each build their own tree from scratch, matching gen_
-        expr_ir's own StringLiteral case's identical "no cross-
-        occurrence dedup, keep it simple" choice.
-
-        Reuse WITHIN one call isn't optional, though: it's the only
-        way a self-referential struct (`struct Node: int value; []Node
-        children`) can be represented as a finite amount of static
-        data at all. Reserving this type's label BEFORE recursing into
-        anything it contains is what breaks that cycle -- a nested
-        reference back to the same type finds its label already in
-        in_progress and reuses it.
+        `in_progress` is scoped to a single top-level call, not a
+        whole-program cache -- two print() calls on the same struct
+        type each build their own tree from scratch. Reuse WITHIN one
+        call isn't optional, though: it's the only way a self-
+        referential struct (`struct Node: int value; []Node children`)
+        can be represented as a finite amount of static data at all.
+        Reserving this type's label BEFORE recursing into anything it
+        contains is what breaks that cycle.
 
         Every non-leaf kind (ARRAY, SLICE, STRUCT) carries its own
         type-name string (e.g. "[3]int", "Point") as a second field
         right after the kind tag; hornet_stringify prints this
-        immediately before that kind's opening bracket/brace at EVERY
-        level it appears, not just the outermost value a print() call
-        names directly. INT/INT8/UINT8/BOOL/STR carry no name field at
-        all -- a genuine per-kind layout difference, not a uniform
-        field every descriptor has.
-        """
+        immediately before that kind's opening bracket/brace at every
+        level it appears. INT/INT8/UINT8/BOOL/STR carry no name field
+        at all."""
         if t in in_progress:
             return in_progress[t]
         label = self.ir_program.ids.new_label("typedesc")
@@ -129,70 +114,26 @@ class StringsMixin:
 
     def _ir_print_call(self, expr: Call):
         """Builds (without lowering) print(x)'s own real IR -- returns
-        (ir, None), a void call, matching _ir_call's own contract for
-        one.
+        (ir, None), a void call.
 
-        Unlike an ordinary function call (_ir_call/_ir_call_arguments),
-        which passes a scalar BY VALUE and a composite by address,
-        this always computes an ADDRESS for x, regardless of its own
-        type: hornet_print's own signature is uniformly `void
-        hornet_print(void *value_addr, const unsigned char
-        *type_desc)`, and hornet_stringify (called internally, not by
-        this compiler at all anymore) dereferences that address at
-        whatever width its own type descriptor says to. This is why
-        print needs its own dedicated entry point rather than
-        routing through _ir_call the way an ordinary call does --
-        the same reason _ir_len_call has always needed one, and
-        exactly why gen_expr_ir's own dispatch has always excluded
-        'print' from the ordinary-Call case (`expr.name not in
-        ('print', 'len')`), even before this method existed to fill
-        that gap with real IR.
+        Unlike an ordinary call, which passes a scalar BY VALUE and a
+        composite by address, this always computes an ADDRESS for x,
+        regardless of its own type: hornet_print's signature is
+        uniformly `void hornet_print(void *value_addr, const unsigned
+        char *type_desc)`, and hornet_stringify dereferences that
+        address at whatever width its own type descriptor says to.
 
         ARRAY/STRUCT-typed x: reuses _ir_composite_operand_address
-        completely unchanged -- confirmed directly that the shapes it
-        already covers (Variable/Field/Index, a bare ArrayLiteral,
-        an ordinary composite-returning Call) are EXACTLY what
-        semantic.py restricts print's own argument to as well: a
-        struct-literal Call (`print(Point(1, 2))`), the one shape
-        that method doesn't cover, is rejected as print's own
-        argument the same way it's rejected as an equality operand;
-        an ordinary composite-returning Call (`print(makePoint())`)
-        is allowed in both places. Raises IRError, via that
-        method's own contract, on the None it would otherwise return
-        for a shape genuinely out of scope -- moot in practice,
-        for the identical reason it's already moot at every other
-        caller of that method.
-
-        SLICE-typed x: _ir_slice_arg already unifies every reachable
-        slice-typed shape -- an existing Variable/Field/Index, or a
-        freshly-produced value (a Slice production, append, an
-        ordinary Call) -- into one {ptr, len, cap} triple. Rather than
-        separately handling "already has an address" (Variable/Field/
-        Index, via _ir_slice_address) from "needs one materialized"
-        (everything else), this always writes that triple into the
-        SAME shared, unconditionally-reserved 24-byte
-        _unnamed_slice_temp_slot scratch slot (reserved
-        unconditionally for every function, in gen_function_ir -- see
-        its own comment) and takes THAT slot's own address -- one path
-        for every shape, not two.
-
-        Otherwise, a scalar (int/bool/str/int8/uint8/int64): the one
-        shape with no existing "address of this value" concept in
-        real IR at all, since a scalar has only ever needed to live in
-        a Temp before now, never at a durable address. Computes the
-        value via gen_expr_ir, writes it into the existing,
-        unconditionally-reserved 8-byte _print_scalar_temp_slot
-        scratch slot (reserved unconditionally for every function, in
-        gen_function_ir -- see its own comment), and takes that slot's
-        own address. A deliberate, narrowly-scoped exception to
-        keeping IR conceptual rather than physical: there's no way
-        around a real address here, since hornet_print is a genuine
-        C-ABI boundary this compiler's own output has to cross.
-
-        The type descriptor lookup/build itself (_get_or_build_type_
-        descriptor) is unchanged -- already a pure, compile-time
-        operation, feeding this new call site exactly as it always fed
-        the old one."""
+        unchanged. SLICE-typed x: _ir_slice_arg unifies every
+        reachable shape into one {ptr, len, cap} triple, written into
+        the shared, unconditionally-reserved 24-byte _unnamed_slice_
+        temp_slot scratch slot, whose address is then taken. Otherwise
+        a scalar: computed via gen_expr_ir, written into the shared
+        8-byte _print_scalar_temp_slot scratch slot -- a scalar has no
+        other "address of this value" concept in real IR, since it
+        only ever needs to live in a Temp; this is a deliberate,
+        narrow exception, since hornet_print is a genuine C-ABI
+        boundary this compiler's own output has to cross."""
         arg = expr.args[0]
         arg_type = type_of(arg)
 
@@ -233,33 +174,17 @@ class StringsMixin:
         strlen/malloc/strcpy/strcat: IRCall's own lowering is already
         fully generic (just `CallInstr(instr.name)`), with no notion
         of "Hornet function" baked in, so an external C library call
-        needs no new IR concept at all, unlike append's own
-        IRSliceGrow -- this is real IR entirely from EXISTING pieces
-        (IRCall, IRBinOp), composed.
+        needs no new IR concept at all.
 
-        left/right are each evaluated via gen_expr_ir now (a migrated
-        sub-expression -- another concatenation, a scalar Call --
-        stays real IR instead of being immediately, separately
-        lowered), rather than the old-style version's own gen_expr_
-        into. This is also what makes the old-style version's own
-        careful "protect left across evaluating right" stack dance
-        unnecessary here: left_value is already sitting safely in its
-        own Temp home (register or memory, via the allocator) the
-        moment gen_expr_ir(expr.left) returns, regardless of what
-        evaluating right does internally -- the same "a Temp's home is
-        independent of what computed it" property this whole arc has
-        relied on repeatedly (IRCopy's own two-address capture,
-        _ir_index_address's own protection-free design, ...).
+        left/right are each evaluated via gen_expr_ir, so left_value
+        is already sitting safely in its own Temp home (register or
+        memory) by the time right is evaluated, regardless of what
+        that does internally -- no "protect left across evaluating
+        right" dance needed.
 
         MEMORY: _ir_free_if_fresh_concat replicates gen_string_concat_
-        into's own AST-shape check exactly (see its own docstring for
-        why this narrow check is safe with no broader escape
-        analysis) -- called once left's bytes are copied (strcpy) and
-        once right's are (strcat), matching the old-style ordering.
-        No stash-before-free dance is needed here either, for the
-        identical Temp-independence reason: the result buffer's own
-        Temp isn't touched by an intervening free() call the way the
-        old code's own fixed %eax would be."""
+        into's own AST-shape check, called once left's bytes are
+        copied (strcpy) and once right's are (strcat)."""
         left_ir, left_value = self.gen_expr_ir(expr.left)
         right_ir, right_value = self.gen_expr_ir(expr.right)
 
@@ -285,16 +210,13 @@ class StringsMixin:
     def _ir_free_if_fresh_concat(self, operand: Node, value) -> list:
         """If `operand` is itself a Binary(ADD, ...) node -- meaning
         `value` is a fresh buffer _ir_string_concat just malloc'd for
-        *this* expression alone, which could never have been stored
-        into a variable, returned, or passed as an argument -- frees
-        it, via an ordinary IRCall(free). Everything else is left
-        alone: a StringLiteral points into static `.data` and was
-        never heap-allocated (freeing it would corrupt the allocator);
-        a Variable or a Call's return value might be aliased by code
-        we have no visibility into here -- telling those apart from a
-        genuinely fresh, exclusively-owned buffer is a real escape-
-        analysis problem this narrow check deliberately doesn't
-        attempt to solve."""
+        *this* expression alone -- frees it via IRCall(free).
+        Everything else is left alone: a StringLiteral points into
+        static `.data` (freeing it would corrupt the allocator); a
+        Variable or a Call's return value might be aliased elsewhere
+        -- telling those apart from a genuinely fresh, exclusively-
+        owned buffer is a real escape-analysis problem this narrow
+        check deliberately doesn't attempt."""
         if isinstance(operand, Binary) and operand.op == BinaryOp.ADD:
             return [IRCall(dst=None, name='free', args=[value])]
         return []
@@ -302,18 +224,9 @@ class StringsMixin:
     def _ir_string_compare(self, expr: Binary):
         """Builds (without lowering) `left == right` / `left != right`
         (both str) as real IR -- returns (ir, value). Same shape as
-        _ir_string_concat: ordinary IRCall(strcmp) plus an ordinary
-        IRBinOp for the 0/1 bool conversion, reusing
-        _COMPARISON_CONDITION_CODES[op] indirectly via IRBinOp's own
-        existing comparison lowering rather than reimplementing the
-        cmp/SetCC/MovZX sequence here.
-
-        No stash-before-free dance needed here either, for the same
-        Temp-independence reason _ir_string_concat's own docstring
-        gives: strcmp's own result is already safely captured into
-        cmp_result before either free() call ever runs, so freeing a
-        fresh operand can't clobber it the way it could the old code's
-        own fixed %eax."""
+        _ir_string_concat: IRCall(strcmp) plus an ordinary IRBinOp for
+        the 0/1 bool conversion, via IRBinOp's own existing comparison
+        lowering."""
         left_ir, left_value = self.gen_expr_ir(expr.left)
         right_ir, right_value = self.gen_expr_ir(expr.right)
 

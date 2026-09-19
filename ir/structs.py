@@ -31,25 +31,18 @@ class StructsMixin:
 
     def _ir_struct_address(self, expr: Node) -> tuple[list, object]:
         """Builds (without lowering) the address of a struct-typed
-        expr -- Variable, Field, Index, or now an ordinary composite-
-        returning Call (`makePoint().x`, materialized first via _ir_
-        materialize_composite_call -- see its own docstring) -- as
-        real IR. Field/Index delegate to _ir_field_address/_ir_
-        index_address, which call back into this method for their own
-        STRUCT-typed base -- the same mutual recursion those two
-        already use for an ARRAY-typed base, so a chain of arbitrary
-        depth (`a.b.c`, `rows[0].f`) falls out with no special-casing.
+        expr -- Variable, Field, Index, or an ordinary composite-
+        returning Call (materialized via _ir_materialize_composite_
+        call) -- as real IR. Field/Index delegate to _ir_field_
+        address/_ir_index_address, which call back into this method
+        for their own STRUCT-typed base, so a chain of arbitrary depth
+        (`a.b.c`, `rows[0].f`) falls out with no special-casing.
 
         The Variable case is the one genuine leaf: a named struct
-        variable's own address is either a fixed, compile-time %rbp-
-        relative offset (IRLocalAddress directly) or, if heap-
-        allocated, the pointer STORED at that offset (IRLocalAddress
-        for the slot's own address, then an ordinary IRLoad reading
-        the pointer through it) -- IRLocalAddress always means "the
-        address of this slot," never "the value stored there," so the
-        heap-allocated case composes it with IRLoad rather than
-        needing its own, second meaning (see IRLocalAddress's own
-        docstring)."""
+        variable's own address is either a fixed %rbp-relative offset
+        (IRLocalAddress directly) or, if heap-allocated, the pointer
+        stored at that offset (IRLocalAddress for the slot's own
+        address, then an IRLoad reading the pointer through it)."""
         if isinstance(expr, Variable):
             slot = self._local_slot(expr.name)
             struct_type = self._local_type(expr.name)
@@ -71,14 +64,8 @@ class StructsMixin:
     def _ir_field_address(self, expr: Field) -> tuple[list, object]:
         """Builds (without lowering) the address of `expr.base.expr.
         name` as real IR: the base's own address (recursively, via
-        _ir_struct_address), plus expr.name's fixed byte offset, as an
-        ordinary IRBinOp(ADD) on two INT64 values -- offset already
-        fits IRBinOp's existing type-driven lowering with no changes
-        needed at all (it already derives its own operand width from
-        left.type, already INT64 here). Skips the add entirely when
-        offset is 0, an ordinary micro-optimization, not a correctness
-        requirement -- IRBinOp(ADD, x, 0) would compute the identical
-        address either way."""
+        _ir_struct_address) plus expr.name's fixed byte offset, via
+        IRBinOp(ADD). Skips the add when offset is 0."""
         base_type = type_of(expr.base)
         if base_type.kind != TypeKind.STRUCT:
             raise IRError(
@@ -101,42 +88,22 @@ class StructsMixin:
 
     def _ir_write_struct_literal_into(self, dst_address, expr: Call, struct_type: Type):
         """Builds (without lowering) a struct literal's fields as real
-        IR, written through dst_address -- an ordinary INT64-typed
-        IRValue, however the caller already has it (see _ir_composite_
-        call's own docstring for the same "doesn't care how" contract).
-        Returns None only when some field's own value is itself out of
-        scope for _ir_write_composite_value_into -- a field that's
-        ITSELF composite is no longer automatically out of scope,
-        unlike this method's own earlier version: mutual recursion
-        through _ir_write_composite_value_into handles it, the same
-        shape address computation's own Field/Index handling already
-        relies on elsewhere in this arc.
+        IR, written through dst_address. Returns None only when some
+        field's own value is out of scope for _ir_write_composite_
+        value_into.
 
         Named construction (expr.kwargs) is normalized to the same
         (field_name, value_expr, field_type) shape positional
-        construction already iterates, walking every field in
-        declaration order -- the same normalization gen_struct_
-        literal_into's own old-style version already does. An omitted
-        field's value_expr comes back None, filled via _ir_write_zero_
-        value_into (a TOTAL function -- see its own docstring for why
-        it never needs to fall back the way a value_expr-dependent
-        write can) rather than left as untouched, garbage bytes.
+        construction iterates, walking every field in declaration
+        order. An omitted field's value_expr comes back None, filled
+        via _ir_write_zero_value_into (a TOTAL function).
 
-        Each field's own address is dst_address + its own, already-
-        correct _field_offset (computed once per field, the same
-        proven helper this compiler's own field-address code
-        everywhere else already calls, rather than accumulating a
-        running offset by hand and risking it drifting out of sync
-        with that logic) via ordinary IRBinOp -- skipped entirely for
-        the first field (offset 0 needs no addition, matching _ir_
-        write_slice_descriptor's own identical shortcut for its own
-        ptr field). A scalar field's value is evaluated via gen_expr_ir
-        and written via IRStore; a composite field delegates entirely
-        to _ir_write_composite_value_into. If ANY provided field's own
-        value turns out to be out of scope, the whole literal falls
-        back (returns None) -- see _ir_write_array_literal_into's own
-        docstring for why any IR already built for earlier fields
-        being discarded is harmless, not a partial-write risk."""
+        Each field's own address is dst_address + its own _field_
+        offset, skipped for the first field (offset 0). A scalar
+        field's value is evaluated via gen_expr_ir and written via
+        IRStore; a composite field delegates to _ir_write_composite_
+        value_into. If any field's own value is out of scope, the
+        whole literal falls back (returns None)."""
         struct_info = self.ir_program.struct_registry[struct_type.struct_name]
         field_items = list(struct_info.fields.items())
         if expr.kwargs is not None:
@@ -150,13 +117,11 @@ class StructsMixin:
         for field_name, arg_expr, field_type in entries:
             offset = self._field_offset(struct_type.struct_name, field_name)
             if arg_expr is None:
-                # An OMITTED field in a named, partial literal (only
-                # possible when expr.kwargs is not None -- positional
-                # construction is exhaustive, so arg_expr is never
-                # None there) -- gets its own type's implicit zero
-                # value via _ir_write_zero_value_into, a TOTAL
-                # function (see its own docstring), so this branch
-                # never needs to fall back the way the other two do.
+                # Omitted field in a named, partial literal (positional
+                # construction is exhaustive, so arg_expr is never None
+                # there) -- gets its own type's zero value via _ir_
+                # write_zero_value_into, a TOTAL function that never
+                # needs to fall back.
                 if offset == 0:
                     field_addr = dst_address
                 else:
@@ -190,26 +155,15 @@ class StructsMixin:
     def _ir_materialize_struct_literal(self, expr: Call):
         """Builds (without lowering) a struct-literal Call's own
         materialized address as real IR -- returns (ir, address), or
-        None when some field is itself out of scope for _ir_write_
-        struct_literal_into (a named/partial literal, chiefly -- see
-        its own docstring). The struct-literal counterpart to _ir_
+        None when some field is out of scope for _ir_write_struct_
+        literal_into. The struct-literal counterpart to _ir_
         materialize_array_literal in arrays_slices.py, sharing its
-        exact same skeleton (a reserved slot, or malloc when none was
-        reserved) -- see its own docstring for the full reasoning,
-        which applies here unchanged. Used wherever a struct literal
-        is passed directly as a function-call argument (`draw(Point(1,
-        2))`) -- the identical AST position _collect_argument_temps
-        has always reserved a slot for, since before this arc's own
-        addressable-base work existed; this is that reservation's
-        real-IR consumer finally catching up to it, not a new
-        reservation of its own.
+        same skeleton (a reserved slot, or malloc when none was
+        reserved).
 
-        No value_type ambiguity to worry about here, unlike an
-        ArrayLiteral: a struct-literal Call's own type is
-        unambiguously its own struct name, not something that can
-        resolve differently by context the way a bracketed list can
-        (ARRAY vs SLICE) -- so type_of(expr) is simply, always
-        correct, with nothing to disambiguate."""
+        No value_type ambiguity here, unlike an ArrayLiteral: a
+        struct-literal Call's own type is unambiguously its own struct
+        name, so type_of(expr) is simply, always correct."""
         struct_type = type_of(expr)
         if id(expr) in self._argument_temp_slots:
             slot = self._argument_temp_slots[id(expr)]

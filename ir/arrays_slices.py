@@ -36,20 +36,13 @@ from semantic import TypeKind, Type
 class ArraysSlicesMixin:
     def _ir_array_address(self, expr: Node):
         """The address of an array-typed expr -- Variable is the one
-        genuine leaf (a fixed, compile-time
-        %rbp-relative offset -- IRLocalAddress directly -- or, if
-        heap-allocated, the pointer STORED at that offset --
-        IRLocalAddress for the slot's own address, then an ordinary
-        IRLoad reading the pointer through it, the same composition
-        _ir_struct_address's own Variable case uses, for the identical
-        reason: IRLocalAddress always means "the address of this
-        slot," never "the value stored there"), Index/Field recurse
-        into _ir_index_address/_ir_field_address.
+        genuine leaf (a fixed %rbp-relative offset via IRLocalAddress
+        directly, or, if heap-allocated, the pointer STORED at that
+        offset via IRLocalAddress plus an IRLoad through it), Index/
+        Field recurse into _ir_index_address/_ir_field_address.
 
         Returns None for an ArrayLiteral (construction, not an
-        existing address -- out of scope for this method entirely; a
-        bare ArrayLiteral has its own, separate real-IR handling
-        elsewhere, e.g. _ir_materialize_array_literal)."""
+        existing address -- see _ir_materialize_array_literal)."""
         if isinstance(expr, Variable):
             slot = self._local_slot(expr.name)
             array_type = self._local_type(expr.name)
@@ -68,22 +61,16 @@ class ArraysSlicesMixin:
 
     def _ir_slice_address(self, expr: Node):
         """Mirrors _ir_array_address's own shape for a slice-typed
-        expr, but simpler: a slice variable is never heap-allocated
-        (every one of _is_heap_allocated's own call sites scopes it to
-        ARRAY/STRUCT only -- a slice's own 24-byte descriptor is always a
-        small, fixed-size, stack-resident value, regardless of
-        whether its backing array is heap-allocated), so the Variable
-        leaf is just a single LeaQFrame, no heap-vs-stack branch
-        needed at all. Index/Field recurse into _ir_index_address/
-        _ir_field_address exactly like _ir_array_address's own do --
-        neither cares what the result's own type is, only its address
-        and byte width (already correct for SLICE via type_byte_
-        width/_field_offset, with no changes needed there).
+        expr, but simpler: a slice variable is never heap-allocated --
+        a slice's own 24-byte descriptor is always a small, fixed-size,
+        stack-resident value -- so the Variable leaf is just a single
+        LeaQFrame, no heap-vs-stack branch needed. Index/Field recurse
+        into _ir_index_address/_ir_field_address exactly like _ir_
+        array_address's own do.
 
-        Returns None for a Slice (`arr[a:b]`, slice production -- a
-        fresh descriptor, not an existing address) or a Call (a
-        slice-returning function call) -- both genuinely out of scope
-        for now, real, separate follow-up work."""
+        Returns None for a Slice (`arr[a:b]`, slice production) or a
+        Call (a slice-returning function call) -- both out of scope
+        for this method."""
         if isinstance(expr, Variable):
             slot = self._local_slot(expr.name)
             addr_temp = self.ir_program.ids.new_temp(Type.INT64)
@@ -100,28 +87,19 @@ class ArraysSlicesMixin:
         Call's own materialized address as real IR -- returns (ir,
         address). Used wherever such a call sits directly at an
         addressable-base position (Index.array, Field.base, Slice.
-        array) with no address of its own to compute, unlike a
-        Variable/Field/Index base.
+        array) with no address of its own to compute.
 
         Whether the result lands on the stack or the heap is decided
         entirely by whether _collect_argument_temps_in_expr's own
         pre-pass reserved a slot for id(call_expr) -- see its own
-        docstring for exactly which of the three base positions get
-        one (Index/Field, when small enough) and which never do
-        (Slice, which always escapes, regardless of size, since the
-        slice it produces can outlive this statement). No reservation
-        found here means malloc, matching the identical "no slot
-        reserved -> malloc" contract _gen_materialize_argument_temp_
-        into's own docstring already establishes for a composite-
-        returning Call used as an ordinary function argument -- this
-        is the same mechanism, reused for three more AST positions,
-        not a new one.
+        docstring for which of the three base positions get one
+        (Index/Field, when small enough) and which never do (Slice,
+        which always escapes regardless of size). No reservation found
+        means malloc.
 
         Either way, the destination address is handed to _ir_
-        composite_call exactly as any other composite-returning
-        call's own destination would be -- the result is written
-        through it via the ordinary hidden-pointer convention, with
-        no new IR concept needed at all."""
+        composite_call exactly as any other composite-returning call's
+        own destination would be."""
         if id(call_expr) in self._argument_temp_slots:
             slot = self._argument_temp_slots[id(call_expr)]
             addr = self.ir_program.ids.new_temp(Type.INT64)
@@ -136,40 +114,28 @@ class ArraysSlicesMixin:
     def _ir_materialize_array_literal(self, expr: ArrayLiteral):
         """Builds (without lowering) an ArrayLiteral's own materialized
         address as real IR -- returns (ir, address), or None when some
-        element is itself out of scope for _ir_write_array_literal_
-        into. Used wherever such a literal sits directly at an
-        addressable-base position (`[1, 2, 3][i]`, `[1, 2, 3][a:b]`)
-        with no address of its own to compute -- the ArrayLiteral
+        element is out of scope for _ir_write_array_literal_into. Used
+        wherever such a literal sits directly at an addressable-base
+        position (`[1, 2, 3][i]`, `[1, 2, 3][a:b]`) -- the ArrayLiteral
         counterpart to _ir_materialize_composite_call, sharing its
-        exact same skeleton (a reserved slot, or malloc when none was
-        reserved), just populating the backing via _ir_write_array_
-        literal_into instead of _ir_composite_call.
+        same skeleton (a reserved slot, or malloc when none was
+        reserved).
 
-        A struct-literal Call sitting at one of these same base
-        positions needs no equivalent of its own: semantic.py already
-        rejects that outright, wherever it would appear (Point(1,2).x
-        fails to type-check at all, naming the specific, narrow set of
-        positions a struct literal IS allowed in, none of which
-        include being a base) -- there is no gap here for codegen to
-        close.
+        A struct-literal Call at one of these same base positions
+        needs no equivalent: semantic.py already rejects that outright
+        wherever it would appear.
 
         Only ever reached from _ir_indexable_base's own ARRAY branch,
         never its SLICE branch: type_of on a bare ArrayLiteral used
-        directly as a base (with no declared destination type to
-        resolve it against, unlike a VarDecl/Assign/FieldAssign/
-        IndexAssign/Return's own declared type) is always ARRAY-kind,
-        the same fact _ir_slice_literal's own docstring already
-        establishes -- so a Slice production from this kind of base
-        (`[1, 2, 3][a:b]`) still reaches this same ARRAY-branch
-        materialization for its own base, exactly like an ordinary
-        index read does, with _ir_slice_into itself producing the
-        actual slice descriptor one level up.
+        directly as a base is always ARRAY-kind, so a Slice production
+        from this kind of base (`[1, 2, 3][a:b]`) still reaches this
+        same ARRAY-branch materialization for its own base, with _ir_
+        slice_into itself producing the actual slice descriptor one
+        level up.
 
-        No value_type parameter, deliberately, for the identical
-        reason _ir_slice_literal's own docstring gives for dropping
-        its own: type_of(expr) is already exactly the ARRAY-kind Type
-        this needs, with no destination-type ambiguity possible here
-        at all (there IS no destination at this position)."""
+        No value_type parameter: type_of(expr) is already exactly the
+        ARRAY-kind Type this needs, with no destination-type ambiguity
+        possible at this position."""
         array_type = type_of(expr)
         if id(expr) in self._argument_temp_slots:
             slot = self._argument_temp_slots[id(expr)]
@@ -187,106 +153,51 @@ class ArraysSlicesMixin:
     def _ir_indexable_base(self, expr: Node):
         """Builds (without lowering) the address, length, and capacity
         of an indexable base as real IR -- returns (ir, addr_value,
-        length_value, cap_value), or None when expr's own shape is
-        still out of scope (a struct-literal Call used directly at
-        this position -- moot in practice, since semantic.py already
-        rejects that outright wherever it would appear, not just here;
-        see _ir_materialize_array_literal's own docstring). cap_value
-        is always computed, even by a caller (_ir_index_address) that
-        never reads it back -- cheap enough that one uniform, three-
-        value contract beats making it optional.
+        length_value, cap_value), or None when expr's own shape is out
+        of scope (a struct-literal Call directly at this position --
+        moot in practice, semantic.py already rejects that outright).
+        cap_value is always computed, even by a caller (_ir_index_
+        address) that never reads it back.
 
         ARRAY-typed: delegates to _ir_array_address for a Variable/
-        Field/Index base, to _ir_materialize_composite_call for an
-        ordinary composite-returning Call (`makeArray()[i]`), or to
-        _ir_materialize_array_literal for a bare bracketed-list
-        literal (`[1, 2, 3][i]`) -- see each one's own docstring;
-        length and cap are both always the same
-        compile-time IRConst either way -- an array has no separate
-        capacity.
+        Field/Index base, _ir_materialize_composite_call for an
+        ordinary composite-returning Call, or _ir_materialize_array_
+        literal for a bare bracketed-list literal; length and cap are
+        both the same compile-time IRConst either way -- an array has
+        no separate capacity.
 
-        SLICE-typed, Variable: now the identical shape as the Field/
-        Index case just below, just starting from IRLocalAddress (a
-        fixed, compile-time frame offset) instead of _ir_field_
-        address/_ir_index_address (a runtime-computed one) -- ptr read
-        straight off that address via IRLoad, len/cap via their own
-        +8/+16 addresses computed first through ordinary IRBinOp. len/
-        cap are captured as INT (32-bit) Temps directly, not INT64 --
-        an array/slice's own length or capacity always fits in 32
-        bits, the same assumption the old-style bounds check's own
-        len_reg_32/cap_operand already make.
+        SLICE-typed, Variable: ptr read straight off the descriptor's
+        fixed frame address via IRLoad; len/cap via their own +8/+16
+        addresses computed through ordinary IRBinOp. len/cap are
+        captured as INT (32-bit) Temps -- an array/slice's own length
+        or capacity always fits in 32 bits.
 
-        SLICE-typed, Field/Index (`p.values`, `rows[i]`): unlike the
-        Variable case, there's no fixed, compile-time offset to read
-        three fields from directly -- the descriptor's own address is
-        itself a runtime value, computed via _ir_field_address/_ir_
-        index_address (already generic over the result's own type, so
-        neither needed any change to support this). ptr is read
-        straight off that address via IRLoad; len/cap need their own
-        +8/+16 addresses computed first, via ordinary IRBinOp, since
-        IRLoad always reads at its address's own location, with no
-        offset field of its own. This is also what makes a slice
-        reached through a chain (`outer.inner.values[0]`, or a slice-
-        of-slices `rows[i][j]`, where rows[i] is itself SLICE-typed
-        and reached via this exact branch recursively) fall out for
-        free: _ir_field_address/_ir_index_address already recurse
-        through arbitrary Variable/Field/Index chains on their own.
+        SLICE-typed, Field/Index (`p.values`, `rows[i]`): same read
+        shape as Variable, but the descriptor's own address is itself
+        a runtime value, computed via _ir_field_address/_ir_index_
+        address (already generic over the result's own type). This is
+        what makes a slice reached through a chain (`outer.inner.
+        values[0]`, `rows[i][j]`) fall out for free: those two methods
+        already recurse through arbitrary Variable/Field/Index chains.
 
         SLICE-typed, ordinary composite-returning Call
-        (`makeSlice()[i]`): same read shape as Field/Index just above,
-        just with the descriptor's own address coming from _ir_
-        materialize_composite_call instead. Also reached, via _ir_
-        slice_into's own delegation to this method for its OWN base,
-        by a slice PRODUCED from this call's result (`makeArray()
-        [a:b]`) -- see _ir_materialize_composite_call's own docstring
-        for why that specific shape always heap-allocates, regardless
-        of size, unlike an ordinary index/field read of the same call.
+        (`makeSlice()[i]`): same read shape, with the descriptor's own
+        address coming from _ir_materialize_composite_call instead.
+        Also reached, via _ir_slice_into's own delegation to this
+        method, by a slice PRODUCED from this call's result
+        (`makeArray()[a:b]`).
 
-        SLICE-typed, append (`append(s, x)[i]`, `append(s, x) ==
-        none`, `sumSlice(append(s, x))`, ...): _ir_append_call already
-        returns exactly (ir, ptr, len, cap) -- the identical four-
-        tuple this method itself returns -- so this delegates straight
-        to it, the same "no materialization needed, the values already
-        are what this method wants back" shape the Slice case just
-        below uses for _ir_slice_into. append is checked here, before
-        the ordinary-composite-Call case just above, for the identical
-        reason it's always checked before an ordinary Call everywhere
-        else in this arc: it's a builtin, never a compiled function,
-        so _is_ordinary_composite_call already excludes it by name --
-        without a dedicated case here, `append(...)` used directly as
-        a base fell through to `if not isinstance(expr, (Variable,
-        Field, Index)): return None`, forcing every caller composed
-        through this method (index/field addressing, VarDecl/Assign/
-        IndexAssign/FieldAssign/Return's own copy logic, equality,
-        argument-passing, none-comparison) down old-style fallback
-        paths that were never actually exercised by this arc's own
-        test suite before -- three of which turned out to be
-        genuinely broken (a link-time "undefined reference to
-        `append`", a KeyError from a pre-pass assumption that never
-        held for this shape, and an implicit None return crashing
-        with a TypeError several frames away) rather than just slower.
-        This one, two-line addition is the fix for all of them at
-        once, not four separate patches: every one of those call
-        sites already recurses through this method for its own base
-        resolution, so they compose correctly automatically once this
-        method itself does.
+        SLICE-typed, append (`append(s, x)[i]`, `append(s, x) == none`,
+        ...): _ir_append_call already returns exactly (ir, ptr, len,
+        cap), so this delegates straight to it. Checked before the
+        ordinary-composite-Call case above, since append is a builtin,
+        never a compiled function.
 
         SLICE-typed, Slice (`arr[:][0]`, `s[a:b][c:d]`): delegates
-        straight to _ir_slice_into, whose own return shape (ir, ptr,
-        len, cap) already matches this method's own exactly -- there
-        is no scratch-slot materialization to do here at all, unlike
-        the old-style gen_indexable_base_into's own Slice case. That
-        mechanism existed only to work around hand-written assembly's
-        fixed registers; _ir_slice_into already produces its own
-        triple as ordinary, independent Temps, so using them directly
-        is not a shortcut around some missing step, it's simply what
-        the values already are. This is also what makes arbitrarily
-        deep chains (`arr[a:b][c:d][e]`) fall out for free, via the
-        same mutual recursion _ir_index_address/_ir_array_address/
-        this method already use for multi-dimensional arrays -- each
-        nested _ir_slice_into call gets its own fresh Temps, so unlike
-        the old-style shared slot, there is no nested-lifetime safety
-        argument to make here at all."""
+        straight to _ir_slice_into, whose own return shape already
+        matches this method's exactly. This is what makes arbitrarily
+        deep chains (`arr[a:b][c:d][e]`) fall out for free: each nested
+        _ir_slice_into call gets its own fresh Temps."""
         base_type = type_of(expr)
         if base_type.kind == TypeKind.ARRAY:
             if self._is_ordinary_composite_call(expr):
@@ -369,18 +280,14 @@ class ArraysSlicesMixin:
     def _ir_nil_slice(self):
         """Builds (without lowering) a nil slice's own {ptr, len, cap}
         triple as real IR -- all-zero, matching this compiler's own
-        nil-slice representation throughout (ptr=0 -- never
-        dereferenced, since len=0 always gets checked first before any
-        element access; len=cap=0). Returns (ir, ptr_value, len_value,
-        cap_value), the identical shape _ir_indexable_base/_ir_
-        append_call/_ir_slice_into already return.
+        nil-slice representation (ptr=0, never dereferenced since
+        len=0 always gets checked first). Returns (ir, ptr_value,
+        len_value, cap_value), the same shape _ir_indexable_base/_ir_
+        append_call/_ir_slice_into return.
 
         Shared by every VarDecl/Assign/IndexAssign/FieldAssign/Return
         case initializing a slice-typed destination to a bare `none`,
-        and by _ir_slice_arg's own NoneLiteral case just below --
-        factored out here specifically so all of them build the
-        IDENTICAL triple from one place, rather than each duplicating
-        this same three-IRMove sequence independently."""
+        and by _ir_slice_arg's own NoneLiteral case."""
         ptr = self.ir_program.ids.new_temp(Type.INT64)
         length = self.ir_program.ids.new_temp(Type.INT)
         cap = self.ir_program.ids.new_temp(Type.INT)
@@ -406,37 +313,20 @@ class ArraysSlicesMixin:
     def _ir_index_address(self, expr: Index):
         """Builds (without lowering) the address of expr.array[expr.
         index] as real IR -- the shared foundation for a scalar
-        element read/write (dispatch.py's _ir_load / this module's
-        own _ir_index_assign) and a sub-array (this method's own
-        recursive base case, via _ir_array_address, when expr.array
-        is itself an Index -- this method and _ir_array_address call
-        back into each other for exactly this reason, so `matrix[i][j]`
-        falls out with no special-casing for depth).
+        element read/write and a sub-array (this method's own
+        recursive base case, via _ir_array_address, when expr.array is
+        itself an Index, so `matrix[i][j]` falls out with no special-
+        casing for depth).
 
         Returns None when expr.array's own base is out of scope for
-        real IR right now -- see _ir_indexable_base.
+        real IR -- see _ir_indexable_base.
 
-        The bounds check aside (IRBoundsCheck -- see its own
-        docstring for why no ordinary BinaryOp can express it), the
-        actual arithmetic is ordinary IRBinOp: multiply the index by
-        the element's own stride, add to the base. Reuses exactly the
-        same 32-bit-multiply-then-64-bit-add shape gen_index_address_
-        into's own comment already justifies -- the bounds check
-        guarantees a small, non-negative index, so a 32-bit multiply
-        is safe, and its own write already zero-extends into the full
-        64-bit register the following ADD reads (IRBinOp's own
-        lowering derives each operation's width from its LEFT operand
-        -- INT for the multiply, INT64 for the add -- with no explicit
-        width juggling needed here at all).
-
-        No push/pop protection is needed around evaluating expr.index,
-        unlike the old-style version: base_addr/length_value are
-        already safely stored in their own Temp homes (register or
-        memory, via the allocator) the moment _ir_indexable_base
-        finishes, before expr.index (which could itself be arbitrarily
-        complex, even a call) ever runs -- the same "a Temp's home is
-        independent of what computed it" property that already made
-        IRCopy's own two-address capture protection-free."""
+        The bounds check aside (IRBoundsCheck), the actual arithmetic
+        is ordinary IRBinOp: multiply the index by the element's own
+        stride, add to the base. The bounds check guarantees a small,
+        non-negative index, so a 32-bit multiply is safe, and its own
+        write zero-extends into the full 64-bit register the
+        following ADD reads."""
         base = self._ir_indexable_base(expr.array)
         if base is None:
             return None
@@ -460,35 +350,21 @@ class ArraysSlicesMixin:
         """Builds (without lowering) expr.array[expr.low:expr.high]'s
         resulting {ptr, len, cap} triple as real IR -- returns (ir,
         ptr_value, len_value, cap_value), or None when expr.array's
-        own base is out of scope (see _ir_indexable_base) -- an
-        ArrayLiteral, or a Call, when expr.array is slice-typed.
+        own base is out of scope.
 
-        Mirrors the old-style version's own logic exactly, just via
-        real IR: resolve low/high (each defaulting to 0 / the base's own
+        Resolves low/high (each defaulting to 0 / the base's own
         length -- high defaults to LENGTH, not CAP: `arr[3:]` means
         "to the current end", not "to the full capacity"; only an
-        explicitly-given high is allowed to reach cap), three bounds
-        checks (IRSliceBoundsCheck -- low <= cap, high <= cap, low <=
-        high, matching the old-style version's own order and its own
-        comment for why cap, not len, is the bound), then the three
-        derived values (new_cap = cap - low, new_len = high - low, ptr = addr
-        + low*stride) via ordinary IRBinOp.
+        explicitly-given high can reach cap), three bounds checks
+        (IRSliceBoundsCheck -- low <= cap, high <= cap, low <= high),
+        then the three derived values (new_cap = cap - low, new_len =
+        high - low, ptr = addr + low*stride) via ordinary IRBinOp.
 
-        Unlike the old-style version's own careful "compute new_cap/new_len
-        BEFORE low is scaled" ordering (needed there because low_32
-        is mutated in place by the following IMul), no such ordering
-        matters here at all: low_value/high_value/cap_value are
-        immutable once computed -- every IRBinOp below just reads
-        them, never mutates them -- so new_cap/new_len/ptr can be
-        computed in any order.
-
-        No push/pop protection needed anywhere in here either, unlike
-        the old-style version's own extensive stack discipline: every
-        intermediate value already has its own, independent Temp home,
-        safely written before whatever evaluates next (even expr.low/
-        expr.high, which could be arbitrarily complex) ever runs --
-        the same property that already made _ir_index_address
-        protection-free."""
+        low_value/high_value/cap_value are immutable once computed --
+        every IRBinOp below just reads them -- so new_cap/new_len/ptr
+        can be computed in any order, and no push/pop protection is
+        needed anywhere: every intermediate value already has its own
+        Temp home, safely written before whatever evaluates next."""
         base = self._ir_indexable_base(expr.array)
         if base is None:
             return None
@@ -528,69 +404,46 @@ class ArraysSlicesMixin:
         """Builds (without lowering) a bare bracketed-list literal
         resolved to SLICE by context (`[]int s = [1, 2, 3]`; the
         general TYPED form, `[]int[1, 2, 3]`, is a different AST shape
-        entirely -- a Slice node wrapping an ArrayLiteral, reached
-        instead through _ir_indexable_base's own, still out-of-scope
-        ArrayLiteral case) as real IR -- returns (ir, ptr_value,
-        len_value, cap_value), or None when some element is itself out
-        of scope for _ir_write_composite_value_into. The identical
-        (ir, ptr, len, cap) shape _ir_slice_into already produces, so
-        this drops into every place that already consumes it (_ir_
-        write_slice_descriptor, and _ir_write_composite_value_into's
-        own Slice/append cases) with no new consuming code needed.
+        -- a Slice node wrapping an ArrayLiteral) as real IR -- returns
+        (ir, ptr_value, len_value, cap_value), or None when some
+        element is out of scope for _ir_write_composite_value_into.
+        The same (ir, ptr, len, cap) shape _ir_slice_into produces, so
+        this drops into every place that already consumes it.
 
         Always mallocs a fresh backing array, sized to fit -- at LEAST
         1 byte, even for an empty literal (`[]int[]`), guaranteeing a
         genuine, non-null, unique pointer regardless of malloc(0)'s
-        implementation-defined behavior, the same reason gen_array_
-        literal_heap_alloc_into's own docstring gives: this is what
-        makes `s == none` correctly false for an intentionally empty
-        slice literal (a real, live, zero-length slice, not a nil
-        one, same as `arr[5:5]`) -- rather than a genuinely new rule,
-        this replicates that old-style method's own exact behavior.
-        Always heap-allocated regardless of size, unlike an ordinary
-        array variable's own 16KB stack threshold: a slice literal's
-        backing has to outlive the statement that creates it, the
-        identical reasoning _ir_materialize_composite_call's own
-        docstring gives for why a slice PRODUCED from a materialized
-        call always escapes too.
+        implementation-defined behavior: this is what makes `s ==
+        none` correctly false for an intentionally empty slice literal
+        (a real, live, zero-length slice, not a nil one, same as
+        `arr[5:5]`). Always heap-allocated regardless of size, unlike
+        an ordinary array variable's own stack threshold: a slice
+        literal's backing has to outlive the statement that creates
+        it.
 
         The actual element-writing is _ir_write_array_literal_into,
-        reused completely UNCHANGED, not a new, parallel builder
-        mirroring it: that method only ever reads value_type's own
+        reused unchanged: that method only ever reads value_type's own
         .element_type, never .kind or .size, so handing it a SLICE-
         kind Type instead of an ARRAY-kind one works without any
-        change on its own end -- exactly what the old-style version
-        already did, passing type_of(expr) (a SLICE-kind Type here) as
-        its own array_type argument: this isn't a new capability being
-        assumed, it's the same one the old code already relied on.
-        Nested composite elements (a slice-of-structs, a slice-of-
-        slices) fall out for free the same way: _ir_write_array_
-        literal_into already recurses into _ir_write_composite_value_
-        into for those.
+        change on its own end. Nested composite elements (a slice-of-
+        structs, a slice-of-slices) fall out for free the same way:
+        _ir_write_array_literal_into already recurses into _ir_write_
+        composite_value_into for those.
 
         len and cap are both the literal's own element count -- a
         fresh literal's own backing has no spare room to grow into
-        yet, matching the old-style version's own ArrayLiteral case
-        exactly ('cap is set equal to len').
+        yet.
 
         Takes no value_type parameter, deliberately: type_of(expr) is
-        ALWAYS an ARRAY-kind Type, correctly sized to the literal's
-        own element count, regardless of what the surrounding context
+        ALWAYS an ARRAY-kind Type, correctly sized to the literal's own
+        element count, regardless of what the surrounding context
         resolves the overall expression to (SLICE, here) -- semantic.py
-        annotates an ArrayLiteral node by its own literal shape ("N
-        elements of type X"), never by how its caller happens to use
-        it. A REAL BUG, found and fixed before this ever shipped: an
-        earlier version of this method computed its own malloc size
-        from the CALLER's own SLICE-kind Type instead (type_byte_width
-        of ANY slice is always 24, the descriptor's own fixed size,
-        regardless of what it describes) -- for a slice-of-slices
-        literal with more than one outer element, this under-allocated
-        by exactly half (24 bytes reserved for what needed count * 24),
-        corrupting adjacent heap memory the moment the second element
-        was written. Caught by test_untyped_nested_slice_literal,
-        which returned 11 instead of 10 -- traced directly rather than
-        assumed, confirming type_of(expr) was already 48 bytes (2 * 24,
-        correct) while the old computation gave 24."""
+        annotates an ArrayLiteral node by its own literal shape, never
+        by how its caller happens to use it. Computing this method's
+        own malloc size from the CALLER's own SLICE-kind Type instead
+        would under-allocate for a slice-of-slices literal: type_byte_
+        width of ANY slice is always 24 (the descriptor's own fixed
+        size), regardless of what it describes."""
         array_type = type_of(expr)
         count = len(expr.elements)
         size = max(1, type_byte_width(array_type, self.ir_program.struct_registry))
@@ -642,46 +495,25 @@ class ArraysSlicesMixin:
 
     def _ir_write_zero_value_into(self, dst_address, value_type: Type) -> list:
         """Builds (without lowering) value_type's implicit zero value
-        as real IR, written through dst_address (an ordinary INT64-
-        typed IRValue, however the caller already has it -- see _ir_
-        composite_call's own docstring for the same "doesn't care how"
-        contract). Unlike _ir_write_composite_value_into, this is a
-        TOTAL function: it never returns None, since a type's own zero
-        value depends only on the type itself, never on some
-        unpredictable runtime expression's own shape -- always fully,
-        recursively computable at compile time.
+        as real IR, written through dst_address. Unlike _ir_write_
+        composite_value_into, this is a TOTAL function: it never
+        returns None, since a type's own zero value depends only on
+        the type itself, always fully, recursively computable at
+        compile time.
 
-        Dispatches on value_type.kind, mirroring the old-style _gen_
-        zero_value_into's own dispatch, structured instead the same
-        way this arc's other composite writers already are (per-
-        field/per-element, recursing for a nested composite) rather
-        than that method's own flattening (_flatten_struct_fields) --
-        purely a style choice, both are equally correct, but this
-        keeps the shape consistent with _ir_write_struct_literal_into
-        right below:
-          - SLICE: none's own {0, 0, 0} descriptor, via the exact same
-            _ir_write_slice_descriptor_into_address every other slice-
-            producing case in this arc already uses -- a zero-value
-            slice and a none-valued one are, by design, the identical
+        Dispatches on value_type.kind:
+          - SLICE: none's own {0, 0, 0} descriptor, via _ir_write_
+            slice_descriptor_into_address -- a zero-value slice and a
+            none-valued one are, by design, the identical
             representation.
           - STRUCT: every field, each field's own address computed via
-            ordinary IRBinOp (skipped for the first field, offset 0
-            needing no addition -- the same shortcut used throughout
-            this arc), recursing back into this method for each
-            field's own type.
+            ordinary IRBinOp (skipped for the first field, offset 0),
+            recursing back into this method for each field's own type.
           - ARRAY: delegates to _ir_zero_array_loop -- a genuine
-            runtime loop, not per-element unrolling: an array's own
-            element count can be large, and the old-style _gen_zero_
-            array_into's own choice to always loop, never unroll,
-            regardless of size, is worth preserving exactly, not
-            silently regressing into `count` separate IRStores.
+            runtime loop, not per-element unrolling, since an array's
+            own element count can be large.
           - str: the address of a single shared, static empty-string
-            constant (_get_empty_str_label) -- never a null pointer,
-            for the exact reason _get_empty_str_label's own docstring
-            gives (a null zero value would be an active hazard). An
-            ordinary IRStaticDataAddress captured into a Temp, the
-            same real-IR leaf gen_expr_ir's own StringLiteral case
-            already uses.
+            constant (_get_empty_str_label) -- never a null pointer.
           - int/bool/int8/uint8: an ordinary IRConst(0, value_type),
             written via IRStore at value_type's own declared width."""
         if value_type.kind == TypeKind.SLICE:
@@ -717,43 +549,21 @@ class ArraysSlicesMixin:
         loop zeroing `count` consecutive elements of element_type,
         starting at dst_address -- the array-leaf counterpart to _ir_
         write_zero_value_into's own scalar/slice/struct cases, all of
-        which can be straight-line code since their own size is
-        always small and fixed. Mirrors _ir_while_head's own IRLabel/
-        IRBranch/IRJump shape exactly, the first
-        genuine bounded-iteration loop built as real IR in this arc --
-        everything before this has been straight-line or branch-and-
-        merge, never actual iteration.
+        which can be straight-line code since their own size is always
+        small and fixed.
 
         Each iteration recomputes its own element address from a loop
-        counter i (an ordinary, persistent Temp -- reassigned each
-        iteration via IRMove into a fresh next-value Temp, the exact
-        same shape an ordinary named `i = i + 1` statement already
-        compiles to, not a raw in-place IRBinOp), via the identical
-        32-bit-multiply-then-64-bit-add shape _ir_index_address's own
-        comment already justifies for ordinary indexing (a bounds-
-        checked runtime index there; a loop-bounded counter, never
-        exceeding `count`, here) -- IRBinOp's own lowering derives
-        each operation's width from its LEFT operand with no explicit
-        width juggling needed. Then delegates to _ir_write_zero_value_
-        into recursively for that one element, which could itself be
-        another array (a multi-dimensional zero-init), a struct, or a
-        scalar/slice leaf.
+        counter i (an ordinary, persistent Temp, reassigned each
+        iteration via IRMove into a fresh next-value Temp), via the
+        same 32-bit-multiply-then-64-bit-add shape _ir_index_address
+        uses for ordinary indexing. Then delegates to _ir_write_zero_
+        value_into recursively for that one element, which could
+        itself be another array (a multi-dimensional zero-init), a
+        struct, or a scalar/slice leaf.
 
-        Needs NONE of the old-style _gen_array_struct_zero_loop's own
-        careful fixed-register (%r12/%r13) protection across that
-        recursive call -- and, unlike the old code's own three,
-        separately hand-written sibling loops (flat-zero/str-address/
-        struct-recursive, one per leaf shape, each needing its own
-        register-collision reasoning), needs only this ONE, because
-        _ir_write_zero_value_into already dispatches uniformly on the
-        leaf's own type. Every Temp this loop uses (i, the byte
-        offset, the per-iteration address) is independent of whatever
-        Temps that recursive call allocates for itself, the same "a
-        Temp's home is independent of what computed it" property this
-        whole arc has relied on repeatedly -- a genuine simplification
-        over the old code's own approach, not just a translation of
-        it, made possible by Temps replacing fixed registers
-        entirely."""
+        Every Temp this loop uses (i, the byte offset, the per-
+        iteration address) is independent of whatever Temps that
+        recursive call allocates for itself."""
         element_width = type_byte_width(element_type, self.ir_program.struct_registry)
         i = self.ir_program.ids.new_temp(Type.INT)
         start_label = self.ir_program.ids.new_label("zero_array_start")
@@ -785,43 +595,18 @@ class ArraysSlicesMixin:
         mismatch_label the moment any element/field/byte differs
         between the two given addresses -- falls through only once
         everything has matched. Recurses for ARRAY (a bounded loop,
-        mirroring _ir_zero_array_loop's own shape exactly, just
-        comparing instead of zeroing) and STRUCT (per field, NOT
-        flattened via _flatten_struct_fields -- matching _ir_write_
-        struct_literal_into's own style, not the old-style _gen_
-        struct_fields_equality_at_addresses' -- both are equally
-        correct, this just keeps the shape consistent with this arc's
-        own newer code), reaching str (IRCall(strcmp), reused exactly
-        as _ir_string_compare already uses it) and int/bool/int8/
-        uint8 (an ordinary IRLoad-into-value_type's-own-width +
-        IRBinOp comparison) as its base cases.
+        mirroring _ir_zero_array_loop's own shape, just comparing
+        instead of zeroing) and STRUCT (per field), reaching str
+        (IRCall(strcmp)) and int/bool/int8/uint8 (an ordinary IRLoad-
+        into-value_type's-own-width plus IRBinOp comparison) as its
+        base cases.
 
-        A REAL BUG, found and fixed here rather than carried forward:
-        the old-style _gen_struct_fields_equality_at_addresses' own
-        scalar-field branch always did a 4-byte compare regardless of
-        the field's own declared width, silently reading past an
-        int8/uint8 field's own 1-byte storage into whatever garbage
-        happened to sit adjacent on the stack -- the exact same class
-        of bug the old-style array-equality loop was already found and
-        fixed for, for the ARRAY-of-int8 case, just never applied to
-        the STRUCT-field case too. Here,
-        both go through the identical IRLoad-at-value_type's-own-
-        width call, so the width is correct by construction rather
-        than needing its own special case: IRLoad already reads at
-        dst.type's own declared width universally (see its own
-        docstring), int8/uint8 included, the same choke point
-        _gen_read_scalar_into's own docstring describes.
-
-        Two Temps' own live ranges spanning arbitrary further real IR
-        (nested loops, calls) is exactly the property this whole arc
-        has relied on repeatedly to avoid the old-style code's own
-        careful, fixed-register (%rbx/%r12/%r13/%r14/%r15) protection
-        across recursive comparisons, at any nesting depth -- every
-        Temp here gets its own, independent home from the allocator,
-        so there is no shared-register hazard to protect against at
-        all, unlike the old-style _gen_array_struct_equality_loop,
-        whose own docstring used to spend several paragraphs on
-        exactly that hazard."""
+        The scalar-field/element case's own width-aware load matters:
+        comparing at a fixed 4-byte width regardless of the field's
+        own declared width would silently read past an int8/uint8
+        field's own 1-byte storage into adjacent memory. Going through
+        IRLoad-at-value_type's-own-width makes the width correct by
+        construction rather than needing its own special case."""
         if value_type.kind == TypeKind.ARRAY:
             element_type = value_type.element_type
             element_width = type_byte_width(element_type, self.ir_program.struct_registry)
@@ -889,8 +674,7 @@ class ArraysSlicesMixin:
                 IRLabel(continue_label),
             ]
         # int, bool, int8, uint8 -- an ordinary, width-aware
-        # load-and-compare (see this method's own docstring for why
-        # this is the actual bug fix, not just a translation).
+        # load-and-compare (see this method's own docstring).
         left_val = self.ir_program.ids.new_temp(value_type)
         right_val = self.ir_program.ids.new_temp(value_type)
         mismatch_cond = self.ir_program.ids.new_temp(Type.BOOL)
@@ -904,73 +688,39 @@ class ArraysSlicesMixin:
 
     def _ir_write_composite_value_into(self, dst_address, value_expr: Node, value_type: Type):
         """The general-purpose dispatcher underlying nested literal
-        construction: writes value_expr's own value through
-        dst_address (an already-computed, ordinary IRValue), by
-        dispatching on value_expr's own shape. Returns None when out
-        of scope (a named/partial struct literal, chiefly -- see _ir_
-        write_struct_literal_into's own docstring for why that stays
-        deferred).
+        construction: writes value_expr's own value through dst_
+        address, by dispatching on value_expr's own shape. Returns
+        None when out of scope (a named/partial struct literal,
+        chiefly).
 
         CRITICAL: the ArrayLiteral case below checks value_type.kind
         == ARRAY explicitly, not just isinstance(value_expr,
         ArrayLiteral) -- the identical bracketed-list AST shape is
         ALSO how a slice literal parses (`[1, 2]` used where a slice
         is expected, e.g. the inner literals of the array-of-slices
-        `[2][]int[[1, 2], [3, 4]]`).
-        Without this check, value_type.kind == SLICE reaches _ir_
-        write_array_literal_into anyway, which silently treats a
-        slice's own 24-byte descriptor width as if it were the outer
-        array's own element width -- corrupting every subsequent
-        element's computed address. A real bug, caught only once
-        VarDecl/Assign/IndexAssign/FieldAssign's own wiring (mirroring
-        Return's) finally exercised an array-of-slices literal through
-        this dispatcher for the first time; slice-typed elements never
-        reached here via any of this arc's own earlier test coverage
-        before that point.
+        `[2][]int[[1, 2], [3, 4]]`). Without this check, value_type.
+        kind == SLICE would reach _ir_write_array_literal_into anyway,
+        silently treating a slice's own 24-byte descriptor width as if
+        it were the outer array's own element width -- corrupting
+        every subsequent element's computed address. A slice-typed
+        ArrayLiteral-shaped value_expr goes through _ir_slice_literal
+        instead.
 
-        A slice-typed ArrayLiteral-shaped value_expr is now real IR
-        too, via _ir_slice_literal -- real slice-LITERAL construction
-        (as opposed to slice PRODUCTION via `arr[a:b]`, already real IR
-        via _ir_slice_into), a genuinely separate piece of work from
-        everything else in this method, built and wired in as its own,
-        later step. See _ir_slice_literal's own docstring for why it
-        takes no value_type parameter at all, unlike this method's own
-        ARRAY case just above -- and for two more real bugs (a malloc-
-        size one, and a Return-dispatch one) the identical ARRAY-vs-
-        SLICE ambiguity this docstring already documents above caused
-        during THAT migration too, in two different, more subtle
-        forms.
-
-        Unifies, into one place, every composite-producing shape this
-        arc has already built SEPARATELY, each for its own original
-        call site: an existing value's own address (_ir_copy_into_
-        address, originally built for Return/VarDecl/Assign/
-        IndexAssign/FieldAssign's own Variable/Field/Index case), a
-        Slice production or append call for a slice-typed value (both
-        via _ir_write_slice_descriptor_into_address, originally built
-        for VarDecl/Assign/IndexAssign/FieldAssign's own slice-
-        producing cases), an ordinary composite-returning Call (_ir_
-        composite_call, originally built for Return/VarDecl/Assign/
-        IndexAssign/FieldAssign's own forwarding case), or nested
-        literal construction itself -- recursing back into _ir_write_
-        array_literal_into/_ir_write_struct_literal_into, which now
-        call back into THIS dispatcher for any of their own composite
-        elements/fields in turn. Mutual recursion, the same shape
-        address computation's own Field/Index handling already relies
-        on elsewhere in this arc (_ir_array_address calling into
-        itself, indirectly, through _ir_field_address/_ir_index_
-        address, for a chain of arbitrary depth).
+        Unifies, into one place, every composite-producing shape: an
+        existing value's own address (_ir_copy_into_address), a Slice
+        production or append call for a slice-typed value (_ir_write_
+        slice_descriptor_into_address), an ordinary composite-
+        returning Call (_ir_composite_call), or nested literal
+        construction itself -- recursing back into _ir_write_array_
+        literal_into/_ir_write_struct_literal_into, which call back
+        into THIS dispatcher for any of their own composite elements/
+        fields in turn.
 
         `append` is checked, and handled, BEFORE the generic ordinary-
         Call case below -- append is a Call whose own name is never in
-        struct_registry, so without this explicit, earlier check it
-        would silently reach _ir_composite_call instead, trying to
-        call a function literally named 'append' that was never
-        compiled at all. This is the exact same ordering bug already
-        found and fixed in gen_statement_ir's own Return/VarDecl/
-        Assign/IndexAssign/FieldAssign cases -- worth being explicit
-        about here too, rather than risk reintroducing it in a new
-        location."""
+        struct_registry, so without this earlier check it would
+        silently reach _ir_composite_call instead, trying to call a
+        function literally named 'append' that was never compiled."""
         if isinstance(value_expr, (Variable, Field, Index)):
             return self._ir_copy_into_address(dst_address, value_expr, value_type)
         if isinstance(value_expr, NoneLiteral):
@@ -1006,36 +756,20 @@ class ArraysSlicesMixin:
 
     def _ir_write_array_literal_into(self, dst_address, expr: ArrayLiteral, array_type: Type):
         """Builds (without lowering) an array literal's elements as
-        real IR, written through dst_address -- an ordinary INT64-
-        typed IRValue, however the caller already has it (see _ir_
-        composite_call's own docstring for the same "doesn't care how"
-        contract). Returns None when out of scope: only when some
-        element's own value is itself out of scope for _ir_write_
-        composite_value_into (a named/partial struct literal, chiefly
-        -- see its own docstring) -- an element that's ITSELF composite
-        (an array of arrays/slices/structs) is no longer automatically
-        out of scope, unlike this method's own earlier version: mutual
-        recursion through _ir_write_composite_value_into handles it,
-        the same shape address computation's own Field/Index handling
-        already relies on elsewhere in this arc.
+        real IR, written through dst_address. Returns None when some
+        element's own value is out of scope for _ir_write_composite_
+        value_into (a named/partial struct literal, chiefly) -- an
+        element that's itself composite is handled via mutual
+        recursion through that method.
 
         Each element's own address is dst_address + i*element_width
-        via ordinary IRBinOp -- skipped entirely for element 0 (offset
-        0 needs no addition, matching _ir_write_slice_descriptor's own
-        identical shortcut for its own ptr field). A scalar element's
-        value is evaluated via gen_expr_ir (so a migrated sub-
-        expression stays real IR) and written via IRStore; a composite
-        element delegates entirely to _ir_write_composite_value_into.
-        If ANY element turns out to be out of scope, the whole literal
-        falls back (this method returns None) -- any IR already built
-        for earlier elements (including a few now-orphaned Temp ids
-        from _new_temp) is simply discarded by the caller in favor of
-        old-style construction for the ENTIRE literal, the same
-        harmless-but-pointless waste already accepted elsewhere in
-        this arc (a VarDecl's own hidden-pointer leaf, built and then
-        discarded, when its own composite-call case turns out not to
-        apply) -- there's no risk of a partial, inconsistent write,
-        since none of this IR is ever actually emitted in that case."""
+        via ordinary IRBinOp, skipped for element 0. A scalar
+        element's value is evaluated via gen_expr_ir and written via
+        IRStore; a composite element delegates to _ir_write_composite_
+        value_into. If any element is out of scope, the whole literal
+        falls back (returns None) -- any IR already built for earlier
+        elements is simply discarded by the caller, with no risk of a
+        partial write since none of it is ever emitted."""
         element_type = array_type.element_type
         element_width = type_byte_width(element_type, self.ir_program.struct_registry)
         ir = []
@@ -1078,21 +812,14 @@ class ArraysSlicesMixin:
     def _ir_array_literal_side_effects_only(self, expr: ArrayLiteral) -> list:
         """A bare array-literal statement (`[3]int[1, 2, 3]` alone,
         with no assignment) never needs its VALUE materialized
-        anywhere -- nothing ever reads it as a coherent array -- so
-        rather than reserving a scratch slot sized to fit it (an array
-        literal has no natural upper bound the way a slice's fixed
-        24-byte descriptor does), this just evaluates each of the
-        literal's directly-written elements for whatever side effects
-        it might have (e.g. a function call), discarding every result
-        -- like any other bare expression statement.
+        anywhere, so this just evaluates each of the literal's
+        directly-written elements for whatever side effects it might
+        have, discarding every result.
 
-        Recurses for a nested ArrayLiteral element (a multi-dimensional
-        literal used bare), via gen_expr_ir instead of the old-style
-        gen_expr_into for a scalar element, so a migrated sub-
-        expression (e.g. a call) stays real IR too. An element that's
+        Recurses for a nested ArrayLiteral element. An element that's
         itself some other, non-literal array-, slice-, or struct-typed
         expression (a Variable, an indexed sub-array, an array/struct-
-        returning Call, ...) is a real, deliberately out-of-scope gap:
+        returning Call, ...) is a deliberately out-of-scope gap:
         reading a bare array-typed Variable has no side effect worth
         preserving, but an array-returning Call might, and correctly
         distinguishing the two isn't implemented here. Raises a clear
@@ -1120,26 +847,18 @@ class ArraysSlicesMixin:
         """Builds (without lowering) `slice_expr == none` or
         `slice_expr != none` (in either operand order) as real IR --
         returns (ir, value), or None when slice_expr's own base is
-        out of scope (see _ir_indexable_base's own docstring) -- moot
-        in practice, confirmed exhaustively: every reachable slice-
-        typed base shape (Variable/Field/Index/ArrayLiteral/ordinary-
-        Call/append/Slice) already succeeds through _ir_indexable_
-        base. The caller (gen_expr_ir) raises CodegenError explicitly
-        on a None here rather than silently propagating it further up
-        the call chain, where it would eventually surface as an
-        unrelated TypeError somewhere else entirely.
+        out of scope -- moot in practice: every reachable slice-typed
+        base shape already succeeds through _ir_indexable_base. The
+        caller (gen_expr_ir) raises IRError explicitly on a None here
+        rather than silently propagating it further up the call
+        chain.
 
         Reuses _ir_indexable_base for the slice's own address,
-        discarding length/cap -- the same "keep one of three, discard
-        the rest" shape _ir_len_call already uses. An ordinary
-        IRBinOp (expr.op, ptr, IRConst(0, INT64)) already produces
-        exactly the right comparison, with no new IR op needed at
-        all: gen_binary_op's own existing dispatch already picks CmpQ
-        (64-bit) whenever operand_type is INT64, for ANY comparison
-        operator, not just arithmetic ones -- see its own docstring.
-        This checks specifically whether the slice's ptr field is
-        null (Go's nil-vs-empty-slice distinction), exactly the
-        semantics a slice-vs-none comparison needs."""
+        discarding length/cap. An ordinary IRBinOp (expr.op, ptr,
+        IRConst(0, INT64)) produces the right comparison -- checking
+        specifically whether the slice's ptr field is null (Go's
+        nil-vs-empty-slice distinction), exactly the semantics a
+        slice-vs-none comparison needs."""
         slice_expr = expr.left if type_of(expr.left).kind == TypeKind.SLICE else expr.right
         base = self._ir_indexable_base(slice_expr)
         if base is None:
@@ -1155,35 +874,21 @@ class ArraysSlicesMixin:
         of _ir_append_call's own REUSE and REALLOCATE branches, each
         reaching a different target_addr through a different path.
         Returns None when out of scope (propagating _ir_write_
-        composite_value_into's own None, for a composite element whose
-        own nested content is itself out of scope).
+        composite_value_into's own None).
 
         Scalar element types (int/bool/str/int64) go through an
-        ordinary IRStore, exactly as append's own real-IR work always
-        has. Composite element types (array/slice/struct) reuse _ir_
-        write_composite_value_into completely UNCHANGED -- the
-        identical dispatcher every other "write a composite value into
-        a known address" site in this arc already uses (VarDecl/
-        Assign/IndexAssign/FieldAssign/Return/a struct field/an array
-        element), so a slice-typed element correctly writes a fresh
-        {ptr, len, cap} descriptor, an array-typed element correctly
-        copies element-by-element, and a struct-typed element
-        correctly writes field-by-field -- append needed no new
-        writing logic of its own at all, only this one, small piece of
-        wiring calling into what already existed.
+        ordinary IRStore. Composite element types (array/slice/struct)
+        reuse _ir_write_composite_value_into unchanged -- the same
+        dispatcher every other "write a composite value into a known
+        address" site uses.
 
         Called once per branch, not once upfront with the result
-        reused in both (the way a purely scalar value's own old
-        design could): a composite value has no single Temp of its
+        reused in both: a composite value has no single Temp of its
         own to compute once and reuse, since WRITING it is the whole
-        operation -- there's no separate "the value" to hold onto
-        independently of where it gets written. This duplicates the
-        value argument's own codegen across both branches (ordinary
-        branch-and-merge code growth, the same any if/else already
-        accepts when both arms independently compute something), but
-        never double-EXECUTES it at runtime: exactly one of the two
-        branches ever runs for a given call, decided by the length-
-        vs-cap check before either branch's own code is ever reached."""
+        operation. This duplicates the value argument's own codegen
+        across both branches, but never double-EXECUTES it at runtime
+        -- exactly one of the two branches ever runs for a given
+        call."""
         if element_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT):
             return self._ir_write_composite_value_into(target_addr, value_arg, element_type)
         value_ir, value = self.gen_expr_ir(value_arg)
@@ -1193,43 +898,26 @@ class ArraysSlicesMixin:
         """Builds (without lowering) append(s, value)'s resulting
         {ptr, len, cap} triple as real IR -- returns (ir, ptr_value,
         len_value, cap_value), or None when out of scope: s's own base
-        out of scope (see _ir_indexable_base) -- anything but a
-        Variable/Field/Index/Slice/ArrayLiteral/an ordinary composite-
-        returning Call, or NoneLiteral -- or `value` itself out of
-        scope for _ir_write_append_value_at, when the element type is
-        composite (a named/partial struct literal nested inside it,
-        chiefly).
+        out of scope, or `value` itself out of scope for _ir_write_
+        append_value_at when the element type is composite.
 
-        ANY element type is now in scope, including array/slice/
-        struct -- see _ir_write_append_value_at's own docstring for
-        how writing the value itself works for each. Previously
-        excluded entirely (falling back to the old-style, fully
-        general gen_append_call_into) purely because the growth path
-        (see below) used to fuse growth together with writing the new
-        value into one op (the old IRAppendGrow), scoped to a scalar
-        element only as a direct consequence.
+        ANY element type is in scope, including array/slice/struct --
+        see _ir_write_append_value_at's own docstring for how writing
+        the value works for each.
 
-        The reuse-vs-reallocate decision itself is real IR: an
-        ordinary IRBinOp comparison (length >= cap; a plain SIGNED
-        comparison is correct here, unlike IRBoundsCheck's own
-        unsigned trick -- len/cap are compiler-maintained invariants,
-        never a user-supplied value that could be negative) plus an
-        ordinary IRBranch, exactly the same shape every other
-        conditional decision in gen_expr_ir/gen_statement_ir already
-        uses. The REUSE path (length < cap) is entirely real IR:
-        compute the target address, write the value, increment length.
-        The REALLOCATE path (length >= cap) grows first via IRSliceGrow
-        -- see its own docstring for why growth and writing the value
-        are two separate steps here, not fused into one op the way the
-        old, scalar-only IRAppendGrow used to -- THEN writes the value
-        into the newly-available slot at the same, already-known
-        offset (length * element_width) within the fresh backing.
+        The reuse-vs-reallocate decision is real IR: an ordinary
+        IRBinOp comparison (length >= cap; a plain SIGNED comparison
+        is correct here, unlike IRBoundsCheck's own unsigned trick --
+        len/cap are compiler-maintained invariants, never a user-
+        supplied value that could be negative) plus an ordinary
+        IRBranch. The REUSE path (length < cap): compute the target
+        address, write the value, increment length. The REALLOCATE
+        path (length >= cap): grows first via IRSliceGrow, then writes
+        the value into the newly-available slot at the same offset
+        (length * element_width) within the fresh backing.
 
         Both paths write into the SAME three result Temps (result_ptr/
-        result_len/result_cap), then jump to a shared end label -- the
-        same "both branches assign the same Temp" pattern an if/else
-        already uses for a named-local variable, just for an anonymous
-        one here."""
+        result_len/result_cap), then jump to a shared end label."""
         slice_arg, value_arg = expr.args
         slice_type = type_of(slice_arg)
         element_type = slice_type.element_type
