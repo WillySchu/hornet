@@ -890,7 +890,11 @@ class Parser:
             if self.check(TokenType.STRUCT):
                 structs.append(self.parse_struct_def())
             elif self.check(TokenType.TYPE):
-                type_aliases.append(self.parse_type_alias())
+                declaration = self.parse_type_declaration()
+                if isinstance(declaration, StructDef):
+                    structs.append(declaration)
+                else:
+                    type_aliases.append(declaration)
             else:
                 functions.append(self.parse_function())
             self.skip_newlines()
@@ -899,31 +903,59 @@ class Parser:
             line=start_tok.line, col=start_tok.col,
         )
 
-    def parse_type_alias(self) -> TypeAlias:
-        """`type Name = TargetType` -- a single-line, top-level
-        declaration, no body. `Name` is an ordinary IDENTIFIER (a type
-        keyword is its own token type, never tokenized as IDENTIFIER,
-        so `type int = ...` is rejected by the next `expect` call).
-        TargetType reuses parse_type() directly -- see TypeAlias's own
-        docstring for why the parser accepts more here than semantic.py
-        currently allows."""
-        start_tok = self.expect(TokenType.TYPE, "Expected 'type' to start a type alias")
-        name_tok = self.expect(TokenType.IDENTIFIER, "Expected a name for this type alias")
-        self.expect(TokenType.ASSIGN, "Expected '=' in a type alias declaration")
+    def parse_type_declaration(self) -> Union[TypeAlias, StructDef]:
+        """`type Name = TargetType` (an alias), or `type Name struct:
+        <field-or-method>+` -- a second, newer spelling for an
+        ordinary struct declaration, parsed identically to (and
+        producing the exact same StructDef as) `struct Name: ...`; see
+        _parse_struct_body, shared by both spellings. `Name` is an
+        ordinary IDENTIFIER (a type keyword is its own token type,
+        never tokenized as IDENTIFIER, so `type int = ...` is rejected
+        by the next `expect` call). TargetType, for the alias form,
+        reuses parse_type() directly -- see TypeAlias's own docstring
+        for why the parser accepts more here than semantic.py
+        currently allows.
+
+        The two forms are told apart by ONE token of lookahead right
+        after the name: `=` means an alias; `struct` means a struct
+        declaration. `struct Name: ...` (no leading `type`) still
+        parses too, entirely unchanged -- this is an ADDITIONAL
+        spelling, not a replacement; see parse_program's own dispatch,
+        which still recognizes both. (A planned follow-up migrates
+        every existing `struct Name:` use to `type Name struct:` and
+        removes the bare form -- see TODO.md's own "Require `type`
+        keyword to declare new type for structs" -- but until then
+        both stay valid.)"""
+        start_tok = self.expect(TokenType.TYPE, "Expected 'type' to start a type declaration")
+        name_tok = self.expect(TokenType.IDENTIFIER, "Expected a name for this type declaration")
+        if self.check(TokenType.STRUCT):
+            self.advance()  # consume 'struct'
+            return self._parse_struct_body(start_tok, name_tok)
+        self.expect(TokenType.ASSIGN, "Expected '=' (for a type alias) or 'struct' (for a struct declaration)")
         target_type = self.parse_type()
         self.expect(TokenType.NEWLINE, "Expected a newline after a type alias declaration")
         return TypeAlias(name=name_tok.val, target_type=target_type, line=start_tok.line, col=start_tok.col)
 
     def parse_struct_def(self) -> StructDef:
         """`struct Name: <field-or-method>+` -- header line then an
-        indented block, like a function. Each FIELD line is `type
-        name` (no initializer), reusing parse_type() directly rather
-        than parse_var_decl. Each METHOD line starts with `def`,
+        indented block, like a function. See _parse_struct_body for
+        the body itself, shared with the newer `type Name struct: ...`
+        spelling (parse_type_declaration) -- both produce an identical
+        StructDef; only the header differs."""
+        start_tok = self.expect(TokenType.STRUCT, "Expected 'struct'")
+        name_tok = self.expect(TokenType.IDENTIFIER, "Expected a struct name")
+        return self._parse_struct_body(start_tok, name_tok)
+
+    def _parse_struct_body(self, start_tok: Token, name_tok: Token) -> StructDef:
+        """The shared body -- `: <field-or-method>+`, an indented
+        block like a function's -- for both struct declaration
+        spellings, given that the caller has ALREADY consumed the
+        header up through the name. Each FIELD line is `type name`
+        (no initializer), reusing parse_type() directly rather than
+        parse_var_decl. Each METHOD line starts with `def`,
         unambiguous with one token of lookahead, delegated to parse_
         method_def -- see StructDef's own docstring for why fields and
         methods can freely interleave."""
-        start_tok = self.expect(TokenType.STRUCT, "Expected 'struct'")
-        name_tok = self.expect(TokenType.IDENTIFIER, "Expected a struct name")
         self.expect(TokenType.COLON, "Expected ':' to start the struct body")
         self.expect(TokenType.NEWLINE, "Expected a newline after ':'")
         self.skip_newlines()

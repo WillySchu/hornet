@@ -12412,6 +12412,30 @@ class TestComments:
 class TestStructs:
     pytestmark = GCC_SKIP
 
+    def test_type_struct_form_is_equivalent_to_bare_struct_form(self):
+        """`type Point struct: ...` -- a second, additional spelling
+        for a struct declaration (see parser.py's own parse_type_
+        declaration) -- must work end-to-end exactly like `struct
+        Point: ...` does: field read/write, a method call, everything
+        this whole class already exercises for the bare form. This is
+        the one integration-level check for the new spelling; every
+        other test in this class deliberately keeps using the bare
+        form, since the two are meant to be interchangeable, not
+        redundant to test twice throughout."""
+        assert_program_exit_code(
+            "type Point struct:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "    def int sum(self):\n"
+            "        return self.x + self.y\n"
+            "\n"
+            "def int main():\n"
+            "    Point p = Point(3, 4)\n"
+            "    return p.sum()\n",
+            7,
+        )
+
     def test_basic_field_read_and_write(self):
         assert_program_exit_code(
             "struct Point:\n"

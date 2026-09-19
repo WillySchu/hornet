@@ -2570,3 +2570,103 @@ def test_position_new_node_defaults_to_zero_when_built_by_hand():
     misleading guess."""
     node = parser.Constant(value=1)
     assert (node.line, node.col) == (0, 0)
+
+
+# ---------------------------------------------------------------------------
+# type Name struct: ... -- a second, additional spelling for a struct
+# declaration (parse_type_declaration), alongside the original bare
+# `struct Name: ...` (parse_struct_def) -- both must produce an
+# IDENTICAL StructDef, and parse_program must sort either spelling
+# into Program.structs, never Program.type_aliases.
+# ---------------------------------------------------------------------------
+
+def test_parse_type_declaration_struct_form_matches_bare_struct_form():
+    """The whole point of a soft cutover: `type Point struct: ...` and
+    `struct Point: ...` must parse to the exact same StructDef."""
+    struct_tokens = [
+        lexer.Token(lexer.TokenType.STRUCT, 'struct', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Point', 1, 8),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 13),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 14),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.INT, 'int', 2, 5),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'x', 2, 9),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 10),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 3, 1),
+    ]
+    type_tokens = [
+        lexer.Token(lexer.TokenType.TYPE, 'type', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Point', 1, 6),
+        lexer.Token(lexer.TokenType.STRUCT, 'struct', 1, 12),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 18),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 19),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.INT, 'int', 2, 5),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'x', 2, 9),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 10),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 3, 1),
+    ]
+    from_struct_keyword = parser.Parser(struct_tokens).parse_struct_def()
+    from_type_keyword = parser.Parser(type_tokens).parse_type_declaration()
+    assert from_struct_keyword == from_type_keyword
+    assert isinstance(from_type_keyword, parser.StructDef)
+
+
+def test_parse_type_declaration_alias_form_still_works():
+    """parse_type_declaration replaces parse_type_alias outright (not
+    just adding to it) -- the plain alias form must still work
+    unchanged."""
+    tokens = [
+        lexer.Token(lexer.TokenType.TYPE, 'type', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'MyInt', 1, 6),
+        lexer.Token(lexer.TokenType.ASSIGN, '=', 1, 12),
+        lexer.Token(lexer.TokenType.INT, 'int', 1, 14),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 17),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 1),
+    ]
+    result = parser.Parser(tokens).parse_type_declaration()
+    assert result == parser.TypeAlias(name='MyInt', target_type='int')
+
+
+def test_parse_type_declaration_neither_assign_nor_struct_raises():
+    tokens = [
+        lexer.Token(lexer.TokenType.TYPE, 'type', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Foo', 1, 6),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'bar', 1, 10),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 13),
+    ]
+    with pytest.raises(
+        parser.ParseError,
+        match=re.escape(
+            "Expected '=' (for a type alias) or 'struct' (for a struct declaration) "
+            "at line 1, column 10"
+        )
+    ):
+        parser.Parser(tokens).parse_type_declaration()
+
+
+def test_parse_program_sorts_type_struct_form_into_structs_not_aliases():
+    """The dispatch in parse_program: a `type Name struct: ...`
+    declaration must land in Program.structs, exactly like `struct
+    Name: ...` does -- never in Program.type_aliases, even though it's
+    parsed by the same method (parse_type_declaration) an actual alias
+    is."""
+    tokens = [
+        lexer.Token(lexer.TokenType.TYPE, 'type', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Point', 1, 6),
+        lexer.Token(lexer.TokenType.STRUCT, 'struct', 1, 12),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 18),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 19),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.INT, 'int', 2, 5),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'x', 2, 9),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 10),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 3, 1),
+    ]
+    program = parser.Parser(tokens).parse_program()
+    assert len(program.structs) == 1
+    assert program.structs[0].name == 'Point'
+    assert program.type_aliases == []
