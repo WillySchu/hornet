@@ -81,6 +81,7 @@ class TokenType(Enum):
     NONE = auto()
     STRUCT = auto()
     TYPE = auto()
+    IS = auto()
 
     # Special
     NEWLINE = auto()
@@ -90,7 +91,7 @@ class TokenType(Enum):
     EOF = auto()
 
 
-class Token():
+class Token:
     def __init__(self, t: TokenType, val: str, line: int, col: int):
         self.type = t
         self.val = val
@@ -109,7 +110,7 @@ class Token():
         return self.__str__()
 
 
-class Lexer():
+class Lexer:
     """Tokenizes Hornet source, including synthesizing INDENT/DEDENT
     tokens for block structure (see tokenize()'s docstring).
     """
@@ -163,6 +164,7 @@ class Lexer():
             'none': TokenType.NONE,
             'struct': TokenType.STRUCT,
             'type': TokenType.TYPE,
+            'is': TokenType.IS,
         }
 
         # Compile master regex pattern

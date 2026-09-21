@@ -2642,7 +2642,7 @@ def test_parse_type_declaration_alias_form_still_works():
     assert result == parser.TypeAlias(name='MyInt', target_type='int')
 
 
-def test_parse_type_declaration_neither_assign_nor_struct_raises():
+def test_parse_type_declaration_none_of_assign_struct_is_raises():
     tokens = [
         lexer.Token(lexer.TokenType.TYPE, 'type', 1, 1),
         lexer.Token(lexer.TokenType.IDENTIFIER, 'Foo', 1, 6),
@@ -2652,8 +2652,8 @@ def test_parse_type_declaration_neither_assign_nor_struct_raises():
     with pytest.raises(
         parser.ParseError,
         match=re.escape(
-            "Expected '=' (for a type alias) or 'struct' (for a struct declaration) "
-            "at line 1, column 10"
+            "Expected '=' (for a type alias), 'struct' (for a struct declaration), "
+            "or 'is' (for a sum type) at line 1, column 10"
         )
     ):
         parser.Parser(tokens).parse_type_declaration()
@@ -2680,4 +2680,94 @@ def test_parse_program_sorts_type_struct_form_into_structs_not_aliases():
     program = parser.Parser(tokens).parse_program()
     assert len(program.structs) == 1
     assert program.structs[0].name == 'Point'
+    assert program.type_aliases == []
+
+
+# ---------------------------------------------------------------------------
+# type Name is Variant | Variant (| Variant)* -- a sum type declaration
+# (SumTypeDef, via _parse_sum_type_body). Semantic questions (does each
+# variant name actually resolve to a declared struct, are there
+# duplicates) aren't this file's concern -- these only check the
+# GRAMMAR: at least two variants required, arbitrary variant counts
+# beyond that, and parse_program sorting the result into Program.
+# sum_types specifically.
+# ---------------------------------------------------------------------------
+
+def test_parse_type_declaration_sum_type_two_variants():
+    tokens = [
+        lexer.Token(lexer.TokenType.TYPE, 'type', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Shape', 1, 6),
+        lexer.Token(lexer.TokenType.IS, 'is', 1, 12),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Circle', 1, 15),
+        lexer.Token(lexer.TokenType.PIPE, '|', 1, 22),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Square', 1, 24),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 30),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 1),
+    ]
+    result = parser.Parser(tokens).parse_type_declaration()
+    assert result == parser.SumTypeDef(name='Shape', variants=['Circle', 'Square'])
+    assert isinstance(result, parser.SumTypeDef)
+
+
+def test_parse_type_declaration_sum_type_more_than_two_variants():
+    """No special-casing beyond two -- an arbitrary number of '|'-
+    separated variants all accumulate the same way."""
+    tokens = [
+        lexer.Token(lexer.TokenType.TYPE, 'type', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Shape', 1, 6),
+        lexer.Token(lexer.TokenType.IS, 'is', 1, 12),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Circle', 1, 15),
+        lexer.Token(lexer.TokenType.PIPE, '|', 1, 22),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Square', 1, 24),
+        lexer.Token(lexer.TokenType.PIPE, '|', 1, 31),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Triangle', 1, 33),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 41),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 1),
+    ]
+    result = parser.Parser(tokens).parse_type_declaration()
+    assert result.variants == ['Circle', 'Square', 'Triangle']
+
+
+def test_parse_type_declaration_sum_type_single_variant_raises():
+    """The parser's own "at least two variants" check -- mirroring
+    _parse_struct_body's "at least one field" -- fires on a single
+    bare name with no '|' at all, before semantic.py ever sees it."""
+    tokens = [
+        lexer.Token(lexer.TokenType.TYPE, 'type', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Shape', 1, 6),
+        lexer.Token(lexer.TokenType.IS, 'is', 1, 12),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Circle', 1, 15),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 21),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 1),
+    ]
+    with pytest.raises(
+        parser.ParseError,
+        match=re.escape(
+            "Expected at least one '|' and a second variant in sum type "
+            "'Shape' -- a sum type needs at least two variants "
+            "at line 1, column 15"
+        )
+    ):
+        parser.Parser(tokens).parse_type_declaration()
+
+
+def test_parse_program_sorts_sum_type_into_sum_types():
+    """The dispatch in parse_program: a `type Name is ...` declaration
+    lands in Program.sum_types specifically -- never structs or
+    type_aliases, even though all three share one entry point
+    (parse_type_declaration)."""
+    tokens = [
+        lexer.Token(lexer.TokenType.TYPE, 'type', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Shape', 1, 6),
+        lexer.Token(lexer.TokenType.IS, 'is', 1, 12),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Circle', 1, 15),
+        lexer.Token(lexer.TokenType.PIPE, '|', 1, 22),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Square', 1, 24),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 30),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 1),
+    ]
+    program = parser.Parser(tokens).parse_program()
+    assert len(program.sum_types) == 1
+    assert program.sum_types[0].name == 'Shape'
+    assert program.structs == []
     assert program.type_aliases == []

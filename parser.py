@@ -688,10 +688,35 @@ class TypeAlias(Node):
 
 
 @dataclass
+class SumTypeDef(Node):
+    """`type Name is Variant | Variant (| Variant)*` -- declares a new,
+    nominal type whose value is EXACTLY ONE of its listed variants at
+    any given time, each an already-declared struct name (not a
+    literal payload of its own -- there's no separate variant-
+    constructor syntax; a variant is constructed exactly like any
+    other struct, e.g. `Circle(5)`, and becomes a Shape purely through
+    being assigned into one). `variants` preserves declaration order,
+    since that's what decides the discriminant each variant is
+    assigned at codegen time.
+
+    At least two variants are required -- parse_type_declaration
+    itself enforces this (a single bare name with no `|` at all is a
+    parse error, not a one-variant SumTypeDef), the same way
+    _parse_struct_body already requires at least one field. Two
+    variants sharing a name, and whether each name actually refers to
+    a declared struct, are semantic questions the parser can't answer
+    -- left to semantic.py, the same way a struct's own duplicate-
+    field-name check is."""
+    name: str
+    variants: List[str] = field(default_factory=list)
+
+
+@dataclass
 class Program(Node):
     functions: List[Function] = field(default_factory=list)
     structs: List[StructDef] = field(default_factory=list)
     type_aliases: List[TypeAlias] = field(default_factory=list)
+    sum_types: List[SumTypeDef] = field(default_factory=list)
 
     def __repr__(self) -> str:
         return self.pretty()
@@ -886,6 +911,7 @@ class Parser:
         functions = []
         structs = []
         type_aliases = []
+        sum_types = []
         self.skip_newlines()
         while not self.at_end():
             if self.check(TokenType.STRUCT):
@@ -899,43 +925,73 @@ class Parser:
                 declaration = self.parse_type_declaration()
                 if isinstance(declaration, StructDef):
                     structs.append(declaration)
+                elif isinstance(declaration, SumTypeDef):
+                    sum_types.append(declaration)
                 else:
                     type_aliases.append(declaration)
             else:
                 functions.append(self.parse_function())
             self.skip_newlines()
         return Program(
-            functions=functions, structs=structs, type_aliases=type_aliases,
+            functions=functions, structs=structs, type_aliases=type_aliases, sum_types=sum_types,
             line=start_tok.line, col=start_tok.col,
         )
 
-    def parse_type_declaration(self) -> Union[TypeAlias, StructDef]:
-        """`type Name = TargetType` (an alias), or `type Name struct:
+    def parse_type_declaration(self) -> Union[TypeAlias, StructDef, SumTypeDef]:
+        """`type Name = TargetType` (an alias), `type Name struct:
         <field-or-method>+` (a struct declaration; see StructDef's own
         docstring, and _parse_struct_body for the shared body-parsing
-        logic). `Name` is an ordinary IDENTIFIER (a type keyword is
-        its own token type, never tokenized as IDENTIFIER, so `type
-        int = ...` is rejected by the next `expect` call). TargetType,
-        for the alias form, reuses parse_type() directly -- see
-        TypeAlias's own docstring for why the parser accepts more here
-        than semantic.py currently allows.
+        logic), or `type Name is Variant | Variant (| Variant)*` (a sum
+        type declaration; see SumTypeDef's own docstring). `Name` is an
+        ordinary IDENTIFIER (a type keyword is its own token type,
+        never tokenized as IDENTIFIER, so `type int = ...` is rejected
+        by the next `expect` call). TargetType, for the alias form,
+        reuses parse_type() directly -- see TypeAlias's own docstring
+        for why the parser accepts more here than semantic.py
+        currently allows.
 
-        The two forms are told apart by ONE token of lookahead right
+        The three forms are told apart by ONE token of lookahead right
         after the name: `=` means an alias; `struct` means a struct
-        declaration. A bare `struct Name: ...` (no leading `type`) is
-        rejected outright by parse_program with a clear, specific
-        error -- this IS the only spelling now; see TODO.md's own,
-        now-resolved "Require `type` keyword to declare new type for
-        structs"."""
+        declaration; `is` means a sum type. A bare `struct Name: ...`
+        (no leading `type`) is rejected outright by parse_program with
+        a clear, specific error -- this IS the only spelling now; see
+        TODO.md's own, now-resolved "Require `type` keyword to declare
+        new type for structs"."""
         start_tok = self.expect(TokenType.TYPE, "Expected 'type' to start a type declaration")
         name_tok = self.expect(TokenType.IDENTIFIER, "Expected a name for this type declaration")
         if self.check(TokenType.STRUCT):
             self.advance()  # consume 'struct'
             return self._parse_struct_body(start_tok, name_tok)
-        self.expect(TokenType.ASSIGN, "Expected '=' (for a type alias) or 'struct' (for a struct declaration)")
+        if self.check(TokenType.IS):
+            self.advance()  # consume 'is'
+            return self._parse_sum_type_body(start_tok, name_tok)
+        self.expect(TokenType.ASSIGN, "Expected '=' (for a type alias), 'struct' (for a struct declaration), or 'is' (for a sum type)")
         target_type = self.parse_type()
         self.expect(TokenType.NEWLINE, "Expected a newline after a type alias declaration")
         return TypeAlias(name=name_tok.val, target_type=target_type, line=start_tok.line, col=start_tok.col)
+
+    def _parse_sum_type_body(self, start_tok: Token, name_tok: Token) -> SumTypeDef:
+        """`Variant | Variant (| Variant)*` -- given that the caller
+        (parse_type_declaration) has ALREADY consumed `type Name is` up
+        through `is`. At least one `|` is required (so at least two
+        variants), enforced here directly rather than left to semantic.
+        py -- the same split StructDef's own "at least one field" check
+        already draws between a structurally-empty declaration (a
+        parser concern) and a duplicate or unresolvable name (a
+        semantic one)."""
+        first_tok = self.expect(TokenType.IDENTIFIER, "Expected a variant name")
+        variants = [first_tok.val]
+        while self.match(TokenType.PIPE):
+            variant_tok = self.expect(TokenType.IDENTIFIER, "Expected a variant name after '|'")
+            variants.append(variant_tok.val)
+        if len(variants) < 2:
+            raise ParseError(
+                f"Expected at least one '|' and a second variant in sum type "
+                f"'{name_tok.val}' -- a sum type needs at least two variants "
+                f"at line {first_tok.line}, column {first_tok.col}"
+            )
+        self.expect(TokenType.NEWLINE, "Expected a newline after a sum type declaration")
+        return SumTypeDef(name=name_tok.val, variants=variants, line=start_tok.line, col=start_tok.col)
 
     def _parse_struct_body(self, start_tok: Token, name_tok: Token) -> StructDef:
         """`: <field-or-method>+` -- an indented block, like a
