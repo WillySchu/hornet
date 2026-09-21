@@ -86,7 +86,7 @@ def test_ir_function_body_contains_only_real_ir_ops():
     module docstring) was supposed to make impossible. Every element
     of body must be one of IRInstr's own listed types, no exceptions."""
     ast = _parse_and_analyze(
-        "struct Point:\n"
+        "type Point struct:\n"
         "    int x\n"
         "    int y\n"
         "\n"
@@ -138,7 +138,7 @@ def test_ir_program_carries_struct_and_type_alias_registries():
     them, not just string_literals/type_descriptors), matching
     Program's own registries exactly."""
     ast = _parse_and_analyze(
-        "struct Point:\n"
+        "type Point struct:\n"
         "    int x\n"
         "    int y\n"
         "\n"

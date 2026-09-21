@@ -2265,7 +2265,7 @@ class TestFunctions:
         array_arg_address_into), so this is a genuinely distinct case
         to cover, not a duplicate of the array one above."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -3752,7 +3752,7 @@ class TestArrayEquality:
 
     def test_array_field_comparison(self):
         assert_program_exit_code(
-            "struct Row:\n"
+            "type Row struct:\n"
             "    [3]int values\n"
             "\n"
             "def int main():\n"
@@ -3885,7 +3885,7 @@ class TestStructEquality:
 
     def test_equal_structs(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -3900,7 +3900,7 @@ class TestStructEquality:
 
     def test_unequal_structs(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -3915,7 +3915,7 @@ class TestStructEquality:
 
     def test_not_equal_operator(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -3932,7 +3932,7 @@ class TestStructEquality:
         """A mismatch in the very FIRST field -- proves comparison
         doesn't just check the last field or skip early ones."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -3947,7 +3947,7 @@ class TestStructEquality:
 
     def test_bool_field(self):
         assert_program_exit_code(
-            "struct Flag:\n"
+            "type Flag struct:\n"
             "    bool on\n"
             "\n"
             "def int main():\n"
@@ -3965,7 +3965,7 @@ class TestStructEquality:
         a real strcmp-backed comparison -- the same reasoning
         TestArrayEquality's own identical test already established."""
         assert_program_exit_code(
-            "struct Person:\n"
+            "type Person struct:\n"
             "    int age\n"
             "    str name\n"
             "\n"
@@ -3981,7 +3981,7 @@ class TestStructEquality:
 
     def test_str_field_not_equal(self):
         assert_program_exit_code(
-            "struct Person:\n"
+            "type Person struct:\n"
             "    int age\n"
             "    str name\n"
             "\n"
@@ -3996,9 +3996,9 @@ class TestStructEquality:
 
     def test_nested_struct_field_equal(self):
         assert_program_exit_code(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    int v\n"
-            "struct Outer:\n"
+            "type Outer struct:\n"
             "    Inner i\n"
             "    int b\n"
             "\n"
@@ -4017,9 +4017,9 @@ class TestStructEquality:
         actually descends into nested structs rather than treating
         them as opaque/always-equal."""
         assert_program_exit_code(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    int v\n"
-            "struct Outer:\n"
+            "type Outer struct:\n"
             "    Inner i\n"
             "    int b\n"
             "\n"
@@ -4037,7 +4037,7 @@ class TestStructEquality:
         collision bug during development -- see this class's own
         module-level comment."""
         assert_program_exit_code(
-            "struct Row:\n"
+            "type Row struct:\n"
             "    [3]int values\n"
             "\n"
             "def int main():\n"
@@ -4051,7 +4051,7 @@ class TestStructEquality:
 
     def test_array_field_not_equal(self):
         assert_program_exit_code(
-            "struct Row:\n"
+            "type Row struct:\n"
             "    [3]int values\n"
             "\n"
             "def int main():\n"
@@ -4065,7 +4065,7 @@ class TestStructEquality:
 
     def test_array_of_str_field_equal_different_pointers(self):
         assert_program_exit_code(
-            "struct Words:\n"
+            "type Words struct:\n"
             "    [2]str ws\n"
             "\n"
             "def int main():\n"
@@ -4084,7 +4084,7 @@ class TestStructEquality:
         struct's own fields the same way it already recurses through
         nested arrays."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -4099,7 +4099,7 @@ class TestStructEquality:
 
     def test_array_of_comparable_structs_not_equal(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -4121,7 +4121,7 @@ class TestStructEquality:
         all sharing a small, fixed set of register names across three
         levels."""
         assert_program_exit_code(
-            "struct Bag:\n"
+            "type Bag struct:\n"
             "    [2]str items\n"
             "\n"
             "def int main():\n"
@@ -4141,7 +4141,7 @@ class TestStructEquality:
         register-clobbering) comparison and correctly advance to
         compare the second."""
         assert_program_exit_code(
-            "struct Bag:\n"
+            "type Bag struct:\n"
             "    [2]str items\n"
             "\n"
             "def int main():\n"
@@ -4164,10 +4164,10 @@ class TestStructEquality:
         each Item), which then does an ordinary strcmp for Item's own
         str field."""
         assert_program_exit_code(
-            "struct Item:\n"
+            "type Item struct:\n"
             "    str name\n"
             "    int qty\n"
-            "struct Container:\n"
+            "type Container struct:\n"
             "    [2]Item items\n"
             "    int tag\n"
             "\n"
@@ -4183,10 +4183,10 @@ class TestStructEquality:
 
     def test_doubly_nested_mismatch(self):
         assert_program_exit_code(
-            "struct Item:\n"
+            "type Item struct:\n"
             "    str name\n"
             "    int qty\n"
-            "struct Container:\n"
+            "type Container struct:\n"
             "    [2]Item items\n"
             "    int tag\n"
             "\n"
@@ -4201,7 +4201,7 @@ class TestStructEquality:
 
     def test_comparison_does_not_mutate_either_operand(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -4229,7 +4229,7 @@ class TestStructEquality:
         is the STRUCT-FIELD case specifically, which stayed broken
         until array/struct equality moved to real IR."""
         assert_program_exit_code(
-            "struct Small:\n"
+            "type Small struct:\n"
             "    int8 a\n"
             "    int8 b\n"
             "\n"
@@ -4256,7 +4256,7 @@ class TestStructEquality:
         already-correct "genuinely different" case while correcting
         the "genuinely equal" one."""
         assert_program_exit_code(
-            "struct Small:\n"
+            "type Small struct:\n"
             "    int8 a\n"
             "    int8 b\n"
             "\n"
@@ -4285,7 +4285,7 @@ class TestStructEquality:
         also happen to work if the field were mistakenly treated as
         int8."""
         assert_program_exit_code(
-            "struct Small:\n"
+            "type Small struct:\n"
             "    uint8 a\n"
             "    uint8 b\n"
             "\n"
@@ -4307,7 +4307,7 @@ class TestStructEquality:
         not_equal -- see its own docstring for why this side of the
         comparison was never actually broken by the bug."""
         assert_program_exit_code(
-            "struct Small:\n"
+            "type Small struct:\n"
             "    uint8 a\n"
             "    uint8 b\n"
             "\n"
@@ -4336,7 +4336,7 @@ class TestStructEquality:
         4)`) needs no equivalent test: semantic.py already rejects
         that outright, wherever it would appear, not just here."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -4387,7 +4387,7 @@ class TestMethods:
 
     def test_basic_method_call(self):
         assert_program_exit_code(
-            "struct A:\n"
+            "type A struct:\n"
             "    int a\n"
             "    def int add_b(s, int b):\n"
             "        return s.a + b\n"
@@ -4403,7 +4403,7 @@ class TestMethods:
         ordinary function -- called as a bare statement (its own
         result, if any, discarded) rather than used as a value."""
         assert_program_stdout(
-            "struct A:\n"
+            "type A struct:\n"
             "    int a\n"
             "    def add_b(s, int b):\n"
             "        print(s.a + b)\n"
@@ -4421,7 +4421,7 @@ class TestMethods:
         method mutating its own receiver never affects the caller's
         own value."""
         assert_program_exit_code(
-            "struct Counter:\n"
+            "type Counter struct:\n"
             "    int n\n"
             "    def mutate(s):\n"
             "        s.n = 999\n"
@@ -4435,7 +4435,7 @@ class TestMethods:
 
     def test_method_returning_a_struct(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "    def Point doubled(s):\n"
@@ -4450,7 +4450,7 @@ class TestMethods:
 
     def test_method_returning_a_slice(self):
         assert_program_exit_code(
-            "struct Row:\n"
+            "type Row struct:\n"
             "    [3]int values\n"
             "    def []int asSlice(s):\n"
             "        return s.values[:]\n"
@@ -4464,7 +4464,7 @@ class TestMethods:
 
     def test_method_with_array_field_and_array_param(self):
         assert_program_exit_code(
-            "struct Row:\n"
+            "type Row struct:\n"
             "    [3]int values\n"
             "    def int sumPlus(s, [3]int other):\n"
             "        return s.values[0] + s.values[1] + s.values[2] + other[0] + other[1] + other[2]\n"
@@ -4477,7 +4477,7 @@ class TestMethods:
 
     def test_method_calling_another_method_on_the_same_struct(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "    def int getX(s):\n"
@@ -4498,7 +4498,7 @@ class TestMethods:
         with zero conflict, unlike struct and function names, which
         DO share one namespace (see analyze()'s own collision check)."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    def int getX(s):\n"
             "        return s.x\n"
@@ -4514,11 +4514,11 @@ class TestMethods:
 
     def test_two_different_structs_with_same_named_methods(self):
         assert_program_exit_code(
-            "struct A:\n"
+            "type A struct:\n"
             "    int v\n"
             "    def int getV(s):\n"
             "        return s.v\n"
-            "struct B:\n"
+            "type B struct:\n"
             "    int v\n"
             "    def int getV(s):\n"
             "        return s.v * 10\n"
@@ -4535,7 +4535,7 @@ class TestMethods:
         purely from whether '(' follows -- no restriction needed to
         keep a method and a field of the same name apart."""
         assert_program_exit_code(
-            "struct Weird:\n"
+            "type Weird struct:\n"
             "    int x\n"
             "    def int x(s):\n"
             "        return 42\n"
@@ -4548,11 +4548,11 @@ class TestMethods:
 
     def test_receiver_via_a_field_access_chain(self):
         assert_program_exit_code(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    int v\n"
             "    def int doubled(s):\n"
             "        return s.v * 2\n"
-            "struct Outer:\n"
+            "type Outer struct:\n"
             "    Inner i\n"
             "\n"
             "def int main():\n"
@@ -4563,7 +4563,7 @@ class TestMethods:
 
     def test_method_call_as_a_function_argument(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    def int getX(s):\n"
             "        return s.x\n"
@@ -4579,7 +4579,7 @@ class TestMethods:
 
     def test_method_call_as_an_array_literal_element(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    def int getX(s):\n"
             "        return s.x\n"
@@ -4594,7 +4594,7 @@ class TestMethods:
 
     def test_method_call_as_index_assign_value(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    def int getX(s):\n"
             "        return s.x\n"
@@ -4609,11 +4609,11 @@ class TestMethods:
 
     def test_method_call_as_field_assign_value(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    def int getX(s):\n"
             "        return s.x\n"
-            "struct Holder:\n"
+            "type Holder struct:\n"
             "    int v\n"
             "\n"
             "def int main():\n"
@@ -4628,11 +4628,11 @@ class TestMethods:
         """`o.getInner().doubled()` -- the receiver of the SECOND
         method call is itself the result of the first."""
         assert_program_exit_code(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    int v\n"
             "    def int doubled(s):\n"
             "        return s.v * 2\n"
-            "struct Outer:\n"
+            "type Outer struct:\n"
             "    Inner i\n"
             "    def Inner getInner(s):\n"
             "        return s.i\n"
@@ -4653,7 +4653,7 @@ class TestMethods:
         comment for why a struct LITERAL receiver is different (still
         rejected, but for an unrelated, pre-existing reason)."""
         assert_program_exit_code(
-            "struct A:\n"
+            "type A struct:\n"
             "    int v\n"
             "    def int foo(s):\n"
             "        return s.v\n"
@@ -4674,7 +4674,7 @@ class TestMethods:
         so this is rejected by the existing position-restriction
         system with no new code needed for methods specifically."""
         assert_program_semantic_error(
-            "struct A:\n"
+            "type A struct:\n"
             "    int v\n"
             "    def int foo(s):\n"
             "        return s.v\n"
@@ -4686,7 +4686,7 @@ class TestMethods:
 
     def test_duplicate_method_name_on_the_same_struct_is_rejected(self):
         assert_program_semantic_error(
-            "struct A:\n"
+            "type A struct:\n"
             "    int v\n"
             "    def int foo(s):\n"
             "        return 1\n"
@@ -4700,7 +4700,7 @@ class TestMethods:
 
     def test_undefined_method_is_rejected(self):
         assert_program_semantic_error(
-            "struct A:\n"
+            "type A struct:\n"
             "    int v\n"
             "\n"
             "def int main():\n"
@@ -4719,7 +4719,7 @@ class TestMethods:
 
     def test_wrong_argument_count_is_rejected(self):
         assert_program_semantic_error(
-            "struct A:\n"
+            "type A struct:\n"
             "    int v\n"
             "    def int foo(s, int b):\n"
             "        return b\n"
@@ -4732,7 +4732,7 @@ class TestMethods:
 
     def test_wrong_argument_type_is_rejected(self):
         assert_program_semantic_error(
-            "struct A:\n"
+            "type A struct:\n"
             "    int v\n"
             "    def int foo(s, int b):\n"
             "        return b\n"
@@ -4749,10 +4749,10 @@ class TestMethods:
         call's own argument loop uses _check_expr_allowing_struct_
         literal, the same helper every other allowed position uses."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
-            "struct Line:\n"
+            "type Line struct:\n"
             "    int id\n"
             "    def int sumWith(s, Point p):\n"
             "        return p.x + p.y + s.id\n"
@@ -4769,7 +4769,7 @@ class TestMethods:
         parameters (7 slots total, including the receiver) hits the
         exact same limit a 7-parameter free function already would."""
         source = (
-            "struct A:\n"
+            "type A struct:\n"
             "    int v\n"
             "    def int sum6(s, int a, int b, int c, int d, int e, int f):\n"
             "        return a + b + c + d + e + f\n"
@@ -4784,7 +4784,7 @@ class TestMethods:
 
     def test_five_explicit_params_plus_receiver_fits_exactly(self):
         assert_program_exit_code(
-            "struct A:\n"
+            "type A struct:\n"
             "    int v\n"
             "    def int sum5(s, int a, int b, int c, int d, int e):\n"
             "        return a + b + c + d + e\n"
@@ -4887,7 +4887,7 @@ class TestTypeAliases:
         assert_program_exit_code(
             "type MyInt = int\n"
             "\n"
-            "struct Point:\n"
+            "type Point struct:\n"
             "    MyInt x\n"
             "    MyInt y\n"
             "\n"
@@ -4983,7 +4983,7 @@ class TestTypeAliases:
         assert_program_exit_code(
             "type MyInt = int\n"
             "\n"
-            "struct Adder:\n"
+            "type Adder struct:\n"
             "    int base\n"
             "    def MyInt addTo(s, MyInt x):\n"
             "        return s.base + x\n"
@@ -5069,7 +5069,7 @@ class TestTypeAliases:
 
     def test_alias_to_an_array_of_a_struct_type(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -5152,7 +5152,7 @@ class TestTypeAliases:
         assert_program_exit_code(
             "type IntArray = [3]int\n"
             "\n"
-            "struct Row:\n"
+            "type Row struct:\n"
             "    IntArray values\n"
             "\n"
             "def int main():\n"
@@ -5216,7 +5216,7 @@ class TestTypeAliases:
         struct's own name used directly, so the alias is interchangeable
         with it everywhere a type name is expected."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -5230,7 +5230,7 @@ class TestTypeAliases:
 
     def test_alias_of_alias_to_a_struct_name(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "\n"
             "type A = Point\n"
@@ -5244,12 +5244,12 @@ class TestTypeAliases:
 
     def test_alias_to_a_struct_name_as_a_field_type(self):
         assert_program_exit_code(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    int v\n"
             "\n"
             "type InnerAlias = Inner\n"
             "\n"
-            "struct Outer:\n"
+            "type Outer struct:\n"
             "    InnerAlias inner\n"
             "\n"
             "def int main():\n"
@@ -5267,7 +5267,7 @@ class TestTypeAliases:
         struct's own real name) -- a separate, narrower gap from
         general type-name interchangeability, not yet closed."""
         assert_program_semantic_error(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "\n"
             "type PointAlias = Point\n"
@@ -5282,7 +5282,7 @@ class TestTypeAliases:
         assert_program_semantic_error(
             "type Point = int\n"
             "\n"
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "\n"
             "def int main():\n"
@@ -5295,7 +5295,7 @@ class TestTypeAliases:
         their own, earlier pass regardless of where a struct is
         textually written relative to the alias that collides with it."""
         assert_program_semantic_error(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "\n"
             "type Point = int\n"
@@ -5606,7 +5606,7 @@ class TestInt8Uint8TypeSystem:
 
     def test_int8_as_method_argument(self):
         self._check(
-            "struct A:\n"
+            "type A struct:\n"
             "    int v\n"
             "    def int useIt(s, int8 x):\n"
             "        return 0\n"
@@ -5621,7 +5621,7 @@ class TestInt8Uint8TypeSystem:
         struct literal's positional argument loop used to skip the
         target-aware check entirely."""
         self._check(
-            "struct S:\n"
+            "type S struct:\n"
             "    int8 x\n"
             "    uint8 y\n"
             "\n"
@@ -5632,7 +5632,7 @@ class TestInt8Uint8TypeSystem:
 
     def test_int8_struct_field_named(self):
         self._check(
-            "struct S:\n"
+            "type S struct:\n"
             "    int8 x\n"
             "    uint8 y\n"
             "\n"
@@ -5643,7 +5643,7 @@ class TestInt8Uint8TypeSystem:
 
     def test_int8_struct_field_positional_out_of_range(self):
         self._check(
-            "struct S:\n"
+            "type S struct:\n"
             "    int8 x\n"
             "\n"
             "def int main():\n"
@@ -5694,7 +5694,7 @@ class TestInt8Uint8TypeSystem:
         since check_struct_literal's own argument loop had no target-
         type awareness whatsoever before this fix."""
         self._check(
-            "struct Holder:\n"
+            "type Holder struct:\n"
             "    []int xs\n"
             "\n"
             "def int main():\n"
@@ -5839,7 +5839,7 @@ class TestInt8Uint8Storage:
 
     def test_int8_struct_field_read(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int8 x\n"
             "    uint8 y\n"
             "\n"
@@ -5854,7 +5854,7 @@ class TestInt8Uint8Storage:
         offset lays out the first (narrower) field correctly, not
         just that a lone field works."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int8 x\n"
             "    uint8 y\n"
             "\n"
@@ -5866,7 +5866,7 @@ class TestInt8Uint8Storage:
 
     def test_int8_struct_field_assign(self):
         assert_program_exit_code(
-            "struct S:\n"
+            "type S struct:\n"
             "    int8 v\n"
             "\n"
             "def int8 main():\n"
@@ -5883,7 +5883,7 @@ class TestInt8Uint8Storage:
         avoid any confusion with a process exit code's own unrelated
         truncation to an unsigned byte at the OS level."""
         assert_program_exit_code(
-            "struct S:\n"
+            "type S struct:\n"
             "    int8 x\n"
             "    int z\n"
             "\n"
@@ -6121,7 +6121,7 @@ class TestInt8Uint8Storage:
 
     def test_struct_with_int8_field_zero_init(self):
         assert_program_exit_code(
-            "struct S:\n"
+            "type S struct:\n"
             "    int8 x\n"
             "    uint8 y\n"
             "    int z\n"
@@ -6134,7 +6134,7 @@ class TestInt8Uint8Storage:
 
     def test_struct_with_int8_array_field_zero_init_does_not_corrupt_adjacent_field(self):
         assert_program_exit_code(
-            "struct S:\n"
+            "type S struct:\n"
             "    [3]int8 arr\n"
             "    int guard\n"
             "\n"
@@ -6165,7 +6165,7 @@ class TestInt8Uint8Storage:
         copy at all, for the identical underlying reason a bare int8
         leaf did."""
         assert_program_exit_code(
-            "struct S:\n"
+            "type S struct:\n"
             "    int8 x\n"
             "    int y\n"
             "\n"
@@ -6182,7 +6182,7 @@ class TestInt8Uint8Storage:
         tier ever fires at all; the whole copy is exclusively 1-byte
         movbs."""
         assert_program_exit_code(
-            "struct Pair:\n"
+            "type Pair struct:\n"
             "    int8 a\n"
             "    int8 b\n"
             "\n"
@@ -6199,7 +6199,7 @@ class TestInt8Uint8Storage:
         (a 4-byte chunk, then two separate 1-byte ones) in a single
         leaf's own copy."""
         assert_program_exit_code(
-            "struct Mixed:\n"
+            "type Mixed struct:\n"
             "    int8 a\n"
             "    int b\n"
             "    uint8 c\n"
@@ -6472,7 +6472,7 @@ class TestInt8Uint8Print:
 
     def test_print_struct_with_int8_and_uint8_fields(self):
         assert_program_stdout(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int8 x\n"
             "    uint8 y\n"
             "\n"
@@ -6610,7 +6610,7 @@ class TestByte:
 
     def test_byte_struct_field(self):
         assert_program_exit_code(
-            "struct S:\n"
+            "type S struct:\n"
             "    byte v\n"
             "\n"
             "def byte main():\n"
@@ -6946,7 +6946,7 @@ class TestCastingCodegen:
 
     def test_cast_as_struct_field_value(self):
         assert_program_exit_code(
-            "struct S:\n"
+            "type S struct:\n"
             "    int8 v\n"
             "\n"
             "def int8 main():\n"
@@ -7131,7 +7131,7 @@ class TestInt64TypeSystem:
 
     def test_int64_struct_field(self):
         self._check(
-            "struct S:\n"
+            "type S struct:\n"
             "    int64 v\n"
             "\n"
             "def int main():\n"
@@ -7221,7 +7221,7 @@ class TestInt64Storage:
 
     def test_int64_struct_field_read(self):
         assert_program_exit_code(
-            "struct S:\n"
+            "type S struct:\n"
             "    int64 v\n"
             "\n"
             "def int64 main():\n"
@@ -7232,7 +7232,7 @@ class TestInt64Storage:
 
     def test_int64_struct_field_assign(self):
         assert_program_exit_code(
-            "struct S:\n"
+            "type S struct:\n"
             "    int64 v\n"
             "\n"
             "def int64 main():\n"
@@ -7553,7 +7553,7 @@ class TestInt64Storage:
 
     def test_struct_with_int64_field_as_parameter(self):
         assert_program_exit_code(
-            "struct Big:\n"
+            "type Big struct:\n"
             "    int64 v\n"
             "\n"
             "def int checkBig(Big b):\n"
@@ -7570,7 +7570,7 @@ class TestInt64Storage:
 
     def test_method_with_int64_argument_beyond_32bit_range(self):
         assert_program_exit_code(
-            "struct S:\n"
+            "type S struct:\n"
             "    int v\n"
             "    def int checkArg(s, int64 x):\n"
             "        int64 threshold = 4000000000\n"
@@ -7773,7 +7773,7 @@ class TestInt64Print:
 
     def test_print_struct_with_int64_field(self):
         assert_program_stdout(
-            "struct Big:\n"
+            "type Big struct:\n"
             "    int64 v\n"
             "\n"
             "def int main():\n"
@@ -7801,7 +7801,7 @@ class TestInt64Print:
 
     def test_print_array_of_structs_with_int64_field(self):
         assert_program_stdout(
-            "struct Big:\n"
+            "type Big struct:\n"
             "    int64 v\n"
             "\n"
             "def int main():\n"
@@ -7882,7 +7882,7 @@ class TestInt64RegressionsFoundDuringPrintStep:
     def test_field_assign_int64_large_value(self):
         """Regression for gen_field_assign's own shuttle-copy fix."""
         assert_program_exit_code(
-            "struct S:\n"
+            "type S struct:\n"
             "    int64 v\n"
             "\n"
             "def int main():\n"
@@ -7901,7 +7901,7 @@ class TestInt64RegressionsFoundDuringPrintStep:
         (dst_mem.base is 'rax', not 'rbp') by constructing the struct
         as part of an array literal element."""
         assert_program_exit_code(
-            "struct Big:\n"
+            "type Big struct:\n"
             "    int64 v\n"
             "\n"
             "def int main():\n"
@@ -9558,7 +9558,7 @@ class TestAppend:
         counterpart, where the value argument is a struct literal
         directly."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -9589,7 +9589,7 @@ class TestAppend:
         off to gen_struct_value_into, which already dispatches a
         struct-literal Call correctly."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -9662,7 +9662,7 @@ class TestAppend:
         anymore. Confirmed to have raised exactly this KeyError on the
         reverted code before writing this test in."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -9691,7 +9691,7 @@ class TestAppend:
         Confirmed to have raised exactly this TypeError on the
         reverted code before writing this test in."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -9715,7 +9715,7 @@ class TestAppend:
         that this now reaches real IR with zero old-style
         invocations, where it previously did not."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -10097,7 +10097,7 @@ class TestSliceParametersAndReturns:
 
     def test_slice_typed_field_as_argument(self):
         assert_program_exit_code(
-            "struct Holder:\n"
+            "type Holder struct:\n"
             "    []int xs\n"
             "\n"
             "def int sum3([]int s):\n"
@@ -10459,7 +10459,7 @@ class TestPrintArraysAndSlices:
 
     def test_array_of_structs_literal_as_direct_print_argument(self):
         assert_program_stdout(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -10524,7 +10524,7 @@ class TestPrintArraysAndSlices:
 
     def test_slice_of_structs_literal_as_direct_print_argument(self):
         assert_program_stdout(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -10570,7 +10570,7 @@ class TestPrintArraysAndSlices:
 
     def test_slice_of_a_slice_typed_field_as_direct_print_argument(self):
         assert_program_stdout(
-            "struct Holder:\n"
+            "type Holder struct:\n"
             "    []int xs\n"
             "\n"
             "def int main():\n"
@@ -11211,7 +11211,7 @@ class TestNone:
         crashed there instead), kept here as real-IR coverage, not a
         bug regression test."""
         assert_program_exit_code(
-            "struct Box:\n"
+            "type Box struct:\n"
             "    []int values\n"
             "\n"
             "def int main():\n"
@@ -12109,7 +12109,7 @@ class TestSemanticErrors:
         field anywhere) is fine now -- see TestStructEquality's own
         test_array_of_comparable_structs."""
         assert_program_semantic_error(
-            "struct Holder:\n"
+            "type Holder struct:\n"
             "    []int xs\n"
             "\n"
             "def bool main():\n"
@@ -12198,10 +12198,10 @@ class TestSemanticErrors:
 
     def test_duplicate_struct_reports_the_second_structs_own_line(self):
         ast = _parse(
-            "struct A:\n"           # line 1 -- the first, unproblematic declaration
+            "type A struct:\n"           # line 1 -- the first, unproblematic declaration
             "    int x\n"
             "\n"
-            "struct A:\n"           # line 4 -- the redeclaration itself, 'struct' at column 1
+            "type A struct:\n"           # line 4 -- the redeclaration itself, 'type' at column 1
             "    int y\n"
             "\n"
             "def int main():\n"
@@ -12438,7 +12438,7 @@ class TestStructs:
 
     def test_basic_field_read_and_write(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -12452,7 +12452,7 @@ class TestStructs:
 
     def test_field_to_field_copy(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -12472,7 +12472,7 @@ class TestStructs:
         into's own Variable case (a flat copy via gen_array_copy), not
         gen_field_assign at all."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -12490,7 +12490,7 @@ class TestStructs:
         """THE test proving a struct copies rather than aliases: `Point
         q = p` then mutating q must never affect p."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -12509,7 +12509,7 @@ class TestStructs:
         local_copy: mutating a struct PARAMETER inside a function must
         never affect the caller's own struct."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "\n"
             "def int mutate(Point p):\n"
@@ -12526,9 +12526,9 @@ class TestStructs:
 
     def test_nested_struct_field_access(self):
         assert_program_exit_code(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    int v\n"
-            "struct Outer:\n"
+            "type Outer struct:\n"
             "    Inner inner\n"
             "\n"
             "def int main():\n"
@@ -12540,9 +12540,9 @@ class TestStructs:
 
     def test_struct_field_containing_another_struct_assigned_wholesale(self):
         assert_program_exit_code(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    int v\n"
-            "struct Outer:\n"
+            "type Outer struct:\n"
             "    Inner inner\n"
             "\n"
             "def int main():\n"
@@ -12556,7 +12556,7 @@ class TestStructs:
 
     def test_array_of_structs(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -12576,7 +12576,7 @@ class TestStructs:
         exactly this shape) -- found by this test failing outright,
         not by inspection."""
         assert_program_exit_code(
-            "struct Row:\n"
+            "type Row struct:\n"
             "    [3]int data\n"
             "\n"
             "def int main():\n"
@@ -12589,7 +12589,7 @@ class TestStructs:
 
     def test_struct_as_function_parameter(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -12606,7 +12606,7 @@ class TestStructs:
 
     def test_struct_as_function_return_type(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -12629,7 +12629,7 @@ class TestStructs:
         already is (the same destination address passed one level
         deeper, no intermediate copy)."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -12653,9 +12653,9 @@ class TestStructs:
         not a bare Variable, the one real addition a struct argument
         needed beyond what an array argument already had."""
         assert_program_exit_code(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    int v\n"
-            "struct Outer:\n"
+            "type Outer struct:\n"
             "    Inner inner\n"
             "\n"
             "def int getV(Inner i):\n"
@@ -12674,7 +12674,7 @@ class TestStructs:
         parameter-copy convention still works correctly through the
         resulting pointer (not just declaration)."""
         assert_program_exit_code(
-            "struct Big:\n"
+            "type Big struct:\n"
             "    [5000]int data\n"
             "\n"
             "def int useBig(Big b):\n"
@@ -12691,7 +12691,7 @@ class TestStructs:
     def test_large_struct_actually_uses_malloc(self):
         """The asm-level confirmation behind the test just above."""
         source = (
-            "struct Big:\n"
+            "type Big struct:\n"
             "    [5000]int data\n"
             "\n"
             "def int main():\n"
@@ -12709,9 +12709,9 @@ class TestStructs:
         are all reserved up front, before any struct's own fields are
         resolved (see _collect_structs's own pass 1)."""
         assert_program_exit_code(
-            "struct A:\n"
+            "type A struct:\n"
             "    B b\n"
-            "struct B:\n"
+            "type B struct:\n"
             "    int v\n"
             "\n"
             "def int main():\n"
@@ -12723,9 +12723,9 @@ class TestStructs:
 
     def test_duplicate_struct_name_is_rejected(self):
         source = (
-            "struct Foo:\n"
+            "type Foo struct:\n"
             "    int a\n"
-            "struct Foo:\n"
+            "type Foo struct:\n"
             "    int b\n"
             "\n"
             "def int main():\n"
@@ -12736,7 +12736,7 @@ class TestStructs:
 
     def test_duplicate_field_name_is_rejected(self):
         source = (
-            "struct Foo:\n"
+            "type Foo struct:\n"
             "    int a\n"
             "    int a\n"
             "\n"
@@ -12748,7 +12748,7 @@ class TestStructs:
 
     def test_unknown_field_access_is_rejected(self):
         source = (
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "\n"
             "def int main():\n"
@@ -12769,7 +12769,7 @@ class TestStructs:
 
     def test_wrong_typed_field_assignment_is_rejected(self):
         source = (
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "\n"
             "def int main():\n"
@@ -12791,7 +12791,7 @@ class TestStructs:
 
     def test_direct_self_containment_is_rejected(self):
         source = (
-            "struct Foo:\n"
+            "type Foo struct:\n"
             "    Foo f\n"
             "\n"
             "def int main():\n"
@@ -12802,9 +12802,9 @@ class TestStructs:
 
     def test_mutual_cycle_is_rejected(self):
         source = (
-            "struct A:\n"
+            "type A struct:\n"
             "    B b\n"
-            "struct B:\n"
+            "type B struct:\n"
             "    A a\n"
             "\n"
             "def int main():\n"
@@ -12819,9 +12819,9 @@ class TestStructs:
         inline, N times over, so this is exactly as size-infinite as
         a direct cycle."""
         source = (
-            "struct A:\n"
+            "type A struct:\n"
             "    [5]B b\n"
-            "struct B:\n"
+            "type B struct:\n"
             "    A a\n"
             "\n"
             "def int main():\n"
@@ -12834,9 +12834,9 @@ class TestStructs:
         """The positive control for the two cycle tests above: an
         array of a DIFFERENT, non-cyclic struct must NOT be rejected."""
         ast = _parse(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
-            "struct Triangle:\n"
+            "type Triangle struct:\n"
             "    [3]Point vertices\n"
             "\n"
             "def int main():\n"
@@ -12851,9 +12851,9 @@ class TestStructs:
         field-by-field comparison ever happening (see semantic.py's
         own Type docstring)."""
         source = (
-            "struct A:\n"
+            "type A struct:\n"
             "    int v\n"
-            "struct B:\n"
+            "type B struct:\n"
             "    int v\n"
             "\n"
             "def int useA(A a):\n"
@@ -12877,7 +12877,7 @@ class TestStructs:
         STRUCTS section and analyze_array_escapes's own AGGREGATES AND
         SLOTS section for the full design."""
         assert_program_exit_code(
-            "struct Row:\n"
+            "type Row struct:\n"
             "    []int values\n"
             "\n"
             "def int main():\n"
@@ -12905,7 +12905,7 @@ class TestStructs:
         one call site's own recursion couldn't have been verified
         against the other without a test like this one."""
         assert_program_exit_code(
-            "struct Row:\n"
+            "type Row struct:\n"
             "    []int values\n"
             "\n"
             "def int main():\n"
@@ -12921,7 +12921,7 @@ class TestStructs:
         whole_value_node_of already uses for a plain array-of-slices
         declaration."""
         assert_program_exit_code(
-            "struct Rows:\n"
+            "type Rows struct:\n"
             "    [2][]int values\n"
             "\n"
             "def int main():\n"
@@ -12938,9 +12938,9 @@ class TestStructs:
         field -- _contains_slice recurses into a nested struct's own
         registered fields, not just the immediate field list."""
         assert_program_exit_code(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    []int values\n"
-            "struct Outer:\n"
+            "type Outer struct:\n"
             "    Inner inner\n"
             "\n"
             "def int main():\n"
@@ -12956,7 +12956,7 @@ class TestStructs:
         throughout this class: an ordinary (non-slice) array field
         must never be treated as needing any of this machinery."""
         ast = _parse(
-            "struct Fixed:\n"
+            "type Fixed struct:\n"
             "    [3]int values\n"
             "\n"
             "def int main():\n"
@@ -12975,7 +12975,7 @@ class TestStructs:
         legal, intentional pattern -- a tree or linked structure built
         from slices -- not merely tolerated."""
         assert_program_exit_code(
-            "struct Node:\n"
+            "type Node struct:\n"
             "    int value\n"
             "    []Node children\n"
             "\n"
@@ -12995,7 +12995,7 @@ class TestStructs:
         typed fields were supported, so this gap was never exercised
         until now."""
         assert_program_exit_code(
-            "struct Row:\n"
+            "type Row struct:\n"
             "    []int values\n"
             "\n"
             "def int main():\n"
@@ -13015,7 +13015,7 @@ class TestStructs:
         semantic.py changes at all once slice-typed fields were
         allowed through."""
         assert_program_exit_code(
-            "struct Row:\n"
+            "type Row struct:\n"
             "    []int values\n"
             "\n"
             "def int main():\n"
@@ -13035,7 +13035,7 @@ class TestStructs:
         then indexing through it is identical to indexing through any
         other slice."""
         assert_program_exit_code(
-            "struct Row:\n"
+            "type Row struct:\n"
             "    []int values\n"
             "\n"
             "def int main():\n"
@@ -13049,7 +13049,7 @@ class TestStructs:
 
     def test_wrong_typed_value_assigned_to_a_slice_typed_field_is_rejected(self):
         source = (
-            "struct Row:\n"
+            "type Row struct:\n"
             "    []int values\n"
             "\n"
             "def int main():\n"
@@ -13081,7 +13081,7 @@ class TestStructs:
         that array used to occupy before ever reading the field back
         out."""
         assert_program_exit_code(
-            "struct Row:\n"
+            "type Row struct:\n"
             "    []int values\n"
             "\n"
             "def Row makeRow():\n"
@@ -13114,7 +13114,7 @@ class TestStructs:
         slice into ANY field unconditionally promoted its own backing
         array; this one specifically requires that not to happen."""
         source = (
-            "struct Row:\n"
+            "type Row struct:\n"
             "    []int values\n"
             "\n"
             "def int main():\n"
@@ -13140,7 +13140,7 @@ class TestStructs:
         (`rows[0][0:2]`), not just struct fields -- see
         TestArrayEscapeAnalysis for that side of the same fix."""
         assert_program_exit_code(
-            "struct Row:\n"
+            "type Row struct:\n"
             "    []int values\n"
             "\n"
             "def []int makeSub():\n"
@@ -13175,7 +13175,7 @@ class TestStructs:
         and `q` the identical shared slot for their own struct type,
         no separate propagation logic needed."""
         assert_program_exit_code(
-            "struct Row:\n"
+            "type Row struct:\n"
             "    []int values\n"
             "\n"
             "def Row makeRow():\n"
@@ -13207,7 +13207,7 @@ class TestStructs:
         copied on entry, exactly like an array one) alongside field
         escape tracking together."""
         assert_program_exit_code(
-            "struct Row:\n"
+            "type Row struct:\n"
             "    []int values\n"
             "\n"
             "def []int extract(Row r):\n"
@@ -13241,7 +13241,7 @@ class TestStructs:
         needed no separate fix here -- it falls out of field_slot_of
         being wired into contribution()'s own Field case."""
         assert_program_exit_code(
-            "struct Row:\n"
+            "type Row struct:\n"
             "    []int values\n"
             "\n"
             "def []int makeAppended():\n"
@@ -13271,7 +13271,7 @@ class TestStructs:
         own identical restriction and for the identical reason (see
         FieldAssign's own docstring in parser.py)."""
         source = (
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "\n"
             "def int main():\n"
@@ -13299,7 +13299,7 @@ class TestStructLiterals:
 
     def test_basic_construction_via_var_decl(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -13314,7 +13314,7 @@ class TestStructLiterals:
         ALREADY-declared variable reassigned wholesale via a struct
         literal, not just a VarDecl's own initializer."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -13327,7 +13327,7 @@ class TestStructLiterals:
 
     def test_str_field(self):
         assert_program_exit_code(
-            "struct Person:\n"
+            "type Person struct:\n"
             "    int age\n"
             "    str name\n"
             "\n"
@@ -13341,7 +13341,7 @@ class TestStructLiterals:
 
     def test_array_typed_field(self):
         assert_program_exit_code(
-            "struct Row:\n"
+            "type Row struct:\n"
             "    [3]int values\n"
             "\n"
             "def int main():\n"
@@ -13352,7 +13352,7 @@ class TestStructLiterals:
 
     def test_slice_typed_field_with_none(self):
         assert_program_exit_code(
-            "struct Holder:\n"
+            "type Holder struct:\n"
             "    []int xs\n"
             "\n"
             "def int main():\n"
@@ -13365,7 +13365,7 @@ class TestStructLiterals:
 
     def test_slice_typed_field_with_a_real_slice(self):
         assert_program_exit_code(
-            "struct Holder:\n"
+            "type Holder struct:\n"
             "    []int xs\n"
             "\n"
             "def int main():\n"
@@ -13381,10 +13381,10 @@ class TestStructLiterals:
         struct literal directly (see test_nested_struct_literal_is_
         rejected below)."""
         assert_program_exit_code(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    int v\n"
             "\n"
-            "struct Outer:\n"
+            "type Outer struct:\n"
             "    Inner i\n"
             "    int b\n"
             "\n"
@@ -13414,7 +13414,7 @@ class TestStructLiterals:
         TestStructs's own test_large_struct_is_heap_allocated / test_
         large_struct_actually_uses_malloc pairing."""
         assert_program_exit_code(
-            "struct Big:\n"
+            "type Big struct:\n"
             "    [2100]int a\n"
             "    [2100]int b\n"
             "    int tag\n"
@@ -13444,7 +13444,7 @@ class TestStructLiterals:
         before this fix -- caught by a person actually running this on
         macOS, not by this sandbox, which only has Linux available."""
         source = (
-            "struct Big:\n"
+            "type Big struct:\n"
             "    [2100]int a\n"
             "    [2100]int b\n"
             "    int tag\n"
@@ -13467,7 +13467,7 @@ class TestStructLiterals:
         size threshold, rather than 'malloc' simply appearing in the
         output incidentally (e.g. from unrelated program setup)."""
         source = (
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -13482,7 +13482,7 @@ class TestStructLiterals:
 
     def test_value_semantics_mutating_a_copy_does_not_affect_the_original(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -13501,7 +13501,7 @@ class TestStructLiterals:
         struct_literal_as_direct_function_argument below -- but this
         variable-first form remains just as valid."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -13516,7 +13516,7 @@ class TestStructLiterals:
 
     def test_wrong_argument_count_is_rejected(self):
         assert_program_semantic_error(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -13528,7 +13528,7 @@ class TestStructLiterals:
 
     def test_wrong_argument_type_is_rejected(self):
         assert_program_semantic_error(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -13547,7 +13547,7 @@ class TestStructLiterals:
         own dedicated stack slot before taking its address (see
         codegen.py's _collect_argument_temps)."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -13573,7 +13573,7 @@ class TestStructLiterals:
         array-returning-literal case, which never needed a semantic.py
         change to begin with)."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -13596,7 +13596,7 @@ class TestStructLiterals:
         parameter handling), so this is exactly as simple for a large,
         heap-promoted struct as for a small one."""
         assert_program_exit_code(
-            "struct Big:\n"
+            "type Big struct:\n"
             "    [5000]int data\n"
             "    int tag\n"
             "\n"
@@ -13612,7 +13612,7 @@ class TestStructLiterals:
 
     def test_struct_literal_return_value_with_a_slice_typed_field(self):
         assert_program_exit_code(
-            "struct Holder:\n"
+            "type Holder struct:\n"
             "    []int xs\n"
             "\n"
             "def Holder makeHolder():\n"
@@ -13632,9 +13632,9 @@ class TestStructLiterals:
         struct_literal's own, identical detection in its argument
         loop, recursing into itself."""
         assert_program_exit_code(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    int v\n"
-            "struct Outer:\n"
+            "type Outer struct:\n"
             "    Inner i\n"
             "    int b\n"
             "\n"
@@ -13649,7 +13649,7 @@ class TestStructLiterals:
 
     def test_struct_literal_returned_from_a_function_with_no_declared_return_type_is_rejected(self):
         assert_program_semantic_error(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -13668,9 +13668,9 @@ class TestStructLiterals:
         struct_literal, which _types_compatible then checks exactly
         like any other returned value's type."""
         assert_program_semantic_error(
-            "struct A:\n"
+            "type A struct:\n"
             "    int x\n"
-            "struct B:\n"
+            "type B struct:\n"
             "    int y\n"
             "\n"
             "def A makeA():\n"
@@ -13689,10 +13689,10 @@ class TestStructLiterals:
         check_struct_literal's own, identical detection in its
         argument loop."""
         assert_program_exit_code(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    int v\n"
             "\n"
-            "struct Outer:\n"
+            "type Outer struct:\n"
             "    Inner i\n"
             "    int b\n"
             "\n"
@@ -13706,9 +13706,9 @@ class TestStructLiterals:
         """The Assign counterpart -- nesting isn't specific to a
         VarDecl's own initializer."""
         assert_program_exit_code(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    int v\n"
-            "struct Outer:\n"
+            "type Outer struct:\n"
             "    Inner i\n"
             "    int b\n"
             "\n"
@@ -13725,12 +13725,12 @@ class TestStructLiterals:
         method again, so nesting works to any depth check_expr itself
         could recurse to."""
         assert_program_exit_code(
-            "struct C:\n"
+            "type C struct:\n"
             "    int v\n"
-            "struct B:\n"
+            "type B struct:\n"
             "    C c\n"
             "    int w\n"
-            "struct A:\n"
+            "type A struct:\n"
             "    B b\n"
             "    int u\n"
             "\n"
@@ -13742,9 +13742,9 @@ class TestStructLiterals:
 
     def test_nested_struct_literal_with_an_array_typed_field(self):
         assert_program_exit_code(
-            "struct Row:\n"
+            "type Row struct:\n"
             "    [2]int values\n"
-            "struct Grid:\n"
+            "type Grid struct:\n"
             "    Row r\n"
             "    int tag\n"
             "\n"
@@ -13759,9 +13759,9 @@ class TestStructLiterals:
         argument is reported normally, not masked by anything about
         the outer literal or the recursion itself."""
         assert_program_semantic_error(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    int v\n"
-            "struct Outer:\n"
+            "type Outer struct:\n"
             "    Inner i\n"
             "    int b\n"
             "\n"
@@ -13780,10 +13780,10 @@ class TestStructLiterals:
         gen_struct_value_into, which already dispatches a struct-
         literal Call correctly."""
         assert_program_exit_code(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    int v\n"
             "\n"
-            "struct Outer:\n"
+            "type Outer struct:\n"
             "    Inner i\n"
             "\n"
             "def int main():\n"
@@ -13802,7 +13802,7 @@ class TestStructLiterals:
         into, which already dispatches a struct-literal Call
         correctly."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "\n"
             "def int main():\n"
@@ -13815,9 +13815,9 @@ class TestStructLiterals:
 
     def test_nested_struct_literal_as_index_assign_value(self):
         assert_program_exit_code(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    int v\n"
-            "struct Outer:\n"
+            "type Outer struct:\n"
             "    Inner i\n"
             "    int b\n"
             "\n"
@@ -13830,11 +13830,11 @@ class TestStructLiterals:
 
     def test_nested_struct_literal_as_field_assign_value(self):
         assert_program_exit_code(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    int v\n"
-            "struct Mid:\n"
+            "type Mid struct:\n"
             "    Inner i\n"
-            "struct Outer:\n"
+            "type Outer struct:\n"
             "    Mid m\n"
             "\n"
             "def int main():\n"
@@ -13846,7 +13846,7 @@ class TestStructLiterals:
 
     def test_struct_literal_with_slice_field_as_index_assign_value(self):
         assert_program_exit_code(
-            "struct Holder:\n"
+            "type Holder struct:\n"
             "    []int xs\n"
             "\n"
             "def int main():\n"
@@ -13858,9 +13858,9 @@ class TestStructLiterals:
 
     def test_struct_literal_with_slice_field_as_field_assign_value(self):
         assert_program_exit_code(
-            "struct Holder:\n"
+            "type Holder struct:\n"
             "    []int xs\n"
-            "struct Wrapper:\n"
+            "type Wrapper struct:\n"
             "    Holder h\n"
             "\n"
             "def int main():\n"
@@ -13880,7 +13880,7 @@ class TestStructLiterals:
         check, not a new malloc-count proof the way argument
         materialization needed one."""
         assert_program_exit_code(
-            "struct Big:\n"
+            "type Big struct:\n"
             "    [5000]int data\n"
             "    int tag\n"
             "\n"
@@ -13894,10 +13894,10 @@ class TestStructLiterals:
 
     def test_large_struct_literal_as_field_assign_value(self):
         assert_program_exit_code(
-            "struct Big:\n"
+            "type Big struct:\n"
             "    [5000]int data\n"
             "    int tag\n"
-            "struct Wrapper:\n"
+            "type Wrapper struct:\n"
             "    Big b\n"
             "\n"
             "def int main():\n"
@@ -13915,7 +13915,7 @@ class TestStructLiterals:
         array-literal statement already does (see test_bare_statement_
         with_side_effecting_element)."""
         assert_program_stdout(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -13931,7 +13931,7 @@ class TestStructLiterals:
 
     def test_struct_and_function_name_collision_is_rejected(self):
         assert_program_semantic_error(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "\n"
             "def int Point():\n"
@@ -13944,7 +13944,7 @@ class TestStructLiterals:
 
     def test_struct_named_after_a_builtin_is_rejected(self):
         assert_program_semantic_error(
-            "struct print:\n"
+            "type print struct:\n"
             "    int x\n"
             "\n"
             "def int main():\n"
@@ -13954,7 +13954,7 @@ class TestStructLiterals:
 
     def test_print_a_struct_built_via_literal(self):
         assert_program_stdout(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -14011,7 +14011,7 @@ class TestArgumentMaterialization:
 
     def test_struct_literal_as_argument(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -14044,7 +14044,7 @@ class TestArgumentMaterialization:
 
     def test_struct_returning_call_as_argument(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -14081,7 +14081,7 @@ class TestArgumentMaterialization:
     def test_two_struct_literals_alive_in_the_same_call(self):
         """The struct counterpart to the test just above."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -14095,7 +14095,7 @@ class TestArgumentMaterialization:
 
     def test_mixed_array_and_struct_literal_in_the_same_call(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -14201,7 +14201,7 @@ class TestArgumentMaterialization:
 
     def test_large_struct_literal_argument_is_heap_allocated(self):
         assert_program_exit_code(
-            "struct Big:\n"
+            "type Big struct:\n"
             "    [5000]int data\n"
             "    int tag\n"
             "\n"
@@ -14217,7 +14217,7 @@ class TestArgumentMaterialization:
     def test_large_struct_literal_argument_actually_uses_malloc(self):
         """The asm-level confirmation behind the test just above."""
         source = (
-            "struct Big:\n"
+            "type Big struct:\n"
             "    [5000]int data\n"
             "    int tag\n"
             "\n"
@@ -14258,10 +14258,10 @@ class TestArgumentMaterialization:
         one via check_struct_literal's own, identical detection in its
         own argument loop, recursing into itself."""
         assert_program_exit_code(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    int v\n"
             "\n"
-            "struct Outer:\n"
+            "type Outer struct:\n"
             "    Inner i\n"
             "    int b\n"
             "\n"
@@ -14332,7 +14332,7 @@ class TestCompositeCallAsAddressableBase:
 
     def test_struct_returning_call_field_accessed_directly(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -14507,7 +14507,7 @@ class TestNamedStructLiterals:
 
     def test_named_construction_both_fields(self):
         assert_program_exit_code(
-            "struct A:\n"
+            "type A struct:\n"
             "    int x\n"
             "    str y\n"
             "\n"
@@ -14521,7 +14521,7 @@ class TestNamedStructLiterals:
 
     def test_named_fields_out_of_declaration_order(self):
         assert_program_exit_code(
-            "struct A:\n"
+            "type A struct:\n"
             "    int x\n"
             "    str y\n"
             "\n"
@@ -14533,7 +14533,7 @@ class TestNamedStructLiterals:
 
     def test_partial_construction_first_field_only(self):
         assert_program_exit_code(
-            "struct A:\n"
+            "type A struct:\n"
             "    int x\n"
             "    str y\n"
             "\n"
@@ -14545,7 +14545,7 @@ class TestNamedStructLiterals:
 
     def test_partial_construction_second_field_only(self):
         assert_program_exit_code(
-            "struct A:\n"
+            "type A struct:\n"
             "    int x\n"
             "    str y\n"
             "\n"
@@ -14559,9 +14559,9 @@ class TestNamedStructLiterals:
 
     def test_nested_named_struct_literal(self):
         assert_program_exit_code(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    int v\n"
-            "struct Outer:\n"
+            "type Outer struct:\n"
             "    Inner i\n"
             "    int b\n"
             "\n"
@@ -14573,7 +14573,7 @@ class TestNamedStructLiterals:
 
     def test_named_construction_as_function_argument(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -14587,7 +14587,7 @@ class TestNamedStructLiterals:
 
     def test_named_construction_as_return_value(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -14602,7 +14602,7 @@ class TestNamedStructLiterals:
 
     def test_named_construction_as_index_assign_value(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -14616,9 +14616,9 @@ class TestNamedStructLiterals:
 
     def test_named_construction_as_field_assign_value(self):
         assert_program_exit_code(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    int v\n"
-            "struct Outer:\n"
+            "type Outer struct:\n"
             "    Inner i\n"
             "\n"
             "def int main():\n"
@@ -14630,7 +14630,7 @@ class TestNamedStructLiterals:
 
     def test_named_construction_as_array_literal_element(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -14642,7 +14642,7 @@ class TestNamedStructLiterals:
 
     def test_named_construction_with_array_typed_field(self):
         assert_program_exit_code(
-            "struct Row:\n"
+            "type Row struct:\n"
             "    [3]int values\n"
             "\n"
             "def int main():\n"
@@ -14653,7 +14653,7 @@ class TestNamedStructLiterals:
 
     def test_named_construction_with_slice_typed_field(self):
         assert_program_exit_code(
-            "struct Holder:\n"
+            "type Holder struct:\n"
             "    []int xs\n"
             "\n"
             "def int main():\n"
@@ -14669,7 +14669,7 @@ class TestNamedStructLiterals:
         check any large struct already gets, regardless of whether
         it's populated positionally, by name, or field-by-field."""
         assert_program_exit_code(
-            "struct Big:\n"
+            "type Big struct:\n"
             "    [5000]int data\n"
             "    int tag\n"
             "\n"
@@ -14682,7 +14682,7 @@ class TestNamedStructLiterals:
 
     def test_unknown_field_name_is_rejected(self):
         assert_program_semantic_error(
-            "struct A:\n"
+            "type A struct:\n"
             "    int x\n"
             "    str y\n"
             "\n"
@@ -14694,7 +14694,7 @@ class TestNamedStructLiterals:
 
     def test_duplicate_field_name_is_rejected(self):
         assert_program_semantic_error(
-            "struct A:\n"
+            "type A struct:\n"
             "    int x\n"
             "    str y\n"
             "\n"
@@ -14706,7 +14706,7 @@ class TestNamedStructLiterals:
 
     def test_wrong_type_for_named_field_is_rejected(self):
         assert_program_semantic_error(
-            "struct A:\n"
+            "type A struct:\n"
             "    int x\n"
             "    str y\n"
             "\n"
@@ -14732,7 +14732,7 @@ class TestNamedStructLiterals:
 
     def test_named_arguments_rejected_for_print(self):
         assert_program_semantic_error(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "\n"
             "def int main():\n"
@@ -14747,7 +14747,7 @@ class TestNamedStructLiterals:
         syntax-shape question the parser can answer without knowing
         whether `A` even names a struct."""
         source = (
-            "struct A:\n"
+            "type A struct:\n"
             "    int x\n"
             "    str y\n"
             "\n"
@@ -14760,7 +14760,7 @@ class TestNamedStructLiterals:
 
     def test_named_then_positional_is_a_parse_error(self):
         source = (
-            "struct A:\n"
+            "type A struct:\n"
             "    int x\n"
             "    str y\n"
             "\n"
@@ -14779,7 +14779,7 @@ class TestNamedStructLiterals:
         construction, not something parse_call has to specifically
         guard against."""
         assert_program_exit_code(
-            "struct A:\n"
+            "type A struct:\n"
             "    bool x\n"
             "\n"
             "def int main():\n"
@@ -14822,7 +14822,7 @@ class TestNamedStructLiteralZeroFill:
 
     def test_omitted_int_field(self):
         assert_program_exit_code(
-            "struct A:\n"
+            "type A struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -14834,7 +14834,7 @@ class TestNamedStructLiteralZeroFill:
 
     def test_omitted_bool_field(self):
         assert_program_exit_code(
-            "struct A:\n"
+            "type A struct:\n"
             "    int x\n"
             "    bool flag\n"
             "\n"
@@ -14851,7 +14851,7 @@ class TestNamedStructLiteralZeroFill:
         null pointer -- proven by concatenating onto it, not just by
         not crashing when it's printed."""
         assert_program_stdout(
-            "struct Person:\n"
+            "type Person struct:\n"
             "    int age\n"
             "    str name\n"
             "\n"
@@ -14864,7 +14864,7 @@ class TestNamedStructLiteralZeroFill:
 
     def test_omitted_slice_field(self):
         assert_program_exit_code(
-            "struct Holder:\n"
+            "type Holder struct:\n"
             "    int tag\n"
             "    []int xs\n"
             "\n"
@@ -14876,7 +14876,7 @@ class TestNamedStructLiteralZeroFill:
 
     def test_omitted_array_field(self):
         assert_program_exit_code(
-            "struct Row:\n"
+            "type Row struct:\n"
             "    int tag\n"
             "    [3]int values\n"
             "\n"
@@ -14888,9 +14888,9 @@ class TestNamedStructLiteralZeroFill:
 
     def test_omitted_struct_field(self):
         assert_program_exit_code(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    int v\n"
-            "struct Outer:\n"
+            "type Outer struct:\n"
             "    int tag\n"
             "    Inner inner\n"
             "\n"
@@ -14902,7 +14902,7 @@ class TestNamedStructLiteralZeroFill:
 
     def test_multiple_omitted_fields_interspersed_with_provided_ones(self):
         assert_program_exit_code(
-            "struct Five:\n"
+            "type Five struct:\n"
             "    int a\n"
             "    int b\n"
             "    int c\n"
@@ -14922,7 +14922,7 @@ class TestNamedStructLiteralZeroFill:
         gen_struct_literal_into's own dst_mem.base, now exercised with
         the omitted field coming FIRST."""
         assert_program_exit_code(
-            "struct Triple:\n"
+            "type Triple struct:\n"
             "    [5000]int mid\n"
             "    int c\n"
             "\n"
@@ -14947,7 +14947,7 @@ class TestNamedStructLiteralZeroFill:
             "    a[0] = 7\n"
             "    return a\n"
             "\n"
-            "struct Triple:\n"
+            "type Triple struct:\n"
             "    int a\n"
             "    [5000]int mid\n"
             "    int c\n"
@@ -14960,10 +14960,10 @@ class TestNamedStructLiteralZeroFill:
 
     def test_nested_named_literal_with_omitted_inner_field(self):
         assert_program_exit_code(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    int a\n"
             "    int b\n"
-            "struct Outer:\n"
+            "type Outer struct:\n"
             "    Inner inner\n"
             "    int tag\n"
             "\n"
@@ -14982,7 +14982,7 @@ class TestNamedStructLiteralZeroFill:
         'expects N arguments, got 0' error instead, not this feature at
         all. Verified directly rather than assumed."""
         assert_program_exit_code(
-            "struct Triple:\n"
+            "type Triple struct:\n"
             "    int a\n"
             "    int b\n"
             "    int c\n"
@@ -14998,9 +14998,9 @@ class TestNamedStructLiteralZeroFill:
         and adjacent -- exercises protect_dst across three consecutive
         zero-fills in a row, each of a genuinely different kind."""
         assert_program_exit_code(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    int v\n"
-            "struct Big:\n"
+            "type Big struct:\n"
             "    [5000]int arr\n"
             "    Inner inner\n"
             "    []int sl\n"
@@ -15079,7 +15079,7 @@ class TestStructLiteralArrayFieldAddressRegression:
             "    a[4999] = 77\n"
             "    return a\n"
             "\n"
-            "struct Big:\n"
+            "type Big struct:\n"
             "    int tag\n"
             "    [5000]int data\n"
             "\n"
@@ -15099,7 +15099,7 @@ class TestStructLiteralArrayFieldAddressRegression:
             "    a[4999] = 77\n"
             "    return a\n"
             "\n"
-            "struct Big:\n"
+            "type Big struct:\n"
             "    int tag\n"
             "    [5000]int data\n"
             "\n"
@@ -15117,7 +15117,7 @@ class TestStructLiteralArrayFieldAddressRegression:
         exact same _gen_address_of_memory_into call and was fixed by
         the same change."""
         assert_program_exit_code(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    [5000]int data\n"
             "\n"
             "def Inner makeInner():\n"
@@ -15125,7 +15125,7 @@ class TestStructLiteralArrayFieldAddressRegression:
             "    a[4999] = 42\n"
             "    return Inner(a)\n"
             "\n"
-            "struct Outer:\n"
+            "type Outer struct:\n"
             "    int tag\n"
             "    Inner inner\n"
             "\n"
@@ -15290,7 +15290,7 @@ class TestImplicitZeroValue:
 
     def test_struct_with_scalar_fields_zero_value(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -15302,7 +15302,7 @@ class TestImplicitZeroValue:
 
     def test_struct_with_str_field_zero_value(self):
         assert_program_stdout(
-            "struct Person:\n"
+            "type Person struct:\n"
             "    str name\n"
             "    int age\n"
             "\n"
@@ -15315,7 +15315,7 @@ class TestImplicitZeroValue:
 
     def test_struct_with_slice_field_zero_value(self):
         assert_program_stdout(
-            "struct Holder:\n"
+            "type Holder struct:\n"
             "    []int xs\n"
             "\n"
             "def int main():\n"
@@ -15327,9 +15327,9 @@ class TestImplicitZeroValue:
 
     def test_nested_struct_field_zero_value(self):
         assert_program_exit_code(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    int v\n"
-            "struct Outer:\n"
+            "type Outer struct:\n"
             "    Inner i\n"
             "    int b\n"
             "\n"
@@ -15346,7 +15346,7 @@ class TestImplicitZeroValue:
         zero-loop weren't protecting the struct's own base register
         across sibling fields (see this class's own module comment)."""
         assert_program_exit_code(
-            "struct Big:\n"
+            "type Big struct:\n"
             "    int tag\n"
             "    [5000]int data\n"
             "\n"
@@ -15363,7 +15363,7 @@ class TestImplicitZeroValue:
         though this specific case (base == 'rbp') needs no protection
         at all (see _gen_zero_value_into's own docstring for why)."""
         assert_program_exit_code(
-            "struct Triple:\n"
+            "type Triple struct:\n"
             "    int a\n"
             "    [3]int mid\n"
             "    int c\n"
@@ -15382,7 +15382,7 @@ class TestImplicitZeroValue:
         register (not 'rbp'), so this is the case that actually
         exercises the push/pop protection directly."""
         assert_program_exit_code(
-            "struct Triple:\n"
+            "type Triple struct:\n"
             "    int a\n"
             "    [5000]int mid\n"
             "    int c\n"
@@ -15397,7 +15397,7 @@ class TestImplicitZeroValue:
 
     def test_array_of_structs_zero_value(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -15409,7 +15409,7 @@ class TestImplicitZeroValue:
 
     def test_array_of_structs_with_str_field(self):
         assert_program_stdout(
-            "struct Person:\n"
+            "type Person struct:\n"
             "    str name\n"
             "    int age\n"
             "\n"
@@ -15433,7 +15433,7 @@ class TestImplicitZeroValue:
         proven for that earlier bug -- verified directly here, not
         just reasoned about."""
         assert_program_exit_code(
-            "struct Bag:\n"
+            "type Bag struct:\n"
             "    [10]int items\n"
             "\n"
             "def int main():\n"
@@ -15448,10 +15448,10 @@ class TestImplicitZeroValue:
         struct has its own str field -- one level deeper than the
         test above."""
         assert_program_stdout(
-            "struct Item:\n"
+            "type Item struct:\n"
             "    str name\n"
             "    int qty\n"
-            "struct Container:\n"
+            "type Container struct:\n"
             "    int tag\n"
             "    [2]Item items\n"
             "\n"
@@ -15488,7 +15488,7 @@ class TestImplicitZeroValue:
 
     def test_explicit_struct_initializer_on_heap_allocated_var_still_works(self):
         assert_program_exit_code(
-            "struct Big:\n"
+            "type Big struct:\n"
             "    int tag\n"
             "    [5000]int data\n"
             "\n"
@@ -15509,7 +15509,7 @@ class TestImplicitZeroValue:
         mechanism, and TestNamedStructLiterals for the fuller test
         coverage of this specifically."""
         assert_program_exit_code(
-            "struct A:\n"
+            "type A struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -15528,7 +15528,7 @@ class TestArraysOfStructs:
         involved at all -- two ordinary, already-declared struct
         variables used as an array literal's own elements."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -15546,7 +15546,7 @@ class TestArraysOfStructs:
 
     def test_array_literal_of_struct_literals(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -15562,7 +15562,7 @@ class TestArraysOfStructs:
         not just int/bool/str/'[', as starting a typed literal's own
         element type) alongside the codegen fix."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -15578,7 +15578,7 @@ class TestArraysOfStructs:
         covers both shapes (see _looks_like_typed_literal's own two
         checks, one per shape)."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -15596,7 +15596,7 @@ class TestArraysOfStructs:
         through gen_array_value_into regardless of what the innermost
         leaf type turns out to be."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -15612,7 +15612,7 @@ class TestArraysOfStructs:
         literal -- each is a genuinely different expression shape
         gen_struct_value_into has to dispatch on internally."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -15635,7 +15635,7 @@ class TestArraysOfStructs:
         """`[base[0], base[1]]` -- each element is itself an Index
         expression reading a struct out of a DIFFERENT array."""
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -15648,10 +15648,10 @@ class TestArraysOfStructs:
 
     def test_struct_field_that_is_an_array_of_structs_built_via_nested_literal(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
-            "struct Pair:\n"
+            "type Pair struct:\n"
             "    [2]Point pts\n"
             "\n"
             "def int main():\n"
@@ -15662,7 +15662,7 @@ class TestArraysOfStructs:
 
     def test_value_semantics_mutating_a_copy_does_not_affect_the_original(self):
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -15683,7 +15683,7 @@ class TestArraysOfStructs:
         over the 16384-byte stack threshold."""
         elements = ", ".join(f"Point({i}, {i})" for i in range(2500))
         assert_program_exit_code(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -15697,7 +15697,7 @@ class TestArraysOfStructs:
         """The asm-level confirmation behind the test just above."""
         elements = ", ".join(f"Point({i}, {i})" for i in range(2500))
         source = (
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -15714,7 +15714,7 @@ class TestArraysOfStructs:
         """Negative control: a small array-of-structs literal, well
         under the stack limit, should produce no malloc call at all."""
         source = (
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -15729,9 +15729,9 @@ class TestArraysOfStructs:
 
     def test_mismatched_struct_types_in_array_literal_is_rejected(self):
         assert_program_semantic_error(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
-            "struct Other:\n"
+            "type Other struct:\n"
             "    int y\n"
             "\n"
             "def int main():\n"
@@ -15744,7 +15744,7 @@ class TestArraysOfStructs:
 
     def test_struct_and_scalar_mixed_in_untyped_array_literal_is_rejected(self):
         assert_program_semantic_error(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "\n"
             "def int main():\n"
@@ -15765,7 +15765,7 @@ class TestArraysOfStructs:
         ARRAY- and SLICE-typed elements already get in this same
         position."""
         source = (
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -15829,7 +15829,7 @@ class TestPrintStructs:
 
     def test_basic_struct(self):
         assert_program_stdout(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -15844,7 +15844,7 @@ class TestPrintStructs:
 
     def test_single_field_struct(self):
         assert_program_stdout(
-            "struct Wrapper:\n"
+            "type Wrapper struct:\n"
             "    int value\n"
             "\n"
             "def int main():\n"
@@ -15857,7 +15857,7 @@ class TestPrintStructs:
 
     def test_struct_with_bool_field(self):
         assert_program_stdout(
-            "struct Flag:\n"
+            "type Flag struct:\n"
             "    bool on\n"
             "\n"
             "def int main():\n"
@@ -15874,7 +15874,7 @@ class TestPrintStructs:
         same "quoted only when nested" convention TestPrintArraysAndSlices'
         own test_str_elements_are_quoted already established."""
         assert_program_stdout(
-            "struct Person:\n"
+            "type Person struct:\n"
             "    str name\n"
             "    int age\n"
             "\n"
@@ -15892,10 +15892,10 @@ class TestPrintStructs:
         simplest genuinely recursive case: hornet_stringify calls
         itself once, for the nested Inner value."""
         assert_program_stdout(
-            "struct Inner:\n"
+            "type Inner struct:\n"
             "    int v\n"
             "\n"
-            "struct Outer:\n"
+            "type Outer struct:\n"
             "    Inner inner\n"
             "\n"
             "def int main():\n"
@@ -15908,7 +15908,7 @@ class TestPrintStructs:
 
     def test_struct_with_array_field(self):
         assert_program_stdout(
-            "struct Row:\n"
+            "type Row struct:\n"
             "    [3]int values\n"
             "\n"
             "def int main():\n"
@@ -15921,7 +15921,7 @@ class TestPrintStructs:
 
     def test_struct_with_slice_field(self):
         assert_program_stdout(
-            "struct Row:\n"
+            "type Row struct:\n"
             "    []int values\n"
             "\n"
             "def int main():\n"
@@ -15935,7 +15935,7 @@ class TestPrintStructs:
 
     def test_struct_with_empty_slice_field(self):
         assert_program_stdout(
-            "struct Row:\n"
+            "type Row struct:\n"
             "    []int values\n"
             "\n"
             "def int main():\n"
@@ -15948,7 +15948,7 @@ class TestPrintStructs:
 
     def test_array_of_structs(self):
         assert_program_stdout(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -15965,7 +15965,7 @@ class TestPrintStructs:
 
     def test_slice_of_structs(self):
         assert_program_stdout(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -15985,11 +15985,11 @@ class TestPrintStructs:
         """print's own Field-access support (not just a bare
         Variable) for a struct-typed argument -- `print(container.p)`."""
         assert_program_stdout(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
-            "struct Container:\n"
+            "type Container struct:\n"
             "    Point p\n"
             "\n"
             "def int main():\n"
@@ -16006,7 +16006,7 @@ class TestPrintStructs:
         `print(pts[0])` -- an array/slice ELEMENT, not the whole
         container."""
         assert_program_stdout(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -16032,7 +16032,7 @@ class TestPrintStructs:
         no compile-time-fixed depth anywhere in the codegen that makes
         this work."""
         assert_program_stdout(
-            "struct Node:\n"
+            "type Node struct:\n"
             "    int value\n"
             "    []Node children\n"
             "\n"
@@ -16052,7 +16052,7 @@ class TestPrintStructs:
 
     def test_multiple_struct_prints_each_get_exactly_one_newline(self):
         assert_program_stdout(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -16081,7 +16081,7 @@ class TestPrintStructs:
         argument/test_slice_returning_call_as_direct_print_argument
         just above)."""
         assert_program_stdout(
-            "struct Point:\n"
+            "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
@@ -16221,7 +16221,7 @@ class TestASTPrettyPrinting:
         mechanism to render, with no special-casing needed despite the
         struct's own self-reference."""
         ast = _parse(
-            "struct Node:\n"
+            "type Node struct:\n"
             "    int value\n"
             "    []Node children\n"
             "\n"

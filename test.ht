@@ -1,8 +1,8 @@
-struct HasArray:
+type HasArray struct:
     [5]int values
 
 
-struct Point:
+type Point struct:
     int x
     int y
 

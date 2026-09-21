@@ -1,4 +1,4 @@
-struct Point:
+type Point struct:
     int x
     int y
 

@@ -1,11 +1,11 @@
-struct Container:
+type Container struct:
     [3]int values
 
-struct Point:
+type Point struct:
     int x
     int y
 
-struct Line:
+type Line struct:
     Point start
     Point end
 

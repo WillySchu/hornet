@@ -5,5 +5,5 @@ def int main():
     return 0
 
 
-struct Node:
+type Node struct:
     int value

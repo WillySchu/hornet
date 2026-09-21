@@ -1,8 +1,8 @@
-struct Point:
+type Point struct:
     int x
     int y
 
-struct Container:
+type Container struct:
     []int values
 
 def int main():
