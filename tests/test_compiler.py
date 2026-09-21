@@ -6401,6 +6401,80 @@ class TestNarrowingCodegen:
             expected=12,
         )
 
+    # -- a narrowed variable used everywhere else a struct value can
+    # flow -- not just field access. Every one of these goes through
+    # the SAME _ir_struct_address mechanism field access does, but
+    # each has its own, separate calling code (print, VarDecl/Assign,
+    # argument-passing, Return, equality), and this whole feature has
+    # repeatedly shown that a shared mechanism doesn't guarantee every
+    # caller of it was actually exercised -- so each is checked
+    # directly rather than assumed to follow from the others.
+
+    def test_printing_a_narrowed_variable_prints_as_its_own_variant(self):
+        assert_program_stdout(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    if s is Circle:\n"
+            "        print(s)\n"
+            "    return 0\n",
+            "Circle(radius: 5)\n",
+        )
+
+    def test_extracting_a_narrowed_variable_into_a_plain_struct_variable(self):
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    if s is Circle:\n"
+            "        Circle c = s\n"
+            "        return c.radius\n"
+            "    return 0\n",
+            expected=5,
+        )
+
+    def test_passing_a_narrowed_variable_as_a_struct_typed_argument(self):
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int takesCircle(Circle c):\n"
+            "    return c.radius\n"
+            "\n"
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    if s is Circle:\n"
+            "        return takesCircle(s)\n"
+            "    return 0\n",
+            expected=5,
+        )
+
+    def test_returning_a_narrowed_variable_as_a_struct_typed_return_value(self):
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def Circle asCircle(Shape s):\n"
+            "    if s is Circle:\n"
+            "        return s\n"
+            "    return Circle(-1)\n"
+            "\n"
+            "def int main():\n"
+            "    Circle c = asCircle(Circle(9))\n"
+            "    return c.radius\n",
+            expected=9,
+        )
+
+    def test_equality_between_a_narrowed_variable_and_a_plain_struct(self):
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    Circle other = Circle(5)\n"
+            "    if s is Circle:\n"
+            "        if s == other:\n"
+            "            return 1\n"
+            "        return 2\n"
+            "    return 0\n",
+            expected=1,
+        )
+
 
 # ---------------------------------------------------------------------------
 # int8/uint8, step 1 of 3: the TYPE SYSTEM only -- lexer/parser keywords,
