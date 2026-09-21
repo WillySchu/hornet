@@ -17,6 +17,7 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
+- Struct literal as print argument.
 - Cleanup remaining IR/backend coupling.
 - FFI
 - Separate the runtime code from codegen.
