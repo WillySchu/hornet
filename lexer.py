@@ -82,6 +82,7 @@ class TokenType(Enum):
     STRUCT = auto()
     TYPE = auto()
     IS = auto()
+    MATCH = auto()
 
     # Special
     NEWLINE = auto()
@@ -165,6 +166,7 @@ class Lexer:
             'struct': TokenType.STRUCT,
             'type': TokenType.TYPE,
             'is': TokenType.IS,
+            'match': TokenType.MATCH,
         }
 
         # Compile master regex pattern
@@ -219,7 +221,7 @@ class Lexer:
             ('PERCENT',       r'%'),               # Modulo
             ('TILDE',         r'\~'),              # Tilde
             ('AMPERSAND',     r'&'),               # Bitwise AND
-            ('PIPE',          r'\|'),              # Bitwise OR
+            ('PIPE',          r'\|'),               # Bitwise OR
             ('CARET',         r'\^'),              # Bitwise XOR
             ('DOT',           r'\.'),
 

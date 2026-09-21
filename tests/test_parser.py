@@ -2891,3 +2891,173 @@ def test_while_condition_does_not_recognize_is_check():
     ]
     with pytest.raises(parser.ParseError, match="Expected ':' to start the while body"):
         parser.Parser(tokens).parse_while()
+
+
+# ---------------------------------------------------------------------------
+# `match NAME: (is TypeName: <block>)+ [else: <block>]?` -- exhaustive
+# matching's own grammar. Introduces no new AST node: parse_match
+# desugars entirely into an ordinary nested-If chain, one IsCheck-
+# conditioned If per arm, chained through else_body exactly like an
+# elif chain already is (see If's own docstring) -- these only check
+# that desugaring produces the right SHAPE (is_match set on the
+# outermost If alone, each arm's own condition, correct else_body
+# chaining) and the grammar's own error cases; whether the chain is
+# actually exhaustive is semantic.py's job, not tested here.
+# ---------------------------------------------------------------------------
+
+def test_match_desugars_into_a_nested_if_chain():
+    tokens = [
+        lexer.Token(lexer.TokenType.MATCH, 'match', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 's', 1, 7),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.IS, 'is', 2, 5),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Circle', 2, 8),
+        lexer.Token(lexer.TokenType.COLON, ':', 2, 14),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 15),
+        lexer.Token(lexer.TokenType.INDENT, '', 3, 1),
+        lexer.Token(lexer.TokenType.RETURN, 'return', 3, 9),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 3, 16),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 3, 17),
+        lexer.Token(lexer.TokenType.DEDENT, '', 4, 5),
+        lexer.Token(lexer.TokenType.IS, 'is', 4, 5),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Square', 4, 8),
+        lexer.Token(lexer.TokenType.COLON, ':', 4, 14),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 4, 15),
+        lexer.Token(lexer.TokenType.INDENT, '', 5, 1),
+        lexer.Token(lexer.TokenType.RETURN, 'return', 5, 9),
+        lexer.Token(lexer.TokenType.NUMBER, '2', 5, 16),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 5, 17),
+        lexer.Token(lexer.TokenType.DEDENT, '', 6, 1),
+        lexer.Token(lexer.TokenType.DEDENT, '', 6, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 6, 1),
+    ]
+    outer = parser.Parser(tokens).parse_match()
+    assert outer.is_match is True
+    assert isinstance(outer.condition, parser.IsCheck)
+    assert outer.condition.variable_name == 's'
+    assert outer.condition.type_name == 'Circle'
+
+    assert len(outer.else_body) == 1
+    inner = outer.else_body[0]
+    assert isinstance(inner, parser.If)
+    assert inner.is_match is False  # only the OUTERMOST node is marked
+    assert inner.condition.variable_name == 's'
+    assert inner.condition.type_name == 'Square'
+    assert inner.else_body is None  # no trailing else -- relies on exhaustiveness
+
+
+def test_match_with_explicit_else():
+    """The else_body on the LAST arm is the explicit block itself,
+    not one more IsCheck-conditioned If -- else is not an arm."""
+    tokens = [
+        lexer.Token(lexer.TokenType.MATCH, 'match', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 's', 1, 7),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.IS, 'is', 2, 5),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Circle', 2, 8),
+        lexer.Token(lexer.TokenType.COLON, ':', 2, 14),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 15),
+        lexer.Token(lexer.TokenType.INDENT, '', 3, 1),
+        lexer.Token(lexer.TokenType.RETURN, 'return', 3, 9),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 3, 16),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 3, 17),
+        lexer.Token(lexer.TokenType.DEDENT, '', 4, 5),
+        lexer.Token(lexer.TokenType.ELSE, 'else', 4, 5),
+        lexer.Token(lexer.TokenType.COLON, ':', 4, 9),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 4, 10),
+        lexer.Token(lexer.TokenType.INDENT, '', 5, 1),
+        lexer.Token(lexer.TokenType.RETURN, 'return', 5, 9),
+        lexer.Token(lexer.TokenType.NUMBER, '0', 5, 16),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 5, 17),
+        lexer.Token(lexer.TokenType.DEDENT, '', 6, 1),
+        lexer.Token(lexer.TokenType.DEDENT, '', 6, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 6, 1),
+    ]
+    outer = parser.Parser(tokens).parse_match()
+    assert outer.is_match is True
+    assert len(outer.else_body) == 1
+    return_stmt = outer.else_body[0]
+    assert isinstance(return_stmt, parser.Return)
+
+
+def test_match_with_no_arms_raises():
+    tokens = [
+        lexer.Token(lexer.TokenType.MATCH, 'match', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 's', 1, 7),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.ELSE, 'else', 2, 5),
+        lexer.Token(lexer.TokenType.COLON, ':', 2, 9),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 10),
+        lexer.Token(lexer.TokenType.INDENT, '', 3, 1),
+        lexer.Token(lexer.TokenType.RETURN, 'return', 3, 9),
+        lexer.Token(lexer.TokenType.NUMBER, '0', 3, 16),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 3, 17),
+        lexer.Token(lexer.TokenType.DEDENT, '', 4, 1),
+        lexer.Token(lexer.TokenType.DEDENT, '', 4, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 4, 1),
+    ]
+    with pytest.raises(parser.ParseError, match="Expected at least one 'is' arm"):
+        parser.Parser(tokens).parse_match()
+
+
+def test_match_subject_must_be_a_bare_identifier():
+    """Matching IsCheck's own restriction -- a match subject that's an
+    arbitrary expression is rejected at the grammar level, not
+    deferred to semantic.py."""
+    tokens = [
+        lexer.Token(lexer.TokenType.MATCH, 'match', 1, 1),
+        lexer.Token(lexer.TokenType.NUMBER, '5', 1, 7),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 9),
+    ]
+    with pytest.raises(parser.ParseError, match="Expected a variable name to match on"):
+        parser.Parser(tokens).parse_match()
+
+
+def test_match_requires_is_or_else_between_arms():
+    tokens = [
+        lexer.Token(lexer.TokenType.MATCH, 'match', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 's', 1, 7),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'oops', 2, 5),
+        lexer.Token(lexer.TokenType.EOF, '', 2, 9),
+    ]
+    with pytest.raises(parser.ParseError, match="Expected 'is' \\(a match arm\\) or 'else'"):
+        parser.Parser(tokens).parse_match()
+
+
+def test_parse_statement_dispatches_to_match():
+    """parse_statement's own dispatch (`if self.check(TokenType.MATCH):
+    return self.parse_match()`) -- every other test in this section
+    calls parse_match directly, bypassing that dispatch line entirely,
+    so this is the one test that actually goes through parse_program's
+    ordinary statement-parsing path."""
+    tokens = [
+        lexer.Token(lexer.TokenType.MATCH, 'match', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 's', 1, 7),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.IS, 'is', 2, 5),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Circle', 2, 8),
+        lexer.Token(lexer.TokenType.COLON, ':', 2, 14),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 15),
+        lexer.Token(lexer.TokenType.INDENT, '', 3, 1),
+        lexer.Token(lexer.TokenType.RETURN, 'return', 3, 9),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 3, 16),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 3, 17),
+        lexer.Token(lexer.TokenType.DEDENT, '', 4, 1),
+        lexer.Token(lexer.TokenType.DEDENT, '', 4, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 4, 1),
+    ]
+    result = parser.Parser(tokens).parse_statement()
+    assert isinstance(result, parser.If)
+    assert result.is_match is True

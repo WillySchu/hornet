@@ -641,10 +641,25 @@ class If(Node):
     is `else: if c: b`). else_body is always just Optional[List[Node]]
     either way, so semantic.py/codegen.py consume it uniformly and an
     elif chain of any length falls out of ordinary nesting.
-    """
+
+    `match` isn't its own AST concept either, for the identical reason:
+    parse_match (parser.py) desugars an entire `match NAME: is Type:
+    ... is Type: ...` into this SAME nested-If shape, one IsCheck-
+    conditioned If per arm, chained through else_body exactly like an
+    elif chain is -- the last arm's own else_body is the explicit
+    `else:` block if one was written, or None if the match instead
+    relies on covering every one of NAME's own sum type's declared
+    variants. is_match is set ONLY on the outermost If of such a
+    chain (never the nested arms inside it) -- the one marker analyze_
+    if (which verifies that exhaustiveness, when else_body is None)
+    and always_returns (which needs to treat a proven-exhaustive match
+    with no trailing else as still guaranteeing a return) both check,
+    rather than either re-deriving "did this come from a match" from
+    the chain's own shape."""
     condition: Node
     then_body: List[Node]
     else_body: Optional[List[Node]] = None
+    is_match: bool = False
 
 
 @dataclass
@@ -1235,6 +1250,8 @@ class Parser:
             return self.parse_return()
         if self.check(TokenType.IF):
             return self.parse_if()
+        if self.check(TokenType.MATCH):
+            return self.parse_match()
         if self.check(TokenType.WHILE):
             return self.parse_while()
         if self.check(TokenType.BREAK):
@@ -1336,6 +1353,80 @@ class Parser:
             type_tok = self.expect(TokenType.IDENTIFIER, "Expected a type name after 'is'")
             return IsCheck(variable_name=name_tok.val, type_name=type_tok.val, line=name_tok.line, col=name_tok.col)
         return self.parse_expression()
+
+    def parse_match(self) -> If:
+        """`match NAME: (is TypeName: <block>)+ [else: <block>]?` --
+        desugars ENTIRELY into an ordinary nested-If chain here, at
+        parse time, identically in shape to how an elif chain already
+        desugars (see _parse_if_body's own docstring): match
+        introduces no new AST node of its own at all. Each arm becomes
+        one IsCheck-conditioned If (variable_name always NAME, the
+        match's own subject -- an arm only writes its own type_name,
+        `is Circle:`, not the full `NAME is Circle:` an ordinary if
+        would need), chained through else_body exactly like an elif
+        chain is. The LAST arm's own else_body is the explicit `else:`
+        block if one was written, or None if the match instead relies
+        on covering every one of NAME's own sum type's declared
+        variants -- checked later, by semantic.py's analyze_if, using
+        the one marker this desugaring leaves behind: is_match=True,
+        set ONLY on the outermost If returned here (see If's own
+        docstring for why exactly one place, not the chain's shape
+        itself, is what marks this).
+
+        NAME is restricted to a bare IDENTIFIER, matching IsCheck's own
+        restriction in _parse_if_condition above -- a match subject
+        that's an arbitrary expression (`match shapes[0]:`) is out of
+        scope for the identical reasons a narrowing `is` check already
+        is.
+
+        Built from the LAST arm backward (or from the explicit else,
+        if any), so each arm's own else_body is already the fully-
+        built If (or block) it needs to chain to by the time it's
+        constructed -- the same direction _parse_if_body's own elif
+        recursion effectively builds in, just iteratively instead of
+        via recursion, since every arm is already in hand as a flat
+        list before any chaining happens."""
+        start_tok = self.expect(TokenType.MATCH, "Expected 'match'")
+        name_tok = self.expect(TokenType.IDENTIFIER, "Expected a variable name to match on")
+        self.expect(TokenType.COLON, "Expected ':' to start the match body")
+        self.expect(TokenType.NEWLINE, "Expected a newline after ':'")
+        self.skip_newlines()
+        self.expect(TokenType.INDENT, "Expected an indented block")
+        self.skip_newlines()
+
+        arms: List[Tuple[Token, str, List[Node]]] = []
+        else_body: Optional[List[Node]] = None
+        while not self.check(TokenType.DEDENT) and not self.at_end():
+            if self.match(TokenType.ELSE):
+                self.expect(TokenType.COLON, "Expected ':' to start the else body")
+                self.expect(TokenType.NEWLINE, "Expected a newline after ':'")
+                else_body = self.parse_block()
+                self.skip_newlines()
+                break
+            arm_tok = self.expect(TokenType.IS, "Expected 'is' (a match arm) or 'else'")
+            type_tok = self.expect(TokenType.IDENTIFIER, "Expected a type name after 'is'")
+            self.expect(TokenType.COLON, "Expected ':' to start this arm's body")
+            self.expect(TokenType.NEWLINE, "Expected a newline after ':'")
+            arm_body = self.parse_block()
+            arms.append((arm_tok, type_tok.val, arm_body))
+            self.skip_newlines()
+
+        self.expect(TokenType.DEDENT, "Expected the match body to end")
+
+        if not arms:
+            raise ParseError(
+                f"Expected at least one 'is' arm in this match "
+                f"at line {start_tok.line}, column {start_tok.col}"
+            )
+
+        chained_body = else_body
+        for arm_tok, type_name, arm_body in reversed(arms):
+            condition = IsCheck(variable_name=name_tok.val, type_name=type_name, line=arm_tok.line, col=arm_tok.col)
+            chained_body = [If(condition=condition, then_body=arm_body, else_body=chained_body, line=arm_tok.line, col=arm_tok.col)]
+
+        outermost = chained_body[0]
+        outermost.is_match = True
+        return outermost
 
     def parse_var_decl(
         self,

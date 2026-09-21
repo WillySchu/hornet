@@ -17340,6 +17340,7 @@ class TestASTPrettyPrinting:
             "    ),\n"
             "    then_body=[Return(value=Constant(value=1))],\n"
             "    else_body=None,\n"
+            "    is_match=False,\n"
             ")"
         )
 
