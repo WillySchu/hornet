@@ -72,6 +72,45 @@ def test_type_from_name_unknown():
         semantic.type_from_name('unknown', {}, {})
 
 
+# ---------------------------------------------------------------------------
+# type_from_name's own sum_types parameter -- deliberately opt-in
+# (defaults to disallowed), unlike structs/aliases, which are required.
+# See type_from_name's own docstring for why. TestSumTypes in test_
+# compiler.py covers the full semantic-analysis picture (SemanticAnalyzer's
+# own registry, name collisions, variant validation, widening); these
+# stay scoped to type_from_name in isolation.
+# ---------------------------------------------------------------------------
+
+def test_type_from_name_sum_type_resolves_when_passed():
+    sum_types = {'Shape': semantic.SumTypeInfo(name='Shape', variants=['Circle', 'Square'])}
+    expected = semantic.Type(kind=semantic.TypeKind.SUM, sum_type_name='Shape')
+    assert expected == semantic.type_from_name('Shape', {}, {}, sum_types=sum_types)
+
+
+def test_type_from_name_sum_type_unknown_when_omitted():
+    """The deliberately safe default: a sum type name reports as
+    unknown -- not silently resolved -- at a call site that doesn't
+    pass sum_types at all, exactly like _resolve_struct_fields's own
+    call site (struct fields can't be sum-typed yet)."""
+    sum_types = {'Shape': semantic.SumTypeInfo(name='Shape', variants=['Circle', 'Square'])}
+    with pytest.raises(semantic.SemanticError, match="Unknown type 'Shape'"):
+        semantic.type_from_name('Shape', {}, {})  # sum_types omitted
+
+
+def test_type_from_name_sum_type_array_element():
+    """A sum type as an array's own element type, recursing through
+    ArrayTypeExpr -- exercises sum_types being threaded through the
+    recursive call, not just the top-level one."""
+    sum_types = {'Shape': semantic.SumTypeInfo(name='Shape', variants=['Circle', 'Square'])}
+    type_expr = parser.ArrayTypeExpr(size=3, element_type='Shape')
+    expected = semantic.Type(
+        kind=semantic.TypeKind.ARRAY,
+        element_type=semantic.Type(kind=semantic.TypeKind.SUM, sum_type_name='Shape'),
+        size=3,
+    )
+    assert expected == semantic.type_from_name(type_expr, {}, {}, sum_types=sum_types)
+
+
 # TODO(will): Test always_returns
 
 # TODO(will): Test SemanticAnalyzer

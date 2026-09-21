@@ -2522,7 +2522,7 @@ class TestFunctionsWithNoDeclaredReturnType:
             "    return log(1) == log(2)\n"
         )
         ast = _parse(source)
-        with pytest.raises(SemanticError, match="does not support slice, void, or none operands"):
+        with pytest.raises(SemanticError, match="does not support slice, void, sum type, or none operands"):
             analyze(ast)
 
 
@@ -5321,6 +5321,374 @@ class TestTypeAliases:
             "def int main():\n"
             "    return 0\n",
             match="builtin",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Sum types (`type Name is Variant | Variant (| Variant)*`) -- semantic
+# analysis only (Stage 2): declaration, name resolution, widening a
+# variant struct into its sum type, and every rejection this stage is
+# responsible for. No codegen exists for these yet, so every "accepted"
+# test here stops at analyze() -- there's nothing to compile-and-run
+# against, unlike TestStructs/TestTypeAliases's own happy-path tests.
+# ---------------------------------------------------------------------------
+
+class TestSumTypes:
+
+    # -- accepted (analyze() must NOT raise) -------------------------------
+
+    def test_widening_a_variant_into_a_sum_type_via_var_decl(self):
+        ast = _parse(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type Shape is Circle | Square\n"
+            "\n"
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_widening_a_variant_into_a_sum_type_via_assign(self):
+        """The same widening rule via an ordinary Assign, not just a
+        VarDecl's own initializer -- both go through the identical
+        _types_compatible check, but exercised separately since
+        _check_value_flowing_into_allowing_struct_literal is called
+        from two different call sites for these."""
+        ast = _parse(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type Shape is Circle | Square\n"
+            "\n"
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    s = Square(3)\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_widening_an_already_typed_variable_not_just_a_bare_literal(self):
+        """`Shape s = c`, c already Circle-typed -- not just a bare
+        `Circle(5)` struct literal -- proving the widening rule lives
+        in _types_compatible itself, not in some struct-literal-
+        specific special case."""
+        ast = _parse(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type Shape is Circle | Square\n"
+            "\n"
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    Shape s = c\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_sum_type_as_function_parameter_and_widening_the_argument(self):
+        ast = _parse(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type Shape is Circle | Square\n"
+            "\n"
+            "def int takesShape(Shape s):\n"
+            "    return 0\n"
+            "\n"
+            "def int main():\n"
+            "    return takesShape(Circle(5))\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_sum_type_as_return_type_and_widening_the_return_value(self):
+        ast = _parse(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type Shape is Circle | Square\n"
+            "\n"
+            "def Shape makeShape():\n"
+            "    return Circle(5)\n"
+            "\n"
+            "def int main():\n"
+            "    Shape s = makeShape()\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_array_of_sum_type_as_a_local_variable(self):
+        """[3]Shape as a bare local -- allowed, unlike as a struct
+        field (test_sum_type_as_a_struct_field_is_rejected below):
+        nothing embeds it inside another type's own fixed layout, so
+        there's no cycle risk to guard against here."""
+        ast = _parse(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type Shape is Circle | Square\n"
+            "\n"
+            "def int main():\n"
+            "    [3]Shape shapes\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_more_than_two_variants(self):
+        ast = _parse(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type Triangle struct:\n"
+            "    int base\n"
+            "\n"
+            "type Shape is Circle | Square | Triangle\n"
+            "\n"
+            "def int main():\n"
+            "    Shape s = Triangle(3)\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    # -- rejected -----------------------------------------------------------
+
+    def test_widening_an_unrelated_struct_is_rejected(self):
+        assert_program_semantic_error(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type Triangle struct:\n"
+            "    int base\n"
+            "\n"
+            "type Shape is Circle | Square\n"
+            "\n"
+            "def int main():\n"
+            "    Shape s = Triangle(3)\n"
+            "    return 0\n",
+            match="Cannot initialize 's'",
+        )
+
+    def test_variant_naming_an_alias_instead_of_a_struct_is_rejected(self):
+        assert_program_semantic_error(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type MyInt = int\n"
+            "\n"
+            "type Shape is Circle | MyInt\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="not a declared struct",
+        )
+
+    def test_unknown_variant_name_is_rejected(self):
+        assert_program_semantic_error(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Shape is Circle | Nonexistent\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="not a declared struct",
+        )
+
+    def test_duplicate_variant_is_rejected(self):
+        assert_program_semantic_error(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type Shape is Circle | Square | Circle\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="more than once",
+        )
+
+    def test_no_initializer_is_rejected(self):
+        assert_program_semantic_error(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type Shape is Circle | Square\n"
+            "\n"
+            "def int main():\n"
+            "    Shape s\n"
+            "    return 0\n",
+            match="has no initializer",
+        )
+
+    def test_sum_type_as_a_struct_field_is_rejected(self):
+        assert_program_semantic_error(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type Shape is Circle | Square\n"
+            "\n"
+            "type Container struct:\n"
+            "    Shape s\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="Unknown type 'Shape'",
+        )
+
+    def test_array_of_sum_type_as_a_struct_field_is_also_rejected(self):
+        """Not just a bare Shape field -- an array of them is rejected
+        too, since _directly_embedded_struct_name-style array-
+        unwrapping means [3]Shape as a field is exactly as size-
+        infinite-prone as a bare Shape field would be."""
+        assert_program_semantic_error(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type Shape is Circle | Square\n"
+            "\n"
+            "type Container struct:\n"
+            "    [3]Shape shapes\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="Unknown type 'Shape'",
+        )
+
+    def test_equality_between_sum_types_is_rejected(self):
+        assert_program_semantic_error(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type Shape is Circle | Square\n"
+            "\n"
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    Shape t = Circle(5)\n"
+            "    if s == t:\n"
+            "        return 1\n"
+            "    return 0\n",
+            match="does not support slice, void, sum type, or none operands",
+        )
+
+    def test_sum_type_name_colliding_with_a_struct_is_rejected(self):
+        assert_program_semantic_error(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type Circle is Circle | Square\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="collides with a struct",
+        )
+
+    def test_sum_type_name_colliding_with_an_alias_is_rejected(self):
+        assert_program_semantic_error(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type Shape = int\n"
+            "\n"
+            "type Shape is Circle | Square\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="collides with a type alias",
+        )
+
+    def test_function_name_colliding_with_a_sum_type_is_rejected(self):
+        assert_program_semantic_error(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type Shape is Circle | Square\n"
+            "\n"
+            "def int Shape():\n"
+            "    return 0\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="collides with a sum type",
+        )
+
+    def test_sum_type_named_after_a_builtin_is_rejected(self):
+        assert_program_semantic_error(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type print is Circle | Square\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="builtin",
+        )
+
+    def test_duplicate_sum_type_declaration_is_rejected(self):
+        assert_program_semantic_error(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type Shape is Circle | Square\n"
+            "\n"
+            "type Shape is Circle | Square\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="is already declared",
         )
 
 
@@ -11356,14 +11724,14 @@ class TestNone:
         exception (see check_binary's own comment)."""
         assert_semantic_error(
             "    return none == none",
-            match="does not support slice, void, or none operands",
+            match="does not support slice, void, sum type, or none operands",
             return_type="bool",
         )
 
     def test_comparing_int_to_none_is_rejected(self):
         assert_semantic_error(
             "    return 5 == none",
-            match="does not support slice, void, or none operands",
+            match="does not support slice, void, sum type, or none operands",
             return_type="bool",
         )
 

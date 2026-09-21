@@ -227,6 +227,7 @@ from parser import (
     SliceTypeExpr,
     StringLiteral,
     StructDef,
+    SumTypeDef,
     TypeAlias,
     Unary,
     UnaryOp,
@@ -250,6 +251,7 @@ class TypeKind(Enum):
     ARRAY = auto()
     SLICE = auto()
     STRUCT = auto()
+    SUM = auto()   # see SumTypeInfo's own docstring
     VOID = auto()  # see Type.VOID's own docstring below -- purely internal
     NONE = auto()  # see Type.NONE's own docstring below -- user-writable
                    # (via the `none` literal), but never as a DECLARED type
@@ -261,9 +263,11 @@ class Type:
     (kind=ARRAY, element_type one level down, size that dimension's
     fixed length), a slice (kind=SLICE, element_type one level down,
     size always None -- a slice's length is a runtime property of the
-    VALUE, not its type), or a struct (kind=STRUCT, struct_name the
+    VALUE, not its type), a struct (kind=STRUCT, struct_name the
     declared name, element_type/size both None -- field layout lives
-    in the struct registry, not duplicated here).
+    in the struct registry, not duplicated here), or a sum type
+    (kind=SUM, sum_type_name the declared name -- variant list lives
+    in the sum-type registry, the same split STRUCT already has).
 
     Frozen to get structural equality/hashing for free: `Type(ARRAY,
     Type.INT, 3) == Type(ARRAY, Type.INT, 3)` is correctly True for
@@ -271,16 +275,18 @@ class Type:
     correctly True too, recursing to arbitrary depth since element_
     type is itself a Type -- no special-casing needed anywhere that
     already does `left_type != right_type` (check_binary, analyze_
-    var_decl, check_call, ...). This is also what gives struct types
-    NOMINAL equality essentially for free: struct_name is just one
-    more field this same machinery compares, so two structs with
-    identical fields but different names are correctly different
-    types, with no field-by-field comparison involved.
+    var_decl, check_call, ...). This is also what gives struct (and
+    sum) types NOMINAL equality essentially for free: struct_name (or
+    sum_type_name) is just one more field this same machinery
+    compares, so two structs -- or sum types -- with identical shapes
+    but different names are correctly different types, with no field-
+    or variant-by-variant comparison involved.
     """
     kind: TypeKind
     element_type: Optional['Type'] = None  # set when kind == ARRAY or SLICE
     size: Optional[int] = None             # only set when kind == ARRAY
     struct_name: Optional[str] = None      # only set when kind == STRUCT
+    sum_type_name: Optional[str] = None    # only set when kind == SUM
 
     def __str__(self) -> str:
         if self.kind == TypeKind.ARRAY:
@@ -289,6 +295,8 @@ class Type:
             return f"[]{self.element_type}"
         if self.kind == TypeKind.STRUCT:
             return self.struct_name
+        if self.kind == TypeKind.SUM:
+            return self.sum_type_name
         return self.kind.name.lower()
 
 
@@ -342,13 +350,40 @@ class StructInfo:
     fields: Dict[str, Type]
 
 
-def type_from_name(type_expr, structs: Dict[str, StructInfo], aliases: Dict[str, Type], node: Optional[Node] = None) -> Type:
+@dataclass
+class SumTypeInfo:
+    """Everything semantic analysis (and, eventually, codegen) needs
+    about one declared sum type: its name and its variants, an
+    ordered list of already-declared STRUCT names (never a scalar, an
+    alias, or another sum type -- see _resolve_sum_types). Order is
+    preserved and load-bearing: it's what decides each variant's own
+    discriminant (its index in this list), the same way a struct's own
+    field order decides codegen's memory layout.
+
+    Deliberately just names, not resolved Types the way StructInfo's
+    own fields are -- a variant's real shape is already available by
+    looking it up in the struct registry directly (self.structs),
+    exactly the same struct a bare `Circle(5)` literal already
+    resolves against; duplicating that here would just be two sources
+    of truth for the same thing."""
+    name: str
+    variants: List[str]
+
+
+def type_from_name(
+    type_expr,
+    structs: Dict[str, StructInfo],
+    aliases: Dict[str, Type],
+    node: Optional[Node] = None,
+    sum_types: Dict[str, SumTypeInfo] = None,
+) -> Type:
     """Converts a parsed type expression (VarDecl.var_type/Function.
     return_type/Param.type/StructField.field_type) into a Type.
-    `type_expr` is a plain str (scalar, struct name, or alias name), an
-    ArrayTypeExpr, or a SliceTypeExpr (see their own docstrings in
-    parser.py) -- handled by recursing on element_type, bottoming out
-    at a scalar/struct/alias name with no depth limit.
+    `type_expr` is a plain str (scalar, struct name, sum-type name, or
+    alias name), an ArrayTypeExpr, or a SliceTypeExpr (see their own
+    docstrings in parser.py) -- handled by recursing on element_type,
+    bottoming out at a scalar/struct/sum-type/alias name with no depth
+    limit.
 
     `structs` and `aliases` are both required parameters, not defaulted
     to empty dicts, so a call site that forgets to pass one fails
@@ -359,6 +394,29 @@ def type_from_name(type_expr, structs: Dict[str, StructInfo], aliases: Dict[str,
     signatures) -- resolving either is a single dict lookup, never a
     recursive re-resolution.
 
+    `sum_types`, unlike those two, DOES default -- to nothing resolvable
+    (see below) -- because unlike structs/aliases, which every call
+    site needs to recognize, a sum type is deliberately NOT allowed
+    EVERYWHERE yet: not as a struct field's type, at any depth of array
+    wrapping (see _resolve_struct_fields's own call site). That would
+    need real cycle-detection work this doesn't have yet -- a struct
+    field embeds its value inline, directly or through an array (the
+    same reason _check_struct_contains already walks through arrays
+    looking for an embedded struct), so a sum-typed field, or an array-
+    of-sum-type-typed one, could form the identical infinite-size cycle
+    a self-containing struct already can't. Every OTHER position (a
+    VarDecl's own type, a Param, a return type, a fully-typed array
+    literal's own type_expr, even a Cast's target -- rejected there
+    anyway, just less specifically, by the int-family check right
+    after) is safe regardless of array/slice wrapping, since none of
+    them embed a value inside another type's own fixed layout the way
+    a struct field does. Omitting the argument (or passing `None`,
+    same thing) is how a call site says "sum types aren't valid here"
+    -- deliberately the SAFE default, unlike structs/aliases:
+    forgetting to pass it just means a sum-type name reports as
+    unknown here, not that it silently resolves somewhere it
+    shouldn't.
+
     `node`, purely for error attribution (see SemanticError's own
     docstring), is the declaration OWNING type_expr (a Param, VarDecl,
     Function, ...) -- type_expr itself is often a bare string with no
@@ -366,13 +424,14 @@ def type_from_name(type_expr, structs: Dict[str, StructInfo], aliases: Dict[str,
     than re-derived at each recursive call.
 
     Only fails for a program that isn't syntactically valid, or
-    references an undeclared struct/alias name -- parse_type() already
+    references an undeclared struct/alias/sum-type name (or a sum-type
+    name where one currently isn't allowed) -- parse_type() already
     restricts everything else at parse time."""
     if isinstance(type_expr, ArrayTypeExpr):
-        element = type_from_name(type_expr.element_type, structs, aliases, node)
+        element = type_from_name(type_expr.element_type, structs, aliases, node, sum_types)
         return Type(TypeKind.ARRAY, element_type=element, size=type_expr.size)
     if isinstance(type_expr, SliceTypeExpr):
-        element = type_from_name(type_expr.element_type, structs, aliases, node)
+        element = type_from_name(type_expr.element_type, structs, aliases, node, sum_types)
         return Type(TypeKind.SLICE, element_type=element)
     if type_expr in _TYPE_NAMES:
         return _TYPE_NAMES[type_expr]
@@ -380,6 +439,8 @@ def type_from_name(type_expr, structs: Dict[str, StructInfo], aliases: Dict[str,
         return aliases[type_expr]
     if type_expr in structs:
         return Type(TypeKind.STRUCT, struct_name=type_expr)
+    if sum_types is not None and type_expr in sum_types:
+        return Type(TypeKind.SUM, sum_type_name=type_expr)
     raise SemanticError(f"Unknown type '{type_expr}'", node)
 
 
@@ -508,6 +569,7 @@ class SemanticAnalyzer:
         self.structs: Dict[str, StructInfo] = {}  # name -> resolved fields; see _reserve_struct_names/_resolve_struct_fields
         self.methods: Dict[Tuple[str, str], Tuple[List[Type], Type, str]] = {}  # (struct, method) -> (param types, return type, mangled name); see _collect_methods
         self.type_aliases: Dict[str, Type] = {}  # name -> resolved target Type; see _collect_type_aliases
+        self.sum_types: Dict[str, SumTypeInfo] = {}  # name -> resolved variants; see _resolve_sum_types
 
     def analyze(self, program: Program) -> None:
         # Pass order matters and is load-bearing:
@@ -528,7 +590,15 @@ class SemanticAnalyzer:
         self.structs = self._resolve_struct_fields(program.structs, struct_registry)
         program.struct_registry = self.structs  # stashed for codegen.py's own use
 
-        # 3.5. Collect struct methods, immediately lowering each into
+        # 3.5. Resolve every sum type: each variant against the struct
+        #    registry just finished above (needs REAL struct types, not
+        #    just reserved names, so this can't run any earlier). Must
+        #    finish before method/function-signature collection below,
+        #    so a signature can already reference a sum type.
+        self.sum_types = self._resolve_sum_types(program.sum_types, self.structs)
+        program.sum_type_registry = self.sum_types  # stashed for codegen.py's own future use, mirroring struct_registry
+
+        # 3.6. Collect struct methods, immediately lowering each into
         #    an ordinary mangled-name Function appended to program.
         #    functions -- see _collect_methods. Must run after struct
         #    fields are resolved (a receiver or param might need a
@@ -568,10 +638,17 @@ class SemanticAnalyzer:
                     f"same",
                     fn,
                 )
+            if fn.name in self.sum_types:
+                raise SemanticError(
+                    f"Function '{fn.name}' collides with a sum type "
+                    f"of the same name -- function and sum-type names "
+                    f"share one namespace and can never be the same",
+                    fn,
+                )
             if fn.name in self.functions:
                 raise SemanticError(f"Function '{fn.name}' is already declared", fn)
-            param_types = [type_from_name(p.type, self.structs, self.type_aliases, p) for p in fn.params]
-            return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.structs, self.type_aliases, fn)
+            param_types = [type_from_name(p.type, self.structs, self.type_aliases, p, self.sum_types) for p in fn.params]
+            return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.structs, self.type_aliases, fn, self.sum_types)
             self.functions[fn.name] = (param_types, return_type)
 
         # 5. Check each function's own body, including every
@@ -580,6 +657,76 @@ class SemanticAnalyzer:
         #    now, indistinguishable from an ordinary function.
         for fn in program.functions:
             self.analyze_function(fn)
+
+    def _resolve_sum_types(self, sum_type_defs: List[SumTypeDef], structs: Dict[str, StructInfo]) -> Dict[str, SumTypeInfo]:
+        """Resolves every sum type: a name-collision check against
+        everything already established by this point (builtins,
+        structs, aliases -- the same "check the new name against
+        everything established so far" pattern _collect_type_aliases
+        already follows for aliases-vs-structs), then each variant
+        name against the struct registry `_resolve_struct_fields` just
+        finished -- a variant must already be a declared struct, never
+        a scalar, an alias, or another sum type. At least two variants
+        is already guaranteed by the parser (parse_type_declaration's
+        own _parse_sum_type_body); a DUPLICATE variant name within one
+        sum type is this method's own job, the same split a struct's
+        duplicate-field-name check already draws against parse_struct_
+        def's own "at least one field" check.
+
+        No cycle check needed here, unlike _resolve_struct_fields: a
+        sum type can never be reached again once you've stepped into a
+        struct's own field graph, since struct field resolution never
+        allows a sum type as a field's own type in the first place
+        (type_from_name's own sum_types parameter, omitted at that call
+        site on purpose -- see its docstring). Nothing can ever
+        "contain" a sum type transitively, so the self-containment
+        cycle _check_struct_contains guards structs against simply
+        can't arise here."""
+        registry: Dict[str, SumTypeInfo] = {}
+        for std in sum_type_defs:
+            if std.name in _BUILTIN_FUNCTION_NAMES:
+                raise SemanticError(
+                    f"'{std.name}' is a builtin and can't be used as a "
+                    f"sum type name",
+                    std,
+                )
+            if std.name in structs:
+                raise SemanticError(
+                    f"Sum type '{std.name}' collides with a struct of "
+                    f"the same name -- struct and sum-type names share "
+                    f"one namespace and can never be the same",
+                    std,
+                )
+            if std.name in self.type_aliases:
+                raise SemanticError(
+                    f"Sum type '{std.name}' collides with a type alias "
+                    f"of the same name -- type-alias and sum-type names "
+                    f"share one namespace and can never be the same",
+                    std,
+                )
+            if std.name in registry:
+                raise SemanticError(f"Sum type '{std.name}' is already declared", std)
+
+            seen_variants: Set[str] = set()
+            for variant_name in std.variants:
+                if variant_name not in structs:
+                    raise SemanticError(
+                        f"Sum type '{std.name}' names '{variant_name}' as "
+                        f"a variant, but '{variant_name}' is not a "
+                        f"declared struct -- a sum type's variants must "
+                        f"each be an already-declared struct name",
+                        std,
+                    )
+                if variant_name in seen_variants:
+                    raise SemanticError(
+                        f"Sum type '{std.name}' lists '{variant_name}' "
+                        f"as a variant more than once",
+                        std,
+                    )
+                seen_variants.add(variant_name)
+
+            registry[std.name] = SumTypeInfo(name=std.name, variants=list(std.variants))
+        return registry
 
     def _collect_methods(self, program: Program) -> Dict[Tuple[str, str], Tuple[List[Type], Type, str]]:
         """For every struct's methods: reject a duplicate name on the
@@ -610,8 +757,8 @@ class SemanticAnalyzer:
                         md,
                     )
                 seen_names.add(md.name)
-                param_types = [type_from_name(p.type, self.structs, self.type_aliases, p) for p in md.params]
-                return_type = Type.VOID if md.return_type is None else type_from_name(md.return_type, self.structs, self.type_aliases, md)
+                param_types = [type_from_name(p.type, self.structs, self.type_aliases, p, self.sum_types) for p in md.params]
+                return_type = Type.VOID if md.return_type is None else type_from_name(md.return_type, self.structs, self.type_aliases, md, self.sum_types)
                 methods[(sd.name, md.name)] = (param_types, return_type, mangle_method_name(sd.name, md.name))
         return methods
 
@@ -828,8 +975,8 @@ class SemanticAnalyzer:
         # name checking for free (`def int f(int a, int a):` collides in
         # this same scope exactly like `int a` twice in a row would).
         for p in fn.params:
-            self._declare(p.name, type_from_name(p.type, self.structs, self.type_aliases, p), p)
-        return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.structs, self.type_aliases, fn)
+            self._declare(p.name, type_from_name(p.type, self.structs, self.type_aliases, p, self.sum_types), p)
+        return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.structs, self.type_aliases, fn, self.sum_types)
         for stmt in fn.body:
             self.analyze_statement(stmt, return_type)
         # Checked last, after every statement is individually known
@@ -899,20 +1046,32 @@ class SemanticAnalyzer:
 
     def _types_compatible(self, value_type: Type, target_type: Type) -> bool:
         """True if a value of `value_type` can be used where
-        `target_type` is expected -- ordinary equality, or the one
-        exception this language allows: Type.NONE is compatible with
-        ANY slice type (its zero/nil value). Deliberately narrow --
+        `target_type` is expected -- ordinary equality, or one of two
+        exceptions this language allows: Type.NONE is compatible with
+        ANY slice type (its zero/nil value), and a struct is compatible
+        with a sum type that lists it as one of its own variants (the
+        one and only way a sum-typed value ever gets its value at all,
+        there being no separate variant-constructor syntax -- see
+        SumTypeDef's own docstring). Deliberately narrow otherwise --
         not int/bool/str/array, even though str is also a pointer
-        under the hood.
+        under the hood, and NOT sum-type-to-sum-type even when their
+        variant lists happen to overlap -- only a bare struct widens
+        into a sum type, not a value that's already been widened into
+        a different one.
 
         Shared by every site with a clear "this is the expected type"
         side (a VarDecl initializer, Assign, IndexAssign, argument,
-        return value), so `none` becomes valid at all of them
-        uniformly. Equality (`==`/`!=`) has no such fixed side and is
-        checked separately, directly in check_binary."""
+        return value), so `none` and struct-to-sum-type both become
+        valid at all of them uniformly. Equality (`==`/`!=`) has no
+        such fixed side and is checked separately, directly in
+        check_binary."""
         if value_type == target_type:
             return True
-        return value_type == Type.NONE and target_type.kind == TypeKind.SLICE
+        if value_type == Type.NONE and target_type.kind == TypeKind.SLICE:
+            return True
+        if value_type.kind == TypeKind.STRUCT and target_type.kind == TypeKind.SUM:
+            return value_type.struct_name in self.sum_types[target_type.sum_type_name].variants
+        return False
 
     def _as_folded_int_literal(self, expr: Node) -> Optional[int]:
         """If `expr` is a compile-time integer literal -- a bare
@@ -1044,7 +1203,22 @@ class SemanticAnalyzer:
         return self._check_value_flowing_into(expr, target_type)
 
     def analyze_var_decl(self, stmt: VarDecl) -> None:
-        declared_type = type_from_name(stmt.var_type, self.structs, self.type_aliases, stmt)
+        declared_type = type_from_name(stmt.var_type, self.structs, self.type_aliases, stmt, self.sum_types)
+        if stmt.init is None and declared_type.kind == TypeKind.SUM:
+            # Unlike every other type, a sum type has no natural zero
+            # value -- no variant is privileged as "the default", and
+            # picking one implicitly (e.g. always the first-declared)
+            # would be exactly the kind of implicit behavior this
+            # language avoids everywhere else. So, unlike a struct or
+            # array (every field/element zeroed) or a scalar (0/false/
+            # ''), a sum-typed declaration must be explicitly
+            # initialized.
+            raise SemanticError(
+                f"'{stmt.name}' (declared {declared_type}) has no "
+                f"initializer -- a sum type has no natural zero value, "
+                f"so one is required here",
+                stmt,
+            )
         if stmt.init is not None:
             # Checked before `stmt.name` is added to scope below, so a
             # self-referential initializer (`int a = a`) correctly fails
@@ -1324,7 +1498,7 @@ class SemanticAnalyzer:
         fix, for a struct-typed element with no literal involved at
         all."""
         if expr.type_expr is not None:
-            declared_type = type_from_name(expr.type_expr, self.structs, self.type_aliases, expr)
+            declared_type = type_from_name(expr.type_expr, self.structs, self.type_aliases, expr, self.sum_types)
             if len(expr.elements) != declared_type.size:
                 raise SemanticError(
                     f"Array literal declares type {declared_type} (size "
@@ -1786,7 +1960,7 @@ class SemanticAnalyzer:
         feature). A cast always produces exactly the type it names,
         unlike arithmetic (where int8 stays int8) -- there's no
         operand-dependent result to derive."""
-        target_type = type_from_name(expr.target_type, self.structs, self.type_aliases, expr)
+        target_type = type_from_name(expr.target_type, self.structs, self.type_aliases, expr, self.sum_types)
         source_type = self.check_expr(expr.expr)
         if target_type not in _INTEGER_TYPES or source_type not in _INTEGER_TYPES:
             raise SemanticError(
@@ -1920,7 +2094,14 @@ class SemanticAnalyzer:
             # codegen has no slice comparison logic, and it isn't even
             # well-defined yet (compare elements, like array equality
             # now does, or the pointer/length/cap triple?) -- a real
-            # feature to consider later, not implemented yet.
+            # feature to consider later, not implemented yet. Sum-type
+            # equality is rejected for the identical reason -- codegen
+            # has no lowering for it yet either (tag equality, then
+            # conditional payload equality only if the tags match, is
+            # the obvious shape it would eventually take, mirroring
+            # how STRUCT vs STRUCT above already works) -- not because
+            # two Shapes being equal is nonsensical the way comparing
+            # a void result would be.
             #
             # VOID is rejected because it's structurally nonsensical,
             # not a missing feature: `foo() == bar()`, neither with a
@@ -1934,10 +2115,11 @@ class SemanticAnalyzer:
             # NONE is rejected for the same reason, except the case
             # already handled above -- equality has no fixed target
             # side the way _types_compatible's other callers do.
-            if left_type.kind in (TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE) or right_type.kind in (TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE):
+            if left_type.kind in (TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE, TypeKind.SUM) or right_type.kind in (TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE, TypeKind.SUM):
                 raise SemanticError(
-                    f"'{op.symbol()}' does not support slice, void, or "
-                    f"none operands, except comparing a slice to none",
+                    f"'{op.symbol()}' does not support slice, void, sum "
+                    f"type, or none operands, except comparing a slice "
+                    f"to none",
                     expr,
                 )
             if left_type != right_type:
