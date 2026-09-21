@@ -608,6 +608,31 @@ class ExprStmt(Node):
 
 
 @dataclass
+class IsCheck(Node):
+    """`NAME is TypeName` -- an `if` statement's ENTIRE condition (see
+    If's own docstring), recognized as its own special shape directly
+    by _parse_if_condition, never a production inside the general
+    expression grammar: not composable with `and`/`or`/`not`, not
+    assignable to a bool-typed variable, not usable as a `while`
+    condition or anywhere else a condition can appear. Broader,
+    composable boolean-expression support is deliberately deferred --
+    this first cut only needs to recognize `if NAME is TypeName:` as a
+    single, all-or-nothing shape, not embed a new production into
+    parse_expression's own precedence climbing at all.
+
+    `variable_name` must already be an in-scope, sum-typed variable,
+    and `type_name` must be a struct that's actually one of that sum
+    type's own declared variants -- both checked by semantic.py, which
+    also narrows `variable_name`'s own type to `type_name` within the
+    If's then_body specifically (never its else_body -- see semantic.
+    py's own analyze_if). The parser here only recognizes the SHAPE
+    (IDENTIFIER 'is' IDENTIFIER), not whether either name refers to
+    anything real."""
+    variable_name: str
+    type_name: str
+
+
+@dataclass
 class If(Node):
     """`if cond: <then_body> [elif cond: ...]* [else: <else_body>]?`.
 
@@ -1258,13 +1283,17 @@ class Parser:
 
     def _parse_if_body(self, start_tok: Token) -> If:
         """Shared by parse_if/parse_elif_as_if -- both are `KEYWORD
-        expression ':' NEWLINE block`, differing only in which keyword
+        condition ':' NEWLINE block`, differing only in which keyword
         the caller already consumed (and passes in, as start_tok, so
         the resulting If is positioned at 'if'/'elif' either way).
         Recurses into parse_elif_as_if for an arbitrarily long elif
-        chain, plus an optional else.
+        chain, plus an optional else. `condition` itself comes from
+        _parse_if_condition, not parse_expression directly -- see its
+        own docstring for why an `elif`'s own condition gets exactly
+        the same is-check recognition an `if`'s does, following
+        naturally from `elif` being nothing more than a nested If.
         """
-        condition = self.parse_expression()
+        condition = self._parse_if_condition()
         self.expect(TokenType.COLON, "Expected ':' to start the if body")
         self.expect(TokenType.NEWLINE, "Expected a newline after ':'")
         then_body = self.parse_block()
@@ -1279,6 +1308,34 @@ class Parser:
             else_body = self.parse_block()
 
         return If(condition=condition, then_body=then_body, else_body=else_body, line=start_tok.line, col=start_tok.col)
+
+    def _parse_if_condition(self) -> Node:
+        """`NAME is TypeName` (an IsCheck -- see its own docstring)
+        when the condition begins with exactly that shape, recognized
+        by TWO tokens of lookahead (IDENTIFIER then IS) before
+        consuming anything at all; an ordinary parse_expression()
+        otherwise.
+
+        This is an all-or-nothing dispatch on the condition's own
+        first two tokens, not a new production spliced into parse_
+        expression's own precedence climbing -- deliberately, for now
+        (see IsCheck's own docstring): `if shape is Circle and x > 0:`
+        does not parse as one combined condition today, and neither
+        does a bare `shape is Circle` anywhere other than directly
+        here, right after `if`/`elif`.
+
+        No ambiguity to resolve either way: `is` is a reserved keyword
+        (never tokenized as IDENTIFIER), and no OTHER expression
+        production can ever continue with an IS token right after a
+        bare name -- so IDENTIFIER-then-IS at a condition's own start
+        can only ever be this shape, never the beginning of some other,
+        longer expression that merely happens to start with a name."""
+        if self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.IS:
+            name_tok = self.advance()
+            self.advance()  # consume 'is'
+            type_tok = self.expect(TokenType.IDENTIFIER, "Expected a type name after 'is'")
+            return IsCheck(variable_name=name_tok.val, type_name=type_tok.val, line=name_tok.line, col=name_tok.col)
+        return self.parse_expression()
 
     def parse_var_decl(
         self,

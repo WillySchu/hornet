@@ -2771,3 +2771,123 @@ def test_parse_program_sorts_sum_type_into_sum_types():
     assert program.sum_types[0].name == 'Shape'
     assert program.structs == []
     assert program.type_aliases == []
+
+
+# ---------------------------------------------------------------------------
+# `if NAME is TypeName:` (IsCheck) -- sum type narrowing's own grammar,
+# stage 1: recognized as an if/elif condition's own special shape,
+# never a production inside the general expression grammar. These
+# only check the GRAMMAR (the shape parses into an IsCheck with the
+# right variable_name/type_name, ordinary conditions are unaffected,
+# and while doesn't recognize this shape at all) -- whether either
+# name refers to anything real, and whether NAME's own type actually
+# narrows anywhere, are semantic.py's job, not tested here.
+# ---------------------------------------------------------------------------
+
+def test_if_condition_recognizes_is_check():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 's', 1, 4),
+        lexer.Token(lexer.TokenType.IS, 'is', 1, 6),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Circle', 1, 9),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 15),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 16),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.RETURN, 'return', 2, 5),
+        lexer.Token(lexer.TokenType.NUMBER, '0', 2, 12),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 13),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 3, 1),
+    ]
+    result = parser.Parser(tokens).parse_if()
+    assert isinstance(result.condition, parser.IsCheck)
+    assert result.condition.variable_name == 's'
+    assert result.condition.type_name == 'Circle'
+
+
+def test_elif_condition_also_recognizes_is_check():
+    """_parse_if_body is shared by parse_if/parse_elif_as_if -- an
+    elif's own condition gets the identical is-check recognition an
+    if's does, following naturally from elif being nothing more than
+    a nested If (see If's own docstring)."""
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.TRUE, 'true', 1, 4),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.RETURN, 'return', 2, 5),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 2, 12),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 13),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
+        lexer.Token(lexer.TokenType.ELIF, 'elif', 3, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 's', 3, 6),
+        lexer.Token(lexer.TokenType.IS, 'is', 3, 8),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Square', 3, 11),
+        lexer.Token(lexer.TokenType.COLON, ':', 3, 17),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 3, 18),
+        lexer.Token(lexer.TokenType.INDENT, '', 4, 1),
+        lexer.Token(lexer.TokenType.RETURN, 'return', 4, 5),
+        lexer.Token(lexer.TokenType.NUMBER, '2', 4, 12),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 4, 13),
+        lexer.Token(lexer.TokenType.DEDENT, '', 5, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 5, 1),
+    ]
+    result = parser.Parser(tokens).parse_if()
+    elif_node = result.else_body[0]
+    assert isinstance(elif_node, parser.If)
+    assert isinstance(elif_node.condition, parser.IsCheck)
+    assert elif_node.condition.variable_name == 's'
+    assert elif_node.condition.type_name == 'Square'
+
+
+def test_ordinary_if_condition_is_unaffected():
+    """A bare identifier NOT followed by 'is' -- the two-token
+    lookahead must not misfire and must fall through to an ordinary
+    parse_expression() unchanged."""
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'flag', 1, 4),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 9),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.RETURN, 'return', 2, 5),
+        lexer.Token(lexer.TokenType.NUMBER, '0', 2, 12),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 13),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 3, 1),
+    ]
+    result = parser.Parser(tokens).parse_if()
+    assert isinstance(result.condition, parser.Variable)
+    assert result.condition.name == 'flag'
+
+
+def test_is_check_requires_a_type_name_after_is():
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 's', 1, 4),
+        lexer.Token(lexer.TokenType.IS, 'is', 1, 6),
+        lexer.Token(lexer.TokenType.NUMBER, '5', 1, 9),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 10),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 11),
+    ]
+    with pytest.raises(parser.ParseError, match="Expected a type name after 'is'"):
+        parser.Parser(tokens).parse_if()
+
+
+def test_while_condition_does_not_recognize_is_check():
+    """Deliberately restricted to if/elif for this first cut (see
+    IsCheck's own docstring) -- a while condition falls through to
+    parse_expression, which stops at the bare name and leaves 'is'
+    unconsumed, so this fails at the next expect(COLON) instead of
+    ever producing an IsCheck."""
+    tokens = [
+        lexer.Token(lexer.TokenType.WHILE, 'while', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 's', 1, 7),
+        lexer.Token(lexer.TokenType.IS, 'is', 1, 9),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Circle', 1, 12),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 18),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 19),
+    ]
+    with pytest.raises(parser.ParseError, match="Expected ':' to start the while body"):
+        parser.Parser(tokens).parse_while()
