@@ -191,9 +191,10 @@ class IRFunctionBuilder(
         SECOND, each parameter is processed using its own Temp(s) from
         the first pass -- exactly like a VarDecl's own initializer --
         via whichever real-IR building block matches its shape (IRCopy
-        for a stack-allocated array/struct copy, malloc plus IRCopy for
-        a heap-allocated one, _ir_write_slice_descriptor_into_address
-        for a slice's three-value alias), and, first, the hidden return
+        for a stack-allocated array/struct/sum-typed copy, malloc plus
+        IRCopy for a heap-allocated one, _ir_write_slice_descriptor_
+        into_address for a slice's three-value alias), and, first, the
+        hidden return
         pointer, if present, is written into its own slot via
         IRLocalAddress and IRStore. A scalar or str parameter has
         nothing left to do here: the first pass already targeted its
@@ -215,7 +216,7 @@ class IRFunctionBuilder(
                 ir.append(IRReadArgument(dst=cap_value, index=reg_index + 2))
                 reg_index += 3
                 captured.append((ptr_value, len_value, cap_value))
-            elif p_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT):
+            elif p_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM):
                 caller_ptr = self.ir_program.ids.new_temp(Type.INT64)
                 ir.append(IRReadArgument(dst=caller_ptr, index=reg_index))
                 reg_index += 1
@@ -240,7 +241,7 @@ class IRFunctionBuilder(
                 param_addr = self.ir_program.ids.new_temp(Type.INT64)
                 ir.append(IRLocalAddress(dst=param_addr, slot=slot))
                 ir.extend(self._ir_write_slice_descriptor_into_address(param_addr, ptr_value, len_value, cap_value))
-            elif p_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT):
+            elif p_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM):
                 caller_ptr = cap
                 slot = self._bind_param(p, ir_fn)
                 param_addr = self.ir_program.ids.new_temp(Type.INT64)

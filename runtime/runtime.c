@@ -280,6 +280,49 @@ static void hornet_stringify(
             hornet_buf_append_byte(buf, ')');
             break;
         }
+        case HORNET_TYPEDESC_SUM: {
+            // Descriptor shape: [tag, variant_count, variant_desc_ptr,
+            // variant_desc_ptr, ...] -- no name field, and no wrapper
+            // syntax of its own (no brackets, no parens added here):
+            // a sum-typed value prints EXACTLY as its active variant
+            // would on its own (`Circle(radius: 5)`, never `Shape
+            // (Circle(radius: 5))`) -- see _get_or_build_type_
+            // descriptor's own SUM case in ir/strings.py for why.
+            //
+            // The discriminant that picks WHICH variant lives in the
+            // VALUE, not the descriptor: a 4-byte int at value_addr's
+            // own start (SUM_TYPE_TAG_WIDTH in ir/utils.py --
+            // hardcoded here as a plain 4, not generated, matching
+            // every other structural layout detail in this file),
+            // indexing directly into the variant-pointer array right
+            // after variant_count. Always a value this compiler
+            // itself wrote (see SumTypeDef's own docstring in
+            // parser.py -- there's no user-facing way to construct an
+            // out-of-range one), so no bounds check here, matching how
+            // a struct's own field_offset or an array's own elem_
+            // width is trusted unconditionally too.
+            //
+            // The recursive call passes 1, matching every other
+            // composite case's own children here (ARRAY/SLICE
+            // elements, STRUCT fields) -- not, as might seem more
+            // "correct" for a value that's meant to print completely
+            // transparently, whatever quote_strings this SUM case
+            // itself received. That distinction turns out to be
+            // unobservable either way: a variant is always a struct
+            // (semantic.py's own restriction -- see SumTypeDef's own
+            // docstring), and HORNET_TYPEDESC_STRUCT's own case, just
+            // above, never reads its OWN incoming quote_strings
+            // parameter at all -- only a bare leaf STR value, or a
+            // collection recursing toward one, ever consults it. If a
+            // variant could ever be something other than a struct,
+            // this would need revisiting.
+            int32_t discriminant = read_i32(value_addr);
+            const unsigned char *variant_desc =
+                (const unsigned char *)read_desc_word(type_desc, 2 + discriminant);
+            void *payload_addr = (char *)value_addr + 4;
+            hornet_stringify(payload_addr, variant_desc, 1, buf);
+            break;
+        }
         default:
             // Unreachable for any type this compiler ever hands
             // here -- matches build_stringify_function's own

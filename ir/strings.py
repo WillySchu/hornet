@@ -28,6 +28,7 @@ _TYPEDESC_STRUCT = 5
 _TYPEDESC_INT8 = 6
 _TYPEDESC_UINT8 = 7
 _TYPEDESC_INT64 = 8
+_TYPEDESC_SUM = 9
 
 
 class StringsMixin:
@@ -95,6 +96,30 @@ class StringsMixin:
                 field_fields.extend([field_name_label, field_type_label, field_offset])
                 field_count += 1
             self.ir_program.type_descriptors.append((label, [_TYPEDESC_STRUCT, name_label, field_count] + field_fields))
+        elif t.kind == TypeKind.SUM:
+            # Descriptor shape: [tag, variant_count, variant_desc_ptr,
+            # variant_desc_ptr, ...] -- deliberately no name field, and
+            # no per-variant name either (unlike a struct field, which
+            # names itself): a sum-typed value prints EXACTLY as
+            # whatever its active variant would on its own (`Circle
+            # (radius: 5)`, not `Shape(Circle(radius: 5))`) -- see
+            # hornet_stringify's own SUM case for why this makes the
+            # variant list a plain array of pointers, indexed directly
+            # by the runtime discriminant, rather than the (name,
+            # type, offset) triples a struct's own fields need: a
+            # variant has no name or offset of its own to record here
+            # at all, just a type to recurse into once the tag picks
+            # which one. Variant order matters -- it's what the
+            # discriminant already indexes by (see SumTypeDef's own
+            # docstring in parser.py), so sum_type_registry's own
+            # preserved order is used unchanged, not re-sorted or
+            # deduplicated here.
+            sum_type_info = self.ir_program.sum_type_registry[t.sum_type_name]
+            variant_desc_labels = [
+                self._get_or_build_type_descriptor(Type(TypeKind.STRUCT, struct_name=variant_name), in_progress)
+                for variant_name in sum_type_info.variants
+            ]
+            self.ir_program.type_descriptors.append((label, [_TYPEDESC_SUM, len(variant_desc_labels)] + variant_desc_labels))
         else:
             raise IRError(f"No type descriptor rule for: {t}")
 
@@ -123,26 +148,30 @@ class StringsMixin:
         char *type_desc)`, and hornet_stringify dereferences that
         address at whatever width its own type descriptor says to.
 
-        ARRAY/STRUCT-typed x: reuses _ir_composite_operand_address
-        unchanged. SLICE-typed x: _ir_slice_arg unifies every
-        reachable shape into one {ptr, len, cap} triple, written into
-        the shared, unconditionally-reserved 24-byte _unnamed_slice_
-        temp_slot scratch slot, whose address is then taken. Otherwise
-        a scalar: computed via gen_expr_ir, written into the shared
-        8-byte _print_scalar_temp_slot scratch slot -- a scalar has no
-        other "address of this value" concept in real IR, since it
-        only ever needs to live in a Temp; this is a deliberate,
-        narrow exception, since hornet_print is a genuine C-ABI
-        boundary this compiler's own output has to cross."""
+        ARRAY/STRUCT/SUM-typed x: reuses _ir_composite_operand_address
+        unchanged -- a SUM-typed value's own address is exactly what
+        that function already computes generically for a Variable/
+        Field/Index or an ordinary composite-returning Call (see its
+        own docstring), same as a struct's. SLICE-typed x: _ir_slice_
+        arg unifies every reachable shape into one {ptr, len, cap}
+        triple, written into the shared, unconditionally-reserved
+        24-byte _unnamed_slice_temp_slot scratch slot, whose address
+        is then taken. Otherwise a scalar: computed via gen_expr_ir,
+        written into the shared 8-byte _print_scalar_temp_slot scratch
+        slot -- a scalar has no other "address of this value" concept
+        in real IR, since it only ever needs to live in a Temp; this
+        is a deliberate, narrow exception, since hornet_print is a
+        genuine C-ABI boundary this compiler's own output has to
+        cross."""
         arg = expr.args[0]
         arg_type = type_of(arg)
 
-        if arg_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT):
+        if arg_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM):
             result = self._ir_composite_operand_address(arg, arg_type)
             if result is None:
                 raise IRError(
                     f"_ir_composite_operand_address returned None for print()'s own "
-                    f"ARRAY/STRUCT-typed argument ({arg!r}) -- expected to always "
+                    f"ARRAY/STRUCT/SUM-typed argument ({arg!r}) -- expected to always "
                     f"succeed, since semantic.py already restricts print's own "
                     f"argument to exactly the shapes that method covers"
                 )

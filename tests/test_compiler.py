@@ -5872,6 +5872,193 @@ class TestSumTypesCodegen:
 
 
 # ---------------------------------------------------------------------------
+# Sum types, print() support. A sum-typed value prints EXACTLY as its
+# active variant would on its own -- `Circle(radius: 5)`, never `Shape
+# (Circle(radius: 5))` -- matching how every language with real sum
+# types (Rust, the ML family, Swift, Kotlin/Scala) prints a variant's
+# own identity, never its enclosing type's. No new codegen dispatch was
+# needed for this: print() already works by walking a runtime TYPE
+# DESCRIPTOR (see _get_or_build_type_descriptor's own module docstring
+# in ir/strings.py) rather than compiling per-type formatting code, so
+# "print support" meant teaching that one generic mechanism (on both
+# the Python side that builds the descriptor and the C runtime side in
+# runtime/runtime.c that reads it) a new descriptor shape, not adding
+# per-call-site logic anywhere.
+#
+# The one real bug found here was NOT in the descriptor/stringify
+# mechanism itself -- that worked correctly the first time for a bare
+# local variable. It was in something print() merely exposed: a sum-
+# typed FUNCTION PARAMETER was completely broken before this, since
+# ir/builder.py's own parameter-prologue setup (_ir_param_setup) checks
+# `p_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT)` in two places to
+# decide a parameter is passed by address and needs a copy-in step --
+# neither included SUM, so a sum-typed parameter fell into the
+# scalar/str branch instead, reading the caller's POINTER as if it
+# were the parameter's own value with no copy at all. A small Shape
+# printed garbage; a larger one segfaulted. See test_sum_typed_
+# parameter_prints_correctly below for the test that caught it --
+# every other test in this class passed before that fix landed.
+# ---------------------------------------------------------------------------
+
+class TestSumTypesPrint:
+
+    _SHAPE_DECLS = (
+        "type Circle struct:\n"
+        "    int radius\n"
+        "\n"
+        "type Square struct:\n"
+        "    int64 side\n"
+        "\n"
+        "type Shape is Circle | Square\n"
+        "\n"
+    )
+
+    def test_bare_struct_baseline(self):
+        """Not a sum type at all -- just confirms the expected struct-
+        print format this whole class compares against. print(x) needs
+        x assigned to a variable first -- check_print_call uses plain
+        check_expr, not the struct-literal-allowing variant, a pre-
+        existing restriction unrelated to sum types."""
+        assert_program_stdout(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    print(c)\n"
+            "    return 0\n",
+            "Circle(radius: 5)\n",
+        )
+
+    def test_sum_typed_value_prints_identically_to_the_bare_struct(self):
+        """The actual design decision this whole feature rests on:
+        Shape holding a Circle prints EXACTLY like a bare Circle --
+        no `Shape(...)` wrapper anywhere."""
+        assert_program_stdout(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    print(s)\n"
+            "    return 0\n",
+            "Circle(radius: 5)\n",
+        )
+
+    def test_second_variant_prints_its_own_discriminant_correctly(self):
+        assert_program_stdout(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Square(9)\n"
+            "    print(s)\n"
+            "    return 0\n",
+            "Square(side: 9)\n",
+        )
+
+    def test_three_variants_each_print_correctly(self):
+        """Discriminant indexing beyond 0/1 -- Triangle is index 2, and
+        its own variant descriptor (found via the tag reading
+        variant_desc_ptrs[2]) must be the right one, not Circle's or
+        Square's."""
+        assert_program_stdout(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int64 side\n"
+            "\n"
+            "type Triangle struct:\n"
+            "    [3]int sides\n"
+            "\n"
+            "type Shape is Circle | Square | Triangle\n"
+            "\n"
+            "def int main():\n"
+            "    Shape a = Circle(1)\n"
+            "    Shape b = Square(2)\n"
+            "    Shape c = Triangle([3, 4, 5])\n"
+            "    print(a)\n"
+            "    print(b)\n"
+            "    print(c)\n"
+            "    return 0\n",
+            "Circle(radius: 1)\nSquare(side: 2)\nTriangle(sides: [3]int[3, 4, 5])\n",
+        )
+
+    def test_array_of_shapes_prints_each_element_independently(self):
+        assert_program_stdout(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    [2]Shape shapes = [Circle(1), Square(2)]\n"
+            "    print(shapes)\n"
+            "    return 0\n",
+            "[2]Shape[Circle(radius: 1), Square(side: 2)]\n",
+        )
+
+    def test_variant_with_a_string_field_quotes_correctly(self):
+        """A struct field is always quoted regardless of nesting depth
+        (hornet_stringify's own STRUCT case hardcodes quote_strings=1
+        for every field, unconditionally) -- so this must match
+        exactly whether the Label is bare or wrapped in a Shape."""
+        assert_program_stdout(
+            "type Label struct:\n"
+            "    str text\n"
+            "\n"
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Shape is Label | Circle\n"
+            "\n"
+            "def int main():\n"
+            "    Label l = Label('hi')\n"
+            "    print(l)\n"
+            "    Shape s = Label('hi')\n"
+            "    print(s)\n"
+            "    return 0\n",
+            "Label(text: 'hi')\nLabel(text: 'hi')\n",
+        )
+
+    def test_sum_typed_parameter_prints_correctly(self):
+        """The actual bug: a sum-typed parameter's own prologue copy-
+        in was skipped entirely (see this class's own module-level
+        comment) -- passed by address, but the callee never copied the
+        pointed-to value into its own local slot at all, so it read
+        garbage (or segfaulted, for a wider Shape) wherever the
+        parameter was then used. This is a real end-to-end print, not
+        an IR-shape check -- a wrong copy-in silently produces
+        DIFFERENT wrong output on every run (whatever memory happens
+        to follow), which an exit-code-only test would never catch."""
+        assert_program_stdout(
+            self._SHAPE_DECLS +
+            "def int printIt(Shape s):\n"
+            "    print(s)\n"
+            "    return 0\n"
+            "\n"
+            "def int main():\n"
+            "    printIt(Circle(1))\n"
+            "    printIt(Square(2))\n"
+            "    return 0\n",
+            "Circle(radius: 1)\nSquare(side: 2)\n",
+        )
+
+    def test_sum_typed_parameter_passed_through_another_function(self):
+        """One level further than the test above -- a sum-typed
+        parameter received by one function, then passed on (still
+        sum-typed, no re-widening) as an argument to a second, not
+        just printed directly -- stresses the parameter copy-in
+        alongside the already-sum-typed argument-passing path
+        together, not each in isolation."""
+        assert_program_stdout(
+            self._SHAPE_DECLS +
+            "def int printIt(Shape s):\n"
+            "    print(s)\n"
+            "    return 0\n"
+            "\n"
+            "def int forwardIt(Shape s):\n"
+            "    return printIt(s)\n"
+            "\n"
+            "def int main():\n"
+            "    forwardIt(Square(7))\n"
+            "    return 0\n",
+            "Square(side: 7)\n",
+        )
+
+
+# ---------------------------------------------------------------------------
 # int8/uint8, step 1 of 3: the TYPE SYSTEM only -- lexer/parser keywords,
 # TypeKind/Type additions, literal range-checking, and arithmetic type-
 # checking rules (check_binary/check_unary). Deliberately NOT yet about
