@@ -109,17 +109,27 @@ class StatementsMixin:
                 nil_ir, ptr_value, len_value, cap_value = self._ir_nil_slice()
                 write_ir = self._ir_write_slice_descriptor_into_address(hidden_ptr, ptr_value, len_value, cap_value)
                 return hidden_ptr_ir + nil_ir + write_ir + [IRReturn(value=None)]
-            # A sum-typed return -- checked, and handled completely,
-            # BEFORE any of the shape-based dispatch below: every case
-            # from here down uses type_of(stmt.value) (the VALUE's own
-            # type) as what to write through the hidden pointer, which
-            # is exactly WRONG here the same way it was in VarDecl's
-            # own dispatch (see the identical comment there) -- `return
-            # Circle(5)` from a function declared to return Shape needs
-            # ir_fn.return_type (Shape), not type_of(stmt.value)
-            # (Circle), or the hidden pointer gets Circle's own raw
-            # field bytes with no discriminant tag at all.
-            if ir_fn.return_type.kind == TypeKind.SUM:
+            # A sum-typed return -- only for GENUINE widening
+            # (stmt.value itself is struct-typed, narrower than
+            # ir_fn.return_type). `return t`, t already Shape-typed
+            # (or `return someShapeFn()`, forwarding a call that
+            # already returns Shape directly), is NOT widening and
+            # must NOT come through here -- _ir_write_sum_type_value_
+            # into always reads source_struct_type.struct_name to pick
+            # a discriminant, None for an already-sum-typed source.
+            # Every case from here down uses type_of(stmt.value) (the
+            # VALUE's own type) as what to write through the hidden
+            # pointer, which is exactly WRONG for GENUINE widening the
+            # same way it was in VarDecl's own dispatch (see the
+            # identical comment there) -- `return Circle(5)` from a
+            # function declared to return Shape needs ir_fn.return_
+            # type (Shape), not type_of(stmt.value) (Circle), or the
+            # hidden pointer gets Circle's own raw field bytes with no
+            # discriminant tag at all. An already-sum-typed stmt.value
+            # instead falls through to the ordinary cases below
+            # (including the "forward the hidden pointer straight
+            # through" case right after this one), unchanged.
+            if ir_fn.return_type.kind == TypeKind.SUM and type_of(stmt.value).kind == TypeKind.STRUCT:
                 hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr(ir_fn)
                 write_ir = self._ir_write_sum_type_value_into(hidden_ptr, stmt.value, ir_fn.return_type)
                 if write_ir is not None:
@@ -292,6 +302,24 @@ class StatementsMixin:
             # `Shape s` form, since a sum type has no natural zero
             # value), so there's no "no initializer" case to handle
             # here the way ARRAY/STRUCT/SLICE below each need one.
+            #
+            # Only fires for GENUINE widening -- stmt.init itself is
+            # struct-typed (a narrower type than var_type). `Shape t =
+            # s`, s already Shape-typed, is NOT widening at all (both
+            # sides are already the identical type) and must NOT come
+            # through here: _ir_write_sum_type_value_into always reads
+            # source_struct_type.struct_name to pick a discriminant,
+            # which is None for an already-sum-typed source -- a
+            # genuine crash this exact check exists to prevent, found
+            # only by actually compiling a program that exercises it.
+            # An already-sum-typed init instead falls through,
+            # unhandled here, to the ordinary Variable/Field/Index-copy
+            # and ordinary-composite-call cases below -- ordinary
+            # value-to-value copies of the SAME type, needing no
+            # widening logic at all, just the SUM entry added to their
+            # own address_fn dicts (see _ir_copy_into_address/_ir_
+            # copy_assign).
+            #
             # Checked, and handled completely, BEFORE the Variable/
             # Field/Index case right below -- deliberately: that case
             # ALSO matches (var_type.kind in COMPOSITE_KINDS now
@@ -305,7 +333,7 @@ class StatementsMixin:
             # already-struct-typed Variable/Field/Index init
             # uniformly, by recursing back into _ir_write_composite_
             # value_into for the payload once the tag's written.
-            if var_type.kind == TypeKind.SUM:
+            if var_type.kind == TypeKind.SUM and type_of(stmt.init).kind == TypeKind.STRUCT:
                 slot = self._bind_local(stmt, ir_fn)
                 ir = []
                 if self._is_heap_allocated(id(stmt), var_type):
@@ -411,6 +439,7 @@ class StatementsMixin:
                     TypeKind.ARRAY: self._ir_array_address,
                     TypeKind.STRUCT: self._ir_struct_address,
                     TypeKind.SLICE: self._ir_slice_address,
+                    TypeKind.SUM: self._ir_struct_address,  # generic address computation -- see its own docstring
                 }[var_type.kind]
                 dst_ir, dst_address = address_fn(Variable(name=stmt.name))
                 ir.extend(dst_ir)
@@ -492,16 +521,26 @@ class StatementsMixin:
             if var_type.kind not in COMPOSITE_KINDS:
                 ir, value = self.gen_expr_ir(stmt.value)
                 return ir + [IRMove(dst=self._local_temp(stmt.name), src=value)]
-            # A sum-typed Assign -- checked, and handled completely,
-            # BEFORE the Variable/Field/Index case right below, for the
-            # identical reason VarDecl's own SUM check (just above)
+            # A sum-typed Assign -- only for GENUINE widening (stmt.
+            # value itself is struct-typed, narrower than var_type),
+            # the identical restriction VarDecl's own SUM check (just
+            # above) needs for the identical reason: `s = t`, t already
+            # Shape-typed, is NOT widening (both sides already the
+            # same type) and must NOT come through here --
+            # _ir_write_sum_type_value_into always reads source_
+            # struct_type.struct_name to pick a discriminant, None for
+            # an already-sum-typed source. Checked, and handled
+            # completely, BEFORE the Variable/Field/Index case right
+            # below, for the identical reason VarDecl's own SUM check
             # needs to come first there too: _ir_copy_assign's flat,
             # same-shape copy is wrong here regardless, since the
             # existing variable's own slot is ALREADY Shape-shaped (an
             # Assign never changes a variable's own declared type) but
             # stmt.value itself may be a narrower struct that needs
-            # widening on the way in.
-            if var_type.kind == TypeKind.SUM:
+            # widening on the way in. An already-sum-typed stmt.value
+            # instead falls through to the ordinary cases below, same
+            # as VarDecl's own.
+            if var_type.kind == TypeKind.SUM and type_of(stmt.value).kind == TypeKind.STRUCT:
                 dst_ir, dst_address = self._ir_struct_address(Variable(name=stmt.name))
                 write_ir = self._ir_write_sum_type_value_into(dst_address, stmt.value, var_type)
                 if write_ir is not None:
@@ -560,6 +599,7 @@ class StatementsMixin:
                     TypeKind.ARRAY: self._ir_array_address,
                     TypeKind.STRUCT: self._ir_struct_address,
                     TypeKind.SLICE: self._ir_slice_address,
+                    TypeKind.SUM: self._ir_struct_address,  # generic address computation -- see its own docstring
                 }[var_type.kind](Variable(name=stmt.name))
                 return dst_ir + self._ir_composite_call(dst_address, stmt.value)
             # Same array-literal/struct-literal case as VarDecl's own,
@@ -585,19 +625,30 @@ class StatementsMixin:
             # FieldAssign, whose own case below explains the
             # contrast).
             element_type = type_of(stmt.array).element_type
-            # A sum-typed element -- checked, and handled completely,
-            # BEFORE the scalar check right below, for the identical
-            # reason VarDecl/Assign/Return's own SUM checks need to
-            # come first there too: element_type.kind not in (SLICE,
-            # STRUCT) is true for SUM as well (SUM is neither), so
-            # without this, a struct value being widened into a Shape-
-            # typed ELEMENT would fall into _ir_index_assign's own
-            # scalar path instead -- which just calls gen_expr_ir on a
-            # struct-literal Call, something that path was never built
-            # to handle at all (not even the "wrong width" class of
-            # bug the other three fixes were -- this one doesn't
-            # produce any real IR whatsoever, straight to IRError).
-            if element_type.kind == TypeKind.SUM:
+            # A sum-typed element -- only for GENUINE widening
+            # (stmt.value itself is struct-typed, narrower than
+            # element_type); `shapes[0] = t`, t already Shape-typed,
+            # is NOT widening and must NOT come through here, for the
+            # identical reason VarDecl/Assign/Return's own SUM checks
+            # need the same restriction (see VarDecl's own comment,
+            # just above in this same file). Checked, and handled
+            # completely, BEFORE the scalar check right below, for the
+            # identical reason VarDecl/Assign/Return's own SUM checks
+            # need to come first there too: element_type.kind not in
+            # (SLICE, STRUCT) is true for SUM as well (SUM is
+            # neither), so without this, a struct value being widened
+            # into a Shape-typed ELEMENT would fall into _ir_index_
+            # assign's own scalar path instead -- which just calls
+            # gen_expr_ir on a struct-literal Call, something that
+            # path was never built to handle at all (not even the
+            # "wrong width" class of bug the other three fixes were --
+            # this one doesn't produce any real IR whatsoever, straight
+            # to IRError). SUM is also added to the scalar check's own
+            # exclusion tuple right below (not just left to fall
+            # through from here), so an already-sum-typed stmt.value
+            # reaches the ordinary Variable/Field/Index-copy case after
+            # this one, not the scalar path.
+            if element_type.kind == TypeKind.SUM and type_of(stmt.value).kind == TypeKind.STRUCT:
                 result = self._ir_index_address(Index(array=stmt.array, index=stmt.index))
                 if result is None:
                     raise IRError(
@@ -608,10 +659,10 @@ class StatementsMixin:
                 write_ir = self._ir_write_sum_type_value_into(dst_address, stmt.value, element_type)
                 if write_ir is not None:
                     return dst_ir + write_ir
-            if element_type.kind not in (TypeKind.SLICE, TypeKind.STRUCT):
+            if element_type.kind not in (TypeKind.SLICE, TypeKind.STRUCT, TypeKind.SUM):
                 return self._ir_index_assign(stmt, element_type)
             if (
-                    element_type.kind in (TypeKind.STRUCT, TypeKind.SLICE)
+                    element_type.kind in (TypeKind.STRUCT, TypeKind.SLICE, TypeKind.SUM)
                     and isinstance(stmt.value, (Variable, Field, Index))
             ):
                 dst_expr = Index(array=stmt.array, index=stmt.index)
@@ -639,13 +690,13 @@ class StatementsMixin:
                     dst_expr = Index(array=stmt.array, index=stmt.index)
                     return append_ir + self._ir_write_slice_descriptor(dst_expr, ptr_value, len_value, cap_value)
             if (
-                    element_type.kind in (TypeKind.STRUCT, TypeKind.SLICE)
+                    element_type.kind in (TypeKind.STRUCT, TypeKind.SLICE, TypeKind.SUM)
                     and (isinstance(stmt.value, Call)
                          and stmt.value.name != 'append'
                          and stmt.value.name not in self.ir_program.struct_registry)
             ):
                 dst_expr = Index(array=stmt.array, index=stmt.index)
-                address_fn = self._ir_struct_address if element_type.kind == TypeKind.STRUCT else self._ir_slice_address
+                address_fn = self._ir_slice_address if element_type.kind == TypeKind.SLICE else self._ir_struct_address
                 dst_ir, dst_address = address_fn(dst_expr)
                 return dst_ir + self._ir_composite_call(dst_address, stmt.value)
             # A struct-literal (positional or named/partial) value --
@@ -857,6 +908,7 @@ class StatementsMixin:
             TypeKind.ARRAY: self._ir_array_address,
             TypeKind.STRUCT: self._ir_struct_address,
             TypeKind.SLICE: self._ir_slice_address,
+            TypeKind.SUM: self._ir_struct_address,  # generic address computation -- see its own docstring
         }[value_type.kind]
         src_ir, src_addr = address_of(src_expr)
         return src_ir + [IRCopy(dst_address=dst_address, src_address=src_addr, value_type=value_type)]
@@ -880,6 +932,7 @@ class StatementsMixin:
             TypeKind.ARRAY: self._ir_array_address,
             TypeKind.STRUCT: self._ir_struct_address,
             TypeKind.SLICE: self._ir_slice_address,
+            TypeKind.SUM: self._ir_struct_address,  # generic address computation -- see its own docstring
         }[value_type.kind]
         dst_ir, dst_addr = address_of(dst_expr)
         return dst_ir + self._ir_copy_into_address(dst_addr, src_expr, value_type)

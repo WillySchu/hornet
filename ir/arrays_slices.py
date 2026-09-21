@@ -725,16 +725,24 @@ class ArraysSlicesMixin:
         The SUM check comes FIRST, before even the Variable/Field/
         Index case -- deliberately: value_type.kind == SUM must take
         priority over value_expr's own shape regardless of what that
-        shape is. A Circle-typed variable widening into a Shape-typed
-        address is NOT an ordinary same-shape copy (_ir_copy_into_
-        address would flatly copy type_byte_width(Shape) bytes
-        starting at the Circle's own address, reading past its real
-        bounds into whatever memory happens to follow, and would never
-        write a discriminant tag at all) -- it needs _ir_write_sum_
-        type_value_into's own tag-then-payload treatment regardless of
-        whether value_expr is a bare struct literal or an already-
-        struct-typed value."""
-        if value_type.kind == TypeKind.SUM:
+        shape is, PROVIDED value_expr itself is genuinely narrower
+        (STRUCT-typed) -- true widening. A Circle-typed variable
+        widening into a Shape-typed address is NOT an ordinary same-
+        shape copy (_ir_copy_into_address would flatly copy type_
+        byte_width(Shape) bytes starting at the Circle's own address,
+        reading past its real bounds into whatever memory happens to
+        follow, and would never write a discriminant tag at all) -- it
+        needs _ir_write_sum_type_value_into's own tag-then-payload
+        treatment regardless of whether value_expr is a bare struct
+        literal or an already-struct-typed value. But value_expr may
+        ALREADY be sum-typed itself (`[2]Shape shapes = [a, b]`, a and
+        b already Shape-typed variables) -- NOT widening at all, and
+        _ir_write_sum_type_value_into would crash outright trying to
+        read a discriminant from a type with no struct_name at all.
+        That case is deliberately excluded here and falls through to
+        the ordinary Variable/Field/Index/composite-call cases right
+        below, same type on both sides, needing no widening logic."""
+        if value_type.kind == TypeKind.SUM and type_of(value_expr).kind == TypeKind.STRUCT:
             return self._ir_write_sum_type_value_into(dst_address, value_expr, value_type)
         if isinstance(value_expr, (Variable, Field, Index)):
             return self._ir_copy_into_address(dst_address, value_expr, value_type)

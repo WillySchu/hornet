@@ -13,12 +13,25 @@ assigned into one, checked at the semantic level by _types_compatible
 own variants) and lowered here, at the one place every such value
 actually gets written: _ir_write_composite_value_into's own dispatch,
 which reaches _ir_write_sum_type_value_into below whenever value_type
-is SUM-kind, regardless of whether value_expr is a bare struct literal
-or an already-struct-typed value -- both are handled uniformly, by
-writing the tag once here and then recursing back into that SAME
-dispatcher, now with the source struct's own type, to write the
-payload exactly as if it were an ordinary struct-typed target (which,
-as far as THAT recursive call is concerned, it is)."""
+is SUM-kind AND value_expr is genuinely narrower (STRUCT-typed) --
+true widening, whether value_expr is a bare struct literal or an
+already-struct-typed value, both handled uniformly by writing the tag
+once here and then recursing back into that SAME dispatcher, now with
+the source struct's own type, to write the payload exactly as if it
+were an ordinary struct-typed target (which, as far as THAT recursive
+call is concerned, it is).
+
+An already-SUM-typed value_expr (`Shape t = s`, s already Shape) is
+NOT widening -- both sides are already the identical type -- and must
+NOT reach _ir_write_sum_type_value_into at all: it always looks up a
+discriminant via value_expr's own struct_name, which is None for a sum
+type, not a struct, and crashes immediately. Every call site that
+checks for widening (this dispatcher, and VarDecl/Assign/Return/
+IndexAssign's own SUM checks in ir/statements.py) guards it with a
+second condition -- the SOURCE is struct-typed, not just the TARGET
+being sum-typed -- letting an already-matching sum-typed value fall
+through to the ordinary composite-copy path instead, the identical one
+any other same-type value already uses."""
 
 from ir.ir import IRBinOp, IRCall, IRConst, IRLocalAddress, IRStore
 from ir.utils import SUM_TYPE_TAG_WIDTH, type_byte_width, type_of

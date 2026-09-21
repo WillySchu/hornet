@@ -5723,6 +5723,155 @@ class TestSumTypes:
 
 
 # ---------------------------------------------------------------------------
+# Sum types, stage 4: actual codegen. No new IR instruction types were
+# introduced for widening (_ir_write_sum_type_value_into composes
+# ordinary IRStore/IRBinOp/IRCopy/IRCall -- see ir/sum_types.py's own
+# module docstring), so these are end-to-end compile-AND-RUN tests
+# confirming that composition survives optimization, register
+# allocation, and lowering intact -- not (only) new codegen rules.
+#
+# A second, distinct class of bug turned up only here, one level past
+# TestSumTypes' own IR-construction tests: every VarDecl/Assign/Return/
+# IndexAssign fix that intercepts a sum-typed target unconditionally
+# (checking only var_type.kind == SUM) crashes the moment the SOURCE
+# is ALREADY sum-typed too (`Shape t = s`, s already Shape) --
+# _ir_write_sum_type_value_into always tries to read source_struct_
+# type.struct_name to pick a discriminant, which is None for a sum
+# type, not a struct. Every widening check needed a second condition
+# (type_of(source).kind == TypeKind.STRUCT) restricting it to GENUINE
+# widening, falling through to the ordinary composite-copy path
+# otherwise -- found only by actually compiling and running a program
+# that assigns an already-Shape-typed value into another Shape slot,
+# not by any of the narrower IR-construction tests in TestSumTypes.
+# ---------------------------------------------------------------------------
+
+class TestSumTypesCodegen:
+
+    _SHAPE_DECLS = (
+        "type Circle struct:\n"
+        "    int radius\n"
+        "\n"
+        "type Square struct:\n"
+        "    int64 side\n"
+        "\n"
+        "type Shape is Circle | Square\n"
+        "\n"
+    )
+
+    def test_var_decl_literal_widening_runs(self):
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    return 0\n",
+            expected=0,
+        )
+
+    def test_var_decl_from_already_sum_typed_variable_runs(self):
+        """The actual bug: `Shape t = s`, s already Shape-typed -- NOT
+        widening. Crashed unconditionally before the source-type
+        check was added (ValueError: None is not in list, from trying
+        to look up a struct name that doesn't exist on a sum type)."""
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    Shape t = s\n"
+            "    return 0\n",
+            expected=0,
+        )
+
+    def test_assign_from_already_sum_typed_variable_runs(self):
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    Shape t = Square(9)\n"
+            "    t = s\n"
+            "    return 0\n",
+            expected=0,
+        )
+
+    def test_return_forwarding_an_already_sum_typed_value_runs(self):
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def Shape identity(Shape s):\n"
+            "    return s\n"
+            "\n"
+            "def int main():\n"
+            "    Shape s = identity(Circle(5))\n"
+            "    return 0\n",
+            expected=0,
+        )
+
+    def test_array_literal_of_already_sum_typed_elements_runs(self):
+        """[a, b] into a [2]Shape, a and b already Shape-typed -- the
+        actual bug: _ir_write_composite_value_into's own SUM check
+        originally fired unconditionally, crashing on an already-sum-
+        typed element the same way the VarDecl case above did, just
+        one level deeper (inside array-literal construction rather
+        than at a bare VarDecl)."""
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape a = Circle(5)\n"
+            "    Shape b = Square(9)\n"
+            "    [2]Shape shapes = [a, b]\n"
+            "    return 0\n",
+            expected=0,
+        )
+
+    def test_index_assign_from_already_sum_typed_variable_runs(self):
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    [2]Shape shapes = [Circle(1), Square(2)]\n"
+            "    Shape s = Circle(5)\n"
+            "    shapes[0] = s\n"
+            "    return 0\n",
+            expected=0,
+        )
+
+    def test_function_argument_already_sum_typed_runs(self):
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int takesShape(Shape s):\n"
+            "    return 0\n"
+            "\n"
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    return takesShape(s)\n",
+            expected=0,
+        )
+
+    def test_everything_together_runs(self):
+        """Every position at once -- VarDecl (literal and from an
+        existing variable), Assign, an array literal of shapes,
+        IndexAssign, append into a sum-typed slice, and an already
+        sum-typed function argument -- compiled, assembled, linked
+        with the real runtime, and actually executed. The first real
+        confirmation that sum types work all the way through
+        optimization, register allocation, and lowering, not just
+        through IR construction."""
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int takesShape(Shape s):\n"
+            "    return 0\n"
+            "\n"
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    Shape t = s\n"
+            "    t = Square(9)\n"
+            "    [2]Shape shapes = [Circle(1), Square(2)]\n"
+            "    shapes[0] = Square(3)\n"
+            "    []Shape dynShapes\n"
+            "    dynShapes = append(dynShapes, Circle(7))\n"
+            "    return takesShape(t)\n",
+            expected=0,
+        )
+
+
+# ---------------------------------------------------------------------------
 # int8/uint8, step 1 of 3: the TYPE SYSTEM only -- lexer/parser keywords,
 # TypeKind/Type additions, literal range-checking, and arithmetic type-
 # checking rules (check_binary/check_unary). Deliberately NOT yet about

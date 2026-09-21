@@ -230,11 +230,13 @@ def test_append_into_sum_typed_slice_uses_shapes_own_element_width():
 
 def test_array_literal_of_shapes_widens_each_element():
     """[Circle(5), Square(9)] into a [2]Shape -- each element widens
-    independently (through _ir_write_composite_value_into's own SUM
-    check, already fixed for VarDecl/Assign/Return -- this confirms it
-    ALSO covers array-literal elements with no separate fix needed,
-    since _ir_write_array_literal_into already recurses through that
-    same dispatcher for each of its own composite elements)."""
+    independently through _ir_write_composite_value_into's own SUM
+    check, which already covers array-literal elements (no separate
+    fix needed for THIS case specifically) since _ir_write_array_
+    literal_into recurses through that same dispatcher for each of its
+    own composite elements. The already-sum-typed sibling case right
+    below DID need its own fix, though -- see that test's own
+    docstring."""
     ir_program = _build(
         _SHAPE_DECLS +
         "def int main():\n"
@@ -249,6 +251,30 @@ def test_array_literal_of_shapes_widens_each_element():
     # docstring); {0, 1} both appearing somewhere is what actually
     # matters here.
     assert {0, 1} <= {w.value.value for w in tag_writes}
+
+
+def test_array_literal_of_already_sum_typed_elements_does_not_crash():
+    """[a, b] into a [2]Shape, a and b ALREADY Shape-typed variables --
+    NOT widening at all (both sides already the same type). The actual
+    bug: _ir_write_composite_value_into's own SUM check originally
+    fired unconditionally on value_type.kind == SUM alone, without
+    checking whether value_expr itself was genuinely narrower --
+    crashing here with "None is not in list" (source_struct_type.
+    struct_name is None for an already-sum-typed source, not a real
+    struct name to look up). Found only by testing this exact
+    combination -- element widening (tested above) and an already-
+    typed source (tested elsewhere for VarDecl/Assign) had each been
+    tested separately, but not together, inside an array literal."""
+    ir_program = _build(
+        _SHAPE_DECLS +
+        "def int main():\n"
+        "    Shape a = Circle(5)\n"
+        "    Shape b = Square(9)\n"
+        "    [2]Shape shapes = [a, b]\n"
+        "    return 0\n"
+    )
+    fn = _fn(ir_program, 'main')
+    assert fn is not None
 
 
 def test_index_assign_into_sum_typed_array_element_writes_discriminant():
