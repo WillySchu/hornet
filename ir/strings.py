@@ -41,10 +41,10 @@ class StringsMixin:
         whole-program cache -- two print() calls on the same struct
         type each build their own tree from scratch. Reuse WITHIN one
         call isn't optional, though: it's the only way a self-
-        referential struct (`struct Node: int value; []Node children`)
-        can be represented as a finite amount of static data at all.
-        Reserving this type's label BEFORE recursing into anything it
-        contains is what breaks that cycle.
+        referential struct (`type Node struct: int value; []Node
+        children`) can be represented as a finite amount of static
+        data at all. Reserving this type's label BEFORE recursing into
+        anything it contains is what breaks that cycle.
 
         Every non-leaf kind (ARRAY, SLICE, STRUCT) carries its own
         type-name string (e.g. "[3]int", "Point") as a second field

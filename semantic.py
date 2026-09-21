@@ -749,8 +749,9 @@ class SemanticAnalyzer:
         """Resolves every struct's field types, then checks for
         cycles. `registry` already has every struct's NAME reserved (a
         None placeholder), which is what lets a forward reference work
-        (`struct A: B b` before `struct B: ...` is declared) -- type_
-        from_name's struct-name check only needs NAME membership.
+        (`type A struct: B b` before `type B struct: ...` is
+        declared) -- type_from_name's struct-name check only needs
+        NAME membership.
 
         1. Resolve each struct's field types (rejecting a duplicate
            field name), replacing its None placeholder with a real
@@ -785,9 +786,9 @@ class SemanticAnalyzer:
         over, so an array of a struct that contains X is exactly as
         size-infinite as X containing itself). A SLICE field
         deliberately doesn't count: its backing storage is a separate,
-        runtime-sized allocation, not embedded inline -- `struct A:
-        []A elements` is a genuinely supported pattern (a tree or
-        linked structure), not merely tolerated.
+        runtime-sized allocation, not embedded inline -- `type A
+        struct: []A elements` is a genuinely supported pattern (a tree
+        or linked structure), not merely tolerated.
 
         `path` is the visited chain, for a readable error message --
         struct counts are small enough that this doesn't need

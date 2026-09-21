@@ -567,7 +567,7 @@ def test_escape_analyzer_whole_value_node_of_variable_struct_no_slice():
 
 def test_escape_analyzer_whole_value_node_of_variable_struct_slice():
     source = """
-struct A:
+type A struct:
     int x
     str y
     []int sl

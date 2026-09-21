@@ -12364,7 +12364,7 @@ class TestComments:
         )
 
 # ---------------------------------------------------------------------------
-# Structs: `struct Name: <field>+`, a new, NOMINAL type with named,
+# Structs: `type Name struct: <field>+`, a new, NOMINAL type with named,
 # ordered, heterogeneous fields, read and written via `.` (`p.x`,
 # `p.x = 1`). Value semantics throughout, exactly like an array -- copied
 # on VarDecl init, plain Assign, parameter passing, and return, never
@@ -12383,7 +12383,7 @@ class TestComments:
 #   - No `==` on structs, and no `print` on a struct (deferred pending a
 #     real string-building facility -- see codegen.py's own note).
 #
-# Slice-typed fields (`struct Row: []int values`, directly, through an
+# Slice-typed fields (`type Row struct: []int values`, directly, through an
 # array, or through a nested struct) used to be explicitly rejected here
 # too, for the identical reason arrays needed their own escape analysis
 # built out before they could be trusted: a struct escaping a function
@@ -12868,9 +12868,9 @@ class TestStructs:
             analyze(_parse(source))
 
     def test_slice_typed_field_basic_read_and_write(self):
-        """Slice-typed fields (`struct Row: []int values`) are fully
-        supported: semantic.py used to reject this outright as an
-        explicit scope boundary, until codegen.py's escape analysis
+        """Slice-typed fields (`type Row struct: []int values`) are
+        fully supported: semantic.py used to reject this outright as
+        an explicit scope boundary, until codegen.py's escape analysis
         was extended (field_slot_of, alongside indexed_slot_of) to
         give a slice field's own backing array the identical treatment
         an array-of-slices element already has -- see codegen.py's own
@@ -12966,10 +12966,11 @@ class TestStructs:
         analyze(ast)  # should not raise
 
     def test_self_referential_struct_via_slice_field(self):
-        """`struct Node: []Node children` -- explicitly the motivating
-        pattern cycle detection was scoped to allow from day one (see
-        semantic.py's own _check_struct_contains): a slice field never
-        counts as a sizing cycle, since its own backing storage is a
+        """`type Node struct: []Node children` -- explicitly the
+        motivating pattern cycle detection was scoped to allow from
+        day one (see semantic.py's own _check_struct_contains): a
+        slice field never counts as a sizing cycle, since its own
+        backing storage is a
         separate, runtime-sized allocation, not embedded inline. Now
         that slice-typed fields are supported at all, this is a real,
         legal, intentional pattern -- a tree or linked structure built
@@ -16213,7 +16214,7 @@ class TestASTPrettyPrinting:
         assert "resolved_type" not in return_stmt.pretty()
 
     def test_self_referential_struct_field_type_renders_correctly(self):
-        """`struct Node: []Node children` -- SliceTypeExpr's own
+        """`type Node struct: []Node children` -- SliceTypeExpr's own
         element_type is just the plain string 'Node' at the AST level
         (struct fields are named by string, not an actual cyclic
         object reference -- see StructField's own docstring), so this

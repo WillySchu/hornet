@@ -25,7 +25,6 @@ Updates:
 - CSE pass optimization for array addresses and thus indexes.
 - `type` type.
 - `typeof`
-- Require `type` keyword to declare new type for structs.
 - Consider enabling struct literal syntax for aliases.
 - `fuction` type.
 - Add `byte` literal.

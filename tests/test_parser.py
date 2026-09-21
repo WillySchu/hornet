@@ -2573,29 +2573,14 @@ def test_position_new_node_defaults_to_zero_when_built_by_hand():
 
 
 # ---------------------------------------------------------------------------
-# type Name struct: ... -- a second, additional spelling for a struct
-# declaration (parse_type_declaration), alongside the original bare
-# `struct Name: ...` (parse_struct_def) -- both must produce an
-# IDENTICAL StructDef, and parse_program must sort either spelling
-# into Program.structs, never Program.type_aliases.
+# type Name struct: ... -- the only spelling for a struct declaration
+# now that the hard cutover has happened (see parser.py's own
+# parse_program: a bare `struct Name:` at the top level is rejected
+# outright, with a specific error pointing at the new spelling).
 # ---------------------------------------------------------------------------
 
-def test_parse_type_declaration_struct_form_matches_bare_struct_form():
-    """The whole point of a soft cutover: `type Point struct: ...` and
-    `struct Point: ...` must parse to the exact same StructDef."""
-    struct_tokens = [
-        lexer.Token(lexer.TokenType.STRUCT, 'struct', 1, 1),
-        lexer.Token(lexer.TokenType.IDENTIFIER, 'Point', 1, 8),
-        lexer.Token(lexer.TokenType.COLON, ':', 1, 13),
-        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 14),
-        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
-        lexer.Token(lexer.TokenType.INT, 'int', 2, 5),
-        lexer.Token(lexer.TokenType.IDENTIFIER, 'x', 2, 9),
-        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 10),
-        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
-        lexer.Token(lexer.TokenType.EOF, '', 3, 1),
-    ]
-    type_tokens = [
+def test_parse_type_declaration_struct_form_produces_a_struct_def():
+    tokens = [
         lexer.Token(lexer.TokenType.TYPE, 'type', 1, 1),
         lexer.Token(lexer.TokenType.IDENTIFIER, 'Point', 1, 6),
         lexer.Token(lexer.TokenType.STRUCT, 'struct', 1, 12),
@@ -2608,10 +2593,37 @@ def test_parse_type_declaration_struct_form_matches_bare_struct_form():
         lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
         lexer.Token(lexer.TokenType.EOF, '', 3, 1),
     ]
-    from_struct_keyword = parser.Parser(struct_tokens).parse_struct_def()
-    from_type_keyword = parser.Parser(type_tokens).parse_type_declaration()
-    assert from_struct_keyword == from_type_keyword
-    assert isinstance(from_type_keyword, parser.StructDef)
+    result = parser.Parser(tokens).parse_type_declaration()
+    assert result == parser.StructDef(name='Point', fields=[parser.StructField(name='x', field_type='int')])
+
+
+def test_bare_struct_keyword_at_top_level_is_rejected():
+    """The hard cutover itself: `struct Name: ...` (no leading `type`)
+    used to parse (see git history around parse_struct_def, now
+    removed) -- now parse_program rejects it outright with a specific
+    error pointing at the replacement spelling, rather than falling
+    through to some more confusing "expected def" message from
+    parse_function."""
+    tokens = [
+        lexer.Token(lexer.TokenType.STRUCT, 'struct', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Point', 1, 8),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 13),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 14),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.INT, 'int', 2, 5),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'x', 2, 9),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 10),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 3, 1),
+    ]
+    with pytest.raises(
+        parser.ParseError,
+        match=re.escape(
+            "Bare 'struct Name:' is no longer supported -- write "
+            "'type Name struct:' instead at line 1, column 1"
+        )
+    ):
+        parser.Parser(tokens).parse_program()
 
 
 def test_parse_type_declaration_alias_form_still_works():
@@ -2649,10 +2661,9 @@ def test_parse_type_declaration_neither_assign_nor_struct_raises():
 
 def test_parse_program_sorts_type_struct_form_into_structs_not_aliases():
     """The dispatch in parse_program: a `type Name struct: ...`
-    declaration must land in Program.structs, exactly like `struct
-    Name: ...` does -- never in Program.type_aliases, even though it's
-    parsed by the same method (parse_type_declaration) an actual alias
-    is."""
+    declaration must land in Program.structs -- never in Program.
+    type_aliases, even though it's parsed by the same method (parse_
+    type_declaration) an actual alias is."""
     tokens = [
         lexer.Token(lexer.TokenType.TYPE, 'type', 1, 1),
         lexer.Token(lexer.TokenType.IDENTIFIER, 'Point', 1, 6),
