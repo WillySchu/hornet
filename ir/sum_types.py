@@ -33,9 +33,10 @@ being sum-typed -- letting an already-matching sum-typed value fall
 through to the ordinary composite-copy path instead, the identical one
 any other same-type value already uses."""
 
-from ir.ir import IRBinOp, IRCall, IRConst, IRLocalAddress, IRStore
+from ir.errors import IRError
+from ir.ir import IRBinOp, IRCall, IRConst, IRLoad, IRLocalAddress, IRStore
 from ir.utils import SUM_TYPE_TAG_WIDTH, type_byte_width, type_of
-from parser import Node, BinaryOp
+from parser import IsCheck, Node, BinaryOp, Variable
 from semantic import Type, TypeKind
 
 
@@ -106,3 +107,52 @@ class SumTypesMixin:
         if write_ir is None:
             return None
         return addr_ir + write_ir, addr
+
+    def _ir_is_check(self, expr: IsCheck) -> tuple[list, object]:
+        """Builds real IR for `NAME is TypeName` (see IsCheck's own
+        docstring in parser.py) itself -- an ordinary bool-producing
+        comparison, no different in kind from `x == 5`: read the
+        discriminant tag out of NAME's own address, compare it against
+        TypeName's own fixed discriminant.
+
+        NAME's own address comes from _ir_struct_address, called on a
+        FRESH Variable(name=...) rather than some node already in
+        hand -- there isn't one: IsCheck carries variable_name as a
+        bare string, not a Variable AST node, since it's a special
+        condition shape recognized directly by the parser (_parse_if_
+        condition), never built from an ordinary primary expression.
+        This fresh node's own resolved_type is None, same as every
+        other synthesized Variable(name=...) elsewhere in this
+        codebase (see _ir_struct_address's own docstring for why that
+        reads as "not narrowed, want the whole value's own address" --
+        exactly right here, since testing `is` always needs the TAG's
+        own address, at NAME's own start, never a narrowed, offset
+        one, regardless of any narrowing already active from an
+        ENCLOSING is-check on this same name (impossible anyway --
+        once narrowed, NAME's own type is the plain struct variant,
+        not a sum type, so check_is_check's own first check already
+        rejects testing `is` on it again).
+
+        TypeName's own discriminant is its index in the sum type's own
+        declared variant list -- the identical computation _ir_write_
+        sum_type_value_into already uses to WRITE this same tag in the
+        first place, so the two stay consistent by construction, not
+        by coincidence."""
+        sum_type = self._local_type(expr.variable_name)
+        result = self._ir_struct_address(Variable(name=expr.variable_name))
+        if result is None:
+            raise IRError(
+                f"_ir_struct_address returned None for an IsCheck's own variable "
+                f"({expr.variable_name!r}) -- expected to always succeed for a "
+                f"reachable, sum-typed variable"
+            )
+        addr_ir, addr_value = result
+        tag_temp = self.ir_program.ids.new_temp(Type.INT)
+        load_ir = [IRLoad(dst=tag_temp, address=addr_value)]
+
+        variants = self.ir_program.sum_type_registry[sum_type.sum_type_name].variants
+        discriminant = variants.index(expr.type_name)
+
+        result_temp = self.ir_program.ids.new_temp(Type.BOOL)
+        compare_ir = [IRBinOp(dst=result_temp, op=BinaryOp.EQUAL, left=tag_temp, right=IRConst(discriminant, Type.INT))]
+        return addr_ir + load_ir + compare_ir, result_temp

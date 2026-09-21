@@ -11,7 +11,7 @@ arrays_slices.py."""
 
 from ir.errors import IRError
 from ir.ir import IRBinOp, IRConst, IRStore, IRLoad, IRLocalAddress, IRCall
-from ir.utils import COMPOSITE_KINDS, type_byte_width, type_of
+from ir.utils import COMPOSITE_KINDS, SUM_TYPE_TAG_WIDTH, type_byte_width, type_of
 from parser import Node, Variable, Field, Index, Call, BinaryOp
 from semantic import TypeKind, Type
 
@@ -42,7 +42,40 @@ class StructsMixin:
         variable's own address is either a fixed %rbp-relative offset
         (IRLocalAddress directly) or, if heap-allocated, the pointer
         stored at that offset (IRLocalAddress for the slot's own
-        address, then an IRLoad reading the pointer through it)."""
+        address, then an IRLoad reading the pointer through it).
+
+        A NARROWED occurrence needs one more step: expr.resolved_type
+        (set by semantic.py's own analyze_if, e.g. Circle for a `shape
+        is Circle` branch) differing from struct_type (_local_type --
+        the SLOT's own, unchanging declared type, e.g. Shape, decided
+        once at _bind_local time and never re-shadowed here the way
+        semantic.py's OWN scopes are) means this occurrence is
+        narrowed: the struct's real bytes start SUM_TYPE_TAG_WIDTH
+        into the slot's own address (the discriminant tag sits at the
+        front), not at its start. A genuinely sum-typed reference --
+        every OTHER caller of this same Variable case, from before
+        narrowing existed: widening a struct INTO this slot, print(),
+        an ordinary argument or return -- has resolved_type ==
+        struct_type (both the same sum type) and takes the unchanged,
+        no-offset path, exactly as it always has; deliberately NOT
+        decided by struct_type.kind == SUM alone, which would
+        incorrectly add the offset for every one of those other,
+        already-working cases too.
+
+        Read directly off expr.resolved_type, not through type_of --
+        an internal Variable node synthesized purely for IR building
+        (e.g. Variable(name=stmt.name), all over VarDecl/Assign's own
+        handling in ir/statements.py) never goes through semantic
+        analysis and so never has one at all; None is treated the same
+        as "not narrowed" here rather than type_of's own "raise, this
+        is a bug" stance, because such a node can PROVABLY never
+        legitimately be a narrowed occurrence: a VarDecl re-declaring
+        an actively-narrowed name is already rejected as a duplicate
+        declaration in the same scope, and an Assign to one is already
+        rejected outright by analyze_assign -- both well before this
+        ever runs. Every node that COULD be narrowed is an actual,
+        parsed source reference, which always has a real resolved_type
+        from check_expr."""
         if isinstance(expr, Variable):
             slot = self._local_slot(expr.name)
             struct_type = self._local_type(expr.name)
@@ -51,8 +84,46 @@ class StructsMixin:
             if self._is_heap_allocated(self._local_decl_id(expr.name), struct_type):
                 addr_temp = self.ir_program.ids.new_temp(Type.INT64)
                 ir.append(IRLoad(dst=addr_temp, address=slot_addr))
-                return ir, addr_temp
-            return ir, slot_addr
+                base_addr = addr_temp
+            else:
+                base_addr = slot_addr
+            if struct_type.kind == TypeKind.SUM:
+                # narrowed_type is expr.resolved_type directly, not
+                # type_of(expr) -- None is expected and MEANINGFUL
+                # here, not a bug to raise on: an internal Variable
+                # node synthesized purely for IR building (e.g.
+                # Variable(name=stmt.name), all over VarDecl/Assign's
+                # own handling in ir/statements.py, reusing this same
+                # address-computation machinery for a declaration's or
+                # assignment's own target name) never goes through
+                # semantic analysis at all, so it never HAS a resolved_
+                # type. That's fine here specifically, because such a
+                # node can PROVABLY never be a narrowed occurrence: a
+                # VarDecl re-declaring an actively-narrowed name is
+                # already rejected as a duplicate declaration in the
+                # same scope (the narrowing's own shadow already
+                # occupies it), and an Assign to one is already
+                # rejected outright by analyze_assign's own check --
+                # both at the semantic level, well before this ever
+                # runs. Every node that COULD legitimately be narrowed
+                # is an actual, parsed source reference, which always
+                # has a real resolved_type from check_expr.
+                narrowed_type = expr.resolved_type
+                if narrowed_type is None or narrowed_type == struct_type:
+                    return ir, base_addr  # genuinely sum-typed (or an internal, always-whole-value node), not narrowed
+                if narrowed_type.kind != TypeKind.STRUCT:
+                    raise IRError(
+                        f"Variable '{expr.name}' has sum type {struct_type} but its own "
+                        f"resolved_type {narrowed_type} is neither that same sum type nor "
+                        f"a struct -- expected only these two shapes for a sum-typed name"
+                    )
+                payload_addr = self.ir_program.ids.new_temp(Type.INT64)
+                ir.append(IRBinOp(
+                    dst=payload_addr, op=BinaryOp.ADD,
+                    left=base_addr, right=IRConst(SUM_TYPE_TAG_WIDTH, Type.INT64),
+                ))
+                return ir, payload_addr
+            return ir, base_addr
         if isinstance(expr, Field):
             return self._ir_field_address(expr)
         if isinstance(expr, Index):

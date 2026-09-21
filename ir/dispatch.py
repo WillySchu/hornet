@@ -22,6 +22,7 @@ from parser import (
     Constant,
     Field,
     Index,
+    IsCheck,
     Node,
     StringLiteral,
     Unary,
@@ -39,8 +40,10 @@ class DispatchMixin:
         len(x)/print(x) call (their own dedicated entry points, not
         routed through _ir_call -- neither is an ordinary function
         call), an ordinary scalar-or-void-returning Call (via _ir_
-        call), Unary, and Cast -- and raises IRError for everything
-        else.
+        call), Unary, Cast, and IsCheck (via _ir_is_check, ir/sum_
+        types.py -- a sum type's own runtime discriminant test, never
+        a general expression; see IsCheck's own docstring in parser.
+        py) -- and raises IRError for everything else.
 
         An ArrayLiteral, Slice, NoneLiteral, or a composite-returning
         Call used as a bare statement is routed around this method
@@ -120,6 +123,8 @@ class DispatchMixin:
             src_ir, src_value = self.gen_expr_ir(expr.expr)
             t = self.ir_program.ids.new_temp(type_of(expr))
             return src_ir + [IRCast(dst=t, src=src_value)], t
+        if isinstance(expr, IsCheck):
+            return self._ir_is_check(expr)
         raise IRError(
             f"No real-IR case for expression of type {type(expr).__name__}: {expr!r}"
         )

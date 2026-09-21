@@ -6069,10 +6069,12 @@ class TestSumTypesPrint:
 # outright -- not "for now" pending a future relaxation with an
 # obvious shape, a genuinely open question with no planned resolution.
 #
-# No codegen exists for this yet (see IsCheck's own comparison against
-# a runtime discriminant, and narrowed field access's own base-address-
-# plus-tag-width offset -- both Stage 3): every "accepted" test here
-# stops at analyze() -- there's nothing to compile-and-run against.
+# Stage 3's own actual codegen -- the runtime discriminant comparison
+# and narrowed field access's own base-address-plus-tag-width offset
+# -- is tested separately, in TestNarrowingCodegen below: these stay
+# semantic-analysis-only (analyze() either raises or doesn't), since
+# they were all true before Stage 3 ever existed and don't need
+# re-verifying at the codegen level too.
 # ---------------------------------------------------------------------------
 
 class TestNarrowing:
@@ -6249,6 +6251,154 @@ class TestNarrowing:
             "    else:\n"
             "        return s.radius\n",
             match="Cannot access field 'radius' on non-struct type Shape",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Sum type narrowing, stage 3: actual codegen. The IsCheck condition
+# itself is an ordinary tag-vs-discriminant comparison (no new IR
+# instruction kind -- the same IRBinOp/EQUAL shape `x == 5` already
+# uses); narrowed field access needed real, new work in _ir_struct_
+# address's own Variable case, adding SUM_TYPE_TAG_WIDTH to the
+# computed address whenever a reference's own resolved_type (Circle,
+# set by semantic.py's analyze_if) differs from its slot's unchanging
+# declared type (Shape) -- see that method's own docstring for the
+# full reasoning, including why a genuinely sum-typed reference (every
+# OTHER caller of that same Variable case, from before narrowing
+# existed) must NOT get that offset.
+#
+# Deliberately verified by actually compiling, linking, and RUNNING
+# each of these, not just inspecting the generated IR (see tests/ir/
+# test_sum_types.py for that level) -- a wrong offset here wouldn't
+# fail to compile, it would silently read the wrong bytes, which only
+# an actual runtime value can catch.
+# ---------------------------------------------------------------------------
+
+class TestNarrowingCodegen:
+
+    _SHAPE_DECLS = (
+        "type Circle struct:\n"
+        "    int radius\n"
+        "\n"
+        "type Square struct:\n"
+        "    int width\n"
+        "    int height\n"
+        "\n"
+        "type Shape is Circle | Square\n"
+        "\n"
+    )
+
+    def test_narrowed_field_read_returns_the_correct_value(self):
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    if s is Circle:\n"
+            "        return s.radius\n"
+            "    return 0\n",
+            expected=5,
+        )
+
+    def test_false_branch_is_taken_when_the_variant_does_not_match(self):
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Square(3, 4)\n"
+            "    if s is Circle:\n"
+            "        return s.radius\n"
+            "    return 99\n",
+            expected=99,
+        )
+
+    def test_second_field_of_the_narrowed_variant_reads_correctly(self):
+        """s.height -- Square's SECOND field, a non-zero offset within
+        Square on top of the tag-width offset. Confirms the two
+        offsets compose (tag width, then field offset), not that only
+        one or the other happens to be right."""
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Square(3, 4)\n"
+            "    if s is Square:\n"
+            "        return s.width + s.height\n"
+            "    return 0\n",
+            expected=7,
+        )
+
+    def test_elif_chain_across_three_variants(self):
+        assert_program_exit_code(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int width\n"
+            "    int height\n"
+            "\n"
+            "type Triangle struct:\n"
+            "    int base\n"
+            "\n"
+            "type Shape is Circle | Square | Triangle\n"
+            "\n"
+            "def int describe(Shape s):\n"
+            "    if s is Circle:\n"
+            "        return s.radius * 10\n"
+            "    elif s is Square:\n"
+            "        return s.width + s.height\n"
+            "    elif s is Triangle:\n"
+            "        return s.base * 100\n"
+            "    return -1\n"
+            "\n"
+            "def int main():\n"
+            "    int total = 0\n"
+            "    total = total + describe(Circle(5))\n"
+            "    total = total + describe(Square(3, 4))\n"
+            "    total = total + describe(Triangle(2))\n"
+            "    return total\n",
+            expected=(50 + 7 + 200) % 256,
+        )
+
+    def test_narrowing_a_function_parameter(self):
+        """The identical mechanism, on a PARAMETER rather than a local
+        -- checked directly, not assumed to follow from the local-
+        variable case, since a parameter's own address comes through
+        the calling convention's copy-in prologue rather than an
+        ordinary VarDecl, and parameters have been the one recurring
+        blind spot throughout this entire feature."""
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int describe(Shape s):\n"
+            "    if s is Circle:\n"
+            "        return s.radius\n"
+            "    return -1\n"
+            "\n"
+            "def int main():\n"
+            "    return describe(Circle(7))\n",
+            expected=7,
+        )
+
+    def test_nested_block_inside_narrowed_branch_reads_correctly(self):
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Circle(9)\n"
+            "    if s is Circle:\n"
+            "        if true:\n"
+            "            return s.radius\n"
+            "    return 0\n",
+            expected=9,
+        )
+
+    def test_two_different_variables_narrowed_simultaneously(self):
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape a = Circle(3)\n"
+            "    Shape b = Square(4, 5)\n"
+            "    if a is Circle:\n"
+            "        if b is Square:\n"
+            "            return a.radius + b.width + b.height\n"
+            "    return 0\n",
+            expected=12,
         )
 
 

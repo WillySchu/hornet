@@ -19,7 +19,7 @@ import desugar
 import parser
 import semantic
 from lexer import lex
-from ir.ir import IRBinOp, IRConst, IRCopy, IRSliceGrow, IRStore
+from ir.ir import IRBinOp, IRBranch, IRConst, IRCopy, IRLoad, IRSliceGrow, IRStore
 from ir.program_builder import build_ir_program
 from semantic import Type, TypeKind
 
@@ -331,3 +331,121 @@ def test_widening_argument_too_large_for_a_stack_slot_mallocs_instead():
     ]
     assert len(mallocs) == 1
     assert mallocs[0].args[0].value == 20004
+
+
+# ---------------------------------------------------------------------------
+# Narrowing (`if NAME is TypeName:`), stage 3: the IsCheck condition
+# itself (an ordinary tag-vs-discriminant comparison, no different in
+# kind from `x == 5`), and narrowed field access -- the harder piece:
+# a narrowed name's own address needs SUM_TYPE_TAG_WIDTH added before
+# any field offset, since its slot is still Shape-shaped (tag then
+# payload), not Circle-shaped, regardless of what the branch narrows
+# it to. _ir_struct_address's own Variable case decides this by
+# comparing the REFERENCE's own resolved_type (Circle, set by
+# semantic.py's analyze_if) against the SLOT's own, unchanging
+# declared type (Shape, from _local_type) -- equal means a genuinely
+# sum-typed reference (print, widening, ...) and no offset; different
+# means narrowed.
+# ---------------------------------------------------------------------------
+
+def test_is_check_compares_tag_against_the_right_discriminant():
+    """s is Square -- Square is variant index 1. The comparison must
+    be against 1, not 0 (Circle's own discriminant) or any other
+    value."""
+    ir_program = _build(
+        _SHAPE_DECLS +
+        "def int main():\n"
+        "    Shape s = Circle(5)\n"
+        "    if s is Square:\n"
+        "        return 1\n"
+        "    return 0\n"
+    )
+    fn = _fn(ir_program, 'main')
+    branches = [instr for instr in fn.body if isinstance(instr, IRBranch)]
+    assert len(branches) == 1
+    # The comparison feeding the branch's own cond Temp -- find the
+    # IRBinOp that defines it, rather than assume position.
+    compares = [instr for instr in fn.body if isinstance(instr, IRBinOp) and instr.dst == branches[0].cond]
+    assert len(compares) == 1
+    assert compares[0].right == IRConst(1, Type.INT)
+
+
+def test_narrowed_field_access_offsets_by_the_tag_width():
+    """shape.radius, inside `if shape is Circle:` -- the address
+    computation must be base + SUM_TYPE_TAG_WIDTH(4) + field_offset
+    (0, radius is Circle's first field), not just base + field_offset
+    the way an ordinary (non-narrowed) struct field access would be."""
+    ir_program = _build(
+        _SHAPE_DECLS +
+        "def int main():\n"
+        "    Shape s = Circle(5)\n"
+        "    if s is Circle:\n"
+        "        return s.radius\n"
+        "    return 0\n"
+    )
+    fn = _fn(ir_program, 'main')
+    adds = [instr for instr in fn.body if isinstance(instr, IRBinOp) and instr.right == IRConst(4, Type.INT64)]
+    # At least one ADD-by-4: the narrowed field access's own offset.
+    # (Widening's own tag-to-payload ADD, from `Shape s = Circle(5)`
+    # itself, is ALSO an ADD-by-4 -- this test only needs to confirm
+    # at least one exists specifically for the field access, not
+    # disentangle which is which.)
+    assert len(adds) >= 1
+    loads = [instr for instr in fn.body if isinstance(instr, IRLoad)]
+    # The narrowed read itself: a load whose address is exactly one
+    # of those +4 ADDs' own destination (field_offset 0, so no
+    # SECOND add on top -- straight from the tag-width offset alone).
+    assert any(load.address == add.dst for load in loads for add in adds)
+
+
+def test_narrowed_field_access_at_a_nonzero_field_offset():
+    """s.height, Square's own SECOND field -- the address needs BOTH
+    the tag-width offset AND the field's own offset within Square,
+    not just one or the other."""
+    ir_program = _build(
+        "type Circle struct:\n"
+        "    int radius\n"
+        "\n"
+        "type Square struct:\n"
+        "    int width\n"
+        "    int height\n"
+        "\n"
+        "type Shape is Circle | Square\n"
+        "\n"
+        "def int main():\n"
+        "    Shape s = Square(3, 4)\n"
+        "    if s is Square:\n"
+        "        return s.height\n"
+        "    return 0\n"
+    )
+    fn = _fn(ir_program, 'main')
+    # Two chained ADDs feeding the final load: +4 (tag width), then
+    # +4 again (height's own offset within Square, after width's own
+    # 4 bytes) -- not collapsed into one, and not just one alone.
+    add_fours = [instr for instr in fn.body if isinstance(instr, IRBinOp) and instr.right == IRConst(4, Type.INT64)]
+    chained = [a for a in add_fours if any(a.left == b.dst for b in add_fours)]
+    assert len(chained) >= 1
+
+
+def test_narrowing_through_a_function_parameter():
+    """The identical mechanism, exercised on a PARAMETER rather than a
+    local -- narrowing's own address computation (_local_slot/_local_
+    type) doesn't distinguish where the slot's own data came from, but
+    every other stage of this feature has had a parameter-specific
+    blind spot at least once, so this is checked directly rather than
+    assumed to follow from the local-variable case."""
+    ir_program = _build(
+        _SHAPE_DECLS +
+        "def int describe(Shape s):\n"
+        "    if s is Circle:\n"
+        "        return s.radius\n"
+        "    return 0\n"
+        "\n"
+        "def int main():\n"
+        "    return describe(Circle(5))\n"
+    )
+    fn = _fn(ir_program, 'describe')
+    branches = [instr for instr in fn.body if isinstance(instr, IRBranch)]
+    assert len(branches) == 1
+    adds = [instr for instr in fn.body if isinstance(instr, IRBinOp) and instr.right == IRConst(4, Type.INT64)]
+    assert len(adds) >= 1
