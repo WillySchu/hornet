@@ -6059,6 +6059,200 @@ class TestSumTypesPrint:
 
 
 # ---------------------------------------------------------------------------
+# Sum type narrowing, stage 2: semantic analysis only. `if NAME is
+# TypeName:` narrows NAME to TypeName for exactly the then_body (never
+# else_body -- no nameable "not Circle" type once a sum type has more
+# than two variants), by re-declaring it in the scope analyze_if
+# already pushes there, an ordinary shadow of the outer, sum-typed
+# binding (see _declare's own "fine to shadow" docstring). Reassigning
+# a narrowed name anywhere within its narrowed scope is rejected
+# outright -- not "for now" pending a future relaxation with an
+# obvious shape, a genuinely open question with no planned resolution.
+#
+# No codegen exists for this yet (see IsCheck's own comparison against
+# a runtime discriminant, and narrowed field access's own base-address-
+# plus-tag-width offset -- both Stage 3): every "accepted" test here
+# stops at analyze() -- there's nothing to compile-and-run against.
+# ---------------------------------------------------------------------------
+
+class TestNarrowing:
+
+    _SHAPE_DECLS = (
+        "type Circle struct:\n"
+        "    int radius\n"
+        "\n"
+        "type Square struct:\n"
+        "    int side\n"
+        "\n"
+        "type Shape is Circle | Square\n"
+        "\n"
+    )
+
+    # -- accepted (analyze() must NOT raise) -------------------------------
+
+    def test_narrowed_field_access(self):
+        ast = _parse(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    if s is Circle:\n"
+            "        return s.radius\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_elif_narrows_to_its_own_variant(self):
+        ast = _parse(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Square(9)\n"
+            "    if s is Circle:\n"
+            "        return s.radius\n"
+            "    elif s is Square:\n"
+            "        return s.side\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_nested_block_inside_narrowed_branch_still_sees_it(self):
+        ast = _parse(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    if s is Circle:\n"
+            "        if true:\n"
+            "            return s.radius\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_reassigning_an_unrelated_variable_inside_narrowed_branch_is_fine(self):
+        """The reassignment rejection is keyed to the specific
+        narrowed NAME -- an ordinary local, unrelated to the
+        narrowing, is still freely reassignable in the same scope."""
+        ast = _parse(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    if s is Circle:\n"
+            "        int x = 5\n"
+            "        x = 10\n"
+            "        return s.radius\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_two_different_variables_narrowed_simultaneously(self):
+        ast = _parse(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape a = Circle(5)\n"
+            "    Shape b = Square(9)\n"
+            "    if a is Circle:\n"
+            "        if b is Square:\n"
+            "            return a.radius + b.side\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    # -- rejected -------------------------------------------------------
+
+    def test_reassigning_the_narrowed_variable_is_rejected(self):
+        assert_program_semantic_error(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    if s is Circle:\n"
+            "        s = Square(9)\n"
+            "    return 0\n",
+            match="Cannot reassign 's'",
+        )
+
+    def test_reassigning_the_narrowed_variable_in_a_nested_block_is_also_rejected(self):
+        assert_program_semantic_error(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    if s is Circle:\n"
+            "        if true:\n"
+            "            s = Square(9)\n"
+            "    return 0\n",
+            match="Cannot reassign 's'",
+        )
+
+    def test_unrelated_struct_is_rejected(self):
+        assert_program_semantic_error(
+            self._SHAPE_DECLS +
+            "type Triangle struct:\n"
+            "    int base\n"
+            "\n"
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    if s is Triangle:\n"
+            "        return 0\n"
+            "    return 0\n",
+            match="is not one of Shape's own declared variants",
+        )
+
+    def test_undeclared_struct_name_is_rejected(self):
+        assert_program_semantic_error(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    if s is Nonexistent:\n"
+            "        return 0\n"
+            "    return 0\n",
+            match="is not a declared struct",
+        )
+
+    def test_non_sum_typed_left_side_is_rejected(self):
+        assert_program_semantic_error(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    if c is Circle:\n"
+            "        return 0\n"
+            "    return 0\n",
+            match="is not a sum type",
+        )
+
+    def test_undeclared_variable_name_is_rejected(self):
+        assert_program_semantic_error(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    if nonexistent is Circle:\n"
+            "        return 0\n"
+            "    return 0\n",
+            match="Reference to undeclared variable",
+        )
+
+    def test_narrowing_does_not_leak_outside_the_if(self):
+        """s.radius after the if -- s is Shape again there, which has
+        no field called radius at all."""
+        assert_program_semantic_error(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    if s is Circle:\n"
+            "        return s.radius\n"
+            "    return s.radius\n",
+            match="Cannot access field 'radius' on non-struct type Shape",
+        )
+
+    def test_else_body_does_not_narrow(self):
+        assert_program_semantic_error(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    if s is Circle:\n"
+            "        return 0\n"
+            "    else:\n"
+            "        return s.radius\n",
+            match="Cannot access field 'radius' on non-struct type Shape",
+        )
+
+
+# ---------------------------------------------------------------------------
 # int8/uint8, step 1 of 3: the TYPE SYSTEM only -- lexer/parser keywords,
 # TypeKind/Type additions, literal range-checking, and arithmetic type-
 # checking rules (check_binary/check_unary). Deliberately NOT yet about

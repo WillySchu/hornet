@@ -217,6 +217,7 @@ from parser import (
     If,
     Index,
     IndexAssign,
+    IsCheck,
     Node,
     NoneLiteral,
     Param,
@@ -570,6 +571,7 @@ class SemanticAnalyzer:
         self.methods: Dict[Tuple[str, str], Tuple[List[Type], Type, str]] = {}  # (struct, method) -> (param types, return type, mangled name); see _collect_methods
         self.type_aliases: Dict[str, Type] = {}  # name -> resolved target Type; see _collect_type_aliases
         self.sum_types: Dict[str, SumTypeInfo] = {}  # name -> resolved variants; see _resolve_sum_types
+        self._narrowed_names: set = set()  # currently-narrowed variable names; see analyze_if/analyze_assign
 
     def analyze(self, program: Program) -> None:
         # Pass order matters and is load-bearing:
@@ -1256,6 +1258,13 @@ class SemanticAnalyzer:
         self._declare(stmt.name, declared_type, stmt)
 
     def analyze_assign(self, stmt: Assign) -> None:
+        if stmt.name in self._narrowed_names:
+            raise SemanticError(
+                f"Cannot reassign '{stmt.name}' while it's narrowed by "
+                f"an enclosing 'is' check -- assign to a different "
+                f"variable instead",
+                stmt,
+            )
         declared_type = self._lookup(stmt.name, stmt)  # may resolve to an enclosing scope
         value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, declared_type)
         if not self._types_compatible(value_type, declared_type):
@@ -1397,8 +1406,41 @@ class SemanticAnalyzer:
             )
 
         self._push_scope()
+        # An IsCheck condition narrows its own variable_name to
+        # type_name for exactly this then_body -- check_is_check has
+        # already confirmed variable_name is a sum-typed variable and
+        # type_name one of its own declared variants, so re-declaring
+        # it here, in the scope just pushed, is a plain, ordinary
+        # shadow (see _declare's own docstring: "a name already
+        # declared in an enclosing scope is fine to shadow"), ordinary
+        # innermost-scope lookup doing the rest for every reference
+        # inside. Deliberately NOT done for else_body -- see IsCheck's
+        # own docstring for why (no nameable "not Circle" type once a
+        # sum type has more than two variants, so there's no single
+        # rule that would apply consistently either way).
+        #
+        # _narrowed_names records the name for analyze_assign's own
+        # reassignment check for exactly as long as this then_body
+        # (and anything nested inside it) is being analyzed -- added
+        # right before, removed right after, symmetric with the scope
+        # push/pop themselves. A flat set, not a stack keyed to scope
+        # depth: two DIFFERENT names narrowed in a nested `if shape1
+        # is Circle: if shape2 is Square: ...` both stay valid
+        # entries simultaneously with no conflict, and re-narrowing
+        # the SAME name can't arise at all -- once narrowed, that
+        # name's own type is already the plain struct variant, not a
+        # sum type any more, so check_is_check's own first check would
+        # already reject a second `shape is ...` on it before this
+        # would ever matter.
+        narrowed_name = None
+        if isinstance(stmt.condition, IsCheck):
+            narrowed_name = stmt.condition.variable_name
+            self._declare(narrowed_name, Type(TypeKind.STRUCT, struct_name=stmt.condition.type_name), stmt.condition)
+            self._narrowed_names.add(narrowed_name)
         for s in stmt.then_body:
             self.analyze_statement(s, return_type)
+        if narrowed_name is not None:
+            self._narrowed_names.discard(narrowed_name)
         self._pop_scope()
 
         # then/else get independent scopes (module docstring), so a
@@ -1478,6 +1520,8 @@ class SemanticAnalyzer:
             result = self.check_cast(expr)
         elif isinstance(expr, Binary):
             result = self.check_binary(expr)
+        elif isinstance(expr, IsCheck):
+            result = self.check_is_check(expr)
         else:
             raise SemanticError(f"No semantic rule for expression: {expr!r}", expr)
         expr.resolved_type = result
@@ -1934,6 +1978,48 @@ class SemanticAnalyzer:
 
     def check_variable(self, expr: Variable) -> Type:
         return self._lookup(expr.name, expr)
+
+    def check_is_check(self, expr: IsCheck) -> Type:
+        """`NAME is TypeName` -- an if/elif condition's own special
+        shape (see IsCheck's own docstring in parser.py), not a
+        general expression: checked here like any other, so it gets
+        an ordinary resolved_type=Type.BOOL annotation and analyze_
+        if's own "condition must be bool" check needs no special-
+        casing for it at all. The actual NARROWING this enables --
+        rebinding NAME to TypeName within the if's own then_body --
+        happens separately, in analyze_if, the only caller that still
+        has stmt.condition itself in hand (check_expr's own dispatch,
+        here, only ever returns a bare Type).
+
+        Three checks, in order: NAME must already be an in-scope, SUM-
+        typed variable (not a struct, not a scalar -- there's nothing
+        to narrow otherwise); TypeName must be a declared struct at
+        all; and, more specifically, TypeName must be one of NAME's
+        own sum type's declared variants -- not just any struct, since
+        `shape is Rectangle`, Rectangle never one of Shape's own
+        variants, can never be true, and letting it silently type-
+        check as an always-false check would hide what's almost
+        certainly a mistake -- the same reasoning _types_compatible
+        already applies to a struct widening into an unrelated sum
+        type."""
+        variable_type = self._lookup(expr.variable_name, expr)
+        if variable_type.kind != TypeKind.SUM:
+            raise SemanticError(
+                f"'{expr.variable_name}' (declared {variable_type}) is "
+                f"not a sum type -- 'is' only narrows a sum-typed "
+                f"variable to one of its own declared variants",
+                expr,
+            )
+        if expr.type_name not in self.structs:
+            raise SemanticError(f"'{expr.type_name}' is not a declared struct", expr)
+        sum_type_info = self.sum_types[variable_type.sum_type_name]
+        if expr.type_name not in sum_type_info.variants:
+            raise SemanticError(
+                f"'{expr.type_name}' is not one of {variable_type}'s own "
+                f"declared variants ({', '.join(sum_type_info.variants)})",
+                expr,
+            )
+        return Type.BOOL
 
     def check_unary(self, expr: Unary) -> Type:
         operand_type = self.check_expr(expr.operand)
