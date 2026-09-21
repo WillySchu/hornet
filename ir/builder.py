@@ -33,6 +33,7 @@ from ir.scalars import ScalarsMixin
 from ir.statements import StatementsMixin
 from ir.strings import StringsMixin
 from ir.structs import StructsMixin
+from ir.sum_types import SumTypesMixin
 from parser import (
     ArrayLiteral,
     Assign,
@@ -63,7 +64,8 @@ class IRFunctionBuilder(
         ScalarsMixin,
         StatementsMixin,
         StringsMixin,
-        StructsMixin):
+        StructsMixin,
+        SumTypesMixin):
 
     def __init__(self, ir_program):
         self.ir_program = ir_program
@@ -80,9 +82,9 @@ class IRFunctionBuilder(
         self._argument_temp_slots = {}
         ir_fn = IRFunction(name=fn.name)
         ir_fn.return_type = Type.VOID if fn.return_type is None else type_from_name(
-            fn.return_type, self.ir_program.struct_registry, self.ir_program.type_alias_registry)
+            fn.return_type, self.ir_program.struct_registry, self.ir_program.type_alias_registry, sum_types=self.ir_program.sum_type_registry)
         return_type = ir_fn.return_type
-        param_types = [type_from_name(p.type, self.ir_program.struct_registry, self.ir_program.type_alias_registry) for p in fn.params]
+        param_types = [type_from_name(p.type, self.ir_program.struct_registry, self.ir_program.type_alias_registry, sum_types=self.ir_program.sum_type_registry) for p in fn.params]
 
         # Which of this function's array declarations need to be
         # heap-allocated because a slice backed by them might outlive
@@ -90,7 +92,7 @@ class IRFunctionBuilder(
         # analyze_array_escapes) -- needed before _collect_params/
         # _collect_locals decide each slot's own byte width.
         self._escaping_array_ids = analyze_array_escapes(
-            fn, param_types, self.ir_program.struct_registry, self.ir_program.type_alias_registry)
+            fn, param_types, self.ir_program.struct_registry, self.ir_program.type_alias_registry, self.ir_program.sum_type_registry)
 
         # An array/slice/struct-typed return needs a hidden pointer --
         # the caller passes the address to write the result into, as
@@ -244,7 +246,7 @@ class IRFunctionBuilder(
                 param_addr = self.ir_program.ids.new_temp(Type.INT64)
                 ir.append(IRLocalAddress(dst=param_addr, slot=slot))
                 if self._is_heap_allocated(id(p), p_type):
-                    size = type_byte_width(p_type, self.ir_program.struct_registry)
+                    size = type_byte_width(p_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
                     new_ptr = self.ir_program.ids.new_temp(Type.INT64)
                     ir.append(IRCall(dst=new_ptr, name='malloc', args=[IRConst(size, Type.INT64)]))
                     ir.append(IRStore(address=param_addr, value=new_ptr, value_type=Type.INT64))
@@ -264,8 +266,8 @@ class IRFunctionBuilder(
         has already reserved the hidden-return-pointer slot, if
         needed."""
         for p in params:
-            p_type = type_from_name(p.type, self.ir_program.struct_registry, self.ir_program.type_alias_registry)
-            width = 8 if self._is_heap_allocated(id(p), p_type) else type_byte_width(p_type, self.ir_program.struct_registry)
+            p_type = type_from_name(p.type, self.ir_program.struct_registry, self.ir_program.type_alias_registry, sum_types=self.ir_program.sum_type_registry)
+            width = 8 if self._is_heap_allocated(id(p), p_type) else type_byte_width(p_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
             ir_fn.var_slots[id(p)] = self.ir_program.ids.new_slot(width, f"param:{p.name}", ir_fn)
 
     def _bind_param(self, p: Param, ir_fn: IRFunction) -> int:
@@ -276,7 +278,7 @@ class IRFunctionBuilder(
         slot -- not yet a resolved offset, which _resolve_frame_layout
         computes later, in lower_function."""
         slot = ir_fn.var_slots[id(p)]
-        p_type = type_from_name(p.type, self.ir_program.struct_registry, self.ir_program.type_alias_registry)
+        p_type = type_from_name(p.type, self.ir_program.struct_registry, self.ir_program.type_alias_registry, sum_types=self.ir_program.sum_type_registry)
         self.scopes[-1][p.name] = (slot, p_type, id(p), self.ir_program.ids.temp_at_offset(p_type, slot))
         return slot
 
@@ -296,9 +298,9 @@ class IRFunctionBuilder(
         total frame size up at the end."""
         for stmt in statements:
             if isinstance(stmt, VarDecl):
-                var_type = type_from_name(stmt.var_type, self.ir_program.struct_registry, self.ir_program.type_alias_registry)
+                var_type = type_from_name(stmt.var_type, self.ir_program.struct_registry, self.ir_program.type_alias_registry, sum_types=self.ir_program.sum_type_registry)
                 width = 8 if self._is_heap_allocated(
-                    id(stmt), var_type) else type_byte_width(var_type, self.ir_program.struct_registry)
+                    id(stmt), var_type) else type_byte_width(var_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
                 ir_fn.var_slots[id(stmt)] = self.ir_program.ids.new_slot(width, f"local:{stmt.name}", ir_fn)
             elif isinstance(stmt, If):
                 self._collect_locals(stmt.then_body, ir_fn)
@@ -412,11 +414,30 @@ class IRFunctionBuilder(
         if expr is None:
             return
         if isinstance(expr, Call):
-            for arg in expr.args:
+            # The callee's own declared parameter types (None for a
+            # builtin -- print/len/append are never in function_
+            # registry, and none of them has a sum-typed parameter to
+            # widen an argument into regardless). Looked up ONCE per
+            # Call, not per argument -- a single dict lookup, reused
+            # for however many arguments this call actually has.
+            param_types = self.ir_program.function_registry[expr.name][0] if expr.name in self.ir_program.function_registry else None
+            for i, arg in enumerate(expr.args):
                 self._collect_argument_temps_in_expr(arg, ir_fn)
                 arg_type = type_of(arg)
-                if arg_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and not isinstance(arg, (Variable, Index, Field)):
-                    self._reserve_argument_temp(arg, arg_type, ir_fn)
+                # A struct-typed argument flowing into a sum-typed
+                # parameter needs a slot sized for the WIDER sum type
+                # (tag + largest variant), not the narrower struct it
+                # actually is -- see _ir_materialize_sum_type_value
+                # (ir/sum_types.py), which is what actually writes
+                # into a slot reserved this way. Every other case
+                # (including an ALREADY sum-typed argument, needing no
+                # widening at all -- e.g. `takesShape(makeShape())`)
+                # keeps using arg_type unchanged, exactly as before.
+                reserve_type = arg_type
+                if param_types is not None and arg_type.kind == TypeKind.STRUCT and param_types[i].kind == TypeKind.SUM:
+                    reserve_type = param_types[i]
+                if reserve_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM) and not isinstance(arg, (Variable, Index, Field)):
+                    self._reserve_argument_temp(arg, reserve_type, ir_fn)
         elif isinstance(expr, Binary):
             self._collect_argument_temps_in_expr(expr.left, ir_fn)
             self._collect_argument_temps_in_expr(expr.right, ir_fn)
@@ -467,9 +488,9 @@ class IRFunctionBuilder(
         candidate for escape-driven promotion, since it flows into the
         callee as a whole value copied on entry, never sliced by the
         caller."""
-        if is_heap_allocated(t, self.ir_program.struct_registry):
+        if is_heap_allocated(t, self.ir_program.struct_registry, self.ir_program.sum_type_registry):
             return
-        width = type_byte_width(t, self.ir_program.struct_registry)
+        width = type_byte_width(t, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
         self._argument_temp_slots[id(expr)] = self.ir_program.ids.new_slot(width, "argument_temp", ir_fn)
 
     def _push_scope(self) -> None:
@@ -491,7 +512,7 @@ class IRFunctionBuilder(
         never actually use it -- those address this variable's slot
         directly instead."""
         slot = ir_fn.var_slots[id(stmt)]
-        var_type = type_from_name(stmt.var_type, self.ir_program.struct_registry, self.ir_program.type_alias_registry)
+        var_type = type_from_name(stmt.var_type, self.ir_program.struct_registry, self.ir_program.type_alias_registry, sum_types=self.ir_program.sum_type_registry)
         self.scopes[-1][stmt.name] = (slot, var_type, id(stmt), self.ir_program.ids.temp_at_offset(var_type, slot))
         return slot
 
@@ -553,4 +574,4 @@ class IRFunctionBuilder(
         trigger only, since the terminal backing storage a slice
         descriptor points at is always a real array, never a struct
         directly)."""
-        return is_heap_allocated(t, self.ir_program.struct_registry) or decl_id in self._escaping_array_ids
+        return is_heap_allocated(t, self.ir_program.struct_registry, self.ir_program.sum_type_registry) or decl_id in self._escaping_array_ids

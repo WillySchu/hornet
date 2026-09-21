@@ -44,18 +44,20 @@ from ir.utils import type_byte_width
 _STACK_ARRAY_LIMIT_BYTES = 16384
 
 
-def is_heap_allocated(t: Type, structs: dict[str, StructInfo]) -> bool:
+def is_heap_allocated(t: Type, structs: dict[str, StructInfo], sum_types: dict) -> bool:
     """Whether a value of type `t` is heap-allocated rather than stored
     inline in its own stack slot purely because of its OWN size -- true
-    for an array OR STRUCT type whose total footprint (type_byte_width)
-    exceeds _STACK_ARRAY_LIMIT_BYTES, false for every scalar type and
-    every array/struct under the limit. A struct gets the same size-
-    based treatment an array does -- both are value types whose
-    footprint is a genuine, unbounded property of their own declared
-    shape, so the identical risk (one huge local or parameter blowing
-    the stack) applies equally to both. Purely a function of the type
-    itself, never stored anywhere -- anywhere codegen has the Type, it
-    can just call this directly.
+    for an ARRAY, STRUCT, or SUM type whose total footprint (type_byte_
+    width) exceeds _STACK_ARRAY_LIMIT_BYTES, false for every scalar
+    type and every array/struct/sum type under the limit. A struct (or
+    sum type) gets the same size-based treatment an array does -- all
+    three are value types whose footprint is a genuine, unbounded
+    property of their own declared shape (a sum type's is its largest
+    variant's own, which is exactly as unbounded as that variant
+    struct's own footprint already is), so the identical risk (one
+    huge local or parameter blowing the stack) applies equally to all
+    three. Purely a function of the type itself, never stored anywhere
+    -- anywhere codegen has the Type, it can just call this directly.
 
     This is NOT the only reason a particular array ends up heap-
     allocated -- see analyze_array_escapes below for the other,
@@ -65,7 +67,7 @@ def is_heap_allocated(t: Type, structs: dict[str, StructInfo]) -> bool:
     needs heap allocation should go through
     CodeGenerator._is_heap_allocated instead, which combines this size
     check with that escape-analysis result."""
-    return t.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and type_byte_width(t, structs) > _STACK_ARRAY_LIMIT_BYTES
+    return t.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM) and type_byte_width(t, structs, sum_types) > _STACK_ARRAY_LIMIT_BYTES
 
 
 def _unwrap_slices(expr: Node) -> Node:
@@ -87,10 +89,11 @@ def root_variable_name(expr: Node) -> Optional[str]:
 
 
 class EscapeAnalyzer:
-    def __init__(self, fn: Function, param_types: list[Type], structs: dict[str, StructInfo], aliases: dict[str, Type]):
+    def __init__(self, fn: Function, param_types: list[Type], structs: dict[str, StructInfo], aliases: dict[str, Type], sum_types: dict):
         self.fn = fn
         self.structs = structs
         self.aliases = aliases
+        self.sum_types = sum_types
 
         self.array_decls: set[int] = set()
         self.slice_decls: set[int] = set()
@@ -384,7 +387,7 @@ class EscapeAnalyzer:
     def walk_statements(self, statements: list[Node]) -> None:
         for stmt in statements:
             if isinstance(stmt, VarDecl):
-                var_type = type_from_name(stmt.var_type, self.structs, self.aliases)
+                var_type = type_from_name(stmt.var_type, self.structs, self.aliases, sum_types=self.sum_types)
                 self.declare(stmt.name, id(stmt), var_type)
                 if stmt.init is not None:
                     target_node = self.whole_value_node_of(stmt.name)
@@ -463,7 +466,7 @@ class EscapeAnalyzer:
 
 
 def analyze_array_escapes(
-        fn: Function, param_types: list[Type], structs: dict[str, StructInfo], aliases: dict[str, Type]) -> set[int]:
+        fn: Function, param_types: list[Type], structs: dict[str, StructInfo], aliases: dict[str, Type], sum_types: dict) -> set[int]:
     """Returns the set of id()s -- of this function's VarDecl or Param
     nodes -- for array-typed declarations that need to be heap-
     allocated because a slice backed by them might outlive this
@@ -586,5 +589,5 @@ def analyze_array_escapes(
          declarations that need to survive past this function's
          return.
     """
-    analyzer = EscapeAnalyzer(fn, param_types, structs, aliases)
+    analyzer = EscapeAnalyzer(fn, param_types, structs, aliases, sum_types)
     return analyzer.analyze()

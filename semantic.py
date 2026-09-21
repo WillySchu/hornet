@@ -650,6 +650,7 @@ class SemanticAnalyzer:
             param_types = [type_from_name(p.type, self.structs, self.type_aliases, p, self.sum_types) for p in fn.params]
             return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.structs, self.type_aliases, fn, self.sum_types)
             self.functions[fn.name] = (param_types, return_type)
+        program.function_registry = self.functions  # stashed for codegen.py's own use, mirroring struct_registry -- see ir/scalars.py's own argument-widening use
 
         # 5. Check each function's own body, including every
         #    synthesized method-function's, via the same analyze_
@@ -967,6 +968,22 @@ class SemanticAnalyzer:
             field_type = field_type.element_type
         return field_type.struct_name if field_type.kind == TypeKind.STRUCT else None
 
+    @staticmethod
+    def _contains_sum_type_at_any_array_depth(t: Type) -> bool:
+        """True if `t` is itself a sum type, or an array (at any
+        depth) of one -- the same array-unwrapping _directly_embedded_
+        struct_name already does for structs, but asking a narrower
+        question (just "is a sum type anywhere in here", not "which
+        struct"). Used only to decide whether a VarDecl's own zero-
+        value case is even well-defined (see analyze_var_decl) -- a
+        sum type has none, so neither does an array of them. A SLICE
+        of sum types is deliberately NOT unwrapped the way ARRAY is:
+        its own zero value (the nil slice) never actually touches an
+        individual element."""
+        while t.kind == TypeKind.ARRAY:
+            t = t.element_type
+        return t.kind == TypeKind.SUM
+
     def analyze_function(self, fn: Function) -> None:
         self.scopes = [{}]  # fresh, single-level scope stack per function
         self.loop_depth = 0
@@ -1204,7 +1221,7 @@ class SemanticAnalyzer:
 
     def analyze_var_decl(self, stmt: VarDecl) -> None:
         declared_type = type_from_name(stmt.var_type, self.structs, self.type_aliases, stmt, self.sum_types)
-        if stmt.init is None and declared_type.kind == TypeKind.SUM:
+        if stmt.init is None and self._contains_sum_type_at_any_array_depth(declared_type):
             # Unlike every other type, a sum type has no natural zero
             # value -- no variant is privileged as "the default", and
             # picking one implicitly (e.g. always the first-declared)
@@ -1212,7 +1229,13 @@ class SemanticAnalyzer:
             # language avoids everywhere else. So, unlike a struct or
             # array (every field/element zeroed) or a scalar (0/false/
             # ''), a sum-typed declaration must be explicitly
-            # initialized.
+            # initialized -- and so, transitively, must an ARRAY of
+            # them: `[3]Shape shapes` (no initializer) would need to
+            # zero-fill 3 slots with a value that doesn't exist, same
+            # as a bare `Shape s` would. A SLICE of sum types has no
+            # such problem and isn't checked here -- its own zero
+            # value is the nil slice (ptr=0, len=0, cap=0), with no
+            # individual Shape ever actually written.
             raise SemanticError(
                 f"'{stmt.name}' (declared {declared_type}) has no "
                 f"initializer -- a sum type has no natural zero value, "

@@ -15,7 +15,7 @@ from semantic import Type, TypeKind
 
 
 class ScalarsMixin:
-    def _ir_call_arguments(self, args: list) -> tuple:
+    def _ir_call_arguments(self, args: list, callee_name: str) -> tuple:
         """The shared per-argument marshaling loop between _ir_call
         and _ir_composite_call, returning (arg_ir, arg_values) rather
         than building the final IRCall itself -- the two callers
@@ -33,18 +33,56 @@ class ScalarsMixin:
         STRUCT-typed argument: identical shape, just Variable/Field/
         Index via _ir_struct_address, a struct-literal Call via _ir_
         materialize_struct_literal, then an ordinary composite-
-        returning Call again.
+        returning Call again -- UNLESS `callee_name`'s own declared
+        parameter type at this position is a SUM type that lists this
+        struct as a variant, in which case it's WIDENING, not an
+        ordinary struct argument at all: _ir_materialize_sum_type_
+        value (ir/sum_types.py), sized and tagged for the wider sum
+        type, not the narrower struct this argument's own expression
+        actually is.
+
+        SUM-typed argument (already sum-typed, no widening needed --
+        `takesShape(s)`, s already Shape): the identical Variable/
+        Field/Index / ordinary-composite-call shape STRUCT has, minus
+        a literal-Call case -- there's no sum-type literal syntax to
+        parse into one (see SumTypeDef's own docstring in parser.py).
+
+        `callee_name` is None-able for the one case that means there's
+        no declared signature to consult at all: a builtin (print/len/
+        append never appear in function_registry, and none has a sum-
+        typed parameter to widen into regardless) -- when None, or
+        when the callee just isn't found (shouldn't happen for a real
+        call, but this stays a plain lookup miss rather than a raise),
+        every argument is treated exactly as it was before sum types
+        existed.
 
         `ir`/`addr_value` are plain local variables, reused across
         every argument -- leaving them unbound on a second argument
         (after an earlier one already assigned them) would silently
         reuse that earlier argument's own address for this one instead
         of crashing; the explicit IRError above closes that."""
+        param_types = self.ir_program.function_registry[callee_name][0] if callee_name in self.ir_program.function_registry else None
         arg_ir = []
         arg_values = []
-        for arg in args:
+        for i, arg in enumerate(args):
             arg_type = type_of(arg)
-            if arg_type.kind == TypeKind.ARRAY:
+            is_widening = (
+                param_types is not None
+                and arg_type.kind == TypeKind.STRUCT
+                and param_types[i].kind == TypeKind.SUM
+            )
+            if is_widening:
+                result = self._ir_materialize_sum_type_value(arg, param_types[i])
+                if result is None:
+                    raise IRError(
+                        f"_ir_materialize_sum_type_value returned None for a "
+                        f"struct-literal argument widening into a sum-typed "
+                        f"parameter ({arg!r}) -- some field is out of scope for "
+                        f"real IR, with no old-style fallback remaining to catch it")
+                ir, addr_value = result
+                arg_ir.extend(ir)
+                arg_values.append(addr_value)
+            elif arg_type.kind == TypeKind.ARRAY:
                 if isinstance(arg, (Variable, Field, Index)):
                     result = self._ir_array_address(arg)
                     if result is None:
@@ -96,6 +134,23 @@ class ScalarsMixin:
                         f"{type(arg).__name__}: {arg!r}")
                 arg_ir.extend(ir)
                 arg_values.append(addr_value)
+            elif arg_type.kind == TypeKind.SUM:
+                if isinstance(arg, (Variable, Field, Index)):
+                    result = self._ir_struct_address(arg)  # generic address computation -- see its own docstring
+                    if result is None:
+                        raise IRError(
+                            f"_ir_struct_address returned None for a SUM-typed "
+                            f"Variable/Field/Index argument ({arg!r}) -- expected to "
+                            f"always succeed for this shape")
+                    ir, addr_value = result
+                elif self._is_ordinary_composite_call(arg):
+                    ir, addr_value = self._ir_materialize_composite_call(arg, arg_type)
+                else:
+                    raise IRError(
+                        f"No codegen rule for a SUM-typed call argument of shape "
+                        f"{type(arg).__name__}: {arg!r}")
+                arg_ir.extend(ir)
+                arg_values.append(addr_value)
             elif arg_type.kind == TypeKind.SLICE or isinstance(arg, NoneLiteral):
                 result = self._ir_slice_arg(arg)
                 if result is None:
@@ -134,7 +189,7 @@ class ScalarsMixin:
             )
         result_type = type_of(expr)
         t_result = None if result_type == Type.VOID else self.ir_program.ids.new_temp(result_type)
-        arg_ir, arg_values = self._ir_call_arguments(expr.args)
+        arg_ir, arg_values = self._ir_call_arguments(expr.args, expr.name)
         ir = arg_ir + [IRCall(dst=t_result, name=expr.name, args=arg_values)]
         return ir, t_result
 
@@ -165,7 +220,7 @@ class ScalarsMixin:
                 f"per the SysV ABI -- stack-passed arguments aren't "
                 f"implemented)"
             )
-        arg_ir, arg_values = self._ir_call_arguments(call_expr.args)
+        arg_ir, arg_values = self._ir_call_arguments(call_expr.args, call_expr.name)
         return arg_ir + [IRCall(dst=None, name=call_expr.name, args=[dst_address] + arg_values)]
 
     def _ir_short_circuit(self, expr: Binary, *, short_circuit_value: int, label_prefix: str) -> tuple[list, object]:

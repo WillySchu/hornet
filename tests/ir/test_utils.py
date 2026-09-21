@@ -12,34 +12,34 @@ import pytest
 import parser
 import semantic
 from ir.errors import IRError
-from ir.utils import COMPOSITE_KINDS, leaf_type, type_byte_width, type_of
+from ir.utils import COMPOSITE_KINDS, SUM_TYPE_TAG_WIDTH, leaf_type, type_byte_width, type_of
 
 
 def test_type_byte_width_int():
     t = semantic.Type(kind=semantic.TypeKind.INT)
-    assert 4 == type_byte_width(t, {})
+    assert 4 == type_byte_width(t, {}, {})
 
 
 def test_type_byte_width_bool():
     t = semantic.Type(kind=semantic.TypeKind.BOOL)
-    assert 4 == type_byte_width(t, {})
+    assert 4 == type_byte_width(t, {}, {})
 
 
 def test_type_byte_width_str():
     t = semantic.Type(kind=semantic.TypeKind.STR)
-    assert 8 == type_byte_width(t, {})
+    assert 8 == type_byte_width(t, {}, {})
 
 
 def test_type_byte_width_array_int():
     t = semantic.Type(kind=semantic.TypeKind.ARRAY, element_type=semantic.Type(kind=semantic.TypeKind.INT), size=7)
     expected = 28  # 4 * 7
-    assert expected == type_byte_width(t, {})
+    assert expected == type_byte_width(t, {}, {})
 
 
 def test_type_byte_width_array_str():
     t = semantic.Type(kind=semantic.TypeKind.ARRAY, element_type=semantic.Type(kind=semantic.TypeKind.STR), size=11)
     expected = 88  # 8 * 11
-    assert expected == type_byte_width(t, {})
+    assert expected == type_byte_width(t, {}, {})
 
 
 def test_type_byte_width_nested_array_str():
@@ -53,7 +53,7 @@ def test_type_byte_width_nested_array_str():
         size=11,
     )
     expected = 440  # 11 * 5 * 8
-    assert expected == type_byte_width(t, {})
+    assert expected == type_byte_width(t, {}, {})
 
 
 def test_type_byte_width_doubly_nested_array_int():
@@ -71,7 +71,7 @@ def test_type_byte_width_doubly_nested_array_int():
         size=11,
     )
     expected = 1540  # 11 * 5 * 7 * 4
-    assert expected == type_byte_width(t, {})
+    assert expected == type_byte_width(t, {}, {})
 
 
 def test_type_byte_width_basic_struct():
@@ -86,7 +86,7 @@ def test_type_byte_width_basic_struct():
     }
     t = semantic.Type(kind=semantic.TypeKind.STRUCT, struct_name='A')
     expected = 12  # 8 + 4
-    assert expected == type_byte_width(t, structs)
+    assert expected == type_byte_width(t, structs, {})
 
 
 def test_type_byte_width_struct_with_array_field():
@@ -106,7 +106,7 @@ def test_type_byte_width_struct_with_array_field():
     }
     t = semantic.Type(kind=semantic.TypeKind.STRUCT, struct_name='A')
     expected = 52  # 8 + 4 + (8 * 5)
-    assert expected == type_byte_width(t, structs)
+    assert expected == type_byte_width(t, structs, {})
 
 
 def test_type_byte_width_struct_with_slice_field():
@@ -125,7 +125,7 @@ def test_type_byte_width_struct_with_slice_field():
     }
     t = semantic.Type(kind=semantic.TypeKind.STRUCT, struct_name='A')
     expected = 36  # 8 + 4 + 24
-    assert expected == type_byte_width(t, structs)
+    assert expected == type_byte_width(t, structs, {})
 
 
 def test_type_byte_width_struct_with_struct_array_field():
@@ -152,7 +152,7 @@ def test_type_byte_width_struct_with_struct_array_field():
     }
     t = semantic.Type(kind=semantic.TypeKind.STRUCT, struct_name='A')
     expected = 28  # 8 + 4 + ((4 + 4) * 2)
-    assert expected == type_byte_width(t, structs)
+    assert expected == type_byte_width(t, structs, {})
 
 
 def test_type_byte_width_struct_with_struct_slice_field():
@@ -178,7 +178,7 @@ def test_type_byte_width_struct_with_struct_slice_field():
     }
     t = semantic.Type(kind=semantic.TypeKind.STRUCT, struct_name='A')
     expected = 36  # 8 + 4 + 24
-    assert expected == type_byte_width(t, structs)
+    assert expected == type_byte_width(t, structs, {})
 
 
 def test_type_byte_width_struct_with_self_referential_struct_array_field():
@@ -199,7 +199,36 @@ def test_type_byte_width_struct_with_self_referential_struct_array_field():
     t = semantic.Type(kind=semantic.TypeKind.STRUCT, struct_name='A')
 
     with pytest.raises(RecursionError):
-        type_byte_width(t, structs)
+        type_byte_width(t, structs, {})
+
+
+def test_type_byte_width_sum_type_is_tag_plus_largest_variant():
+    """4 (tag) + 8 (Square's own width, the larger of the two) -- not
+    4 + 4 + 8 (the SUM of both variants, the way a struct's fields
+    would be), since only one variant is ever live at once and both
+    share the same payload space starting right after the tag."""
+    structs = {
+        'Circle': semantic.StructInfo(name='Circle', fields={'radius': semantic.Type(kind=semantic.TypeKind.INT)}),
+        'Square': semantic.StructInfo(name='Square', fields={'side': semantic.Type(kind=semantic.TypeKind.INT64)}),
+    }
+    sum_types = {'Shape': semantic.SumTypeInfo(name='Shape', variants=['Circle', 'Square'])}
+    t = semantic.Type(kind=semantic.TypeKind.SUM, sum_type_name='Shape')
+    expected = SUM_TYPE_TAG_WIDTH + 8  # 4 + 8 = 12
+    assert expected == type_byte_width(t, structs, sum_types)
+
+
+def test_type_byte_width_sum_type_variant_order_does_not_affect_width():
+    """The same two variants, declared in the OPPOSITE order -- width
+    is the max regardless of which one happens to be widest or
+    declared first."""
+    structs = {
+        'Circle': semantic.StructInfo(name='Circle', fields={'radius': semantic.Type(kind=semantic.TypeKind.INT)}),
+        'Square': semantic.StructInfo(name='Square', fields={'side': semantic.Type(kind=semantic.TypeKind.INT64)}),
+    }
+    sum_types = {'Shape': semantic.SumTypeInfo(name='Shape', variants=['Square', 'Circle'])}
+    t = semantic.Type(kind=semantic.TypeKind.SUM, sum_type_name='Shape')
+    expected = SUM_TYPE_TAG_WIDTH + 8
+    assert expected == type_byte_width(t, structs, sum_types)
 
 
 def test_leaf_type_no_array():
@@ -263,10 +292,10 @@ def test_type_of_array():
     assert array_type == type_of(node)
 
 
-def test_composite_kinds_is_exactly_array_slice_struct():
+def test_composite_kinds_is_exactly_array_slice_struct_sum():
     """Pinned exactly, not just checked for a subset/superset: every
     call site that switched to this shared constant (ir/statements.py,
     ir/arrays_slices.py, ir/builder.py, ir/dispatch.py, ir/structs.py)
     relies on it meaning precisely "composite, address-based value
     type" -- no more, no less."""
-    assert COMPOSITE_KINDS == {semantic.TypeKind.ARRAY, semantic.TypeKind.SLICE, semantic.TypeKind.STRUCT}
+    assert COMPOSITE_KINDS == {semantic.TypeKind.ARRAY, semantic.TypeKind.SLICE, semantic.TypeKind.STRUCT, semantic.TypeKind.SUM}

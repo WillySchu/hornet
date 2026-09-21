@@ -109,6 +109,21 @@ class StatementsMixin:
                 nil_ir, ptr_value, len_value, cap_value = self._ir_nil_slice()
                 write_ir = self._ir_write_slice_descriptor_into_address(hidden_ptr, ptr_value, len_value, cap_value)
                 return hidden_ptr_ir + nil_ir + write_ir + [IRReturn(value=None)]
+            # A sum-typed return -- checked, and handled completely,
+            # BEFORE any of the shape-based dispatch below: every case
+            # from here down uses type_of(stmt.value) (the VALUE's own
+            # type) as what to write through the hidden pointer, which
+            # is exactly WRONG here the same way it was in VarDecl's
+            # own dispatch (see the identical comment there) -- `return
+            # Circle(5)` from a function declared to return Shape needs
+            # ir_fn.return_type (Shape), not type_of(stmt.value)
+            # (Circle), or the hidden pointer gets Circle's own raw
+            # field bytes with no discriminant tag at all.
+            if ir_fn.return_type.kind == TypeKind.SUM:
+                hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr(ir_fn)
+                write_ir = self._ir_write_sum_type_value_into(hidden_ptr, stmt.value, ir_fn.return_type)
+                if write_ir is not None:
+                    return hidden_ptr_ir + write_ir + [IRReturn(value=None)]
             # A composite return whose own value is an ordinary
             # function call (`return someFn()`) -- forwards the
             # CURRENT function's own received hidden pointer straight
@@ -249,7 +264,7 @@ class StatementsMixin:
             # those does its own single _bind_local call once its own
             # shape is confirmed to apply, and binding twice would
             # just orphan a Temp id, harmlessly but pointlessly.
-            var_type = type_from_name(stmt.var_type, self.ir_program.struct_registry, self.ir_program.type_alias_registry)
+            var_type = type_from_name(stmt.var_type, self.ir_program.struct_registry, self.ir_program.type_alias_registry, sum_types=self.ir_program.sum_type_registry)
             if not isinstance(stmt.init, NoneLiteral) and var_type.kind not in COMPOSITE_KINDS:
                 self._bind_local(stmt, ir_fn)
                 if stmt.init is not None:
@@ -272,6 +287,34 @@ class StatementsMixin:
                     if var_type == Type.STR:
                         return [IRStaticDataAddress(dst=self._local_temp(stmt.name), label=self._get_empty_str_label())]
                     return [IRMove(dst=self._local_temp(stmt.name), src=IRConst(0, var_type))]
+            # A sum-typed VarDecl -- always HAS an initializer
+            # (semantic.py's analyze_var_decl already rejects the bare
+            # `Shape s` form, since a sum type has no natural zero
+            # value), so there's no "no initializer" case to handle
+            # here the way ARRAY/STRUCT/SLICE below each need one.
+            # Checked, and handled completely, BEFORE the Variable/
+            # Field/Index case right below -- deliberately: that case
+            # ALSO matches (var_type.kind in COMPOSITE_KINDS now
+            # includes SUM), but _ir_copy_assign's own flat, same-
+            # shape copy is exactly wrong here for the identical
+            # reason _ir_write_composite_value_into's own SUM check
+            # (see ir/sum_types.py) has to come first there too: a
+            # Circle-typed variable's own address has no discriminant
+            # tag and isn't Shape-shaped at all. _ir_write_sum_type_
+            # value_into handles BOTH a struct-literal Call and an
+            # already-struct-typed Variable/Field/Index init
+            # uniformly, by recursing back into _ir_write_composite_
+            # value_into for the payload once the tag's written.
+            if var_type.kind == TypeKind.SUM:
+                slot = self._bind_local(stmt, ir_fn)
+                ir = []
+                if self._is_heap_allocated(id(stmt), var_type):
+                    ir.extend(self._ir_malloc_and_store(var_type, slot))
+                dst_ir, dst_address = self._ir_struct_address(Variable(name=stmt.name))
+                ir.extend(dst_ir)
+                write_ir = self._ir_write_sum_type_value_into(dst_address, stmt.init, var_type)
+                if write_ir is not None:
+                    return ir + write_ir
             # An array/struct/slice-typed initializer that's itself a
             # Variable/Field/Index (an existing value with a real
             # address to copy from) -- see _ir_copy_assign.
@@ -449,6 +492,20 @@ class StatementsMixin:
             if var_type.kind not in COMPOSITE_KINDS:
                 ir, value = self.gen_expr_ir(stmt.value)
                 return ir + [IRMove(dst=self._local_temp(stmt.name), src=value)]
+            # A sum-typed Assign -- checked, and handled completely,
+            # BEFORE the Variable/Field/Index case right below, for the
+            # identical reason VarDecl's own SUM check (just above)
+            # needs to come first there too: _ir_copy_assign's flat,
+            # same-shape copy is wrong here regardless, since the
+            # existing variable's own slot is ALREADY Shape-shaped (an
+            # Assign never changes a variable's own declared type) but
+            # stmt.value itself may be a narrower struct that needs
+            # widening on the way in.
+            if var_type.kind == TypeKind.SUM:
+                dst_ir, dst_address = self._ir_struct_address(Variable(name=stmt.name))
+                write_ir = self._ir_write_sum_type_value_into(dst_address, stmt.value, var_type)
+                if write_ir is not None:
+                    return dst_ir + write_ir
             # Same Variable/Field/Index-shaped copy as VarDecl's own
             # case just above -- no heap-allocation branch needed here
             # at all (unlike VarDecl's own): an existing slice
@@ -528,6 +585,29 @@ class StatementsMixin:
             # FieldAssign, whose own case below explains the
             # contrast).
             element_type = type_of(stmt.array).element_type
+            # A sum-typed element -- checked, and handled completely,
+            # BEFORE the scalar check right below, for the identical
+            # reason VarDecl/Assign/Return's own SUM checks need to
+            # come first there too: element_type.kind not in (SLICE,
+            # STRUCT) is true for SUM as well (SUM is neither), so
+            # without this, a struct value being widened into a Shape-
+            # typed ELEMENT would fall into _ir_index_assign's own
+            # scalar path instead -- which just calls gen_expr_ir on a
+            # struct-literal Call, something that path was never built
+            # to handle at all (not even the "wrong width" class of
+            # bug the other three fixes were -- this one doesn't
+            # produce any real IR whatsoever, straight to IRError).
+            if element_type.kind == TypeKind.SUM:
+                result = self._ir_index_address(Index(array=stmt.array, index=stmt.index))
+                if result is None:
+                    raise IRError(
+                        f"_ir_index_address returned None for a sum-typed "
+                        f"IndexAssign ({stmt!r}) -- expected to always succeed "
+                        f"for a reachable base")
+                dst_ir, dst_address = result
+                write_ir = self._ir_write_sum_type_value_into(dst_address, stmt.value, element_type)
+                if write_ir is not None:
+                    return dst_ir + write_ir
             if element_type.kind not in (TypeKind.SLICE, TypeKind.STRUCT):
                 return self._ir_index_assign(stmt, element_type)
             if (
@@ -736,7 +816,7 @@ class StatementsMixin:
         its own backing allocation made before its address is ever
         computed -- see this method's own call sites in gen_statement_
         ir's own VarDecl case, one per fresh-value-producing shape."""
-        size = type_byte_width(var_type, self.ir_program.struct_registry)
+        size = type_byte_width(var_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
         ptr = self.ir_program.ids.new_temp(Type.INT64)
         slot_addr = self.ir_program.ids.new_temp(Type.INT64)
         return [

@@ -68,8 +68,8 @@ class ArraysSlicesLoweringMixin:
             (r64, r32) for r64, r32 in [('rax', 'eax'), ('rcx', 'ecx'), ('rdx', 'edx')]
             if r64 not in used_bases
         )
-        leaf_width = type_byte_width(leaf, self.ir_program.struct_registry)
-        total = type_byte_width(array_type, self.ir_program.struct_registry)
+        leaf_width = type_byte_width(leaf, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+        total = type_byte_width(array_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
         instructions = []
         off = 0
         while off < total:

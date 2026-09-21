@@ -73,13 +73,13 @@ class StringsMixin:
             name_label = self.ir_program.ids.new_label("typedesc_name")
             self.ir_program.string_literals.append((name_label, str(t)))
             elem_label = self._get_or_build_type_descriptor(t.element_type, in_progress)
-            elem_width = type_byte_width(t.element_type, self.ir_program.struct_registry)
+            elem_width = type_byte_width(t.element_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
             self.ir_program.type_descriptors.append((label, [_TYPEDESC_ARRAY, name_label, elem_label, t.size, elem_width]))
         elif t.kind == TypeKind.SLICE:
             name_label = self.ir_program.ids.new_label("typedesc_name")
             self.ir_program.string_literals.append((name_label, str(t)))
             elem_label = self._get_or_build_type_descriptor(t.element_type, in_progress)
-            elem_width = type_byte_width(t.element_type, self.ir_program.struct_registry)
+            elem_width = type_byte_width(t.element_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
             self.ir_program.type_descriptors.append((label, [_TYPEDESC_SLICE, name_label, elem_label, elem_width]))
         elif t.kind == TypeKind.STRUCT:
             name_label = self.ir_program.ids.new_label("typedesc_name")

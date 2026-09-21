@@ -5434,11 +5434,41 @@ class TestSumTypes:
         analyze(ast)  # should not raise
 
     def test_array_of_sum_type_as_a_local_variable(self):
-        """[3]Shape as a bare local -- allowed, unlike as a struct
+        """[3]Shape -- allowed as a parameter type, unlike as a struct
         field (test_sum_type_as_a_struct_field_is_rejected below):
         nothing embeds it inside another type's own fixed layout, so
-        there's no cycle risk to guard against here."""
+        there's no cycle risk to guard against here. A parameter,
+        deliberately, not a bare local with no initializer -- a sum
+        type (and so, transitively, an array of them) has no natural
+        zero value, so a no-initializer local of this type is its own,
+        separate rejection (test_array_of_sum_type_with_no_initializer_
+        is_rejected below); a parameter needs no initializer at all,
+        so it isolates the ARRAY-of-SUM-as-a-type-position question
+        from that one."""
         ast = _parse(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type Shape is Circle | Square\n"
+            "\n"
+            "def int main([3]Shape shapes):\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_array_of_sum_type_with_no_initializer_is_rejected(self):
+        """The gap _contains_sum_type_at_any_array_depth exists to
+        close: a bare `[3]Shape shapes` (no initializer) looks, from
+        declared_type.kind alone, like an ordinary ARRAY -- not SUM --
+        so a check that only asked "is the declared type itself SUM"
+        would miss this entirely, letting it through to codegen with
+        no valid zero value to actually write. Found by testing all
+        the way through IR generation, not by review -- see this
+        method's own trace in the codebase history if curious."""
+        assert_program_semantic_error(
             "type Circle struct:\n"
             "    int radius\n"
             "\n"
@@ -5449,9 +5479,9 @@ class TestSumTypes:
             "\n"
             "def int main():\n"
             "    [3]Shape shapes\n"
-            "    return 0\n"
+            "    return 0\n",
+            match="has no initializer",
         )
-        analyze(ast)  # should not raise
 
     def test_more_than_two_variants(self):
         ast = _parse(

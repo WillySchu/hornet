@@ -395,8 +395,9 @@ class IRProgram:
     string_literals/type_descriptors aren't tied to any one function's
     frame, so they live here.
 
-    struct_registry/type_alias_registry (name -> StructInfo/Type,
-    stamped onto Program by semantic.analyze() -- see build_ir_
+    struct_registry/type_alias_registry/sum_type_registry/function_
+    registry (name -> StructInfo/Type/SumTypeInfo/(param types, return
+    type), stamped onto Program by semantic.analyze() -- see build_ir_
     program's own defensive check) are copied here too: an
     IRLocalAddress/IRStructAddress referencing a struct field, or any
     type this IR's own Temps carry, is only fully interpretable
@@ -414,5 +415,7 @@ class IRProgram:
     type_descriptors: list = field(default_factory=list)
     struct_registry: dict = field(default_factory=dict)
     type_alias_registry: dict = field(default_factory=dict)
+    sum_type_registry: dict = field(default_factory=dict)
+    function_registry: dict = field(default_factory=dict)
     ids: object = None
     _empty_str_label: object = None

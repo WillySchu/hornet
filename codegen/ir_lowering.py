@@ -119,7 +119,7 @@ class InstructionSelector:
         if temp.id in self.host.ir_program.ids._temp_offsets:
             return FrameSlot(slot=self.host.ir_program.ids._temp_offsets[temp.id])
         if temp.id not in self.host.ir_program.ids._temp_slots:
-            width = type_byte_width(temp.type, self.host.ir_program.struct_registry)
+            width = type_byte_width(temp.type, self.host.ir_program.struct_registry, self.host.ir_program.sum_type_registry)
             self.host.ir_program.ids._temp_slots[temp.id] = self.host.ir_program.ids.new_slot(width, f"temp:{temp.id}", self.ir_fn)
         return FrameSlot(slot=self.host.ir_program.ids._temp_slots[temp.id])
 

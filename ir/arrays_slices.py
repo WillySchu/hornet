@@ -106,7 +106,7 @@ class ArraysSlicesMixin:
             addr_ir = [IRLocalAddress(dst=addr, slot=slot)]
         else:
             addr = self.ir_program.ids.new_temp(Type.INT64)
-            size = type_byte_width(value_type, self.ir_program.struct_registry)
+            size = type_byte_width(value_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
             addr_ir = [IRCall(dst=addr, name='malloc', args=[IRConst(size, Type.INT64)])]
         call_ir = self._ir_composite_call(addr, call_expr)
         return addr_ir + call_ir, addr
@@ -143,7 +143,7 @@ class ArraysSlicesMixin:
             addr_ir = [IRLocalAddress(dst=addr, slot=slot)]
         else:
             addr = self.ir_program.ids.new_temp(Type.INT64)
-            size = type_byte_width(array_type, self.ir_program.struct_registry)
+            size = type_byte_width(array_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
             addr_ir = [IRCall(dst=addr, name='malloc', args=[IRConst(size, Type.INT64)])]
         write_ir = self._ir_write_array_literal_into(addr, expr, array_type)
         if write_ir is None:
@@ -332,7 +332,7 @@ class ArraysSlicesMixin:
             return None
         base_ir, base_addr, length_value, _cap_value = base
         element_type = type_of(expr.array).element_type
-        element_stride = type_byte_width(element_type, self.ir_program.struct_registry)
+        element_stride = type_byte_width(element_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
 
         index_ir, index_value = self.gen_expr_ir(expr.index)
         check = IRBoundsCheck(index=index_value, length=length_value)
@@ -369,7 +369,7 @@ class ArraysSlicesMixin:
         if base is None:
             return None
         base_ir, base_addr, length_value, cap_value = base
-        element_stride = type_byte_width(type_of(expr.array).element_type, self.ir_program.struct_registry)
+        element_stride = type_byte_width(type_of(expr.array).element_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
 
         if expr.high is not None:
             high_ir, high_value = self.gen_expr_ir(expr.high)
@@ -446,7 +446,7 @@ class ArraysSlicesMixin:
         size), regardless of what it describes."""
         array_type = type_of(expr)
         count = len(expr.elements)
-        size = max(1, type_byte_width(array_type, self.ir_program.struct_registry))
+        size = max(1, type_byte_width(array_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry))
         ptr = self.ir_program.ids.new_temp(Type.INT64)
         malloc_ir = [IRCall(dst=ptr, name='malloc', args=[IRConst(size, Type.INT64)])]
         write_ir = self._ir_write_array_literal_into(ptr, expr, array_type)
@@ -564,7 +564,7 @@ class ArraysSlicesMixin:
         Every Temp this loop uses (i, the byte offset, the per-
         iteration address) is independent of whatever Temps that
         recursive call allocates for itself."""
-        element_width = type_byte_width(element_type, self.ir_program.struct_registry)
+        element_width = type_byte_width(element_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
         i = self.ir_program.ids.new_temp(Type.INT)
         start_label = self.ir_program.ids.new_label("zero_array_start")
         body_label = self.ir_program.ids.new_label("zero_array_body")
@@ -609,7 +609,7 @@ class ArraysSlicesMixin:
         construction rather than needing its own special case."""
         if value_type.kind == TypeKind.ARRAY:
             element_type = value_type.element_type
-            element_width = type_byte_width(element_type, self.ir_program.struct_registry)
+            element_width = type_byte_width(element_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
             i = self.ir_program.ids.new_temp(Type.INT)
             start_label = self.ir_program.ids.new_label("eq_array_start")
             body_label = self.ir_program.ids.new_label("eq_array_body")
@@ -720,7 +720,22 @@ class ArraysSlicesMixin:
         Call case below -- append is a Call whose own name is never in
         struct_registry, so without this earlier check it would
         silently reach _ir_composite_call instead, trying to call a
-        function literally named 'append' that was never compiled."""
+        function literally named 'append' that was never compiled.
+
+        The SUM check comes FIRST, before even the Variable/Field/
+        Index case -- deliberately: value_type.kind == SUM must take
+        priority over value_expr's own shape regardless of what that
+        shape is. A Circle-typed variable widening into a Shape-typed
+        address is NOT an ordinary same-shape copy (_ir_copy_into_
+        address would flatly copy type_byte_width(Shape) bytes
+        starting at the Circle's own address, reading past its real
+        bounds into whatever memory happens to follow, and would never
+        write a discriminant tag at all) -- it needs _ir_write_sum_
+        type_value_into's own tag-then-payload treatment regardless of
+        whether value_expr is a bare struct literal or an already-
+        struct-typed value."""
+        if value_type.kind == TypeKind.SUM:
+            return self._ir_write_sum_type_value_into(dst_address, value_expr, value_type)
         if isinstance(value_expr, (Variable, Field, Index)):
             return self._ir_copy_into_address(dst_address, value_expr, value_type)
         if isinstance(value_expr, NoneLiteral):
@@ -771,7 +786,7 @@ class ArraysSlicesMixin:
         elements is simply discarded by the caller, with no risk of a
         partial write since none of it is ever emitted."""
         element_type = array_type.element_type
-        element_width = type_byte_width(element_type, self.ir_program.struct_registry)
+        element_width = type_byte_width(element_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
         ir = []
         for i, elem_expr in enumerate(expr.elements):
             if element_type.kind in COMPOSITE_KINDS:
@@ -921,7 +936,7 @@ class ArraysSlicesMixin:
         slice_arg, value_arg = expr.args
         slice_type = type_of(slice_arg)
         element_type = slice_type.element_type
-        element_width = type_byte_width(element_type, self.ir_program.struct_registry)
+        element_width = type_byte_width(element_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
 
         if isinstance(slice_arg, NoneLiteral):
             ptr = self.ir_program.ids.new_temp(Type.INT64)

@@ -26,7 +26,7 @@ class StructsMixin:
         for name, field_type in self.ir_program.struct_registry[struct_name].fields.items():
             if name == field_name:
                 return offset
-            offset += type_byte_width(field_type, self.ir_program.struct_registry)
+            offset += type_byte_width(field_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
         raise IRError(f"Struct '{struct_name}' has no field '{field_name}'")
 
     def _ir_struct_address(self, expr: Node) -> tuple[list, object]:
@@ -171,7 +171,7 @@ class StructsMixin:
             addr_ir = [IRLocalAddress(dst=addr, slot=slot)]
         else:
             addr = self.ir_program.ids.new_temp(Type.INT64)
-            size = type_byte_width(struct_type, self.ir_program.struct_registry)
+            size = type_byte_width(struct_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
             addr_ir = [IRCall(dst=addr, name='malloc', args=[IRConst(size, Type.INT64)])]
         write_ir = self._ir_write_struct_literal_into(addr, expr, struct_type)
         if write_ir is None:

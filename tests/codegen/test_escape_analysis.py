@@ -39,46 +39,46 @@ def _analyze(fn: parser.Function):
 
 def test_is_heap_allocated_int():
     t = semantic.Type(kind=semantic.TypeKind.INT)
-    assert not ea.is_heap_allocated(t, {})
+    assert not ea.is_heap_allocated(t, {}, {})
 
 
 def test_is_heap_allocated_str():
     t = semantic.Type(kind=semantic.TypeKind.STR)
-    assert not ea.is_heap_allocated(t, {})
+    assert not ea.is_heap_allocated(t, {}, {})
 
 
 def test_is_heap_allocated_bool():
     t = semantic.Type(kind=semantic.TypeKind.BOOL)
-    assert not ea.is_heap_allocated(t, {})
+    assert not ea.is_heap_allocated(t, {}, {})
 
 
 def test_is_heap_allocated_none():
     t = semantic.Type(kind=semantic.TypeKind.NONE)
-    assert not ea.is_heap_allocated(t, {})
+    assert not ea.is_heap_allocated(t, {}, {})
 
 
 def test_is_heap_allocated_array_int_stack():
     size = 4096  # int = 4, 4 * 4096 = 16384
     t = semantic.Type(kind=semantic.TypeKind.ARRAY, element_type=semantic.Type(kind=semantic.TypeKind.INT), size=size)
-    assert not ea.is_heap_allocated(t, {})
+    assert not ea.is_heap_allocated(t, {}, {})
 
 
 def test_is_heap_allocated_array_int_heap():
     size = 4097  # int = 4, 4 * 4096 = 16388
     t = semantic.Type(kind=semantic.TypeKind.ARRAY, element_type=semantic.Type(kind=semantic.TypeKind.INT), size=size)
-    assert ea.is_heap_allocated(t, {})
+    assert ea.is_heap_allocated(t, {}, {})
 
 
 def test_is_heap_allocated_array_str_stack():
     size = 2048  # str = 8, 4 * 4096 = 16384
     t = semantic.Type(kind=semantic.TypeKind.ARRAY, element_type=semantic.Type(kind=semantic.TypeKind.STR), size=size)
-    assert not ea.is_heap_allocated(t, {})
+    assert not ea.is_heap_allocated(t, {}, {})
 
 
 def test_is_heap_allocated_array_str_heap():
     size = 2049  # str = 9, 4 * 4096 = 16388
     t = semantic.Type(kind=semantic.TypeKind.ARRAY, element_type=semantic.Type(kind=semantic.TypeKind.STR), size=size)
-    assert ea.is_heap_allocated(t, {})
+    assert ea.is_heap_allocated(t, {}, {})
 
 
 # TODO(will): Test Structs.
@@ -149,7 +149,7 @@ def test_root_variable_name():
 def test_analyze_array_escapes_empty():
     fn = parser.Function(name='main', return_type=None)
     expected = set()
-    res = ea.analyze_array_escapes(fn, [], {}, {})
+    res = ea.analyze_array_escapes(fn, [], {}, {}, {})
     assert expected == res
 
 
@@ -171,7 +171,7 @@ def test_analyze_array_escapes_fn_on_uninitialized_slice():
         ],
     )
     expected = set()
-    res = ea.analyze_array_escapes(fn, [], {}, {})
+    res = ea.analyze_array_escapes(fn, [], {}, {}, {})
     assert expected == res
 
 
@@ -197,7 +197,7 @@ def test_analyze_array_escapes_fn_on_initialized_slice():
         ],
     )
     expected = set()
-    res = ea.analyze_array_escapes(fn, [], {}, {})
+    res = ea.analyze_array_escapes(fn, [], {}, {}, {})
     assert expected == res
 
 
@@ -223,7 +223,7 @@ def test_analyze_array_escapes_return_initialized_slice():
     )
     _analyze(fn)
     expected = set()
-    res = ea.analyze_array_escapes(fn, [], {}, {})
+    res = ea.analyze_array_escapes(fn, [], {}, {}, {})
     assert expected == res
 
 
@@ -265,7 +265,7 @@ def test_analyze_array_escapes_return_sliced_array():
         ],
     )
     _analyze(fn)
-    res = ea.analyze_array_escapes(fn, [], {}, {})
+    res = ea.analyze_array_escapes(fn, [], {}, {}, {})
     assert len(res) == 1
 
 
@@ -281,9 +281,9 @@ def print_ints([]int ints):
     print(ints)
 '''
     ast = parse_and_analyze(source)
-    main_res = ea.analyze_array_escapes(ast.functions[0], [], {}, {})
+    main_res = ea.analyze_array_escapes(ast.functions[0], [], {}, {}, {})
     assert main_res == set()
-    print_ints_res = ea.analyze_array_escapes(ast.functions[1], [semantic.Type(kind=semantic.TypeKind.SLICE)], {}, {})
+    print_ints_res = ea.analyze_array_escapes(ast.functions[1], [semantic.Type(kind=semantic.TypeKind.SLICE)], {}, {}, {})
     assert print_ints_res == set()
 
 
@@ -314,10 +314,11 @@ def test_test2():
         [semantic.Type(kind=semantic.TypeKind.ARRAY, element_type='int')],
         {},
         {},
+        {},
     )
     assert len(sliceints_res) == 1
-    assert set() == ea.analyze_array_escapes(ast.functions[1], [semantic.Type(kind=semantic.TypeKind.INT)], {}, {})
-    assert set() == ea.analyze_array_escapes(ast.functions[2], [], {}, {})
+    assert set() == ea.analyze_array_escapes(ast.functions[1], [semantic.Type(kind=semantic.TypeKind.INT)], {}, {}, {})
+    assert set() == ea.analyze_array_escapes(ast.functions[2], [], {}, {}, {})
 
 
 def test_escape_analyzer_declare():
@@ -350,7 +351,7 @@ def test_escape_analyzer_declare():
     ]
 
     for tc in tcs:
-        analyzer = ea.EscapeAnalyzer(fn, [], {}, {})
+        analyzer = ea.EscapeAnalyzer(fn, [], {}, {}, {})
         for decl in tc['declarations']:
             analyzer.declare(*decl)
         assert tc['expected']['scopes'] == analyzer.scopes
@@ -403,7 +404,7 @@ def test_escape_analyzer_resolve():
     ]
 
     for tc in tcs:
-        analyzer = ea.EscapeAnalyzer(fn, [], {}, {})
+        analyzer = ea.EscapeAnalyzer(fn, [], {}, {}, {})
         analyzer.scopes = tc['scopes']
         assert tc['expected'] == analyzer.resolve(tc['name'])
 
@@ -413,7 +414,7 @@ def test_escape_analyzer_resolve():
 
 def test_escape_analyzer_slot_node_id():
     fn = parser.Function(name='main', return_type=None)
-    analyzer = ea.EscapeAnalyzer(fn, [], {}, {})
+    analyzer = ea.EscapeAnalyzer(fn, [], {}, {}, {})
 
     tcs = [
         {
@@ -465,19 +466,19 @@ def test_escape_analyzer_contains_slice():
     ]
 
     for tc in tcs:
-        analyzer = ea.EscapeAnalyzer(fn, [], tc['structs'], {})
+        analyzer = ea.EscapeAnalyzer(fn, [], tc['structs'], {}, {})
         assert tc['res'] == analyzer._contains_slice(tc['type'])
 
 
 def test_escape_analyzer_whole_value_node_of_empty():
     fn = parser.Function(name='main', return_type=None)
-    analyzer = ea.EscapeAnalyzer(fn, [], {}, {})
+    analyzer = ea.EscapeAnalyzer(fn, [], {}, {}, {})
     assert analyzer.whole_value_node_of('var1') is None
 
 
 def test_escape_analyzer_whole_value_node_of_param_not_slice():
     fn = parser.Function(name='main', params=[parser.Param(name='x', type='int')], return_type=None)
-    analyzer = ea.EscapeAnalyzer(fn, [semantic.Type(kind=semantic.TypeKind.INT)], {}, {})
+    analyzer = ea.EscapeAnalyzer(fn, [semantic.Type(kind=semantic.TypeKind.INT)], {}, {}, {})
     assert analyzer.whole_value_node_of('x') is None
 
 
@@ -487,7 +488,7 @@ def test_escape_analyzer_whole_value_node_of_param_slice():
         params=[parser.Param(name='x', type=parser.SliceTypeExpr(element_type='int'))],
         return_type=None,
     )
-    analyzer = ea.EscapeAnalyzer(fn, [semantic.Type(kind=semantic.TypeKind.SLICE)], {}, {})
+    analyzer = ea.EscapeAnalyzer(fn, [semantic.Type(kind=semantic.TypeKind.SLICE)], {}, {}, {})
     # TODO(will): ids aren't deterministic, but would love a better way of testing this.
     assert analyzer.whole_value_node_of('x') is not None
 
@@ -506,7 +507,7 @@ def test_escape_analyzer_whole_value_node_of_variable_no_slice():
         ],
         return_type=None,
     )
-    analyzer = ea.EscapeAnalyzer(fn, [], {}, {})
+    analyzer = ea.EscapeAnalyzer(fn, [], {}, {}, {})
     assert analyzer.whole_value_node_of('x') is None
     analyzer.walk_statements([fn])
     assert analyzer.whole_value_node_of('x') is None
@@ -532,7 +533,7 @@ def test_escape_analyzer_whole_value_node_of_variable_slice():
         ],
         return_type=None,
     )
-    analyzer = ea.EscapeAnalyzer(fn, [], {}, {})
+    analyzer = ea.EscapeAnalyzer(fn, [], {}, {}, {})
     assert analyzer.whole_value_node_of('sl') is None
     analyzer.walk_statements(fn.body)
     assert analyzer.whole_value_node_of('sl') is not None
@@ -560,7 +561,7 @@ def test_escape_analyzer_whole_value_node_of_variable_struct_no_slice():
             'y': semantic.Type(kind=semantic.TypeKind.STR),
         },
     )}
-    analyzer = ea.EscapeAnalyzer(fn, [], structs, {})
+    analyzer = ea.EscapeAnalyzer(fn, [], structs, {}, {})
     analyzer.walk_statements(fn.body)
     assert analyzer.whole_value_node_of('a') is None
 
@@ -602,7 +603,7 @@ def helper():
             'sl': semantic.Type(kind=semantic.TypeKind.SLICE),
         },
     )}
-    analyzer = ea.EscapeAnalyzer(fn, [], structs, {})
+    analyzer = ea.EscapeAnalyzer(fn, [], structs, {}, {})
     analyzer.walk_statements(fn.body)
     assert analyzer.whole_value_node_of('a') == -1
 
@@ -610,21 +611,21 @@ def helper():
 def test_escape_analyzer_indexed_slot_of_no_base_type():
     fn = parser.Function(name='main', return_type=None)
     node = parser.Constant(value=1)
-    analyzer = ea.EscapeAnalyzer(fn, [], {}, {})
+    analyzer = ea.EscapeAnalyzer(fn, [], {}, {}, {})
     assert analyzer.indexed_slot_of(node) is None
 
 
 def test_escape_analyzer_indexed_slot_of_base_type_not_array_or_slice():
     fn = parser.Function(name='main', return_type=None)
     node = parser.Constant(value=1, resolved_type=semantic.Type(kind=semantic.TypeKind.INT))
-    analyzer = ea.EscapeAnalyzer(fn, [], {}, {})
+    analyzer = ea.EscapeAnalyzer(fn, [], {}, {}, {})
     assert analyzer.indexed_slot_of(node) is None
 
 
 def test_escape_analyzer_indexed_slot_of_no_element_type():
     fn = parser.Function(name='main', return_type=None)
     node = parser.ArrayLiteral(resolved_type=semantic.Type(kind=semantic.TypeKind.ARRAY))
-    analyzer = ea.EscapeAnalyzer(fn, [], {}, {})
+    analyzer = ea.EscapeAnalyzer(fn, [], {}, {}, {})
     assert analyzer.indexed_slot_of(node) is None
 
 
@@ -636,7 +637,7 @@ def test_escape_analyzer_indexed_slot_of_element_type_not_slice():
             element_type=semantic.Type(kind=semantic.TypeKind.INT),
         ),
     )
-    analyzer = ea.EscapeAnalyzer(fn, [], {}, {})
+    analyzer = ea.EscapeAnalyzer(fn, [], {}, {}, {})
     assert analyzer.indexed_slot_of(node) is None
 
 
@@ -650,7 +651,7 @@ def test_escape_analyzer_indexed_slot_of_no_root_variable():
             ),
         ),
     )
-    analyzer = ea.EscapeAnalyzer(fn, [], {}, {})
+    analyzer = ea.EscapeAnalyzer(fn, [], {}, {}, {})
     assert analyzer.indexed_slot_of(node) is None
 
 
@@ -665,7 +666,7 @@ def test_escape_analyzer_indexed_slot():
             element_type=semantic.Type(kind=semantic.TypeKind.SLICE),
         ),
     )
-    analyzer = ea.EscapeAnalyzer(fn, [], {}, {})
+    analyzer = ea.EscapeAnalyzer(fn, [], {}, {}, {})
     analyzer.whole_value_node_of = mock.MagicMock()
     analyzer.whole_value_node_of.return_value = -1
     assert analyzer.indexed_slot_of(node) == -1
