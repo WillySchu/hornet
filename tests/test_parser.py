@@ -3063,3 +3063,165 @@ def test_parse_statement_dispatches_to_match():
     result = parser.Parser(tokens).parse_statement()
     assert isinstance(result, parser.If)
     assert result.is_match is True
+
+
+# ---------------------------------------------------------------------------
+# Pointers, stage 1: grammar only. `*T` in type position (PointerTypeExpr),
+# `&`/`*` as new unary operators (UnaryOp.ADDRESS_OF/DEREFERENCE, reusing
+# the existing AMPERSAND/STAR tokens -- no new lexer tokens needed at
+# all), and `*pointer = value` as a new assignment target (DerefAssign).
+#
+# The one genuinely hard part: '*' can start EITHER a pointer TYPE
+# (`*Circle p`, a VarDecl) OR a dereference EXPRESSION (`*p = 5`, an
+# assignment) -- unlike every other type-starting token, which this
+# parser (deliberately, with no symbol table) can always tell apart
+# from an expression by shape alone. parse_statement resolves this by
+# speculatively parsing a type and backtracking (restoring self.pos)
+# if it turns out not to be followed by a variable name -- these tests
+# check that disambiguation directly, via the real lexer, since hand-
+# building tokens for a speculative-parse-and-backtrack path is more
+# error-prone than just running the whole thing end to end.
+# ---------------------------------------------------------------------------
+
+def _parse_program(source: str) -> parser.Program:
+    tokens = lexer.Lexer(source).tokenize()
+    return parser.Parser(tokens).parse_program()
+
+
+def test_pointer_type_in_a_var_decl():
+    prog = _parse_program(
+        "def int main():\n"
+        "    *int p\n"
+        "    return 0\n"
+    )
+    var_type = prog.functions[0].body[0].var_type
+    assert isinstance(var_type, parser.PointerTypeExpr)
+    assert var_type.pointee_type == 'int'
+
+
+def test_pointer_to_struct_type_in_a_var_decl():
+    """The genuinely ambiguous shape (`*Circle p`), resolved correctly:
+    a type name followed by a SECOND identifier (the variable's own
+    name) commits to a VarDecl."""
+    prog = _parse_program(
+        "type Circle struct:\n"
+        "    int radius\n"
+        "\n"
+        "def int main():\n"
+        "    *Circle p\n"
+        "    return 0\n"
+    )
+    var_type = prog.functions[0].body[0].var_type
+    assert isinstance(var_type, parser.PointerTypeExpr)
+    assert var_type.pointee_type == 'Circle'
+
+
+def test_pointer_to_pointer_type_parses_without_restriction():
+    """parse_type/PointerTypeExpr don't reject `**int` themselves --
+    see PointerTypeExpr's own docstring for why that's semantic.py's
+    job instead."""
+    prog = _parse_program(
+        "def int main():\n"
+        "    **int p\n"
+        "    return 0\n"
+    )
+    var_type = prog.functions[0].body[0].var_type
+    assert isinstance(var_type, parser.PointerTypeExpr)
+    assert isinstance(var_type.pointee_type, parser.PointerTypeExpr)
+    assert var_type.pointee_type.pointee_type == 'int'
+
+
+def test_address_of_expression():
+    prog = _parse_program(
+        "def int main():\n"
+        "    int x = 5\n"
+        "    *int p = &x\n"
+        "    return 0\n"
+    )
+    addr_expr = prog.functions[0].body[1].init
+    assert isinstance(addr_expr, parser.Unary)
+    assert addr_expr.op == parser.UnaryOp.ADDRESS_OF
+    assert isinstance(addr_expr.operand, parser.Variable)
+    assert addr_expr.operand.name == 'x'
+
+
+def test_dereference_read_expression():
+    prog = _parse_program(
+        "def int main():\n"
+        "    int x = 5\n"
+        "    *int p = &x\n"
+        "    int y = *p\n"
+        "    return y\n"
+    )
+    deref_expr = prog.functions[0].body[2].init
+    assert isinstance(deref_expr, parser.Unary)
+    assert deref_expr.op == parser.UnaryOp.DEREFERENCE
+    assert isinstance(deref_expr.operand, parser.Variable)
+    assert deref_expr.operand.name == 'p'
+
+
+def test_dereference_assignment_is_not_mistaken_for_a_pointer_var_decl():
+    """The critical disambiguation case: `*p = 10` is a DerefAssign,
+    NOT a (nonsensical) attempt at a pointer-typed VarDecl whose
+    pointee type happens to be spelled 'p'."""
+    prog = _parse_program(
+        "def int main():\n"
+        "    int x = 5\n"
+        "    *int p = &x\n"
+        "    *p = 10\n"
+        "    return x\n"
+    )
+    deref_assign = prog.functions[0].body[2]
+    assert isinstance(deref_assign, parser.DerefAssign)
+    assert isinstance(deref_assign.pointer, parser.Variable)
+    assert deref_assign.pointer.name == 'p'
+    assert deref_assign.value == parser.Constant(value=10)
+
+
+def test_ordinary_multiplication_is_unaffected():
+    prog = _parse_program(
+        "def int main():\n"
+        "    int x = 3 * 4\n"
+        "    return x\n"
+    )
+    mult_expr = prog.functions[0].body[0].init
+    assert isinstance(mult_expr, parser.Binary)
+    assert mult_expr.op == parser.BinaryOp.MULTIPLY
+
+
+def test_dereference_of_a_non_type_falls_through_when_speculative_parse_fails():
+    """`*5` as its own bare statement -- the speculative parse_type()
+    call inside parse_statement itself raises (5 is never a valid
+    type), not just "no identifier follows a successfully-parsed
+    type" -- a DIFFERENT branch of the same backtracking logic than
+    the *p-vs-*Circle-p cases above, worth its own direct test. Must
+    be `*5` as parse_statement's OWN first token, not merely appearing
+    on the right of an assignment (`x = *5`), which never reaches
+    parse_statement's own STAR-handling branch at all -- parse_
+    expression already handles a dereference wherever it's just one
+    operand among others."""
+    prog = _parse_program(
+        "def int main():\n"
+        "    *5\n"
+        "    return 0\n"
+    )
+    stmt = prog.functions[0].body[0]
+    assert isinstance(stmt, parser.ExprStmt)
+    deref_expr = stmt.expr
+    assert isinstance(deref_expr, parser.Unary)
+    assert deref_expr.op == parser.UnaryOp.DEREFERENCE
+    assert deref_expr.operand == parser.Constant(value=5)
+
+
+def test_compound_assignment_through_a_dereference_is_rejected():
+    with pytest.raises(
+        parser.ParseError,
+        match="Compound assignment through a dereferenced pointer",
+    ):
+        _parse_program(
+            "def int main():\n"
+            "    int x = 5\n"
+            "    *int p = &x\n"
+            "    *p += 1\n"
+            "    return x\n"
+        )

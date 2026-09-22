@@ -60,12 +60,23 @@ class UnaryOp(Enum):
     NEGATE = auto()      # '-'    arithmetic negation
     COMPLEMENT = auto()  # '~'    bitwise complement
     NOT = auto()         # 'not'  logical not
+    ADDRESS_OF = auto()  # '&'    address of a variable, producing a pointer
+    DEREFERENCE = auto()  # '*'   pointer dereference, reusing the SAME
+                           # token STAR already means in type position
+                           # (PointerTypeExpr) and, at a different
+                           # precedence entirely, as multiplication
+                           # (BinaryOp.MULTIPLY) -- no ambiguity in any
+                           # of the three: a type expression, a unary
+                           # prefix position, and a binary infix
+                           # position are never confused with each other.
 
     def symbol(self) -> str:
         return {
             UnaryOp.NEGATE: '-',
             UnaryOp.COMPLEMENT: '~',
             UnaryOp.NOT: 'not',
+            UnaryOp.ADDRESS_OF: '&',
+            UnaryOp.DEREFERENCE: '*',
         }[self]
 
 
@@ -495,6 +506,32 @@ class SliceTypeExpr(Node):
 
 
 @dataclass
+class PointerTypeExpr(Node):
+    """`*pointee_type` in type position, e.g. `*int`, `*Circle`.
+    Sibling to ArrayTypeExpr/SliceTypeExpr -- a prefix marker wrapping
+    whatever parse_type returns for the rest, same recursive shape,
+    reusing the SAME token STAR already means in expression position
+    (multiplication) and, one level up in precedence, as the
+    dereference unary operator (see UnaryOp.DEREFERENCE) -- no
+    ambiguity either way, since a type expression and a value
+    expression are never parsed by the same call.
+
+    `pointee_type` recurses arbitrarily deep -- `**int` parses here
+    exactly like any other nesting depth (PointerTypeExpr(pointee_
+    type=PointerTypeExpr(pointee_type='int'))); nothing in this
+    class, or in parse_type, rejects it. semantic.py's own type_from_
+    name is deliberately where pointer-to-pointer gets disallowed
+    instead, for now -- rejecting after a normal, unrestricted parse
+    is far less code than teaching the grammar itself a new
+    restriction, and the restriction is expected to lift later
+    (unlike, say, IsCheck's own bare-identifier restriction, which
+    IS enforced at the grammar level, in _parse_if_condition -- that
+    one reflects a narrower notion of what `is` even MEANS, not
+    "simplest implementation for now")."""
+    pointee_type: Union[str, ArrayTypeExpr, SliceTypeExpr, 'PointerTypeExpr']
+
+
+@dataclass
 class VarDecl(Node):
     """`int a` (init=None) or `int a = 1`. `var_type` is a type
     keyword string, an ArrayTypeExpr, or a SliceTypeExpr."""
@@ -548,6 +585,28 @@ class FieldAssign(Node):
     could get evaluated twice."""
     base: Node
     name: str
+    value: Node
+
+
+@dataclass
+class DerefAssign(Node):
+    """`*pointer = value` -- writes through a pointer, overwriting
+    whatever it points at. Mirrors IndexAssign/FieldAssign: built by
+    parsing the whole left-hand expression first (an ordinary
+    Unary(DEREFERENCE, ...), ambiguous with a bare dereference READ
+    until the '=' that follows is seen) and reinterpreting its own
+    operand as the assignment's real target -- see parse_expr_stmt_
+    or_assign's own docstring for why all three shapes are handled
+    this same way, rather than looked ahead for.
+
+    Compound assignment (`*p += 1`) is rejected here too, matching
+    IndexAssign/FieldAssign -- NOT for their own reason (a side-
+    effecting sub-expression evaluated twice; `pointer` is restricted
+    to a bare Variable for this first slice of pointer support, which
+    has no such risk), but to keep this slice narrowly scoped to plain
+    assignment. Worth reconsidering on its own once the rest of
+    pointers is settled, not silently expanded here."""
+    pointer: Node
     value: Node
 
 
@@ -824,6 +883,8 @@ _UNARY_OPS = {
     TokenType.MINUS: UnaryOp.NEGATE,
     TokenType.TILDE: UnaryOp.COMPLEMENT,
     TokenType.NOT: UnaryOp.NOT,
+    TokenType.AMPERSAND: UnaryOp.ADDRESS_OF,
+    TokenType.STAR: UnaryOp.DEREFERENCE,
 }
 
 
@@ -1158,7 +1219,7 @@ class Parser:
         name_tok = self.expect(TokenType.IDENTIFIER, "Expected a parameter name")
         return Param(name=name_tok.val, type=param_type, line=start_tok.line, col=start_tok.col)
 
-    def parse_type(self) -> Union[str, ArrayTypeExpr, SliceTypeExpr]:
+    def parse_type(self) -> Union[str, ArrayTypeExpr, SliceTypeExpr, PointerTypeExpr]:
         # A type keyword ('int'/'bool'/'str'/...), OR '[' NUMBER ']'
         # followed by another type recursively (ArrayTypeExpr -- each
         # bracket pair peels off one more wrapping whatever parse_type
@@ -1169,6 +1230,14 @@ class Parser:
         # array size, when present, must be a literal positive whole
         # NUMBER -- validated here, unlike most validation in this
         # file, since a size is closer to syntax than an expression.
+        # OR a leading '*' followed by another type recursively
+        # (PointerTypeExpr -- see its own docstring for why this
+        # doesn't reject `**int` itself, unlike the other two forms
+        # above, which each validate their own syntax immediately).
+        if self.check(TokenType.STAR):
+            star_tok = self.advance()
+            pointee_type = self.parse_type()
+            return PointerTypeExpr(pointee_type=pointee_type, line=star_tok.line, col=star_tok.col)
         if self.check(TokenType.OPEN_BRACKET):
             open_tok = self.advance()
             if self.check(TokenType.CLOSE_BRACKET):
@@ -1241,6 +1310,36 @@ class Parser:
             # all (see Cast's own docstring) -- neither is one of
             # these six keyword token types.
             return self.parse_expr_stmt_or_assign()
+        if self.check(TokenType.STAR):
+            # '*' could mean a pointer TYPE, starting a VarDecl
+            # (`*Circle p`), or a DEREFERENCE expression, starting an
+            # ordinary assignment or expression statement (`*p = 5`,
+            # `*p`) -- unlike every other type-starting token here,
+            # this parser has no symbol table to tell "Circle" (a type
+            # name) apart from "p" (a variable name) at parse time, so
+            # the two can't be told apart by SHAPE alone the way
+            # OPEN_BRACKET's own ambiguity is just below (nothing
+            # starting with '*' is unconditionally a type the way `[`
+            # always is).
+            #
+            # Speculatively parse a type, then un-commit (restore
+            # self.pos) and fall all the way through to the ordinary
+            # dispatch below instead, if either the speculative parse
+            # fails outright (ParseError -- e.g. `*5`, not a type at
+            # all) or nothing recognizable as a VarDecl's own variable
+            # name (a bare IDENTIFIER) follows it. `*Circle p` and
+            # `**int p` both still correctly commit here -- parse_type
+            # itself handles arbitrary pointer nesting already (see
+            # PointerTypeExpr's own docstring).
+            saved_pos = self.pos
+            start_tok = self.current()
+            try:
+                parsed_type = self.parse_type()
+            except ParseError:
+                parsed_type = None
+            if parsed_type is not None and self.check(TokenType.IDENTIFIER):
+                return self.parse_var_decl(var_type=parsed_type, start_tok=start_tok)
+            self.pos = saved_pos
         if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET):
             # A type-starting token could mean a VarDecl or a bare,
             # fully-typed array/slice-literal statement (`[3]int[1, 2,
@@ -1502,19 +1601,22 @@ class Parser:
         return Return(value=value, line=start_tok.line, col=start_tok.col)
 
     def parse_expr_stmt_or_assign(self) -> Node:
-        """Handles three shapes that can't be told apart by one token
+        """Handles four shapes that can't be told apart by one token
         of lookahead: a bare expression statement (`foo()`), an
-        index-assignment (`arr[i] = value`), and a field-assignment
-        (`s.f = value`). Rather than look ahead through however many
-        `[...]`/`.name` suffixes the left side has, this parses the
-        leading expression through ordinary machinery first (already
-        building nested Index/Field nodes -- see parse_postfix), then
-        decides from what kind of node came out and what follows.
+        index-assignment (`arr[i] = value`), a field-assignment
+        (`s.f = value`), and a deref-assignment (`*p = value`).
+        Rather than look ahead through however many `[...]`/`.name`
+        suffixes the left side has, this parses the leading expression
+        through ordinary machinery first (already building nested
+        Index/Field/Unary nodes -- see parse_postfix/parse_unary),
+        then decides from what kind of node came out and what
+        follows.
 
-        Only plain `=` is handled for either assignable shape --
-        `arr[i] += 1` and `s.f += 1` are rejected with a clear error
-        (see IndexAssign's/FieldAssign's own docstrings for why
-        compound assignment isn't supported there at all)."""
+        Only plain `=` is handled for any of the three assignable
+        shapes -- `arr[i] += 1`, `s.f += 1`, and `*p += 1` are all
+        rejected with a clear error (see IndexAssign's/FieldAssign's/
+        DerefAssign's own docstrings for why compound assignment isn't
+        supported for any of them)."""
         expr = self.parse_expression()
         if self.check(TokenType.ASSIGN):
             if isinstance(expr, Index):
@@ -1525,6 +1627,10 @@ class Parser:
                 self.advance()
                 value = self.parse_expression()
                 return FieldAssign(base=expr.base, name=expr.name, value=value, line=expr.line, col=expr.col)
+            if isinstance(expr, Unary) and expr.op == UnaryOp.DEREFERENCE:
+                self.advance()
+                value = self.parse_expression()
+                return DerefAssign(pointer=expr.operand, value=value, line=expr.line, col=expr.col)
             tok = self.current()
             raise ParseError(
                 f"Left-hand side of '=' is not assignable "
@@ -1537,6 +1643,13 @@ class Parser:
                 f"Compound assignment to {article_and_kind} ('{tok.val}') "
                 f"is not supported yet -- write it as a plain '=' instead "
                 f"at line {tok.line}, column {tok.col}"
+            )
+        if isinstance(expr, Unary) and expr.op == UnaryOp.DEREFERENCE and self.current().type in _COMPOUND_ASSIGN_OPS:
+            tok = self.current()
+            raise ParseError(
+                f"Compound assignment through a dereferenced pointer "
+                f"('{tok.val}') is not supported yet -- write it as a "
+                f"plain '=' instead at line {tok.line}, column {tok.col}"
             )
         return ExprStmt(expr=expr, line=expr.line, col=expr.col)
 
