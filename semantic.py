@@ -212,6 +212,7 @@ from parser import (
     Continue,
     DerefAssign,
     ExprStmt,
+    ExternFunctionDecl,
     Field,
     FieldAssign,
     Function,
@@ -731,6 +732,19 @@ class SemanticAnalyzer:
             param_types = [type_from_name(p.type, self.structs, self.type_aliases, p, self.sum_types) for p in fn.params]
             return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.structs, self.type_aliases, fn, self.sum_types)
             self.functions[fn.name] = (param_types, return_type)
+
+        # 4.5. Collect every extern function's signature into this
+        #    SAME registry -- check_call's own lookup (self.functions)
+        #    doesn't distinguish an extern declaration from an
+        #    ordinary one at all once this runs, which is exactly the
+        #    point: calling one looks identical to calling the other
+        #    from here on. The one thing that IS extern-specific:
+        #    every param and the return type must be a scalar or
+        #    pointer kind -- see check_extern_function_decl's own
+        #    docstring for why that's a v1 scope line, not a
+        #    permanent restriction.
+        for ext in program.extern_functions:
+            self.check_extern_function_decl(ext)
         program.function_registry = self.functions  # stashed for codegen.py's own use, mirroring struct_registry -- see ir/scalars.py's own argument-widening use
 
         # 5. Check each function's own body, including every
@@ -1064,6 +1078,90 @@ class SemanticAnalyzer:
         while t.kind == TypeKind.ARRAY:
             t = t.element_type
         return t.kind == TypeKind.SUM
+
+    def check_extern_function_decl(self, ext: ExternFunctionDecl) -> None:
+        """Registers an `extern` declaration into self.functions, the
+        exact same registry ordinary Function signatures already live
+        in -- check_call's own lookup never needs to know which kind
+        of function it found. Mirrors the collision checks the
+        ordinary-function loop just above already does (builtin,
+        struct, alias, sum-type, already-declared name), plus one more
+        extern-specific check with no ordinary-function counterpart:
+        every param and the return type must be a scalar or pointer
+        kind.
+
+        That restriction is a v1 SCOPE line, not a permanent one --
+        struct-by-value across an FFI boundary raises a real question
+        this doesn't answer yet (Hornet's own struct layout has no
+        padding or alignment at all, unlike C's, so the two can
+        silently disagree the moment a struct mixes int8/uint8 fields
+        with wider ones -- see this feature's own design discussion).
+        Array and slice are excluded for the same reason a struct is
+        (an array is just as layout-sensitive, and a slice's own
+        three-word descriptor has no C equivalent to line up against
+        at all), and sum type for the additional reason that its own
+        runtime tag has no meaning to C code regardless of layout.
+        Scalar and pointer are excluded from this restriction because
+        they're the one shape with an unambiguous, single, already-
+        agreed-on C representation on both sides: a scalar's own
+        width already matches its C counterpart's (an `int` here is
+        already 4 bytes, `int64` already 8, ...), and a pointer is
+        just an 8-byte address regardless of what it points at,
+        exactly like C's own pointer types are."""
+        if ext.name in _BUILTIN_FUNCTION_NAMES:
+            raise SemanticError(
+                f"'{ext.name}' is a builtin and can't be redefined as "
+                f"an extern function",
+                ext,
+            )
+        if ext.name in self.structs:
+            raise SemanticError(
+                f"Extern function '{ext.name}' collides with a struct "
+                f"of the same name -- struct and function names share "
+                f"one namespace and can never be the same, since "
+                f"'{ext.name}(...)' would otherwise be ambiguous "
+                f"between a call and a struct literal",
+                ext,
+            )
+        if ext.name in self.type_aliases:
+            raise SemanticError(
+                f"Extern function '{ext.name}' collides with a type "
+                f"alias of the same name -- function and type-alias "
+                f"names share one namespace and can never be the same",
+                ext,
+            )
+        if ext.name in self.sum_types:
+            raise SemanticError(
+                f"Extern function '{ext.name}' collides with a sum "
+                f"type of the same name -- function and sum-type "
+                f"names share one namespace and can never be the same",
+                ext,
+            )
+        if ext.name in self.functions:
+            raise SemanticError(f"Function '{ext.name}' is already declared", ext)
+
+        param_types = [type_from_name(p.type, self.structs, self.type_aliases, p, self.sum_types) for p in ext.params]
+        return_type = Type.VOID if ext.return_type is None else type_from_name(ext.return_type, self.structs, self.type_aliases, ext, self.sum_types)
+
+        for p, p_type in zip(ext.params, param_types):
+            if p_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT, TypeKind.SUM):
+                raise SemanticError(
+                    f"Extern function '{ext.name}''s parameter '{p.name}' has "
+                    f"type {p_type} -- only scalar and pointer types are "
+                    f"supported in an extern function's signature for now "
+                    f"(array/slice/struct/sum-typed parameters aren't yet)",
+                    p,
+                )
+        if return_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT, TypeKind.SUM):
+            raise SemanticError(
+                f"Extern function '{ext.name}' returns {return_type} -- "
+                f"only scalar and pointer types are supported as an "
+                f"extern function's own return type for now "
+                f"(array/slice/struct/sum aren't yet)",
+                ext,
+            )
+
+        self.functions[ext.name] = (param_types, return_type)
 
     def analyze_function(self, fn: Function) -> None:
         self.scopes = [{}]  # fresh, single-level scope stack per function
@@ -2247,7 +2345,34 @@ class SemanticAnalyzer:
                     f"'*' requires a pointer operand, got {operand_type}",
                     expr,
                 )
-            return operand_type.element_type
+            pointee_type = operand_type.element_type
+            if pointee_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT, TypeKind.SUM):
+                # Restricted to a SCALAR pointee for this first slice
+                # of pointer support -- not a structural limitation
+                # (unlike, say, `&` requiring a bare Variable, which
+                # reflects what escape analysis can currently reason
+                # about): reading a whole composite value out of a
+                # dereferenced pointer as a SOURCE (`Circle c = *p`,
+                # `someFunc(*p)`, `return *p`) would need every ir/
+                # statements.py call site that currently recognizes
+                # Variable/Field/Index as a composite-addressable
+                # shape to also recognize this one -- a dozen call
+                # sites across four files, a substantially larger
+                # change than everything else in this pointer slice
+                # combined. `p.field` (auto-deref, no explicit '*'
+                # needed) and `*p = value` (DerefAssign, overwriting
+                # the whole pointee) both already work regardless of
+                # the pointee's own kind -- this restriction is
+                # specifically about READING a composite value out
+                # through an explicit '*', nothing else.
+                raise SemanticError(
+                    f"'*' on a pointer to {pointee_type} (a composite type) "
+                    f"isn't supported yet as a value -- write through it "
+                    f"with '*p = value', or access a field directly "
+                    f"(auto-deref already handles 'p.field')",
+                    expr,
+                )
+            return pointee_type
         raise SemanticError(f"No semantic rule for unary operator: {expr.op}", expr)
 
     def check_cast(self, expr: Cast) -> Type:

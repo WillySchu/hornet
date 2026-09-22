@@ -83,6 +83,7 @@ class TokenType(Enum):
     TYPE = auto()
     IS = auto()
     MATCH = auto()
+    EXTERN = auto()
 
     # Special
     NEWLINE = auto()
@@ -167,6 +168,7 @@ class Lexer:
             'type': TokenType.TYPE,
             'is': TokenType.IS,
             'match': TokenType.MATCH,
+            'extern': TokenType.EXTERN,
         }
 
         # Compile master regex pattern

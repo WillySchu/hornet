@@ -3225,3 +3225,102 @@ def test_compound_assignment_through_a_dereference_is_rejected():
             "    *p += 1\n"
             "    return x\n"
         )
+
+
+# ---------------------------------------------------------------------------
+# `extern [type] NAME(params)` -- an external function declaration, no
+# body, no ':'. Introduces one new AST node (ExternFunctionDecl, distinct
+# from Function -- see its own docstring in parser.py for why) and one
+# new Program list (extern_functions), sorted at parse time exactly like
+# StructDef/SumTypeDef already are. Grammar mirrors parse_function's own
+# return-type/name/params handling exactly, just without the trailing
+# ':'/NEWLINE/body a real function always has.
+# ---------------------------------------------------------------------------
+
+def test_extern_function_with_scalar_return_and_params():
+    program = _parse_program(
+        "extern int abs(int n)\n"
+        "def int main():\n"
+        "    return abs(-5)\n"
+    )
+    assert len(program.extern_functions) == 1
+    ext = program.extern_functions[0]
+    assert isinstance(ext, parser.ExternFunctionDecl)
+    assert ext.name == 'abs'
+    assert ext.return_type == 'int'
+    assert len(ext.params) == 1
+    assert ext.params[0].name == 'n'
+    assert ext.params[0].type == 'int'
+    assert len(program.functions) == 1  # main only -- abs is NOT a Function
+
+
+def test_extern_function_with_no_return_type_is_void():
+    """No return type at all (not a 'void' keyword -- Hornet has none,
+    see Function's own docstring) means void, identical to an ordinary
+    Function's own convention."""
+    program = _parse_program(
+        "extern free(*int8 p)\n"
+        "def int main():\n"
+        "    return 0\n"
+    )
+    ext = program.extern_functions[0]
+    assert ext.name == 'free'
+    assert ext.return_type is None
+
+
+def test_extern_function_with_pointer_return_type():
+    program = _parse_program(
+        "extern *int8 malloc(int64 size)\n"
+        "def int main():\n"
+        "    return 0\n"
+    )
+    ext = program.extern_functions[0]
+    assert ext.name == 'malloc'
+    assert isinstance(ext.return_type, parser.PointerTypeExpr)
+    assert ext.return_type.pointee_type == 'int8'
+
+
+def test_extern_function_with_no_params():
+    program = _parse_program(
+        "extern int getpid()\n"
+        "def int main():\n"
+        "    return getpid()\n"
+    )
+    ext = program.extern_functions[0]
+    assert ext.params == []
+
+
+def test_extern_function_with_multiple_params():
+    program = _parse_program(
+        "extern *int8 memcpy(*int8 dst, *int8 src, int64 n)\n"
+        "def int main():\n"
+        "    return 0\n"
+    )
+    ext = program.extern_functions[0]
+    assert [p.name for p in ext.params] == ['dst', 'src', 'n']
+
+
+def test_extern_function_order_independent_from_ordinary_functions():
+    """Mirrors how ordinary functions/structs are already collected
+    into their own Program list regardless of source order -- an
+    extern declaration appearing AFTER the function that calls it
+    parses identically to one appearing before."""
+    program = _parse_program(
+        "def int main():\n"
+        "    return abs(-5)\n"
+        "\n"
+        "extern int abs(int n)\n"
+    )
+    assert len(program.extern_functions) == 1
+    assert program.extern_functions[0].name == 'abs'
+    assert len(program.functions) == 1
+
+
+def test_extern_function_requires_a_name():
+    with pytest.raises(parser.ParseError, match="Expected a function name"):
+        _parse_program("extern int (int n)\n")
+
+
+def test_extern_function_requires_parens():
+    with pytest.raises(parser.ParseError, match="Expected '\\(' after function name"):
+        _parse_program("extern int abs\n")

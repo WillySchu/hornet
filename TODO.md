@@ -29,7 +29,6 @@ Updates:
 - Narrowing inside a while condition. Excluded by construction in v1 (only if is recognized), but worth its own tracked item since loop bodies raise questions v1 never has to answer — what does narrowing across iterations even mean once reassignment is disallowed anyway.
 - Struct literal as print argument.
 - Cleanup remaining IR/backend coupling.
-- FFI
 - Pass structs to FFI calls.
 - Separate the runtime code from codegen.
 - `IRBranch` peephole optimization to skip redundant unconditional jumps.

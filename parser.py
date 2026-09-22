@@ -783,6 +783,44 @@ class Function(Node):
 
 
 @dataclass
+class ExternFunctionDecl(Node):
+    """`extern type NAME(params)`, or `extern NAME(params)` with the
+    type omitted (return_type=None, meaning void -- same convention as
+    Function's own). No body, no ':' -- this declares a function
+    implemented elsewhere (in C, linked in separately, e.g. libc,
+    already linked by default -- see build.py's own link step), not
+    one Hornet compiles itself. `name` is used AS THE REAL, UNMANGLED
+    symbol the linker resolves against -- no aliasing syntax exists
+    yet (a deliberate, narrow v1 choice, not an oversight), so it must
+    already be a valid Hornet identifier, which every real C symbol
+    name already is.
+
+    Mirrors Function's own shape (name/return_type/params) exactly,
+    minus body, rather than reusing Function directly with an empty
+    body: an ordinary Function's body is never actually optional (a
+    real function always has at least an implicit fall-through), so a
+    separate node keeps the two unambiguous by construction rather
+    than by convention -- the same reasoning StructDef/SumTypeDef get
+    their own node instead of overloading an existing one.
+
+    `params` reuses Param directly, and (like Function's own) always
+    names each parameter, even though the name is never referenced by
+    anything (there's no body to reference it in) -- consistency with
+    Function's own grammar, and reuse of parse_params() unchanged,
+    rather than a second, name-optional parameter grammar just for
+    this one case.
+
+    semantic.py restricts every param and the return type to a scalar
+    or pointer kind (never ARRAY/SLICE/STRUCT/SUM) -- see check_
+    extern_function_decl's own docstring for why that's a v1 scope
+    line, not a permanent one (struct-by-value's own C layout
+    question is a separate, later piece of work)."""
+    name: str
+    return_type: Optional[Union[str, ArrayTypeExpr, SliceTypeExpr]]
+    params: List[Param] = field(default_factory=list)
+
+
+@dataclass
 class TypeAlias(Node):
     """`type Name = TargetType` -- introduces `Name` as an alternate
     spelling for an existing type, interchangeable with it everywhere
@@ -830,6 +868,7 @@ class Program(Node):
     structs: List[StructDef] = field(default_factory=list)
     type_aliases: List[TypeAlias] = field(default_factory=list)
     sum_types: List[SumTypeDef] = field(default_factory=list)
+    extern_functions: List[ExternFunctionDecl] = field(default_factory=list)
 
     def __repr__(self) -> str:
         return self.pretty()
@@ -1027,6 +1066,7 @@ class Parser:
         structs = []
         type_aliases = []
         sum_types = []
+        extern_functions = []
         self.skip_newlines()
         while not self.at_end():
             if self.check(TokenType.STRUCT):
@@ -1044,11 +1084,14 @@ class Parser:
                     sum_types.append(declaration)
                 else:
                     type_aliases.append(declaration)
+            elif self.check(TokenType.EXTERN):
+                extern_functions.append(self.parse_extern_function())
             else:
                 functions.append(self.parse_function())
             self.skip_newlines()
         return Program(
             functions=functions, structs=structs, type_aliases=type_aliases, sum_types=sum_types,
+            extern_functions=extern_functions,
             line=start_tok.line, col=start_tok.col,
         )
 
@@ -1179,6 +1222,24 @@ class Parser:
         body = self.parse_block()
         return Function(
             name=name_tok.val, return_type=return_type, params=params, body=body,
+            line=start_tok.line, col=start_tok.col,
+        )
+
+    def parse_extern_function(self) -> ExternFunctionDecl:
+        """`extern [type] NAME(params)` -- mirrors parse_function's own
+        return-type/name/params handling exactly, minus the ':' and
+        body: no colon, no newline expected after the parameter list,
+        just the declaration itself, terminated the same way any other
+        top-level statement is (parse_program's own skip_newlines
+        handles whatever comes next, blank or not)."""
+        start_tok = self.expect(TokenType.EXTERN, "Expected 'extern' to start an external function declaration")
+        return_type = self.parse_type() if self._check_starts_with_return_type() else None
+        name_tok = self.expect(TokenType.IDENTIFIER, "Expected a function name")
+        self.expect(TokenType.OPEN_PAREN, "Expected '(' after function name")
+        params = self.parse_params()
+        self.expect(TokenType.CLOSE_PAREN, "Expected ')' after parameter list")
+        return ExternFunctionDecl(
+            name=name_tok.val, return_type=return_type, params=params,
             line=start_tok.line, col=start_tok.col,
         )
 

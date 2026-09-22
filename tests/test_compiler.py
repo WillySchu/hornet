@@ -7364,6 +7364,221 @@ class TestPointerEscapeAnalysis:
 
 
 # ---------------------------------------------------------------------------
+# `extern [type] NAME(params)`: declares a function implemented elsewhere
+# (in C, already linked in -- libc, by default, via gcc's own linker
+# invocation with no extra flags) and registers it into check_call's own
+# ordinary function registry (self.functions) -- calling one looks
+# identical to calling an ordinary Hornet function from that point on.
+#
+# v1 scope, deliberately: fixed-arity only (no variadics -- printf-style
+# functions need their own, separate follow-up, both for the SysV %al
+# convention and because a realistic variadic call can easily exceed the
+# 6-register limit this compiler's own calling convention already caps
+# at, with no stack-passed-argument support to fall back on). Every
+# param and the return type restricted to scalar or pointer kinds --
+# array/slice/struct/sum are excluded, most concretely because Hornet's
+# own struct layout has no padding or alignment at all, unlike C's,
+# which can silently disagree the moment a struct mixes narrow (int8/
+# uint8) fields with wider ones.
+#
+# IR/codegen needed NO new code at all: _ir_call/IRCall/CallInstr
+# already treat a call by name uniformly regardless of whether the
+# callee is Hornet-defined or extern-declared, confirmed end to end
+# below (malloc/free/strlen, actually linked against libc and run, not
+# just compiled).
+# ---------------------------------------------------------------------------
+
+class TestExternFunctions:
+
+    def test_basic_extern_call(self):
+        ast = _parse(
+            "extern int abs(int n)\n"
+            "def int main():\n"
+            "    return abs(-5)\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_extern_call_with_wrong_argument_count_is_rejected(self):
+        assert_program_semantic_error(
+            "extern int abs(int n)\n"
+            "def int main():\n"
+            "    return abs(-5, 3)\n",
+            match="expects 1 argument",
+        )
+
+    def test_extern_call_with_wrong_argument_type_is_rejected(self):
+        assert_program_semantic_error(
+            "extern int abs(int n)\n"
+            "def int main():\n"
+            "    return abs(true)\n",
+            match="should be int, got bool",
+        )
+
+    def test_extern_colliding_with_a_builtin_is_rejected(self):
+        assert_program_semantic_error(
+            "extern int len(int n)\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="'len' is a builtin and can't be redefined as an extern function",
+        )
+
+    def test_extern_colliding_with_a_struct_is_rejected(self):
+        assert_program_semantic_error(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "extern int Circle(int n)\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="collides with a struct of the same name",
+        )
+
+    def test_extern_colliding_with_a_type_alias_is_rejected(self):
+        assert_program_semantic_error(
+            "type MyInt = int\n"
+            "\n"
+            "extern int MyInt(int n)\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="collides with a type alias of the same name",
+        )
+
+    def test_extern_colliding_with_a_sum_type_is_rejected(self):
+        assert_program_semantic_error(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type Shape is Circle | Square\n"
+            "\n"
+            "extern int Shape(int n)\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="collides with a sum type of the same name",
+        )
+
+    def test_extern_colliding_with_an_ordinary_function_is_rejected(self):
+        assert_program_semantic_error(
+            "extern int abs(int n)\n"
+            "def int abs():\n"
+            "    return 0\n",
+            match="'abs' is already declared",
+        )
+
+    def test_two_externs_with_the_same_name_are_rejected(self):
+        assert_program_semantic_error(
+            "extern int abs(int n)\n"
+            "extern int abs(int n)\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="'abs' is already declared",
+        )
+
+    def test_struct_typed_extern_parameter_is_rejected(self):
+        assert_program_semantic_error(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "extern int useCircle(Circle c)\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="only scalar and pointer types are supported in an extern function's signature",
+        )
+
+    def test_slice_typed_extern_return_is_rejected(self):
+        assert_program_semantic_error(
+            "extern []int makeSlice()\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="only scalar and pointer types are supported as an extern function's own return type",
+        )
+
+    def test_array_typed_extern_parameter_is_rejected(self):
+        assert_program_semantic_error(
+            "extern int useArray([3]int arr)\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="only scalar and pointer types are supported in an extern function's signature",
+        )
+
+    def test_pointer_param_and_return_are_accepted(self):
+        ast = _parse(
+            "extern *int8 malloc(int64 size)\n"
+            "extern free(*int8 p)\n"
+            "def int main():\n"
+            "    *int8 p = malloc(8)\n"
+            "    free(p)\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_extern_with_no_return_type_is_void(self):
+        ast = _parse(
+            "extern free(*int8 p)\n"
+            "def int main():\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_extern_declared_after_its_own_call_site(self):
+        """Order-independence, matching ordinary functions: an extern
+        declared AFTER the function that calls it is no different from
+        one declared before."""
+        ast = _parse(
+            "def int main():\n"
+            "    return abs(-5)\n"
+            "\n"
+            "extern int abs(int n)\n"
+        )
+        analyze(ast)  # should not raise
+
+
+class TestExternFunctionsCodegen:
+
+    def test_call_a_fixed_arity_libc_function(self):
+        assert_program_exit_code(
+            "extern int abs(int n)\n"
+            "def int main():\n"
+            "    return abs(-42)\n",
+            expected=42,
+        )
+
+    def test_malloc_free_and_strlen_via_extern(self):
+        """Exercises a pointer return value (malloc), writing and
+        reading through it, a void-returning call taking a pointer
+        (free), and str's own existing char*-compatibility (strlen) --
+        all through extern declarations, all via the exact same
+        IRCall/CallInstr path already proven by the compiler's own
+        internal calls to these same three functions."""
+        assert_program_exit_code(
+            "extern *int malloc(int64 size)\n"
+            "extern free(*int p)\n"
+            "extern int strlen(str s)\n"
+            "\n"
+            "def int main():\n"
+            "    *int p = malloc(8)\n"
+            "    *p = 99\n"
+            "    int result = *p\n"
+            "    free(p)\n"
+            "    int len = strlen('hello world')\n"
+            "    return result - len\n",
+            expected=99 - 11,
+        )
+
+    def test_extern_taking_no_arguments(self):
+        assert_program_exit_code(
+            "extern int getpid()\n"
+            "def int main():\n"
+            "    int pid = getpid()\n"
+            "    if pid > 0:\n"
+            "        return 1\n"
+            "    return 0\n",
+            expected=1,
+        )
+
+
 # int8/uint8, step 1 of 3: the TYPE SYSTEM only -- lexer/parser keywords,
 # TypeKind/Type additions, literal range-checking, and arithmetic type-
 # checking rules (check_binary/check_unary). Deliberately NOT yet about
