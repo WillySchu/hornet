@@ -30,6 +30,7 @@ Updates:
 - Struct literal as print argument.
 - Cleanup remaining IR/backend coupling.
 - FFI
+- Pass structs to FFI calls.
 - Separate the runtime code from codegen.
 - `IRBranch` peephole optimization to skip redundant unconditional jumps.
 - IRAddress
@@ -55,6 +56,7 @@ Updates:
 - Flow sensitive escape analysis.
 - Deduplicate emitted type descriptors when we call print()
 - Variadic functions.
+- Variadic FFI calls?
 - Make `append` variadic.
 - Spread operator.
 - `is` keyword.
@@ -76,3 +78,5 @@ Updates:
 - Explore graph coloring algorithm for register allocation (Chaitin-Briggs).
 - Consider renaming CodeGenerator to something like X86Backend.
 - Target different architectures?
+- Link to non libc functions for FFI?
+- Call hornet code from C?
