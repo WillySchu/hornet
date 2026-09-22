@@ -373,7 +373,7 @@ class IRFunction:
     function state read only from gen_statement_ir's own top-level
     Return/VarDecl cases (via _ir_hidden_return_ptr/_bind_local).
 
-    `scopes`, `_argument_temp_slots`, and `_escaping_array_ids` stay on
+    `scopes`, `_argument_temp_slots`, and `_escaping_decl_ids` stay on
     CodeGenerator's own self instead, reset per function: each is read
     from deep inside gen_expr_ir's own call tree across several files,
     so threading them through explicitly would touch many call sites

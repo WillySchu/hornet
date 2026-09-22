@@ -10,7 +10,7 @@ which). Building a function's own IR needs nothing lowering-specific
 (frame layout, register assignment), so this class has no
 CodeGenerator dependency at all.
 
-scopes, loop_labels, _argument_temp_slots, _escaping_array_ids, and the
+scopes, loop_labels, _argument_temp_slots, _escaping_decl_ids, and the
 two unconditionally-reserved scratch slots are genuine fields here,
 reset fresh per function -- none of this state is ever read past its
 own function's own build call.
@@ -88,12 +88,14 @@ class IRFunctionBuilder(
         return_type = ir_fn.return_type
         param_types = [type_from_name(p.type, self.ir_program.struct_registry, self.ir_program.type_alias_registry, sum_types=self.ir_program.sum_type_registry) for p in fn.params]
 
-        # Which of this function's array declarations need to be
-        # heap-allocated because a slice backed by them might outlive
-        # this function's return, regardless of size (see
+        # Which of this function's declarations (of ANY type -- a
+        # pointer's own target isn't restricted to arrays the way a
+        # slice's own backing storage always is) need to be heap-
+        # allocated because a slice or pointer backed by them might
+        # outlive this function's return, regardless of size (see
         # analyze_array_escapes) -- needed before _collect_params/
         # _collect_locals decide each slot's own byte width.
-        self._escaping_array_ids = analyze_array_escapes(
+        self._escaping_decl_ids = analyze_array_escapes(
             fn, param_types, self.ir_program.struct_registry, self.ir_program.type_alias_registry, self.ir_program.sum_type_registry)
 
         # An array/slice/struct-typed return needs a hidden pointer --
@@ -487,7 +489,7 @@ class IRFunctionBuilder(
         size threshold every named local/parameter uses: a large value
         is heap-allocated fresh at the call site instead. Deliberately
         not routed through _is_heap_allocated (which also consults
-        self._escaping_array_ids): an argument-temp is never a
+        self._escaping_decl_ids): an argument-temp is never a
         candidate for escape-driven promotion, since it flows into the
         callee as a whole value copied on entry, never sliced by the
         caller."""
@@ -576,8 +578,13 @@ class IRFunctionBuilder(
         """Whether the specific array- or struct-typed declaration
         identified by decl_id needs to be heap-allocated: is_heap_
         allocated's pure size check, OR analyze_array_escapes's result
-        (cached in self._escaping_array_ids -- an array-specific
-        trigger only, since the terminal backing storage a slice
-        descriptor points at is always a real array, never a struct
-        directly)."""
-        return is_heap_allocated(t, self.ir_program.struct_registry, self.ir_program.sum_type_registry) or decl_id in self._escaping_array_ids
+        (cached in self._escaping_decl_ids -- a declaration of ANY
+        type can appear here now, not just array: a pointer's own
+        target isn't restricted to arrays the way a slice's own
+        backing storage always is, since `&x` can target a scalar,
+        struct, array, or sum-typed x. This method itself is still
+        only ever CALLED for array/struct/sum-typed decl_ids -- a
+        scalar whose address escapes is rejected outright at semantic
+        analysis instead of reaching here at all; see check_unary's
+        own ADDRESS_OF case)."""
+        return is_heap_allocated(t, self.ir_program.struct_registry, self.ir_program.sum_type_registry) or decl_id in self._escaping_decl_ids

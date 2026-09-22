@@ -26,13 +26,35 @@ class PointersMixin:
         local time regardless of its own type -- see _local_slot's own
         docstring).
 
+        A HEAP-ALLOCATED x (its own composite size over the threshold,
+        or its OWN address escaping past this function via a pointer
+        -- see _is_heap_allocated/analyze_array_escapes) needs the
+        identical extra indirection _ir_struct_address's own Variable
+        case already applies: x's own slot holds a POINTER to x's real
+        storage in that case, not x's data directly, so &x is that
+        stored pointer (one more IRLoad through the slot's own
+        address), not the slot's own address itself. A scalar x is
+        never heap-allocated at all right now -- is_heap_allocated's
+        own size check is false for every scalar type, and a scalar
+        whose OWN address escapes is rejected outright by semantic.py
+        instead of ever reaching real-IR generation (see check_unary's
+        own ADDRESS_OF case) -- so this branch is unreachable for a
+        scalar x today, but written generally rather than assuming
+        that stays true forever.
+
         This is exactly what register_allocator.py's own eligible_
-        intervals (see its own docstring) keys off of to stay sound:
-        any slot an IRLocalAddress instruction anywhere in this
-        function ever targets is excluded from register allocation
-        entirely, so x's value always lives in memory, never purely in
-        a register -- otherwise a read or write through this pointer
-        could see a stale value the register alone was holding.
+        intervals (see its own docstring) keys off of to stay sound
+        for the NON-heap-allocated case: any slot an IRLocalAddress
+        instruction anywhere in this function ever targets is excluded
+        from register allocation entirely, so x's value always lives
+        in memory, never purely in a register -- otherwise a read or
+        write through this pointer could see a stale value the
+        register alone was holding. A heap-allocated x's own slot
+        holds just a pointer, read once here and then never written
+        again by this function specifically for x's OWN address, so
+        it doesn't need this same protection the same way -- though
+        it's excluded anyway, harmlessly, since IRLocalAddress still
+        targets it.
 
         expr.operand is guaranteed a bare Variable by semantic.py's
         own check_unary (see UnaryOp.ADDRESS_OF's own docstring there
@@ -45,9 +67,15 @@ class PointersMixin:
                 f"Variable -- semantic.py's own check_unary should have already "
                 f"rejected this before real-IR generation ever runs"
             )
-        slot = self._local_slot(expr.operand.name)
-        t = self.ir_program.ids.new_temp(type_of(expr))
-        return [IRLocalAddress(dst=t, slot=slot)], t
+        name = expr.operand.name
+        slot = self._local_slot(name)
+        slot_addr = self.ir_program.ids.new_temp(type_of(expr))
+        ir = [IRLocalAddress(dst=slot_addr, slot=slot)]
+        if self._is_heap_allocated(self._local_decl_id(name), self._local_type(name)):
+            addr_temp = self.ir_program.ids.new_temp(type_of(expr))
+            ir.append(IRLoad(dst=addr_temp, address=slot_addr))
+            return ir, addr_temp
+        return ir, slot_addr
 
     def _ir_dereference(self, expr: Unary) -> tuple[list, IRValue]:
         """`*p` -- reads the pointee's own value: gen_expr_ir(expr.

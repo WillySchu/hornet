@@ -1148,8 +1148,13 @@ class Parser:
     def _check_starts_with_return_type(self) -> bool:
         """True if the current position starts an optional return type
         before a def's name -- shared by parse_function/parse_method_
-        def. A type keyword or '[' starts a return type unambiguously
-        with one token of lookahead. A struct-typed return needs a
+        def. A type keyword, '[', or '*' starts a return type
+        unambiguously with one token of lookahead (a pointer return
+        type has none of parse_statement's own '*'-vs-dereference
+        ambiguity: there's no expression position here at all, only a
+        type or the def's own name, so no speculative-parse-and-
+        backtrack dance is needed the way parse_statement's own STAR
+        handling needs one). A struct-typed return needs a
         SECOND token: IDENTIFIER alone is ambiguous between "a struct
         return type" and "the def's own name", resolved by a second
         identifier immediately after (a name is always followed by
@@ -1157,7 +1162,7 @@ class Parser:
         IDENTIFIER disambiguation parse_statement's struct-typed-
         VarDecl check needs, for the same reason (struct names aren't
         reserved keywords)."""
-        return self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET) or (
+        return self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET, TokenType.STAR) or (
             self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.IDENTIFIER
         )
 

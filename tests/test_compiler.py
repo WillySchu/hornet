@@ -908,6 +908,19 @@ def assert_program_semantic_error(source: str, match: str = None) -> None:
         analyze(ast)
 
 
+def assert_program_codegen_error(source: str, match: str = None) -> None:
+    """Like assert_program_semantic_error, but for a program that's
+    well-typed (passes analyze() cleanly) and is only rejected one
+    stage later, during codegen itself -- currently just escape
+    analysis's own scalar-address-escapes rejection (see
+    TestPointerEscapeAnalysis), which needs the real IR-building
+    pipeline to run at all, not just semantic.py's own AST walk."""
+    ast = _parse(source)
+    analyze(ast)
+    with pytest.raises(CodegenError, match=match):
+        generate_asm(ast, platform=ASM_PLATFORM)
+
+
 def assert_stdout(body: str, expected_stdout: str, return_type: str = "int") -> None:
     """Like assert_exit_code, but checks the program's actual printed
     output instead of its exit code -- the only way to meaningfully
@@ -7242,6 +7255,111 @@ class TestPointersCodegen:
             "    *Circle first = arr[0]\n"
             "    return first.radius\n",
             expected=7,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Pointer escape analysis: `&x` generalizes analyze_array_escapes' own
+# direct_backing edge, alongside array-slicing, exactly as scoped before
+# any of this was written. The composite case (a struct/array/sum local
+# whose address escapes) reuses the SAME heap-promotion machinery
+# already built for large locals -- genuinely made safe, not just
+# detected. A SCALAR local whose address escapes has no such machinery
+# (deliberately, the (b) side of the fork agreed on: detect and reject,
+# not build heap-indirection for scalars yet) -- rejected outright with
+# a clear CodegenError instead.
+#
+# test_dangling_pointer_program_is_now_rejected is the exact program
+# that motivated this whole stage -- confirmed, empirically, to compile
+# and run with a silently dangling pointer BEFORE this work, and to be
+# rejected outright now.
+# ---------------------------------------------------------------------------
+
+class TestPointerEscapeAnalysis:
+
+    def test_dangling_pointer_program_is_now_rejected(self):
+        """The motivating bug, stated plainly: this compiled and ran
+        with no error before this stage existed, silently returning a
+        pointer into a stack frame that had already been torn down."""
+        assert_program_codegen_error(
+            "type Holder struct:\n"
+            "    *int p\n"
+            "\n"
+            "def Holder makeDangling():\n"
+            "    int x = 42\n"
+            "    return Holder(&x)\n"
+            "\n"
+            "def int main():\n"
+            "    Holder h = makeDangling()\n"
+            "    return *h.p\n",
+            match="'x' \\(declared int\\) cannot have its address taken",
+        )
+
+    def test_scalar_address_returned_directly_is_rejected(self):
+        assert_program_codegen_error(
+            "def *int makeDangling():\n"
+            "    int x = 42\n"
+            "    return &x\n"
+            "\n"
+            "def int main():\n"
+            "    *int p = makeDangling()\n"
+            "    return *p\n",
+            match="'x' \\(declared int\\) cannot have its address taken",
+        )
+
+    def test_scalar_address_passed_to_another_function_is_rejected(self):
+        assert_program_codegen_error(
+            "def int useIt(*int p):\n"
+            "    return *p\n"
+            "\n"
+            "def int caller():\n"
+            "    int x = 7\n"
+            "    return useIt(&x)\n"
+            "\n"
+            "def int main():\n"
+            "    return caller()\n",
+            match="'x' \\(declared int\\) cannot have its address taken",
+        )
+
+    def test_struct_address_escaping_is_genuinely_heap_safe(self):
+        """Not just accepted -- verified actually safe: an intervening
+        call between makeCircle returning and p being read, deliberately
+        sized to plausibly clobber a dangling stack slot if c were NOT
+        genuinely heap-promoted (see this whole stage's own earlier
+        debugging history for why "it happened to still work" is not
+        the same as "it's actually safe")."""
+        assert_program_exit_code(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "def *Circle makeCircle():\n"
+            "    Circle c = Circle(5)\n"
+            "    return &c\n"
+            "\n"
+            "def int clobber():\n"
+            "    int a = 111\n"
+            "    int b = 222\n"
+            "    int c = 333\n"
+            "    int d = 444\n"
+            "    return a + b + c + d\n"
+            "\n"
+            "def int main():\n"
+            "    *Circle p = makeCircle()\n"
+            "    int unused = clobber()\n"
+            "    return p.radius\n",
+            expected=5,
+        )
+
+    def test_purely_local_pointer_is_unaffected(self):
+        """A pointer whose target never escapes this same function must
+        stay exactly as fast/simple as before -- no rejection, no heap
+        promotion, ordinary stack storage throughout."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    int x = 5\n"
+            "    *int p = &x\n"
+            "    return *p\n",
+            expected=5,
         )
 
 

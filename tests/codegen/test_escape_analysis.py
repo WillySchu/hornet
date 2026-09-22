@@ -4,10 +4,13 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 import desugar
 import parser
 import semantic
 import codegen.escape_analysis as ea
+from codegen.errors import CodegenError
 from lexer import lex
 
 
@@ -453,7 +456,7 @@ def test_escape_analyzer_slot_node_id():
         assert tc['expected'] == analyzer.slot_node_id(tc['id'], tc['slot'])
 
 
-def test_escape_analyzer_contains_slice():
+def test_escape_analyzer_contains_address_holder():
     fn = parser.Function(name='main', return_type=None)
 
     tcs = [
@@ -462,12 +465,22 @@ def test_escape_analyzer_contains_slice():
             'structs': {},
             'res': True,
         },
+        {
+            'type': semantic.Type(kind=semantic.TypeKind.POINTER, element_type=semantic.Type.INT),
+            'structs': {},
+            'res': True,
+        },
+        {
+            'type': semantic.Type.INT,
+            'structs': {},
+            'res': False,
+        },
         # TODO(will): Finish these tests.
     ]
 
     for tc in tcs:
         analyzer = ea.EscapeAnalyzer(fn, [], tc['structs'], {}, {})
-        assert tc['res'] == analyzer._contains_slice(tc['type'])
+        assert tc['res'] == analyzer._contains_address_holder(tc['type'])
 
 
 def test_escape_analyzer_whole_value_node_of_empty():
@@ -691,3 +704,159 @@ def test_escape_analyzer_scan_expr_for_escaping_calls():
 def test_escape_analyzer_walk_statements():
     # TODO(will): Finsh.
     ...
+
+
+# ---------------------------------------------------------------------------
+# Pointers: `&x` as a second way to produce a direct_backing edge,
+# alongside array-slicing -- the generalization discussed at length before
+# any of this was written. Two real bugs were found and fixed while
+# building it, both by actually running programs rather than trusting the
+# analysis alone:
+#   1. _ir_address_of never had any concept of a heap-allocated variable
+#      at all -- it always computed &x as the slot's own address, but a
+#      heap-allocated variable's slot holds a POINTER to the real data,
+#      not the data itself. Fixed by mirroring _ir_struct_address's own
+#      "if heap-allocated, load through one more indirection" pattern.
+#   2. A scalar whose address escapes has no heap-promotion machinery at
+#      all (unlike array/struct/sum, which already had it before pointers
+#      existed) -- is_heap_allocated's own size check is unconditionally
+#      false for every scalar type, and nothing in a scalar VarDecl's own
+#      construction ever mallocs one. Silently treating an escaping
+#      scalar like any other escaping declaration would read its raw
+#      VALUE as if it were a pointer, corrupting it. Rejected outright
+#      instead, with a CodegenError -- the (b) side of the fork agreed on
+#      before implementation: reuse the analysis to detect it, but don't
+#      try to make it safe via heap promotion yet.
+# See tests/test_compiler.py's own TestPointerEscapeAnalysis for the
+# compile-and-run counterparts, including the dangling-pointer program
+# that motivated this whole stage.
+# ---------------------------------------------------------------------------
+
+def test_address_of_a_struct_local_returned_directly_escapes():
+    ast = parse_and_analyze(
+        "type Circle struct:\n"
+        "    int radius\n"
+        "\n"
+        "def *Circle makeCircle():\n"
+        "    Circle c = Circle(5)\n"
+        "    return &c\n"
+    )
+    fn = ast.functions[0]
+    c_decl_id = id(fn.body[0])
+    result = ea.analyze_array_escapes(fn, [], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+    assert c_decl_id in result
+
+
+def test_address_of_a_struct_local_never_escapes_stays_out_of_the_result():
+    ast = parse_and_analyze(
+        "type Circle struct:\n"
+        "    int radius\n"
+        "\n"
+        "def int main():\n"
+        "    Circle c = Circle(5)\n"
+        "    *Circle p = &c\n"
+        "    return p.radius\n"
+    )
+    fn = ast.functions[0]
+    c_decl_id = id(fn.body[0])
+    result = ea.analyze_array_escapes(fn, [], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+    assert c_decl_id not in result
+
+
+def test_address_of_a_scalar_local_returned_directly_is_rejected():
+    ast = parse_and_analyze(
+        "def *int makeDangling():\n"
+        "    int x = 42\n"
+        "    return &x\n"
+    )
+    fn = ast.functions[0]
+    with pytest.raises(CodegenError, match="'x' \\(declared int\\) cannot have its address taken"):
+        ea.analyze_array_escapes(fn, [], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+
+
+def test_address_of_a_scalar_local_wrapped_in_a_returned_struct_is_rejected():
+    """Confirms the rejection also fires when &x is passed as a struct
+    CONSTRUCTOR argument (Holder(&x)) rather than returned bare --
+    reached via scan_expr_for_escaping_calls's own conservative "any
+    call's arguments might escape" treatment, which a struct
+    constructor call falls under too (contribution() has no dedicated
+    case for a struct literal itself, a separate, pre-existing gap for
+    slices too -- deliberately out of scope here), not via
+    contribution() being given the whole struct literal directly."""
+    ast = parse_and_analyze(
+        "type Holder struct:\n"
+        "    *int p\n"
+        "\n"
+        "def Holder makeDangling():\n"
+        "    int x = 42\n"
+        "    return Holder(&x)\n"
+    )
+    fn = ast.functions[0]
+    with pytest.raises(CodegenError, match="'x' \\(declared int\\) cannot have its address taken"):
+        ea.analyze_array_escapes(fn, [], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+
+
+def test_address_of_a_scalar_local_passed_as_a_call_argument_is_rejected():
+    """The existing, pre-pointer conservatism (any call argument might
+    escape, intraprocedurally) already covers this -- &x passed to
+    ANY user-defined function is treated the same as returning it
+    directly, matching how a slice argument already works."""
+    ast = parse_and_analyze(
+        "def int useIt(*int p):\n"
+        "    return *p\n"
+        "\n"
+        "def int caller():\n"
+        "    int x = 7\n"
+        "    return useIt(&x)\n"
+    )
+    fn = ast.functions[1]  # caller, not useIt
+    with pytest.raises(CodegenError, match="'x' \\(declared int\\) cannot have its address taken"):
+        ea.analyze_array_escapes(fn, [], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+
+
+def test_address_of_via_reassignment_not_just_var_decl_init():
+    """`p = &x` (Assign, an EXISTING pointer variable reassigned) needs
+    the identical treatment `*int p = &x` (VarDecl's own init) already
+    gets -- walk_statements' own Assign case mirrors its VarDecl case
+    exactly, but this exercises that path directly rather than only
+    ever through a VarDecl's own initializer."""
+    ast = parse_and_analyze(
+        "type Circle struct:\n"
+        "    int radius\n"
+        "\n"
+        "def *Circle makeCircle():\n"
+        "    Circle c = Circle(5)\n"
+        "    *Circle p = none\n"
+        "    p = &c\n"
+        "    return p\n"
+    )
+    fn = ast.functions[0]
+    c_decl_id = id(fn.body[0])
+    result = ea.analyze_array_escapes(fn, [], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+    assert c_decl_id in result
+
+
+def test_pointer_aliasing_through_a_struct_field_assign_propagates():
+    """s.field = someOtherPointer (FieldAssign, a pointer-VALUED RHS
+    that's itself a Variable, not a bare &x) needs to propagate the
+    aliasing through slice_deps -- if the whole struct later escapes,
+    whatever someOtherPointer itself pointed at must be found too."""
+    ast = parse_and_analyze(
+        "type Circle struct:\n"
+        "    int radius\n"
+        "\n"
+        "type Holder struct:\n"
+        "    *Circle p\n"
+        "\n"
+        "def Holder makeHolder():\n"
+        "    Circle c = Circle(5)\n"
+        "    *Circle q = &c\n"
+        "    Holder h = Holder(none)\n"
+        "    h.p = q\n"
+        "    return h\n"
+    )
+    fn = ast.functions[0]
+    c_decl_id = id(fn.body[0])
+    result = ea.analyze_array_escapes(fn, [], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+    assert c_decl_id in result
+

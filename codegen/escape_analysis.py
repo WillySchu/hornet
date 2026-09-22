@@ -9,6 +9,7 @@ a struct field (see analyze_array_escapes for the full algorithm)."""
 
 from typing import Optional
 
+from codegen.errors import CodegenError
 from parser import (
     ArrayLiteral,
     Assign,
@@ -25,6 +26,7 @@ from parser import (
     Return,
     Slice,
     Unary,
+    UnaryOp,
     VarDecl,
     Variable,
     While,
@@ -97,11 +99,13 @@ class EscapeAnalyzer:
 
         self.array_decls: set[int] = set()
         self.slice_decls: set[int] = set()
+        self.pointer_decls: set[int] = set()
         self.decl_types: dict[int, Type] = {}
+        self.decl_names: dict[int, str] = {}
         self.direct_backing: dict[int, set[int]] = {}
         self.slice_deps: dict[int, set[int]] = {}
-        self.escaping_slices: set[int] = set()
-        self.escaping_arrays: set[int] = set()
+        self.escaping_address_holders: set[int] = set()
+        self.escaping_decls: set[int] = set()
         self.aggregate_slot_ids: dict[tuple[int, str], int] = {}
 
         self.scopes: list[dict[str, int]] = [{}]
@@ -111,38 +115,79 @@ class EscapeAnalyzer:
 
         self._AGGREGATE_ELEMENTS_SLOT = '[]'  # the one shared slot for a WHOLE
         # aggregate declaration -- an array-/slice-of-slices (used by
-        # indexed_slot_of) or a struct containing a slice-typed field
-        # (used by field_slot_of), at any nesting depth -- regardless of
-        # which specific index or field is involved. The SAME sentinel
-        # serves both, since a given declaration is always either array/
-        # slice-shaped or struct-shaped, never both. Chosen because '['
-        # and ']' can never appear in a Hornet identifier, so this can
-        # never collide with a real field name.
+        # indexed_slot_of) or a struct containing a slice- or pointer-
+        # typed field (used by field_slot_of), at any nesting depth --
+        # regardless of which specific index or field is involved. The
+        # SAME sentinel serves all of these, since a given declaration
+        # is always either array/slice-shaped or struct-shaped, never
+        # both. Chosen because '[' and ']' can never appear in a
+        # Hornet identifier, so this can never collide with a real
+        # field name.
 
     def analyze(self) -> set[int]:
         self.walk_statements(self.fn.body)
 
-        result: set[int] = set(self.escaping_arrays)
+        result: set[int] = set(self.escaping_decls)
         visited: set[int] = set()
-        stack: list[int] = list(self.escaping_slices)
+        stack: list[int] = list(self.escaping_address_holders)
         while stack:
-            slice_id = stack.pop()
-            if slice_id in visited:
+            node_id = stack.pop()
+            if node_id in visited:
                 continue
-            visited.add(slice_id)
-            result |= self.direct_backing.get(slice_id, set())
-            for dep in self.slice_deps.get(slice_id, set()):
+            visited.add(node_id)
+            result |= self.direct_backing.get(node_id, set())
+            for dep in self.slice_deps.get(node_id, set()):
                 if dep not in visited:
                     stack.append(dep)
+
+        # A SCALAR declaration in the result (a plain int/bool/str/...,
+        # never array/struct/sum) means its own address escaped via a
+        # pointer -- `&x` outliving x's own function -- with no way to
+        # make that safe yet: unlike array/struct/sum, a scalar has no
+        # heap-promotion machinery at all (is_heap_allocated's own size
+        # check is unconditionally false for every scalar type, and
+        # nothing in ir/statements.py's own scalar VarDecl construction
+        # ever mallocs one), so silently treating this decl_id like any
+        # other escaping one -- as _ir_address_of's own heap-allocated
+        # branch would -- reads the scalar's own raw VALUE as if it
+        # were a pointer, corrupting it. Rejected outright here instead
+        # (a deliberate, narrower scope decision, not a soundness gap
+        # left open by accident): the composite case above already has
+        # real heap-promotion machinery and is left to actually use it;
+        # only the scalar case, which doesn't have that machinery yet,
+        # is a hard error.
+        for decl_id in result:
+            decl_type = self.decl_types.get(decl_id)
+            if decl_type is not None and decl_type.kind not in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM):
+                name = self.decl_names.get(decl_id, "<unknown>")
+                raise CodegenError(
+                    f"'{name}' (declared {decl_type}) cannot have its address "
+                    f"taken and returned, stored somewhere that outlives this "
+                    f"function, or passed to another function that might do so "
+                    f"-- only a struct, array, or sum-typed local can currently "
+                    f"survive past the function that declared it this way"
+                )
+
         return result
 
     def declare(self, name: str, decl_id: int, decl_type: Type) -> None:
         self.scopes[-1][name] = decl_id
         self.decl_types[decl_id] = decl_type
+        self.decl_names[decl_id] = name
         if decl_type.kind == TypeKind.ARRAY:
             self.array_decls.add(decl_id)
         if decl_type.kind == TypeKind.SLICE:
             self.slice_decls.add(decl_id)
+            self.direct_backing.setdefault(decl_id, set())
+            self.slice_deps.setdefault(decl_id, set())
+        if decl_type.kind == TypeKind.POINTER:
+            # A pointer-typed declaration is ALWAYS a trackable node,
+            # exactly like a slice-typed one -- both are inherently
+            # address-holding values, whether or not this specific
+            # one's own address is ever taken (which would be a
+            # DIFFERENT declaration's own concern -- see contribution's
+            # own ADDRESS_OF case).
+            self.pointer_decls.add(decl_id)
             self.direct_backing.setdefault(decl_id, set())
             self.slice_deps.setdefault(decl_id, set())
 
@@ -169,18 +214,19 @@ class EscapeAnalyzer:
 
     def indexed_slot_of(self, base_expr: Node) -> Optional[int]:
         """Recognizes `base_expr` as something that, indexed ONE more
-        time, produces a slice. Resolves it to whatever ROOT Variable
-        underlies the whole chain (see root_variable_name), returning
-        that root's shared indexed-elements slot id (see slot_node_id).
+        time, produces a slice or a pointer. Resolves it to whatever
+        ROOT Variable underlies the whole chain (see
+        root_variable_name), returning that root's shared indexed-
+        elements slot id (see slot_node_id).
 
         Returns None if base_expr's type isn't an array or slice, if
-        indexing it one more time wouldn't yield a slice, or if the
-        chain doesn't resolve to a bare Variable at its root."""
+        indexing it one more time wouldn't yield a slice or pointer, or
+        if the chain doesn't resolve to a bare Variable at its root."""
         base_type = base_expr.resolved_type
         if base_type is None or base_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE):
             return None
         element_type = base_type.element_type
-        if element_type is None or element_type.kind != TypeKind.SLICE:
+        if element_type is None or element_type.kind not in (TypeKind.SLICE, TypeKind.POINTER):
             return None
         root_name = root_variable_name(base_expr)
         if root_name is None:
@@ -189,13 +235,13 @@ class EscapeAnalyzer:
 
     def field_slot_of(self, field_expr: Field) -> Optional[int]:
         """Recognizes field_expr as a struct field access whose value
-        needs this analysis's tracking: the field is slice-typed, or is
-        an aggregate containing a slice at some depth (see
-        _contains_slice). Resolves to the ROOT Variable underlying the
-        whole access chain (see root_variable_name) and returns that
-        root's shared aggregate-elements slot id (see slot_node_id) --
-        the SAME slot indexed_slot_of gives an array/slice-of-slices
-        declaration.
+        needs this analysis's tracking: the field is slice- or
+        pointer-typed, or is an aggregate containing one at some depth
+        (see _contains_address_holder). Resolves to the ROOT Variable
+        underlying the whole access chain (see root_variable_name) and
+        returns that root's shared aggregate-elements slot id (see
+        slot_node_id) -- the SAME slot indexed_slot_of gives an array/
+        slice-of-slices declaration.
 
         Deliberately ONE combined slot per root declaration, not one
         per distinct field path (`p.a` and `p.b` share it, even though
@@ -208,14 +254,14 @@ class EscapeAnalyzer:
         field into one shared slot is sound (a write into any field
         still makes the WHOLE declaration escape when it needs to),
         just coarser than necessary for two logically-independent
-        slice fields on the same struct.
+        slice or pointer fields on the same struct.
 
         Returns None if field_expr's base isn't struct-typed, the
         struct is unknown, or the field doesn't exist (all three
         already guaranteed impossible by the time semantic analysis
         has passed -- this stays defensive rather than assuming), if
-        the field's type doesn't contain a slice, or if the chain
-        doesn't resolve to a bare Variable at its root."""
+        the field's type doesn't contain a slice or pointer, or if the
+        chain doesn't resolve to a bare Variable at its root."""
         base_type = field_expr.base.resolved_type
         if base_type is None or base_type.kind != TypeKind.STRUCT:
             return None
@@ -223,7 +269,7 @@ class EscapeAnalyzer:
         if struct_info is None or field_expr.name not in struct_info.fields:
             return None
         field_type = struct_info.fields[field_expr.name]
-        if not self._contains_slice(field_type):
+        if not self._contains_address_holder(field_type):
             return None
         root_name = root_variable_name(field_expr)
         if root_name is None:
@@ -232,9 +278,9 @@ class EscapeAnalyzer:
 
     def whole_value_node_of(self, name: str) -> Optional[int]:
         """Resolves `name` to the node id tracking its value, if it's a
-        slice or contains one. Returns None if `name` doesn't resolve
-        to anything, or resolves to a type that isn't a slice and
-        doesn't contain one."""
+        slice or pointer, or contains one. Returns None if `name`
+        doesn't resolve to anything, or resolves to a type that isn't
+        a slice or pointer and doesn't contain one."""
         decl_id = self.resolve(name)
         if decl_id is None:
             return None
@@ -242,49 +288,66 @@ class EscapeAnalyzer:
         if decl_type is not None:
             if decl_type.kind in (TypeKind.ARRAY, TypeKind.SLICE):
                 element_type = decl_type.element_type
-                if element_type is not None and self._contains_slice(element_type):
+                if element_type is not None and self._contains_address_holder(element_type):
                     return self.slot_node_id(decl_id, self._AGGREGATE_ELEMENTS_SLOT)
-            elif decl_type.kind == TypeKind.STRUCT and self._contains_slice(decl_type):
+            elif decl_type.kind == TypeKind.STRUCT and self._contains_address_holder(decl_type):
                 return self.slot_node_id(decl_id, self._AGGREGATE_ELEMENTS_SLOT)
-        if decl_id in self.slice_decls:
+        if decl_id in self.slice_decls or decl_id in self.pointer_decls:
             return decl_id
         return None
 
-    def _contains_slice(self, t: Type) -> bool:
-        """True if `t` is itself a slice, or contains one at ANY depth
-        of further nesting.
+    def _contains_address_holder(self, t: Type) -> bool:
+        """True if `t` is itself a slice or pointer, or contains one at
+        ANY depth of further nesting.
 
         Recursing into a STRUCT's fields is safe from infinite
-        recursion even for a self-referential struct: the SLICE case
-        above is always checked first and returns True immediately
-        without recursing further, so this can never recurse back into
-        the same struct through a slice field. semantic.py's cycle
+        recursion even for a self-referential struct: the SLICE and
+        POINTER cases below are always checked first and return True
+        immediately without recursing FURTHER -- crucially, the
+        POINTER case never recurses into t.element_type (the pointee's
+        own type) at all, which is what makes a genuinely self-
+        referential struct through a pointer field (`type Node struct:
+        int value; *Node next`) safe here: nothing ever looks at what
+        `next` points AT, only that `next` itself is a pointer, so
+        there's no cycle to walk into in the first place.
+
+        For the SLICE case specifically, semantic.py's own cycle
         detection guarantees the only way a struct could reach itself
-        again is through a slice field (a direct or array-embedded
-        self-reference is rejected), so any cycle that could exist here
-        is guaranteed to pass through a slice-typed field first."""
+        THROUGH RECURSION here is through a slice field (a direct or
+        array-embedded self-reference is rejected), so any cycle
+        reachable by actually recursing is guaranteed to pass through
+        a slice-typed field first, stopping immediately there. Pointer
+        fields need no such argument at all, for the reason above --
+        they're never recursed through regardless of what they point
+        at, self-referential or not."""
         if t.kind == TypeKind.SLICE:
             return True
+        if t.kind == TypeKind.POINTER:
+            return True
         if t.kind == TypeKind.ARRAY:
-            return self._contains_slice(t.element_type)
+            return self._contains_address_holder(t.element_type)
         if t.kind == TypeKind.STRUCT:
             struct_info = self.structs.get(t.struct_name)
             if struct_info is None:
                 return False
-            return any(self._contains_slice(field_type) for field_type in struct_info.fields.values())
+            return any(self._contains_address_holder(field_type) for field_type in struct_info.fields.values())
         return False
 
     def contribution(self, value_expr: Node) -> tuple[Optional[int], Optional[int]]:
-        """Returns (array_decl_id, slice_decl_id) -- whichever ONE of
-        the two value_expr's aliasing actually resolves to (never
-        both), or (None, None) if it isn't backed by any of this
-        function's declarations at all (a fresh literal, `none`, an
-        ordinary user-function call's return value, ...). An
-        aggregate's slot id (see AGGREGATES AND SLOTS in
+        """Returns (backing_decl_id, derived_from_decl_id) -- whichever
+        ONE of the two value_expr's aliasing actually resolves to
+        (never both), or (None, None) if it isn't backed by any of
+        this function's declarations at all (a fresh literal, `none`,
+        an ordinary user-function call's return value, ...).
+        backing_decl_id can be ANY type now, not just array -- &x's
+        own target isn't restricted the way a Slice's own base always
+        is, since it can be a scalar, struct, array, or sum-typed x.
+        An aggregate's slot id (see AGGREGATES AND SLOTS in
         analyze_array_escapes) is returned as the second element here
-        exactly like a bare slice Variable's id would be -- callers
-        don't need to know it came from indexing into an aggregate
-        rather than reading a plain slice variable directly."""
+        exactly like a bare slice or pointer Variable's id would be --
+        callers don't need to know it came from indexing into an
+        aggregate rather than reading a plain slice/pointer variable
+        directly."""
         if isinstance(value_expr, Slice):
             # Re-slicing never changes what backs a value, so unwrap
             # any further re-slicing FIRST (`s[0:3][0:2]`) down to
@@ -314,6 +377,18 @@ class EscapeAnalyzer:
                     return base_id, None
                 if base_id in self.slice_decls:
                     return None, base_id
+        elif isinstance(value_expr, Unary) and value_expr.op == UnaryOp.ADDRESS_OF:
+            # &x -- x is guaranteed a bare Variable by semantic.py's
+            # own check_unary restriction (see UnaryOp.ADDRESS_OF's
+            # own docstring there). x's own decl_id becomes this
+            # pointer VALUE's own "backing" declaration -- the
+            # identical role array_decl_id plays for a Slice above,
+            # generalized to any type: x can be scalar, struct, array,
+            # or sum-typed, not just array the way a Slice's own base
+            # always is.
+            base_id = self.resolve(value_expr.operand.name)
+            if base_id is not None:
+                return base_id, None
         elif isinstance(value_expr, Variable):
             node_id = self.whole_value_node_of(value_expr.name)
             if node_id is not None:
@@ -326,10 +401,10 @@ class EscapeAnalyzer:
             if slot_id is not None:
                 return None, slot_id
         elif isinstance(value_expr, Field):
-            # Reading a slice-typed (or slice-containing) field back
-            # out of a declared struct -- `p.values` -- resolves to
-            # that struct's combined aggregate-elements slot,
-            # structurally identical to the Index case above.
+            # Reading a slice- or pointer-typed (or such-containing)
+            # field back out of a declared struct -- `p.values` --
+            # resolves to that struct's combined aggregate-elements
+            # slot, structurally identical to the Index case above.
             slot_id = self.field_slot_of(value_expr)
             if slot_id is not None:
                 return None, slot_id
@@ -349,11 +424,11 @@ class EscapeAnalyzer:
         if isinstance(expr, Call):
             if expr.name not in ('print', 'len', 'append'):
                 for arg in expr.args:
-                    array_id, slice_id = self.contribution(arg)
-                    if array_id is not None:
-                        self.escaping_arrays.add(array_id)
-                    if slice_id is not None:
-                        self.escaping_slices.add(slice_id)
+                    backing_id, derived_from_id = self.contribution(arg)
+                    if backing_id is not None:
+                        self.escaping_decls.add(backing_id)
+                    if derived_from_id is not None:
+                        self.escaping_address_holders.add(derived_from_id)
             for arg in expr.args:
                 self.scan_expr_for_escaping_calls(arg)
         elif isinstance(expr, Binary):
@@ -392,29 +467,29 @@ class EscapeAnalyzer:
                 if stmt.init is not None:
                     target_node = self.whole_value_node_of(stmt.name)
                     if target_node is not None:
-                        array_id, slice_id = self.contribution(stmt.init)
-                        if array_id is not None:
-                            self.direct_backing[target_node].add(array_id)
-                        if slice_id is not None:
-                            self.slice_deps[target_node].add(slice_id)
+                        backing_id, derived_from_id = self.contribution(stmt.init)
+                        if backing_id is not None:
+                            self.direct_backing[target_node].add(backing_id)
+                        if derived_from_id is not None:
+                            self.slice_deps[target_node].add(derived_from_id)
                     self.scan_expr_for_escaping_calls(stmt.init)
             elif isinstance(stmt, Assign):
                 target_node = self.whole_value_node_of(stmt.name)
                 if target_node is not None:
-                    array_id, slice_id = self.contribution(stmt.value)
-                    if array_id is not None:
-                        self.direct_backing[target_node].add(array_id)
-                    if slice_id is not None:
-                        self.slice_deps[target_node].add(slice_id)
+                    backing_id, derived_from_id = self.contribution(stmt.value)
+                    if backing_id is not None:
+                        self.direct_backing[target_node].add(backing_id)
+                    if derived_from_id is not None:
+                        self.slice_deps[target_node].add(derived_from_id)
                 self.scan_expr_for_escaping_calls(stmt.value)
             elif isinstance(stmt, IndexAssign):
                 slot_id = self.indexed_slot_of(stmt.array)
                 if slot_id is not None:
-                    array_id, slice_id = self.contribution(stmt.value)
-                    if array_id is not None:
-                        self.direct_backing[slot_id].add(array_id)
-                    if slice_id is not None:
-                        self.slice_deps[slot_id].add(slice_id)
+                    backing_id, derived_from_id = self.contribution(stmt.value)
+                    if backing_id is not None:
+                        self.direct_backing[slot_id].add(backing_id)
+                    if derived_from_id is not None:
+                        self.slice_deps[slot_id].add(derived_from_id)
                 self.scan_expr_for_escaping_calls(stmt.array)
                 self.scan_expr_for_escaping_calls(stmt.index)
                 self.scan_expr_for_escaping_calls(stmt.value)
@@ -431,20 +506,20 @@ class EscapeAnalyzer:
                 # promote its backing array) rather than by inspection.
                 slot_id = self.field_slot_of(Field(base=stmt.base, name=stmt.name))
                 if slot_id is not None:
-                    array_id, slice_id = self.contribution(stmt.value)
-                    if array_id is not None:
-                        self.direct_backing[slot_id].add(array_id)
-                    if slice_id is not None:
-                        self.slice_deps[slot_id].add(slice_id)
+                    backing_id, derived_from_id = self.contribution(stmt.value)
+                    if backing_id is not None:
+                        self.direct_backing[slot_id].add(backing_id)
+                    if derived_from_id is not None:
+                        self.slice_deps[slot_id].add(derived_from_id)
                 self.scan_expr_for_escaping_calls(stmt.base)
                 self.scan_expr_for_escaping_calls(stmt.value)
             elif isinstance(stmt, Return):
                 if stmt.value is not None:
-                    array_id, slice_id = self.contribution(stmt.value)
-                    if array_id is not None:
-                        self.escaping_arrays.add(array_id)
-                    if slice_id is not None:
-                        self.escaping_slices.add(slice_id)
+                    backing_id, derived_from_id = self.contribution(stmt.value)
+                    if backing_id is not None:
+                        self.escaping_decls.add(backing_id)
+                    if derived_from_id is not None:
+                        self.escaping_address_holders.add(derived_from_id)
                     self.scan_expr_for_escaping_calls(stmt.value)
             elif isinstance(stmt, ExprStmt):
                 self.scan_expr_for_escaping_calls(stmt.expr)
@@ -505,19 +580,22 @@ def analyze_array_escapes(
       1. Walk the function body once (recursing into If/While bodies
          with a scope stack, so shadowed names resolve correctly),
          building:
-           - direct_backing: for each trackable node (a slice-typed
-             declaration, or an aggregate's slot), which array-typed
-             declaration(s) it's ever directly sliced from.
+           - direct_backing: for each trackable node (a slice- or
+             pointer-typed declaration, or an aggregate's slot), which
+             declaration(s) it's ever directly sliced from or taken
+             the address of -- ANY type, for the pointer case (`&x`
+             can target a scalar, struct, array, or sum-typed x, not
+             just an array the way slicing's own base always is).
            - slice_deps: for each trackable node, which OTHER
              trackable node(s) it might be derived from (re-slicing, a
-             slice-to-slice copy, `append`, or reading an aggregate
-             element back out).
-           - escaping_slices / escaping_arrays: nodes directly marked
-             escaping, from a `return` value or a slice/array argument
-             to a user-defined call (found via a full recursive scan
-             of every sub-expression, not just top-level ones --
-             `return foo(bar(s))` still needs `s` checked as bar's
-             argument).
+             slice-to-slice or pointer-to-pointer copy, `append`, or
+             reading an aggregate element back out).
+           - escaping_address_holders / escaping_decls: nodes directly
+             marked escaping, from a `return` value or a slice/pointer/
+             array argument to a user-defined call (found via a full
+             recursive scan of every sub-expression, not just top-
+             level ones -- `return foo(bar(s))` still needs `s`
+             checked as bar's argument).
 
          AGGREGATES AND SLOTS: an "aggregate" is any declaration that
          can hold MULTIPLE independently-accessed values, at least one
@@ -581,13 +659,13 @@ def analyze_array_escapes(
          array_decls (its unrelated existing role, e.g. `rows[0:2]`)
          and, via its slot(s), the slice-tracking structure -- two
          independent roles a single declaration can have.
-      2. Compute the transitive closure from escaping_slices, following
-         slice_deps edges (BFS via an explicit stack, not recursion, so
-         it can't stack-overflow on a pathological chain), unioning in
-         direct_backing at every node reached, plus escaping_arrays
-         found directly. The result is exactly the set of array
-         declarations that need to survive past this function's
-         return.
+      2. Compute the transitive closure from escaping_address_holders,
+         following slice_deps edges (BFS via an explicit stack, not
+         recursion, so it can't stack-overflow on a pathological
+         chain), unioning in direct_backing at every node reached,
+         plus escaping_decls found directly. The result is exactly the
+         set of declarations -- of any type, not just array -- that
+         need to survive past this function's return.
     """
     analyzer = EscapeAnalyzer(fn, param_types, structs, aliases, sum_types)
     return analyzer.analyze()
