@@ -43,7 +43,6 @@ Updates:
 - Change slice's zero type to an empty slice rather than `none`.
 - Disallow untyped array literals from anything except assignment to a typed variable / parameter / return.
 - Reconsider heap allocated literal arrays for `gen_indexable_base_into` (apparently `len([1, 2, 3])` and `[1, 2, 3][0]` work?)
-- Add source location for error messages from semantic analysis.
 - `assert`
 - `in` keyword.
 - `cap` builtin?
