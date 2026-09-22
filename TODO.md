@@ -17,8 +17,10 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
-- Compount assignment to pointer derefernces.
+- Allow pointer to scalar returns.
+- Compound assignment to pointer derefernces.
 - Take address of fields and elements.
+- Read composite value through dereference (`Circle c = *p`).
 - Add sum type matching for non bare variables (function returns, indexes, fields, etc.).
 - is as a general, composable boolean expression — usable with and/or/not, assignable to bool, usable in while conditions or as a function argument. This is the biggest deferred item; it needs real control-flow-sensitive narrowing (what does if shape is Circle and x > 0: narrow? what survives an early return guard?), not just a special if-condition shape.
 - else-branch narrowing — even the "exactly two variants, so else means the other one" case.
