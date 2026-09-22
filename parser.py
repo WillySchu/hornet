@@ -655,11 +655,25 @@ class If(Node):
     and always_returns (which needs to treat a proven-exhaustive match
     with no trailing else as still guaranteeing a return) both check,
     rather than either re-deriving "did this come from a match" from
-    the chain's own shape."""
+    the chain's own shape.
+
+    match_arm_count, set alongside is_match (both only on the
+    outermost If, both None/False everywhere else), is what actually
+    lets analyze_if/always_returns walk the chain safely: bounding the
+    walk to EXACTLY this many else_body[0] steps, rather than walking
+    "as long as else_body looks like a single nested If" -- which
+    sounds equivalent but isn't. An ordinary, hand-written `if NAME is
+    Type:` can legally be the SOLE statement inside a match's own
+    explicit `else:` block, and that inner If is indistinguishable by
+    SHAPE alone from one more synthesized arm (same IsCheck condition
+    shape, same single-statement else_body). Walking by count, fixed
+    at desugaring time, sidesteps that ambiguity entirely instead of
+    trying to detect it by inspection."""
     condition: Node
     then_body: List[Node]
     else_body: Optional[List[Node]] = None
     is_match: bool = False
+    match_arm_count: Optional[int] = None
 
 
 @dataclass
@@ -1368,10 +1382,13 @@ class Parser:
         block if one was written, or None if the match instead relies
         on covering every one of NAME's own sum type's declared
         variants -- checked later, by semantic.py's analyze_if, using
-        the one marker this desugaring leaves behind: is_match=True,
-        set ONLY on the outermost If returned here (see If's own
-        docstring for why exactly one place, not the chain's shape
-        itself, is what marks this).
+        the two markers this desugaring leaves behind, both set ONLY
+        on the outermost If returned here: is_match=True, and match_
+        arm_count=len(arms) (see If's own docstring for why the count
+        is needed too, not just the bool -- an ordinary hand-written
+        `if NAME is Type:` can legally be the sole statement inside
+        this SAME match's own explicit `else:` block, indistinguishable
+        by shape alone from one more synthesized arm).
 
         NAME is restricted to a bare IDENTIFIER, matching IsCheck's own
         restriction in _parse_if_condition above -- a match subject
@@ -1426,6 +1443,7 @@ class Parser:
 
         outermost = chained_body[0]
         outermost.is_match = True
+        outermost.match_arm_count = len(arms)
         return outermost
 
     def parse_var_decl(

@@ -6477,6 +6477,264 @@ class TestNarrowingCodegen:
 
 
 # ---------------------------------------------------------------------------
+# Exhaustive matching (`match NAME: is Type: ... [else: ...]`). Introduces
+# no new AST node -- parse_match desugars entirely into an ordinary
+# nested-If chain, the identical shape an elif chain already has, one
+# IsCheck-conditioned If per arm (see If's own docstring in parser.py).
+# That means narrowing, IR generation, and codegen all already handle
+# a match's own desugared output with zero new code -- the only
+# genuinely new logic is semantic.py's own _check_match_exhaustiveness
+# (duplicate-arm and missing-variant checking) and always_returns' own
+# companion awareness (a proven-exhaustive match with no trailing else
+# still guarantees a return, the same way an if/else where both sides
+# return already does).
+#
+# The one thing that made this harder than "just walk else_body until
+# it runs out": an ordinary, hand-written `if NAME is Type:` can
+# legally be the SOLE statement inside a match's own explicit `else:`
+# block, and is indistinguishable BY SHAPE ALONE from one more
+# synthesized arm (identical IsCheck condition, identical single-
+# statement else_body). Walking a FIXED count (match_arm_count, set
+# once at desugaring time) rather than inferring the chain's own
+# length from shape is what makes this sound -- see test_ambiguous_
+# ordinary_if_inside_explicit_else_is_not_mistaken_for_another_arm
+# below for the case that would otherwise break.
+# ---------------------------------------------------------------------------
+
+class TestExhaustiveMatching:
+
+    _SHAPE_DECLS = (
+        "type Circle struct:\n"
+        "    int radius\n"
+        "\n"
+        "type Square struct:\n"
+        "    int side\n"
+        "\n"
+        "type Shape is Circle | Square\n"
+        "\n"
+    )
+
+    # -- accepted (analyze() must NOT raise) -------------------------------
+
+    def test_exhaustive_two_arm_match(self):
+        ast = _parse(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    match s:\n"
+            "        is Circle:\n"
+            "            return s.radius\n"
+            "        is Square:\n"
+            "            return s.side\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_exhaustive_three_arm_match(self):
+        ast = _parse(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type Triangle struct:\n"
+            "    int base\n"
+            "\n"
+            "type Shape is Circle | Square | Triangle\n"
+            "\n"
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    match s:\n"
+            "        is Circle:\n"
+            "            return s.radius\n"
+            "        is Square:\n"
+            "            return s.side\n"
+            "        is Triangle:\n"
+            "            return s.base\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_explicit_else_covers_the_rest_without_testing_every_variant(self):
+        ast = _parse(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    match s:\n"
+            "        is Circle:\n"
+            "            return s.radius\n"
+            "        else:\n"
+            "            return -1\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_ambiguous_ordinary_if_inside_explicit_else_is_not_mistaken_for_another_arm(self):
+        """The case match_arm_count exists specifically to get right:
+        an ordinary `if s is Square:` as the sole statement inside the
+        match's own explicit else -- must NOT be treated as another
+        arm of the SAME match (which would, among other things, mean
+        exhaustiveness is deemed already satisfied by an arm that was
+        never actually declared as one)."""
+        ast = _parse(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    match s:\n"
+            "        is Circle:\n"
+            "            return s.radius\n"
+            "        else:\n"
+            "            if s is Square:\n"
+            "                return s.side\n"
+            "            return -1\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_exhaustive_match_with_no_else_and_no_trailing_return_satisfies_all_paths_return(self):
+        """The always_returns companion piece: a function whose ENTIRE
+        body is an exhaustive match with no trailing else, and no
+        return statement after the match either, must still satisfy
+        "all paths return" -- exactly the case an ordinary if/elif
+        with no else could never satisfy, since a match's own
+        exhaustiveness has already been verified as a genuine
+        guarantee, not just an assumption."""
+        ast = _parse(
+            self._SHAPE_DECLS +
+            "def int describe(Shape s):\n"
+            "    match s:\n"
+            "        is Circle:\n"
+            "            return s.radius\n"
+            "        is Square:\n"
+            "            return s.side\n"
+        )
+        analyze(ast)  # should not raise
+
+    # -- rejected -------------------------------------------------------
+
+    def test_missing_variant_is_rejected_and_named(self):
+        assert_program_semantic_error(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    match s:\n"
+            "        is Circle:\n"
+            "            return s.radius\n"
+            "    return 0\n",
+            match="missing: Square",
+        )
+
+    def test_missing_multiple_variants_are_all_named(self):
+        assert_program_semantic_error(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type Triangle struct:\n"
+            "    int base\n"
+            "\n"
+            "type Shape is Circle | Square | Triangle\n"
+            "\n"
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    match s:\n"
+            "        is Circle:\n"
+            "            return s.radius\n"
+            "    return 0\n",
+            match="missing: Square, Triangle",
+        )
+
+    def test_duplicate_arm_is_rejected(self):
+        assert_program_semantic_error(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape s = Circle(5)\n"
+            "    match s:\n"
+            "        is Circle:\n"
+            "            return s.radius\n"
+            "        is Circle:\n"
+            "            return 0\n"
+            "        is Square:\n"
+            "            return s.side\n"
+            "    return 0\n",
+            match="'Circle' is tested more than once",
+        )
+
+    def test_one_arm_not_returning_still_fails_all_paths_return(self):
+        assert_program_semantic_error(
+            self._SHAPE_DECLS +
+            "def int describe(Shape s):\n"
+            "    match s:\n"
+            "        is Circle:\n"
+            "            return s.radius\n"
+            "        is Square:\n"
+            "            int x = s.side\n",
+            match="does not return a value on all code paths",
+        )
+
+    def test_ordinary_if_elif_with_no_else_is_still_rejected(self):
+        """Regression check: an ORDINARY if/elif (is_match=False) with
+        no else must still be correctly rejected by always_returns --
+        confirms the new match-aware branch didn't accidentally make
+        this check MORE permissive for non-match code."""
+        assert_program_semantic_error(
+            "def int describe(int x):\n"
+            "    if x > 0:\n"
+            "        return 1\n"
+            "    elif x < 0:\n"
+            "        return -1\n",
+            match="does not return a value on all code paths",
+        )
+
+
+class TestExhaustiveMatchingCodegen:
+
+    _SHAPE_DECLS = (
+        "type Circle struct:\n"
+        "    int radius\n"
+        "\n"
+        "type Square struct:\n"
+        "    int side\n"
+        "\n"
+        "type Shape is Circle | Square\n"
+        "\n"
+    )
+
+    def test_match_narrows_and_reads_the_correct_field_per_arm(self):
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int describe(Shape s):\n"
+            "    match s:\n"
+            "        is Circle:\n"
+            "            return s.radius\n"
+            "        is Square:\n"
+            "            return s.side\n"
+            "\n"
+            "def int main():\n"
+            "    return describe(Square(9))\n",
+            expected=9,
+        )
+
+    def test_match_with_explicit_else_runs_correctly(self):
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int describe(Shape s):\n"
+            "    match s:\n"
+            "        is Circle:\n"
+            "            return s.radius\n"
+            "        else:\n"
+            "            return -1\n"
+            "\n"
+            "def int main():\n"
+            "    return describe(Square(9))\n",
+            expected=256 - 1,
+        )
+
+
+# ---------------------------------------------------------------------------
 # int8/uint8, step 1 of 3: the TYPE SYSTEM only -- lexer/parser keywords,
 # TypeKind/Type additions, literal range-checking, and arithmetic type-
 # checking rules (check_binary/check_unary). Deliberately NOT yet about
@@ -17341,6 +17599,7 @@ class TestASTPrettyPrinting:
             "    then_body=[Return(value=Constant(value=1))],\n"
             "    else_body=None,\n"
             "    is_match=False,\n"
+            "    match_arm_count=None,\n"
             ")"
         )
 

@@ -457,6 +457,20 @@ def always_returns(statements: List[Node]) -> bool:
         if isinstance(stmt, Return):
             return True
         if isinstance(stmt, If):
+            # A match with no explicit trailing else relies entirely
+            # on its own exhaustiveness (already verified by analyze_
+            # if by the time this ever runs -- always_returns is only
+            # ever called after a function's whole body has already
+            # been analyzed) rather than an else at all, so it needs
+            # its own check, walked the SAME match_arm_count-bounded
+            # way _check_match_exhaustiveness itself walks (see If's
+            # own docstring for why "as long as else_body looks like
+            # a nested If" isn't safe here either -- the identical
+            # ambiguity with a hand-written `if NAME is Type:` as an
+            # explicit else's own sole statement applies to this walk
+            # too).
+            if stmt.is_match and _match_always_returns(stmt):
+                return True
             # Only counts with an else where BOTH sides guarantee a
             # return -- an if with no else can always just not run its
             # body.
@@ -473,6 +487,37 @@ def always_returns(statements: List[Node]) -> bool:
         # VarDecl, Assign, Break, Continue, ExprStmt: none of these
         # guarantee a return; move on to the next statement.
     return False
+
+
+def _match_always_returns(stmt: If) -> bool:
+    """Whether a match-desugared If chain (stmt is its outermost node
+    -- see If's own docstring) guarantees a return on every one of its
+    arms, INCLUDING an explicit trailing else if it has one.
+
+    Walks EXACTLY stmt.match_arm_count steps through else_body[0] to
+    find the chain's own last arm -- never "as long as else_body looks
+    like a nested If" -- for the identical reason _check_match_
+    exhaustiveness's own walk needs that same bound: an ordinary,
+    hand-written `if NAME is Type:` can legally be the sole statement
+    inside this SAME match's own explicit `else:` block, and looks
+    exactly like one more synthesized arm by shape alone.
+
+    Only ever called with stmt.is_match already confirmed true, from
+    always_returns' own If case -- and only after analyze_if has
+    already run (always_returns is only ever called once a function's
+    whole body has already been analyzed), so this trusts, rather than
+    re-verifies, that the chain was already proven exhaustive if it
+    has no trailing else at all."""
+    current = stmt
+    for i in range(stmt.match_arm_count):
+        if not always_returns(current.then_body):
+            return False
+        if i < stmt.match_arm_count - 1:
+            current = current.else_body[0]
+    # current is now the LAST arm.
+    if current.else_body is None:
+        return True  # no explicit else -- relies on already-verified exhaustiveness
+    return always_returns(current.else_body)
 
 
 def contains_reachable_break(statements: List[Node]) -> bool:
@@ -1405,6 +1450,9 @@ class SemanticAnalyzer:
                 stmt.condition,
             )
 
+        if stmt.is_match:
+            self._check_match_exhaustiveness(stmt)
+
         self._push_scope()
         # An IsCheck condition narrows its own variable_name to
         # type_name for exactly this then_body -- check_is_check has
@@ -1452,6 +1500,58 @@ class SemanticAnalyzer:
             for s in stmt.else_body:
                 self.analyze_statement(s, return_type)
             self._pop_scope()
+
+    def _check_match_exhaustiveness(self, stmt: If) -> None:
+        """Walks a match-desugared If chain (stmt is its outermost
+        node -- see If's own docstring) checking two things: no
+        variant is tested more than once, and, if the chain has no
+        explicit trailing `else:`, every one of the subject's own sum
+        type's declared variants is covered by some arm.
+
+        Walks EXACTLY stmt.match_arm_count steps through else_body[0]
+        -- never "as long as else_body looks like a single nested If"
+        -- since an ordinary, hand-written `if NAME is Type:` can
+        legally be the sole statement inside this SAME match's own
+        explicit `else:` block, indistinguishable by shape alone from
+        one more synthesized arm (identical IsCheck condition shape,
+        identical single-statement else_body). match_arm_count, fixed
+        at desugaring time, is what makes this walk unambiguous
+        regardless of what the user wrote in their own else block.
+
+        Called from analyze_if AFTER check_expr(stmt.condition) --
+        i.e. check_is_check -- has already confirmed the FIRST arm's
+        own variable_name is a sum-typed variable and its type_name a
+        real variant, so _lookup here is safe to assume succeeds."""
+        subject_name = stmt.condition.variable_name
+        subject_type = self._lookup(subject_name, stmt.condition)
+        sum_type_info = self.sum_types[subject_type.sum_type_name]
+
+        seen: Dict[str, IsCheck] = {}
+        current = stmt
+        for i in range(stmt.match_arm_count):
+            arm_condition = current.condition
+            if arm_condition.type_name in seen:
+                raise SemanticError(
+                    f"'{arm_condition.type_name}' is tested more than once in "
+                    f"this match on '{subject_name}'",
+                    arm_condition,
+                )
+            seen[arm_condition.type_name] = arm_condition
+            if i < stmt.match_arm_count - 1:
+                current = current.else_body[0]
+        # current is now the LAST arm.
+
+        if current.else_body is not None:
+            return  # an explicit trailing else -- exhaustiveness not required
+
+        missing = [v for v in sum_type_info.variants if v not in seen]
+        if missing:
+            raise SemanticError(
+                f"This match on '{subject_name}' (declared {subject_type}) "
+                f"doesn't cover every variant -- missing: {', '.join(missing)} "
+                f"(add an arm for each, or an 'else:' to cover the rest)",
+                stmt,
+            )
 
     def analyze_while(self, stmt: While, return_type: Type) -> None:
         condition_type = self.check_expr(stmt.condition)

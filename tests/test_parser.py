@@ -2935,6 +2935,7 @@ def test_match_desugars_into_a_nested_if_chain():
     ]
     outer = parser.Parser(tokens).parse_match()
     assert outer.is_match is True
+    assert outer.match_arm_count == 2
     assert isinstance(outer.condition, parser.IsCheck)
     assert outer.condition.variable_name == 's'
     assert outer.condition.type_name == 'Circle'
@@ -2943,6 +2944,7 @@ def test_match_desugars_into_a_nested_if_chain():
     inner = outer.else_body[0]
     assert isinstance(inner, parser.If)
     assert inner.is_match is False  # only the OUTERMOST node is marked
+    assert inner.match_arm_count is None
     assert inner.condition.variable_name == 's'
     assert inner.condition.type_name == 'Square'
     assert inner.else_body is None  # no trailing else -- relies on exhaustiveness
