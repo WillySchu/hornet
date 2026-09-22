@@ -29,6 +29,4 @@ def HasArray make_ha():
 
 def int8 main():
     HasArray ha = HasArray([1,2,3,4,5])
-
-    print(ha.values == make_ha().values)
     return 0
