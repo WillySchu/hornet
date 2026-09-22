@@ -6735,6 +6735,280 @@ class TestExhaustiveMatchingCodegen:
 
 
 # ---------------------------------------------------------------------------
+# Pointers, stage 2: semantic analysis only. Go-style pointers -- safe by
+# construction via escape analysis (not yet built; that's stage 3), no
+# borrow checker, uniformly nullable via the existing `none` literal,
+# reusing the SAME "absent" zero value slices already have rather than a
+# separate optional-vs-non-optional split. No new IR/codegen exists yet:
+# every test here is analyze()-level only, exactly like TestSumTypes/
+# TestNarrowing were before their own later stages.
+#
+# `&`/`*` reuse the existing Unary/UnaryOp AST shape (ADDRESS_OF/
+# DEREFERENCE), not new node types -- see UnaryOp's own docstring in
+# parser.py for why, mirroring how NEGATE/COMPLEMENT/NOT already share
+# one shape despite each having its own type-checking rule. `&` is
+# restricted to a bare Variable operand for this first slice (struct
+# fields and array/slice elements are a deliberate, planned widening, not
+# a structural limitation -- see check_unary's own comment).
+#
+# Auto-deref (Go-style: `p.field` works directly on a *Circle, no
+# explicit `(*p).field` needed) is implemented in exactly ONE place for
+# field access -- _check_struct_and_field, shared by check_field (read)
+# and analyze_field_assign (write), so both work identically with zero
+# duplicated logic -- plus a second, deliberately separate copy in
+# _check_method_call for the receiver, since `.` should mean the same
+# thing for a method call as it does for a field access even though the
+# two aren't unified into one shared helper.
+# ---------------------------------------------------------------------------
+
+class TestPointers:
+
+    _CIRCLE = "type Circle struct:\n    int radius\n\n"
+
+    # -- accepted (analyze() must NOT raise) -------------------------------
+
+    def test_basic_pointer_type_resolves(self):
+        ast = _parse(
+            "def int main():\n"
+            "    int x = 5\n"
+            "    *int p = &x\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_address_of_produces_a_pointer_to_the_variables_own_type(self):
+        ast = _parse(
+            self._CIRCLE +
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    *Circle p = &c\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_dereference_reads_the_pointee_type(self):
+        ast = _parse(
+            "def int main():\n"
+            "    int x = 5\n"
+            "    *int p = &x\n"
+            "    int y = *p\n"
+            "    return y\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_auto_deref_field_read(self):
+        ast = _parse(
+            self._CIRCLE +
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    *Circle p = &c\n"
+            "    int r = p.radius\n"
+            "    return r\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_auto_deref_field_write(self):
+        ast = _parse(
+            self._CIRCLE +
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    *Circle p = &c\n"
+            "    p.radius = 9\n"
+            "    return c.radius\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_auto_deref_method_call(self):
+        ast = _parse(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "    def int area(self):\n"
+            "        return self.radius * self.radius\n"
+            "\n"
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    *Circle p = &c\n"
+            "    return p.area()\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_deref_assign_overwrites_the_whole_pointee(self):
+        ast = _parse(
+            self._CIRCLE +
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    *Circle p = &c\n"
+            "    *p = Circle(9)\n"
+            "    return c.radius\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_pointer_is_compatible_with_none(self):
+        ast = _parse(
+            self._CIRCLE +
+            "def int main():\n"
+            "    *Circle p = none\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_same_type_pointers_are_comparable(self):
+        ast = _parse(
+            self._CIRCLE +
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    *Circle p = &c\n"
+            "    *Circle q = &c\n"
+            "    if p == q:\n"
+            "        return 1\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_pointer_comparable_to_none(self):
+        ast = _parse(
+            self._CIRCLE +
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    *Circle p = &c\n"
+            "    if p != none:\n"
+            "        return 1\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_struct_field_can_be_pointer_typed(self):
+        """The linked-structure case pointers exist to solve: a struct
+        pointing at itself through a pointer field is fine, unlike
+        embedding itself directly ever could be -- a pointer is always
+        a fixed 8 bytes regardless of what it points to, so this
+        doesn't reopen _check_struct_contains's own cycle detection at
+        all."""
+        ast = _parse(
+            "type Node struct:\n"
+            "    int value\n"
+            "    *Node next\n"
+            "\n"
+            "def int main():\n"
+            "    Node n = Node(5, none)\n"
+            "    return n.value\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_array_element_can_be_pointer_typed(self):
+        ast = _parse(
+            self._CIRCLE +
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    [3]*Circle arr = [3]*Circle[&c, none, none]\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_slice_element_can_be_pointer_typed(self):
+        ast = _parse(
+            self._CIRCLE +
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    []*Circle s = []*Circle[&c, none]\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    # -- rejected -------------------------------------------------------
+
+    def test_pointer_to_pointer_is_rejected(self):
+        assert_program_semantic_error(
+            "def int main():\n"
+            "    int x = 5\n"
+            "    *int p = &x\n"
+            "    **int pp = &p\n"
+            "    return 0\n",
+            match="Pointer-to-pointer types aren't supported yet",
+        )
+
+    def test_address_of_a_field_is_rejected(self):
+        assert_program_semantic_error(
+            self._CIRCLE +
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    *int p = &c.radius\n"
+            "    return 0\n",
+            match="'&' can only take the address of a bare variable",
+        )
+
+    def test_address_of_an_index_is_rejected(self):
+        assert_program_semantic_error(
+            "def int main():\n"
+            "    [3]int arr = [1, 2, 3]\n"
+            "    *int p = &arr[0]\n"
+            "    return 0\n",
+            match="'&' can only take the address of a bare variable",
+        )
+
+    def test_dereferencing_a_non_pointer_is_rejected(self):
+        assert_program_semantic_error(
+            "def int main():\n"
+            "    int x = 5\n"
+            "    int y = *x\n"
+            "    return y\n",
+            match="'\\*' requires a pointer operand, got int",
+        )
+
+    def test_field_access_on_a_non_pointer_non_struct_is_still_rejected(self):
+        """Regression check: auto-deref only fires for POINTER-to-
+        STRUCT -- an ordinary non-struct, non-pointer base must still
+        be rejected exactly as before."""
+        assert_program_semantic_error(
+            "def int main():\n"
+            "    int x = 5\n"
+            "    int y = x.field\n"
+            "    return y\n",
+            match="Cannot access field 'field' on non-struct type int",
+        )
+
+    def test_deref_assign_to_a_non_pointer_is_rejected(self):
+        assert_program_semantic_error(
+            self._CIRCLE +
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    *c = Circle(9)\n"
+            "    return 0\n",
+            match="Cannot dereference a value of type Circle for assignment",
+        )
+
+    def test_deref_assign_with_an_incompatible_value_is_rejected(self):
+        assert_program_semantic_error(
+            self._CIRCLE +
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    *Circle p = &c\n"
+            "    *p = Square(9)\n"
+            "    return 0\n",
+            match="Cannot assign a value of type Square through a pointer to Circle",
+        )
+
+    def test_bare_pointer_vs_incompatible_type_is_still_rejected(self):
+        """Regression check: only none-vs-pointer is carved out of the
+        equality rejection list -- an ordinary type mismatch through a
+        pointer must still be rejected."""
+        assert_program_semantic_error(
+            self._CIRCLE +
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    *Circle p = &c\n"
+            "    if p == 5:\n"
+            "        return 1\n"
+            "    return 0\n",
+            match="Cannot compare",
+        )
+
+
+# ---------------------------------------------------------------------------
 # int8/uint8, step 1 of 3: the TYPE SYSTEM only -- lexer/parser keywords,
 # TypeKind/Type additions, literal range-checking, and arithmetic type-
 # checking rules (check_binary/check_unary). Deliberately NOT yet about

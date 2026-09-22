@@ -210,6 +210,7 @@ from parser import (
     Cast,
     Constant,
     Continue,
+    DerefAssign,
     ExprStmt,
     Field,
     FieldAssign,
@@ -222,6 +223,7 @@ from parser import (
     NoneLiteral,
     Param,
     Parser,
+    PointerTypeExpr,
     Program,
     Return,
     Slice,
@@ -253,6 +255,7 @@ class TypeKind(Enum):
     SLICE = auto()
     STRUCT = auto()
     SUM = auto()   # see SumTypeInfo's own docstring
+    POINTER = auto()  # see Type's own docstring below
     VOID = auto()  # see Type.VOID's own docstring below -- purely internal
     NONE = auto()  # see Type.NONE's own docstring below -- user-writable
                    # (via the `none` literal), but never as a DECLARED type
@@ -266,9 +269,14 @@ class Type:
     size always None -- a slice's length is a runtime property of the
     VALUE, not its type), a struct (kind=STRUCT, struct_name the
     declared name, element_type/size both None -- field layout lives
-    in the struct registry, not duplicated here), or a sum type
-    (kind=SUM, sum_type_name the declared name -- variant list lives
-    in the sum-type registry, the same split STRUCT already has).
+    in the struct registry, not duplicated here), a sum type (kind=
+    SUM, sum_type_name the declared name -- variant list lives in the
+    sum-type registry, the same split STRUCT already has), or a
+    pointer (kind=POINTER, element_type one level down -- REUSING
+    ARRAY/SLICE's own field, since "the type this points to" is the
+    identical shape as "the type this contains"; no dedicated field of
+    its own, the same way SLICE doesn't get one just because it isn't
+    called "element_type" in its own vocabulary).
 
     Frozen to get structural equality/hashing for free: `Type(ARRAY,
     Type.INT, 3) == Type(ARRAY, Type.INT, 3)` is correctly True for
@@ -281,10 +289,15 @@ class Type:
     sum_type_name) is just one more field this same machinery
     compares, so two structs -- or sum types -- with identical shapes
     but different names are correctly different types, with no field-
-    or variant-by-variant comparison involved.
+    or variant-by-variant comparison involved. A pointer's own equality
+    is structural on its OWN element_type too, which is exactly what
+    makes `*Circle == *Circle` a real, meaningful check (are these
+    pointers even the SAME kind of pointer) distinct from the runtime
+    question check_binary's equality branch answers separately (do
+    these two same-typed pointers hold the same address).
     """
     kind: TypeKind
-    element_type: Optional['Type'] = None  # set when kind == ARRAY or SLICE
+    element_type: Optional['Type'] = None  # set when kind == ARRAY, SLICE, or POINTER
     size: Optional[int] = None             # only set when kind == ARRAY
     struct_name: Optional[str] = None      # only set when kind == STRUCT
     sum_type_name: Optional[str] = None    # only set when kind == SUM
@@ -298,6 +311,8 @@ class Type:
             return self.struct_name
         if self.kind == TypeKind.SUM:
             return self.sum_type_name
+        if self.kind == TypeKind.POINTER:
+            return f"*{self.element_type}"
         return self.kind.name.lower()
 
 
@@ -381,10 +396,10 @@ def type_from_name(
     """Converts a parsed type expression (VarDecl.var_type/Function.
     return_type/Param.type/StructField.field_type) into a Type.
     `type_expr` is a plain str (scalar, struct name, sum-type name, or
-    alias name), an ArrayTypeExpr, or a SliceTypeExpr (see their own
-    docstrings in parser.py) -- handled by recursing on element_type,
-    bottoming out at a scalar/struct/sum-type/alias name with no depth
-    limit.
+    alias name), an ArrayTypeExpr, a SliceTypeExpr, or a
+    PointerTypeExpr (see their own docstrings in parser.py) -- handled
+    by recursing on element_type/pointee_type, bottoming out at a
+    scalar/struct/sum-type/alias name with no depth limit.
 
     `structs` and `aliases` are both required parameters, not defaulted
     to empty dicts, so a call site that forgets to pass one fails
@@ -434,6 +449,25 @@ def type_from_name(
     if isinstance(type_expr, SliceTypeExpr):
         element = type_from_name(type_expr.element_type, structs, aliases, node, sum_types)
         return Type(TypeKind.SLICE, element_type=element)
+    if isinstance(type_expr, PointerTypeExpr):
+        # Pointer-to-pointer (`**int`) parses fine -- PointerTypeExpr
+        # itself places no restriction on nesting (see its own
+        # docstring in parser.py) -- but is rejected HERE, for now:
+        # the easier of the two ways to disallow it, given genuine
+        # pointer-to-pointer support is planned for later, once this
+        # first slice of pointer support is proven out. No struct/
+        # array-field cycle concern the way a sum-typed field has --
+        # a pointer is always a fixed 8 bytes regardless of what it
+        # points to -- this restriction is purely "not yet", not "not
+        # safe".
+        pointee = type_from_name(type_expr.pointee_type, structs, aliases, node, sum_types)
+        if pointee.kind == TypeKind.POINTER:
+            raise SemanticError(
+                "Pointer-to-pointer types aren't supported yet -- "
+                "planned for later, once single-level pointers are proven out",
+                node,
+            )
+        return Type(TypeKind.POINTER, element_type=pointee)
     if type_expr in _TYPE_NAMES:
         return _TYPE_NAMES[type_expr]
     if type_expr in aliases:
@@ -1093,6 +1127,8 @@ class SemanticAnalyzer:
             self.analyze_index_assign(stmt)
         elif isinstance(stmt, FieldAssign):
             self.analyze_field_assign(stmt)
+        elif isinstance(stmt, DerefAssign):
+            self.analyze_deref_assign(stmt)
         elif isinstance(stmt, Return):
             self.analyze_return(stmt, return_type)
         elif isinstance(stmt, If):
@@ -1110,12 +1146,13 @@ class SemanticAnalyzer:
 
     def _types_compatible(self, value_type: Type, target_type: Type) -> bool:
         """True if a value of `value_type` can be used where
-        `target_type` is expected -- ordinary equality, or one of two
-        exceptions this language allows: Type.NONE is compatible with
-        ANY slice type (its zero/nil value), and a struct is compatible
-        with a sum type that lists it as one of its own variants (the
-        one and only way a sum-typed value ever gets its value at all,
-        there being no separate variant-constructor syntax -- see
+        `target_type` is expected -- ordinary equality, or one of
+        three exceptions this language allows: Type.NONE is compatible
+        with ANY slice type OR any pointer type (both share the same
+        "absent" zero/nil value), and a struct is compatible with a
+        sum type that lists it as one of its own variants (the one and
+        only way a sum-typed value ever gets its value at all, there
+        being no separate variant-constructor syntax -- see
         SumTypeDef's own docstring). Deliberately narrow otherwise --
         not int/bool/str/array, even though str is also a pointer
         under the hood, and NOT sum-type-to-sum-type even when their
@@ -1131,7 +1168,7 @@ class SemanticAnalyzer:
         check_binary."""
         if value_type == target_type:
             return True
-        if value_type == Type.NONE and target_type.kind == TypeKind.SLICE:
+        if value_type == Type.NONE and target_type.kind in (TypeKind.SLICE, TypeKind.POINTER):
             return True
         if value_type.kind == TypeKind.STRUCT and target_type.kind == TypeKind.SUM:
             return value_type.struct_name in self.sum_types[target_type.sum_type_name].variants
@@ -1345,6 +1382,28 @@ class SemanticAnalyzer:
             raise SemanticError(
                 f"Cannot assign a value of type {value_type} to field "
                 f"'{stmt.name}' of type {field_type}",
+                stmt,
+            )
+
+    def analyze_deref_assign(self, stmt: DerefAssign) -> None:
+        """`*pointer = value` -- writes through a pointer, mirroring
+        analyze_field_assign/analyze_index_assign one level over: check
+        `pointer` is pointer-typed, then that `value` is compatible
+        with its element_type (the pointee's own type, what actually
+        gets overwritten)."""
+        pointer_type = self.check_expr(stmt.pointer)
+        if pointer_type.kind != TypeKind.POINTER:
+            raise SemanticError(
+                f"Cannot dereference a value of type {pointer_type} for "
+                f"assignment -- '*' requires a pointer operand",
+                stmt.pointer,
+            )
+        pointee_type = pointer_type.element_type
+        value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, pointee_type)
+        if not self._types_compatible(value_type, pointee_type):
+            raise SemanticError(
+                f"Cannot assign a value of type {value_type} through a "
+                f"pointer to {pointee_type}",
                 stmt,
             )
 
@@ -1722,8 +1781,21 @@ class SemanticAnalyzer:
         index one level over: check base_expr is struct-typed, look up
         field_name in its registered field list, and return the
         field's type -- or raise a clear error for whichever went
-        wrong."""
+        wrong.
+
+        A POINTER-to-struct base auto-dereferences here too, Go-style:
+        `p.field` (and `p.field = value`, through this SAME shared
+        helper) works directly whether `p` is a Circle or a *Circle,
+        with no explicit `(*p).field` needed. This is the ONE place
+        that decision needs making -- both callers, and every method-
+        call receiver too (see check_method_call's own, separate
+        auto-deref, mirroring this one for the identical reason: `.`
+        should mean the same thing whether it's a field or a method),
+        go through code that ultimately resolves a struct-typed base
+        this same way."""
         base_type = self.check_expr(base_expr)
+        if base_type.kind == TypeKind.POINTER and base_type.element_type.kind == TypeKind.STRUCT:
+            base_type = base_type.element_type
         if base_type.kind != TypeKind.STRUCT:
             raise SemanticError(
                 f"Cannot access field '{field_name}' on non-struct type {base_type}",
@@ -1859,6 +1931,12 @@ class SemanticAnalyzer:
         receiver is never counted, since it's never in the written
         argument list."""
         receiver_type = self.check_expr(expr.receiver)
+        if receiver_type.kind == TypeKind.POINTER and receiver_type.element_type.kind == TypeKind.STRUCT:
+            # Go-style auto-deref, mirroring _check_struct_and_field's
+            # own identical decision for field access -- `.` means the
+            # same thing here whether the receiver is a Circle or a
+            # *Circle.
+            receiver_type = receiver_type.element_type
         if receiver_type.kind != TypeKind.STRUCT:
             raise SemanticError(
                 f"Cannot call method '{expr.name}' on a value of type "
@@ -2144,6 +2222,32 @@ class SemanticAnalyzer:
                     expr,
                 )
             return Type.BOOL
+        if expr.op == UnaryOp.ADDRESS_OF:
+            # Restricted to a bare Variable for this first slice of
+            # pointer support -- see PointerTypeExpr's own docstring
+            # for the "widen later" framing this restriction shares
+            # with pointer-to-pointer's own. `&s.field`/`&arr[i]` are
+            # the natural next step (escape analysis already has a
+            # "slot" concept for aggregate members, from slices), not
+            # ruled out for a structural reason the way, say, `&(x +
+            # 1)` (no variable, nothing to take the address OF) would
+            # be -- just not built yet.
+            if not isinstance(expr.operand, Variable):
+                raise SemanticError(
+                    f"'&' can only take the address of a bare variable "
+                    f"for now, not {type(expr.operand).__name__} -- "
+                    f"struct fields and array/slice elements are planned, "
+                    f"not yet supported",
+                    expr,
+                )
+            return Type(TypeKind.POINTER, element_type=operand_type)
+        if expr.op == UnaryOp.DEREFERENCE:
+            if operand_type.kind != TypeKind.POINTER:
+                raise SemanticError(
+                    f"'*' requires a pointer operand, got {operand_type}",
+                    expr,
+                )
+            return operand_type.element_type
         raise SemanticError(f"No semantic rule for unary operator: {expr.op}", expr)
 
     def check_cast(self, expr: Cast) -> Type:
@@ -2204,7 +2308,7 @@ class SemanticAnalyzer:
             return all(self._is_comparable_type(field_type) for field_type in struct_info.fields.values())
         if t.kind == TypeKind.SLICE:
             return False
-        return True  # INT, BOOL, STR
+        return True  # INT, BOOL, STR, POINTER
 
     def check_binary(self, expr: Binary) -> Type:
         left_type = self.check_expr(expr.left)
@@ -2240,14 +2344,18 @@ class SemanticAnalyzer:
             return Type.BOOL
 
         if op in _EQUALITY_OPS:
-            # A slice compared to `none` (either order) is checked
-            # first, since it's meaningful and allowed -- one of three
-            # exceptions to the slice/void/none rejection below.
-            none_vs_slice = (
-                (left_type == Type.NONE and right_type.kind == TypeKind.SLICE) or
-                (right_type == Type.NONE and left_type.kind == TypeKind.SLICE)
+            # A slice OR a pointer compared to `none` (either order)
+            # is checked first, since it's meaningful and allowed --
+            # both share the same "absent" zero/nil value, and this is
+            # the one place equality doesn't have a fixed "target"
+            # side the way _types_compatible's other callers do, so
+            # its own none-vs-slice/pointer carve-out is checked
+            # directly here rather than through that shared helper.
+            none_vs_nilable = (
+                (left_type == Type.NONE and right_type.kind in (TypeKind.SLICE, TypeKind.POINTER)) or
+                (right_type == Type.NONE and left_type.kind in (TypeKind.SLICE, TypeKind.POINTER))
             )
-            if none_vs_slice:
+            if none_vs_nilable:
                 return Type.BOOL
 
             # ARRAY vs ARRAY: valid when both sides are the exact same
@@ -2328,7 +2436,7 @@ class SemanticAnalyzer:
                 raise SemanticError(
                     f"'{op.symbol()}' does not support slice, void, sum "
                     f"type, or none operands, except comparing a slice "
-                    f"to none",
+                    f"or pointer to none",
                     expr,
                 )
             if left_type != right_type:

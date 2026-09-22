@@ -1824,13 +1824,17 @@ class Parser:
 
         IDENTIFIER was added to both checks once struct literals
         existed -- before that, a struct name here could only mean an
-        ordinary VarDecl's type, with nothing to disambiguate."""
+        ordinary VarDecl's type, with nothing to disambiguate. STAR
+        was added once pointer types existed, for the identical
+        reason -- `[3]*Circle[...]` needs `*Circle` recognized as a
+        type-starting token following the size bracket, the same way
+        a scalar keyword or struct name already is."""
         if not self.check(TokenType.OPEN_BRACKET):
             return False
         if self.peek(1).type == TokenType.CLOSE_BRACKET:
-            return self.peek(2).type in (TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR, TokenType.IDENTIFIER, TokenType.OPEN_BRACKET)
+            return self.peek(2).type in (TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR, TokenType.IDENTIFIER, TokenType.OPEN_BRACKET, TokenType.STAR)
         if self.peek(1).type == TokenType.NUMBER and self.peek(2).type == TokenType.CLOSE_BRACKET:
-            return self.peek(3).type in (TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR, TokenType.IDENTIFIER, TokenType.OPEN_BRACKET)
+            return self.peek(3).type in (TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR, TokenType.IDENTIFIER, TokenType.OPEN_BRACKET, TokenType.STAR)
         return False
 
     def _parse_bracketed_literal(self, parsed_type: Union[str, 'ArrayTypeExpr', 'SliceTypeExpr']) -> Node:
