@@ -17,6 +17,7 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
+- Add a case for Call nodes in escape analysis.
 - Allow pointer to scalar returns.
 - Compound assignment to pointer derefernces.
 - Take address of fields and elements.
