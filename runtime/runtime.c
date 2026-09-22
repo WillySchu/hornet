@@ -323,6 +323,24 @@ static void hornet_stringify(
             hornet_stringify(payload_addr, variant_desc, 1, buf);
             break;
         }
+        case HORNET_TYPEDESC_POINTER: {
+            // Prints the raw address itself, Go-style (0xc0000...),
+            // never the pointee's own value -- see _get_or_build_type_
+            // descriptor's own POINTER case in ir/strings.py for why
+            // there's no recursion here at all, unlike every other
+            // composite case above: quote_strings is irrelevant, and
+            // the descriptor carries no pointee-type field to recurse
+            // through even if it wanted to. value_addr holds the
+            // address of the pointer VALUE (an 8-byte address itself),
+            // exactly the same "value_addr points at a pointer, not
+            // the pointee's own bytes" shape HORNET_TYPEDESC_STR's own
+            // case above already has -- read_ptr, not a dereference.
+            void *value = read_ptr(value_addr);
+            char digits[20];
+            int n = snprintf(digits, sizeof(digits), "0x%llx", (unsigned long long)(uintptr_t)value);
+            hornet_buf_append_bytes(buf, digits, n);
+            break;
+        }
         default:
             // Unreachable for any type this compiler ever hands
             // here -- matches build_stringify_function's own

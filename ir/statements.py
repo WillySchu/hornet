@@ -27,6 +27,7 @@ from parser import (
     Break,
     Call,
     Continue,
+    DerefAssign,
     ExprStmt,
     Field,
     FieldAssign,
@@ -275,7 +276,17 @@ class StatementsMixin:
             # shape is confirmed to apply, and binding twice would
             # just orphan a Temp id, harmlessly but pointlessly.
             var_type = type_from_name(stmt.var_type, self.ir_program.struct_registry, self.ir_program.type_alias_registry, sum_types=self.ir_program.sum_type_registry)
-            if not isinstance(stmt.init, NoneLiteral) and var_type.kind not in COMPOSITE_KINDS:
+            if var_type.kind not in COMPOSITE_KINDS:
+                # A `none` init reaches here too now -- for a POINTER
+                # target specifically (`*int q = none`): var_type.kind
+                # not in COMPOSITE_KINDS already excludes the only
+                # OTHER target `none` is ever valid for (SLICE, which
+                # IS a composite kind, handled by its own dedicated
+                # case below), so there's no longer a separate
+                # NoneLiteral exclusion needed here at all -- gen_expr_
+                # ir's own NoneLiteral case (ir/dispatch.py) already
+                # produces the right IRConst(0, INT64) for it, exactly
+                # like any other scalar initializer.
                 self._bind_local(stmt, ir_fn)
                 if stmt.init is not None:
                     ir, value = self.gen_expr_ir(stmt.init)
@@ -513,10 +524,10 @@ class StatementsMixin:
             # scalar variable -- `var_type` here is necessarily
             # already scalar in any well-typed program whenever it
             # isn't ARRAY/SLICE/STRUCT (none of those, including
-            # NoneLiteral flowing into a slice target, can reach a
-            # non-composite variable at all), so no separate NoneLiteral
-            # check is needed the way VarDecl's own case above needs
-            # one.
+            # NoneLiteral flowing into a slice OR pointer target, can
+            # reach a non-composite variable at all), so no separate
+            # NoneLiteral check is needed here, the same reason
+            # VarDecl's own case above no longer needs one either.
             var_type = self._local_type(stmt.name)
             if var_type.kind not in COMPOSITE_KINDS:
                 ir, value = self.gen_expr_ir(stmt.value)
@@ -790,6 +801,8 @@ class StatementsMixin:
                 write_ir = writer(dst_address, stmt.value, field_type)
                 if write_ir is not None:
                     return dst_ir + write_ir
+        elif isinstance(stmt, DerefAssign):
+            return self._ir_deref_assign(stmt)
         elif isinstance(stmt, Break):
             return self._ir_break()
         elif isinstance(stmt, Continue):

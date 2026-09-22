@@ -215,7 +215,7 @@ class CodeGenerator(
         self._bounds_check_fail_labels = {}
         self._slot_offsets = {}
         ir = ir_fn.body
-        self._register_assignment = allocate_registers(ir)
+        self._register_assignment = allocate_registers(ir, self.ir_program.ids._temp_offsets)
         instructions = []
         # A fresh InstructionSelector per function: _temp_mem's own
         # call to _new_slot needs ir_fn to write onto, and constructing

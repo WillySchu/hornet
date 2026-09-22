@@ -79,7 +79,7 @@ from ir.ir import (
     IRValue,
     Temp,
 )
-from ir.utils import type_byte_width
+from ir.utils import is_wide_type, type_byte_width
 from codegen.utils import as_qword_register, ARG_REGISTERS_32, ARG_REGISTERS_64
 from semantic import Type
 
@@ -145,40 +145,36 @@ class InstructionSelector:
         gen_function), the value is already sitting there, not in
         memory -- this is just a register-to-register move (or, if it
         already happens to BE `dst`, no instruction at all). Otherwise,
-        falls back to reading its memory slot: str needs its own case
-        (a full 8-byte pointer read via MovQ) since host._gen_read_
-        scalar_into (ScalarsLoweringMixin) only special-cases int8/uint8/int64,
-        falling through to a plain 4-byte Mov for everything else --
-        which would truncate a pointer. Every existing caller of that
-        method already special-cases str itself first; this is one
-        more such caller, not a gap in it."""
+        falls back to reading its memory slot via host._gen_read_
+        scalar_into (ScalarsLoweringMixin), which already handles str/
+        int64/pointer's own wide (8-byte) storage correctly on its own
+        (is_wide_type, ir/utils.py) -- no separate str case needed
+        here anymore."""
         reg_name = self.host._register_assignment.get(temp.id)
         if reg_name is not None:
             src = Register(reg_name)
-            wide = temp.type in (Type.INT64, Type.STR)
+            wide = is_wide_type(temp.type)
             if wide:
                 src, dst = as_qword_register(src), as_qword_register(dst)
             if src == dst:
                 return []
             return [MovQ(src=src, dst=dst)] if wide else [Mov(src=src, dst=dst)]
-        if temp.type == Type.STR:
-            return [MovQ(src=self._temp_mem(temp), dst=as_qword_register(dst))]
         return self.host._gen_read_scalar_into(self._temp_mem(temp), temp.type, dst)
 
     def _gen_write_temp_from(self, src: Register, temp: Temp) -> list[Instruction]:
         """The write-side counterpart to _gen_read_temp_into -- same
-        register-assignment check, same str special case."""
+        register-assignment check, same reliance on host._gen_write_
+        scalar_from's own wide-type handling for the memory-spill
+        fallback."""
         reg_name = self.host._register_assignment.get(temp.id)
         if reg_name is not None:
             dst = Register(reg_name)
-            wide = temp.type in (Type.INT64, Type.STR)
+            wide = is_wide_type(temp.type)
             if wide:
                 src, dst = as_qword_register(src), as_qword_register(dst)
             if src == dst:
                 return []
             return [MovQ(src=src, dst=dst)] if wide else [Mov(src=src, dst=dst)]
-        if temp.type == Type.STR:
-            return [MovQ(src=as_qword_register(src), dst=self._temp_mem(temp))]
         return self.host._gen_write_scalar_from(src, temp.type, self._temp_mem(temp))
 
     def lower_ir(self, instructions: list) -> list[Instruction]:
@@ -244,7 +240,7 @@ class InstructionSelector:
                 # the value already arrived correctly represented for
                 # dst's own type, the same invariant every OTHER
                 # Temp-to-Temp copy in this compiler already relies on.
-                wide = instr.dst.type in (Type.INT64, Type.STR)
+                wide = is_wide_type(instr.dst.type)
                 src = Register((ARG_REGISTERS_64 if wide else ARG_REGISTERS_32)[instr.index])
                 out.append(MovQ(src=src, dst=Register('rax')) if wide else Mov(src=src, dst=Register('eax')))
                 out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))

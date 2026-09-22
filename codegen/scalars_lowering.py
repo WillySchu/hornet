@@ -53,6 +53,7 @@ from codegen.assembly_ast import (
 )
 from codegen.errors import CodegenError
 from codegen.utils import as_qword_register, COMPARISON_CONDITION_CODES, as_byte_register
+from ir.utils import is_wide_type
 from parser import BinaryOp, UnaryOp
 from semantic import Type
 
@@ -75,7 +76,7 @@ class ScalarsLoweringMixin:
         dst's 32-bit view even when the comparison itself (Cmp vs
         CmpQ) operated on the 64-bit one, since a bool is never wider
         than 4 bytes no matter how wide the compared values were."""
-        is_64bit = operand_type == Type.INT64
+        is_64bit = is_wide_type(operand_type)
         if is_64bit and op not in COMPARISON_CONDITION_CODES:
             src64 = as_qword_register(src)
             dst64 = as_qword_register(dst)
@@ -258,10 +259,10 @@ class ScalarsLoweringMixin:
 
     def _gen_read_scalar_into(self, mem: Memory, t: Type, dst: Register) -> list[Instruction]:
         """Reads a scalar value of type `t` (int, int8, uint8, int64,
-        or bool) from `mem` into `dst` -- the one choke point every
-        scalar READ site in this file goes through, so int8/uint8's
-        narrow (1-byte) storage and int64's wide (8-byte) storage only
-        ever needed handling in ONE place.
+        bool, or pointer) from `mem` into `dst` -- the one choke point
+        every scalar READ site in this file goes through, so int8/
+        uint8's narrow (1-byte) storage and int64/pointer's wide
+        (8-byte) storage only ever needed handling in ONE place.
 
         int8 needs a SIGN-extending read (MovSX) and uint8 a ZERO-
         extending one (MovZX) rather than an ordinary 4-byte Mov,
@@ -269,19 +270,21 @@ class ScalarsLoweringMixin:
         misinterpret a negative value as large and positive (int8(-1)
         == 0xFF read as a raw 4-byte int would become 255, not -1).
 
-        int64 needs a full 8-byte read (MovQ) into `dst`'s 64-bit VIEW
-        (as_qword_register(dst)) -- `dst` itself is always passed as a
-        32-bit-named register by every caller, with this method
-        deciding which actual view to read into. An ordinary 4-byte
-        Mov here would silently drop int64's high 32 bits entirely,
-        not just read a stale value.
+        int64/pointer (is_wide_type, ir/utils.py) need a full 8-byte
+        read (MovQ) into `dst`'s 64-bit VIEW (as_qword_register(dst))
+        -- `dst` itself is always passed as a 32-bit-named register by
+        every caller, with this method deciding which actual view to
+        read into. An ordinary 4-byte Mov here would silently drop
+        int64's high 32 bits, or -- worse, for a pointer -- corrupt
+        the address into something unrelated rather than merely lose
+        numeric precision.
 
         int and bool are untouched -- an ordinary 4-byte Mov."""
         if t == Type.INT8:
             return [MovSX(src=mem, dst=dst)]
         if t == Type.UINT8:
             return [MovZX(src=mem, dst=dst)]
-        if t == Type.INT64:
+        if is_wide_type(t):
             return [MovQ(src=mem, dst=as_qword_register(dst))]
         return [Mov(src=mem, dst=dst)]
 
@@ -290,26 +293,28 @@ class ScalarsLoweringMixin:
         `src`, into `dst_mem` -- the WRITE-side counterpart to
         _gen_read_scalar_into: every scalar WRITE site in this file
         goes through this, rather than each one separately remembering
-        that int8/uint8 need a narrower store or int64 a wider one.
+        that int8/uint8 need a narrower store or int64/pointer a wider
+        one.
 
         int8/uint8 need a 1-byte, TRUNCATING store (MovB, of src's low-
         byte alias) rather than an ordinary 4-byte Mov, which would
         clobber adjacent memory (an adjacent struct field, the next
         array element, ...).
 
-        int64 needs a full 8-byte store (MovQ, of src's 64-bit VIEW) --
-        CALLERS are responsible for having already computed the value
-        into that same 64-bit view before reaching this method (every
-        real-IR case that can produce an int64 result already does
-        this, via the appropriate 64-bit register view), not just
-        src's low 32 bits: an ordinary 4-byte Mov here would
-        write only the low half, and reading src's 64-bit view when
-        only the low 32 bits were computed would write whatever stale
-        garbage occupied the register's high bits.
+        int64/pointer (is_wide_type, ir/utils.py) need a full 8-byte
+        store (MovQ, of src's 64-bit VIEW) -- CALLERS are responsible
+        for having already computed the value into that same 64-bit
+        view before reaching this method (every real-IR case that can
+        produce an int64 or pointer result already does this, via the
+        appropriate 64-bit register view), not just src's low 32 bits:
+        an ordinary 4-byte Mov here would write only the low half, and
+        reading src's 64-bit view when only the low 32 bits were
+        computed would write whatever stale garbage occupied the
+        register's high bits.
 
         int and bool are untouched -- an ordinary 4-byte Mov."""
         if t == Type.INT8 or t == Type.UINT8:
             return [MovB(src=as_byte_register(src), dst=dst_mem)]
-        if t == Type.INT64:
+        if is_wide_type(t):
             return [MovQ(src=as_qword_register(src), dst=dst_mem)]
         return [Mov(src=src, dst=dst_mem)]

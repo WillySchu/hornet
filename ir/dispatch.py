@@ -24,8 +24,10 @@ from parser import (
     Index,
     IsCheck,
     Node,
+    NoneLiteral,
     StringLiteral,
     Unary,
+    UnaryOp,
     Variable,
 )
 from semantic import Type, TypeKind
@@ -40,10 +42,15 @@ class DispatchMixin:
         len(x)/print(x) call (their own dedicated entry points, not
         routed through _ir_call -- neither is an ordinary function
         call), an ordinary scalar-or-void-returning Call (via _ir_
-        call), Unary, Cast, and IsCheck (via _ir_is_check, ir/sum_
-        types.py -- a sum type's own runtime discriminant test, never
-        a general expression; see IsCheck's own docstring in parser.
-        py) -- and raises IRError for everything else.
+        call), Unary, Cast, IsCheck (via _ir_is_check, ir/sum_types.py
+        -- a sum type's own runtime discriminant test, never a general
+        expression; see IsCheck's own docstring in parser.py), and
+        ADDRESS_OF/DEREFERENCE (via _ir_address_of/_ir_dereference,
+        ir/pointers.py -- checked ahead of the generic Unary case just
+        below, since neither shape fits it: ADDRESS_OF never evaluates
+        its own operand as a value at all, and DEREFERENCE needs an
+        IRLoad, not an IRUnOp) -- and raises IRError for everything
+        else.
 
         An ArrayLiteral, Slice, NoneLiteral, or a composite-returning
         Call used as a bare statement is routed around this method
@@ -113,6 +120,10 @@ class DispatchMixin:
                 return result
         if isinstance(expr, Call) and expr.name not in ('print', 'len') and type_of(expr).kind not in COMPOSITE_KINDS:
             return self._ir_call(expr)
+        if isinstance(expr, Unary) and expr.op == UnaryOp.ADDRESS_OF:
+            return self._ir_address_of(expr)
+        if isinstance(expr, Unary) and expr.op == UnaryOp.DEREFERENCE:
+            return self._ir_dereference(expr)
         if isinstance(expr, Unary):
             # Recursing into expr.operand FIRST is what makes a
             # chained operator (`~-2`) compose correctly.
@@ -125,6 +136,27 @@ class DispatchMixin:
             return src_ir + [IRCast(dst=t, src=src_value)], t
         if isinstance(expr, IsCheck):
             return self._ir_is_check(expr)
+        if isinstance(expr, NoneLiteral):
+            # A pointer's own "null" is just the address 0 -- no
+            # descriptor to build the way a nil SLICE needs (ptr, len,
+            # cap all zero, via _ir_nil_slice), so no dedicated
+            # special-casing is needed the many places a slice-typed
+            # target's own `none` gets intercepted earlier (VarDecl/
+            # Assign/IndexAssign/FieldAssign/Return/argument-passing,
+            # all gated on TypeKind.SLICE specifically, in ir/
+            # statements.py and ir/arrays_slices.py) -- those never
+            # reach gen_expr_ir with a NoneLiteral at all. This is
+            # purely the FALLBACK for contexts with no such
+            # interception: a pointer-typed VarDecl/Assign initializer
+            # (an ordinary scalar target, evaluated via gen_expr_ir
+            # like any other), and pointer-vs-none equality (_ir_
+            # binary's own generic case, once neither operand is
+            # SLICE/ARRAY/STRUCT-kind -- see _ir_expr_binary's own
+            # dispatch), where the ordinary IRBinOp(EQUAL, ...) this
+            # produces already works correctly once BOTH operands are
+            # real IRValues, with no pointer-specific comparison logic
+            # needed at all.
+            return [], IRConst(0, Type.INT64)
         raise IRError(
             f"No real-IR case for expression of type {type(expr).__name__}: {expr!r}"
         )

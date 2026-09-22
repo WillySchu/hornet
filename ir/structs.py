@@ -76,9 +76,52 @@ class StructsMixin:
         ever runs. Every node that COULD be narrowed is an actual,
         parsed source reference, which always has a real resolved_type
         from check_expr."""
+        if isinstance(expr, (Field, Index)) and expr.resolved_type is not None and expr.resolved_type.kind == TypeKind.POINTER:
+            # Auto-deref, one level over from the Variable case just
+            # below: `b.next.value`, where `b.next` (a POINTER-typed
+            # field access, not a bare name) needs ITS OWN value (the
+            # address it holds), not b.next's own ADDRESS (where the
+            # pointer's 8 bytes live within b's own layout) -- the
+            # identical principle, just reached through a Field or
+            # Index base instead of a Variable one.
+            #
+            # Read directly off expr.resolved_type, not through type_
+            # of -- exactly the same reasoning as the Variable case's
+            # own comment below, just for Field/Index instead of
+            # Variable: a SYNTHESIZED Field/Index node (e.g. dst_expr
+            # = Field(base=stmt.base, name=stmt.name), built fresh in
+            # gen_statement_ir's own FieldAssign/IndexAssign handling
+            # as a COPY DESTINATION, reusing this same address-
+            # computation machinery) never goes through semantic
+            # analysis and so never has a resolved_type at all. That's
+            # fine here: such a node is always constructed specifically
+            # because its own field_type/element_type is ALREADY known
+            # to be a composite kind (ARRAY/STRUCT/SLICE -- see
+            # COMPOSITE_KINDS checks at each such call site), never
+            # POINTER, so treating a missing resolved_type as "not
+            # pointer, don't auto-deref" is correct here, not just a
+            # safe approximation.
+            return self.gen_expr_ir(expr)
         if isinstance(expr, Variable):
+            var_type = self._local_type(expr.name)
+            if var_type.kind == TypeKind.POINTER:
+                # Auto-deref: p.field (p: *Circle) needs p's OWN
+                # value (the address it holds), not p's own SLOT's
+                # address (which would give the address of the
+                # pointer VARIABLE itself, not what it points at). An
+                # ordinary scalar read, via gen_expr_ir -- exactly how
+                # a pointer's own value is read everywhere else, since
+                # a pointer is just an 8-byte scalar for every purpose
+                # other than what it points at.
+                #
+                # p.method() (_check_method_call's own, separate auto-
+                # deref) reaches this SAME path too, once desugar_
+                # methods has already rewritten it into an ordinary
+                # call with p as the first argument -- Field's own
+                # Variable base here is identical in shape either way.
+                return self.gen_expr_ir(expr)
             slot = self._local_slot(expr.name)
-            struct_type = self._local_type(expr.name)
+            struct_type = var_type
             slot_addr = self.ir_program.ids.new_temp(Type.INT64)
             ir = [IRLocalAddress(dst=slot_addr, slot=slot)]
             if self._is_heap_allocated(self._local_decl_id(expr.name), struct_type):
@@ -136,8 +179,20 @@ class StructsMixin:
         """Builds (without lowering) the address of `expr.base.expr.
         name` as real IR: the base's own address (recursively, via
         _ir_struct_address) plus expr.name's fixed byte offset, via
-        IRBinOp(ADD). Skips the add when offset is 0."""
+        IRBinOp(ADD). Skips the add when offset is 0.
+
+        A POINTER-to-struct base auto-dereferences here too -- see
+        _check_struct_and_field_type's own docstring for why type_of
+        (expr.base) alone isn't enough (it reports p's own LITERAL
+        declared type, *Circle, never the auto-dereferenced Circle).
+        _ir_struct_address(expr.base) below already handles this
+        correctly on its own (its Variable case's own auto-deref), so
+        only THIS method's own base_type/struct_name resolution, used
+        for the field offset lookup, needs the identical check
+        repeated -- the address computation itself doesn't."""
         base_type = type_of(expr.base)
+        if base_type.kind == TypeKind.POINTER and base_type.element_type.kind == TypeKind.STRUCT:
+            base_type = base_type.element_type
         if base_type.kind != TypeKind.STRUCT:
             raise IRError(
                 f"Cannot access field '{expr.name}' on a value of "
@@ -252,8 +307,20 @@ class StructsMixin:
     def _check_struct_and_field_type(self, base_expr: Node, field_name: str) -> Type:
         """Returns field_name's declared type within base_expr's
         struct type. Doesn't raise on an invalid access -- already
-        validated by semantic.py before codegen runs."""
+        validated by semantic.py before codegen runs.
+
+        A POINTER-to-struct base auto-dereferences here too, mirroring
+        _ir_struct_address's own Variable-case decision (and semantic.
+        py's _check_struct_and_field, the ORIGINAL source of this same
+        decision) -- type_of(base_expr) reports a Variable's own
+        LITERAL declared type (*Circle for `p`), never the auto-
+        dereferenced one, since semantic analysis validates the access
+        without rewriting the reference's own resolved_type -- so this
+        needs to make the identical call itself, not assume type_of
+        already made it."""
         base_type = type_of(base_expr)
+        if base_type.kind == TypeKind.POINTER and base_type.element_type.kind == TypeKind.STRUCT:
+            base_type = base_type.element_type
         return self.ir_program.struct_registry[base_type.struct_name].fields[field_name]
 
 

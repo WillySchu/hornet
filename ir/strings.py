@@ -29,6 +29,7 @@ _TYPEDESC_INT8 = 6
 _TYPEDESC_UINT8 = 7
 _TYPEDESC_INT64 = 8
 _TYPEDESC_SUM = 9
+_TYPEDESC_POINTER = 10
 
 
 class StringsMixin:
@@ -120,6 +121,17 @@ class StringsMixin:
                 for variant_name in sum_type_info.variants
             ]
             self.ir_program.type_descriptors.append((label, [_TYPEDESC_SUM, len(variant_desc_labels)] + variant_desc_labels))
+        elif t.kind == TypeKind.POINTER:
+            # Descriptor shape: just [tag] -- no name field, and no
+            # pointee-type field either, unlike ARRAY/SLICE's own
+            # elem_label: print(p) prints p's own raw address (see
+            # UnaryOp.DEREFERENCE's/hornet_stringify's own POINTER
+            # case), never recurses into what it points at, so there's
+            # nothing here to build a descriptor FOR beyond the tag
+            # itself -- the same "no extra fields" shape INT/BOOL/STR
+            # already have, for the identical reason: all four print
+            # as one raw value, not a structured container.
+            self.ir_program.type_descriptors.append((label, [_TYPEDESC_POINTER]))
         else:
             raise IRError(f"No type descriptor rule for: {t}")
 

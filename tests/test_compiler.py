@@ -7009,6 +7009,243 @@ class TestPointers:
 
 
 # ---------------------------------------------------------------------------
+# Pointers, stage 3: actual codegen. Every test here is a compile-AND-RUN
+# check, deliberately -- this stage found five real, independent bugs that
+# a purely IR-level test suite would never have caught (a truncating 32-bit
+# move corrupting an address; is_wide_type missing from six separate
+# lowering sites; auto-deref missing from two more call sites beyond the
+# original _ir_struct_address fix; no NoneLiteral case in gen_expr_ir at
+# all; and, hardest to find, gen_binary_op's own width check silently
+# truncating pointer ARITHMETIC -- not just moves -- only visible once an
+# actual recursive linked-list traversal was run end to end). Several of
+# these tests exist specifically because they're the smallest programs
+# that once reproduced one of those bugs, not because they're
+# comprehensive coverage for its own sake.
+#
+# See tests/ir/test_pointers.py for the IR-level (construction-only)
+# counterparts.
+# ---------------------------------------------------------------------------
+
+class TestPointersCodegen:
+
+    _CIRCLE = (
+        "type Circle struct:\n"
+        "    int radius\n"
+        "\n"
+    )
+
+    _NODE = (
+        "type Node struct:\n"
+        "    int value\n"
+        "    *Node next\n"
+        "\n"
+    )
+
+    def test_basic_address_of_and_dereference_round_trip(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    int x = 5\n"
+            "    *int p = &x\n"
+            "    int y = *p\n"
+            "    return y\n",
+            expected=5,
+        )
+
+    def test_pointer_sees_a_later_mutation_of_the_pointee(self):
+        """The register-allocator exclusion's own reason to exist: x
+        must never live purely in a register once &x is taken, or a
+        later write to x could go unseen through p."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    int x = 5\n"
+            "    *int p = &x\n"
+            "    x = 10\n"
+            "    int y = *p\n"
+            "    return y\n",
+            expected=10,
+        )
+
+    def test_scalar_deref_assign_overwrites_the_pointee(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    int x = 5\n"
+            "    *int p = &x\n"
+            "    *p = 10\n"
+            "    return x\n",
+            expected=10,
+        )
+
+    def test_struct_deref_assign_via_struct_literal(self):
+        assert_program_exit_code(
+            self._CIRCLE +
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    *Circle p = &c\n"
+            "    *p = Circle(20)\n"
+            "    return c.radius\n",
+            expected=20,
+        )
+
+    def test_struct_deref_assign_via_another_variable(self):
+        assert_program_exit_code(
+            self._CIRCLE +
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    Circle other = Circle(9)\n"
+            "    *Circle p = &c\n"
+            "    *p = other\n"
+            "    return c.radius\n",
+            expected=9,
+        )
+
+    def test_auto_deref_field_read_and_write(self):
+        assert_program_exit_code(
+            self._CIRCLE +
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    *Circle p = &c\n"
+            "    p.radius = 9\n"
+            "    return c.radius\n",
+            expected=9,
+        )
+
+    def test_chained_auto_deref_field_read(self):
+        """b.next.value -- b.next is itself a pointer-typed field
+        access, not a bare variable; found a real bug the first time
+        this was tried (auto-deref was only implemented for
+        _ir_struct_address's Variable case, not Field/Index)."""
+        assert_program_exit_code(
+            self._NODE +
+            "def int main():\n"
+            "    Node c = Node(3, none)\n"
+            "    Node b = Node(2, &c)\n"
+            "    return b.next.value\n",
+            expected=3,
+        )
+
+    def test_method_call_through_a_pointer_receiver(self):
+        assert_program_exit_code(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "    def int area(self):\n"
+            "        return self.radius * self.radius\n"
+            "\n"
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    *Circle p = &c\n"
+            "    return p.area()\n",
+            expected=25,
+        )
+
+    def test_same_type_pointer_equality(self):
+        assert_program_exit_code(
+            self._CIRCLE +
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    *Circle p = &c\n"
+            "    *Circle q = &c\n"
+            "    if p == q:\n"
+            "        return 1\n"
+            "    return 0\n",
+            expected=1,
+        )
+
+    def test_pointer_vs_none_equality(self):
+        assert_program_exit_code(
+            self._CIRCLE +
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    *Circle p = &c\n"
+            "    *Circle q = none\n"
+            "    if p != none and q == none:\n"
+            "        return 1\n"
+            "    return 0\n",
+            expected=1,
+        )
+
+    def test_none_as_a_pointer_assign_target_not_just_var_decl(self):
+        """q = none (Assign, not VarDecl) -- Assign's own scalar path
+        never needed the same NoneLiteral-exclusion VarDecl's did, but
+        worth checking directly rather than assumed."""
+        assert_program_exit_code(
+            self._CIRCLE +
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    *Circle q = &c\n"
+            "    q = none\n"
+            "    if q == none:\n"
+            "        return 1\n"
+            "    return 0\n",
+            expected=1,
+        )
+
+    def test_recursive_linked_list_traversal(self):
+        """The bug that took the most work to isolate: pointer
+        arithmetic for a field offset (head + 4, computing &head.next)
+        was silently lowered as a 32-bit add, corrupting the address --
+        invisible in every simpler test, only reachable once an actual
+        function called itself with a pointer parameter it needed to
+        both read AND advance."""
+        assert_program_exit_code(
+            self._NODE +
+            "def int sumList(*Node head):\n"
+            "    if head == none:\n"
+            "        return 0\n"
+            "    return head.value + sumList(head.next)\n"
+            "\n"
+            "def int main():\n"
+            "    Node c = Node(3, none)\n"
+            "    Node b = Node(2, &c)\n"
+            "    Node a = Node(1, &b)\n"
+            "    return sumList(&a)\n",
+            expected=6,
+        )
+
+    def test_print_a_bare_pointer_prints_an_address(self):
+        result = compile_and_run(
+            "def int main():\n"
+            "    int x = 5\n"
+            "    *int p = &x\n"
+            "    print(p)\n"
+            "    return 0\n"
+        )
+        assert re.match(r"^0x[0-9a-f]+\n$", result.stdout), result.stdout
+
+    def test_print_a_null_pointer_prints_0x0(self):
+        assert_program_stdout(
+            self._CIRCLE +
+            "def int main():\n"
+            "    *Circle p = none\n"
+            "    print(p)\n"
+            "    return 0\n",
+            "0x0\n",
+        )
+
+    def test_print_a_struct_with_a_pointer_field(self):
+        result = compile_and_run(
+            self._NODE +
+            "def int main():\n"
+            "    Node c = Node(3, none)\n"
+            "    Node b = Node(2, &c)\n"
+            "    print(b)\n"
+            "    return 0\n"
+        )
+        assert re.match(r"^Node\(value: 2, next: 0x[0-9a-f]+\)\n$", result.stdout), result.stdout
+
+    def test_array_of_pointers(self):
+        assert_program_exit_code(
+            self._CIRCLE +
+            "def int main():\n"
+            "    Circle c = Circle(7)\n"
+            "    [3]*Circle arr = [3]*Circle[&c, none, none]\n"
+            "    *Circle first = arr[0]\n"
+            "    return first.radius\n",
+            expected=7,
+        )
+
+
+# ---------------------------------------------------------------------------
 # int8/uint8, step 1 of 3: the TYPE SYSTEM only -- lexer/parser keywords,
 # TypeKind/Type additions, literal range-checking, and arithmetic type-
 # checking rules (check_binary/check_unary). Deliberately NOT yet about

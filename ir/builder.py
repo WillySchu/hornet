@@ -29,6 +29,7 @@ from ir.ir import (
 )
 from ir.arrays_slices import ArraysSlicesMixin
 from ir.dispatch import DispatchMixin
+from ir.pointers import PointersMixin
 from ir.scalars import ScalarsMixin
 from ir.statements import StatementsMixin
 from ir.strings import StringsMixin
@@ -61,6 +62,7 @@ from semantic import type_from_name, Type, TypeKind
 class IRFunctionBuilder(
         ArraysSlicesMixin,
         DispatchMixin,
+        PointersMixin,
         ScalarsMixin,
         StatementsMixin,
         StringsMixin,
@@ -519,9 +521,12 @@ class IRFunctionBuilder(
 
     def _local_slot(self, name: str) -> int:
         """Resolves `name` to its own logical frame slot -- for a
-        composite-typed (array/struct/slice) variable's own address,
-        the only case this is called for (_ir_array_address/_ir_
-        struct_address/_ir_slice_address/_ir_indexable_base)."""
+        composite-typed (array/struct/slice) variable's own address
+        (_ir_array_address/_ir_struct_address/_ir_slice_address/_ir_
+        indexable_base), or, now, for `&name` on a SCALAR too (see
+        ir/pointers.py's own _ir_address_of) -- the identical slot
+        lookup either way, since every variable gets one at _bind_
+        local time regardless of its own type."""
         for scope in reversed(self.scopes):
             if name in scope:
                 return scope[name][0]

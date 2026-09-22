@@ -89,7 +89,26 @@ def type_byte_width(t: Type, structs: dict[str, StructInfo], sum_types: dict) ->
             for variant_name in sum_types[t.sum_type_name].variants
         )
         return SUM_TYPE_TAG_WIDTH + max(variant_widths)
+    if t.kind == TypeKind.POINTER:
+        return 8  # one machine address, regardless of the pointee's own width
     return 4  # INT, BOOL
+
+
+def is_wide_type(t: Type) -> bool:
+    """True for the three scalar-shaped types that need a FULL 8-byte
+    register/memory move rather than codegen's own ordinary 4-byte
+    default: int64 and str (already established -- see, e.g.,
+    _gen_read_scalar_into's own docstring in codegen/scalars_lowering.
+    py) and, now, POINTER, for the identical reason str already needed
+    it -- a pointer IS just a raw 8-byte address, exactly like str's
+    own underlying representation, and an ordinary 4-byte Mov would
+    silently truncate it, corrupting the address rather than merely
+    losing precision the way it would for an oversized int. Every
+    "wide" check throughout codegen/ir_lowering.py and codegen/
+    scalars_lowering.py goes through this one predicate, so a fourth
+    wide-needing type, if one is ever added, only needs updating
+    here."""
+    return t in (Type.INT64, Type.STR) or t.kind == TypeKind.POINTER
 
 
 def leaf_type(t: Type) -> Type:

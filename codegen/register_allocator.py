@@ -274,7 +274,7 @@ def compute_live_intervals(blocks: list[BasicBlock], live_in: list, live_out: li
     return {tid: LiveInterval(temp=entry[0], start=entry[1], end=entry[2]) for tid, entry in bounds.items()}
 
 
-def eligible_intervals(ir: list, intervals: dict) -> dict:
+def eligible_intervals(ir: list, intervals: dict, temp_home_slots: Optional[dict] = None) -> dict:
     """Filters out every interval that can't be safely register-
     allocated -- see this module's own docstring for why any Temp
     SURVIVING THROUGH an IRCall it doesn't own is excluded
@@ -300,11 +300,30 @@ def eligible_intervals(ir: list, intervals: dict) -> dict:
     IRLocalAddress/IRStaticDataAddress are deliberately absent from
     the unsafe set below: each writes only its own dst, from a fixed,
     compile-time-known frame offset or label, with no other register
-    touched at all -- exactly as safe as an ordinary IRBinOp/IRMove."""
+    touched at all -- exactly as safe as an ordinary IRBinOp/IRMove.
+
+    A second, independent exclusion, when temp_home_slots is given:
+    any Temp whose OWN home slot (temp_home_slots[tid], see
+    IdAllocator.temp_at_offset) is one that some IRLocalAddress
+    instruction in THIS SAME ir computes the address of -- meaning
+    something holds a raw pointer into that slot and could read or
+    write through it at any point (see UnaryOp.ADDRESS_OF's own IR
+    case, ir/dispatch.py's _ir_address_of), so this Temp's value can
+    never safely live purely in a register: every read or write
+    through that address needs to see the exact same, up to date
+    value an ordinary read of the Temp itself would. temp_home_slots
+    is None for any caller that doesn't need this (existing tests
+    exercising the call-survival exclusion above in isolation), in
+    which case this second check is simply skipped -- not "no Temps
+    excluded by it", genuinely absent, matching this function's prior
+    behavior exactly."""
     unsafe_positions = [i for i, instr in enumerate(ir) if isinstance(instr, (IRCall, IRSliceGrow))]
+    addressed_slots = {instr.slot for instr in ir if isinstance(instr, IRLocalAddress)} if temp_home_slots is not None else None
     result = {}
     for tid, interval in intervals.items():
         if any(_is_hazard(interval, pos, ir) for pos in unsafe_positions):
+            continue
+        if addressed_slots is not None and temp_home_slots.get(tid) in addressed_slots:
             continue
         result[tid] = interval
     return result
@@ -384,13 +403,19 @@ def linear_scan(intervals: dict, available_registers: list[str] = ALLOCATABLE_RE
     return assignment
 
 
-def allocate_registers(ir: list) -> dict:
+def allocate_registers(ir: list, temp_home_slots: Optional[dict] = None) -> dict:
     """The whole pipeline, run over one function's own accumulated IR:
     build the CFG, compute liveness, derive live intervals, filter to
     what's actually eligible, and run linear scan over the result.
-    Returns temp.id -> register name, exactly like linear_scan itself."""
+    Returns temp.id -> register name, exactly like linear_scan itself.
+
+    temp_home_slots, passed straight through to eligible_intervals
+    (see its own docstring), is the codegen.py call site's way of
+    saying "these Temps must never be register-allocated if their own
+    home slot has its address taken" -- optional, and skipped when
+    omitted, since not every caller (tests included) needs it."""
     blocks = build_cfg(ir)
     live_in, live_out = compute_liveness(blocks)
     intervals = compute_live_intervals(blocks, live_in, live_out)
-    eligible = eligible_intervals(ir, intervals)
+    eligible = eligible_intervals(ir, intervals, temp_home_slots)
     return linear_scan(eligible)
