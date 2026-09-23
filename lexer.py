@@ -15,6 +15,12 @@ class TokenType(Enum):
                       # token type for both would make it impossible for
                       # the parser to tell "the word str" apart from "an
                       # actual string value" by type alone.
+    BYTE = auto()  # a BYTE *literal*, e.g. "a" -- double-quoted,
+                    # distinct from STRING's own single-quoted syntax,
+                    # so the two can never be visually confused for one
+                    # another the way, say, an optional trailing suffix
+                    # would risk. See parser.py's own ByteLiteral for
+                    # what this actually becomes.
 
     # Punctuation
     OPEN_PAREN = auto()
@@ -179,6 +185,7 @@ class Lexer:
             ('NUMBER',      r'\d+(\.\d+)?'),     # Integer or decimal
             ('IDENTIFIER',  r'[a-zA-Z_]\w*'),    # Variable names/keywords
             ('STRING',      r"'([^'\\]|\\.)*'"), # String literals
+            ('BYTE',        r'"([^"\\]|\\.)*"'), # Byte literals (double-quoted -- see parser.py's own ByteLiteral)
 
             # Triple character -- must come before the double- and
             # single-character '<'/'>' rules below (SHIFT_LEFT,
@@ -309,6 +316,8 @@ class Lexer:
                 self.tokens.append(Token(token_type, value, self.line, column))
             elif kind == 'STRING':
                 self.tokens.append(Token(TokenType.STRING, value, self.line, column))
+            elif kind == 'BYTE':
+                self.tokens.append(Token(TokenType.BYTE, value, self.line, column))
             elif kind == 'ASSIGN':
                 self.tokens.append(Token(TokenType.ASSIGN, value, self.line, column))
             elif kind == 'NEWLINE':

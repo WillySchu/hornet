@@ -206,6 +206,7 @@ from parser import (
     BinaryOp,
     BoolLiteral,
     Break,
+    ByteLiteral,
     Call,
     Cast,
     Constant,
@@ -1905,6 +1906,16 @@ class SemanticAnalyzer:
             result = Type.NONE
         elif isinstance(expr, StringLiteral):
             result = Type.STR
+        elif isinstance(expr, ByteLiteral):
+            # No further validation needed here at all: parse_primary
+            # already confirmed expr.value resolves to exactly one
+            # byte (0-255) before ever constructing this node -- see
+            # ByteLiteral's own docstring in parser.py for why that
+            # happens at parse time rather than here, the same
+            # reasoning Constant's own int/float value already gets
+            # resolved at parse time instead of needing a semantic-
+            # level check of its own.
+            result = Type.UINT8
         elif isinstance(expr, Variable):
             result = self.check_variable(expr)
         elif isinstance(expr, ArrayLiteral):

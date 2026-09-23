@@ -86,7 +86,13 @@ def build_executable(source_path: str, output_path: str, platform: str = DEFAULT
 
     with tempfile.TemporaryDirectory() as tmpdir:
         asm_path = os.path.join(tmpdir, "program.s")
-        with open(asm_path, "w") as f:
+        # Latin-1, not the default UTF-8 -- see compile.py's own,
+        # identical comment for why: a str literal's own raw bytes
+        # can legitimately be any 0-255 value now (\xNN escapes), and
+        # Latin-1 is the one encoding where every code point 0-255
+        # maps to exactly one byte, keeping the emitted .data byte
+        # count matching len()'s own compile-time value exactly.
+        with open(asm_path, "w", encoding="latin-1") as f:
             f.write(asm)
 
         runtime_o_path = os.path.join(tmpdir, "runtime.o")

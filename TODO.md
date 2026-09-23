@@ -17,6 +17,7 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
+- Imports / packages.
 - Mutable []byte ↔ str conversion.
 - FFI/extern string interop design.
 - String indexing (s[i] → a single byte).
@@ -32,7 +33,6 @@ Updates:
 - `typeof`
 - Consider enabling struct literal syntax for aliases.
 - `function` type.
-- Add `byte` literal.
 - User defined types built off other types.
 - Change slice's zero type to an empty slice rather than `none`.
 - Disallow untyped array literals from anything except assignment to a typed variable / parameter / return.
@@ -44,7 +44,6 @@ Updates:
 - Hashing.
 - Dicts.
 - Sets.
-- Imports / packages.
 - Generics.
 - Sorting.
 - Format strings.

@@ -295,6 +295,40 @@ class StringLiteral(Node):
 
 
 @dataclass
+class ByteLiteral(Node):
+    """`"a"` -- double-quoted, unlike STRING's own single-quoted
+    syntax, so the two can never be visually confused for one another.
+    Always uint8-typed (see check_byte_literal in semantic.py); int8
+    is deliberately out of scope here -- the motivating use case (a
+    future str-indexing result) is inherently unsigned, and there's no
+    call for a second, signed flavor of this same literal shape yet.
+
+    `value` holds the literal's own already-resolved BYTE VALUE (0-255)
+    as a plain Python int, not the one-character string its own source
+    text still spells -- computed directly here, in parse_primary,
+    exactly like Constant already computes its own int/float directly
+    from a NUMBER token's raw text, rather than needing a later,
+    separate resolution pass.
+
+    Fully validated at parse time too, for the identical reason: unlike
+    StringLiteral's own content (whose validity depends on nothing but
+    itself, but which is never REJECTED for being the "wrong length" --
+    a string can be any length at all), a BYTE literal's own validity
+    -- resolving to EXACTLY one byte, once escape sequences settle --
+    is a pure, local property of its own source text, no different in
+    kind from a NUMBER token's own digits already being well-formed by
+    construction. So this raises ParseError directly, in parse_primary,
+    the same place and same way a malformed NUMBER already would (if
+    it could -- the lexer's own regex already guarantees NUMBER is
+    well-formed, which is exactly why Constant never needs this check
+    at all; BYTE's own regex accepts any quoted content, so this
+    method has to be the one place that actually confirms it resolves
+    to one byte)."""
+    value: int
+    resolved_type: Optional[Any] = None
+
+
+@dataclass
 class Variable(Node):
     """A reference to a local variable, e.g. the `a` in `a + 1`."""
     name: str
@@ -931,8 +965,12 @@ class ParseError(Exception):
     """Raised when the parser encounters unexpected or malformed input."""
 
 
-# Escape sequences recognized inside a STRING literal's raw text. Keyed
-# by the character *after* the backslash.
+# Escape sequences recognized inside a STRING or BYTE literal's raw
+# text. Keyed by the character *after* the backslash. \xNN (exactly
+# two hex digits) is handled separately, in _unescape_quoted_literal
+# itself, not folded into this table: it consumes two MORE characters
+# than every other entry here (a single character each), a shape this
+# simple one-key-in/one-value-out dict can't express at all.
 _ESCAPE_SEQUENCES = {
     'n': '\n',
     't': '\t',
@@ -943,23 +981,52 @@ _ESCAPE_SEQUENCES = {
     '\\': '\\',
 }
 
+_HEX_DIGITS = '0123456789abcdefABCDEF'
 
-def _unescape_string_literal(raw: str) -> str:
-    """Converts a STRING token's raw text (still quoted, e.g. `'it\\'s'`)
-    into its actual content: quotes stripped, backslash escapes
-    resolved via _ESCAPE_SEQUENCES. An escape not in the table (the
-    lexer's STRING regex accepts a backslash followed by any single
-    character) is treated leniently -- the backslash is dropped and
-    the character kept as-is, rather than raising."""
-    inner = raw[1:-1]  # strip the surrounding single quotes
+
+def _unescape_quoted_literal(raw: str) -> str:
+    """Converts a STRING or BYTE token's raw text (still quoted, e.g.
+    `'it\\'s'` or `"\\x41"`) into its actual content: the surrounding
+    quote character -- single for STRING, double for BYTE, both
+    single-character delimiters, so stripping exactly one from each
+    end (raw[1:-1]) already works for either -- stripped, backslash
+    escapes resolved via _ESCAPE_SEQUENCES or, for `\\xNN`, the byte
+    value those two hex digits spell out. An escape that's neither in
+    the table nor `\\x` followed by two valid hex digits (the lexer's
+    own STRING/BYTE regexes both accept a backslash followed by any
+    single character, so this function still has to handle whatever
+    reaches it) is treated leniently -- the backslash is dropped and
+    the character kept as-is, rather than raising; a malformed `\\x`
+    (fewer than two hex digits, or non-hex characters after it) falls
+    into this same lenient case, becoming literal `x` plus whatever
+    follows, not a raised error.
+
+    \\xNN reaches every one of the 256 possible byte values -- not
+    just the handful _ESCAPE_SEQUENCES already names, or whatever
+    happens to be directly typeable -- which is what actually makes a
+    BYTE literal (check_byte_literal's own "exactly one byte" checked
+    AFTER this resolves) able to express any uint8 value at all, and
+    lets a STRING literal embed one too, exactly as any other byte in
+    it already can. The resulting Python character (chr(0-255)) is
+    still safe against the mismatch between len() and the actual
+    emitted byte count that motivated this in the first place: every
+    call site that ever writes generated assembly out to a real file
+    now does so as Latin-1, not the default UTF-8 (see compile.py's
+    own comment on this), the one encoding where a code point's own
+    numeric value and its single emitted byte are always identical."""
+    inner = raw[1:-1]  # strip the surrounding quote character
     chars = []
     i = 0
     while i < len(inner):
         ch = inner[i]
         if ch == '\\' and i + 1 < len(inner):
             nxt = inner[i + 1]
-            chars.append(_ESCAPE_SEQUENCES.get(nxt, nxt))
-            i += 2
+            if nxt == 'x' and i + 3 < len(inner) and inner[i + 2] in _HEX_DIGITS and inner[i + 3] in _HEX_DIGITS:
+                chars.append(chr(int(inner[i + 2:i + 4], 16)))
+                i += 4
+            else:
+                chars.append(_ESCAPE_SEQUENCES.get(nxt, nxt))
+                i += 2
         else:
             chars.append(ch)
             i += 1
@@ -1974,7 +2041,16 @@ class Parser:
             return NoneLiteral(line=tok.line, col=tok.col)
         if self.check(TokenType.STRING):
             tok = self.advance()
-            return StringLiteral(value=_unescape_string_literal(tok.val), line=tok.line, col=tok.col)
+            return StringLiteral(value=_unescape_quoted_literal(tok.val), line=tok.line, col=tok.col)
+        if self.check(TokenType.BYTE):
+            tok = self.advance()
+            resolved = _unescape_quoted_literal(tok.val)
+            if len(resolved) != 1 or ord(resolved) > 255:
+                raise ParseError(
+                    f"A byte literal must resolve to exactly one byte (0-255), got "
+                    f"{resolved!r} at line {tok.line}, column {tok.col}"
+                )
+            return ByteLiteral(value=ord(resolved), line=tok.line, col=tok.col)
         if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR) and self.peek(1).type == TokenType.OPEN_PAREN:
             return self.parse_cast()
         if self._looks_like_typed_literal():

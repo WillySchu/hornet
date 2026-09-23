@@ -17,6 +17,7 @@ from parser import (
     Binary,
     BinaryOp,
     BoolLiteral,
+    ByteLiteral,
     Call,
     Cast,
     Constant,
@@ -79,6 +80,13 @@ class DispatchMixin:
         through _ir_slice_arg rather than here."""
         if isinstance(expr, Constant):
             return [], IRConst(expr.value, type_of(expr))
+        if isinstance(expr, ByteLiteral):
+            # Exactly Constant's own shape just above -- expr.value is
+            # already a resolved Python int (0-255), computed once at
+            # parse time (see ByteLiteral's own docstring in parser.py
+            # for why), so there's nothing left to compute here beyond
+            # wrapping it in an IRConst at its own type (always UINT8).
+            return [], IRConst(expr.value, Type.UINT8)
         if isinstance(expr, BoolLiteral):
             return [], IRConst(1 if expr.value else 0, Type.BOOL)
         if isinstance(expr, Variable):

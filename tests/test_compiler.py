@@ -776,7 +776,13 @@ def _compile_to_binary(source: str, tmp: Path) -> tuple[Path, str]:
     runtime_o_path = tmp / "runtime.o"
 
     asm = generate_asm(ast, platform=ASM_PLATFORM)
-    asm_path.write_text(asm)
+    # Latin-1, not write_text's own default UTF-8 -- see compile.py's
+    # own, identical comment for why: a str literal's own raw bytes
+    # can legitimately be any 0-255 value now (\xNN escapes), and
+    # Latin-1 is the one encoding where every code point 0-255 maps to
+    # exactly one byte, keeping the emitted .data byte count matching
+    # len()'s own compile-time value exactly.
+    asm_path.write_text(asm, encoding="latin-1")
 
     # Compiled fresh, unconditionally, the same way build.py's own
     # build_executable does -- print() now compiles to an ordinary
@@ -834,9 +840,22 @@ def _run_binary(bin_path: Path, asm: str) -> subprocess.CompletedProcess:
         # assert_program_stdout below). Every prior helper here only
         # ever looked at .returncode, so capturing stdout/stderr as
         # well doesn't change anything about their behavior.
+        #
+        # encoding='latin-1', not text=True's own default UTF-8: a
+        # program's own stdout can now legitimately contain any raw
+        # byte 0-255 (a str value built from a \xNN escape, or printed
+        # via a byte-typed value derived from one -- see ByteLiteral's
+        # own docstring in parser.py), which isn't necessarily valid
+        # UTF-8 at all. Latin-1 decodes every byte 0-255 into the
+        # identical code point, matching how compile.py/build.py/this
+        # same file's own compile_and_run already WRITE generated
+        # assembly (see compile.py's own comment on that) -- so a
+        # captured byte and the Python character a test asserts
+        # against it (e.g. '\xc8' in an expected string) are always
+        # the same value, never re-encoded into something else.
         return subprocess.run(
             [str(bin_path)], timeout=EXECUTION_TIMEOUT,
-            capture_output=True, text=True,
+            capture_output=True, encoding='latin-1',
         )
     except subprocess.TimeoutExpired:
         # Now that while loops exist, a genuine codegen bug (e.g. a
@@ -2512,6 +2531,156 @@ class TestStringSlicing:
             "    return len(s[true:3])",
             match="Slice low bound must be int",
         )
+
+
+class TestByteLiterals:
+    """`"a"` -- double-quoted, always uint8-typed (see ByteLiteral's
+    own docstring in parser.py, and check_expr's own case for it in
+    semantic.py). int8 deliberately out of scope -- see this feature's
+    own design discussion for why."""
+
+    pytestmark = GCC_SKIP
+
+    def test_basic_byte_literal_value(self):
+        """print(), not return: a byte's own exit code would be
+        truncated to the same 8-bit range regardless, so this
+        confirms the actual printed value, not just a code that could
+        coincidentally match after wraparound."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    byte b = \"a\"\n"
+            "    print(b)\n"
+            "    return 0\n",
+            "97\n",
+        )
+
+    def test_print_shows_the_number_not_the_character(self):
+        """The Go-style gotcha this feature inherits deliberately,
+        not accidentally -- print() already treated every uint8 value
+        this way before ByteLiteral existed at all (see runtime.c's
+        own HORNET_TYPEDESC_UINT8 case), so a byte literal's own
+        value prints identically to any other uint8's."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    print(\"A\")\n"
+            "    return 0\n",
+            "65\n",
+        )
+
+    def test_direct_comparison_against_a_byte_literal(self):
+        """The actual, motivating ergonomics fix: comparing a uint8
+        value against a known character used to require either a raw
+        ASCII code or an explicit uint8(...) cast -- this now works
+        directly, both sides already the same type."""
+        assert_exit_code(
+            "    byte b = \"a\"\n"
+            "    return b == \"a\"",
+            1,
+            return_type="bool",
+        )
+
+    def test_byte_level_range_check_and_arithmetic(self):
+        """The concrete use case that motivated this feature: a
+        range check (a >= 'a' and a <= 'z', both comparisons against
+        byte literals) and case-conversion arithmetic (a - 'a' + 'A'),
+        neither needing any cast or raw ASCII code anywhere."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    byte a = \"a\"\n"
+            "    if a >= \"a\" and a <= \"z\":\n"
+            "        print('in range')\n"
+            "    byte upper = a - \"a\" + \"A\"\n"
+            "    print(upper)\n"
+            "    return 0\n",
+            "in range\n65\n",
+        )
+
+    def test_named_escape_sequences_still_work(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    byte newline = \"\\n\"\n"
+            "    print(newline)\n"
+            "    byte tab = \"\\t\"\n"
+            "    print(tab)\n"
+            "    return 0\n",
+            "10\n9\n",
+        )
+
+    def test_hex_escape_reaches_every_byte_value(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    byte lo = \"\\x00\"\n"
+            "    print(lo)\n"
+            "    byte mid = \"\\x41\"\n"
+            "    print(mid)\n"
+            "    byte hi = \"\\xff\"\n"
+            "    print(hi)\n"
+            "    return 0\n",
+            "0\n65\n255\n",
+        )
+
+    def test_hex_escape_case_insensitive_digits(self):
+        assert_exit_code(
+            "    byte a = \"\\x4a\"\n"
+            "    byte b = \"\\x4A\"\n"
+            "    return a == b",
+            1,
+            return_type="bool",
+        )
+
+    def test_empty_byte_literal_is_rejected(self):
+        source = (
+            "def int main():\n"
+            "    byte b = \"\"\n"
+            "    return 0\n"
+        )
+        with pytest.raises(ParseError, match="must resolve to exactly one byte"):
+            _parse(source)
+
+    def test_multi_character_byte_literal_is_rejected(self):
+        source = (
+            "def int main():\n"
+            "    byte b = \"ab\"\n"
+            "    return 0\n"
+        )
+        with pytest.raises(ParseError, match="must resolve to exactly one byte"):
+            _parse(source)
+
+    def test_hex_escape_in_a_string_literal_matches_len_to_actual_byte_count(self):
+        """The bug this feature's own encoding fix (compile.py/build.
+        py/the test harness all writing generated assembly as Latin-1,
+        not the default UTF-8) exists to prevent: a str literal
+        containing a high (>= 128) byte value via \\xNN, confirmed
+        both by its own len() and by round-tripping through print()
+        unchanged -- if the emitted .data byte count didn't match
+        len()'s own compile-time value, this would print something
+        other than the original 16 characters, or len() itself would
+        disagree with what actually got printed."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    str s = 'high byte: \\xc8 end'\n"
+            "    print(len(s))\n"
+            "    print(s)\n"
+            "    return 0\n",
+            "16\nhigh byte: \xc8 end\n",
+        )
+
+    def test_malformed_hex_escape_falls_back_leniently(self):
+        """\\x followed by fewer than two valid hex digits doesn't
+        raise -- it falls through to the same lenient "unknown
+        escape" handling _unescape_quoted_literal already gives any
+        other unrecognized escape (see its own docstring): the
+        backslash is dropped, 'x' kept literally. "\\xg1" resolves to
+        the THREE characters 'x', 'g', '1' -- correctly rejected here
+        not because the escape itself is malformed, but because three
+        characters is too many for a byte literal regardless."""
+        source = (
+            "def int main():\n"
+            "    byte b = \"\\xg1\"\n"
+            "    return 0\n"
+        )
+        with pytest.raises(ParseError, match="must resolve to exactly one byte"):
+            _parse(source)
 
 
 # ---------------------------------------------------------------------------

@@ -161,7 +161,7 @@ def test_binary_op_symbol():
         assert tc['str'] == tc['op'].symbol()
 
 
-def test_unescape_string_literal():
+def test_unescape_quoted_literal():
     tcs = [
         {
             'input': "'asdf'",
@@ -196,10 +196,31 @@ def test_unescape_string_literal():
             'input': "'Hello World!\r'",
             'expected': 'Hello World!\r',
         },
+        {
+            # \xNN -- shared by STRING and BYTE alike, so exercised
+            # here via the (single-quoted) STRING shape; ByteLiteral's
+            # own semantic-level tests exercise the double-quoted
+            # BYTE shape this same function also has to handle.
+            'input': "'\\x41'",
+            'expected': 'A',
+        },
+        {
+            # Both hex-digit cases valid, in the same literal.
+            'input': "'\\x4a\\x4A'",
+            'expected': 'JJ',
+        },
+        {
+            # A malformed \x (only one hex digit here, then a
+            # non-hex 'g') falls through to the same lenient
+            # "unknown escape" handling as any other -- 'x' kept
+            # literally, backslash dropped, nothing raised.
+            'input': "'\\xg1'",
+            'expected': 'xg1',
+        },
     ]
 
     for tc in tcs:
-        assert tc['expected'] == parser._unescape_string_literal(tc['input'])
+        assert tc['expected'] == parser._unescape_quoted_literal(tc['input'])
 
 
 def test_parser_init_empty():

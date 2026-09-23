@@ -32,11 +32,22 @@ def main():
     args = parser.parse_args()
 
     asm = compile_to_asm(args.file, args.platform)
+    # Latin-1, not the default UTF-8: an emitted str literal's own raw
+    # bytes (see ir/strings.py's own module docstring -- str is a byte
+    # sequence, not Unicode text) can legitimately include any 0-255
+    # value now that string/byte literals support \xNN escapes (see
+    # parser.py's own _unescape_quoted_literal) -- Latin-1 is the one
+    # encoding where every code point 0-255 maps to exactly that one
+    # byte, so this is the only choice that keeps the emitted .data
+    # byte count matching len()'s own, compile-time-computed value
+    # exactly, for every byte, not just the ASCII ones. UTF-8 would
+    # silently re-encode anything >= 128 into two or more bytes,
+    # corrupting that byte-for-byte correspondence.
     if args.output:
-        with open(args.output, 'w') as f:
+        with open(args.output, 'w', encoding='latin-1') as f:
             f.write(asm)
     else:
-        print(asm, end='')
+        sys.stdout.buffer.write(asm.encode('latin-1'))
 
 
 def compile_to_asm(source: str, platform: str = 'macos') -> str:
