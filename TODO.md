@@ -17,10 +17,11 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
-Mutable []byte ↔ str conversion.
-FFI/extern string interop design.
-String slicing (s[a:b]).
-String indexing (s[i] → a single byte).
+- Mutable []byte ↔ str conversion.
+- FFI/extern string interop design.
+- String slicing (s[a:b]).
+- String indexing (s[i] → a single byte).
+- Take address of slice.
 - is as a general, composable boolean expression — usable with and/or/not, assignable to bool, usable in while conditions or as a function argument. This is the biggest deferred item; it needs real control-flow-sensitive narrowing (what does if shape is Circle and x > 0: narrow? what survives an early return guard?), not just a special if-condition shape.
 - else-branch narrowing — even the "exactly two variants, so else means the other one" case.
 - Narrowing inside a while condition. Excluded by construction in v1 (only if is recognized), but worth its own tracked item since loop bodies raise questions v1 never has to answer — what does narrowing across iterations even mean once reassignment is disallowed anyway.
