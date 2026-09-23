@@ -63,6 +63,7 @@ Updates:
 - Consider aligning struct storage rather than packing.
 - Consider adding a semantic AST with type information rather than annotating the existing AST from the parser.
 - Bounds Check Elimination.
+- Interfaces.
 - Error handling.
 - GC...
 - Free memory `malloc`ed by string concatenation.
