@@ -17,7 +17,6 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
-- Imports / packages.
 - `is` narrowing and sum types with qualified (imported) names.
 - Named struct field instantiation with qualified name.
 - Named imports and import * - the export-table design above is meant to make this additive later, not a redesign, but it's not being built now.

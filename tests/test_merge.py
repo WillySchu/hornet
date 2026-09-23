@@ -13,6 +13,7 @@ wouldn't cover nearly as much of what actually matters.
 
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -29,6 +30,18 @@ GCC_AVAILABLE = shutil.which("gcc") is not None
 pytestmark = pytest.mark.skipif(not GCC_AVAILABLE, reason="gcc not available")
 
 RUNTIME_C_PATH = Path(__file__).parent.parent / "runtime" / "runtime.c"
+
+# Same convention tests/test_compiler.py's own HOST_IS_MACOS/ASM_
+# PLATFORM already use, and build.py/compile.py's own HOST_IS_MACOS/
+# DEFAULT_PLATFORM before that -- see build.py's own comment for why
+# this matters: gcc's default target on Apple Silicon is arm64, which
+# can't assemble this compiler's x86-64 AT&T-syntax output at all, and
+# the assembly itself is platform-shaped regardless of host (a leading
+# underscore on every external symbol, on macOS) -- generating Linux-
+# shaped assembly unconditionally, the way an earlier version of this
+# file did, fails on a macOS host for both reasons at once.
+HOST_IS_MACOS = sys.platform == "darwin"
+ASM_PLATFORM = "macos" if HOST_IS_MACOS else "linux"
 
 
 def _write(tmpdir: str, name: str, content: str) -> str:
@@ -47,15 +60,22 @@ def _compile_and_run(entry_path: str, tmpdir: str) -> subprocess.CompletedProces
     desugar_methods(merged)
     analyze(merged)
     from codegen.codegen import generate_asm
-    asm = generate_asm(merged, platform="linux")
+    asm = generate_asm(merged, platform=ASM_PLATFORM)
 
     asm_path = Path(tmpdir) / "program.s"
     asm_path.write_text(asm, encoding="latin-1")
     runtime_o = Path(tmpdir) / "runtime.o"
-    subprocess.run(["gcc", "-c", str(RUNTIME_C_PATH), "-o", str(runtime_o)], check=True, capture_output=True)
+    runtime_cc_cmd = ["gcc"]
+    if HOST_IS_MACOS:
+        runtime_cc_cmd += ["-arch", "x86_64"]
+    runtime_cc_cmd += ["-c", str(RUNTIME_C_PATH), "-o", str(runtime_o)]
+    subprocess.run(runtime_cc_cmd, check=True, capture_output=True)
     binary = Path(tmpdir) / "program"
-    link = subprocess.run(
-        ["gcc", str(asm_path), str(runtime_o), "-o", str(binary)], capture_output=True, text=True)
+    gcc_cmd = ["gcc"]
+    if HOST_IS_MACOS:
+        gcc_cmd += ["-arch", "x86_64"]
+    gcc_cmd += [str(asm_path), str(runtime_o), "-o", str(binary)]
+    link = subprocess.run(gcc_cmd, capture_output=True, text=True)
     assert link.returncode == 0, f"link failed:\n{link.stderr}\n--- asm ---\n{asm}"
     return subprocess.run([str(binary)], capture_output=True, text=True)
 
