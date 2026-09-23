@@ -55,7 +55,6 @@ Updates:
 - Variadic FFI calls?
 - Make `append` variadic.
 - Spread operator.
-- Fix strings to basically be byte slices.
 - int32
 - Change int to an alias.
 - float
