@@ -7434,6 +7434,58 @@ class TestPointersCodegen:
             expected=30,
         )
 
+    def test_dereferencing_a_pointer_to_slice_as_a_function_argument(self):
+        """A real, standalone gap this closes: _ir_indexable_base's own
+        SLICE-typed dispatch (shared by _ir_slice_arg) never had a
+        Unary(DEREFERENCE) case at all, unlike its ARRAY-typed sibling
+        (already routed through is_composite_addressable) -- *p passed
+        directly as a slice-typed argument used to fail outright with
+        an IRError, not silently misbehave."""
+        assert_program_exit_code(
+            "def int sumIt([]int s):\n"
+            "    int total = 0\n"
+            "    int i = 0\n"
+            "    while i < len(s):\n"
+            "        total = total + s[i]\n"
+            "        i = i + 1\n"
+            "    return total\n"
+            "\n"
+            "def int main():\n"
+            "    [3]int arr = [10, 20, 30]\n"
+            "    []int s = arr[0:3]\n"
+            "    *[]int p = &s\n"
+            "    return sumIt(*p)\n",
+            expected=60,
+        )
+
+    def test_indexing_directly_into_a_dereferenced_slice_pointer(self):
+        """_ir_indexable_base is shared by _ir_index_address too --
+        this falls out of the identical fix for free, not a separate
+        case: (*p)[i] needs the same descriptor address *p's own
+        function-argument use just above does."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    [3]int arr = [10, 20, 30]\n"
+            "    []int s = arr[0:3]\n"
+            "    *[]int p = &s\n"
+            "    return (*p)[1]\n",
+            expected=20,
+        )
+
+    def test_append_with_a_dereferenced_slice_pointer_as_its_first_argument(self):
+        """append's own first argument -- the one that might reuse its
+        own backing storage -- also routes through _ir_indexable_base,
+        so this falls out of the same fix too."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    [5]int arr = [10, 20, 30, 0, 0]\n"
+            "    []int s = arr[0:3]\n"
+            "    *[]int p = &s\n"
+            "    []int grown = append(*p, 40)\n"
+            "    return grown[3]\n",
+            expected=40,
+        )
+
     def test_address_of_a_field_purely_local(self):
         """The non-escaping case: &c.radius never leaves this
         function, so no heap promotion needed at all -- exactly as

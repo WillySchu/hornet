@@ -165,6 +165,42 @@ class ArraysSlicesMixin:
             return None
         return addr_ir + write_ir, addr
 
+    def _ir_read_slice_descriptor_from_address(self, descriptor_addr) -> tuple:
+        """Builds (without lowering) the {ptr, len, cap} triple read out
+        of an ALREADY-computed slice-descriptor address as real IR --
+        returns (ir, ptr_value, len_value, cap_value). ptr is read
+        directly off the descriptor's own address; len/cap live at
+        fixed +8/+16 offsets from it, each computed via an ordinary
+        IRBinOp before its own IRLoad, the same address-as-a-Temp
+        pattern used everywhere else in this file. len/cap are captured
+        as INT (32-bit) Temps -- an array/slice's own length or
+        capacity always fits in 32 bits.
+
+        The shared core of _ir_indexable_base's own SLICE-typed
+        dispatch (see its own docstring) -- every one of its leaves
+        (Variable, Field/Index, an ordinary composite-returning Call,
+        and now a pointer dereference too) differs only in HOW it
+        gets descriptor_addr in the first place, never in what happens
+        once it has it. Factored out here rather than left duplicated
+        three (now four) times over: exactly the kind of duplication
+        that let one of those four leaves quietly miss a fix (a
+        pointer dereference's own Unary case) the other three already
+        had, until this method existed to make missing one impossible
+        by construction."""
+        ptr_temp = self.ir_program.ids.new_temp(Type.INT64)
+        len_addr = self.ir_program.ids.new_temp(Type.INT64)
+        len_temp = self.ir_program.ids.new_temp(Type.INT)
+        cap_addr = self.ir_program.ids.new_temp(Type.INT64)
+        cap_temp = self.ir_program.ids.new_temp(Type.INT)
+        ir = [
+            IRLoad(dst=ptr_temp, address=descriptor_addr),
+            IRBinOp(dst=len_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(8, Type.INT64)),
+            IRLoad(dst=len_temp, address=len_addr),
+            IRBinOp(dst=cap_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(16, Type.INT64)),
+            IRLoad(dst=cap_temp, address=cap_addr),
+        ]
+        return ir, ptr_temp, len_temp, cap_temp
+
     def _ir_indexable_base(self, expr: Node):
         """Builds (without lowering) the address, length, and capacity
         of an indexable base as real IR -- returns (ir, addr_value,
@@ -238,55 +274,33 @@ class ArraysSlicesMixin:
             if isinstance(expr, Variable):
                 slot = self._local_slot(expr.name)
                 descriptor_addr = self.ir_program.ids.new_temp(Type.INT64)
-                ptr_temp = self.ir_program.ids.new_temp(Type.INT64)
-                len_addr = self.ir_program.ids.new_temp(Type.INT64)
-                len_temp = self.ir_program.ids.new_temp(Type.INT)
-                cap_addr = self.ir_program.ids.new_temp(Type.INT64)
-                cap_temp = self.ir_program.ids.new_temp(Type.INT)
-                ir = [
-                    IRLocalAddress(dst=descriptor_addr, slot=slot),
-                    IRLoad(dst=ptr_temp, address=descriptor_addr),
-                    IRBinOp(dst=len_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(8, Type.INT64)),
-                    IRLoad(dst=len_temp, address=len_addr),
-                    IRBinOp(dst=cap_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(16, Type.INT64)),
-                    IRLoad(dst=cap_temp, address=cap_addr),
-                ]
-                return ir, ptr_temp, len_temp, cap_temp
+                ir, ptr_temp, len_temp, cap_temp = self._ir_read_slice_descriptor_from_address(descriptor_addr)
+                return [IRLocalAddress(dst=descriptor_addr, slot=slot)] + ir, ptr_temp, len_temp, cap_temp
             if isinstance(expr, (Field, Index)):
                 addr_result = self._ir_field_address(expr) if isinstance(expr, Field) else self._ir_index_address(expr)
                 if addr_result is None:
                     return None
                 addr_ir, descriptor_addr = addr_result
-                ptr_temp = self.ir_program.ids.new_temp(Type.INT64)
-                len_addr = self.ir_program.ids.new_temp(Type.INT64)
-                len_temp = self.ir_program.ids.new_temp(Type.INT)
-                cap_addr = self.ir_program.ids.new_temp(Type.INT64)
-                cap_temp = self.ir_program.ids.new_temp(Type.INT)
-                ir = addr_ir + [
-                    IRLoad(dst=ptr_temp, address=descriptor_addr),
-                    IRBinOp(dst=len_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(8, Type.INT64)),
-                    IRLoad(dst=len_temp, address=len_addr),
-                    IRBinOp(dst=cap_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(16, Type.INT64)),
-                    IRLoad(dst=cap_temp, address=cap_addr),
-                ]
-                return ir, ptr_temp, len_temp, cap_temp
+                ir, ptr_temp, len_temp, cap_temp = self._ir_read_slice_descriptor_from_address(descriptor_addr)
+                return addr_ir + ir, ptr_temp, len_temp, cap_temp
+            if isinstance(expr, Unary) and expr.op == UnaryOp.DEREFERENCE:
+                # `*p` (p: *[]int) read as a whole SLICE value, for a
+                # function-call argument or a further index/slice base
+                # -- p's own value already IS the address of its own
+                # pointee's 24-byte descriptor, the identical principle
+                # _ir_slice_address's own matching case already uses
+                # (see its own docstring there) for every OTHER slice-
+                # typed position -- this was the one leaf that hadn't
+                # caught up to it yet.
+                addr_ir, descriptor_addr = self.gen_expr_ir(expr.operand)
+                ir, ptr_temp, len_temp, cap_temp = self._ir_read_slice_descriptor_from_address(descriptor_addr)
+                return addr_ir + ir, ptr_temp, len_temp, cap_temp
             if isinstance(expr, Call) and expr.name == 'append':
                 return self._ir_append_call(expr)
             if self._is_ordinary_composite_call(expr):
                 addr_ir, descriptor_addr = self._ir_materialize_composite_call(expr, base_type)
-                ptr_temp = self.ir_program.ids.new_temp(Type.INT64)
-                len_addr = self.ir_program.ids.new_temp(Type.INT64)
-                len_temp = self.ir_program.ids.new_temp(Type.INT)
-                cap_addr = self.ir_program.ids.new_temp(Type.INT64)
-                cap_temp = self.ir_program.ids.new_temp(Type.INT)
-                ir = addr_ir + [
-                    IRLoad(dst=ptr_temp, address=descriptor_addr),
-                    IRBinOp(dst=len_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(8, Type.INT64)),
-                    IRLoad(dst=len_temp, address=len_addr),
-                    IRBinOp(dst=cap_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(16, Type.INT64)),
-                    IRLoad(dst=cap_temp, address=cap_addr),
-                ]
-                return ir, ptr_temp, len_temp, cap_temp
+                ir, ptr_temp, len_temp, cap_temp = self._ir_read_slice_descriptor_from_address(descriptor_addr)
+                return addr_ir + ir, ptr_temp, len_temp, cap_temp
             if isinstance(expr, Slice):
                 return self._ir_slice_into(expr)
             return None
