@@ -19374,6 +19374,147 @@ class TestPrintStructs:
         )
 
 
+class TestPrintStructLiterals:
+    """`print(Circle(5))` -- a struct literal passed DIRECTLY as
+    print's own argument, not first bound to a variable. Was
+    previously rejected at the semantic level: check_print_call used
+    plain check_expr, which routes any Call whose name is a declared
+    struct straight into check_call's own blanket rejection of a bare
+    struct literal (see check_call's own docstring for the full list
+    of positions a struct literal IS allowed in -- a plain function
+    call's own argument was already on that list; print's argument,
+    handled by a separate method entirely, wasn't). Fixed by having
+    check_print_call use _check_expr_allowing_struct_literal instead,
+    the same helper an ordinary function call's own arguments already
+    use for this identical purpose.
+
+    At the IR-building level, _ir_print_call needed a parallel fix:
+    _ir_composite_operand_address (the thing it delegates to for
+    every other STRUCT/ARRAY/SUM argument) deliberately never
+    recognizes a bare struct literal at all -- it's shared with Binary
+    equality, where a struct literal is deliberately NOT a valid
+    operand, so it can't be taught to accept one without wrongly
+    opening that door too. print(Circle(5)) is instead recognized as
+    its own case, routed through _ir_materialize_struct_literal -- the
+    same helper &Circle(5) and a bare struct-literal statement already
+    use for this exact shape."""
+
+    pytestmark = GCC_SKIP
+
+    def test_basic_struct_literal(self):
+        assert_program_stdout(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "def int main():\n"
+            "    print(Circle(5))\n"
+            "    return 0\n",
+            "Circle(radius: 5)\n",
+        )
+
+    def test_multi_field_struct_literal(self):
+        assert_program_stdout(
+            "type Point struct:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    print(Point(3, 4))\n"
+            "    return 0\n",
+            "Point(x: 3, y: 4)\n",
+        )
+
+    def test_named_argument_struct_literal(self):
+        assert_program_stdout(
+            "type Point struct:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    print(Point(x=9, y=8))\n"
+            "    return 0\n",
+            "Point(x: 9, y: 8)\n",
+        )
+
+    def test_nested_struct_literal(self):
+        """A struct literal whose own field is ITSELF a nested struct
+        literal (Rectangle's topLeft) -- confirms _ir_write_struct_
+        literal_into's own recursive handling of a struct-typed field
+        composes correctly with print's own new dispatch, not just
+        with an ordinary VarDecl initializer."""
+        assert_program_stdout(
+            "type Point struct:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "type Rectangle struct:\n"
+            "    Point topLeft\n"
+            "    int width\n"
+            "    int height\n"
+            "\n"
+            "def int main():\n"
+            "    print(Rectangle(Point(1, 2), 10, 20))\n"
+            "    return 0\n",
+            "Rectangle(topLeft: Point(x: 1, y: 2), width: 10, height: 20)\n",
+        )
+
+    def test_struct_literal_field_is_a_call_expression(self):
+        """Circle(makeRadius()) -- confirms a field expression with
+        its own side effects (an ordinary function call) is evaluated
+        and written correctly, not skipped or evaluated out of order,
+        when the struct literal containing it flows straight into
+        print rather than through an intermediate variable first."""
+        assert_program_stdout(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "def int makeRadius():\n"
+            "    return 42\n"
+            "\n"
+            "def int main():\n"
+            "    print(Circle(makeRadius()))\n"
+            "    return 0\n",
+            "Circle(radius: 42)\n",
+        )
+
+    def test_multiple_struct_literal_print_calls_in_one_function(self):
+        """Two separate struct-literal Call nodes, each its own print
+        argument -- confirms each gets its own, independent argument-
+        temp slot (keyed by id(), same scheme every other synthetic
+        declaration in this compiler already uses -- see _allocate_
+        local_slot's own docstring for the identical concern in a
+        different feature), rather than colliding on a single shared
+        one."""
+        assert_program_stdout(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "def int main():\n"
+            "    print(Circle(1))\n"
+            "    print(Circle(2))\n"
+            "    return 0\n",
+            "Circle(radius: 1)\nCircle(radius: 2)\n",
+        )
+
+    def test_struct_literal_as_a_binary_operand_is_still_rejected(self):
+        """Confirms the deliberately-unrelated restriction this
+        change must NOT loosen: _ir_composite_operand_address is
+        shared with Binary equality, and a struct literal still isn't
+        a valid operand there -- semantic.py's own check_call rejects
+        it before codegen ever runs, exactly as before this arc."""
+        assert_program_semantic_error(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    if c == Circle(5):\n"
+            "        return 1\n"
+            "    return 0\n",
+            match="is a struct literal, which is only allowed",
+        )
+
+
 # ---------------------------------------------------------------------------
 # AST pretty-printing: Node.pretty(), used only for ad hoc inspection/
 # debugging (nothing in codegen.py or semantic.py calls it) -- so this

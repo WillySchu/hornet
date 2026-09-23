@@ -2266,13 +2266,22 @@ class SemanticAnalyzer:
         builtin with no meaningful value to return. Nothing changes in
         codegen.py for this: gen_print_call_into still leaves something
         in %eax at the end of every path, but nothing reads it, same
-        as any other void call's leftover register value."""
+        as any other void call's leftover register value.
+
+        _check_expr_allowing_struct_literal, not plain check_expr --
+        print(Circle(5)) is a direct call argument, exactly the same
+        position an ordinary function call's own argument already is
+        (see check_call's own use of the analogous _check_value_
+        flowing_into_allowing_struct_literal), so a struct-literal
+        argument here needs the identical allowance, not check_call's
+        own default rejection of a bare struct literal it would
+        otherwise recurse into."""
         if len(expr.args) != 1:
             raise SemanticError(
                 f"'print' expects exactly 1 argument, got {len(expr.args)}",
                 expr,
             )
-        arg_type = self.check_expr(expr.args[0])
+        arg_type = self._check_expr_allowing_struct_literal(expr.args[0])
         if arg_type == Type.VOID:
             raise SemanticError(
                 "'print' cannot be called with the result of a function "

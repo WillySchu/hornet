@@ -160,25 +160,51 @@ class StringsMixin:
         char *type_desc)`, and hornet_stringify dereferences that
         address at whatever width its own type descriptor says to.
 
-        ARRAY/STRUCT/SUM-typed x: reuses _ir_composite_operand_address
-        unchanged -- a SUM-typed value's own address is exactly what
-        that function already computes generically for a Variable/
-        Field/Index or an ordinary composite-returning Call (see its
-        own docstring), same as a struct's. SLICE-typed x: _ir_slice_
-        arg unifies every reachable shape into one {ptr, len, cap}
-        triple, written into the shared, unconditionally-reserved
-        24-byte _unnamed_slice_temp_slot scratch slot, whose address
-        is then taken. Otherwise a scalar: computed via gen_expr_ir,
-        written into the shared 8-byte _print_scalar_temp_slot scratch
-        slot -- a scalar has no other "address of this value" concept
-        in real IR, since it only ever needs to live in a Temp; this
-        is a deliberate, narrow exception, since hornet_print is a
-        genuine C-ABI boundary this compiler's own output has to
-        cross."""
+        A struct-literal x (`print(Circle(5))`) is checked FIRST,
+        before the general ARRAY/STRUCT/SUM branch below: _ir_
+        composite_operand_address's own dispatch never covers a bare
+        struct literal at all (see its own docstring -- it's built for
+        Binary equality too, where a struct literal is deliberately
+        NOT a valid operand, so it can't just be added there without
+        wrongly opening that door as well) and would return None for
+        one, same as it would for print's own array/sum branches below
+        if either could ever receive an analogous literal shape (an
+        ArrayLiteral is handled inside _ir_composite_operand_address
+        itself; a bare, unwidened sum-typed literal doesn't exist as
+        its own AST shape at all). _ir_materialize_struct_literal is
+        the SAME helper &Circle(5) (ir/pointers.py) and a struct-
+        literal ExprStmt (ir/statements.py) already use for exactly
+        this shape -- print's own argument needs nothing new, just
+        this one extra dispatch case recognizing it applies here too.
+
+        ARRAY/STRUCT/SUM-typed x otherwise: reuses _ir_composite_
+        operand_address unchanged -- a SUM-typed value's own address
+        is exactly what that function already computes generically
+        for a Variable/Field/Index or an ordinary composite-returning
+        Call (see its own docstring), same as a struct's. SLICE-typed
+        x: _ir_slice_arg unifies every reachable shape into one {ptr,
+        len, cap} triple, written into the shared, unconditionally-
+        reserved 24-byte _unnamed_slice_temp_slot scratch slot, whose
+        address is then taken. Otherwise a scalar: computed via gen_
+        expr_ir, written into the shared 8-byte _print_scalar_temp_
+        slot scratch slot -- a scalar has no other "address of this
+        value" concept in real IR, since it only ever needs to live in
+        a Temp; this is a deliberate, narrow exception, since hornet_
+        print is a genuine C-ABI boundary this compiler's own output
+        has to cross."""
         arg = expr.args[0]
         arg_type = type_of(arg)
 
-        if arg_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM):
+        if isinstance(arg, Call) and arg.name in self.ir_program.struct_registry:
+            result = self._ir_materialize_struct_literal(arg)
+            if result is None:
+                raise IRError(
+                    f"_ir_materialize_struct_literal returned None for print()'s own "
+                    f"struct-literal argument ({arg!r}) -- expected to always succeed, "
+                    f"since semantic.py already validated every one of its fields"
+                )
+            value_addr_ir, value_addr = result
+        elif arg_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM):
             result = self._ir_composite_operand_address(arg, arg_type)
             if result is None:
                 raise IRError(
