@@ -5,8 +5,8 @@ import sys
 
 from codegen.codegen import generate_asm
 from desugar import desugar_methods
-from lexer import lex
-from parser import Parser
+from merge import merge_programs
+from modules import discover_modules
 from semantic import analyze
 
 # Same convention build.py's own HOST_IS_MACOS/DEFAULT_PLATFORM and
@@ -51,8 +51,18 @@ def main():
 
 
 def compile_to_asm(source: str, platform: str = 'macos') -> str:
-    tokens = lex(source)
-    ast = Parser(tokens).parse_program()
+    """`source` is the entry file -- discover_modules resolves and
+    parses it, and every file it transitively imports (see modules.py
+    and merge.py's own module docstrings for the full design); merge_
+    programs folds all of that into one, single, unqualified Program,
+    exactly what this function's own pipeline already expected before
+    imports existed at all. Everything from here down is completely
+    unchanged and unaware modules exist: desugar_methods/analyze/
+    generate_asm all still see one flat Program, the same one they've
+    always seen for a single file -- that's the whole point of the
+    merge model (see modules.py's own module docstring for why)."""
+    entry_program, discovered_modules = discover_modules(source)
+    ast = merge_programs(entry_program, discovered_modules)
     desugar_methods(ast)  # must run before analyze() -- see its own module docstring for why
     analyze(ast)  # raises SemanticError before any code is generated
     return generate_asm(ast, platform=platform)

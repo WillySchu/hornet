@@ -1,3 +1,6 @@
+import 'test2'
+
+
 type HasArray struct:
     [5]int values
 
@@ -41,12 +44,12 @@ def *int int_ptr(int i):
 
 
 def int8 main():
-    int a = 15
-    print(a == 15)
     # TODO(will): Should this work?
     #int8 b = 15
     #print(b == 15)
     # TODO(will): This should definitely work.
     #HasArray ha = *make_ha_ptr()
     #print(HasArray([1,2,3,4,5]))
+    test2.Node n = test2.Node(5)
+    print(n)
     return 0

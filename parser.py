@@ -45,6 +45,7 @@ order, so declare-before-use is enforced there, not here.
 """
 
 import argparse
+import re
 from dataclasses import dataclass, field, fields
 from enum import auto, Enum
 from typing import Any, List, Optional, Tuple, Union
@@ -571,6 +572,36 @@ class PointerTypeExpr(Node):
 
 
 @dataclass
+class QualifiedTypeExpr(Node):
+    """`module.Name` in type position, e.g. `utils.Circle`. Its own
+    node, not folded into a combined `"module.Name"` string the way
+    every OTHER type name is a bare string -- see parse_type's own
+    IDENTIFIER case: unlike an unqualified struct/alias name, a
+    qualified one already has real, separate structure (WHICH module,
+    WHICH name in it) that semantic.py's own resolution needs to
+    consult independently -- `module` against the current file's own
+    import table, `name` against that module's own export table --
+    rather than re-splitting one combined string apart every time
+    resolution needs to happen.
+
+    Only ever a struct or type-alias name in practice (see semantic.
+    py's own type_from_name), the same restriction an unqualified
+    bare-string type name already has -- nothing here enforces that
+    itself, matching how the unqualified case also leaves it to
+    type_from_name rather than the grammar.
+
+    Deliberately NOT reusing Field (`module.Name` parses identically
+    to `structVar.field` in EXPRESSION position, disambiguated later
+    by what `module` resolves to -- see check_field's own docstring in
+    semantic.py) -- type position is parsed by an entirely different
+    method (parse_type, not parse_postfix) that never produces Field
+    nodes at all, so there's no existing shape to reuse here in the
+    first place, only a new one to add."""
+    module: str
+    name: str
+
+
+@dataclass
 class VarDecl(Node):
     """`int a` (init=None) or `int a = 1`. `var_type` is a type
     keyword string, an ArrayTypeExpr, or a SliceTypeExpr."""
@@ -946,12 +977,50 @@ class SumTypeDef(Node):
 
 
 @dataclass
+class ImportDecl(Node):
+    """`import "path"`, or `import "path" as name` -- brings another
+    file's own exported top-level declarations into scope, reachable
+    through a module qualifier (`qualifier.someName`, both in
+    expression position -- Field/Call's own existing `receiver`/base
+    shape, disambiguated at semantic-analysis time, see check_field's
+    own docstring -- and in type position, via QualifiedTypeExpr
+    above).
+
+    `path` is the raw, still-quoted string exactly as parse_primary
+    would resolve a StringLiteral's own text (see _unescape_quoted_
+    literal) -- a deliberate v1 choice, not a permanent design: module
+    = file for now (see this feature's own design discussion), so a
+    file path is what an import needs to resolve TO regardless of
+    surface syntax, and every later consumer of this field (module
+    discovery, resolving `path` against files) only ever needs a
+    normalized (resolved path, module name) pair, produced once, in
+    one place -- so trading this string syntax for something else
+    later touches only how THIS field gets produced, not anything
+    downstream of it.
+
+    `qualifier` is the name a module's own exports are reached
+    through in THIS file -- `path`'s own last path component with any
+    `.ht` extension stripped (e.g. "sub/dir/utils" -> "utils") when
+    `as` isn't given, or the explicit `as name` override otherwise.
+    Already resolved here, at parse time, rather than left for
+    semantic.py to re-derive from `path` -- deriving it is a pure,
+    local, string-only operation (no filesystem access, no semantic
+    context needed), the same reasoning ByteLiteral's own value is
+    already resolved at parse time instead of deferred (see its own
+    docstring): there's nothing further semantic analysis could learn
+    that would change what this SHOULD be."""
+    path: str
+    qualifier: str
+
+
+@dataclass
 class Program(Node):
     functions: List[Function] = field(default_factory=list)
     structs: List[StructDef] = field(default_factory=list)
     type_aliases: List[TypeAlias] = field(default_factory=list)
     sum_types: List[SumTypeDef] = field(default_factory=list)
     extern_functions: List[ExternFunctionDecl] = field(default_factory=list)
+    imports: List[ImportDecl] = field(default_factory=list)
 
     def __repr__(self) -> str:
         return self.pretty()
@@ -1031,6 +1100,28 @@ def _unescape_quoted_literal(raw: str) -> str:
             chars.append(ch)
             i += 1
     return ''.join(chars)
+
+
+def _default_import_qualifier(path: str) -> str:
+    """Derives an import's own default qualifier from its path, when
+    no explicit `as name` overrides it: the last '/'-separated
+    component, with a trailing '.ht' stripped if present (path itself
+    is expected to already omit '.ht' -- matching Python's own
+    `import foo` needing no '.py' -- but this strips it defensively
+    regardless, in case a path was written with it anyway, rather
+    than producing a qualifier that literally contains a '.', which
+    would then be indistinguishable, at any `qualifier.name` use
+    site, from that qualifier's own further-qualified access).
+
+    parse_import's own caller still validates the RESULT is a valid
+    Hornet identifier -- this function itself doesn't, since an
+    invalid one (an empty path, one ending in '/', ...) is exactly
+    when an explicit `as` becomes necessary, not this function's own
+    job to reject."""
+    last_component = path.rsplit('/', 1)[-1]
+    if last_component.endswith('.ht'):
+        last_component = last_component[:-len('.ht')]
+    return last_component
 
 
 # Maps a prefix-operator token straight to the UnaryOp it represents.
@@ -1183,6 +1274,7 @@ class Parser:
         type_aliases = []
         sum_types = []
         extern_functions = []
+        imports = []
         self.skip_newlines()
         while not self.at_end():
             if self.check(TokenType.STRUCT):
@@ -1202,14 +1294,42 @@ class Parser:
                     type_aliases.append(declaration)
             elif self.check(TokenType.EXTERN):
                 extern_functions.append(self.parse_extern_function())
+            elif self.check(TokenType.IMPORT):
+                imports.append(self.parse_import())
             else:
                 functions.append(self.parse_function())
             self.skip_newlines()
         return Program(
             functions=functions, structs=structs, type_aliases=type_aliases, sum_types=sum_types,
-            extern_functions=extern_functions,
+            extern_functions=extern_functions, imports=imports,
             line=start_tok.line, col=start_tok.col,
         )
+
+    def parse_import(self) -> ImportDecl:
+        """`import "path"` or `import "path" as name` -- see
+        ImportDecl's own docstring for the full design. Reuses the
+        ordinary STRING token (a path is written with the same
+        single-quote syntax as any other str literal) rather than
+        inventing a new lexical shape -- deliberately the simplest
+        possible surface syntax for now (see this feature's own
+        design discussion for why this is expected to change later,
+        and what stays stable across that change)."""
+        start_tok = self.expect(TokenType.IMPORT, "Expected 'import'")
+        path_tok = self.expect(TokenType.STRING, "Expected a quoted path after 'import'")
+        path = _unescape_quoted_literal(path_tok.val)
+        if self.match(TokenType.AS):
+            alias_tok = self.expect(TokenType.IDENTIFIER, "Expected a module name after 'as'")
+            qualifier = alias_tok.val
+        else:
+            qualifier = _default_import_qualifier(path)
+            if not re.fullmatch(r'[a-zA-Z_]\w*', qualifier):
+                raise ParseError(
+                    f"Import path {path!r} doesn't produce a valid module name "
+                    f"({qualifier!r}) on its own -- rename the file, or give this "
+                    f"import an explicit qualifier with 'as' "
+                    f"at line {start_tok.line}, column {start_tok.col}"
+                )
+        return ImportDecl(path=path, qualifier=qualifier, line=start_tok.line, col=start_tok.col)
 
     def parse_type_declaration(self) -> Union[TypeAlias, StructDef, SumTypeDef]:
         """`type Name = TargetType` (an alias), `type Name struct:
@@ -1447,11 +1567,24 @@ class Parser:
         if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR):
             return self.advance().val
         if self.check(TokenType.IDENTIFIER):
-            # A struct type reference -- the parser has no symbol table
-            # and just accepts any identifier, handing the bare string
-            # on; semantic.py's struct-registry pass validates it (see
-            # type_from_name).
-            return self.advance().val
+            # A struct/alias type reference -- the parser has no
+            # symbol table and just accepts any identifier, handing
+            # the bare string on; semantic.py's struct-registry pass
+            # validates it (see type_from_name). A '.' right after
+            # (not separated by whitespace-sensitive tokenization
+            # here, so this is unambiguous the same way a.b already
+            # is in expression position) means this is qualified --
+            # `module.Name`, produced as its own QualifiedTypeExpr
+            # node instead (see its own docstring for why this can't
+            # just be another bare string the way the unqualified
+            # case already is).
+            name_tok = self.advance()
+            if self.check(TokenType.DOT):
+                self.advance()
+                qualified_name_tok = self.expect(TokenType.IDENTIFIER, "Expected a type name after '.'")
+                return QualifiedTypeExpr(
+                    module=name_tok.val, name=qualified_name_tok.val, line=name_tok.line, col=name_tok.col)
+            return name_tok.val
         tok = self.current()
         raise ParseError(
             f"Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', "
@@ -1560,6 +1693,27 @@ class Parser:
             # IDENTIFIER alone is ambiguous with a variable reference,
             # call, or field access, so the second token is needed
             # before parse_type() is called at all.
+            start_tok = self.current()
+            parsed_type = self.parse_type()
+            return self.parse_var_decl(var_type=parsed_type, start_tok=start_tok)
+        if (
+                self.check(TokenType.IDENTIFIER)
+                and self.peek(1).type == TokenType.DOT
+                and self.peek(2).type == TokenType.IDENTIFIER
+                and self.peek(3).type == TokenType.IDENTIFIER
+        ):
+            # The identical shape just above, one qualifier deeper:
+            # `module.Name varName` -- IDENTIFIER DOT IDENTIFIER
+            # IDENTIFIER can only mean a qualified struct-typed
+            # VarDecl, for the same reason the unqualified two-
+            # identifier case above is unambiguous (a struct has no
+            # literal syntax of its own to confuse this with).
+            # `module.Name.method()`, `module.Name(...)`, and
+            # `module.someValue` all still fall through correctly to
+            # the ordinary expression-statement/assignment dispatch
+            # below, since none of them has a FOURTH bare IDENTIFIER
+            # immediately following the qualified name the way a
+            # VarDecl's own variable name does.
             start_tok = self.current()
             parsed_type = self.parse_type()
             return self.parse_var_decl(var_type=parsed_type, start_tok=start_tok)
