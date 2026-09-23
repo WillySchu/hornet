@@ -290,24 +290,35 @@ class StatementsMixin:
                 self._bind_local(stmt, ir_fn)
                 if stmt.init is not None:
                     ir, value = self.gen_expr_ir(stmt.init)
-                    return ir + [IRMove(dst=self._local_temp(stmt.name), src=value)]
+                    return ir + self._ir_finish_scalar_var_decl(stmt.name, id(stmt), var_type, value)
                 else:
                     # No initializer at all -- write this type's own
-                    # zero value straight into the Temp _bind_local
-                    # just created. Never routed through _ir_write_
-                    # zero_value_into: that method's own contract is
-                    # writing THROUGH an address, which doesn't apply
-                    # here -- a named scalar variable already has its
-                    # own Temp, never an address.
+                    # zero value. Never routed through _ir_write_zero_
+                    # value_into: that method's own contract is writing
+                    # THROUGH an address, which doesn't apply to the
+                    # ordinary (non-escaping) case here -- a named
+                    # scalar variable already has its own Temp, never
+                    # an address, UNLESS it escapes, in which case _ir_
+                    # finish_scalar_var_decl's own malloc+IRStore
+                    # already covers writing through the one this
+                    # specific variable needs.
                     #
                     # str is the one scalar kind whose own zero value
                     # isn't a raw IRConst(0, ...): it's the address of
                     # a shared, static empty-string constant, never a
                     # null pointer (see _ir_write_zero_value_into's own
-                    # str case).
+                    # str case). Computed into a fresh Temp rather than
+                    # this variable's own permanent one directly (the
+                    # non-escaping case's own previous shortcut), since
+                    # _ir_finish_scalar_var_decl needs a plain IRValue to
+                    # work with regardless of which case produced it.
                     if var_type == Type.STR:
-                        return [IRStaticDataAddress(dst=self._local_temp(stmt.name), label=self._get_empty_str_label())]
-                    return [IRMove(dst=self._local_temp(stmt.name), src=IRConst(0, var_type))]
+                        t = self.ir_program.ids.new_temp(Type.STR)
+                        ir = [IRStaticDataAddress(dst=t, label=self._get_empty_str_label())]
+                    else:
+                        t = IRConst(0, var_type)
+                        ir = []
+                    return ir + self._ir_finish_scalar_var_decl(stmt.name, id(stmt), var_type, t)
             # A sum-typed VarDecl -- always HAS an initializer
             # (semantic.py's analyze_var_decl already rejects the bare
             # `Shape s` form, since a sum type has no natural zero
@@ -531,6 +542,17 @@ class StatementsMixin:
             var_type = self._local_type(stmt.name)
             if var_type.kind not in COMPOSITE_KINDS:
                 ir, value = self.gen_expr_ir(stmt.value)
+                if self._is_heap_allocated(self._local_decl_id(stmt.name), var_type):
+                    # Reassigning an ALREADY-escaping variable: the box
+                    # this variable's own VarDecl already malloc'd
+                    # (_ir_finish_scalar_var_decl) still exists, and any
+                    # `&name` taken earlier is a pointer to it that must
+                    # keep working -- so this writes THROUGH the
+                    # existing pointer (already sitting in name's own
+                    # permanent Temp), never allocates a new box or
+                    # repoints the Temp itself, unlike VarDecl's own
+                    # first-write case.
+                    return ir + [IRStore(address=self._local_temp(stmt.name), value=value, value_type=var_type)]
                 return ir + [IRMove(dst=self._local_temp(stmt.name), src=value)]
             # A sum-typed Assign -- only for GENUINE widening (stmt.
             # value itself is struct-typed, narrower than var_type),
@@ -887,6 +909,41 @@ class StatementsMixin:
             IRCall(dst=ptr, name='malloc', args=[IRConst(size, Type.INT64)]),
             IRLocalAddress(dst=slot_addr, slot=slot),
             IRStore(address=slot_addr, value=ptr, value_type=Type.INT64),
+        ]
+
+    def _ir_finish_scalar_var_decl(self, name: str, decl_id: int, var_type, value) -> list:
+        """The scalar counterpart to _ir_malloc_and_store, for a
+        VarDecl's own FIRST write only (see gen_statement_ir's own
+        VarDecl case, its only caller) -- a later Assign to the same
+        variable must NOT call this again (see gen_statement_ir's own
+        Assign case instead, which writes through the box this
+        allocates rather than replacing it, since any `&name` taken
+        before that Assign has to keep seeing the SAME box, just with
+        new contents).
+
+        Ordinary (non-escaping) case: `value` written straight into
+        name's own permanent Temp, exactly as before this feature
+        existed -- an ordinary IRMove.
+
+        Escaping case: name's own permanent Temp holds a pointer now,
+        not the value (see _bind_local/_bind_param's own matching
+        Temp-type decision) -- mallocs a box sized to var_type's own
+        width, IRStores `value` into it, then IRMoves the fresh
+        pointer into name's own permanent Temp. No IRLocalAddress
+        involved anywhere here, unlike _ir_malloc_and_store's own
+        composite case -- there's no separate named frame slot for a
+        scalar's OWN storage to point at; the permanent Temp itself
+        already IS where this variable's own pointer lives, and
+        register_allocator.py/_temp_mem already know how to home an
+        ordinary Temp like any other, wherever it ends up."""
+        if not self._is_heap_allocated(decl_id, var_type):
+            return [IRMove(dst=self._local_temp(name), src=value)]
+        size = type_byte_width(var_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+        ptr = self.ir_program.ids.new_temp(Type.INT64)
+        return [
+            IRCall(dst=ptr, name='malloc', args=[IRConst(size, Type.INT64)]),
+            IRStore(address=ptr, value=value, value_type=var_type),
+            IRMove(dst=self._local_temp(name), src=ptr),
         ]
 
     def _ir_index_assign(self, stmt: IndexAssign, element_type) -> list:

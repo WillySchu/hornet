@@ -9,7 +9,6 @@ a struct field (see analyze_array_escapes for the full algorithm)."""
 
 from typing import Optional
 
-from codegen.errors import CodegenError
 from parser import (
     ArrayLiteral,
     Assign,
@@ -140,34 +139,19 @@ class EscapeAnalyzer:
                 if dep not in visited:
                     stack.append(dep)
 
-        # A SCALAR declaration in the result (a plain int/bool/str/...,
-        # never array/struct/sum) means its own address escaped via a
-        # pointer -- `&x` outliving x's own function -- with no way to
-        # make that safe yet: unlike array/struct/sum, a scalar has no
-        # heap-promotion machinery at all (is_heap_allocated's own size
-        # check is unconditionally false for every scalar type, and
-        # nothing in ir/statements.py's own scalar VarDecl construction
-        # ever mallocs one), so silently treating this decl_id like any
-        # other escaping one -- as _ir_address_of's own heap-allocated
-        # branch would -- reads the scalar's own raw VALUE as if it
-        # were a pointer, corrupting it. Rejected outright here instead
-        # (a deliberate, narrower scope decision, not a soundness gap
-        # left open by accident): the composite case above already has
-        # real heap-promotion machinery and is left to actually use it;
-        # only the scalar case, which doesn't have that machinery yet,
-        # is a hard error.
-        for decl_id in result:
-            decl_type = self.decl_types.get(decl_id)
-            if decl_type is not None and decl_type.kind not in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM):
-                name = self.decl_names.get(decl_id, "<unknown>")
-                raise CodegenError(
-                    f"'{name}' (declared {decl_type}) cannot have its address "
-                    f"taken and returned, stored somewhere that outlives this "
-                    f"function, or passed to another function that might do so "
-                    f"-- only a struct, array, or sum-typed local can currently "
-                    f"survive past the function that declared it this way"
-                )
-
+        # Every declaration in `result`, scalar or composite, now gets
+        # the identical heap-promotion treatment: _is_heap_allocated's
+        # own escape check was already written generically (see its
+        # own docstring -- "a declaration of ANY type can appear here
+        # now, not just array"), and every scalar read/write/param-
+        # binding/VarDecl-init site now checks it too (see ir/
+        # statements.py's own VarDecl/Assign cases, ir/dispatch.py's
+        # own Variable case, and ir/builder.py's own _bind_local/_bind_
+        # param). &x itself needs no new indirection at all for a
+        # heap-promoted SCALAR specifically -- see _ir_address_of's
+        # own docstring for why a scalar's permanent Temp already IS
+        # its own address once it holds a pointer, unlike a composite's
+        # own named frame slot, which needs an extra IRLoad through it.
         return result
 
     def declare(self, name: str, decl_id: int, decl_type: Type) -> None:

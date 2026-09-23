@@ -7350,11 +7350,14 @@ class TestPointersCodegen:
 
 class TestPointerEscapeAnalysis:
 
-    def test_dangling_pointer_program_is_now_rejected(self):
+    def test_scalar_wrapped_in_struct_escaping_is_genuinely_heap_safe(self):
         """The motivating bug, stated plainly: this compiled and ran
         with no error before this stage existed, silently returning a
-        pointer into a stack frame that had already been torn down."""
-        assert_program_codegen_error(
+        pointer into a stack frame that had already been torn down --
+        now genuinely safe instead, verified the same way the struct
+        case already is: a deliberately clobbering intervening call
+        between makeDangling returning and h.p being read."""
+        assert_program_exit_code(
             "type Holder struct:\n"
             "    *int p\n"
             "\n"
@@ -7362,26 +7365,52 @@ class TestPointerEscapeAnalysis:
             "    int x = 42\n"
             "    return Holder(&x)\n"
             "\n"
+            "def int clobber():\n"
+            "    int a = 111\n"
+            "    int b = 222\n"
+            "    int c = 333\n"
+            "    int d = 444\n"
+            "    return a + b + c + d\n"
+            "\n"
             "def int main():\n"
             "    Holder h = makeDangling()\n"
+            "    int unused = clobber()\n"
             "    return *h.p\n",
-            match="'x' \\(declared int\\) cannot have its address taken",
+            expected=42,
         )
 
-    def test_scalar_address_returned_directly_is_rejected(self):
-        assert_program_codegen_error(
+    def test_scalar_address_returned_directly_is_genuinely_heap_safe(self):
+        """Not just accepted -- verified actually safe, the identical
+        clobbering-call check the struct/Holder cases already get."""
+        assert_program_exit_code(
             "def *int makeDangling():\n"
             "    int x = 42\n"
             "    return &x\n"
             "\n"
+            "def int clobber():\n"
+            "    int a = 111\n"
+            "    int b = 222\n"
+            "    int c = 333\n"
+            "    int d = 444\n"
+            "    return a + b + c + d\n"
+            "\n"
             "def int main():\n"
             "    *int p = makeDangling()\n"
+            "    int unused = clobber()\n"
             "    return *p\n",
-            match="'x' \\(declared int\\) cannot have its address taken",
+            expected=42,
         )
 
-    def test_scalar_address_passed_to_another_function_is_rejected(self):
-        assert_program_codegen_error(
+    def test_scalar_address_passed_to_another_function_is_genuinely_heap_safe(self):
+        """The existing, pre-pointer conservatism (any call argument
+        might escape, intraprocedurally -- see this same scenario's
+        own unit-level counterpart in test_escape_analysis.py) treats
+        &x here as escaping even though useIt itself never actually
+        stores it anywhere -- correct, if conservative: this compiler
+        analyzes one function at a time, not interprocedurally. Either
+        way, x is genuinely heap-promoted now, and *p reads back the
+        correct value through it."""
+        assert_program_exit_code(
             "def int useIt(*int p):\n"
             "    return *p\n"
             "\n"
@@ -7391,7 +7420,98 @@ class TestPointerEscapeAnalysis:
             "\n"
             "def int main():\n"
             "    return caller()\n",
-            match="'x' \\(declared int\\) cannot have its address taken",
+            expected=7,
+        )
+
+    def test_reassignment_after_escape_writes_through_the_same_box(self):
+        """The sharpest possible check on _ir_finish_scalar_var_decl vs
+        the Assign case's own, separate handling: once x has escaped
+        and been heap-promoted, `x = 99` must write THROUGH the box
+        &x already points at, not allocate a fresh one and repoint x's
+        own permanent Temp -- otherwise p would keep reading x's OLD
+        value (99 IS x's new value, and 42 was never returned) after
+        this reassignment, silently stale."""
+        assert_program_exit_code(
+            "def *int makeDangling():\n"
+            "    int x = 42\n"
+            "    *int p = &x\n"
+            "    x = 99\n"
+            "    return p\n"
+            "\n"
+            "def int main():\n"
+            "    *int p = makeDangling()\n"
+            "    return *p\n",
+            expected=99,
+        )
+
+    def test_reading_the_escaped_variable_by_name_after_promotion(self):
+        """Every other test in this class only ever reads the escaped
+        value back THROUGH the pointer (*p) -- this one reads x itself,
+        by name, after its own address has already escaped and it's
+        been heap-promoted (`x = x + 1`, the read on the right-hand
+        side), exercising the OTHER half of the fix (ir/dispatch.py's
+        own Variable read case, an IRLoad through the box now, not a
+        direct Temp read) that every other test here happens not to
+        reach at all. A broken read here wouldn't just be wrong by a
+        small amount -- it would return whatever raw pointer value was
+        sitting in x's own permanent Temp, interpreted as an int, so
+        this is a sensitive check, not a marginal one."""
+        assert_program_exit_code(
+            "def *int makeAndRead():\n"
+            "    int x = 42\n"
+            "    *int p = &x\n"
+            "    x = x + 1\n"
+            "    return p\n"
+            "\n"
+            "def int main():\n"
+            "    *int p = makeAndRead()\n"
+            "    return *p\n",
+            expected=43,
+        )
+
+    def test_escaping_str_with_no_initializer_uses_the_empty_string_zero_value(self):
+        """str's own zero value is special-cased (the address of a
+        shared, static empty-string constant, never a null pointer --
+        see _ir_finish_scalar_var_decl's own docstring) even in the
+        non-escaping case; this confirms that path still produces a
+        genuinely usable, heap-boxed value when s itself escapes too,
+        not just when it stays local."""
+        assert_program_exit_code(
+            "def *str makeEmpty():\n"
+            "    str s\n"
+            "    return &s\n"
+            "\n"
+            "def int main():\n"
+            "    *str p = makeEmpty()\n"
+            "    if *p == '':\n"
+            "        return 1\n"
+            "    return 0\n",
+            expected=1,
+        )
+
+    def test_escaping_parameter_is_genuinely_heap_safe(self):
+        """A PARAMETER's own address escaping, not just a local's --
+        exercises ir/builder.py's own _ir_param_setup scalar case
+        (IRReadArgument into a fresh Temp, then the identical _ir_
+        finish_scalar_var_decl VarDecl's own initializer uses), the
+        one call site TestPointerEscapeAnalysis's own struct/scalar-
+        local tests above never reach at all."""
+        assert_program_exit_code(
+            "def *int identity(int x):\n"
+            "    return &x\n"
+            "\n"
+            "def int clobber():\n"
+            "    int a = 111\n"
+            "    int b = 222\n"
+            "    int c = 333\n"
+            "    int d = 444\n"
+            "    return a + b + c + d\n"
+            "\n"
+            "def int main():\n"
+            "    *int p = identity(17)\n"
+            "    int unused = clobber()\n"
+            "    return *p\n",
+            expected=17,
         )
 
     def test_struct_address_escaping_is_genuinely_heap_safe(self):

@@ -10,7 +10,6 @@ import desugar
 import parser
 import semantic
 import codegen.escape_analysis as ea
-from codegen.errors import CodegenError
 from lexer import lex
 
 
@@ -717,16 +716,16 @@ def test_escape_analyzer_walk_statements():
 #      heap-allocated variable's slot holds a POINTER to the real data,
 #      not the data itself. Fixed by mirroring _ir_struct_address's own
 #      "if heap-allocated, load through one more indirection" pattern.
-#   2. A scalar whose address escapes has no heap-promotion machinery at
-#      all (unlike array/struct/sum, which already had it before pointers
-#      existed) -- is_heap_allocated's own size check is unconditionally
-#      false for every scalar type, and nothing in a scalar VarDecl's own
-#      construction ever mallocs one. Silently treating an escaping
-#      scalar like any other escaping declaration would read its raw
-#      VALUE as if it were a pointer, corrupting it. Rejected outright
-#      instead, with a CodegenError -- the (b) side of the fork agreed on
-#      before implementation: reuse the analysis to detect it, but don't
-#      try to make it safe via heap promotion yet.
+#   2. A scalar whose address escapes now gets real heap-promotion
+#      machinery too (see _ir_finish_scalar_var_decl, ir/statements.py):
+#      is_heap_allocated's own escape check was already written
+#      generically for any type, but nothing in a scalar VarDecl's own
+#      construction mallocs one until now. Silently treating an escaping
+#      scalar like any other escaping declaration WITHOUT that machinery
+#      would have read its raw VALUE as if it were a pointer, corrupting
+#      it -- rejected outright at first (a deliberate, narrower v1 scope
+#      decision, not a soundness gap left open by accident), with the
+#      heap-promotion machinery itself following as its own, later stage.
 # See tests/test_compiler.py's own TestPointerEscapeAnalysis for the
 # compile-and-run counterparts, including the dangling-pointer program
 # that motivated this whole stage.
@@ -763,19 +762,23 @@ def test_address_of_a_struct_local_never_escapes_stays_out_of_the_result():
     assert c_decl_id not in result
 
 
-def test_address_of_a_scalar_local_returned_directly_is_rejected():
+def test_address_of_a_scalar_local_returned_directly_is_now_heap_promoted():
+    """Was rejected outright before scalar heap-promotion existed --
+    now a scalar's decl_id, exactly like an array/struct/sum one, just
+    lands in the returned escaping set."""
     ast = parse_and_analyze(
         "def *int makeDangling():\n"
         "    int x = 42\n"
         "    return &x\n"
     )
     fn = ast.functions[0]
-    with pytest.raises(CodegenError, match="'x' \\(declared int\\) cannot have its address taken"):
-        ea.analyze_array_escapes(fn, [], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+    x_decl_id = id(fn.body[0])
+    result = ea.analyze_array_escapes(fn, [], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+    assert x_decl_id in result
 
 
-def test_address_of_a_scalar_local_wrapped_in_a_returned_struct_is_rejected():
-    """Confirms the rejection also fires when &x is passed as a struct
+def test_address_of_a_scalar_local_wrapped_in_a_returned_struct_is_now_heap_promoted():
+    """Confirms the same holds when &x is passed as a struct
     CONSTRUCTOR argument (Holder(&x)) rather than returned bare --
     reached via scan_expr_for_escaping_calls's own conservative "any
     call's arguments might escape" treatment, which a struct
@@ -792,11 +795,12 @@ def test_address_of_a_scalar_local_wrapped_in_a_returned_struct_is_rejected():
         "    return Holder(&x)\n"
     )
     fn = ast.functions[0]
-    with pytest.raises(CodegenError, match="'x' \\(declared int\\) cannot have its address taken"):
-        ea.analyze_array_escapes(fn, [], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+    x_decl_id = id(fn.body[0])
+    result = ea.analyze_array_escapes(fn, [], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+    assert x_decl_id in result
 
 
-def test_address_of_a_scalar_local_passed_as_a_call_argument_is_rejected():
+def test_address_of_a_scalar_local_passed_as_a_call_argument_is_now_heap_promoted():
     """The existing, pre-pointer conservatism (any call argument might
     escape, intraprocedurally) already covers this -- &x passed to
     ANY user-defined function is treated the same as returning it
@@ -810,8 +814,9 @@ def test_address_of_a_scalar_local_passed_as_a_call_argument_is_rejected():
         "    return useIt(&x)\n"
     )
     fn = ast.functions[1]  # caller, not useIt
-    with pytest.raises(CodegenError, match="'x' \\(declared int\\) cannot have its address taken"):
-        ea.analyze_array_escapes(fn, [], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+    x_decl_id = id(fn.body[0])
+    result = ea.analyze_array_escapes(fn, [], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+    assert x_decl_id in result
 
 
 def test_address_of_via_reassignment_not_just_var_decl_init():

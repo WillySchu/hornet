@@ -84,6 +84,17 @@ class DispatchMixin:
             self.ir_program.string_literals.append((label, expr.value))
             return [IRStaticDataAddress(dst=t, label=label)], t
         if isinstance(expr, Variable):
+            if self._is_heap_allocated(self._local_decl_id(expr.name), self._local_type(expr.name)):
+                # This variable's own address escaped past this
+                # function (see _bind_local/_bind_param's own,
+                # identical check) -- its permanent Temp holds a
+                # pointer to a malloc'd box, not the value directly,
+                # so an ordinary read has to go THROUGH it. &x itself
+                # (check_unary's own ADDRESS_OF case, ir/pointers.py's
+                # own _ir_address_of) reads this exact Temp directly,
+                # unchanged -- it's already the pointer this case
+                # dereferences.
+                return self._ir_load([], self._local_temp(expr.name), self._local_type(expr.name))
             return [], self._local_temp(expr.name)
         if isinstance(expr, Index) and type_of(expr).kind not in (TypeKind.ARRAY, TypeKind.STRUCT):
             result = self._ir_index_address(expr)

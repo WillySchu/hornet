@@ -218,9 +218,22 @@ class IRFunctionBuilder(
                 captured.append(caller_ptr)
             else:
                 # str and every other scalar type alike: IRReadArgument
-                # targets this parameter's own permanent Temp directly.
+                # reads the incoming value into a fresh Temp first,
+                # then _ir_finish_scalar_var_decl (identical helper
+                # VarDecl's own initializer uses -- a parameter's own
+                # incoming value is exactly a first write, the same
+                # kind VarDecl's own init is) decides where it actually
+                # ends up: straight into this parameter's own permanent
+                # Temp for the ordinary case, or malloc'd into a fresh
+                # box (with the permanent Temp repointed at that box's
+                # own address) for one whose own address escapes --
+                # never IRReadArgument targeting the permanent Temp
+                # directly for that second case, since it now holds a
+                # pointer, not p_type's own raw value.
                 self._bind_param(p, ir_fn)
-                ir.append(IRReadArgument(dst=self._local_temp(p.name), index=reg_index))
+                incoming = self.ir_program.ids.new_temp(p_type)
+                ir.append(IRReadArgument(dst=incoming, index=reg_index))
+                ir.extend(self._ir_finish_scalar_var_decl(p.name, id(p), p_type, incoming))
                 reg_index += 1
                 captured.append(None)
 
@@ -272,10 +285,23 @@ class IRFunctionBuilder(
         pointing at the logical slot _collect_params already assigned
         it. Also creates `p`'s own Temp, anchored at that same logical
         slot -- not yet a resolved offset, which _resolve_frame_layout
-        computes later, in lower_function."""
+        computes later, in lower_function.
+
+        The Temp's own type is p_type itself UNLESS p's own address
+        escapes (_is_heap_allocated), in which case it's a pointer to
+        p_type instead: this Temp now holds the address of a malloc'd
+        box holding the real value (see _ir_param_setup's own scalar
+        case), not the value directly, so every later is_wide_type/
+        register-allocation decision needs to see it as 8-byte pointer-
+        shaped, not p_type's own natural width. scope[p.name][1]
+        (p_type itself, read by _local_type) is deliberately NOT
+        changed here -- callers checking "is this variable composite,
+        does it need widening, ..." need Hornet's own declared type,
+        never this storage-representation detail."""
         slot = ir_fn.var_slots[id(p)]
         p_type = type_from_name(p.type, self.ir_program.struct_registry, self.ir_program.type_alias_registry, sum_types=self.ir_program.sum_type_registry)
-        self.scopes[-1][p.name] = (slot, p_type, id(p), self.ir_program.ids.temp_at_offset(p_type, slot))
+        temp_type = Type(TypeKind.POINTER, element_type=p_type) if self._is_heap_allocated(id(p), p_type) else p_type
+        self.scopes[-1][p.name] = (slot, p_type, id(p), self.ir_program.ids.temp_at_offset(temp_type, slot))
         return slot
 
     def _collect_locals(self, statements: List[Node], ir_fn: IRFunction) -> None:
@@ -506,10 +532,19 @@ class IRFunctionBuilder(
         re-emitting a fresh copy each time. Composite-typed (array/
         struct/slice) locals get a Temp here too, for uniformity, but
         never actually use it -- those address this variable's slot
-        directly instead."""
+        directly instead.
+
+        The Temp's own type is var_type itself UNLESS stmt's own
+        address escapes (_is_heap_allocated), in which case it's a
+        pointer to var_type instead -- see _bind_param's own,
+        identical reasoning for why (this Temp now holds a malloc'd
+        box's own address, not the value directly) and for why
+        scope[stmt.name][1] (var_type itself, read by _local_type)
+        stays untouched regardless."""
         slot = ir_fn.var_slots[id(stmt)]
         var_type = type_from_name(stmt.var_type, self.ir_program.struct_registry, self.ir_program.type_alias_registry, sum_types=self.ir_program.sum_type_registry)
-        self.scopes[-1][stmt.name] = (slot, var_type, id(stmt), self.ir_program.ids.temp_at_offset(var_type, slot))
+        temp_type = Type(TypeKind.POINTER, element_type=var_type) if self._is_heap_allocated(id(stmt), var_type) else var_type
+        self.scopes[-1][stmt.name] = (slot, var_type, id(stmt), self.ir_program.ids.temp_at_offset(temp_type, slot))
         return slot
 
     def _local_slot(self, name: str) -> int:
