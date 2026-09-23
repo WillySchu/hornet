@@ -2336,6 +2336,184 @@ class TestStringRepresentation:
         )
 
 
+class TestStringSlicing:
+    """`s[low:high]` for a str-typed s -- see check_slice's own
+    docstring in semantic.py, and _ir_str_slice_into's own in ir/
+    strings.py, for the full design: unlike array/slice slicing,
+    which always produces a SLICE regardless of the base's own kind,
+    slicing a str produces another str (Go's own convention -- a
+    substring IS a string); the bounds check is against len, not a
+    wider cap str has no concept of at all; and none of this needs
+    escape analysis's own involvement, since a str's own backing bytes
+    are never stack-allocated in the first place."""
+
+    pytestmark = GCC_SKIP
+
+    def test_basic_slice(self):
+        assert_exit_code(
+            "    str s = 'hello world'\n"
+            "    return s[6:11] == 'world'",
+            1,
+            return_type="bool",
+        )
+
+    def test_omitted_low_bound(self):
+        assert_exit_code(
+            "    str s = 'hello world'\n"
+            "    return s[:5] == 'hello'",
+            1,
+            return_type="bool",
+        )
+
+    def test_omitted_high_bound(self):
+        assert_exit_code(
+            "    str s = 'hello world'\n"
+            "    return s[6:] == 'world'",
+            1,
+            return_type="bool",
+        )
+
+    def test_both_bounds_omitted(self):
+        """s[:] -- low defaults to 0, high defaults to len (not a
+        wider cap, since str has none): a full, unchanged copy of s's
+        own content."""
+        assert_exit_code(
+            "    str s = 'hello world'\n"
+            "    return s[:] == 'hello world'",
+            1,
+            return_type="bool",
+        )
+
+    def test_empty_slice(self):
+        """low == high is a valid, empty result -- 0 <= bound is a
+        genuinely different comparison than < (see IRSliceBoundsCheck's
+        own docstring), not just a stricter one."""
+        assert_exit_code(
+            "    str s = 'hello'\n"
+            "    return len(s[2:2])",
+            0,
+        )
+
+    def test_slice_result_type_is_str_not_slice(self):
+        """The one place array/slice's own precedent doesn't
+        mechanically generalize: slicing an ARRAY still produces a
+        SLICE, but slicing a str produces a str again, not some other
+        composite kind -- confirmed here by using the result directly
+        as a str (len(), concatenation), which would be a type error
+        if check_slice's own str case still fell through to Type
+        (SLICE, ...)."""
+        assert_exit_code(
+            "    str s = 'hello world'\n"
+            "    str sub = s[0:5]\n"
+            "    str greeting = sub + '!'\n"
+            "    return greeting == 'hello!'",
+            1,
+            return_type="bool",
+        )
+
+    def test_slicing_a_string_literal_directly(self):
+        """'hello world'[6:11] -- the base itself is a StringLiteral,
+        not a Variable, exercising _ir_str_value's own StringLiteral
+        case as the base _ir_str_slice_into reads from, not just the
+        Variable/existing-value case."""
+        assert_exit_code(
+            "    return 'hello world'[6:11] == 'world'",
+            1,
+            return_type="bool",
+        )
+
+    def test_slicing_a_concatenation_result(self):
+        assert_exit_code(
+            "    return ('foo' + 'bar')[2:5] == 'oba'",
+            1,
+            return_type="bool",
+        )
+
+    def test_re_slicing_a_slice(self):
+        """A slice of a slice -- the base itself is already a Slice-
+        produced str, confirming _ir_str_value's own Slice case
+        composes with itself rather than only ever being reached with
+        a plain Variable/literal base."""
+        assert_exit_code(
+            "    str s = 'hello world'\n"
+            "    str first = s[0:5]\n"
+            "    str second = first[1:3]\n"
+            "    return second == 'el'",
+            1,
+            return_type="bool",
+        )
+
+    def test_slicing_preserves_an_embedded_null_byte(self):
+        """Slicing is pure pointer-and-length arithmetic, with no
+        scanning of any kind -- an embedded '\\0' inside the sliced
+        range is ordinary content, carried through exactly like any
+        other byte, not a stopping point."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    str s = 'hello\\0world'\n"
+            "    print(s[3:8])\n"
+            "    return 0\n",
+            "lo\x00wo\n",
+        )
+
+    def test_high_exceeding_length_is_rejected_at_runtime(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    str s = 'hello'\n"
+            "    str bad = s[2:10]\n"
+            "    print(bad)\n"
+            "    return 0\n",
+            "slice bounds out of range\n",
+        )
+
+    def test_low_greater_than_high_is_rejected_at_runtime(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    str s = 'hello'\n"
+            "    str bad = s[4:2]\n"
+            "    print(bad)\n"
+            "    return 0\n",
+            "slice bounds out of range\n",
+        )
+
+    def test_struct_field_constructed_from_a_slice(self):
+        """A struct-literal field's own value is a Slice -- confirms
+        _ir_write_composite_value_into's own str case (which already
+        just delegates to _ir_str_value, unchanged since the previous
+        arc) picks up the new Slice case for free, with no additional
+        wiring needed specifically for this position."""
+        assert_program_exit_code(
+            "type Holder struct:\n"
+            "    str s\n"
+            "\n"
+            "def int main():\n"
+            "    str base = 'hello world'\n"
+            "    Holder h = Holder(base[6:11])\n"
+            "    if h.s == 'world':\n"
+            "        return 1\n"
+            "    return 0\n",
+            expected=1,
+        )
+
+    def test_slicing_a_non_sliceable_type_is_rejected(self):
+        assert_semantic_error(
+            "    int x = 5\n"
+            "    return len(x[0:1])",
+            match="only arrays, slices, and str support slicing",
+        )
+
+    def test_slice_bound_must_be_int(self):
+        """Shares check_slice's own low/high type checks with array/
+        slice slicing unchanged -- str's own base_type check runs
+        first, but low/high's own int-ness is validated identically
+        regardless of what's being sliced."""
+        assert_semantic_error(
+            "    str s = 'hello'\n"
+            "    return len(s[true:3])",
+            match="Slice low bound must be int",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Function calls: parameters, arguments, recursion, and the two distinct
 # register-preservation fixes that make string operations safe across

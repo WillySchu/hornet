@@ -354,16 +354,21 @@ class Slice(Node):
     """`array[low:high]` -- a VIEW into `array` spanning [low, high),
     matching Go's convention. Produces a Slice-typed value (a
     {pointer, length, capacity} descriptor -- see codegen.py's SLICES
-    section), not a copy: a genuine alias into the base's own backing
-    storage, unlike plain array assignment. This aliasing is what
-    makes stack safety load-bearing once slicing exists -- a slice
-    outliving its backing array's stack frame becomes a dangling
-    pointer; see codegen.py's analyze_array_escapes for the mechanism
-    that prevents it.
+    section) for an array or slice base, or a str-typed one (a {ptr,
+    len} descriptor -- see ir/strings.py's own module docstring) for a
+    str base -- either way, not a copy: a genuine alias into the
+    base's own backing storage, unlike plain array assignment. This
+    aliasing is what makes stack safety load-bearing for an array/
+    slice base once slicing exists -- a slice outliving its backing
+    array's stack frame becomes a dangling pointer; see codegen.py's
+    analyze_array_escapes for the mechanism that prevents it. A str
+    base needs no such mechanism: its own backing bytes are never
+    stack-allocated in the first place (see semantic.py's check_slice
+    for the fuller explanation).
 
-    `array` can be either Array- or Slice-typed -- slicing a slice and
+    `array` can be Array-, Slice-, or str-typed -- slicing a slice and
     slicing the outer dimension of a multi-dimensional array both use
-    this node (see semantic.py's check_slice).
+    this node (see semantic.py's check_slice), as does slicing a str.
 
     `low`/`high` are independently optional (`arr[:]`, `arr[2:]`,
     `arr[:5]`), represented as None rather than a default filled in at

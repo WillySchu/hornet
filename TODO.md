@@ -19,7 +19,6 @@ Documentation:
 Updates:
 - Mutable []byte ↔ str conversion.
 - FFI/extern string interop design.
-- String slicing (s[a:b]).
 - String indexing (s[i] → a single byte).
 - is as a general, composable boolean expression — usable with and/or/not, assignable to bool, usable in while conditions or as a function argument. This is the biggest deferred item; it needs real control-flow-sensitive narrowing (what does if shape is Circle and x > 0: narrow? what survives an early return guard?), not just a special if-condition shape.
 - else-branch narrowing — even the "exactly two variants, so else means the other one" case.

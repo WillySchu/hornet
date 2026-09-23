@@ -1604,23 +1604,32 @@ class SemanticAnalyzer:
         return base_type.element_type
 
     def check_slice(self, expr: Slice) -> Type:
-        """`array[low:high]`. `array` must be array- or slice-typed,
-        the same acceptance _check_indexable_and_index uses, since
-        slicing a slice and slicing a multi-dimensional array's outer
-        dimension are both valid. Either bound, if present, must be
-        int; an omitted bound needs no check here -- its default is
-        resolved later, at codegen time.
+        """`array[low:high]`. `array` must be array-, slice-, or str-
+        typed, the same acceptance _check_indexable_and_index uses for
+        the first two, since slicing a slice and slicing a multi-
+        dimensional array's outer dimension are both valid. Either
+        bound, if present, must be int; an omitted bound needs no
+        check here -- its default is resolved later, at codegen time.
 
-        The result is ALWAYS Type(SLICE, element_type=...) regardless
-        of what's being sliced -- a slice expression's own type never
-        depends on its bounds, only on the element type of whatever's
-        being sliced, matching how check_index's own result never
-        depends on WHICH index was used."""
+        The result is Type(SLICE, element_type=...) for an array or
+        slice base, but plain Type.STR for a str one -- unlike array/
+        slice, where slicing an ARRAY still produces a SLICE (the
+        result kind never depends on the base's own kind, only on
+        what it's sliced INTO), str has no separate "slice-of-str"
+        kind to widen into at all: slicing a str produces another str,
+        matching Go's own convention that a substring IS a string, not
+        some other type. See ir/strings.py's own module docstring for
+        why this is safe with str's own immutable, always-static-or-
+        heap {ptr, len} representation, unlike array slicing, which
+        needs escape analysis to prevent an aliased slice from
+        outliving its own backing array's stack frame -- a concern
+        that never arises here, since a str's own backing bytes are
+        never stack-allocated in the first place."""
         base_type = self.check_expr(expr.array)
-        if base_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE):
+        if base_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STR):
             raise SemanticError(
                 f"Cannot slice a value of type {base_type} -- only "
-                f"arrays and slices support slicing",
+                f"arrays, slices, and str support slicing",
                 expr,
             )
         if expr.low is not None:
@@ -1631,6 +1640,8 @@ class SemanticAnalyzer:
             high_type = self.check_expr(expr.high)
             if high_type != Type.INT:
                 raise SemanticError(f"Slice high bound must be int, got {high_type}", expr.high)
+        if base_type.kind == TypeKind.STR:
+            return Type.STR
         return Type(TypeKind.SLICE, element_type=base_type.element_type)
 
     def analyze_return(self, stmt: Return, return_type: Type) -> None:

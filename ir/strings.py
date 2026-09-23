@@ -40,9 +40,9 @@ print (see runtime/runtime.c) -- this file just builds the IRCall
 against hornet_print and the static descriptor data it reads."""
 
 from ir.errors import IRError
-from ir.ir import IRBinOp, IRBranch, IRConst, IRCall, IRJump, IRLabel, IRStaticDataAddress, IRLocalAddress, IRLoad, IRMove, IRStore
+from ir.ir import IRBinOp, IRBranch, IRConst, IRCall, IRJump, IRLabel, IRSliceBoundsCheck, IRStaticDataAddress, IRLocalAddress, IRLoad, IRMove, IRStore
 from ir.utils import type_byte_width, type_of
-from parser import Call, Binary, Field, Index, Node, StringLiteral, Unary, UnaryOp, Variable, BinaryOp
+from parser import Call, Binary, Field, Index, Node, Slice, StringLiteral, Unary, UnaryOp, Variable, BinaryOp
 from semantic import Type, TypeKind
 
 
@@ -311,6 +311,7 @@ class StringsMixin:
         via _ir_str_address + _ir_read_str_descriptor_from_address.
 
         A Binary(ADD) (concatenation) delegates to _ir_string_concat.
+        A Slice (`s[low:high]`) delegates to _ir_str_slice_into.
         An ordinary str-returning Call materializes through the
         hidden-return-pointer convention (_ir_materialize_composite_
         call, the SAME helper every other composite-returning Call
@@ -328,6 +329,8 @@ class StringsMixin:
             return [IRStaticDataAddress(dst=ptr, label=label)], ptr, IRConst(len(expr.value), Type.INT)
         if isinstance(expr, Binary) and expr.op == BinaryOp.ADD:
             return self._ir_string_concat(expr)
+        if isinstance(expr, Slice):
+            return self._ir_str_slice_into(expr)
         result = self._ir_str_address(expr)
         if result is not None:
             addr_ir, addr_value = result
@@ -340,6 +343,64 @@ class StringsMixin:
             read_ir, ptr_value, len_value = self._ir_read_str_descriptor_from_address(addr_value)
             return addr_ir + read_ir, ptr_value, len_value
         return None
+
+    def _ir_str_slice_into(self, expr: Slice):
+        """Builds (without lowering) expr.array[expr.low:expr.high]'s
+        resulting {ptr, len} pair (expr.array itself str-typed) as
+        real IR -- returns (ir, ptr_value, len_value), or None when
+        expr.array's own base is out of scope.
+
+        Closely mirrors _ir_slice_into's own shape (ir/arrays_slices.
+        py), with the two differences str's own representation forces:
+        no cap at all -- str is immutable and never grows, so there's
+        no separate capacity to expose or bounds-check against; high
+        defaults to, and bounds-checks against, len itself, not a
+        wider cap the way slice's own high does -- and element_stride
+        is always 1, str's own "elements" being individual bytes with
+        no wider declared width to compute.
+
+        No stack-safety concern here the way _ir_slice_into's own
+        aliasing raises for an array/slice base (see Slice's own
+        docstring in parser.py, and semantic.py's check_slice, for the
+        fuller explanation): the resulting str's own ptr always still
+        points at whatever expr.array's own ptr already did -- static
+        data or a heap buffer, never the stack -- so this never needs
+        escape analysis's own involvement at all.
+
+        low_value/high_value/length_value are immutable once computed
+        -- the one IRBinOp below just reads them -- so no push/pop
+        protection is needed anywhere: every intermediate value
+        already has its own Temp home, safely written before whatever
+        evaluates next."""
+        result = self._ir_str_value(expr.array)
+        if result is None:
+            return None
+        base_ir, base_ptr, length_value = result
+
+        if expr.high is not None:
+            high_ir, high_value = self.gen_expr_ir(expr.high)
+        else:
+            high_ir, high_value = [], length_value
+        if expr.low is not None:
+            low_ir, low_value = self.gen_expr_ir(expr.low)
+        else:
+            low_ir, low_value = [], IRConst(0, Type.INT)
+
+        checks = [
+            IRSliceBoundsCheck(value=low_value, bound=length_value),
+            IRSliceBoundsCheck(value=high_value, bound=length_value),
+            IRSliceBoundsCheck(value=low_value, bound=high_value),
+        ]
+
+        new_len = self.ir_program.ids.new_temp(Type.INT)
+        ptr = self.ir_program.ids.new_temp(Type.INT64)
+        arithmetic = [
+            IRBinOp(dst=new_len, op=BinaryOp.SUBTRACT, left=high_value, right=low_value),
+            IRBinOp(dst=ptr, op=BinaryOp.ADD, left=base_ptr, right=low_value),
+        ]
+
+        ir = base_ir + high_ir + low_ir + checks + arithmetic
+        return ir, ptr, new_len
 
     def _ir_print_call(self, expr: Call):
         """Builds (without lowering) print(x)'s own real IR -- returns
