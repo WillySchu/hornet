@@ -2683,6 +2683,118 @@ class TestByteLiterals:
             _parse(source)
 
 
+class TestStringIndexing:
+    """`s[i]` for a str-typed s -- see check_index's own docstring in
+    semantic.py, and _ir_str_index_into's own in ir/strings.py, for
+    the full design: unlike array/slice indexing, whose result is the
+    base's own declared element_type, indexing a str always produces
+    a byte, since there's no separate element type a single one of
+    its own bytes could BE. Read-only -- str is immutable, so `s[i] =
+    ...` is rejected, unlike an array/slice element."""
+
+    pytestmark = GCC_SKIP
+
+    def test_basic_index(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    str s = 'hello world'\n"
+            "    byte b = s[6]\n"
+            "    print(b)\n"
+            "    return 0\n",
+            "119\n",
+        )
+
+    def test_result_compares_directly_against_a_byte_literal(self):
+        assert_exit_code(
+            "    str s = 'hello world'\n"
+            "    return s[6] == \"w\"",
+            1,
+            return_type="bool",
+        )
+
+    def test_indexing_a_string_literal_directly(self):
+        """'hello'[1] -- the base itself is a StringLiteral, not a
+        Variable, exercising _ir_str_value's own StringLiteral case
+        as the base _ir_str_index_into reads from."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    print('hello'[1])\n"
+            "    return 0\n",
+            "101\n",
+        )
+
+    def test_indexing_a_concatenation_result(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    print(('foo' + 'bar')[3])\n"
+            "    return 0\n",
+            "98\n",
+        )
+
+    def test_indexing_composes_with_slicing(self):
+        """s[0:5][2] -- the base is itself a Slice-produced str,
+        confirming _ir_str_value's own Slice case (added for
+        TestStringSlicing) composes correctly with indexing too, not
+        just with itself (re-slicing) or with the operations that
+        motivated it originally."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    str s = 'hello world'\n"
+            "    print(s[0:5][2])\n"
+            "    return 0\n",
+            "108\n",
+        )
+
+    def test_index_out_of_bounds_is_rejected_at_runtime(self):
+        """Reuses IRBoundsCheck -- the ordinary indexing check, and
+        its own \"array index out of bounds\" message -- not
+        IRSliceBoundsCheck: this is indexing, not slicing, so it gets
+        indexing's own comparison and wording, confirmed directly
+        here rather than just assumed from the implementation."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    str s = 'hello'\n"
+            "    byte b = s[10]\n"
+            "    print(b)\n"
+            "    return 0\n",
+            "array index out of bounds\n",
+        )
+
+    def test_index_assignment_into_a_str_is_rejected(self):
+        assert_semantic_error(
+            "    str s = 'hello'\n"
+            "    s[0] = \"H\"\n"
+            "    return 0",
+            match="Cannot assign into a str via indexing",
+        )
+
+    def test_index_must_be_int(self):
+        assert_semantic_error(
+            "    str s = 'hello'\n"
+            "    return s[true]",
+            match="Index must be int",
+        )
+
+    def test_indexing_preserves_an_embedded_null_byte(self):
+        """Pure pointer arithmetic and a single IRLoad -- no scanning
+        of any kind -- so a '\\0' at the indexed position reads back
+        correctly, exactly like any other byte."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    str s = 'hi\\0there'\n"
+            "    print(s[2])\n"
+            "    return 0\n",
+            "0\n",
+        )
+
+    def test_indexing_a_non_str_non_array_non_slice_type_is_rejected(self):
+        assert_semantic_error(
+            "    int x = 5\n"
+            "    return x[0]",
+            match="only arrays, slices, and str support indexing",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Function calls: parameters, arguments, recursion, and the two distinct
 # register-preservation fixes that make string operations safe across
@@ -15929,14 +16041,14 @@ class TestSemanticErrors:
         assert_semantic_error(
             "    int x = 5\n"
             "    return x[0]",
-            match="only arrays and slices support indexing",
+            match="only arrays, slices, and str support indexing",
         )
 
     def test_indexing_past_available_dimensions_is_rejected(self):
         assert_semantic_error(
             "    [2][3]int matrix = [[1, 2, 3], [4, 5, 6]]\n"
             "    return matrix[0][0][0]",
-            match="only arrays and slices support indexing",
+            match="only arrays, slices, and str support indexing",
         )
 
     def test_wrong_element_type_in_index_assignment_is_rejected(self):

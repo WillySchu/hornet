@@ -102,6 +102,21 @@ class DispatchMixin:
                 # dereferences.
                 return self._ir_load([], self._local_temp(expr.name), self._local_type(expr.name))
             return [], self._local_temp(expr.name)
+        if isinstance(expr, Index) and type_of(expr.array).kind == TypeKind.STR:
+            # Checked BEFORE the generic scalar-Index case just below,
+            # on expr.array's own type (str), not type_of(expr) (the
+            # RESULT type, always UINT8 here -- which that generic
+            # case's own guard would already accept, since UINT8 isn't
+            # composite, routing this into _ir_index_address, built
+            # for an array/slice base's own addressing and wrong for
+            # str's entirely different one -- see _ir_str_index_into's
+            # own docstring in ir/strings.py).
+            result = self._ir_str_index_into(expr)
+            if result is None:
+                raise IRError(
+                    f"_ir_str_index_into returned None for a str-typed Index read "
+                    f"({expr!r}) -- expected to always succeed for a reachable base")
+            return result
         if isinstance(expr, Index) and type_of(expr).kind not in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.STR):
             result = self._ir_index_address(expr)
             if result is None:

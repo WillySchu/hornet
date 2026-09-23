@@ -1580,8 +1580,11 @@ class SemanticAnalyzer:
             )
 
     def _check_indexable_and_index(self, base_expr: Node, index_expr: Node) -> Type:
-        """Shared by check_index (`base[index]`) and analyze_index_
-        assign (`base[index] = value`): validates `base_expr` is
+        """Shared by check_index (`base[index]`, but ONLY for an
+        array/slice base -- check_index handles a str base itself,
+        entirely separately, never reaching this method with one at
+        all) and analyze_index_assign (`base[index] = value`, every
+        base type alike, str included): validates `base_expr` is
         array- or slice-typed and `index_expr` is int-typed, returning
         the element type. Recurses correctly for multi-dimensional
         access for free: for `matrix[i][j]`, the outer call's base_expr
@@ -1591,12 +1594,28 @@ class SemanticAnalyzer:
         Named for what it accepts, not just arrays -- `s[i]` on a
         Slice uses this same check, since indexing a slice works
         identically to indexing an array from this file's point of
-        view; only codegen differs in where it finds the address."""
+        view; only codegen differs in where it finds the address.
+
+        A str base reaching this method at all can only mean index-
+        ASSIGNMENT (`s[i] = someByte`) -- str itself DOES support
+        indexing (see check_index's own, separate case), just not
+        assignment, since str is immutable; the error message below
+        says so explicitly for that one case, rather than the
+        otherwise-correct-sounding but now misleading "only arrays and
+        slices support indexing", which would wrongly suggest str
+        never supports this at all."""
         base_type = self.check_expr(base_expr)
+        if base_type.kind == TypeKind.STR:
+            raise SemanticError(
+                "Cannot assign into a str via indexing -- str supports "
+                "reading a byte by index (`b = s[i]`), but is immutable, "
+                "so `s[i] = ...` isn't allowed",
+                base_expr,
+            )
         if base_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE):
             raise SemanticError(
                 f"Cannot index into a value of type {base_type} -- "
-                f"only arrays and slices support indexing",
+                f"only arrays, slices, and str support indexing",
                 base_expr,
             )
         index_type = self.check_expr(index_expr)
@@ -2025,6 +2044,33 @@ class SemanticAnalyzer:
         return Type(TypeKind.ARRAY, element_type=first, size=len(expr.elements))
 
     def check_index(self, expr: Index) -> Type:
+        """`base[index]`. Delegates to _check_indexable_and_index for
+        an array/slice base (see its own docstring) -- or handles a
+        str base directly here instead of folding it into that shared
+        method: str indexing must stay READ-only (str is immutable),
+        but _check_indexable_and_index is ALSO used by analyze_index_
+        assign for `base[index] = value` -- adding str there would
+        incorrectly make `s[i] = someByte` type-check too. Keeping
+        str's own check entirely separate, reachable only from here,
+        makes that boundary a fact about the CODE itself (index-
+        assign's own checker simply never considers str at all)
+        rather than something a second, separate rejection would have
+        to maintain by hand.
+
+        Indexing a str produces a byte, not a str -- unlike an array/
+        slice base, where the result is the base's own declared
+        element_type, str's own {ptr, len} descriptor (see ir/
+        strings.py's own module docstring) has no separate element
+        type to read at all, since there's nothing else a single one
+        of its own bytes could BE. See this feature's own design
+        discussion for why byte, not a length-1 str, is the result
+        here."""
+        base_type = self.check_expr(expr.array)
+        if base_type.kind == TypeKind.STR:
+            index_type = self.check_expr(expr.index)
+            if index_type != Type.INT:
+                raise SemanticError(f"Index must be int, got {index_type}", expr.index)
+            return Type.UINT8
         return self._check_indexable_and_index(expr.array, expr.index)
 
     def check_field(self, expr: Field) -> Type:

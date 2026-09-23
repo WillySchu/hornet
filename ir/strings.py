@@ -40,7 +40,7 @@ print (see runtime/runtime.c) -- this file just builds the IRCall
 against hornet_print and the static descriptor data it reads."""
 
 from ir.errors import IRError
-from ir.ir import IRBinOp, IRBranch, IRConst, IRCall, IRJump, IRLabel, IRSliceBoundsCheck, IRStaticDataAddress, IRLocalAddress, IRLoad, IRMove, IRStore
+from ir.ir import IRBinOp, IRBoundsCheck, IRBranch, IRConst, IRCall, IRJump, IRLabel, IRSliceBoundsCheck, IRStaticDataAddress, IRLocalAddress, IRLoad, IRMove, IRStore
 from ir.utils import type_byte_width, type_of
 from parser import Call, Binary, Field, Index, Node, Slice, StringLiteral, Unary, UnaryOp, Variable, BinaryOp
 from semantic import Type, TypeKind
@@ -401,6 +401,48 @@ class StringsMixin:
 
         ir = base_ir + high_ir + low_ir + checks + arithmetic
         return ir, ptr, new_len
+
+    def _ir_str_index_into(self, expr: Index):
+        """Builds (without lowering) expr.array[expr.index]'s
+        resulting byte (expr.array itself str-typed) as real IR --
+        returns (ir, value), or None when expr.array's own base is
+        out of scope.
+
+        Closely mirrors _ir_index_address's own shape (ir/
+        arrays_slices.py), but produces the byte's own VALUE directly
+        (an IRLoad at UINT8 width, dst.type's own width deciding that
+        -- see IRLoad's own docstring) rather than just its address:
+        str indexing's whole result IS that one byte, with no wider
+        caller here that still needs an address to do something else
+        with, the way an ordinary array-element read or an Index-
+        assignment target both do. element_stride is always 1, the
+        same reasoning _ir_str_slice_into's own docstring already
+        gives for high/low: str's own "elements" are individual
+        bytes, with no wider declared width to multiply by.
+
+        Reuses IRBoundsCheck (index >= length) directly, NOT
+        IRSliceBoundsCheck: this is ordinary INDEXING, not slicing, so
+        the ordinary indexing check -- and its own "array index out
+        of bounds" message -- applies here exactly like it already
+        does for an array/slice element read, not slicing's own
+        different comparison and message (see IRSliceBoundsCheck's
+        own docstring for why the two are deliberately separate ops
+        rather than one, mode-flagged version)."""
+        result = self._ir_str_value(expr.array)
+        if result is None:
+            return None
+        base_ir, base_ptr, length_value = result
+
+        index_ir, index_value = self.gen_expr_ir(expr.index)
+        check = IRBoundsCheck(index=index_value, length=length_value)
+
+        byte_addr = self.ir_program.ids.new_temp(Type.INT64)
+        add = IRBinOp(dst=byte_addr, op=BinaryOp.ADD, left=base_ptr, right=index_value)
+
+        value = self.ir_program.ids.new_temp(Type.UINT8)
+        load = IRLoad(dst=value, address=byte_addr)
+
+        return base_ir + index_ir + [check, add, load], value
 
     def _ir_print_call(self, expr: Call):
         """Builds (without lowering) print(x)'s own real IR -- returns
