@@ -18,6 +18,12 @@ Documentation:
 
 Updates:
 - Imports / packages.
+- Named imports and import * - the export-table design above is meant to make this additive later, not a redesign, but it's not being built now.
+- A real standard library.
+- Spreading one package across multiple files.
+- A package-style in-file declaration decoupling the module's name from its filename.
+- Struct field/method-level visibility.
+- Any import-path resolution strategy beyond "relative to the importing file" (a stdlib search path, a project manifest/root, etc.).
 - Mutable []byte ↔ str conversion.
 - FFI/extern string interop design.
 - is as a general, composable boolean expression — usable with and/or/not, assignable to bool, usable in while conditions or as a function argument. This is the biggest deferred item; it needs real control-flow-sensitive narrowing (what does if shape is Circle and x > 0: narrow? what survives an early return guard?), not just a special if-condition shape.
