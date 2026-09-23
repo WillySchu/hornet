@@ -7014,21 +7014,54 @@ class TestPointers:
             match="Pointer-to-pointer types aren't supported yet",
         )
 
-    def test_address_of_a_field_is_rejected(self):
-        assert_program_semantic_error(
+    def test_address_of_a_field_is_now_accepted(self):
+        """Was rejected outright before this stage -- a Field chain
+        rooted in a named variable is now one of the allowed ADDRESS_OF
+        operand shapes, alongside a bare Variable and a struct
+        literal."""
+        ast = _parse(
             self._CIRCLE +
             "def int main():\n"
             "    Circle c = Circle(5)\n"
             "    *int p = &c.radius\n"
+            "    return *p\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_address_of_an_index_is_now_accepted(self):
+        ast = _parse(
+            "def int main():\n"
+            "    [3]int arr = [1, 2, 3]\n"
+            "    *int p = &arr[0]\n"
+            "    return *p\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_address_of_a_field_rooted_in_a_call_is_still_rejected(self):
+        """The one Field/Index shape still excluded: rooted in a
+        function call's own result rather than a named variable --
+        _root_variable_of's own restriction (see check_unary's own
+        ADDRESS_OF case), since there's no stable declaration for
+        escape analysis to attribute the resulting address to."""
+        assert_program_semantic_error(
+            self._CIRCLE +
+            "def Circle makeCircle():\n"
+            "    return Circle(5)\n"
+            "\n"
+            "def int main():\n"
+            "    *int p = &makeCircle().radius\n"
             "    return 0\n",
             match="'&' can only take the address of a bare variable",
         )
 
-    def test_address_of_an_index_is_rejected(self):
+    def test_address_of_an_index_rooted_in_a_call_is_still_rejected(self):
+        """The Index counterpart to the Field case just above."""
         assert_program_semantic_error(
+            "def [3]int makeArray():\n"
+            "    return [1, 2, 3]\n"
+            "\n"
             "def int main():\n"
-            "    [3]int arr = [1, 2, 3]\n"
-            "    *int p = &arr[0]\n"
+            "    *int p = &makeArray()[0]\n"
             "    return 0\n",
             match="'&' can only take the address of a bare variable",
         )
@@ -7401,6 +7434,47 @@ class TestPointersCodegen:
             expected=30,
         )
 
+    def test_address_of_a_field_purely_local(self):
+        """The non-escaping case: &c.radius never leaves this
+        function, so no heap promotion needed at all -- exactly as
+        simple as &c itself already is."""
+        assert_program_exit_code(
+            self._CIRCLE +
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    *int p = &c.radius\n"
+            "    return *p\n",
+            expected=5,
+        )
+
+    def test_address_of_an_element_purely_local(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    [3]int arr = [10, 20, 30]\n"
+            "    *int p = &arr[1]\n"
+            "    return *p\n",
+            expected=20,
+        )
+
+    def test_address_of_a_field_through_an_auto_dereferenced_pointer(self):
+        """`&p.field` where p itself is a pointer (p: *Circle) --
+        auto-deref, not the struct-rooted case: p's own pointee is
+        already, independently safe, so this is just that already-
+        valid address plus field's own offset, no new heap-promotion
+        machinery involved for p itself at all."""
+        assert_program_exit_code(
+            self._CIRCLE +
+            "def *int getFieldThroughPointer(*Circle p):\n"
+            "    return &p.radius\n"
+            "\n"
+            "def int main():\n"
+            "    Circle c = Circle(42)\n"
+            "    *Circle p = &c\n"
+            "    *int q = getFieldThroughPointer(p)\n"
+            "    return *q\n",
+            expected=42,
+        )
+
     def test_pointer_sees_a_later_mutation_of_the_pointee(self):
         """The register-allocator exclusion's own reason to exist: x
         must never live purely in a register once &x is taken, or a
@@ -7751,6 +7825,63 @@ class TestPointerEscapeAnalysis:
             "        return 1\n"
             "    return 0\n",
             expected=1,
+        )
+
+    def test_address_of_a_field_escaping_is_genuinely_heap_safe(self):
+        """&c.radius escaping (not &c itself) -- this is exactly the
+        case escape_analysis.py's own contribution() had no handling
+        for at all before this stage: value_expr.operand.name doesn't
+        crash on a Field operand (it HAS a .name field too, just
+        meaning the field's own name, not a variable's), so the OLD
+        code would silently resolve self.resolve('radius') -- looking
+        up a VARIABLE named 'radius', which doesn't exist -- and treat
+        this as never escaping at all. Same clobbering-call
+        verification as every other "genuinely safe" test here."""
+        assert_program_exit_code(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "def *int getFieldAddr():\n"
+            "    Circle c = Circle(5)\n"
+            "    return &c.radius\n"
+            "\n"
+            "def int clobber():\n"
+            "    int a = 111\n"
+            "    int b = 222\n"
+            "    int c = 333\n"
+            "    int d = 444\n"
+            "    return a + b + c + d\n"
+            "\n"
+            "def int main():\n"
+            "    *int p = getFieldAddr()\n"
+            "    int unused = clobber()\n"
+            "    return *p\n",
+            expected=5,
+        )
+
+    def test_address_of_an_element_escaping_is_genuinely_heap_safe(self):
+        """The Index counterpart to the Field case just above --
+        &arr[i] escaping, not &arr itself. The OLD contribution() code
+        would have crashed outright here (an Index has no .name
+        attribute at all, unlike Field), rather than silently
+        misbehaving -- still a real gap, just a louder one."""
+        assert_program_exit_code(
+            "def *int getElemAddr():\n"
+            "    [3]int arr = [10, 20, 30]\n"
+            "    return &arr[1]\n"
+            "\n"
+            "def int clobber():\n"
+            "    int a = 111\n"
+            "    int b = 222\n"
+            "    int c = 333\n"
+            "    int d = 444\n"
+            "    return a + b + c + d\n"
+            "\n"
+            "def int main():\n"
+            "    *int p = getElemAddr()\n"
+            "    int unused = clobber()\n"
+            "    return *p\n",
+            expected=20,
         )
 
     def test_escaping_parameter_is_genuinely_heap_safe(self):

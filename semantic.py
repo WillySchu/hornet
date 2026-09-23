@@ -2297,6 +2297,27 @@ class SemanticAnalyzer:
             )
         return Type.BOOL
 
+    def _root_variable_of(self, expr: Node) -> Optional[Variable]:
+        """Unwraps a chain of Field/Index nodes down to whatever bare
+        Variable, if any, ultimately sits underneath -- `s.field`,
+        `arr[i]`, `outer.inner[0].field`, arbitrary depth alike. The
+        semantic-level counterpart to codegen/escape_analysis.py's own
+        root_variable_name (that one also unwraps Slice, which never
+        reaches here: check_unary's own ADDRESS_OF case is the only
+        caller, and `&s[a:b]` -- taking the address of a SLICE
+        production itself, not indexing one -- isn't a shape semantic.
+        py's own Slice-node handling ever produces as a bare `&`
+        operand in the first place).
+
+        Returns None when the chain bottoms out in anything else -- a
+        Call (`someFn().field`), most notably: there's no stable
+        declaration for escape analysis to attribute the resulting
+        address to the way there is for a named variable, so `&`'s own
+        ADDRESS_OF case rejects that shape using this same check."""
+        while isinstance(expr, (Field, Index)):
+            expr = expr.base if isinstance(expr, Field) else expr.array
+        return expr if isinstance(expr, Variable) else None
+
     def check_unary(self, expr: Unary) -> Type:
         # _check_expr_allowing_struct_literal, not plain check_expr:
         # ADDRESS_OF's own case just below needs a struct literal
@@ -2332,25 +2353,35 @@ class SemanticAnalyzer:
                 )
             return Type.BOOL
         if expr.op == UnaryOp.ADDRESS_OF:
-            # Restricted to a bare Variable OR a struct literal for
-            # this slice of pointer support -- see PointerTypeExpr's
-            # own docstring for the "widen later" framing this
-            # restriction shares with pointer-to-pointer's own.
-            # `&s.field`/`&arr[i]` are the natural next step (escape
-            # analysis already has a "slot" concept for aggregate
-            # members, from slices), not ruled out for a structural
-            # reason the way, say, `&(x + 1)` (no variable, nothing to
-            # take the address OF) would be -- just not built yet.
-            # Array literals (`&[1, 2, 3]`) are the same shape as a
-            # struct literal here, deliberately not included yet
-            # either -- a separate, later follow-up.
+            # Restricted to a bare Variable, a struct literal, OR a
+            # Field/Index chain rooted in a bare Variable, for this
+            # slice of pointer support -- see PointerTypeExpr's own
+            # docstring for the "widen later" framing this restriction
+            # shares with pointer-to-pointer's own. A chain rooted in
+            # something else (`&someFn().field`, a function call's own
+            # result) is deliberately excluded here too: there's no
+            # stable declaration for escape analysis to attribute the
+            # address to the way there is for a named variable (see
+            # _root_variable_of's own docstring) -- a separate, later
+            # follow-up, similar in spirit to how a struct literal's
+            # own address needed its own synthetic-declaration
+            # treatment (see check_struct_literal's own docstring)
+            # rather than just reusing this same path. Array literals
+            # (`&[1, 2, 3]`) are the same shape as a struct literal
+            # here, deliberately not included yet either -- a
+            # separate, later follow-up too.
             is_struct_literal = isinstance(expr.operand, Call) and expr.operand.name in self.structs
-            if not (isinstance(expr.operand, Variable) or is_struct_literal):
+            is_rooted_field_or_index = (
+                isinstance(expr.operand, (Field, Index))
+                and self._root_variable_of(expr.operand) is not None
+            )
+            if not (isinstance(expr.operand, Variable) or is_struct_literal or is_rooted_field_or_index):
                 raise SemanticError(
-                    f"'&' can only take the address of a bare variable "
-                    f"or a struct literal for now, not "
-                    f"{type(expr.operand).__name__} -- struct fields and "
-                    f"array/slice elements are planned, not yet supported",
+                    f"'&' can only take the address of a bare variable, "
+                    f"a struct literal, or a field/element access rooted "
+                    f"in a named variable for now, not "
+                    f"{type(expr.operand).__name__} -- a function call's "
+                    f"own field/element isn't yet supported",
                     expr,
                 )
             return Type(TypeKind.POINTER, element_type=operand_type)

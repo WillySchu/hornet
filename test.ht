@@ -23,10 +23,18 @@ def [5]int test([5]int arr):
     print(arr)
     return arr
 
+
 def HasArray make_ha():
     return HasArray([1,2,3,4,5])
 
 
+def *HasArray make_ha_ptr():
+    return &HasArray([1,2,3,4,5])
+
+
 def int8 main():
     HasArray ha = HasArray([1,2,3,4,5])
+    *HasArray ha_ptr = make_ha_ptr()
+    [5]int ints = ha_ptr.values
+    print(ints)
     return 0

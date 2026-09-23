@@ -819,6 +819,63 @@ def test_address_of_a_scalar_local_passed_as_a_call_argument_is_now_heap_promote
     assert x_decl_id in result
 
 
+def test_address_of_a_field_resolves_to_the_containing_struct():
+    """`&s.field` escaping doesn't back the pointer with the field
+    itself -- there's no separate box for one field to escape into --
+    it backs it with s's own, WHOLE containing declaration, which the
+    existing composite heap-promotion machinery already knows how to
+    heap-allocate entirely once it's marked escaping this way."""
+    ast = parse_and_analyze(
+        "type Circle struct:\n"
+        "    int radius\n"
+        "\n"
+        "def *int getFieldAddr():\n"
+        "    Circle s = Circle(5)\n"
+        "    return &s.radius\n"
+    )
+    fn = ast.functions[0]
+    s_decl_id = id(fn.body[0])
+    result = ea.analyze_array_escapes(fn, [], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+    assert s_decl_id in result
+
+
+def test_address_of_an_element_resolves_to_the_containing_array():
+    """The Index counterpart to the Field case just above."""
+    ast = parse_and_analyze(
+        "def *int getElemAddr():\n"
+        "    [3]int arr = [1, 2, 3]\n"
+        "    return &arr[1]\n"
+    )
+    fn = ast.functions[0]
+    arr_decl_id = id(fn.body[0])
+    result = ea.analyze_array_escapes(fn, [], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+    assert arr_decl_id in result
+
+
+def test_address_of_a_field_through_an_auto_dereferenced_pointer_does_not_escape_the_pointer():
+    """The critical guard: `&p.field` where p itself is POINTER-typed
+    (auto-deref) must NOT mark p's own decl_id as escaping. p's own
+    pointee is already, independently safe -- heap-allocated (or
+    otherwise valid) wherever p first came from, entirely outside this
+    function's own control -- and &p.field is just that already-valid
+    address plus an offset. Marking p itself as escaping here would be
+    actively wrong: p is an ordinary, freely-copied pointer VALUE, and
+    would incorrectly trigger scalar heap-promotion (Temp boxing) on
+    the pointer variable itself, which has nothing to do with what's
+    actually happening."""
+    ast = parse_and_analyze(
+        "type Circle struct:\n"
+        "    int radius\n"
+        "\n"
+        "def *int getFieldThroughPointer(*Circle p):\n"
+        "    return &p.radius\n"
+    )
+    fn = ast.functions[0]
+    p_decl_id = id(fn.params[0])
+    result = ea.analyze_array_escapes(fn, [semantic.Type(semantic.TypeKind.POINTER, element_type=semantic.Type(semantic.TypeKind.STRUCT, struct_name='Circle'))], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+    assert p_decl_id not in result
+
+
 def test_address_of_via_reassignment_not_just_var_decl_init():
     """`p = &x` (Assign, an EXISTING pointer variable reassigned) needs
     the identical treatment `*int p = &x` (VarDecl's own init) already

@@ -380,8 +380,52 @@ class EscapeAnalyzer:
                 # path (never escape-driven there, by design).
                 self.declare("<struct literal>", id(value_expr.operand), type_of(value_expr.operand))
                 return id(value_expr.operand), None
+            if isinstance(value_expr.operand, (Field, Index)):
+                # `&s.field`/`&arr[i]` -- the other two shapes semantic.
+                # py's own check_unary allows here (see UnaryOp.ADDRESS_
+                # OF's own docstring, and _root_variable_of there, which
+                # this mirrors). Unlike a bare Variable, this doesn't
+                # back the pointer value with the field/element itself
+                # -- there's no separate box for one field to escape
+                # into on its own; a field/element's address is always
+                # its OWN containing declaration's base address plus a
+                # fixed offset, so if this address needs to survive
+                # past this function, the WHOLE containing declaration
+                # has to (the existing composite heap-promotion
+                # machinery, unchanged, once its own decl_id is in
+                # result -- see _is_heap_allocated).
+                #
+                # One real exception: if the chain's own base is
+                # POINTER-typed (auto-deref -- `p.field`, p: *Circle),
+                # there's nothing here to track at all. p's own pointee
+                # is already, independently safe -- heap-allocated (or
+                # otherwise valid) wherever p itself first came from,
+                # entirely outside this function's own control -- and
+                # &p.field is just that already-valid address plus an
+                # offset, exactly as safe as p itself already was.
+                # Marking p's OWN decl_id as escaping here instead would
+                # be actively wrong: p is an ordinary, freely-copied
+                # pointer VALUE, not something that itself needs heap
+                # promotion. field_slot_of's own, identical check (its
+                # own docstring: "Returns None if field_expr's base
+                # isn't struct-typed") is exactly this same guard,
+                # reused here for the identical reason -- checking only
+                # the IMMEDIATE base is already sufficient regardless of
+                # chain depth, since auto-deref can only ever happen at
+                # the one field/index access immediately following it.
+                immediate_base = value_expr.operand.base if isinstance(value_expr.operand, Field) else value_expr.operand.array
+                base_type = immediate_base.resolved_type
+                if base_type is not None and base_type.kind == TypeKind.POINTER:
+                    return None, None
+                root_name = root_variable_name(value_expr.operand)
+                if root_name is not None:
+                    base_id = self.resolve(root_name)
+                    if base_id is not None:
+                        return base_id, None
+                return None, None
             # &x -- x is guaranteed a bare Variable here (the only
-            # remaining shape after the struct-literal case above).
+            # remaining shape after the struct-literal/Field/Index
+            # cases above).
             # x's own decl_id becomes this pointer VALUE's own
             # "backing" declaration -- the identical role array_decl_id
             # plays for a Slice above, generalized to any type: x can

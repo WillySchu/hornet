@@ -56,11 +56,11 @@ class PointersMixin:
         it's excluded anyway, harmlessly, since IRLocalAddress still
         targets it.
 
-        expr.operand is guaranteed a bare Variable OR a struct literal
-        by semantic.py's own check_unary (see UnaryOp.ADDRESS_OF's own
-        docstring there for why this slice of pointer support restricts
-        it that way -- struct fields, array/slice elements, and array
-        literals are planned, not yet reachable here).
+        expr.operand is guaranteed a bare Variable, a struct literal,
+        a Field, or an Index by semantic.py's own check_unary (see
+        UnaryOp.ADDRESS_OF's own docstring there -- a Field/Index chain
+        rooted in anything other than a named variable, e.g. a function
+        call's own result, is excluded there too, not reachable here).
 
         A struct-literal operand (`&Circle(5)`) is handled first,
         entirely separately from the Variable case below: there's no
@@ -73,7 +73,26 @@ class PointersMixin:
         right IR either way (a reserved stack slot, or a fresh malloc
         when none was reserved) -- its own returned address IS this
         expression's own value, unlike the Variable case below, which
-        still needs its own extra heap-allocated indirection check."""
+        still needs its own extra heap-allocated indirection check.
+
+        A Field or Index operand (`&s.field`, `&arr[i]`) is handled
+        next, delegating straight to _ir_field_address/_ir_index_
+        address -- both already compute exactly the address needed
+        here for any other purpose (a scalar field/element's own
+        write, or a composite one's own copy source), already handle
+        arbitrary chain depth and auto-deref through a pointer-typed
+        base internally, and already resolve to a real address with
+        no construction step involved (unlike the struct-literal case
+        above) -- so their own returned address IS this expression's
+        own value too, no extra heap-allocated indirection check
+        needed here either: whichever named variable this chain is
+        ultimately rooted in is what escape analysis's own new ADDRESS_
+        OF case (contribution(), codegen/escape_analysis.py) already
+        attributes THIS address to, so if it escapes, is_heap_
+        allocated already reports that ROOT declaration as heap-
+        allocated -- and _ir_field_address/_ir_index_address already
+        read a heap-allocated base correctly on their own, the same
+        way they already do for every other caller."""
         if isinstance(expr.operand, Call):
             result = self._ir_materialize_struct_literal(expr.operand)
             if result is None:
@@ -81,6 +100,24 @@ class PointersMixin:
                     f"_ir_materialize_struct_literal returned None for a "
                     f"struct-literal '&' operand ({expr.operand!r}) -- "
                     f"expected to always succeed for a reachable shape"
+                )
+            return result
+        if isinstance(expr.operand, Field):
+            result = self._ir_field_address(expr.operand)
+            if result is None:
+                raise IRError(
+                    f"_ir_field_address returned None for a Field '&' "
+                    f"operand ({expr.operand!r}) -- expected to always "
+                    f"succeed for a reachable shape"
+                )
+            return result
+        if isinstance(expr.operand, Index):
+            result = self._ir_index_address(expr.operand)
+            if result is None:
+                raise IRError(
+                    f"_ir_index_address returned None for an Index '&' "
+                    f"operand ({expr.operand!r}) -- expected to always "
+                    f"succeed for a reachable shape"
                 )
             return result
         if not isinstance(expr.operand, Variable):
