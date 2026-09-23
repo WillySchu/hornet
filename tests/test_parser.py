@@ -2875,6 +2875,140 @@ def test_is_check_requires_a_type_name_after_is():
         parser.Parser(tokens).parse_if()
 
 
+def test_is_check_with_index_subject_requires_as_binding():
+    """`shapes[0] is Circle as c` -- subject is the Index node itself,
+    variable_name is the binding, not shapes/0 in any form."""
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'shapes', 1, 4),
+        lexer.Token(lexer.TokenType.OPEN_BRACKET, '[', 1, 10),
+        lexer.Token(lexer.TokenType.NUMBER, '0', 1, 11),
+        lexer.Token(lexer.TokenType.CLOSE_BRACKET, ']', 1, 12),
+        lexer.Token(lexer.TokenType.IS, 'is', 1, 14),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Circle', 1, 17),
+        lexer.Token(lexer.TokenType.AS, 'as', 1, 24),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'c', 1, 27),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 28),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 29),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.RETURN, 'return', 2, 5),
+        lexer.Token(lexer.TokenType.NUMBER, '0', 2, 12),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 13),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 3, 1),
+    ]
+    result = parser.Parser(tokens).parse_if()
+    condition = result.condition
+    assert isinstance(condition, parser.IsCheck)
+    assert condition.variable_name == 'c'
+    assert condition.type_name == 'Circle'
+    assert isinstance(condition.subject, parser.Index)
+    assert condition.subject.array.name == 'shapes'
+    assert condition.subject.index.value == 0
+
+
+def test_is_check_with_non_bare_subject_requires_as():
+    """`shapes[0] is Circle` with no trailing `as` -- rejected with a
+    message naming the actual gap, not a generic parse failure."""
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'shapes', 1, 4),
+        lexer.Token(lexer.TokenType.OPEN_BRACKET, '[', 1, 10),
+        lexer.Token(lexer.TokenType.NUMBER, '0', 1, 11),
+        lexer.Token(lexer.TokenType.CLOSE_BRACKET, ']', 1, 12),
+        lexer.Token(lexer.TokenType.IS, 'is', 1, 14),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Circle', 1, 17),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 23),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 24),
+    ]
+    with pytest.raises(parser.ParseError, match="Expected 'as NAME' after the type name"):
+        parser.Parser(tokens).parse_if()
+
+
+def test_is_check_bare_variable_can_still_take_an_optional_as_rename():
+    """`x is Circle as y` -- a bare-variable subject doesn't NEED `as`
+    (see test_if_condition_recognizes_is_check, subject=None there),
+    but can still take one, opting into a renamed, freshly-bound copy
+    rather than the zero-cost same-name narrowing `is` without `as`
+    gets. Caught, by hand, as a real gap before this branch existed:
+    without it, this shape fell through the bare-variable fast path
+    having consumed only `x is Circle`, leaving `as y` to break the
+    caller's own subsequent `:` expectation with a confusing error."""
+    tokens = [
+        lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'x', 1, 4),
+        lexer.Token(lexer.TokenType.IS, 'is', 1, 6),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Circle', 1, 9),
+        lexer.Token(lexer.TokenType.AS, 'as', 1, 16),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'y', 1, 19),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 20),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 21),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.RETURN, 'return', 2, 5),
+        lexer.Token(lexer.TokenType.NUMBER, '0', 2, 12),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 13),
+        lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 3, 1),
+    ]
+    result = parser.Parser(tokens).parse_if()
+    condition = result.condition
+    assert condition.variable_name == 'y'
+    assert condition.type_name == 'Circle'
+    assert isinstance(condition.subject, parser.Variable)
+    assert condition.subject.name == 'x'
+
+
+def test_match_with_call_subject_binds_only_the_first_arm():
+    """`match makeShape() as s:` -- subject is set on the OUTERMOST
+    If's own condition only (the first arm in source order -- see
+    parse_match's own docstring for why setting it on every arm would
+    re-evaluate the subject once per arm tried). The second arm,
+    nested in the first's own else_body, gets subject=None -- it
+    relies on 's' already being in scope by the time it runs, not on
+    building its own, second binding."""
+    tokens = [
+        lexer.Token(lexer.TokenType.MATCH, 'match', 1, 1),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'makeShape', 1, 7),
+        lexer.Token(lexer.TokenType.OPEN_PAREN, '(', 1, 16),
+        lexer.Token(lexer.TokenType.CLOSE_PAREN, ')', 1, 17),
+        lexer.Token(lexer.TokenType.AS, 'as', 1, 19),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 's', 1, 22),
+        lexer.Token(lexer.TokenType.COLON, ':', 1, 23),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 1, 24),
+        lexer.Token(lexer.TokenType.INDENT, '', 2, 1),
+        lexer.Token(lexer.TokenType.IS, 'is', 2, 5),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Circle', 2, 8),
+        lexer.Token(lexer.TokenType.COLON, ':', 2, 14),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 2, 15),
+        lexer.Token(lexer.TokenType.INDENT, '', 3, 1),
+        lexer.Token(lexer.TokenType.RETURN, 'return', 3, 9),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 3, 16),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 3, 17),
+        lexer.Token(lexer.TokenType.DEDENT, '', 4, 5),
+        lexer.Token(lexer.TokenType.IS, 'is', 4, 5),
+        lexer.Token(lexer.TokenType.IDENTIFIER, 'Square', 4, 8),
+        lexer.Token(lexer.TokenType.COLON, ':', 4, 14),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 4, 15),
+        lexer.Token(lexer.TokenType.INDENT, '', 5, 9),
+        lexer.Token(lexer.TokenType.RETURN, 'return', 5, 9),
+        lexer.Token(lexer.TokenType.NUMBER, '2', 5, 16),
+        lexer.Token(lexer.TokenType.NEWLINE, '\n', 5, 17),
+        lexer.Token(lexer.TokenType.DEDENT, '', 6, 1),
+        lexer.Token(lexer.TokenType.DEDENT, '', 6, 1),
+        lexer.Token(lexer.TokenType.EOF, '', 6, 1),
+    ]
+    outermost = parser.Parser(tokens).parse_match()
+    assert outermost.condition.variable_name == 's'
+    assert outermost.condition.type_name == 'Circle'
+    assert isinstance(outermost.condition.subject, parser.Call)
+    assert outermost.condition.subject.name == 'makeShape'
+
+    second_arm = outermost.else_body[0]
+    assert second_arm.condition.variable_name == 's'
+    assert second_arm.condition.type_name == 'Square'
+    assert second_arm.condition.subject is None
+
+
 def test_while_condition_does_not_recognize_is_check():
     """Deliberately restricted to if/elif for this first cut (see
     IsCheck's own docstring) -- a while condition falls through to
@@ -3008,17 +3142,23 @@ def test_match_with_no_arms_raises():
         parser.Parser(tokens).parse_match()
 
 
-def test_match_subject_must_be_a_bare_identifier():
-    """Matching IsCheck's own restriction -- a match subject that's an
-    arbitrary expression is rejected at the grammar level, not
-    deferred to semantic.py."""
+def test_non_identifier_match_subject_requires_an_as_binding():
+    """The restriction has loosened since sum type matching gained
+    non-bare-variable subject support: a match subject that's an
+    arbitrary expression is no longer rejected outright -- it just
+    needs an explicit `as NAME` (see parse_match's own docstring,
+    subject/binding_name), exactly like a non-bare-variable `is`
+    check already does. Still rejected at the grammar level, just
+    with a different, more specific message now that names the actual
+    gap (a missing `as`) rather than pretending non-identifiers are
+    categorically disallowed."""
     tokens = [
         lexer.Token(lexer.TokenType.MATCH, 'match', 1, 1),
         lexer.Token(lexer.TokenType.NUMBER, '5', 1, 7),
         lexer.Token(lexer.TokenType.COLON, ':', 1, 8),
         lexer.Token(lexer.TokenType.EOF, '', 1, 9),
     ]
-    with pytest.raises(parser.ParseError, match="Expected a variable name to match on"):
+    with pytest.raises(parser.ParseError, match="Expected 'as NAME' after the match subject"):
         parser.Parser(tokens).parse_match()
 
 

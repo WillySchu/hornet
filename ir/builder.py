@@ -47,6 +47,7 @@ from parser import (
     If,
     Index,
     IndexAssign,
+    IsCheck,
     Node,
     Param,
     Return,
@@ -305,6 +306,18 @@ class IRFunctionBuilder(
         self.scopes[-1][p.name] = (slot, p_type, id(p), self.ir_program.ids.temp_at_offset(temp_type, slot))
         return slot
 
+    def _allocate_local_slot(self, stmt: VarDecl, ir_fn: IRFunction) -> None:
+        """The actual per-VarDecl slot-allocation work _collect_locals
+        does for each one it finds -- pulled out on its own so a
+        subject-bearing IsCheck's own binding_decl (a VarDecl that
+        never sits directly in a statement list, only referenced off
+        stmt.condition) can get the IDENTICAL treatment through the
+        same code, rather than a hand-duplicated copy of it."""
+        var_type = type_from_name(stmt.var_type, self.ir_program.struct_registry, self.ir_program.type_alias_registry, sum_types=self.ir_program.sum_type_registry)
+        width = 8 if self._is_heap_allocated(
+            id(stmt), var_type) else type_byte_width(var_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+        ir_fn.var_slots[id(stmt)] = self.ir_program.ids.new_slot(width, f"local:{stmt.name}", ir_fn)
+
     def _collect_locals(self, statements: List[Node], ir_fn: IRFunction) -> None:
         """Recursively walks `statements`, including into every If's
         then_body/else_body and every While's body, and gives each
@@ -318,14 +331,21 @@ class IRFunctionBuilder(
         case), not the array's data directly. No alignment padding
         between slots -- x86-64 doesn't require it, and %rsp's own
         16-byte alignment is satisfied by _frame_size rounding the
-        total frame size up at the end."""
+        total frame size up at the end.
+
+        A subject-bearing IsCheck's own condition.binding_decl (see
+        IsCheck's own docstring in parser.py, and analyze_if's own
+        comment on where binding_decl comes from) is walked here too,
+        exactly like an ordinary VarDecl found directly in the
+        statement list -- it needs its own permanent slot for the
+        SAME reason any other VarDecl does, well before gen_statement_
+        ir's own If case ever runs and tries to bind through it."""
         for stmt in statements:
             if isinstance(stmt, VarDecl):
-                var_type = type_from_name(stmt.var_type, self.ir_program.struct_registry, self.ir_program.type_alias_registry, sum_types=self.ir_program.sum_type_registry)
-                width = 8 if self._is_heap_allocated(
-                    id(stmt), var_type) else type_byte_width(var_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
-                ir_fn.var_slots[id(stmt)] = self.ir_program.ids.new_slot(width, f"local:{stmt.name}", ir_fn)
+                self._allocate_local_slot(stmt, ir_fn)
             elif isinstance(stmt, If):
+                if isinstance(stmt.condition, IsCheck) and stmt.condition.binding_decl is not None:
+                    self._allocate_local_slot(stmt.condition.binding_decl, ir_fn)
                 self._collect_locals(stmt.then_body, ir_fn)
                 if stmt.else_body is not None:
                     self._collect_locals(stmt.else_body, ir_fn)

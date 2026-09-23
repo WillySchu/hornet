@@ -6820,6 +6820,314 @@ class TestExhaustiveMatchingCodegen:
         )
 
 
+class TestNarrowingNonBareVariable:
+    """`is`/`match` narrowing a subject that isn't already a bare
+    variable -- an array/slice element, a function call's own return
+    value -- via an explicit `as NAME` binding (see IsCheck's own
+    docstring in parser.py, and analyze_if's own has_binding comment,
+    for the full mechanism: NAME is declared, once, with subject's own
+    FULL type, in a scope wrapping the whole if/else, before the
+    condition itself is even checked; narrowing NAME within then_body
+    from that point on is the IDENTICAL, unchanged mechanism a bare-
+    variable subject already uses).
+
+    Struct fields are deliberately NOT covered here: a struct field
+    can't be sum-typed at all yet (a separate, prerequisite gap,
+    unrelated to narrowing itself -- see test_sum_typed_struct_field_
+    is_still_rejected below, which just confirms that boundary hasn't
+    shifted)."""
+
+    _SHAPE_DECLS = (
+        "type Circle struct:\n"
+        "    int radius\n"
+        "\n"
+        "type Square struct:\n"
+        "    int side\n"
+        "\n"
+        "type Shape is Circle | Square\n"
+        "\n"
+    )
+
+    def test_array_element_subject(self):
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    [2]Shape shapes = [Circle(5), Square(3)]\n"
+            "    if shapes[0] is Circle as c:\n"
+            "        return c.radius\n"
+            "    return -1\n",
+            expected=5,
+        )
+
+    def test_array_element_subject_false_branch(self):
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    [2]Shape shapes = [Square(9), Circle(2)]\n"
+            "    if shapes[0] is Circle as c:\n"
+            "        return c.radius\n"
+            "    return 99\n",
+            expected=99,
+        )
+
+    def test_call_return_value_subject(self):
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def Shape makeShape(int flag):\n"
+            "    if flag == 1:\n"
+            "        return Circle(7)\n"
+            "    return Square(4)\n"
+            "\n"
+            "def int main():\n"
+            "    if makeShape(1) is Circle as c:\n"
+            "        return c.radius\n"
+            "    return -1\n",
+            expected=7,
+        )
+
+    def test_bare_variable_subject_can_still_be_explicitly_renamed(self):
+        """`x is Circle as y` -- x keeps its own, original, un-
+        narrowed type outside the branch (it was never re-declared,
+        just read once to initialize y's own, separate binding), and
+        y is a genuine copy narrowed to Circle -- both readable."""
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape x = Circle(11)\n"
+            "    if x is Circle as y:\n"
+            "        return y.radius\n"
+            "    return -1\n",
+            expected=11,
+        )
+
+    def test_binding_stays_in_scope_and_un_narrowed_in_else(self):
+        """The binding itself (not its narrowing) is declared in a
+        scope enclosing both then_body AND else_body -- else_body
+        still sees 'c', at Shape, and can run an ordinary, further
+        is-check on it (no 'as' needed there: by that point c is
+        already a bare variable with its own existing storage,
+        exactly like any other)."""
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    [2]Shape shapes = [Square(9), Circle(2)]\n"
+            "    if shapes[0] is Circle as c:\n"
+            "        return c.radius\n"
+            "    else:\n"
+            "        if c is Square as s:\n"
+            "            return s.side\n"
+            "        return -1\n",
+            expected=9,
+        )
+
+    def test_array_element_subject_evaluated_exactly_once(self):
+        """The core correctness property this whole feature exists
+        for: reading shapes[nextIndex(p)] inside then_body must NOT
+        re-evaluate nextIndex(p) a second time -- a naive `if
+        shapes[i] is Circle: ... shapes[i].radius ...` (re-indexing
+        for every use) would call it twice. nextIndex returns its
+        counter's own pre-increment value, so the counter's own final
+        value directly reports how many times it was actually called.
+
+        c.radius * 10 (not * 100 -- the exit code this ultimately
+        becomes is truncated to 8 bits, so anything at or past 256
+        wraps silently rather than failing loudly; keeping every term
+        comfortably under that avoids the result meaning something
+        other than what it looks like)."""
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int nextIndex(*int counter):\n"
+            "    int current = *counter\n"
+            "    *counter = current + 1\n"
+            "    return current\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Shape shapes = [Circle(6), Square(1)]\n"
+            "    int counter = 0\n"
+            "    *int p = &counter\n"
+            "    if shapes[nextIndex(p)] is Circle as c:\n"
+            "        return c.radius * 10 + counter\n"
+            "    return -1\n",
+            expected=6 * 10 + 1,
+        )
+
+    def test_call_subject_evaluated_exactly_once(self):
+        """The Call counterpart: makeShape(p) must be called exactly
+        once, not once (for the is-check) plus again for every field
+        read inside then_body. Circle's own radius is a fixed 9,
+        independent of current -- current only decides Circle vs
+        Square, so c.radius's own value isn't entangled with how many
+        times makeShape happened to be called, keeping the two things
+        this test checks (the field reads correctly; the call
+        happened once) independently legible in the one result."""
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def Shape makeShape(*int counter):\n"
+            "    int current = *counter\n"
+            "    *counter = current + 1\n"
+            "    if current == 0:\n"
+            "        return Circle(9)\n"
+            "    return Square(9)\n"
+            "\n"
+            "def int main():\n"
+            "    int counter = 0\n"
+            "    *int p = &counter\n"
+            "    if makeShape(p) is Circle as c:\n"
+            "        return c.radius * 10 + counter\n"
+            "    return -1\n",
+            expected=9 * 10 + 1,
+        )
+
+    def test_match_with_call_subject_evaluated_exactly_once_even_across_arms(self):
+        """The property that actually motivated NOT setting subject
+        on every arm's own IsCheck (see parse_match's own docstring):
+        makeShape(p) must be called exactly once even though the
+        match only succeeds on its THIRD arm, after two failed checks
+        -- a naive per-arm re-check would call it three times."""
+        assert_program_exit_code(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type Triangle struct:\n"
+            "    int base\n"
+            "\n"
+            "type Shape is Circle | Square | Triangle\n"
+            "\n"
+            "def Shape makeShape(*int counter):\n"
+            "    int current = *counter\n"
+            "    *counter = current + 1\n"
+            "    return Triangle(current)\n"
+            "\n"
+            "def int main():\n"
+            "    int counter = 0\n"
+            "    *int p = &counter\n"
+            "    match makeShape(p) as s:\n"
+            "        is Circle:\n"
+            "            return -1\n"
+            "        is Square:\n"
+            "            return -2\n"
+            "        is Triangle:\n"
+            "            return counter * 100 + s.base\n",
+            expected=100,
+        )
+
+    def test_match_bare_subject_still_works_unrenamed(self):
+        """match NAME: with no 'as' at all -- the pre-existing shape,
+        confirmed unaffected by parse_match's own restructuring."""
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape shape = Square(6)\n"
+            "    match shape:\n"
+            "        is Circle:\n"
+            "            return -1\n"
+            "        is Square:\n"
+            "            return shape.side\n",
+            expected=6,
+        )
+
+    def test_match_bare_subject_with_explicit_rename(self):
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    Shape shape = Circle(13)\n"
+            "    match shape as s:\n"
+            "        is Circle:\n"
+            "            return s.radius\n"
+            "        is Square:\n"
+            "            return -1\n",
+            expected=13,
+        )
+
+    def test_match_with_call_subject_exhaustiveness_still_checked(self):
+        assert_program_semantic_error(
+            self._SHAPE_DECLS +
+            "def Shape makeShape():\n"
+            "    return Circle(1)\n"
+            "\n"
+            "def int main():\n"
+            "    match makeShape() as s:\n"
+            "        is Circle:\n"
+            "            return s.radius\n",
+            match="doesn't cover every variant",
+        )
+
+    def test_non_sum_typed_subject_is_rejected(self):
+        """arr[0] is int-typed, not sum-typed -- rejected with a
+        message that names the actual expression bound to 'c' rather
+        than implying 'c' was some pre-existing, wrongly-typed
+        variable (see check_is_check's own docstring for why the two
+        cases need different wording). Checked against Circle, a
+        declared struct, rather than a scalar keyword like `int`:
+        `int` itself is a reserved type keyword, not a generic
+        IDENTIFIER token, so `is int` doesn't even parse -- irrelevant
+        to what this test means to check anyway, since check_is_check
+        rejects arr[0] itself for not being sum-typed before it ever
+        looks at whether the type name on the right is a declared
+        struct at all."""
+        assert_program_semantic_error(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    [2]int arr = [1, 2]\n"
+            "    if arr[0] is Circle as c:\n"
+            "        return c.radius\n"
+            "    return 0\n",
+            match="The expression bound to 'c'",
+        )
+
+    def test_subject_variant_not_in_the_sum_type_is_rejected(self):
+        assert_program_semantic_error(
+            self._SHAPE_DECLS +
+            "type Triangle struct:\n"
+            "    int base\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Shape shapes = [Circle(5), Square(3)]\n"
+            "    if shapes[0] is Triangle as t:\n"
+            "        return 1\n"
+            "    return 0\n",
+            match="not one of Shape's own",
+        )
+
+    def test_sum_typed_struct_field_is_still_rejected(self):
+        """Confirms the deliberately out-of-scope boundary hasn't
+        shifted: a struct field still can't be sum-typed at all,
+        independent of narrowing -- see this class's own docstring."""
+        assert_program_semantic_error(
+            self._SHAPE_DECLS +
+            "type Holder struct:\n"
+            "    Shape s\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="Unknown type 'Shape'",
+        )
+
+    def test_two_independent_bindings_coexist(self):
+        """Two separate is-checks, each with its own subject and its
+        own binding name, nested -- confirms each gets its own,
+        distinct slot (see _allocate_local_slot's own docstring) and
+        neither's narrowing leaks into or clobbers the other's.
+
+        c.radius * 10, not * 100 -- see test_array_element_subject_
+        evaluated_exactly_once's own comment on why every term here
+        stays comfortably under the 256 an exit code truncates to."""
+        assert_program_exit_code(
+            self._SHAPE_DECLS +
+            "def int main():\n"
+            "    [2]Shape shapes = [Circle(4), Square(7)]\n"
+            "    if shapes[0] is Circle as c:\n"
+            "        if shapes[1] is Square as s:\n"
+            "            return c.radius * 10 + s.side\n"
+            "        return -1\n"
+            "    return -2\n",
+            expected=4 * 10 + 7,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Pointers, stage 2: semantic analysis only. Go-style pointers -- safe by
 # construction via escape analysis (not yet built; that's stage 3), no

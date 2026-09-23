@@ -35,6 +35,7 @@ from parser import (
     If,
     Index,
     IndexAssign,
+    IsCheck,
     Node,
     NoneLiteral,
     Return,
@@ -222,7 +223,34 @@ class StatementsMixin:
             then_label = self.ir_program.ids.new_label("if_then")
             else_label = self.ir_program.ids.new_label("if_else")
             end_label = self.ir_program.ids.new_label("if_end")
-            ir = self._ir_if_head(stmt, then_label, else_label)
+            # A subject-bearing IsCheck (`EXPR is TypeName as NAME` --
+            # see IsCheck's own docstring in parser.py) needs its own
+            # binding bound BEFORE _ir_if_head runs: _ir_is_check (ir/
+            # sum_types.py) reads variable_name's own address via _ir_
+            # struct_address, same as a bare-variable subject always
+            # has, which means variable_name needs a real, bound Temp
+            # already sitting in scope by then -- exactly what binding
+            # through condition.binding_decl, an ordinary VarDecl
+            # (built once, by semantic.py's own analyze_if -- see
+            # IsCheck's own docstring for why it's read here rather
+            # than built fresh), already produces: indistinguishable,
+            # to gen_statement_ir's own VarDecl case, from an ordinary
+            # `Shape __c = shapes[0]` a person could have written by
+            # hand, so the identical machinery handles subject being
+            # an Index, a Field once sum-typed fields exist, or a
+            # composite-returning Call, with nothing new needed here
+            # at all.
+            #
+            # Scoped around the condition check, then_body AND else_
+            # body alike -- see analyze_if's own has_binding comment
+            # for why the binding needs to outlive then_body's own
+            # scope, popped only once the whole If is done.
+            has_binding = isinstance(stmt.condition, IsCheck) and stmt.condition.binding_decl is not None
+            ir = []
+            if has_binding:
+                self._push_scope()
+                ir.extend(self.gen_statement_ir(stmt.condition.binding_decl, ir_fn))
+            ir.extend(self._ir_if_head(stmt, then_label, else_label))
             self._push_scope()
             for s in stmt.then_body:
                 ir.extend(self.gen_statement_ir(s, ir_fn))
@@ -250,6 +278,8 @@ class StatementsMixin:
             # few bytes, not a correctness concern.
             ir.append(IRJump(end_label))
             ir.append(IRLabel(end_label))
+            if has_binding:
+                self._pop_scope()
             return ir
         elif isinstance(stmt, While):
             start_label = self.ir_program.ids.new_label("while_start")

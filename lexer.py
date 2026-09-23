@@ -83,6 +83,7 @@ class TokenType(Enum):
     TYPE = auto()
     IS = auto()
     MATCH = auto()
+    AS = auto()
     EXTERN = auto()
 
     # Special
@@ -168,6 +169,7 @@ class Lexer:
             'type': TokenType.TYPE,
             'is': TokenType.IS,
             'match': TokenType.MATCH,
+            'as': TokenType.AS,
             'extern': TokenType.EXTERN,
         }
 

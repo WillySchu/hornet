@@ -679,15 +679,16 @@ class ExprStmt(Node):
 
 @dataclass
 class IsCheck(Node):
-    """`NAME is TypeName` -- an `if` statement's ENTIRE condition (see
+    """`NAME is TypeName`, or `EXPR is TypeName as NAME` for a non-
+    bare-variable subject -- an `if` statement's ENTIRE condition (see
     If's own docstring), recognized as its own special shape directly
     by _parse_if_condition, never a production inside the general
     expression grammar: not composable with `and`/`or`/`not`, not
     assignable to a bool-typed variable, not usable as a `while`
     condition or anywhere else a condition can appear. Broader,
     composable boolean-expression support is deliberately deferred --
-    this first cut only needs to recognize `if NAME is TypeName:` as a
-    single, all-or-nothing shape, not embed a new production into
+    this first cut only needs to recognize the two shapes below as
+    single, all-or-nothing conditions, not embed a new production into
     parse_expression's own precedence climbing at all.
 
     `variable_name` must already be an in-scope, sum-typed variable,
@@ -697,9 +698,41 @@ class IsCheck(Node):
     If's then_body specifically (never its else_body -- see semantic.
     py's own analyze_if). The parser here only recognizes the SHAPE
     (IDENTIFIER 'is' IDENTIFIER), not whether either name refers to
-    anything real."""
+    anything real.
+
+    `subject`, when not None, is an arbitrary expression (an Index, a
+    Call, a Field once sum-typed fields exist, ...) evaluated ONCE and
+    bound to `variable_name` -- a name this shape always requires
+    explicitly (`as NAME`), since there's no existing name to reuse
+    the way a bare-variable subject already has one. semantic.py's own
+    analyze_if declares variable_name, with subject's own FULL
+    (un-narrowed) type, in a scope enclosing both then_body and
+    else_body, before doing anything else -- from that point on,
+    narrowing variable_name within then_body is the identical,
+    unchanged mechanism a bare-variable subject already uses; the only
+    new thing this shape adds is that one declaration, and doing it
+    once rather than at every occurrence, sidestepping the double-
+    evaluation and aliasing/mutation soundness questions a naive `if
+    shapes[0] is Circle:` (re-reading shapes[0] again for every use
+    inside then_body) would raise. None for a bare-variable subject,
+    which needs no such declaration at all -- variable_name already
+    names something with its own, existing, stable storage.
+
+    `binding_decl`, set by analyze_if the moment subject's own type is
+    known (None until then, and always None when subject itself is),
+    is a synthetic VarDecl(name=variable_name, var_type=<subject's own
+    sum-type name>, init=subject) realizing that declaration as real
+    IR -- constructed exactly ONCE, here, rather than freshly by
+    whatever later reads it: ir/builder.py's own _collect_locals (the
+    pre-pass giving every VarDecl its own permanent stack slot, keyed
+    by id(), before any IR is actually built) needs to see the
+    IDENTICAL object gen_statement_ir's own If case later binds
+    through, not a same-shape but distinct one its own fresh id()
+    could never match."""
     variable_name: str
     type_name: str
+    subject: Optional[Node] = None
+    binding_decl: Optional[Node] = None
 
 
 @dataclass
@@ -1517,60 +1550,129 @@ class Parser:
         return If(condition=condition, then_body=then_body, else_body=else_body, line=start_tok.line, col=start_tok.col)
 
     def _parse_if_condition(self) -> Node:
-        """`NAME is TypeName` (an IsCheck -- see its own docstring)
-        when the condition begins with exactly that shape, recognized
-        by TWO tokens of lookahead (IDENTIFIER then IS) before
-        consuming anything at all; an ordinary parse_expression()
-        otherwise.
+        """`NAME is TypeName` (an IsCheck with subject=None -- the
+        original, zero-cost narrowing path, unchanged from before non-
+        bare-variable subjects existed) when the condition begins with
+        exactly that shape AND isn't followed by `as`, recognized by
+        TWO tokens of lookahead (IDENTIFIER then IS) before consuming
+        anything at all -- deliberately checked FIRST: a bare-variable
+        subject already has an existing name with its own, stable
+        storage to narrow directly, needing no binding syntax at all,
+        so ordinary `x is Circle` is never routed through subject-
+        based binding below.
 
-        This is an all-or-nothing dispatch on the condition's own
-        first two tokens, not a new production spliced into parse_
-        expression's own precedence climbing -- deliberately, for now
-        (see IsCheck's own docstring): `if shape is Circle and x > 0:`
-        does not parse as one combined condition today, and neither
-        does a bare `shape is Circle` anywhere other than directly
-        here, right after `if`/`elif`.
+        `NAME is TypeName as OTHER` (an IsCheck with subject=Variable
+        (name=NAME)) -- a bare-variable subject CAN still take an
+        explicit `as`, opting into a renamed binding built exactly the
+        same way a non-bare-variable subject's always is (a fresh
+        name, no relation to NAME's own existing storage -- a real
+        copy, not the zero-cost reinterpretation `is` without `as`
+        gets). Without this, `x is Circle as y` -- easy to reach for,
+        especially once x is ITSELF some earlier IsCheck's own binding
+        and renaming it again reads naturally -- would silently fall
+        through this branch having consumed only `x is Circle`,
+        leaving `as y` dangling for the caller to choke on with a
+        confusing \"expected ':'\" error that never mentions `as` at
+        all; this was caught exactly that way, by hand, before this
+        branch existed.
 
-        No ambiguity to resolve either way: `is` is a reserved keyword
-        (never tokenized as IDENTIFIER), and no OTHER expression
-        production can ever continue with an IS token right after a
-        bare name -- so IDENTIFIER-then-IS at a condition's own start
-        can only ever be this shape, never the beginning of some other,
-        longer expression that merely happens to start with a name."""
+        Otherwise, `EXPR is TypeName as NAME` (an IsCheck with subject
+        =EXPR) when an ordinarily-parsed expression is immediately
+        followed by IS -- `as NAME` is REQUIRED here, not optional,
+        since EXPR (an Index, a Call, ...) has no existing name of its
+        own the way a bare Variable already does; see IsCheck's own
+        docstring for why this binding, done once here rather than at
+        every occurrence inside then_body, is the actual point of this
+        shape's own existence. Plain parse_expression() otherwise, for
+        an ordinary (non-is) condition, exactly as before.
+
+        This is an all-or-nothing dispatch, not a new production
+        spliced into parse_expression's own precedence climbing --
+        deliberately, for now (see IsCheck's own docstring): `if shape
+        is Circle and x > 0:` does not parse as one combined condition
+        today, and neither does any of the three shapes above anywhere
+        other than directly here, right after `if`/`elif`.
+
+        No ambiguity to resolve in the bare-variable fast path: `is`
+        is a reserved keyword (never tokenized as IDENTIFIER), and no
+        OTHER expression production can ever continue with an IS token
+        right after a bare name -- so IDENTIFIER-then-IS at a
+        condition's own start can only ever be one of the first two
+        shapes above, never the beginning of some other, longer
+        expression that merely happens to start with a name
+        (`shapes[0] is Circle`'s own leading IDENTIFIER, `shapes`, is
+        followed by '[', not IS, so it already falls through to the
+        general, third path correctly, with no special-casing needed
+        here for that)."""
         if self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.IS:
             name_tok = self.advance()
             self.advance()  # consume 'is'
             type_tok = self.expect(TokenType.IDENTIFIER, "Expected a type name after 'is'")
+            if self.check(TokenType.AS):
+                self.advance()  # consume 'as'
+                binding_tok = self.expect(TokenType.IDENTIFIER, "Expected a binding name after 'as'")
+                subject = Variable(name=name_tok.val, line=name_tok.line, col=name_tok.col)
+                return IsCheck(variable_name=binding_tok.val, type_name=type_tok.val, subject=subject, line=name_tok.line, col=name_tok.col)
             return IsCheck(variable_name=name_tok.val, type_name=type_tok.val, line=name_tok.line, col=name_tok.col)
-        return self.parse_expression()
+        expr = self.parse_expression()
+        if self.check(TokenType.IS):
+            is_tok = self.advance()
+            type_tok = self.expect(TokenType.IDENTIFIER, "Expected a type name after 'is'")
+            self.expect(
+                TokenType.AS,
+                "Expected 'as NAME' after the type name -- a non-bare-variable "
+                "subject (an Index, a Call, ...) needs an explicit binding name "
+                "to narrow, since it has no existing name of its own",
+            )
+            binding_tok = self.expect(TokenType.IDENTIFIER, "Expected a binding name after 'as'")
+            return IsCheck(variable_name=binding_tok.val, type_name=type_tok.val, subject=expr, line=is_tok.line, col=is_tok.col)
+        return expr
 
     def parse_match(self) -> If:
-        """`match NAME: (is TypeName: <block>)+ [else: <block>]?` --
-        desugars ENTIRELY into an ordinary nested-If chain here, at
-        parse time, identically in shape to how an elif chain already
-        desugars (see _parse_if_body's own docstring): match
-        introduces no new AST node of its own at all. Each arm becomes
-        one IsCheck-conditioned If (variable_name always NAME, the
-        match's own subject -- an arm only writes its own type_name,
-        `is Circle:`, not the full `NAME is Circle:` an ordinary if
-        would need), chained through else_body exactly like an elif
-        chain is. The LAST arm's own else_body is the explicit `else:`
-        block if one was written, or None if the match instead relies
-        on covering every one of NAME's own sum type's declared
-        variants -- checked later, by semantic.py's analyze_if, using
-        the two markers this desugaring leaves behind, both set ONLY
-        on the outermost If returned here: is_match=True, and match_
-        arm_count=len(arms) (see If's own docstring for why the count
-        is needed too, not just the bool -- an ordinary hand-written
-        `if NAME is Type:` can legally be the sole statement inside
-        this SAME match's own explicit `else:` block, indistinguishable
-        by shape alone from one more synthesized arm).
+        """`match NAME:`, or `match EXPR as NAME:` for a non-bare-
+        variable (or explicitly renamed) subject, `(is TypeName:
+        <block>)+ [else: <block>]?` -- desugars ENTIRELY into an
+        ordinary nested-If chain here, at parse time, identically in
+        shape to how an elif chain already desugars (see _parse_if_
+        body's own docstring): match introduces no new AST node of
+        its own at all. Each arm becomes one IsCheck-conditioned If
+        (variable_name always binding_name, the match's own bare name
+        or explicit `as` binding alike -- an arm only writes its own
+        type_name, `is Circle:`, not the full `binding_name is
+        Circle:` an ordinary if would need), chained through else_body
+        exactly like an elif chain is. The LAST arm's own else_body is
+        the explicit `else:` block if one was written, or None if the
+        match instead relies on covering every one of binding_name's
+        own sum type's declared variants -- checked later, by
+        semantic.py's analyze_if, using the two markers this
+        desugaring leaves behind, both set ONLY on the outermost If
+        returned here: is_match=True, and match_arm_count=len(arms)
+        (see If's own docstring for why the count is needed too, not
+        just the bool -- an ordinary hand-written `if NAME is Type:`
+        can legally be the sole statement inside this SAME match's own
+        explicit `else:` block, indistinguishable by shape alone from
+        one more synthesized arm).
 
-        NAME is restricted to a bare IDENTIFIER, matching IsCheck's own
-        restriction in _parse_if_condition above -- a match subject
-        that's an arbitrary expression (`match shapes[0]:`) is out of
-        scope for the identical reasons a narrowing `is` check already
-        is.
+        subject (None for a bare NAME with no `as`, an arbitrary
+        expression otherwise -- see IsCheck's own docstring in
+        parser.py for what it means there) is set on the FIRST arm's
+        own IsCheck ONLY, never every arm's: setting it on all of them
+        would build a FRESH binding, and so re-evaluate subject, on
+        every arm tried before a match is found -- exactly the
+        double-evaluation problem this whole feature exists to avoid
+        (calling a Call subject repeatedly, say). Since every arm
+        after the first sits nested in that first arm's own else_body,
+        and analyze_if's own subject-bearing binding scope wraps that
+        whole else_body (not just its then_body -- see analyze_if's
+        own has_binding comment), binding_name is ALREADY in scope for
+        every later arm's own condition check by the time it runs: a
+        later arm's own IsCheck, subject=None, does an ordinary
+        self._lookup(binding_name, ...) that finds this same, already-
+        built binding, exactly as readily as it would find a bare-
+        variable subject's own pre-existing storage -- neither check_
+        is_check nor analyze_if's own narrowing needs to know or care
+        that binding_name came from a match subject rather than an
+        ordinary bare variable.
 
         Built from the LAST arm backward (or from the explicit else,
         if any), so each arm's own else_body is already the fully-
@@ -1580,7 +1682,21 @@ class Parser:
         via recursion, since every arm is already in hand as a flat
         list before any chaining happens."""
         start_tok = self.expect(TokenType.MATCH, "Expected 'match'")
-        name_tok = self.expect(TokenType.IDENTIFIER, "Expected a variable name to match on")
+        if self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.COLON:
+            name_tok = self.advance()
+            binding_name = name_tok.val
+            subject = None
+        else:
+            subject = self.parse_expression()
+            self.expect(
+                TokenType.AS,
+                "Expected 'as NAME' after the match subject -- a non-bare-"
+                "variable (or explicitly renamed) subject needs an explicit "
+                "binding name to narrow, since it has no existing name of "
+                "its own",
+            )
+            binding_tok = self.expect(TokenType.IDENTIFIER, "Expected a binding name after 'as'")
+            binding_name = binding_tok.val
         self.expect(TokenType.COLON, "Expected ':' to start the match body")
         self.expect(TokenType.NEWLINE, "Expected a newline after ':'")
         self.skip_newlines()
@@ -1613,8 +1729,14 @@ class Parser:
             )
 
         chained_body = else_body
-        for arm_tok, type_name, arm_body in reversed(arms):
-            condition = IsCheck(variable_name=name_tok.val, type_name=type_name, line=arm_tok.line, col=arm_tok.col)
+        for i, (arm_tok, type_name, arm_body) in reversed(list(enumerate(arms))):
+            condition = IsCheck(
+                variable_name=binding_name,
+                type_name=type_name,
+                subject=subject if i == 0 else None,
+                line=arm_tok.line,
+                col=arm_tok.col,
+            )
             chained_body = [If(condition=condition, then_body=arm_body, else_body=chained_body, line=arm_tok.line, col=arm_tok.col)]
 
         outermost = chained_body[0]

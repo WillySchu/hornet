@@ -1655,6 +1655,57 @@ class SemanticAnalyzer:
             )
 
     def analyze_if(self, stmt: If, return_type: Type) -> None:
+        # A subject-bearing IsCheck (`EXPR is TypeName as NAME` --
+        # see IsCheck's own docstring) needs its own binding declared
+        # BEFORE the condition itself is checked below: check_expr's
+        # own dispatch to check_is_check looks variable_name up via
+        # the ordinary self._lookup it's always used (see check_is_
+        # check's own docstring -- it doesn't need to know or care
+        # whether subject is None), so for this shape that lookup has
+        # to already succeed. subject itself is checked here, exactly
+        # once -- check_is_check never re-checks it, only ever looks
+        # up the name this declares -- which is the whole reason this
+        # shape exists at all: shapes[0] (or a Call) is evaluated
+        # once, not once per occurrence inside then_body, sidestepping
+        # both double-evaluation and the aliasing/mutation soundness
+        # questions that would otherwise raise.
+        #
+        # Pushed in a scope of its own, wrapping the condition check,
+        # then_body AND else_body alike, popped only at the very end:
+        # unlike an ordinary VarDecl, this binding isn't a statement
+        # of its own with a fixed place in some enclosing body, so
+        # nothing else already scopes it -- and it needs to outlive
+        # then_body's own scope below, since else_body (deliberately
+        # never narrowed -- see the comment further down) still gets
+        # the binding itself, just not narrowed. This is the one
+        # deliberate exception to "then/else get independent scopes,
+        # so a name in one is never visible in the other" a few lines
+        # down: the binding predates the then/else split entirely, so
+        # both sides see the same one, un-narrowed, name.
+        has_binding = isinstance(stmt.condition, IsCheck) and stmt.condition.subject is not None
+        if has_binding:
+            self._push_scope()
+            subject_type = self.check_expr(stmt.condition.subject)
+            self._declare(stmt.condition.variable_name, subject_type, stmt.condition)
+            # binding_decl realizes this same declaration as a
+            # synthetic VarDecl for IR-building to bind through later
+            # (see IsCheck's own docstring for why it's built exactly
+            # once, here, rather than freshly wherever it's read) --
+            # only when subject_type actually IS a sum type; otherwise
+            # check_is_check, called via check_expr right below, is
+            # about to raise SemanticError over exactly that, and a
+            # var_type built from a non-sum Type's own (always None)
+            # sum_type_name would be meaningless IR-building could
+            # never actually reach anyway.
+            if subject_type.kind == TypeKind.SUM:
+                stmt.condition.binding_decl = VarDecl(
+                    name=stmt.condition.variable_name,
+                    var_type=subject_type.sum_type_name,
+                    init=stmt.condition.subject,
+                    line=stmt.condition.line,
+                    col=stmt.condition.col,
+                )
+
         condition_type = self.check_expr(stmt.condition)
         if condition_type != Type.BOOL:
             raise SemanticError(
@@ -1676,8 +1727,12 @@ class SemanticAnalyzer:
         # shadow (see _declare's own docstring: "a name already
         # declared in an enclosing scope is fine to shadow"), ordinary
         # innermost-scope lookup doing the rest for every reference
-        # inside. Deliberately NOT done for else_body -- see IsCheck's
-        # own docstring for why (no nameable "not Circle" type once a
+        # inside -- identically whether variable_name already existed
+        # (a bare-variable subject) or was itself just declared, right
+        # above, as this same If's own binding (a subject-bearing
+        # one): narrowing itself neither knows nor cares which. 
+        # Deliberately NOT done for else_body -- see IsCheck's own
+        # docstring for why (no nameable "not Circle" type once a
         # sum type has more than two variants, so there's no single
         # rule that would apply consistently either way).
         #
@@ -1706,13 +1761,20 @@ class SemanticAnalyzer:
         self._pop_scope()
 
         # then/else get independent scopes (module docstring), so a
-        # name in one is never visible in the other. An elif's else_
+        # name in one is never visible in the other -- except a
+        # subject-bearing IsCheck's own binding, declared further up
+        # in a scope enclosing both, which else_body sees too, at its
+        # un-narrowed type (see the comment above narrowed_name for
+        # why narrowing itself stays then_body-only). An elif's else_
         # body is a single nested If (parser.py's If docstring);
         # analyze_if just recurses into it like any other statement.
         if stmt.else_body is not None:
             self._push_scope()
             for s in stmt.else_body:
                 self.analyze_statement(s, return_type)
+            self._pop_scope()
+
+        if has_binding:
             self._pop_scope()
 
     def _check_match_exhaustiveness(self, stmt: If) -> None:
@@ -2313,30 +2375,51 @@ class SemanticAnalyzer:
         return self._lookup(expr.name, expr)
 
     def check_is_check(self, expr: IsCheck) -> Type:
-        """`NAME is TypeName` -- an if/elif condition's own special
-        shape (see IsCheck's own docstring in parser.py), not a
-        general expression: checked here like any other, so it gets
-        an ordinary resolved_type=Type.BOOL annotation and analyze_
-        if's own "condition must be bool" check needs no special-
-        casing for it at all. The actual NARROWING this enables --
-        rebinding NAME to TypeName within the if's own then_body --
-        happens separately, in analyze_if, the only caller that still
-        has stmt.condition itself in hand (check_expr's own dispatch,
+        """`NAME is TypeName`, or `EXPR is TypeName as NAME` (subject
+        not None) -- an if/elif condition's own special shape (see
+        IsCheck's own docstring in parser.py), not a general
+        expression: checked here like any other, so it gets an
+        ordinary resolved_type=Type.BOOL annotation and analyze_if's
+        own "condition must be bool" check needs no special-casing for
+        it at all. The actual NARROWING this enables -- rebinding NAME
+        to TypeName within the if's own then_body -- happens
+        separately, in analyze_if, the only caller that still has
+        stmt.condition itself in hand (check_expr's own dispatch,
         here, only ever returns a bare Type).
 
-        Three checks, in order: NAME must already be an in-scope, SUM-
-        typed variable (not a struct, not a scalar -- there's nothing
-        to narrow otherwise); TypeName must be a declared struct at
-        all; and, more specifically, TypeName must be one of NAME's
-        own sum type's declared variants -- not just any struct, since
-        `shape is Rectangle`, Rectangle never one of Shape's own
-        variants, can never be true, and letting it silently type-
-        check as an always-false check would hide what's almost
-        certainly a mistake -- the same reasoning _types_compatible
-        already applies to a struct widening into an unrelated sum
-        type."""
+        Three checks, in order, identical either way -- for a subject-
+        bearing IsCheck, analyze_if has already declared variable_name
+        with subject's own type before this ever runs (see its own
+        docstring), so the self._lookup below finds that fresh
+        declaration exactly as readily as it finds an ordinary, pre-
+        existing bare variable, and this method itself never needs to
+        know which: NAME must already be an in-scope, SUM-typed
+        variable (not a struct, not a scalar -- there's nothing to
+        narrow otherwise); TypeName must be a declared struct at all;
+        and, more specifically, TypeName must be one of NAME's own sum
+        type's declared variants -- not just any struct, since `shape
+        is Rectangle`, Rectangle never one of Shape's own variants,
+        can never be true, and letting it silently type-check as an
+        always-false check would hide what's almost certainly a
+        mistake -- the same reasoning _types_compatible already
+        applies to a struct widening into an unrelated sum type.
+
+        The first error message below names variable_name itself for
+        a bare-variable subject (an in-scope name the person actually
+        wrote), but a subject-bearing IsCheck instead points at
+        subject -- naming variable_name there ('c', say) would mislead:
+        it's a binding this same statement just introduced, not a
+        pre-existing variable declared with the wrong type."""
         variable_type = self._lookup(expr.variable_name, expr)
         if variable_type.kind != TypeKind.SUM:
+            if expr.subject is not None:
+                raise SemanticError(
+                    f"The expression bound to '{expr.variable_name}' "
+                    f"(type {variable_type}) is not a sum type -- 'is' "
+                    f"only narrows a sum-typed value to one of its own "
+                    f"declared variants",
+                    expr.subject,
+                )
             raise SemanticError(
                 f"'{expr.variable_name}' (declared {variable_type}) is "
                 f"not a sum type -- 'is' only narrows a sum-typed "
