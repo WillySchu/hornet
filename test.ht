@@ -2,6 +2,10 @@ type HasArray struct:
     [5]int values
 
 
+type HasSlice struct:
+    []int values
+
+
 type Point struct:
     int x
     int y
