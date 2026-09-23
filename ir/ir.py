@@ -385,6 +385,12 @@ class IRFunction:
     slot_labels: dict = field(default_factory=dict)
     hidden_return_ptr_slot: Optional[int] = None
     var_slots: dict = field(default_factory=dict)
+    outgoing_stack_args_slot: Optional[int] = None  # set by lower_function,
+    # not gen_function_ir, before lower_ir runs (see its own comment there)
+    # -- the one slot _resolve_frame_layout gives special, always-last
+    # treatment, regardless of where in slot_widths' own insertion order
+    # it actually landed. None for a function whose own calls never need
+    # more than the 6 register-passed argument slots.
 
 
 @dataclass

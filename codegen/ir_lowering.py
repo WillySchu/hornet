@@ -229,8 +229,30 @@ class InstructionSelector:
                 # (memory, or the allocator's own pool) overlaps an
                 # argument register, so placing one can never clobber
                 # another's source.
+                #
+                # Index 6 onward has no register left to go in -- the
+                # SysV ABI reserves only 6 (rdi/rsi/rdx/rcx/r8/r9) --
+                # so instead it's staged through %eax/%rax (a register
+                # no Temp is ever permanently homed in either, for the
+                # identical reason the 6 argument registers aren't)
+                # and written straight into ir_fn.outgoing_stack_args_
+                # slot -- reserved by lower_function, sized to the
+                # worst call this function makes, before lower_ir ever
+                # reached this instruction (see its own comment) --
+                # at that argument's own position within it. Writing
+                # each one there, in any order, is exactly as safe as
+                # the register case above for the same reason: this
+                # region is never a Temp's own home, so nothing placed
+                # here can ever clobber a still-unread argument source.
                 for i, arg_value in enumerate(instr.args):
-                    out.extend(self._gen_load_value(arg_value, Register(ARG_REGISTERS_32[i])))
+                    if i < 6:
+                        out.extend(self._gen_load_value(arg_value, Register(ARG_REGISTERS_32[i])))
+                        continue
+                    wide = is_wide_type(arg_value.type)
+                    scratch = as_qword_register(Register('eax')) if wide else Register('eax')
+                    out.extend(self._gen_load_value(arg_value, Register('eax')))
+                    dst = FrameSlot(self.ir_fn.outgoing_stack_args_slot, 8 * (i - 6))
+                    out.append(MovQ(src=scratch, dst=dst) if wide else Mov(src=scratch, dst=dst))
                 out.append(CallInstr(instr.name))
                 if instr.dst is not None:
                     out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
@@ -240,8 +262,25 @@ class InstructionSelector:
                 # the value already arrived correctly represented for
                 # dst's own type, the same invariant every OTHER
                 # Temp-to-Temp copy in this compiler already relies on.
+                #
+                # Index 6 onward was never in a register at all -- the
+                # caller wrote it into ITS OWN outgoing-stack-arguments
+                # region (see IRCall's own lowering above), which,
+                # once this function's prologue has run (push %rbp;
+                # mov %rsp, %rbp), sits at a FIXED, positive offset
+                # from THIS function's own %rbp: 16 to skip the pushed
+                # return address and saved %rbp, then 8 bytes per
+                # overflow slot. This needs no FrameSlot/_resolve_
+                # frame_layout machinery at all, unlike every other
+                # frame reference in this compiler -- it's not part of
+                # this function's own local layout, so its offset is
+                # already fully known, immediately, with nothing to
+                # wait for.
                 wide = is_wide_type(instr.dst.type)
-                src = Register((ARG_REGISTERS_64 if wide else ARG_REGISTERS_32)[instr.index])
+                if instr.index < 6:
+                    src = Register((ARG_REGISTERS_64 if wide else ARG_REGISTERS_32)[instr.index])
+                else:
+                    src = Memory('rbp', 16 + 8 * (instr.index - 6))
                 out.append(MovQ(src=src, dst=Register('rax')) if wide else Mov(src=src, dst=Register('eax')))
                 out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
             elif isinstance(instr, IRReturn):

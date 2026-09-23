@@ -2348,22 +2348,60 @@ class TestFunctions:
             16,
         )
 
-    def test_more_than_six_parameters_is_a_clean_codegen_error(self):
-        """Only up to 6 parameters/arguments are supported (register-
-        passed per the SysV ABI; stack-passed ones aren't implemented)
-        -- a 7th should fail loudly and clearly, not silently miscompile
-        or crash at runtime."""
-        source = (
+    def test_more_than_six_parameters_now_works_via_the_stack(self):
+        """Was a clean codegen error before stack-passed arguments/
+        parameters existed -- now the 7th parameter (and 7th argument
+        at the call site) is simply read from/written to the caller's
+        own stack region instead of a register. Sums all 7 rather than
+        just returning one, so every slot -- register and stack alike
+        -- is actually exercised, not just present."""
+        assert_program_exit_code(
             "def int seven(int a, int b, int c, int d, int e, int f, int g):\n"
-            "    return a\n"
+            "    return a + b + c + d + e + f + g\n"
             "\n"
             "def int main():\n"
-            "    return seven(1, 2, 3, 4, 5, 6, 7)\n"
+            "    return seven(1, 2, 3, 4, 5, 6, 7)\n",
+            28,
         )
-        ast = _parse(source)
-        analyze(ast)  # semantically fine -- the limit is a codegen-level one
-        with pytest.raises(IRError, match="only supports up to 6"):
-            generate_asm(ast, platform=ASM_PLATFORM)
+
+    def test_wide_typed_overflow_arguments(self):
+        """int64 (and, by the identical is_wide_type logic, str/pointer)
+        overflow arguments need the full 8-byte MovQ into their own
+        stack slot, not a narrowing 4-byte Mov -- exercised here with
+        two int64 parameters past the 6-slot boundary, values large
+        enough that truncation to 32 bits would silently corrupt them
+        into something else entirely."""
+        assert_program_exit_code(
+            "def int64 f(int a, int b, int c, int d, int e, int64 g, int64 h):\n"
+            "    return g + h\n"
+            "\n"
+            "def int main():\n"
+            "    int64 result = f(1, 2, 3, 4, 5, 5000000000, 6000000000)\n"
+            "    return int(result - int64(10999999998))\n",
+            2,
+        )
+
+    def test_multiple_calls_needing_different_overflow_amounts_share_one_region(self):
+        """One call needs 2 overflow slots, another in the same
+        function needs 4 -- the outgoing-stack-arguments region this
+        function reserves is sized to the WORST of the two (see lower_
+        function's own comment), and correctly reused, not summed,
+        across both: each call writes its own overflow arguments
+        starting at the same %rsp-relative position regardless of how
+        many the other call needed."""
+        assert_program_exit_code(
+            "def int eight(int a, int b, int c, int d, int e, int f, int g, int h):\n"
+            "    return a + b + c + d + e + f + g + h\n"
+            "\n"
+            "def int ten(int a, int b, int c, int d, int e, int f, int g, int h, int i, int j):\n"
+            "    return a + b + c + d + e + f + g + h + i + j\n"
+            "\n"
+            "def int main():\n"
+            "    int x = eight(1, 1, 1, 1, 1, 1, 1, 1)\n"
+            "    int y = ten(2, 2, 2, 2, 2, 2, 2, 2, 2, 2)\n"
+            "    return x + y\n",
+            8 + 20,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -3591,19 +3629,19 @@ class TestArrays:
             15,
         )
 
-    def test_six_real_params_on_array_returning_function_is_rejected(self):
-        source = (
+    def test_seven_real_params_on_array_returning_function_works_via_the_stack(self):
+        """The hidden array-return pointer occupies slot 0, so 6 real
+        parameters here means 7 total slots -- previously rejected,
+        now the 7th (parameter 'f') is simply stack-passed."""
+        assert_program_exit_code(
             "def [2]int make6(int a, int b, int c, int d, int e, int f):\n"
-            "    return [a, b]\n"
+            "    return [a, f]\n"
             "\n"
             "def int main():\n"
             "    [2]int r = make6(1, 2, 3, 4, 5, 6)\n"
-            "    return r[0]\n"
+            "    return r[0] + r[1]\n",
+            7,
         )
-        ast = _parse(source)
-        analyze(ast)  # semantically fine -- the limit is codegen-level only
-        with pytest.raises(IRError, match="needs 7 argument register"):
-            generate_asm(ast, platform=ASM_PLATFORM)
 
     def test_array_literal_as_direct_call_argument(self):
         """Used to be a real, deliberate gap (an ArrayLiteral has no
@@ -4813,24 +4851,22 @@ class TestMethods:
             6,
         )
 
-    def test_receiver_counts_toward_the_six_argument_register_limit(self):
-        """The receiver occupies one of the same 6 argument-register
-        slots an ordinary parameter would -- a method with 6 explicit
-        parameters (7 slots total, including the receiver) hits the
-        exact same limit a 7-parameter free function already would."""
-        source = (
+    def test_receiver_plus_six_params_works_via_the_stack(self):
+        """The receiver occupies one of the same slots an ordinary
+        parameter would -- a method with 6 explicit parameters (7
+        slots total, including the receiver) previously hit the exact
+        same limit a 7-parameter free function would; now it doesn't."""
+        assert_program_exit_code(
             "type A struct:\n"
             "    int v\n"
             "    def int sum6(s, int a, int b, int c, int d, int e, int f):\n"
-            "        return a + b + c + d + e + f\n"
+            "        return s.v + a + b + c + d + e + f\n"
             "\n"
             "def int main():\n"
-            "    return 0\n"
+            "    A obj = A(v=1)\n"
+            "    return obj.sum6(2, 3, 4, 5, 6, 7)\n",
+            28,
         )
-        ast = _parse(source)
-        analyze(ast)
-        with pytest.raises(IRError, match="needs 7 argument register"):
-            generate_asm(ast, platform=ASM_PLATFORM)
 
     def test_five_explicit_params_plus_receiver_fits_exactly(self):
         assert_program_exit_code(
@@ -7570,6 +7606,25 @@ class TestExternFunctions:
             "extern int abs(int n)\n"
         )
         analyze(ast)  # should not raise
+
+    def test_extern_with_more_than_six_parameters(self):
+        """extern declarations never go through ir/builder.py's own
+        function-definition path at all (they have no body) -- this
+        exercises the OTHER registration path (check_extern_function_
+        decl, semantic.py) to confirm it never enforced its own 6-slot
+        limit in the first place, and that a call to one routes through
+        the exact same caller-side overflow logic an ordinary Hornet
+        call does. Compiles rather than links/runs -- no real 7+
+        argument libc function exists to declare and call here without
+        adding one to runtime.c purely for this test."""
+        ast = _parse(
+            "extern int sum7(int a, int b, int c, int d, int e, int f, int g)\n"
+            "\n"
+            "def int main():\n"
+            "    return sum7(1, 2, 3, 4, 5, 6, 7)\n"
+        )
+        analyze(ast)
+        generate_asm(ast, platform=ASM_PLATFORM)  # should not raise
 
 
 class TestExternFunctionsCodegen:
@@ -12282,11 +12337,11 @@ class TestSliceParametersAndReturns:
             3,
         )
 
-    def test_seven_slots_from_two_slices_and_a_scalar_is_rejected(self):
-        """The negative half of the boundary pair: one more scalar
-        parameter pushes the same two slices over the 6-slot limit,
-        and must be cleanly rejected -- not silently truncated."""
-        source = (
+    def test_seven_slots_from_two_slices_and_a_scalar_works_via_the_stack(self):
+        """One more scalar parameter pushes two slices (6 slots) to 7
+        total -- previously rejected; now the scalar is simply stack-
+        passed, and everything still reads back correctly."""
+        assert_program_exit_code(
             "def int f([]int a, []int b, int c):\n"
             "    return a[0] + b[0] + c\n"
             "\n"
@@ -12295,12 +12350,33 @@ class TestSliceParametersAndReturns:
             "    [1]int y = [2]\n"
             "    []int sx = x[0:1]\n"
             "    []int sy = y[0:1]\n"
-            "    return f(sx, sy, 3)\n"
+            "    return f(sx, sy, 3)\n",
+            6,
         )
-        ast = _parse(source)
-        analyze(ast)  # semantically fine -- the limit is codegen-level only
-        with pytest.raises(IRError, match="needs 7 argument register"):
-            generate_asm(ast, platform=ASM_PLATFORM)
+
+    def test_a_slice_argument_straddling_the_register_stack_boundary(self):
+        """5 scalars fill slots 0-4, leaving exactly 1 register slot
+        (5, %r9) free -- not enough for a slice's own 3 (ptr/len/cap).
+        This is the sharpest version of the new overflow logic: the
+        SAME slice argument ends up split across the boundary, its ptr
+        component in the last register and its len/cap components on
+        the stack. Nothing in this compiler's own internal calling
+        convention treats a slice as one indivisible unit needing to
+        move together -- IRCall's own args list is already flat, ptr/
+        len/cap as three independent slots by the time a call is
+        built -- so this isn't a special case to handle, just this
+        compiler's ordinary per-slot routing landing on a case where
+        the 3 slots happen not to share one side of the boundary."""
+        assert_program_exit_code(
+            "def int f(int a, int b, int c, int d, int e, []int s):\n"
+            "    return a + b + c + d + e + s[0] + len(s)\n"
+            "\n"
+            "def int main():\n"
+            "    [3]int arr = [10, 20, 30]\n"
+            "    []int s = arr[0:3]\n"
+            "    return f(1, 2, 3, 4, 5, s)\n",
+            1 + 2 + 3 + 4 + 5 + 10 + 3,
+        )
 
     def test_one_slice_and_three_scalars_are_exactly_six_slots(self):
         assert_program_exit_code(

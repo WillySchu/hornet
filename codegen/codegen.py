@@ -44,7 +44,7 @@ from codegen.assembly_ast import (
 )
 from codegen.calling_convention import CALLEE_SAVED_SCRATCH_REGISTERS
 from codegen.emitter import Emitter
-from ir.ir import IRFunction, IRProgram
+from ir.ir import IRCall, IRFunction, IRProgram
 from ir.builder import IRFunctionBuilder
 from ir.program_builder import build_ir_program
 from optimize.optimizer import optimize
@@ -113,11 +113,67 @@ class CodeGenerator(
         placeholder rather than a resolved LeaQFrame for the identical
         reason _temp_mem builds a FrameSlot rather than a resolved
         Memory for an anonymous Temp -- both wait for _patch_frame_
-        slots, right below, to resolve them, once this call has run."""
+        slots, right below, to resolve them, once this call has run.
+
+        ir_fn.outgoing_stack_args_slot, when this function reserved
+        one (lower_function does this itself, before lower_ir runs --
+        see its own comment), gets special, always-LAST treatment
+        here, skipped in the ordinary loop below and placed explicitly
+        afterward -- regardless of where it actually falls in slot_
+        widths' own insertion order, which is EARLIER than whatever
+        _temp_mem discovers for anonymous Temps during lower_ir. This
+        one slot has to be the physically last thing in the frame,
+        immediately adjacent to %rsp: a callee reads its own first
+        overflow argument at a fixed 16(%rbp), which is only correct
+        if THIS function's own %rsp, at the moment of the call, points
+        exactly at this region's own first byte -- one byte off (from
+        ordinary slots landing below it instead of above) and every
+        overflow argument the callee reads is simply wrong, silently.
+
+        One more offset this region alone needs that no other slot
+        does: TRUE %rsp, at the moment of any call this function
+        makes, is NOT %rbp - frame_size -- it's %rbp - frame_size
+        minus the 8*len(CALLEE_SAVED_SCRATCH_REGISTERS) bytes the
+        prologue's own unconditional callee-saved pushes already
+        consumed, between %rbp being set and %rsp being adjusted by
+        frame_size (see gen_function's own prologue-building code).
+        Every ORDINARY slot's own %rbp-relative address is correct
+        regardless of this gap -- nothing else is ever read via %rsp
+        directly -- so this region alone needs its own recorded offset
+        shifted that much deeper than frame_size's own computation
+        would otherwise place it. This shift needs no alignment
+        accounting of its own: %rbp is always 16-byte aligned (a
+        standard SysV fact, given the caller's own 16-byte-aligned
+        %rsp before its own call instruction), and the callee-saved
+        push total is itself already a multiple of 16, so frame_size's
+        own alignment (via the padding below) already guarantees TRUE
+        %rsp lands 16-byte aligned too.
+
+        The explicit padding below exists for the identical reason
+        (frame_size's own 16-byte rounding) discussed above:
+        _frame_size's own 16-byte rounding adds any padding it needs
+        BELOW the last slot resolved here, which would otherwise land
+        between this region and %rsp -- so the padding needed is
+        computed and inserted HERE, ABOVE this region, guaranteeing
+        the running total is already a multiple of 16 by the time this
+        region itself is added, leaving nothing for _frame_size's own
+        rounding to add."""
         next_offset = 0
         for slot_id, width in ir_fn.slot_widths.items():
+            if slot_id == ir_fn.outgoing_stack_args_slot:
+                continue
             next_offset -= width
             self._slot_offsets[slot_id] = next_offset
+
+        if ir_fn.outgoing_stack_args_slot is not None:
+            width = ir_fn.slot_widths[ir_fn.outgoing_stack_args_slot]
+            raw_before = -next_offset
+            pad = (16 - (raw_before + width) % 16) % 16
+            next_offset -= pad
+            next_offset -= width
+            pushed_bytes = 8 * len(CALLEE_SAVED_SCRATCH_REGISTERS)
+            self._slot_offsets[ir_fn.outgoing_stack_args_slot] = next_offset - pushed_bytes
+
         self._next_offset = next_offset
 
     def _patch_frame_slots(self, instructions: List[Instruction]) -> None:
@@ -170,7 +226,7 @@ class CodeGenerator(
             for f in dataclasses.fields(instr):
                 value = getattr(instr, f.name)
                 if isinstance(value, FrameSlot):
-                    setattr(instr, f.name, Memory('rbp', self._slot_offsets[value.slot]))
+                    setattr(instr, f.name, Memory('rbp', self._slot_offsets[value.slot] + value.extra_offset))
 
     def generate(self, ir_program: IRProgram) -> AsmProgram:
         """Purely a lowering step now: takes an already-built
@@ -215,6 +271,38 @@ class CodeGenerator(
         self._bounds_check_fail_labels = {}
         self._slot_offsets = {}
         ir = ir_fn.body
+
+        # Reserve outgoing-stack-argument space, if this function makes
+        # any call needing more than 6 argument slots, BEFORE lower_ir
+        # runs: IRCall's own lowering (inside lower_ir, right below)
+        # needs a real slot id to build a FrameSlot placeholder around
+        # for each overflow argument, and every IRCall this function
+        # will ever make -- with its own final, flat args list, a slice
+        # argument's 3 components already among them -- already exists
+        # in `ir` right now, unlowered. Sized to the WORST call this
+        # function makes, not the sum across all of them: calls happen
+        # one after another, never concurrently, so one call's own
+        # overflow arguments can safely reuse the same bytes a later
+        # (or earlier) call's own overflow arguments used.
+        #
+        # _resolve_frame_layout gives ir_fn.outgoing_stack_args_slot
+        # special, always-LAST treatment regardless of where this
+        # reservation actually lands in slot_widths' own insertion
+        # order -- which matters, because it's earlier than whatever
+        # _temp_mem discovers lazily, mid-lowering, for anonymous Temps
+        # register_allocator.py doesn't promote to a register. This
+        # slot must be the one physically closest to %rsp (so its own
+        # first 8 bytes are exactly what a callee reads at 16(%rbp)),
+        # and insertion order alone can't guarantee that here.
+        max_overflow_slots = max(
+            (len(instr.args) - 6 for instr in ir if isinstance(instr, IRCall)),
+            default=0,
+        )
+        if max_overflow_slots > 0:
+            ir_fn.outgoing_stack_args_slot = self.ir_program.ids.new_slot(
+                8 * max_overflow_slots, "outgoing_stack_args", ir_fn,
+            )
+
         self._register_assignment = allocate_registers(ir, self.ir_program.ids._temp_offsets)
         instructions = []
         # A fresh InstructionSelector per function: _temp_mem's own

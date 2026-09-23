@@ -48,8 +48,13 @@ Updates:
 - Compound index assign.
 - Ternary.
 - For loops.
+- Hashing.
 - Dicts.
-- Stack based params to get around parameter limit.
+- Sets.
+- Imports / packages.
+- Generics.
+- Sorting.
+- Format strings.
 - Slice equality?
 - Flow sensitive escape analysis.
 - Deduplicate emitted type descriptors when we call print()

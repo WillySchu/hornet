@@ -134,22 +134,13 @@ class IRFunctionBuilder(
         self._collect_argument_temps(fn.body, ir_fn)
         self.scopes = [{}]
 
-        # A slice parameter needs THREE consecutive argument-register
-        # slots (ptr, len, cap), not one -- matching how a real C
-        # compiler passes a `struct{void*,long,long}` parameter.
-        param_slots = sum(3 if pt.kind == TypeKind.SLICE else 1 for pt in param_types)
-        total_slots = arg_shift + param_slots
-        if total_slots > 6:
-            raise IRError(
-                f"Function '{fn.name}' needs {total_slots} argument "
-                f"register(s) for its parameters (a slice-typed "
-                f"parameter needs 3)"
-                + (" plus the hidden array/slice-return pointer" if arg_shift else "")
-                + " -- this compiler only supports up to 6 (passed via "
-                "registers per the SysV ABI -- stack-passed parameters "
-                "aren't implemented)"
-            )
-
+        # No slot-count limit enforced here anymore: a parameter (or
+        # the hidden array/slice-return pointer) beyond the 6th slot
+        # is read from the caller's own stack region by IRReadArgument's
+        # own lowering (index >= 6 there), not a register -- see its
+        # own docstring. _ir_param_setup below needs no change either
+        # way: it just keeps counting register/slot indices upward
+        # regardless of how many there are.
         param_setup_ir = self._ir_param_setup(fn, param_types, arg_shift, ir_fn)
 
         statement_ir = []

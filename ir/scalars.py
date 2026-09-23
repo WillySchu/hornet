@@ -6,7 +6,6 @@ caller passes a value's ordinary 32-bit-named register, and these
 (along with gen_binary_op/gen_unary_op/gen_cast_narrowing_into) decide
 internally which actual width to operate on."""
 
-from codegen.calling_convention import total_arg_slots
 from ir.errors import IRError
 from ir.ir import IRBranch, IRJump, IRLabel, IRMove, IRConst, IRCall
 from ir.utils import type_of
@@ -171,22 +170,18 @@ class ScalarsMixin:
         """Builds (without lowering) an ordinary function call's IR.
         Each argument's own shape (scalar, array/struct address, or a
         slice's own {ptr, len, cap} triple) is computed independently
-        into its own Temp(s) first; IRCall's own lowering places them
-        all into argument registers together, immediately before the
-        call.
+        into its own Temp(s) first; IRCall's own lowering places the
+        first 6 into argument registers and any beyond that into the
+        outgoing-stack-arguments region lower_function reserves for
+        this call's own containing function, sized from this exact
+        IRCall's own args list once IR-building is done (see its own
+        comment in codegen.py), together, immediately before the
+        call. No slot count is too large here anymore -- that's a
+        lowering-time reservation now, not an IR-build-time limit.
 
         See _ir_call_arguments for the per-argument dispatch (shared
         with _ir_composite_call). Returns (ir, t_result), t_result
         being None for a void call."""
-        total_slots = total_arg_slots(expr.args)
-        if total_slots > 6:
-            raise IRError(
-                f"Call to '{expr.name}' needs {total_slots} argument "
-                f"register(s) (a slice-typed argument needs 3); this "
-                f"compiler only supports up to 6 (passed via registers "
-                f"per the SysV ABI -- stack-passed arguments aren't "
-                f"implemented)"
-            )
         result_type = type_of(expr)
         t_result = None if result_type == Type.VOID else self.ir_program.ids.new_temp(result_type)
         arg_ir, arg_values = self._ir_call_arguments(expr.args, expr.name)
@@ -209,17 +204,8 @@ class ScalarsMixin:
         level, it just has no scalar result for %eax to hold.
 
         Reuses _ir_call_arguments for the genuine arguments, then
-        prepends dst_address as the actual first argument value."""
-        total_slots = 1 + total_arg_slots(call_expr.args)
-        if total_slots > 6:
-            raise IRError(
-                f"Call to '{call_expr.name}' needs {total_slots} argument "
-                f"register(s) (the hidden return pointer needs its own "
-                f"slot, plus 3 for a slice-typed argument); this "
-                f"compiler only supports up to 6 (passed via registers "
-                f"per the SysV ABI -- stack-passed arguments aren't "
-                f"implemented)"
-            )
+        prepends dst_address as the actual first argument value. No
+        slot count is too large here -- see _ir_call's own docstring."""
         arg_ir, arg_values = self._ir_call_arguments(call_expr.args, call_expr.name)
         return arg_ir + [IRCall(dst=None, name=call_expr.name, args=[dst_address] + arg_values)]
 

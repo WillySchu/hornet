@@ -65,6 +65,14 @@ class FrameSlot(Operand):
     with one of these still unresolved is a bug in that patch pass,
     not something to paper over with a plausible-looking fallback."""
     slot: int
+    extra_offset: int = 0  # bytes added on top of the slot's own resolved
+    # base offset -- lets several independent values share one reserved
+    # region rather than needing a slot apiece: an overflow argument at
+    # position k within the outgoing-stack-arguments region a call
+    # needing more than 6 argument slots reserves (see _resolve_frame_
+    # layout's own docstring) is FrameSlot(that region's slot, 8*k). 0
+    # for every other use of FrameSlot, which addresses its slot's own
+    # base directly.
 
     def emit(self) -> str:
         raise NotImplementedError(
