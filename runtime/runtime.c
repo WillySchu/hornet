@@ -187,11 +187,18 @@ static void hornet_stringify(
             break;
         }
         case HORNET_TYPEDESC_STR: {
-            // The value itself IS a pointer -- value_addr holds the
-            // address of a pointer, not the string's own bytes
-            // directly (unlike every other kind here).
+            // A str value is a 16-byte {ptr, len} descriptor now (see
+            // ir/strings.py's own module docstring) -- value_addr
+            // holds the address of that descriptor, not the string's
+            // own bytes directly (unlike every other kind here). ptr
+            // at offset 0, len (a plain int32_t, same convention a
+            // SLICE's own len/cap already use just below) at offset
+            // 8 -- read directly, never via strlen: there is no null
+            // terminator anywhere in this scheme to scan for, and an
+            // embedded '\0' byte is ordinary content, not a stopping
+            // point.
             const char *s = (const char *)read_ptr(value_addr);
-            int64_t len = (int64_t)strlen(s);
+            int64_t len = (int64_t)read_i32((char *)value_addr + 8);
             if (quote_strings) {
                 hornet_buf_append_byte(buf, '\'');
                 hornet_buf_append_bytes(buf, s, len);

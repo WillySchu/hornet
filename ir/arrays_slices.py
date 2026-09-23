@@ -541,8 +541,11 @@ class ArraysSlicesMixin:
           - ARRAY: delegates to _ir_zero_array_loop -- a genuine
             runtime loop, not per-element unrolling, since an array's
             own element count can be large.
-          - str: the address of a single shared, static empty-string
-            constant (_get_empty_str_label) -- never a null pointer.
+          - str: {ptr=0, len=0} (_ir_zero_str_value), written through
+            dst_address via _ir_write_str_descriptor_into_address --
+            see ir/strings.py's own module docstring for why this is
+            safe now, unlike the OLD C-string scheme's shared, static
+            empty-string constant.
           - int/bool/int8/uint8: an ordinary IRConst(0, value_type),
             written via IRStore at value_type's own declared width."""
         if value_type.kind == TypeKind.SLICE:
@@ -565,12 +568,8 @@ class ArraysSlicesMixin:
         if value_type.kind == TypeKind.ARRAY:
             return self._ir_zero_array_loop(dst_address, value_type.element_type, value_type.size)
         if value_type == Type.STR:
-            addr_temp = self.ir_program.ids.new_temp(Type.STR)
-            ir = [
-                IRStaticDataAddress(dst=addr_temp, label=self._get_empty_str_label()),
-                IRStore(address=dst_address, value=addr_temp, value_type=Type.STR)
-            ]
-            return ir
+            zero_ir, ptr_value, len_value = self._ir_zero_str_value()
+            return zero_ir + self._ir_write_str_descriptor_into_address(dst_address, ptr_value, len_value)
         return [IRStore(address=dst_address, value=IRConst(0, value_type), value_type=value_type)]
 
     def _ir_zero_array_loop(self, dst_address, element_type: Type, count: int) -> list:
@@ -625,10 +624,14 @@ class ArraysSlicesMixin:
         between the two given addresses -- falls through only once
         everything has matched. Recurses for ARRAY (a bounded loop,
         mirroring _ir_zero_array_loop's own shape, just comparing
-        instead of zeroing) and STRUCT (per field), reaching str
-        (IRCall(strcmp)) and int/bool/int8/uint8 (an ordinary IRLoad-
-        into-value_type's-own-width plus IRBinOp comparison) as its
-        base cases.
+        instead of zeroing) and STRUCT (per field), reaching str (a
+        length-first check, then memcmp -- see _ir_string_compare's
+        own docstring in ir/strings.py for why length-first, not just
+        a straight memcmp, matters here too: comparing memcmp(left,
+        right, left_len) before knowing right_len matches it would
+        risk reading past the end of a genuinely shorter right buffer)
+        and int/bool/int8/uint8 (an ordinary IRLoad-into-value_type's-
+        own-width plus IRBinOp comparison) as its base cases.
 
         The scalar-field/element case's own width-aware load matters:
         comparing at a fixed 4-byte width regardless of the field's
@@ -690,14 +693,17 @@ class ArraysSlicesMixin:
             return ir
         continue_label = self.ir_program.ids.new_label("eq_continue")
         if value_type == Type.STR:
-            left_val = self.ir_program.ids.new_temp(Type.STR)
-            right_val = self.ir_program.ids.new_temp(Type.STR)
+            left_read_ir, left_ptr, left_len = self._ir_read_str_descriptor_from_address(left_addr)
+            right_read_ir, right_ptr, right_len = self._ir_read_str_descriptor_from_address(right_addr)
+            lengths_equal = self.ir_program.ids.new_temp(Type.BOOL)
+            lengths_equal_label = self.ir_program.ids.new_label("eq_str_lengths_equal")
             cmp_result = self.ir_program.ids.new_temp(Type.INT)
             mismatch_cond = self.ir_program.ids.new_temp(Type.BOOL)
-            return [
-                IRLoad(dst=left_val, address=left_addr),
-                IRLoad(dst=right_val, address=right_addr),
-                IRCall(dst=cmp_result, name='strcmp', args=[left_val, right_val]),
+            return left_read_ir + right_read_ir + [
+                IRBinOp(dst=lengths_equal, op=BinaryOp.EQUAL, left=left_len, right=right_len),
+                IRBranch(cond=lengths_equal, true_label=lengths_equal_label, false_label=mismatch_label),
+                IRLabel(lengths_equal_label),
+                IRCall(dst=cmp_result, name='memcmp', args=[left_ptr, right_ptr, left_len]),
                 IRBinOp(dst=mismatch_cond, op=BinaryOp.NOT_EQUAL, left=cmp_result, right=IRConst(0, Type.INT)),
                 IRBranch(cond=mismatch_cond, true_label=mismatch_label, false_label=continue_label),
                 IRLabel(continue_label),
@@ -800,6 +806,18 @@ class ArraysSlicesMixin:
                 return None
             slice_ir, ptr_value, len_value, cap_value = production
             return slice_ir + self._ir_write_slice_descriptor_into_address(dst_address, ptr_value, len_value, cap_value)
+        if value_type.kind == TypeKind.STR:
+            # The one str-typed shape none of the cases above already
+            # cover: a StringLiteral or a Binary(ADD) concatenation --
+            # an existing addressable value and a str-returning
+            # ordinary Call both already fell through to their own,
+            # generic cases above (is_composite_addressable/the
+            # trailing isinstance(value_expr, Call) catch-all, both
+            # already generic over value_type). _ir_str_value produces
+            # the {ptr, len} pair; _ir_write_str_descriptor_into_
+            # address writes it through dst_address.
+            value_ir, ptr_value, len_value = self._ir_str_value(value_expr)
+            return value_ir + self._ir_write_str_descriptor_into_address(dst_address, ptr_value, len_value)
         if isinstance(value_expr, Call) and value_expr.name in self.ir_program.struct_registry:
             return self._ir_write_struct_literal_into(dst_address, value_expr, value_type)
         if isinstance(value_expr, Call):
@@ -1062,15 +1080,29 @@ class ArraysSlicesMixin:
         scope (see _ir_indexable_base's own docstring) -- an
         ArrayLiteral, or a Call, when x is slice-typed.
 
-        Reuses _ir_indexable_base directly, the same "address plus
-        length, however each is represented" abstraction indexing and
-        slicing already share. x's own address (and
-        cap) are computed and then discarded, but NOT skipped: x is
-        still fully evaluated regardless, so any bounds check or
-        side effect buried in it genuinely runs -- deliberately: a
-        length-only read must not silently skip a bounds check or
-        side effect the full expression would otherwise trigger
-        (`len(arr[i])` still aborts if i is out of range).
+        str-typed x is handled first, entirely separately: _ir_
+        indexable_base's own "address plus length" abstraction is
+        specifically for an INDEXABLE base (array/slice), which str
+        isn't (str indexing/slicing is its own, later, deliberately
+        deferred follow-up) -- _ir_str_value is the identical
+        "evaluate x once, however its own shape produces a {ptr, len}
+        pair" abstraction, just under a different name for a type
+        outside _ir_indexable_base's own scope. ptr is computed and
+        then discarded, but NOT skipped, for the identical reason x's
+        own address/cap are below: x is still fully evaluated
+        regardless, so any side effect buried in it genuinely runs
+        (`len(s + t)` still concatenates, even though only the
+        resulting length is ever read).
+
+        Reuses _ir_indexable_base directly for ARRAY/SLICE, the same
+        "address plus length, however each is represented" abstraction
+        indexing and slicing already share. x's own address (and cap)
+        are computed and then discarded, but NOT skipped: x is still
+        fully evaluated regardless, so any bounds check or side effect
+        buried in it genuinely runs -- deliberately: a length-only
+        read must not silently skip a bounds check or side effect the
+        full expression would otherwise trigger (`len(arr[i])` still
+        aborts if i is out of range).
 
         For an ARRAY base, the returned value is a compile-time
         IRConst (x's declared size, never read out of x at runtime);
@@ -1078,6 +1110,12 @@ class ArraysSlicesMixin:
         value read from x's own descriptor -- either way, exactly
         _ir_indexable_base's own second return value, unchanged."""
         arg = expr.args[0]
+        if type_of(arg).kind == TypeKind.STR:
+            result = self._ir_str_value(arg)
+            if result is None:
+                return None
+            str_ir, ptr, length = result
+            return str_ir, length
         base = self._ir_indexable_base(arg)
         if base is None:
             return None

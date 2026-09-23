@@ -36,29 +36,30 @@ from semantic import Type, TypeKind
 class DispatchMixin:
     def gen_expr_ir(self, expr: Node) -> tuple[list, Optional[IRValue]]:
         """Builds real IR for the node kinds that have it -- a bare
-        Constant/BoolLiteral/StringLiteral, a scalar Variable, a
-        scalar-typed Index/Field read (via _ir_index_address/_ir_
-        field_address plus _ir_load), Binary (via _ir_expr_binary), a
-        len(x)/print(x) call (their own dedicated entry points, not
-        routed through _ir_call -- neither is an ordinary function
-        call), an ordinary scalar-or-void-returning Call (via _ir_
-        call), Unary, Cast, IsCheck (via _ir_is_check, ir/sum_types.py
-        -- a sum type's own runtime discriminant test, never a general
-        expression; see IsCheck's own docstring in parser.py), and
-        ADDRESS_OF/DEREFERENCE (via _ir_address_of/_ir_dereference,
-        ir/pointers.py -- checked ahead of the generic Unary case just
+        Constant/BoolLiteral, a scalar Variable, a scalar-typed Index/
+        Field read (via _ir_index_address/_ir_field_address plus _ir_
+        load), Binary (via _ir_expr_binary), a len(x)/print(x) call
+        (their own dedicated entry points, not routed through _ir_
+        call -- neither is an ordinary function call), an ordinary
+        scalar-or-void-returning Call (via _ir_call), Unary, Cast,
+        IsCheck (via _ir_is_check, ir/sum_types.py -- a sum type's own
+        runtime discriminant test, never a general expression; see
+        IsCheck's own docstring in parser.py), and ADDRESS_OF/
+        DEREFERENCE (via _ir_address_of/_ir_dereference, ir/
+        pointers.py -- checked ahead of the generic Unary case just
         below, since neither shape fits it: ADDRESS_OF never evaluates
         its own operand as a value at all, and DEREFERENCE needs an
         IRLoad, not an IRUnOp) -- and raises IRError for everything
         else.
 
-        An ArrayLiteral, Slice, NoneLiteral, or a composite-returning
-        Call used as a bare statement is routed around this method
-        entirely by gen_statement_ir's own ExprStmt dispatch; in any
-        other position, each already has its own earlier real-IR case
-        (a VarDecl initializer, a function-call argument, ...) or is a
-        shape semantic.py doesn't allow there at all -- so none of the
-        four actually reach this method's own IRError in practice.
+        An ArrayLiteral, Slice, NoneLiteral, StringLiteral, or a
+        composite-returning Call used as a bare statement is routed
+        around this method entirely by gen_statement_ir's own ExprStmt
+        dispatch; in any other position, each already has its own
+        earlier real-IR case (a VarDecl initializer, a function-call
+        argument, ...) or is a shape semantic.py doesn't allow there
+        at all -- so none of the five actually reach this method's own
+        IRError in practice.
 
         Returns (ir, value) -- value is None only for a void call,
         which can only legally appear via a bare ExprStmt, never as
@@ -69,20 +70,17 @@ class DispatchMixin:
         value; the latter's `expr.name` already has its own persistent
         Temp (see _bind_local), so reading it just hands back that
         Temp. Never reached for a composite-typed Variable (array/
-        slice/struct) -- every real-IR caller of this class already
-        has its own dedicated handling for one before this method
-        could be reached with it."""
+        slice/struct/str -- see ir/strings.py's own module docstring
+        for why str joined this set): every real-IR caller of this
+        class already has its own dedicated handling for one before
+        this method could be reached with it -- a str-typed Variable/
+        Field/Index/Binary(ADD)/Call goes through _ir_str_value (ir/
+        strings.py) instead, exactly as a slice-typed one already goes
+        through _ir_slice_arg rather than here."""
         if isinstance(expr, Constant):
             return [], IRConst(expr.value, type_of(expr))
         if isinstance(expr, BoolLiteral):
             return [], IRConst(1 if expr.value else 0, Type.BOOL)
-        if isinstance(expr, StringLiteral):
-            # A fresh label per occurrence, even for identical content
-            # -- no deduplication.
-            t = self.ir_program.ids.new_temp(Type.STR)
-            label = self.ir_program.ids.new_label("str")
-            self.ir_program.string_literals.append((label, expr.value))
-            return [IRStaticDataAddress(dst=t, label=label)], t
         if isinstance(expr, Variable):
             if self._is_heap_allocated(self._local_decl_id(expr.name), self._local_type(expr.name)):
                 # This variable's own address escaped past this
@@ -96,7 +94,7 @@ class DispatchMixin:
                 # dereferences.
                 return self._ir_load([], self._local_temp(expr.name), self._local_type(expr.name))
             return [], self._local_temp(expr.name)
-        if isinstance(expr, Index) and type_of(expr).kind not in (TypeKind.ARRAY, TypeKind.STRUCT):
+        if isinstance(expr, Index) and type_of(expr).kind not in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.STR):
             result = self._ir_index_address(expr)
             if result is None:
                 raise IRError(
@@ -218,8 +216,16 @@ class DispatchMixin:
         if expr.op == BinaryOp.OR:
             return self._ir_short_circuit(expr, short_circuit_value=1, label_prefix="or")
         if type_of(expr.left) == Type.STR:
-            if expr.op == BinaryOp.ADD:
-                return self._ir_string_concat(expr)
+            # ADD (concatenation) is deliberately NOT dispatched here:
+            # its own result IS a str, a composite, multi-value type
+            # now (see ir/strings.py's own module docstring) -- it can
+            # no longer flow through gen_expr_ir's own single-value
+            # contract at all, so _ir_str_value (ir/strings.py) is the
+            # ONLY caller that ever reaches _ir_string_concat, never
+            # this method. EQUAL/NOT_EQUAL stay here: a comparison's
+            # own result is an ordinary bool regardless of its
+            # operands' own type, a single value gen_expr_ir's
+            # contract already covers correctly.
             if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
                 return self._ir_string_compare(expr)
         if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):

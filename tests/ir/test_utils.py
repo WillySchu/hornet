@@ -27,7 +27,7 @@ def test_type_byte_width_bool():
 
 def test_type_byte_width_str():
     t = semantic.Type(kind=semantic.TypeKind.STR)
-    assert 8 == type_byte_width(t, {}, {})
+    assert 16 == type_byte_width(t, {}, {})  # {ptr, len} -- see ir/strings.py's own module docstring
 
 
 def test_type_byte_width_array_int():
@@ -38,7 +38,7 @@ def test_type_byte_width_array_int():
 
 def test_type_byte_width_array_str():
     t = semantic.Type(kind=semantic.TypeKind.ARRAY, element_type=semantic.Type(kind=semantic.TypeKind.STR), size=11)
-    expected = 88  # 8 * 11
+    expected = 176  # 16 * 11
     assert expected == type_byte_width(t, {}, {})
 
 
@@ -52,7 +52,7 @@ def test_type_byte_width_nested_array_str():
         ),
         size=11,
     )
-    expected = 440  # 11 * 5 * 8
+    expected = 880  # 11 * 5 * 16
     assert expected == type_byte_width(t, {}, {})
 
 
@@ -85,7 +85,7 @@ def test_type_byte_width_basic_struct():
         ),
     }
     t = semantic.Type(kind=semantic.TypeKind.STRUCT, struct_name='A')
-    expected = 12  # 8 + 4
+    expected = 20  # 16 + 4
     assert expected == type_byte_width(t, structs, {})
 
 
@@ -105,7 +105,7 @@ def test_type_byte_width_struct_with_array_field():
         ),
     }
     t = semantic.Type(kind=semantic.TypeKind.STRUCT, struct_name='A')
-    expected = 52  # 8 + 4 + (8 * 5)
+    expected = 100  # 16 + 4 + (16 * 5)
     assert expected == type_byte_width(t, structs, {})
 
 
@@ -124,7 +124,7 @@ def test_type_byte_width_struct_with_slice_field():
         ),
     }
     t = semantic.Type(kind=semantic.TypeKind.STRUCT, struct_name='A')
-    expected = 36  # 8 + 4 + 24
+    expected = 44  # 16 + 4 + 24 -- a slice is always 24 bytes regardless of element type
     assert expected == type_byte_width(t, structs, {})
 
 
@@ -151,7 +151,7 @@ def test_type_byte_width_struct_with_struct_array_field():
         ),
     }
     t = semantic.Type(kind=semantic.TypeKind.STRUCT, struct_name='A')
-    expected = 28  # 8 + 4 + ((4 + 4) * 2)
+    expected = 36  # 16 + 4 + ((4 + 4) * 2)
     assert expected == type_byte_width(t, structs, {})
 
 
@@ -177,7 +177,7 @@ def test_type_byte_width_struct_with_struct_slice_field():
         ),
     }
     t = semantic.Type(kind=semantic.TypeKind.STRUCT, struct_name='A')
-    expected = 36  # 8 + 4 + 24
+    expected = 44  # 16 + 4 + 24
     assert expected == type_byte_width(t, structs, {})
 
 
@@ -292,10 +292,15 @@ def test_type_of_array():
     assert array_type == type_of(node)
 
 
-def test_composite_kinds_is_exactly_array_slice_struct_sum():
+def test_composite_kinds_is_exactly_array_slice_struct_sum_str():
     """Pinned exactly, not just checked for a subset/superset: every
     call site that switched to this shared constant (ir/statements.py,
     ir/arrays_slices.py, ir/builder.py, ir/dispatch.py, ir/structs.py)
     relies on it meaning precisely "composite, address-based value
-    type" -- no more, no less."""
-    assert COMPOSITE_KINDS == {semantic.TypeKind.ARRAY, semantic.TypeKind.SLICE, semantic.TypeKind.STRUCT, semantic.TypeKind.SUM}
+    type" -- no more, no less. str joined this set once it became a
+    16-byte {ptr, len} descriptor rather than a single 8-byte pointer
+    -- see ir/strings.py's own module docstring."""
+    assert COMPOSITE_KINDS == {
+        semantic.TypeKind.ARRAY, semantic.TypeKind.SLICE, semantic.TypeKind.STRUCT,
+        semantic.TypeKind.SUM, semantic.TypeKind.STR,
+    }

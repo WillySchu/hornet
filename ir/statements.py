@@ -163,6 +163,23 @@ class StatementsMixin:
                 hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr(ir_fn)
                 copy_ir = self._ir_copy_into_address(hidden_ptr, stmt.value, value_type)
                 return hidden_ptr_ir + copy_ir + [IRReturn(value=None)]
+            # A str return whose own value is a StringLiteral or a
+            # Binary(ADD) concatenation -- the one str-typed shape
+            # none of the cases above already cover (a composite-
+            # returning Call and an existing addressable value both
+            # already fell through to their own, generic cases just
+            # above -- _ir_composite_call/_ir_copy_into_address are
+            # both already generic over value_type, str included).
+            # _ir_str_value produces the {ptr, len} pair; _ir_write_
+            # str_descriptor_into_address writes it through this
+            # function's own hidden pointer, standing in for a
+            # freshly-computed destination address exactly like every
+            # other case here.
+            if ir_fn.return_type.kind == TypeKind.STR:
+                hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr(ir_fn)
+                value_ir, ptr_value, len_value = self._ir_str_value(stmt.value)
+                write_ir = self._ir_write_str_descriptor_into_address(hidden_ptr, ptr_value, len_value)
+                return hidden_ptr_ir + value_ir + write_ir + [IRReturn(value=None)]
             # A composite return whose own value is an array literal,
             # a bare bracketed-list literal resolved to SLICE by this
             # function's own declared return type, or a POSITIONAL
@@ -334,21 +351,12 @@ class StatementsMixin:
                     # already covers writing through the one this
                     # specific variable needs.
                     #
-                    # str is the one scalar kind whose own zero value
-                    # isn't a raw IRConst(0, ...): it's the address of
-                    # a shared, static empty-string constant, never a
-                    # null pointer (see _ir_write_zero_value_into's own
-                    # str case). Computed into a fresh Temp rather than
-                    # this variable's own permanent one directly (the
-                    # non-escaping case's own previous shortcut), since
-                    # _ir_finish_scalar_var_decl needs a plain IRValue to
-                    # work with regardless of which case produced it.
-                    if var_type == Type.STR:
-                        t = self.ir_program.ids.new_temp(Type.STR)
-                        ir = [IRStaticDataAddress(dst=t, label=self._get_empty_str_label())]
-                    else:
-                        t = IRConst(0, var_type)
-                        ir = []
+                    # str no longer reaches this branch at all (see
+                    # ir/strings.py's own module docstring -- it's a
+                    # COMPOSITE kind now, handled by its own dedicated
+                    # case further down, mirroring slice's).
+                    t = IRConst(0, var_type)
+                    ir = []
                     return ir + self._ir_finish_scalar_var_decl(stmt.name, id(stmt), var_type, t)
             # A sum-typed VarDecl -- always HAS an initializer
             # (semantic.py's analyze_var_decl already rejects the bare
@@ -419,6 +427,39 @@ class StatementsMixin:
                     # garbage was already sitting there.
                     ir.extend(self._ir_malloc_and_store(var_type, slot))
                 return ir + self._ir_copy_assign(Variable(name=stmt.name), stmt.init, var_type)
+            # A str-typed VarDecl whose initializer ISN'T already
+            # addressable (a StringLiteral, a Binary(ADD)
+            # concatenation, or an ordinary str-returning Call -- an
+            # addressable one, a Variable/Field/Index, already matched
+            # the case just above), or has NO initializer at all, in
+            # which case its own zero value ({ptr=0, len=0} -- see
+            # _ir_zero_str_value's own docstring for why this is safe
+            # now, unlike the OLD C-string scheme's shared empty-
+            # string constant) is written instead. Both paths converge
+            # on the identical write: _ir_str_value (or _ir_zero_str_
+            # value) produces the {ptr, len} pair, _ir_write_str_
+            # descriptor writes it through this new variable's own,
+            # just-bound address.
+            #
+            # A heap-allocated destination (this variable's OWN
+            # address later escapes -- see _ir_str_address's own
+            # docstring for why str still needs this, unlike slice)
+            # needs its own fresh backing allocation made here first,
+            # exactly like the existing-value-copy case just above:
+            # this destination is brand new, its slot holds nothing
+            # yet, and _ir_write_str_descriptor would otherwise write
+            # through whatever pointer-sized garbage was already
+            # sitting there.
+            if var_type.kind == TypeKind.STR:
+                slot = self._bind_local(stmt, ir_fn)
+                ir = []
+                if self._is_heap_allocated(id(stmt), var_type):
+                    ir.extend(self._ir_malloc_and_store(var_type, slot))
+                if stmt.init is not None:
+                    value_ir, ptr_value, len_value = self._ir_str_value(stmt.init)
+                else:
+                    value_ir, ptr_value, len_value = self._ir_zero_str_value()
+                return ir + value_ir + self._ir_write_str_descriptor(Variable(name=stmt.name), ptr_value, len_value)
             # A slice-typed initializer that's a bare `none` -- _ir_
             # nil_slice's own all-zero triple. ARRAY/STRUCT can never
             # be `none` -- semantic.py already rejects that outright.
@@ -620,6 +661,22 @@ class StatementsMixin:
                     and is_composite_addressable(stmt.value)
             ):
                 return self._ir_copy_assign(Variable(name=stmt.name), stmt.value, var_type)
+            # A str-typed Assign whose value ISN'T already addressable
+            # (a StringLiteral, a Binary(ADD) concatenation, or an
+            # ordinary str-returning Call -- an addressable one already
+            # matched the case just above). Same "no heap-allocation
+            # branch needed here" reasoning as this whole case's own
+            # opening comment: an existing, already-escaping str
+            # variable's own box was already malloc'd at VarDecl time,
+            # and _ir_str_address's own heap-allocation check already
+            # reads THROUGH that existing pointer transparently -- this
+            # just needs to produce the new {ptr, len} pair and write
+            # it through this variable's own (possibly indirect)
+            # address, exactly like VarDecl's own identical case, minus
+            # the binding and malloc concerns that case alone needs.
+            if var_type.kind == TypeKind.STR:
+                value_ir, ptr_value, len_value = self._ir_str_value(stmt.value)
+                return value_ir + self._ir_write_str_descriptor(Variable(name=stmt.name), ptr_value, len_value)
             # Same none-value case as VarDecl's own, just above -- no
             # binding concern here at all, unlike VarDecl's own.
             if var_type.kind == TypeKind.SLICE and isinstance(stmt.value, NoneLiteral):
@@ -664,6 +721,17 @@ class StatementsMixin:
                     TypeKind.STRUCT: self._ir_struct_address,
                     TypeKind.SLICE: self._ir_slice_address,
                     TypeKind.SUM: self._ir_struct_address,  # generic address computation -- see its own docstring
+                    # STR deliberately absent, unlike this same dict in
+                    # FieldAssign/IndexAssign's own analogous cases:
+                    # str's own dedicated Assign case, just below,
+                    # already runs BEFORE this point and already
+                    # handles every str-typed stmt.value shape
+                    # (including an ordinary Call) via _ir_str_value,
+                    # so a str-typed stmt.value can structurally never
+                    # still be unhandled by the time execution would
+                    # reach this dict at all -- adding an entry here
+                    # that can never run would be dead, misleading
+                    # code, not a genuine safety net.
                 }[var_type.kind](Variable(name=stmt.name))
                 return dst_ir + self._ir_composite_call(dst_address, stmt.value)
             # Same array-literal/struct-literal case as VarDecl's own,
@@ -723,10 +791,10 @@ class StatementsMixin:
                 write_ir = self._ir_write_sum_type_value_into(dst_address, stmt.value, element_type)
                 if write_ir is not None:
                     return dst_ir + write_ir
-            if element_type.kind not in (TypeKind.SLICE, TypeKind.STRUCT, TypeKind.SUM):
+            if element_type.kind not in (TypeKind.SLICE, TypeKind.STRUCT, TypeKind.SUM, TypeKind.STR):
                 return self._ir_index_assign(stmt, element_type)
             if (
-                    element_type.kind in (TypeKind.STRUCT, TypeKind.SLICE, TypeKind.SUM)
+                    element_type.kind in (TypeKind.STRUCT, TypeKind.SLICE, TypeKind.SUM, TypeKind.STR)
                     and is_composite_addressable(stmt.value)
             ):
                 dst_expr = Index(array=stmt.array, index=stmt.index)
@@ -763,6 +831,21 @@ class StatementsMixin:
                 address_fn = self._ir_slice_address if element_type.kind == TypeKind.SLICE else self._ir_struct_address
                 dst_ir, dst_address = address_fn(dst_expr)
                 return dst_ir + self._ir_composite_call(dst_address, stmt.value)
+            # A str-typed IndexAssign whose value is a StringLiteral,
+            # a Binary(ADD) concatenation, or an ordinary str-returning
+            # Call -- the one str-typed shape none of the cases above
+            # already cover (an existing addressable value already
+            # fell through to its own, generic case above). Folds the
+            # Call sub-shape in here too, rather than matching it into
+            # the tuple-based Call case just above: that one dispatches
+            # on a small, fixed {STRUCT, SLICE} address_fn table,
+            # awkward to extend for one more kind when _ir_str_value
+            # already handles a str-returning Call uniformly alongside
+            # its other two shapes anyway.
+            if element_type.kind == TypeKind.STR:
+                dst_expr = Index(array=stmt.array, index=stmt.index)
+                value_ir, ptr_value, len_value = self._ir_str_value(stmt.value)
+                return value_ir + self._ir_write_str_descriptor(dst_expr, ptr_value, len_value)
             # A struct-literal (positional or named/partial) value --
             # no ArrayLiteral case needed here at all, unlike VarDecl/
             # Assign/FieldAssign's own: ARRAY never occurs as an
@@ -830,9 +913,19 @@ class StatementsMixin:
                     TypeKind.ARRAY: self._ir_array_address,
                     TypeKind.STRUCT: self._ir_struct_address,
                     TypeKind.SLICE: self._ir_slice_address,
+                    TypeKind.STR: self._ir_str_address,
                 }[field_type.kind]
                 dst_ir, dst_address = address_fn(dst_expr)
                 return dst_ir + self._ir_composite_call(dst_address, stmt.value)
+            # A str-typed FieldAssign whose value is a StringLiteral or
+            # a Binary(ADD) concatenation -- the one str-typed shape
+            # none of the cases above already cover (an existing
+            # addressable value and a str-returning ordinary Call both
+            # already fell through to their own, generic cases above).
+            if field_type.kind == TypeKind.STR:
+                dst_expr = Field(base=stmt.base, name=stmt.name)
+                value_ir, ptr_value, len_value = self._ir_str_value(stmt.value)
+                return value_ir + self._ir_write_str_descriptor(dst_expr, ptr_value, len_value)
             # Same array-literal/struct-literal case as VarDecl/
             # Assign's own -- FieldAssign's grammar can ALSO produce
             # an array-typed field (unlike IndexAssign, per this
@@ -1047,36 +1140,43 @@ class StatementsMixin:
         Callers are responsible for already having confirmed src_expr
         is a Variable/Field/Index -- see _ir_copy_assign's own
         docstring for why an ArrayLiteral/struct-literal Call/Slice/
-        composite-returning Call is a different case."""
+        StringLiteral/Binary(ADD)/composite-returning Call is a
+        different case."""
         address_of = {
             TypeKind.ARRAY: self._ir_array_address,
             TypeKind.STRUCT: self._ir_struct_address,
             TypeKind.SLICE: self._ir_slice_address,
             TypeKind.SUM: self._ir_struct_address,  # generic address computation -- see its own docstring
+            TypeKind.STR: self._ir_str_address,
         }[value_type.kind]
         src_ir, src_addr = address_of(src_expr)
         return src_ir + [IRCopy(dst_address=dst_address, src_address=src_addr, value_type=value_type)]
 
     def _ir_copy_assign(self, dst_expr: Node, src_expr: Node, value_type) -> list:
         """Builds (without lowering) a whole-array/whole-struct/whole-
-        slice copy as real IR: captures the destination's own address
-        via _ir_array_address/_ir_struct_address/_ir_slice_address --
-        so a heap-allocated variable or a nested field/index
-        destination is handled identically -- then delegates to _ir_
-        copy_into_address for the rest.
+        slice/whole-str copy as real IR: captures the destination's
+        own address via _ir_array_address/_ir_struct_address/_ir_
+        slice_address/_ir_str_address -- so a heap-allocated variable
+        or a nested field/index destination is handled identically --
+        then delegates to _ir_copy_into_address for the rest. A str
+        "copy" here is exactly a slice's own: its 16-byte descriptor,
+        never the bytes it points at -- see ir/strings.py's own module
+        docstring.
 
         Callers are responsible for already having confirmed src_expr
         is a Variable/Field/Index -- an ArrayLiteral, a struct-literal
-        Call, a Slice (slice production), or an ordinary composite-
-        returning Call is a genuinely different case (construction, or
-        the hidden-output-pointer convention) with no existing address
-        to capture at all; see gen_statement_ir's own VarDecl/Assign/
-        IndexAssign/FieldAssign cases for where that check happens."""
+        Call, a Slice (slice production), a StringLiteral, a Binary
+        (ADD) (concatenation), or an ordinary composite-returning Call
+        is a genuinely different case (construction, or the hidden-
+        output-pointer convention) with no existing address to capture
+        at all; see gen_statement_ir's own VarDecl/Assign/IndexAssign/
+        FieldAssign cases for where that check happens."""
         address_of = {
             TypeKind.ARRAY: self._ir_array_address,
             TypeKind.STRUCT: self._ir_struct_address,
             TypeKind.SLICE: self._ir_slice_address,
             TypeKind.SUM: self._ir_struct_address,  # generic address computation -- see its own docstring
+            TypeKind.STR: self._ir_str_address,
         }[value_type.kind]
         dst_ir, dst_addr = address_of(dst_expr)
         return dst_ir + self._ir_copy_into_address(dst_addr, src_expr, value_type)

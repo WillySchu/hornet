@@ -1101,6 +1101,22 @@ class SemanticAnalyzer:
         three-word descriptor has no C equivalent to line up against
         at all), and sum type for the additional reason that its own
         runtime tag has no meaning to C code regardless of layout.
+
+        str joined this exclusion list once it stopped being a plain
+        8-byte pointer (see ir/strings.py's own module docstring): a
+        16-byte {ptr, len} descriptor is just as layout-mismatched
+        against C's own `char *` as a slice's three-word one already
+        is against nothing at all -- and, unlike before, a str value
+        isn't even null-terminated anymore, so handing one to an
+        ordinary C function expecting `char *` (the working, tested
+        case this restriction used to allow -- `extern int strlen(str
+        s)`, calling real libc strlen directly) would be actively
+        wrong even where the raw pointer alone might have looked
+        layout-compatible by coincidence. Real str/FFI interop is
+        deliberately deferred, its own separate, later design
+        question -- this restriction is what keeps that gap from
+        silently compiling into a wrong call in the meantime.
+
         Scalar and pointer are excluded from this restriction because
         they're the one shape with an unambiguous, single, already-
         agreed-on C representation on both sides: a scalar's own
@@ -1144,20 +1160,20 @@ class SemanticAnalyzer:
         return_type = Type.VOID if ext.return_type is None else type_from_name(ext.return_type, self.structs, self.type_aliases, ext, self.sum_types)
 
         for p, p_type in zip(ext.params, param_types):
-            if p_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT, TypeKind.SUM):
+            if p_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT, TypeKind.SUM, TypeKind.STR):
                 raise SemanticError(
                     f"Extern function '{ext.name}''s parameter '{p.name}' has "
                     f"type {p_type} -- only scalar and pointer types are "
                     f"supported in an extern function's signature for now "
-                    f"(array/slice/struct/sum-typed parameters aren't yet)",
+                    f"(array/slice/struct/sum/str-typed parameters aren't yet)",
                     p,
                 )
-        if return_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT, TypeKind.SUM):
+        if return_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT, TypeKind.SUM, TypeKind.STR):
             raise SemanticError(
                 f"Extern function '{ext.name}' returns {return_type} -- "
                 f"only scalar and pointer types are supported as an "
                 f"extern function's own return type for now "
-                f"(array/slice/struct/sum aren't yet)",
+                f"(array/slice/struct/sum/str aren't yet)",
                 ext,
             )
 
@@ -2298,10 +2314,16 @@ class SemanticAnalyzer:
         return Type.VOID
 
     def check_len_call(self, expr: Call) -> Type:
-        """`len(x)`: x must be array- or slice-typed -- str isn't
-        supported yet (a real, separable follow-up, not an oversight);
-        every other type is rejected by this same, single check, where
+        """`len(x)`: x must be array-, slice-, or str-typed; every
+        other type is rejected by this same, single check, where
         print's own much more permissive one needs several carve-outs.
+
+        str joined array/slice once it became a {ptr, len} descriptor
+        with a real length FIELD rather than null-terminated bytes
+        needing a runtime scan (see ir/strings.py's own module
+        docstring) -- len(s) is now exactly as cheap as len(arr): a
+        plain field read, no different in kind from reading a slice's
+        own length out of its descriptor.
 
         x is fully type-checked via check_expr regardless of whether
         codegen needs its computed value (an array's length is a
@@ -2317,14 +2339,9 @@ class SemanticAnalyzer:
                 expr,
             )
         arg_type = self.check_expr(expr.args[0])
-        if arg_type == Type.STR:
+        if arg_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STR):
             raise SemanticError(
-                "'len' does not support str arguments yet",
-                expr.args[0],
-            )
-        if arg_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE):
-            raise SemanticError(
-                f"'len' requires an array or slice argument, got {arg_type}",
+                f"'len' requires an array, slice, or str argument, got {arg_type}",
                 expr.args[0],
             )
         return Type.INT

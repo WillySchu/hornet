@@ -1,17 +1,48 @@
-"""A str value is a plain pointer -- to a literal's static address, or
-a concatenation's malloc'd buffer -- never copied for its bytes the
-way an array or struct is. Also builds the runtime type-descriptor
-tree print() needs (_get_or_build_type_descriptor) and print()'s own
-real-IR call itself (_ir_print_call): the descriptor is walked, and
-stringification happens, entirely in C, by the runtime's own hornet_
-stringify/hornet_print (see runtime/runtime.c) -- this file just
-builds the IRCall against hornet_print and the static descriptor data
-it reads."""
+"""A str value is a 16-byte {ptr, len} descriptor -- ptr at offset 0,
+len (an ordinary 32-bit INT, in its own 8-byte slot -- same convention
+slice's own len/cap already use, see _ir_read_slice_descriptor_from_
+address) at offset 8. Immutable: ptr always points at bytes nobody
+ever writes back into, whether a literal's static address or a fresh
+malloc'd buffer built once, by concatenation, and never touched again.
+No null terminator anywhere in this scheme, and none relied upon: an
+embedded '\\0' byte is ordinary string content, ends nothing, exactly
+as long-lived as every other byte around it.
+
+Structurally str is much closer to slice than to struct/array: a
+small, FIXED-size descriptor (16 bytes, always) whose own two fields
+point at and measure a separately-sized payload elsewhere, rather than
+a type whose own size varies with, and directly holds, its full
+content. So str reuses slice's own conventions throughout -- a
+COMPOSITE kind (see ir/utils.py's own COMPOSITE_KINDS), addressed via
+_ir_str_address exactly like _ir_slice_address, read/written through
+that address via _ir_read_str_descriptor_from_address/_ir_write_str_
+descriptor_into_address exactly like slice's own triple, returned
+through the hidden-return-pointer convention exactly like slice -- NOT
+struct/array's own deep, whole-value copy: a str "copy" is always just
+copying its own 16-byte descriptor, never the bytes it points at,
+identical in spirit to how copying a slice never copies the array it
+aliases.
+
+No ownership tracking of any kind: a concatenation's own malloc'd
+buffer, and every buffer a string literal's own bytes already live in
+statically, are never freed. Deliberate -- see this feature's own
+design discussion for why (the previous concat-only free heuristic
+predated real escape analysis, would already be unsound once strings
+could alias into a shared buffer via slicing, and is fundamentally
+incompatible with a future tracing GC regardless); strings leak in
+this scheme, by design, until real memory management exists.
+
+Also builds the runtime type-descriptor tree print() needs
+(_get_or_build_type_descriptor) and print()'s own real-IR call itself
+(_ir_print_call): the descriptor is walked, and stringification
+happens, entirely in C, by the runtime's own hornet_stringify/hornet_
+print (see runtime/runtime.c) -- this file just builds the IRCall
+against hornet_print and the static descriptor data it reads."""
 
 from ir.errors import IRError
-from ir.ir import IRBinOp, IRConst, IRCall, IRStaticDataAddress, IRLocalAddress, IRStore
+from ir.ir import IRBinOp, IRBranch, IRConst, IRCall, IRJump, IRLabel, IRStaticDataAddress, IRLocalAddress, IRLoad, IRMove, IRStore
 from ir.utils import type_byte_width, type_of
-from parser import Call, Binary, Node, BinaryOp
+from parser import Call, Binary, Field, Index, Node, StringLiteral, Unary, UnaryOp, Variable, BinaryOp
 from semantic import Type, TypeKind
 
 
@@ -137,17 +168,178 @@ class StringsMixin:
 
         return label
 
-    def _get_empty_str_label(self) -> str:
-        """A shared, static, empty ("") string constant -- str's zero
-        value. Deliberately NOT a null pointer: every string operation
-        this file generates dereferences a str value with no null
-        check, so a zero-initialized str has to point at a real, valid
-        (if empty) C string -- a null pointer would segfault the
-        instant anything touched it."""
-        if self.ir_program._empty_str_label is None:
-            self.ir_program._empty_str_label = self.ir_program.ids.new_label("empty_str")
-            self.ir_program.string_literals.append((self.ir_program._empty_str_label, ""))
-        return self.ir_program._empty_str_label
+    def _ir_str_address(self, expr: Node):
+        """Builds (without lowering) the address of a str-typed expr's
+        own 16-byte {ptr, len} descriptor -- Variable, Field, Index,
+        or a pointer dereference -- as real IR. Returns (ir, address),
+        or None for a shape with no existing address at all (a
+        StringLiteral, a Binary(ADD) concatenation, an ordinary str-
+        returning Call): see _ir_str_value for those instead, which
+        this method's own Field/Index callers (_ir_field_address/_ir_
+        index_address, already generic over the result's own type)
+        fall back to when their own base isn't itself addressable.
+
+        The Variable case DOES still need a heap-allocation check,
+        unlike this file's earlier assumption that str, like slice,
+        is simply never individually heap-promoted: that reasoning
+        holds for slice only because a slice's own address can never
+        actually be taken today (no `&mySlice` exists), so the
+        question never arises in practice -- but `&s`, for a str-
+        typed s, was ALREADY legal before this arc (str was scalar
+        then, and check_unary's own ADDRESS_OF restriction allows any
+        bare Variable regardless of type), so a str local's address
+        genuinely can still escape past this function, exactly the
+        way an int/bool/pointer local's already can (see codegen/
+        escape_analysis.py). Mirrors _ir_struct_address's own Variable
+        case for this reason -- minus its sum-type narrowing branch,
+        since str can never itself be sum-typed, so there is nothing
+        to narrow."""
+        if isinstance(expr, Variable):
+            slot = self._local_slot(expr.name)
+            slot_addr = self.ir_program.ids.new_temp(Type.INT64)
+            ir = [IRLocalAddress(dst=slot_addr, slot=slot)]
+            if self._is_heap_allocated(self._local_decl_id(expr.name), self._local_type(expr.name)):
+                addr_temp = self.ir_program.ids.new_temp(Type.INT64)
+                ir.append(IRLoad(dst=addr_temp, address=slot_addr))
+                return ir, addr_temp
+            return ir, slot_addr
+        if isinstance(expr, Field):
+            return self._ir_field_address(expr)
+        if isinstance(expr, Index):
+            return self._ir_index_address(expr)
+        if isinstance(expr, Unary) and expr.op == UnaryOp.DEREFERENCE:
+            # `*p` (p: *str) read as a whole str value -- the
+            # pointer's own value already IS the address of its own
+            # pointee's descriptor, the same principle _ir_struct_
+            # address's own identical case already uses: an ordinary
+            # scalar read, via gen_expr_ir, since a pointer is just an
+            # 8-byte scalar for every purpose other than what it
+            # points at.
+            return self.gen_expr_ir(expr.operand)
+        return None
+
+    def _ir_read_str_descriptor_from_address(self, descriptor_addr) -> tuple:
+        """Builds (without lowering) the {ptr, len} pair read out of
+        an ALREADY-computed str-descriptor address as real IR --
+        returns (ir, ptr_value, len_value). Exactly _ir_read_slice_
+        descriptor_from_address's own shape, minus the cap field: ptr
+        read directly off the descriptor's own address, len at a
+        fixed +8 offset from it, via an ordinary IRBinOp before its
+        own IRLoad. len is captured as an INT (32-bit) Temp -- same
+        convention slice's own len/cap already use, so a length never
+        needs more than 32 bits of range here either."""
+        ptr_temp = self.ir_program.ids.new_temp(Type.INT64)
+        len_addr = self.ir_program.ids.new_temp(Type.INT64)
+        len_temp = self.ir_program.ids.new_temp(Type.INT)
+        ir = [
+            IRLoad(dst=ptr_temp, address=descriptor_addr),
+            IRBinOp(dst=len_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(8, Type.INT64)),
+            IRLoad(dst=len_temp, address=len_addr),
+        ]
+        return ir, ptr_temp, len_temp
+
+    def _ir_write_str_descriptor_into_address(self, dst_address, ptr_value, len_value) -> list:
+        """The shared core of _ir_write_str_descriptor: given an
+        ALREADY-computed destination address, writes an already-
+        produced {ptr, len} pair there at offsets 0/8, via two
+        ordinary IRStores -- exactly _ir_write_slice_descriptor_into_
+        address's own shape, minus the cap field."""
+        len_addr = self.ir_program.ids.new_temp(Type.INT64)
+        return [
+            IRStore(address=dst_address, value=ptr_value, value_type=Type.INT64),
+            IRBinOp(dst=len_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(8, Type.INT64)),
+            IRStore(address=len_addr, value=len_value, value_type=Type.INT),
+        ]
+
+    def _ir_write_str_descriptor(self, dst_expr: Node, ptr_value, len_value) -> list:
+        """Writes an already-produced {ptr, len} pair through dst_
+        expr's own address -- always via _ir_str_address, since the
+        destination is always str-typed here -- then delegates to
+        _ir_write_str_descriptor_into_address for the rest. Exactly
+        _ir_write_slice_descriptor's own shape."""
+        result = self._ir_str_address(dst_expr)
+        if result is None:
+            raise IRError(
+                f"_ir_str_address returned None for a str-descriptor write's "
+                f"own destination ({dst_expr!r}) -- expected to always succeed, "
+                f"since an assignment's own destination is always a Variable/"
+                f"Field/Index, never a str production or Call")
+        dst_ir, dst_addr = result
+        return dst_ir + self._ir_write_str_descriptor_into_address(dst_addr, ptr_value, len_value)
+
+    def _ir_zero_str_value(self) -> tuple:
+        """Builds (without lowering) str's own zero value, {ptr=0,
+        len=0}, as real IR -- returns (ir, ptr_value, len_value).
+        Unlike the OLD, pre-this-arc C-string representation (a
+        shared static empty-string constant, since every operation
+        dereferenced ptr unconditionally), ptr=0 is safe here: len=0
+        means no operation this file generates -- concatenation,
+        comparison, print -- ever reads even one byte through ptr, so
+        there is nothing left for a null ptr to be dangerous FOR. This
+        also means the zero value needs no static data of its own at
+        all, unlike before."""
+        ptr = self.ir_program.ids.new_temp(Type.INT64)
+        length = self.ir_program.ids.new_temp(Type.INT)
+        ir = [
+            IRMove(dst=ptr, src=IRConst(0, Type.INT64)),
+            IRMove(dst=length, src=IRConst(0, Type.INT)),
+        ]
+        return ir, ptr, length
+
+    def _ir_str_value(self, expr: Node) -> tuple:
+        """Builds (without lowering) any str-typed expr's own {ptr,
+        len} pair as real IR -- returns (ir, ptr_value, len_value).
+        The str counterpart to _ir_slice_arg/_ir_indexable_base:
+        every caller that needs a str's own actual content (concat-
+        enation, comparison, print, an argument or return value, a
+        struct-literal field, an array-literal element) goes through
+        here rather than gen_expr_ir, exactly as every slice-aware
+        caller already goes through _ir_slice_arg rather than gen_
+        expr_ir -- see this file's own module docstring, and ir/
+        dispatch.py's own gen_expr_ir docstring, for why str, like
+        slice, never reaches that method at all.
+
+        A StringLiteral needs no runtime work whatsoever: ptr is a
+        compile-time-known static address (IRStaticDataAddress) and
+        len is a compile-time-known constant (len(expr.value) --
+        ASCII-width bytes, matching escape_for_asciz's own assumption
+        elsewhere in this compiler), exactly as cheap as a bare
+        Constant already is in gen_expr_ir.
+
+        A Variable/Field/Index/pointer-dereference (an EXISTING value
+        with a real address) reads its pair straight off that address
+        via _ir_str_address + _ir_read_str_descriptor_from_address.
+
+        A Binary(ADD) (concatenation) delegates to _ir_string_concat.
+        An ordinary str-returning Call materializes through the
+        hidden-return-pointer convention (_ir_materialize_composite_
+        call, the SAME helper every other composite-returning Call
+        already uses -- generic over value_type, so str needs no
+        Call-specific machinery of its own here at all) and reads the
+        result back the same way an existing value's address would be.
+
+        Returns None when expr's own shape is out of scope (a bare
+        `none`, which str can never be -- semantic.py already rejects
+        that outright)."""
+        if isinstance(expr, StringLiteral):
+            ptr = self.ir_program.ids.new_temp(Type.INT64)
+            label = self.ir_program.ids.new_label("str")
+            self.ir_program.string_literals.append((label, expr.value))
+            return [IRStaticDataAddress(dst=ptr, label=label)], ptr, IRConst(len(expr.value), Type.INT)
+        if isinstance(expr, Binary) and expr.op == BinaryOp.ADD:
+            return self._ir_string_concat(expr)
+        result = self._ir_str_address(expr)
+        if result is not None:
+            addr_ir, addr_value = result
+            read_ir, ptr_value, len_value = self._ir_read_str_descriptor_from_address(addr_value)
+            return addr_ir + read_ir, ptr_value, len_value
+        if isinstance(expr, Call) and expr.name in self.ir_program.struct_registry:
+            return None  # a str-literal Call can never exist -- str has no literal-construction syntax of its own
+        if isinstance(expr, Call):
+            addr_ir, addr_value = self._ir_materialize_composite_call(expr, Type.STR)
+            read_ir, ptr_value, len_value = self._ir_read_str_descriptor_from_address(addr_value)
+            return addr_ir + read_ir, ptr_value, len_value
+        return None
 
     def _ir_print_call(self, expr: Call):
         """Builds (without lowering) print(x)'s own real IR -- returns
@@ -181,8 +373,13 @@ class StringsMixin:
         operand_address unchanged -- a SUM-typed value's own address
         is exactly what that function already computes generically
         for a Variable/Field/Index or an ordinary composite-returning
-        Call (see its own docstring), same as a struct's. SLICE-typed
-        x: _ir_slice_arg unifies every reachable shape into one {ptr,
+        Call (see its own docstring), same as a struct's. STR-typed x:
+        _ir_str_value (ir/strings.py) unifies every reachable shape
+        into one {ptr, len} pair, written into the shared,
+        unconditionally-reserved 16-byte _unnamed_str_temp_slot
+        scratch slot, whose address is then taken -- exactly SLICE's
+        own treatment just below, minus the cap field. SLICE-typed x:
+        _ir_slice_arg unifies every reachable shape into one {ptr,
         len, cap} triple, written into the shared, unconditionally-
         reserved 24-byte _unnamed_slice_temp_slot scratch slot, whose
         address is then taken. Otherwise a scalar: computed via gen_
@@ -214,6 +411,12 @@ class StringsMixin:
                     f"argument to exactly the shapes that method covers"
                 )
             value_addr_ir, value_addr = result
+        elif arg_type.kind == TypeKind.STR:
+            str_ir, ptr_value, len_value = self._ir_str_value(arg)
+            str_addr = self.ir_program.ids.new_temp(Type.INT64)
+            value_addr_ir = str_ir + [IRLocalAddress(dst=str_addr, slot=self._unnamed_str_temp_slot)]
+            value_addr_ir.extend(self._ir_write_str_descriptor_into_address(str_addr, ptr_value, len_value))
+            value_addr = str_addr
         elif arg_type.kind == TypeKind.SLICE:
             slice_ir, ptr_value, len_value, cap_value = self._ir_slice_arg(arg)
             slice_addr = self.ir_program.ids.new_temp(Type.INT64)
@@ -237,74 +440,102 @@ class StringsMixin:
 
     def _ir_string_concat(self, expr: Binary):
         """Builds (without lowering) `left + right` (both str) as real
-        IR -- returns (ir, value). Reuses ordinary IRCall directly for
-        strlen/malloc/strcpy/strcat: IRCall's own lowering is already
-        fully generic (just `CallInstr(instr.name)`), with no notion
-        of "Hornet function" baked in, so an external C library call
-        needs no new IR concept at all.
+        IR -- returns (ir, ptr_value, len_value), the same {ptr, len}
+        shape every other _ir_str_value branch returns (see its own
+        docstring -- this is one of them, dispatched to directly
+        rather than duplicated).
 
-        left/right are each evaluated via gen_expr_ir, so left_value
-        is already sitting safely in its own Temp home (register or
-        memory) by the time right is evaluated, regardless of what
-        that does internally -- no "protect left across evaluating
-        right" dance needed.
+        Unlike the OLD, strlen-based version, both lengths are already
+        KNOWN values here, never something to scan for: left/right
+        are each read via _ir_str_value, so left_len/right_len are
+        already sitting in their own Temps by the time this needs
+        them, with no strlen call at all. total_len = left's own
+        length + right's; malloc that many bytes (no "+1" for a
+        trailing null -- nothing downstream of this scheme ever
+        expects or reads one); memcpy left's own bytes in first, then
+        right's own bytes starting right after them.
 
-        MEMORY: _ir_free_if_fresh_concat replicates gen_string_concat_
-        into's own AST-shape check, called once left's bytes are
-        copied (strcpy) and once right's are (strcat)."""
-        left_ir, left_value = self.gen_expr_ir(expr.left)
-        right_ir, right_value = self.gen_expr_ir(expr.right)
+        left/right are each evaluated via _ir_str_value BEFORE either
+        memcpy runs, so left_ptr/left_len are already sitting safely
+        in their own Temp homes by the time right is evaluated,
+        regardless of what that does internally -- no "protect left
+        across evaluating right" dance needed, the same guarantee
+        gen_expr_ir's own ordering already gave the OLD version.
 
-        len_left = self.ir_program.ids.new_temp(Type.INT64)
-        len_right = self.ir_program.ids.new_temp(Type.INT64)
-        total_len = self.ir_program.ids.new_temp(Type.INT64)
-        plus_one = self.ir_program.ids.new_temp(Type.INT64)
-        new_buf = self.ir_program.ids.new_temp(Type.STR)
+        No freeing of any kind, for either operand or the fresh buffer
+        this itself produces -- see this file's own module docstring
+        for why: strings leak in this scheme, by design, until real
+        memory management exists."""
+        left_ir, left_ptr, left_len = self._ir_str_value(expr.left)
+        right_ir, right_ptr, right_len = self._ir_str_value(expr.right)
+
+        total_len = self.ir_program.ids.new_temp(Type.INT)
+        new_buf = self.ir_program.ids.new_temp(Type.INT64)
+        right_dst = self.ir_program.ids.new_temp(Type.INT64)
 
         ir = left_ir + right_ir + [
-            IRCall(dst=len_left, name='strlen', args=[left_value]),
-            IRCall(dst=len_right, name='strlen', args=[right_value]),
-            IRBinOp(dst=total_len, op=BinaryOp.ADD, left=len_left, right=len_right),
-            IRBinOp(dst=plus_one, op=BinaryOp.ADD, left=total_len, right=IRConst(1, Type.INT64)),
-            IRCall(dst=new_buf, name='malloc', args=[plus_one]),
-            IRCall(dst=None, name='strcpy', args=[new_buf, left_value]),
+            IRBinOp(dst=total_len, op=BinaryOp.ADD, left=left_len, right=right_len),
+            IRCall(dst=new_buf, name='malloc', args=[total_len]),
+            IRCall(dst=None, name='memcpy', args=[new_buf, left_ptr, left_len]),
+            IRBinOp(dst=right_dst, op=BinaryOp.ADD, left=new_buf, right=left_len),
+            IRCall(dst=None, name='memcpy', args=[right_dst, right_ptr, right_len]),
         ]
-        ir += self._ir_free_if_fresh_concat(expr.left, left_value)
-        ir += [IRCall(dst=None, name='strcat', args=[new_buf, right_value])]
-        ir += self._ir_free_if_fresh_concat(expr.right, right_value)
-        return ir, new_buf
-
-    def _ir_free_if_fresh_concat(self, operand: Node, value) -> list:
-        """If `operand` is itself a Binary(ADD, ...) node -- meaning
-        `value` is a fresh buffer _ir_string_concat just malloc'd for
-        *this* expression alone -- frees it via IRCall(free).
-        Everything else is left alone: a StringLiteral points into
-        static `.data` (freeing it would corrupt the allocator); a
-        Variable or a Call's return value might be aliased elsewhere
-        -- telling those apart from a genuinely fresh, exclusively-
-        owned buffer is a real escape-analysis problem this narrow
-        check deliberately doesn't attempt."""
-        if isinstance(operand, Binary) and operand.op == BinaryOp.ADD:
-            return [IRCall(dst=None, name='free', args=[value])]
-        return []
+        return ir, new_buf, total_len
 
     def _ir_string_compare(self, expr: Binary):
-        """Builds (without lowering) `left == right` / `left != right`
-        (both str) as real IR -- returns (ir, value). Same shape as
-        _ir_string_concat: IRCall(strcmp) plus an ordinary IRBinOp for
-        the 0/1 bool conversion, via IRBinOp's own existing comparison
-        lowering."""
-        left_ir, left_value = self.gen_expr_ir(expr.left)
-        right_ir, right_value = self.gen_expr_ir(expr.right)
+        """Builds (without lowering) `left == right` / `left !=
+        right` (both str) as real IR -- returns (ir, value). Length-
+        first, not byte-first: two strings of different lengths can
+        never be equal, and -- unlike the OLD strcmp-based version,
+        which relied on a null terminator to know where to stop
+        regardless of either buffer's own true size -- memcmp(left,
+        right, left_len) once lengths are already known equal is safe
+        exactly because they're equal; calling it BEFORE checking that
+        would risk reading past the end of a genuinely shorter right
+        buffer, an out-of-bounds read this scheme cannot risk.
+        lengths_differ_label lets a mismatch skip memcmp entirely,
+        both for safety and as a cheap, common-case optimization.
 
+        t_result is written on BOTH paths (the lengths-differ short
+        circuit, and the memcmp path taken once they're already known
+        equal), each followed by a jump to the same end_label -- the
+        identical register-merge technique _ir_short_circuit already
+        uses for AND/OR, adapted here to a two-outcome comparison
+        rather than a boolean short-circuit.
+
+        A length mismatch's own outcome (mismatch_result) is decided
+        here, in Python, from expr.op itself -- a compile-time-known
+        constant, not a runtime comparison of it: two unequal-length
+        strings are always NOT_EQUAL and never EQUAL, whichever
+        operator this expression actually uses. The equal-lengths
+        path's own result reuses expr.op directly against memcmp's
+        own 0/nonzero result, via an ordinary IRBinOp -- exactly the
+        OLD version's own final line, unchanged, since EQUAL/NOT_EQUAL
+        both already fall out of that one comparison correctly."""
+        left_ir, left_ptr, left_len = self._ir_str_value(expr.left)
+        right_ir, right_ptr, right_len = self._ir_str_value(expr.right)
+
+        lengths_equal = self.ir_program.ids.new_temp(Type.BOOL)
         cmp_result = self.ir_program.ids.new_temp(Type.INT)
         t_result = self.ir_program.ids.new_temp(Type.BOOL)
 
-        ir = left_ir + right_ir + [IRCall(dst=cmp_result, name='strcmp', args=[left_value, right_value])]
-        ir += self._ir_free_if_fresh_concat(expr.left, left_value)
-        ir += self._ir_free_if_fresh_concat(expr.right, right_value)
-        ir += [IRBinOp(dst=t_result, op=expr.op, left=cmp_result, right=IRConst(0, Type.INT))]
+        lengths_equal_label = self.ir_program.ids.new_label("str_cmp_lengths_equal")
+        lengths_differ_label = self.ir_program.ids.new_label("str_cmp_lengths_differ")
+        end_label = self.ir_program.ids.new_label("str_cmp_end")
+
+        mismatch_result = 0 if expr.op == BinaryOp.EQUAL else 1
+
+        ir = left_ir + right_ir + [
+            IRBinOp(dst=lengths_equal, op=BinaryOp.EQUAL, left=left_len, right=right_len),
+            IRBranch(cond=lengths_equal, true_label=lengths_equal_label, false_label=lengths_differ_label),
+            IRLabel(lengths_equal_label),
+            IRCall(dst=cmp_result, name='memcmp', args=[left_ptr, right_ptr, left_len]),
+            IRBinOp(dst=t_result, op=expr.op, left=cmp_result, right=IRConst(0, Type.INT)),
+            IRJump(end_label),
+            IRLabel(lengths_differ_label),
+            IRMove(dst=t_result, src=IRConst(mismatch_result, Type.BOOL)),
+            IRJump(end_label),
+            IRLabel(end_label),
+        ]
         return ir, t_result
-
-
 

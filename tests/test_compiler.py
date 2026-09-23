@@ -1934,33 +1934,23 @@ class TestStrings:
 
 
 # ---------------------------------------------------------------------------
-# String memory management: freeing an intermediate concatenation result
-# the moment it's no longer needed (see codegen.py's
-# _gen_free_if_fresh_concat and its STRINGS section).
-#
-# None of these tests can observe the freeing itself from inside the
-# Hornet language -- there's no way to inspect the heap from here, so
-# what they actually verify is that the optimization *doesn't break
-# anything*: every one of them would still produce the exact same
-# result if this feature didn't exist at all. The CRITICAL-labeled
-# tests are the ones that would actually catch a mistake in this
-# feature specifically -- reusing a named variable, a literal, or a
-# function call's return value after it was incorrectly freed would
-# show up here as wrong output or a crash, not just a leak.
-#
-# The freeing itself -- that it actually happens, targets the right
-# pointer, and never double-frees or frees a non-heap address -- was
-# verified directly with an LD_PRELOAD malloc/free tracer during
-# development (not part of this suite, since it needs a compiled .so
-# shim well outside what a portable pytest file should depend on): a
-# 3-way chain showed exactly 1 free (the intermediate result, not the
-# final one); a 6-way chain (5 concatenations) showed exactly 4 frees
-# with 1 correctly left un-freed; reusing a named variable or two
-# literals showed zero frees; and zero invalid frees appeared in any
-# case tested.
+# String concatenation shapes: chains, reused operands, results stored in
+# variables and read back, and concatenation inside a loop. Originally
+# written to test a since-removed free-if-fresh-concat heuristic (see this
+# feature's own design discussion for why: it predated real escape
+# analysis, was already unsound the moment strings could alias a shared
+# buffer via slicing, and is fundamentally incompatible with a future
+# tracing GC regardless -- strings simply leak now, by design, until real
+# memory management exists). The test BODIES stay valuable regardless of
+# that history: each is still a genuine concatenation-correctness check
+# across a shape (a chain, a reused named operand, a stored intermediate
+# read back twice, ...) that a naive or subtly-wrong _ir_string_concat
+# could still get wrong, freeing or not -- only the class's own former
+# framing (and a few individual docstrings/names) needed correcting once
+# the feature they described no longer exists.
 # ---------------------------------------------------------------------------
 
-class TestStringMemory:
+class TestStringConcatenationShapes:
     pytestmark = GCC_SKIP
 
     def test_basic_concat_no_fresh_operands(self):
@@ -1973,7 +1963,7 @@ class TestStringMemory:
             return_type="bool",
         )
 
-    def test_three_way_chain_intermediate_result_freed(self):
+    def test_three_way_chain(self):
         assert_exit_code(
             "    str a = 'x'\n"
             "    str b = 'y'\n"
@@ -1998,13 +1988,12 @@ class TestStringMemory:
             return_type="bool",
         )
 
-    def test_critical_named_variable_reused_across_two_concats(self):
-        """A named variable used as an operand in one concatenation must
-        still be fully intact and usable in a *second*, later
-        concatenation -- if the freeing check incorrectly matched
-        Variable nodes instead of only Binary(ADD, ...) nodes, this
-        would read freed memory the second time and almost certainly
-        produce garbage or crash."""
+    def test_named_variable_reused_across_two_concats(self):
+        """A named variable used as an operand in one concatenation
+        must still be fully intact and usable in a *second*, later
+        concatenation -- a str value is never mutated by anything
+        that reads it, so this should hold trivially, but is worth
+        pinning down directly rather than assuming."""
         assert_exit_code(
             "    str a = 'shared'\n"
             "    str b = a + '_first'\n"
@@ -2014,7 +2003,7 @@ class TestStringMemory:
             return_type="bool",
         )
 
-    def test_critical_named_variable_reused_four_times(self):
+    def test_named_variable_reused_four_times(self):
         assert_exit_code(
             "    str base = 'X'\n"
             "    str r1 = base + '1'\n"
@@ -2026,12 +2015,7 @@ class TestStringMemory:
             return_type="bool",
         )
 
-    def test_critical_two_literal_operands_never_freed(self):
-        """Both operands here point into static `.data`, never the
-        heap -- calling free() on either would be undefined behavior
-        (most likely heap corruption or an immediate crash), so this is
-        the test that would catch the freeing check failing to exclude
-        StringLiteral operands."""
+    def test_two_literal_operands(self):
         assert_exit_code(
             "    str r = 'lit1' + 'lit2'\n"
             "    return r == 'lit1lit2'",
@@ -2039,13 +2023,7 @@ class TestStringMemory:
             return_type="bool",
         )
 
-    def test_critical_function_call_results_never_freed(self):
-        """A function's return value might be a static literal, a fresh
-        heap buffer, or a parameter passed straight through -- codegen
-        has no visibility into which, so Call results are always
-        excluded from freeing. Using both results again afterward (via
-        the equality check) would surface a use-after-free if this
-        exclusion were missing."""
+    def test_function_call_results_as_concat_operands(self):
         assert_program_exit_code(
             "def str make_a():\n"
             "    return 'aaa'\n"
@@ -2094,16 +2072,12 @@ class TestStringMemory:
             return_type="bool",
         )
 
-    def test_critical_concat_result_stored_in_variable_reused_twice(self):
-        """The subtlest case: `combined`'s value originally came from a
-        concatenation, but once it's stored in a named variable, later
-        *references* to it are Variable nodes, not Binary nodes -- the
-        freeing check has to look at the AST shape at each use site,
-        not "was this value ever produced by a concatenation
-        somewhere". Verified directly with the malloc/free tracer
-        during development: this program allocates 3 buffers and frees
-        none of them, confirming `combined` is correctly never freed on
-        either reuse."""
+    def test_concat_result_stored_in_variable_reused_twice(self):
+        """`combined`'s own value originally came from a
+        concatenation, but once it's stored in a named variable,
+        later reads of it are ordinary Variable reads -- reused twice
+        here, as an operand in two further, independent
+        concatenations, to confirm that composes correctly."""
         assert_exit_code(
             "    str a = 'hello'\n"
             "    str b = 'world'\n"
@@ -2125,6 +2099,240 @@ class TestStringMemory:
             "    return result == 'ababababab'",
             1,
             return_type="bool",
+        )
+
+
+class TestStringRepresentation:
+    """New capabilities and fixes specific to str's redesign around a
+    {ptr, len} descriptor rather than a null-terminated C string (see
+    ir/strings.py's own module docstring) -- as opposed to Test
+    Strings/TestStringConcatenationShapes just above, which mostly
+    test string BEHAVIOR that already worked before this redesign and
+    still needs to keep working identically after it."""
+
+    pytestmark = GCC_SKIP
+
+    def test_embedded_null_byte_prints_in_full(self):
+        """The bug this whole redesign exists to fix: a string
+        containing an embedded '\\0' used to be silently truncated by
+        every operation (print, comparison, concatenation), all of
+        which went through libc functions that treat '\\0' as an
+        end-of-string marker. len()'s own field read (not a scan)
+        means this now prints all 11 bytes, not 5."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    str s = 'hello\\0world'\n"
+            "    print(s)\n"
+            "    return 0\n",
+            "hello\x00world\n",
+        )
+
+    def test_embedded_null_byte_does_not_affect_len(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    str s = 'hello\\0world'\n"
+            "    return len(s)\n",
+            expected=11,
+        )
+
+    def test_embedded_null_byte_does_not_affect_equality(self):
+        """Two embedded-null strings, identical past the null but
+        different after it -- correctly NOT equal, which a strcmp-
+        based comparison (stopping at the first '\\0') would have
+        gotten wrong, reporting them equal."""
+        assert_exit_code(
+            "    str a = 'hi\\0one'\n"
+            "    str b = 'hi\\0two'\n"
+            "    return a != b",
+            1,
+            return_type="bool",
+        )
+
+    def test_len_of_a_str_variable(self):
+        assert_exit_code(
+            "    str s = 'hello'\n"
+            "    return len(s)",
+            5,
+        )
+
+    def test_len_of_a_concatenation(self):
+        assert_exit_code(
+            "    str a = 'foo'\n"
+            "    str b = 'bar'\n"
+            "    return len(a + b)",
+            6,
+        )
+
+    def test_comparison_with_different_lengths_and_a_shared_prefix(self):
+        """'ab' and 'abc' share a two-byte prefix -- the length-first
+        check in _ir_string_compare (ir/strings.py) has to reject this
+        BEFORE ever calling memcmp, both because the two are genuinely
+        unequal and because memcmp(left, right, left_len) once left is
+        the SHORTER of the two would read within bounds but still
+        never even look at the length mismatch -- this is the direct
+        test for that check actually running, not just the memcmp
+        that follows it."""
+        assert_exit_code(
+            "    str a = 'ab'\n"
+            "    str b = 'abc'\n"
+            "    return a != b",
+            1,
+            return_type="bool",
+        )
+
+    def test_comparison_where_the_longer_string_is_on_the_left(self):
+        """The mirror image of the test just above -- the length-first
+        check has to work regardless of which side is shorter, not
+        just when the LEFT operand happens to be."""
+        assert_exit_code(
+            "    str a = 'abc'\n"
+            "    str b = 'ab'\n"
+            "    return a != b",
+            1,
+            return_type="bool",
+        )
+
+    def test_pointer_to_str_parameter_mutates_the_callers_variable(self):
+        """&s (a str-typed local's own address) needs its own,
+        correct heap-promotion handling now that str is a 16-byte
+        descriptor rather than a single 8-byte scalar -- see _ir_str_
+        address's own docstring for the real bug this caught during
+        development: str, unlike slice, still needed the identical
+        heap-allocation check _ir_struct_address's own Variable case
+        already has, since `&s` was already legal before this arc
+        (str was scalar then, and check_unary's own ADDRESS_OF
+        restriction allows any bare variable regardless of type)."""
+        assert_program_exit_code(
+            "def setGreeting(*str p):\n"
+            "    *p = 'hello'\n"
+            "\n"
+            "def int main():\n"
+            "    str s = 'unset'\n"
+            "    setGreeting(&s)\n"
+            "    if s == 'hello':\n"
+            "        return 1\n"
+            "    return 0\n",
+            expected=1,
+        )
+
+    def test_pointer_to_str_local_outlives_the_function_that_declared_it(self):
+        """&s returned from the function that declared s -- s's own
+        address genuinely escapes past that function's own return,
+        the canonical scenario heap-promotion exists for: without the
+        fix above, s's own 16-byte descriptor would live on a stack
+        frame already torn down by the time the caller dereferences
+        the returned pointer, reading garbage rather than 'hello'."""
+        assert_program_exit_code(
+            "def *str makeGreeting():\n"
+            "    str s = 'hello'\n"
+            "    return &s\n"
+            "\n"
+            "def int main():\n"
+            "    *str p = makeGreeting()\n"
+            "    if *p == 'hello':\n"
+            "        return 1\n"
+            "    return 0\n",
+            expected=1,
+        )
+
+    def test_pointer_to_str_parameter_outlives_the_function(self):
+        """The parameter counterpart to the local-variable test just
+        above -- s here is a PARAMETER, not a local VarDecl, so &s
+        exercises _ir_param_setup's own escaping-str branch
+        specifically (malloc a fresh box, store the incoming {ptr,
+        len} pair through it) rather than VarDecl's identical-in-
+        spirit but separately-coded one."""
+        assert_program_exit_code(
+            "def *str identity(str s):\n"
+            "    return &s\n"
+            "\n"
+            "def int main():\n"
+            "    *str p = identity('hello')\n"
+            "    if *p == 'hello':\n"
+            "        return 1\n"
+            "    return 0\n",
+            expected=1,
+        )
+
+    def test_struct_field_equality_with_embedded_null(self):
+        """A struct field is compared via _ir_composite_equal's own
+        recursive str base case (rewritten around length-first-then-
+        memcmp alongside _ir_string_compare) -- this confirms that
+        path, not just the standalone operator, correctly handles an
+        embedded null rather than stopping early."""
+        assert_program_exit_code(
+            "type Holder struct:\n"
+            "    str s\n"
+            "\n"
+            "def int main():\n"
+            "    Holder a = Holder('x\\0y')\n"
+            "    Holder b = Holder('x\\0y')\n"
+            "    Holder c = Holder('x\\0z')\n"
+            "    if a == b and a != c:\n"
+            "        return 1\n"
+            "    return 0\n",
+            expected=1,
+        )
+
+    def test_assign_an_existing_str_variable_from_an_ordinary_call(self):
+        """s = makeGreeting() -- Assign's own dedicated str case (just
+        after the existing-addressable-value copy case, in gen_
+        statement_ir) already handles every remaining str-typed
+        value shape, including an ordinary Call, via _ir_str_value --
+        this is the direct test for that Call sub-shape specifically,
+        not just StringLiteral/concatenation."""
+        assert_program_exit_code(
+            "def str makeGreeting():\n"
+            "    return 'hello'\n"
+            "\n"
+            "def int main():\n"
+            "    str s = 'unset'\n"
+            "    s = makeGreeting()\n"
+            "    if s == 'hello':\n"
+            "        return 1\n"
+            "    return 0\n",
+            expected=1,
+        )
+
+    def test_field_assign_a_str_field_from_an_ordinary_call(self):
+        """h.s = makeGreeting() -- unlike Assign's own case just
+        above, FieldAssign's dictionary-dispatched ordinary-Call case
+        (gen_statement_ir) runs BEFORE its own dedicated str case, so
+        this exercises that dictionary's own STR entry directly."""
+        assert_program_exit_code(
+            "type Holder struct:\n"
+            "    str s\n"
+            "\n"
+            "def str makeGreeting():\n"
+            "    return 'hello'\n"
+            "\n"
+            "def int main():\n"
+            "    Holder h = Holder('unset')\n"
+            "    h.s = makeGreeting()\n"
+            "    if h.s == 'hello':\n"
+            "        return 1\n"
+            "    return 0\n",
+            expected=1,
+        )
+
+    def test_index_assign_a_str_element_from_an_ordinary_call(self):
+        """arr[0] = makeGreeting() -- IndexAssign's own ordinary-Call
+        case deliberately excludes STR from its own tuple check
+        (unlike FieldAssign's dictionary), falling through to str's
+        own dedicated case instead (see gen_statement_ir's own
+        comment there for why) -- this is the direct test that this
+        alternate structuring still gets a str-returning Call right."""
+        assert_program_exit_code(
+            "def str makeGreeting():\n"
+            "    return 'hello'\n"
+            "\n"
+            "def int main():\n"
+            "    [2]str arr = ['a', 'b']\n"
+            "    arr[0] = makeGreeting()\n"
+            "    if arr[0] == 'hello':\n"
+            "        return 1\n"
+            "    return 0\n",
+            expected=1,
         )
 
 
@@ -2994,22 +3202,24 @@ class TestLen:
     def test_len_on_int_is_rejected(self):
         assert_semantic_error(
             "    return len(5)",
-            match="requires an array or slice",
+            match="requires an array, slice, or str",
         )
 
     def test_len_on_bool_is_rejected(self):
         assert_semantic_error(
             "    return len(true)",
-            match="requires an array or slice",
+            match="requires an array, slice, or str",
         )
 
-    def test_len_on_str_is_rejected_with_specific_message(self):
-        """str gets its own, specific "not supported yet" message
-        rather than being folded into the generic type-mismatch --
-        see semantic.py's check_len_call."""
-        assert_semantic_error(
+    def test_len_of_a_string_literal(self):
+        """str joined array/slice as a len()-supported type once it
+        became a {ptr, len} descriptor with a real length field (see
+        check_len_call's own docstring) -- this used to be the
+        rejection case (test_len_on_str_is_rejected_with_specific_
+        message), now it's an ordinary success."""
+        assert_exit_code(
             "    return len('hello')",
-            match="does not support str arguments yet",
+            5,
         )
 
     def test_len_wrong_argument_count_is_rejected(self):
@@ -8545,26 +8755,55 @@ class TestExternFunctionsCodegen:
             expected=42,
         )
 
-    def test_malloc_free_and_strlen_via_extern(self):
+    def test_malloc_and_free_via_extern(self):
         """Exercises a pointer return value (malloc), writing and
-        reading through it, a void-returning call taking a pointer
-        (free), and str's own existing char*-compatibility (strlen) --
-        all through extern declarations, all via the exact same
-        IRCall/CallInstr path already proven by the compiler's own
-        internal calls to these same three functions."""
+        reading through it, and a void-returning call taking a
+        pointer (free) -- both through extern declarations, via the
+        exact same IRCall/CallInstr path already proven by the
+        compiler's own internal calls to these same functions.
+
+        Previously also exercised str's own char*-compatibility
+        (`extern int strlen(str s)`) -- str is no longer FFI-
+        compatible at all now that it's a 16-byte {ptr, len}
+        descriptor rather than a plain pointer (see check_extern_
+        function_decl's own docstring, and test_extern_str_parameter_
+        is_rejected/test_extern_str_return_is_rejected below, which
+        cover that restriction directly)."""
         assert_program_exit_code(
             "extern *int malloc(int64 size)\n"
             "extern free(*int p)\n"
-            "extern int strlen(str s)\n"
             "\n"
             "def int main():\n"
             "    *int p = malloc(8)\n"
             "    *p = 99\n"
             "    int result = *p\n"
             "    free(p)\n"
-            "    int len = strlen('hello world')\n"
-            "    return result - len\n",
-            expected=99 - 11,
+            "    return result\n",
+            expected=99,
+        )
+
+    def test_extern_str_parameter_is_rejected(self):
+        assert_program_semantic_error(
+            "extern int strlen(str s)\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="only scalar and pointer types are supported",
+        )
+
+    def test_extern_str_return_is_rejected(self):
+        """A non-str parameter, deliberately: the parameter loop runs
+        BEFORE the return-type check (see check_extern_function_decl's
+        own code order), so a str-typed parameter here would reject
+        for the wrong reason -- this needs the return type to be the
+        one and only str-typed thing in the signature to genuinely
+        exercise that specific check."""
+        assert_program_semantic_error(
+            "extern str getenv(int fd)\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="only scalar and pointer types are supported",
         )
 
     def test_extern_taking_no_arguments(self):

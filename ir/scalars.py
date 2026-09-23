@@ -150,6 +150,18 @@ class ScalarsMixin:
                         f"{type(arg).__name__}: {arg!r}")
                 arg_ir.extend(ir)
                 arg_values.append(addr_value)
+            elif arg_type.kind == TypeKind.STR:
+                # Exactly the SLICE case just below, minus the cap
+                # field -- see ir/strings.py's own module docstring.
+                result = self._ir_str_value(arg)
+                if result is None:
+                    raise IRError(
+                        f"_ir_str_value returned None for a str-typed call "
+                        f"argument ({arg!r}) -- expected to always succeed for any "
+                        f"reachable shape")
+                ir, ptr_value, len_value = result
+                arg_ir.extend(ir)
+                arg_values.extend([ptr_value, len_value])
             elif arg_type.kind == TypeKind.SLICE or isinstance(arg, NoneLiteral):
                 result = self._ir_slice_arg(arg)
                 if result is None:

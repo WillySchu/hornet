@@ -126,20 +126,48 @@ static void test_bool(void) {
 }
 
 static void test_str(void) {
-    const char *v = "hello";
+    // A str value is a 16-byte {ptr, len} descriptor now (see ir/
+    // strings.py's own module docstring): ptr (8 bytes), len (an
+    // ordinary int32_t, in its own 8-byte slot -- same layout a
+    // SLICE's own len/cap fields already use just above, minus cap).
+    // No null terminator anywhere in this scheme -- len alone decides
+    // how many bytes get read, exactly like it already does for a
+    // slice's own backing storage.
     uint64_t desc[] = {HORNET_TYPEDESC_STR};
 
-    char *s = stringify_to_cstr(&v, desc, 0);
+    struct {
+        const char *ptr;
+        int32_t len;
+    } str_value = {"hello", 5};
+
+    char *s = stringify_to_cstr(&str_value, desc, 0);
     CHECK_STR(s, "hello");
     free(s);
 
-    s = stringify_to_cstr(&v, desc, 1);
+    s = stringify_to_cstr(&str_value, desc, 1);
     CHECK_STR(s, "'hello'");
     free(s);
 
-    const char *empty = "";
-    s = stringify_to_cstr(&empty, desc, 0);
+    struct {
+        const char *ptr;
+        int32_t len;
+    } empty_value = {"", 0};
+    s = stringify_to_cstr(&empty_value, desc, 0);
     CHECK_STR(s, "");
+    free(s);
+
+    // An embedded '\0' byte is ordinary string content now, not a
+    // terminator: len alone decides where the string ends, so this
+    // must print all 11 bytes, not stop at the 5th.
+    struct {
+        const char *ptr;
+        int32_t len;
+    } embedded_null_value = {"hello\0world", 11};
+    s = stringify_to_cstr(&embedded_null_value, desc, 0);
+    if (memcmp(s, "hello\0world", 11) != 0 || strlen(s) != 5) {
+        fprintf(stderr, "FAIL %s:%d: expected 11 bytes 'hello\\0world', got %zu bytes\n", __FILE__, __LINE__, strlen(s));
+        g_failures++;
+    }
     free(s);
 }
 

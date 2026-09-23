@@ -131,6 +131,17 @@ class IRFunctionBuilder(
         # Index for those instead.
         self._print_scalar_temp_slot = self.ir_program.ids.new_slot(8, "print_scalar_temp", ir_fn)
 
+        # A fourth, 16-byte scratch slot, also reserved unconditionally
+        # -- the str counterpart to _unnamed_slice_temp_slot just
+        # above, used by _ir_print_call to materialize a str-typed
+        # print() argument's own {ptr, len} pair (see ir/strings.py's
+        # own module docstring for why str needs this at all now: a
+        # 16-byte descriptor, not a single register, so hornet_print
+        # needs a real address to read it from exactly like a slice
+        # does). Same "fully consumed before any nested reuse" safety
+        # as that one.
+        self._unnamed_str_temp_slot = self.ir_program.ids.new_slot(16, "unnamed_str_temp", ir_fn)
+
         self._collect_params(fn.params, ir_fn)
         self._collect_locals(fn.body, ir_fn)
         self._collect_argument_temps(fn.body, ir_fn)
@@ -213,18 +224,29 @@ class IRFunctionBuilder(
                 ir.append(IRReadArgument(dst=cap_value, index=reg_index + 2))
                 reg_index += 3
                 captured.append((ptr_value, len_value, cap_value))
+            elif p_type.kind == TypeKind.STR:
+                # Exactly the SLICE case just above, minus the cap
+                # field -- see ir/strings.py's own module docstring
+                # for why str is passed this same way now, two
+                # separate argument-register values, not one.
+                ptr_value = self.ir_program.ids.new_temp(Type.INT64)
+                len_value = self.ir_program.ids.new_temp(Type.INT)
+                ir.append(IRReadArgument(dst=ptr_value, index=reg_index))
+                ir.append(IRReadArgument(dst=len_value, index=reg_index + 1))
+                reg_index += 2
+                captured.append((ptr_value, len_value))
             elif p_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM):
                 caller_ptr = self.ir_program.ids.new_temp(Type.INT64)
                 ir.append(IRReadArgument(dst=caller_ptr, index=reg_index))
                 reg_index += 1
                 captured.append(caller_ptr)
             else:
-                # str and every other scalar type alike: IRReadArgument
-                # reads the incoming value into a fresh Temp first,
-                # then _ir_finish_scalar_var_decl (identical helper
-                # VarDecl's own initializer uses -- a parameter's own
-                # incoming value is exactly a first write, the same
-                # kind VarDecl's own init is) decides where it actually
+                # Every OTHER scalar type: IRReadArgument reads the
+                # incoming value into a fresh Temp first, then _ir_
+                # finish_scalar_var_decl (identical helper VarDecl's
+                # own initializer uses -- a parameter's own incoming
+                # value is exactly a first write, the same kind
+                # VarDecl's own init is) decides where it actually
                 # ends up: straight into this parameter's own permanent
                 # Temp for the ordinary case, or malloc'd into a fresh
                 # box (with the permanent Temp repointed at that box's
@@ -251,6 +273,31 @@ class IRFunctionBuilder(
                 param_addr = self.ir_program.ids.new_temp(Type.INT64)
                 ir.append(IRLocalAddress(dst=param_addr, slot=slot))
                 ir.extend(self._ir_write_slice_descriptor_into_address(param_addr, ptr_value, len_value, cap_value))
+            elif p_type.kind == TypeKind.STR:
+                # Exactly the ARRAY/STRUCT/SUM case just below's own
+                # heap-allocated-or-not split, applied to a {ptr, len}
+                # write (_ir_write_str_descriptor_into_address) instead
+                # of an IRCopy: a str PARAMETER's own address can
+                # escape past this function exactly like a str LOCAL's
+                # already can (see _ir_str_address's own docstring for
+                # why str, unlike slice, still needs this at all) --
+                # unlike slice's own case just above, which never needs
+                # this branch, since a slice's own address can never be
+                # taken in the first place.
+                ptr_value, len_value = cap
+                slot = self._bind_param(p, ir_fn)
+                if self._is_heap_allocated(id(p), p_type):
+                    size = type_byte_width(p_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+                    new_ptr = self.ir_program.ids.new_temp(Type.INT64)
+                    ir.append(IRCall(dst=new_ptr, name='malloc', args=[IRConst(size, Type.INT64)]))
+                    param_addr = self.ir_program.ids.new_temp(Type.INT64)
+                    ir.append(IRLocalAddress(dst=param_addr, slot=slot))
+                    ir.append(IRStore(address=param_addr, value=new_ptr, value_type=Type.INT64))
+                    ir.extend(self._ir_write_str_descriptor_into_address(new_ptr, ptr_value, len_value))
+                else:
+                    param_addr = self.ir_program.ids.new_temp(Type.INT64)
+                    ir.append(IRLocalAddress(dst=param_addr, slot=slot))
+                    ir.extend(self._ir_write_str_descriptor_into_address(param_addr, ptr_value, len_value))
             elif p_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM):
                 caller_ptr = cap
                 slot = self._bind_param(p, ir_fn)
@@ -264,7 +311,7 @@ class IRFunctionBuilder(
                     ir.append(IRCopy(dst_address=new_ptr, src_address=caller_ptr, value_type=p_type))
                 else:
                     ir.append(IRCopy(dst_address=param_addr, src_address=caller_ptr, value_type=p_type))
-            # scalar/str: the first pass already did everything.
+            # Every OTHER scalar: the first pass already did everything.
         return ir
 
     def _collect_params(self, params: List[Param], ir_fn: IRFunction) -> None:

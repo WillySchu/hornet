@@ -162,19 +162,24 @@ class PointersMixin:
         machinery: unlike FieldAssign/IndexAssign, there's no "base
         expression" to resolve here, just the pointer itself.
 
-        Scoped to a scalar pointee (an ordinary IRStore) or a struct
+        Scoped to a scalar pointee (an ordinary IRStore), a struct
         pointee, via either an existing Variable/Field/Index source
         (_ir_struct_address to capture its own address, then IRCopy)
         or a struct literal (_ir_write_struct_literal_into) -- the two
         shapes already exercised at the semantic level (analyze_deref_
-        assign's own tests). An array- or slice-typed pointee is
-        deferred, matching this slice of pointer support's other
-        narrow-scope choices (see UnaryOp.ADDRESS_OF's/DEREFERENCE's
-        own comments): slice specifically has several of its own
-        value-shape cases (nil, a Slice production, append) that would
-        need their own dedicated handling, mirroring why gen_statement_
-        ir's own FieldAssign case is so much larger than IndexAssign's
-        -- not something to fold in as an afterthought here.
+        assign's own tests) -- or a str pointee, via _ir_str_value
+        (uniform over every str-typed shape: a StringLiteral, a
+        concatenation, an existing value, or an ordinary str-returning
+        Call) writing directly through ptr_value, which already IS the
+        destination descriptor's own address. An array- or slice-typed
+        pointee is deferred, matching this slice of pointer support's
+        other narrow-scope choices (see UnaryOp.ADDRESS_OF's/
+        DEREFERENCE's own comments): slice specifically has several of
+        its own value-shape cases (nil, a Slice production, append)
+        that would need their own dedicated handling, mirroring why
+        gen_statement_ir's own FieldAssign case is so much larger than
+        IndexAssign's -- not something to fold in as an afterthought
+        here.
 
         stmt.compound_op (`*p += 1`) mirrors ir/statements.py's own
         IndexAssign/FieldAssign handling exactly -- see _ir_compound_
@@ -206,6 +211,22 @@ class PointersMixin:
             write_ir = self._ir_write_struct_literal_into(ptr_value, stmt.value, pointee_type)
             if write_ir is not None:
                 return ptr_ir + write_ir
+
+        if pointee_type.kind == TypeKind.STR:
+            # ptr_value already IS the pointee's own {ptr, len}
+            # descriptor's address (the pointer's own value, read
+            # above like any other) -- no separate _ir_str_address
+            # call needed the way the STRUCT case above needs one for
+            # its OWN source: there, an existing struct value has its
+            # OWN address to capture; here, the DESTINATION already is
+            # one, directly. _ir_str_value produces the {ptr, len}
+            # pair for whatever shape stmt.value actually is
+            # (StringLiteral, concatenation, an existing value, an
+            # ordinary str-returning Call -- all uniformly, the same
+            # dispatcher every other str-typed destination already
+            # goes through).
+            value_ir, ptr, length = self._ir_str_value(stmt.value)
+            return ptr_ir + value_ir + self._ir_write_str_descriptor_into_address(ptr_value, ptr, length)
 
         raise IRError(
             f"No real-IR case for DerefAssign with pointee kind "

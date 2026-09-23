@@ -87,10 +87,23 @@ def escape_for_asciz(s: str) -> str:
     themselves get re-escaped; double-quote needs escaping since
     that's the directive's own delimiter; the rest are the common
     control characters getting their standard short escape so the
-    emitted assembly stays readable text."""
+    emitted assembly stays readable text.
+
+    A null byte gets GAS's own octal escape (\\000), not left raw: an
+    UNescaped one inside the quoted text would end the directive's own
+    string early right there mid-line, as GAS parses it, however many
+    Hornet-level bytes were still meant to follow -- garbling the rest
+    of that line into invalid assembly rather than merely truncating
+    the DATA (which would at least assemble). This matters now in a
+    way it never used to: a str value's own bytes are no longer null-
+    terminated (see ir/strings.py's own module docstring), so an
+    embedded '\\0' is ordinary, fully-supported content a Hornet
+    program can legitimately put in a string literal (`'a\\0b'`), not
+    a hypothetical edge case."""
     s = s.replace('\\', '\\\\')
     s = s.replace('"', '\\"')
     s = s.replace('\n', '\\n')
     s = s.replace('\t', '\\t')
     s = s.replace('\r', '\\r')
+    s = s.replace('\0', '\\000')
     return s

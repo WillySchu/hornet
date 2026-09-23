@@ -23,7 +23,7 @@ from ir.errors import IRError
 # (which two kinds share a bare literal syntax with its own address
 # function; which two are passed as a single pointer argument in the
 # calling convention) and would be wrong to fold into this one.
-COMPOSITE_KINDS = {TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT, TypeKind.SUM}
+COMPOSITE_KINDS = {TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT, TypeKind.SUM, TypeKind.STR}
 
 
 def is_composite_addressable(expr: Node) -> bool:
@@ -67,7 +67,8 @@ SUM_TYPE_TAG_WIDTH = 4
 
 def type_byte_width(t: Type, structs: dict[str, StructInfo], sum_types: dict) -> int:
     """Total bytes needed to store a value of type `t`: 1 for
-    int8/uint8, 4 for int/bool, 8 for str (a pointer), 24 for a slice
+    int8/uint8, 4 for int/bool, 16 for str (ptr, len -- see ir/
+    strings.py's own module docstring), 24 for a slice
     (ptr, len, cap), recursively `size * type_byte_width(element_type)`
     for an array, the sum of type_byte_width over each field, in
     declaration order, for a struct, or -- for a sum type -- a fixed
@@ -108,7 +109,7 @@ def type_byte_width(t: Type, structs: dict[str, StructInfo], sum_types: dict) ->
     if t.kind == TypeKind.SLICE:
         return 24
     if t.kind == TypeKind.STR:
-        return 8
+        return 16  # {ptr, len} -- see this file's own module docstring
     if t.kind == TypeKind.STRUCT:
         return sum(type_byte_width(field_type, structs, sum_types) for field_type in structs[t.struct_name].fields.values())
     if t.kind == TypeKind.SUM:
@@ -123,20 +124,26 @@ def type_byte_width(t: Type, structs: dict[str, StructInfo], sum_types: dict) ->
 
 
 def is_wide_type(t: Type) -> bool:
-    """True for the three scalar-shaped types that need a FULL 8-byte
+    """True for the two scalar-shaped types that need a FULL 8-byte
     register/memory move rather than codegen's own ordinary 4-byte
-    default: int64 and str (already established -- see, e.g.,
-    _gen_read_scalar_into's own docstring in codegen/scalars_lowering.
-    py) and, now, POINTER, for the identical reason str already needed
-    it -- a pointer IS just a raw 8-byte address, exactly like str's
-    own underlying representation, and an ordinary 4-byte Mov would
-    silently truncate it, corrupting the address rather than merely
-    losing precision the way it would for an oversized int. Every
-    "wide" check throughout codegen/ir_lowering.py and codegen/
-    scalars_lowering.py goes through this one predicate, so a fourth
-    wide-needing type, if one is ever added, only needs updating
-    here."""
-    return t in (Type.INT64, Type.STR) or t.kind == TypeKind.POINTER
+    default: int64 (already established -- see, e.g., _gen_read_
+    scalar_into's own docstring in codegen/scalars_lowering.py) and
+    POINTER, for the identical reason -- a pointer IS just a raw
+    8-byte address, and an ordinary 4-byte Mov would silently truncate
+    it, corrupting the address rather than merely losing precision the
+    way it would for an oversized int. Every "wide" check throughout
+    codegen/ir_lowering.py and codegen/scalars_lowering.py goes
+    through this one predicate, so a third wide-needing type, if one
+    is ever added, only needs updating here.
+
+    str is deliberately NOT here, despite once being -- see ir/
+    strings.py's own module docstring for its current, 16-byte {ptr,
+    len} representation: no longer one 8-byte value that merely needs
+    a full-width move, but two, needing the multi-value treatment
+    slice already gets (a descriptor read/written through an address,
+    flattened into two separate call-argument slots, never a single
+    Temp) rather than is_wide_type's own single-Temp-but-wide one."""
+    return t in (Type.INT64,) or t.kind == TypeKind.POINTER
 
 
 def leaf_type(t: Type) -> Type:
