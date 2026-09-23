@@ -554,13 +554,21 @@ class IndexAssign(Node):
     for the outer dimensions of `matrix[i][j] = v`, mirroring how
     Index nests for reads.
 
-    Compound index-assignment (`arr[i] += 1`) isn't supported: it
-    would need the index expression evaluated once and reused for both
-    read and write, which the simple `x += y` desugaring doesn't
-    guarantee if the index isn't side-effect-free."""
+    compound_op, when set (`arr[i] += 1`), names the BinaryOp a
+    compound-assignment operator desugars to (see parser.py's own
+    _COMPOUND_ASSIGN_OPS) -- None for plain `=`. Deliberately NOT
+    desugared into value=Binary(compound_op, Index(...), value) the
+    way a bare-variable compound assignment already is (see parse_
+    assign's own docstring): that would build a SECOND, independent
+    Index node sharing array/index with this one, evaluating `index`
+    (and, for `matrix[i][j] += 1`, `array` itself) a second time --
+    wrong if either has a side effect. ir/arrays_slices.py's own _ir_
+    index_assign computes the address once and reads/writes through
+    that same address instead."""
     array: Node
     index: Node
     value: Node
+    compound_op: Optional[BinaryOp] = None
 
 
 @dataclass
@@ -579,13 +587,15 @@ class FieldAssign(Node):
     """`base.name = value` -- writes a struct field. Mirrors
     IndexAssign: `base` can itself be a Field or Index for a longer
     chain (`s.inner.f = v`), built by parsing the whole left-hand
-    expression first and reinterpreting it as a target. Compound
-    assignment (`s.f += 1`) is rejected for the same reason
-    IndexAssign's is -- a side-effecting sub-expression in the target
-    could get evaluated twice."""
+    expression first and reinterpreting it as a target.
+
+    compound_op mirrors IndexAssign's own field exactly -- see its own
+    docstring for why this isn't desugared into a Binary-wrapped value
+    the way a bare-variable compound assignment is."""
     base: Node
     name: str
     value: Node
+    compound_op: Optional[BinaryOp] = None
 
 
 @dataclass
@@ -599,15 +609,16 @@ class DerefAssign(Node):
     or_assign's own docstring for why all three shapes are handled
     this same way, rather than looked ahead for.
 
-    Compound assignment (`*p += 1`) is rejected here too, matching
-    IndexAssign/FieldAssign -- NOT for their own reason (a side-
-    effecting sub-expression evaluated twice; `pointer` is restricted
-    to a bare Variable for this first slice of pointer support, which
-    has no such risk), but to keep this slice narrowly scoped to plain
-    assignment. Worth reconsidering on its own once the rest of
-    pointers is settled, not silently expanded here."""
+    compound_op mirrors IndexAssign's own field -- see its own
+    docstring. `pointer` is restricted to a bare Variable for this
+    slice of pointer support, so unlike Index/Field this never had a
+    side-effecting-sub-expression risk to begin with; still computed
+    once and read/written through the same address regardless, for
+    the same reason IndexAssign/FieldAssign are, and for consistency
+    with them."""
     pointer: Node
     value: Node
+    compound_op: Optional[BinaryOp] = None
 
 
 @dataclass
@@ -1669,53 +1680,44 @@ class Parser:
     def parse_expr_stmt_or_assign(self) -> Node:
         """Handles four shapes that can't be told apart by one token
         of lookahead: a bare expression statement (`foo()`), an
-        index-assignment (`arr[i] = value`), a field-assignment
-        (`s.f = value`), and a deref-assignment (`*p = value`).
-        Rather than look ahead through however many `[...]`/`.name`
-        suffixes the left side has, this parses the leading expression
-        through ordinary machinery first (already building nested
-        Index/Field/Unary nodes -- see parse_postfix/parse_unary),
-        then decides from what kind of node came out and what
-        follows.
+        index-assignment (`arr[i] = value` or `arr[i] += value`), a
+        field-assignment (`s.f = value` or `s.f += value`), and a
+        deref-assignment (`*p = value` or `*p += value`). Rather than
+        look ahead through however many `[...]`/`.name` suffixes the
+        left side has, this parses the leading expression through
+        ordinary machinery first (already building nested Index/Field/
+        Unary nodes -- see parse_postfix/parse_unary), then decides
+        from what kind of node came out and what follows.
 
-        Only plain `=` is handled for any of the three assignable
-        shapes -- `arr[i] += 1`, `s.f += 1`, and `*p += 1` are all
-        rejected with a clear error (see IndexAssign's/FieldAssign's/
-        DerefAssign's own docstrings for why compound assignment isn't
-        supported for any of them)."""
+        compound_op is None for plain `=`, or whichever BinaryOp
+        _COMPOUND_ASSIGN_OPS maps the operator token to otherwise --
+        IndexAssign/FieldAssign/DerefAssign all carry it through
+        unevaluated (see their own docstrings for why none of the
+        three desugars into value=Binary(...) here the way parse_
+        assign's own bare-variable case does: each one's own target
+        expression -- array/index, base, or pointer -- would otherwise
+        need building TWICE, once for the assignment's own target and
+        once more inside that Binary, evaluating a side-effecting
+        sub-expression twice)."""
         expr = self.parse_expression()
-        if self.check(TokenType.ASSIGN):
+        op_tok = self.current()
+        compound_op = _COMPOUND_ASSIGN_OPS.get(op_tok.type)
+        if op_tok.type == TokenType.ASSIGN or compound_op is not None:
             if isinstance(expr, Index):
                 self.advance()
                 value = self.parse_expression()
-                return IndexAssign(array=expr.array, index=expr.index, value=value, line=expr.line, col=expr.col)
+                return IndexAssign(array=expr.array, index=expr.index, value=value, compound_op=compound_op, line=expr.line, col=expr.col)
             if isinstance(expr, Field):
                 self.advance()
                 value = self.parse_expression()
-                return FieldAssign(base=expr.base, name=expr.name, value=value, line=expr.line, col=expr.col)
+                return FieldAssign(base=expr.base, name=expr.name, value=value, compound_op=compound_op, line=expr.line, col=expr.col)
             if isinstance(expr, Unary) and expr.op == UnaryOp.DEREFERENCE:
                 self.advance()
                 value = self.parse_expression()
-                return DerefAssign(pointer=expr.operand, value=value, line=expr.line, col=expr.col)
-            tok = self.current()
+                return DerefAssign(pointer=expr.operand, value=value, compound_op=compound_op, line=expr.line, col=expr.col)
             raise ParseError(
-                f"Left-hand side of '=' is not assignable "
-                f"at line {tok.line}, column {tok.col}"
-            )
-        if isinstance(expr, (Index, Field)) and self.current().type in _COMPOUND_ASSIGN_OPS:
-            tok = self.current()
-            article_and_kind = "an array element" if isinstance(expr, Index) else "a struct field"
-            raise ParseError(
-                f"Compound assignment to {article_and_kind} ('{tok.val}') "
-                f"is not supported yet -- write it as a plain '=' instead "
-                f"at line {tok.line}, column {tok.col}"
-            )
-        if isinstance(expr, Unary) and expr.op == UnaryOp.DEREFERENCE and self.current().type in _COMPOUND_ASSIGN_OPS:
-            tok = self.current()
-            raise ParseError(
-                f"Compound assignment through a dereferenced pointer "
-                f"('{tok.val}') is not supported yet -- write it as a "
-                f"plain '=' instead at line {tok.line}, column {tok.col}"
+                f"Left-hand side of '{op_tok.val}' is not assignable "
+                f"at line {op_tok.line}, column {op_tok.col}"
             )
         return ExprStmt(expr=expr, line=expr.line, col=expr.col)
 

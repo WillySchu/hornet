@@ -6,6 +6,7 @@ else/end) every branching or looping construct here builds on."""
 
 from ir.errors import IRError
 from ir.ir import (
+    IRBinOp,
     IRBranch,
     IRCall,
     IRConst,
@@ -946,19 +947,62 @@ class StatementsMixin:
             IRMove(dst=self._local_temp(name), src=ptr),
         ]
 
+    def _ir_compound_assign_through_address(self, addr_value, compound_op, value_expr, scalar_type) -> list:
+        """Builds (without lowering) a compound assignment's own
+        read-modify-write through an ALREADY-computed address as real
+        IR -- IRLoads the current value, builds value_expr's own IR,
+        IRBinOps the two together, then IRStores the result back
+        through the SAME address. Shared by _ir_index_assign/_ir_
+        field_assign (this file) and _ir_deref_assign's own scalar
+        branch (ir/pointers.py) -- the one thing all three needed
+        beyond their own existing plain-`=` machinery, once each
+        already has its own address computed exactly once (see
+        IndexAssign's own docstring for why that "exactly once" part
+        is the actual point of this feature existing at all: this
+        method itself never re-derives the address, just uses
+        whatever its own caller already computed, so a side-effecting
+        array/index/base expression is never evaluated twice).
+
+        The current value is read BEFORE value_expr's own IR is built,
+        not after -- `arr[i] += f()` reads arr[i]'s own old value as
+        if written `old = arr[i]; arr[i] = old + f()`, matching how
+        compound assignment reads intuitively; scalar_type is used for
+        both the read and the write, since IndexAssign/FieldAssign/
+        DerefAssign's own compound_op is only ever reachable for a
+        scalar target (structs/arrays/slices have no arithmetic
+        operators defined on them at all -- semantic.py's own check_
+        binary, which _check_compound_assign already routes every
+        compound_op through, would have already rejected anything
+        else)."""
+        current = self.ir_program.ids.new_temp(scalar_type)
+        load_ir = [IRLoad(dst=current, address=addr_value)]
+        value_ir, value = self.gen_expr_ir(value_expr)
+        result = self.ir_program.ids.new_temp(scalar_type)
+        binop_ir = [IRBinOp(dst=result, op=compound_op, left=current, right=value)]
+        store_ir = [IRStore(address=addr_value, value=result, value_type=scalar_type)]
+        return load_ir + value_ir + binop_ir + store_ir
+
     def _ir_index_assign(self, stmt: IndexAssign, element_type) -> list:
         """Builds (without lowering) the scalar-element case of an
         IndexAssign -- the caller (gen_statement_ir) is responsible for
         already having ruled out SLICE/STRUCT. Captures the address via
         _ir_index_address, builds the value's own IR, then IRStores it
         through the address, at the ELEMENT's own declared width -- not
-        necessarily the value's own, per IRStore's own docstring."""
+        necessarily the value's own, per IRStore's own docstring.
+
+        stmt.compound_op (`arr[i] += 1`), when set, delegates the rest
+        (read-modify-write through this same, already-computed
+        address) to _ir_compound_assign_through_address -- see its own
+        docstring for why the address is computed here, once, rather
+        than there."""
         result = self._ir_index_address(Index(array=stmt.array, index=stmt.index))
         if result is None:
             raise IRError(
                 f"_ir_index_address returned None for a scalar-element IndexAssign "
                 f"({stmt!r}) -- expected to always succeed for a reachable base")
         addr_ir, addr_value = result
+        if stmt.compound_op is not None:
+            return addr_ir + self._ir_compound_assign_through_address(addr_value, stmt.compound_op, stmt.value, element_type)
         value_ir, value = self.gen_expr_ir(stmt.value)
         return addr_ir + value_ir + [IRStore(address=addr_value, value=value, value_type=element_type)]
 
@@ -1013,13 +1057,18 @@ class StatementsMixin:
         for already having ruled out SLICE/STRUCT/ARRAY. Same shape as
         _ir_index_assign one level over: captures the address via
         _ir_field_address, builds the value's own IR, then IRStores it
-        through the address at the FIELD's own declared width."""
+        through the address at the FIELD's own declared width.
+
+        stmt.compound_op mirrors _ir_index_assign's own handling
+        exactly -- see its own docstring."""
         result = self._ir_field_address(Field(base=stmt.base, name=stmt.name))
         if result is None:
             raise IRError(
                 f"_ir_field_address returned None for a scalar-typed FieldAssign "
                 f"({stmt!r}) -- expected to always succeed for a reachable base")
         addr_ir, addr_value = result
+        if stmt.compound_op is not None:
+            return addr_ir + self._ir_compound_assign_through_address(addr_value, stmt.compound_op, stmt.value, field_type)
         value_ir, value = self.gen_expr_ir(stmt.value)
         return addr_ir + value_ir + [IRStore(address=addr_value, value=value, value_type=field_type)]
 

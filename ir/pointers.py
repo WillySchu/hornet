@@ -174,12 +174,23 @@ class PointersMixin:
         value-shape cases (nil, a Slice production, append) that would
         need their own dedicated handling, mirroring why gen_statement_
         ir's own FieldAssign case is so much larger than IndexAssign's
-        -- not something to fold in as an afterthought here."""
+        -- not something to fold in as an afterthought here.
+
+        stmt.compound_op (`*p += 1`) mirrors ir/statements.py's own
+        IndexAssign/FieldAssign handling exactly -- see _ir_compound_
+        assign_through_address's own docstring. Only ever reachable
+        for a scalar pointee (semantic.py's own check_binary, which
+        _check_compound_assign already routes every compound_op
+        through, would already have rejected a struct/array/slice
+        one), so it's checked here, in the scalar branch, not
+        threaded into the struct branch below at all."""
         pointer_type = type_of(stmt.pointer)
         pointee_type = pointer_type.element_type
         ptr_ir, ptr_value = self.gen_expr_ir(stmt.pointer)
 
         if pointee_type.kind not in COMPOSITE_KINDS:
+            if stmt.compound_op is not None:
+                return ptr_ir + self._ir_compound_assign_through_address(ptr_value, stmt.compound_op, stmt.value, pointee_type)
             value_ir, value = self.gen_expr_ir(stmt.value)
             return ptr_ir + value_ir + [IRStore(address=ptr_value, value=value, value_type=pointee_type)]
 

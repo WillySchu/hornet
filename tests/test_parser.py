@@ -3213,18 +3213,20 @@ def test_dereference_of_a_non_type_falls_through_when_speculative_parse_fails():
     assert deref_expr.operand == parser.Constant(value=5)
 
 
-def test_compound_assignment_through_a_dereference_is_rejected():
-    with pytest.raises(
-        parser.ParseError,
-        match="Compound assignment through a dereferenced pointer",
-    ):
-        _parse_program(
-            "def int main():\n"
-            "    int x = 5\n"
-            "    *int p = &x\n"
-            "    *p += 1\n"
-            "    return x\n"
-        )
+def test_compound_assignment_through_a_dereference_now_parses():
+    """`*p += 1` -- was rejected at parse time before this stage; now
+    parses into a DerefAssign carrying compound_op, mirroring
+    IndexAssign/FieldAssign exactly."""
+    program = _parse_program(
+        "def int main():\n"
+        "    int x = 5\n"
+        "    *int p = &x\n"
+        "    *p += 1\n"
+        "    return x\n"
+    )
+    stmt = program.functions[0].body[2]
+    assert isinstance(stmt, parser.DerefAssign)
+    assert stmt.compound_op == parser.BinaryOp.ADD
 
 
 # ---------------------------------------------------------------------------

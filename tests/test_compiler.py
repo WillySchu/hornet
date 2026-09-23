@@ -16234,21 +16234,21 @@ class TestStructs:
             102,
         )
 
-    def test_compound_assignment_to_a_field_is_rejected(self):
-        """`p.x += 1` -- rejected at parse time, matching IndexAssign's
-        own identical restriction and for the identical reason (see
-        FieldAssign's own docstring in parser.py)."""
-        source = (
+    def test_compound_assignment_to_a_field_now_works(self):
+        """`p.x += 1` -- was rejected at parse time before this stage;
+        now folded in alongside IndexAssign/DerefAssign, all three
+        sharing the identical read-modify-write-through-one-address
+        mechanism."""
+        assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
             "\n"
             "def int main():\n"
-            "    Point p\n"
+            "    Point p = Point(5)\n"
             "    p.x += 1\n"
-            "    return 0\n"
+            "    return p.x\n",
+            expected=6,
         )
-        with pytest.raises(ParseError, match="Compound assignment"):
-            _parse(source)
 
 
 class TestStructLiterals:
@@ -19091,6 +19091,164 @@ class TestPrintStructs:
 # multi-character operator (`op===` for `==`, easy to misread as a
 # typo or a different operator entirely) -- fixed by quoting it like
 # any other string-valued field (`op='=='`).
+# ---------------------------------------------------------------------------
+class TestCompoundAssignment:
+    """`arr[i] += 1`, `s.field += 1`, `*p += 1` -- all three target
+    shapes (Index/Field/Deref), all sharing the identical read-modify-
+    write-through-one-address mechanism (see _ir_compound_assign_
+    through_address's own docstring in ir/statements.py for why the
+    address is computed exactly once, not re-derived for the read and
+    the write separately)."""
+
+    def test_compound_index_assignment(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    [3]int arr = [1, 2, 3]\n"
+            "    arr[0] += 10\n"
+            "    arr[1] -= 1\n"
+            "    arr[2] *= 3\n"
+            "    return arr[0] + arr[1] + arr[2]\n",
+            expected=11 + 1 + 9,
+        )
+
+    def test_compound_field_assignment(self):
+        assert_program_exit_code(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    c.radius += 10\n"
+            "    return c.radius\n",
+            expected=15,
+        )
+
+    def test_compound_deref_assignment(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    int x = 5\n"
+            "    *int p = &x\n"
+            "    *p += 10\n"
+            "    return x\n",
+            expected=15,
+        )
+
+    def test_index_expression_is_evaluated_exactly_once(self):
+        """The core correctness property this feature depends on:
+        `arr[nextIndex(p)] += 100` must call nextIndex exactly once,
+        not twice (once to read the current value, once to write the
+        new one) -- a naive `arr[i] = arr[i] + 1`-style desugaring
+        would evaluate the index expression twice, silently wrong if
+        it has a side effect. nextIndex increments a counter through a
+        pointer and returns the counter's own PRE-increment value, so
+        the counter's own final value directly reports how many times
+        it was actually called."""
+        assert_program_exit_code(
+            "def int nextIndex(*int counter):\n"
+            "    int current = *counter\n"
+            "    *counter = current + 1\n"
+            "    return current\n"
+            "\n"
+            "def int main():\n"
+            "    [3]int arr = [10, 20, 30]\n"
+            "    int counter = 0\n"
+            "    *int p = &counter\n"
+            "    arr[nextIndex(p)] += 100\n"
+            "    return counter\n",
+            expected=1,
+        )
+
+    def test_field_base_index_expression_is_evaluated_exactly_once(self):
+        """The FieldAssign counterpart: `arr[nextIndex(p)].field += 1`
+        -- base is an Index, not a bare Variable, so this exercises
+        the identical evaluate-once guarantee one level over."""
+        assert_program_exit_code(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "def int nextIndex(*int counter):\n"
+            "    int current = *counter\n"
+            "    *counter = current + 1\n"
+            "    return current\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Circle circles = [Circle(1), Circle(2)]\n"
+            "    int counter = 0\n"
+            "    *int p = &counter\n"
+            "    circles[nextIndex(p)].radius += 100\n"
+            "    return counter\n",
+            expected=1,
+        )
+
+    def test_compound_assignment_to_a_bool_element_is_rejected(self):
+        """Not an integer-family type -- check_binary, which _check_
+        compound_assign already routes every compound_op through,
+        already rejects this on its own, with its own existing error
+        message."""
+        assert_program_semantic_error(
+            "def int main():\n"
+            "    [3]bool arr = [true, false, true]\n"
+            "    arr[0] += true\n"
+            "    return 0\n",
+            match="requires two operands of the same integer type",
+        )
+
+    def test_compound_assignment_to_a_str_element_is_rejected(self):
+        """str concatenation's own codegen shape (_ir_string_concat, a
+        fresh malloc'd buffer) is deliberately deferred -- see _check_
+        compound_assign's own docstring for why (Hornet's own string
+        representation is expected to change before too long)."""
+        assert_program_semantic_error(
+            "def int main():\n"
+            "    []str arr = ['a', 'b']\n"
+            "    arr[0] += 'c'\n"
+            "    return 0\n",
+            match="Compound assignment \\('\\+='\\) to a str-typed target",
+        )
+
+    def test_compound_assignment_to_a_str_field_is_rejected(self):
+        assert_program_semantic_error(
+            "type Holder struct:\n"
+            "    str s\n"
+            "\n"
+            "def int main():\n"
+            "    Holder h = Holder('a')\n"
+            "    h.s += 'b'\n"
+            "    return 0\n",
+            match="Compound assignment \\('\\+='\\) to a str-typed target",
+        )
+
+    def test_all_ten_compound_operators_parse_and_run(self):
+        """One test exercising every entry in _COMPOUND_ASSIGN_OPS
+        against an IndexAssign target, rather than one test per
+        operator -- the dispatch is already uniform (compound_op is
+        just threaded through to an ordinary IRBinOp), so this is
+        about confirming the grammar accepts all ten and each maps to
+        the right BinaryOp, not re-testing the shared mechanism ten
+        times over."""
+        assert_program_exit_code(
+            "def int main():\n"
+            "    [10]int arr = [12, 12, 12, 12, 12, 12, 12, 12, 12, 12]\n"
+            "    arr[0] += 4\n"
+            "    arr[1] -= 4\n"
+            "    arr[2] *= 4\n"
+            "    arr[3] /= 4\n"
+            "    arr[4] %= 5\n"
+            "    arr[5] &= 4\n"
+            "    arr[6] |= 3\n"
+            "    arr[7] ^= 4\n"
+            "    arr[8] <<= 2\n"
+            "    arr[9] >>= 2\n"
+            "    int total = 0\n"
+            "    int i = 0\n"
+            "    while i < 10:\n"
+            "        total = total + arr[i]\n"
+            "        i = i + 1\n"
+            "    return total\n",
+            expected=16 + 8 + 48 + 3 + 2 + 4 + 15 + 8 + 48 + 3,
+        )
+
+
 # ---------------------------------------------------------------------------
 
 class TestASTPrettyPrinting:

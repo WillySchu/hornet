@@ -1454,6 +1454,44 @@ class SemanticAnalyzer:
                 stmt,
             )
 
+    def _check_compound_assign(self, compound_op: BinaryOp, target_type: Type, target_expr_for_check: Node, value_expr: Node, stmt: Node) -> None:
+        """Validates a compound assignment's own operator (`+=`, `-=`,
+        ...) against target_type and value_expr's own type, by
+        delegating entirely to check_binary via a synthetic Binary(
+        compound_op, target_expr_for_check, value_expr) -- reuses
+        every one of its existing rules (the matching-integer-type
+        requirement, and each operator's own proper error message)
+        rather than re-implementing any of that here. target_expr_for_
+        check is a FRESH node (an Index/Field/Unary(DEREFERENCE)
+        mirroring the real assignment's own target) built by each of
+        this method's three callers, not the real target read back out
+        of stmt directly -- check_binary needs an expression of its
+        own to call check_expr on, and building one fresh here is
+        simpler than threading target_type past check_binary's own
+        redundant (but harmless) re-derivation of it.
+
+        str concatenation (compound_op is ADD, target_type is str) is
+        the one shape check_binary would otherwise happily allow that
+        this explicitly rejects instead, with its own clear error:
+        string concatenation's own codegen (_ir_string_concat, a fresh
+        malloc'd buffer) is a genuinely different shape than an
+        ordinary IRBinOp, deliberately deferred rather than folded in
+        here -- Hornet's own string representation is expected to
+        change fundamentally before too long (see TODO.md's own "fix
+        strings to basically be byte slices"), so this is left for
+        that work rather than built against a representation already
+        due to be replaced."""
+        if target_type == Type.STR and compound_op == BinaryOp.ADD:
+            raise SemanticError(
+                f"Compound assignment ('+=') to a str-typed target isn't "
+                f"supported yet -- string concatenation has a different "
+                f"codegen shape than arithmetic compound assignment; "
+                f"write it as a plain '=' instead",
+                stmt,
+            )
+        synthetic = Binary(op=compound_op, left=target_expr_for_check, right=value_expr, line=stmt.line, col=stmt.col)
+        self.check_binary(synthetic)
+
     def analyze_index_assign(self, stmt: IndexAssign) -> None:
         """`array[index] = value` -- value flows into the element type
         via _check_value_flowing_into_allowing_struct_literal, not a
@@ -1461,8 +1499,17 @@ class SemanticAnalyzer:
         struct literal assigned into a slice- or struct-typed element
         gets the same treatment every other already-typed slot does.
         Needed no codegen changes: gen_index_assign's SLICE/STRUCT
-        branches already handle every shape this can produce."""
+        branches already handle every shape this can produce.
+
+        stmt.compound_op (`arr[i] += 1`) is checked via _check_
+        compound_assign, entirely separately from the plain-`=` path
+        below -- see its own docstring."""
         element_type = self._check_indexable_and_index(stmt.array, stmt.index)
+        if stmt.compound_op is not None:
+            target_expr = Index(array=stmt.array, index=stmt.index, line=stmt.line, col=stmt.col)
+            value_expr = stmt.value
+            self._check_compound_assign(stmt.compound_op, element_type, target_expr, value_expr, stmt)
+            return
         value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, element_type)
         if not self._types_compatible(value_type, element_type):
             raise SemanticError(
@@ -1473,8 +1520,13 @@ class SemanticAnalyzer:
 
     def analyze_field_assign(self, stmt: FieldAssign) -> None:
         """`base.name = value` -- mirrors analyze_index_assign one
-        level over, for the identical reasons."""
+        level over, for the identical reasons, including stmt.
+        compound_op's own handling."""
         field_type = self._check_struct_and_field(stmt.base, stmt.name)
+        if stmt.compound_op is not None:
+            target_expr = Field(base=stmt.base, name=stmt.name, line=stmt.line, col=stmt.col)
+            self._check_compound_assign(stmt.compound_op, field_type, target_expr, stmt.value, stmt)
+            return
         value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, field_type)
         if not self._types_compatible(value_type, field_type):
             raise SemanticError(
@@ -1488,7 +1540,8 @@ class SemanticAnalyzer:
         analyze_field_assign/analyze_index_assign one level over: check
         `pointer` is pointer-typed, then that `value` is compatible
         with its element_type (the pointee's own type, what actually
-        gets overwritten)."""
+        gets overwritten). stmt.compound_op's own handling mirrors the
+        other two exactly."""
         pointer_type = self.check_expr(stmt.pointer)
         if pointer_type.kind != TypeKind.POINTER:
             raise SemanticError(
@@ -1497,6 +1550,10 @@ class SemanticAnalyzer:
                 stmt.pointer,
             )
         pointee_type = pointer_type.element_type
+        if stmt.compound_op is not None:
+            target_expr = Unary(op=UnaryOp.DEREFERENCE, operand=stmt.pointer, line=stmt.line, col=stmt.col)
+            self._check_compound_assign(stmt.compound_op, pointee_type, target_expr, stmt.value, stmt)
+            return
         value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, pointee_type)
         if not self._types_compatible(value_type, pointee_type):
             raise SemanticError(
