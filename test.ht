@@ -32,9 +32,11 @@ def *HasArray make_ha_ptr():
     return &HasArray([1,2,3,4,5])
 
 
+def *int int_ptr(int i):
+    return &i
+
+
 def int8 main():
-    HasArray ha = HasArray([1,2,3,4,5])
-    *HasArray ha_ptr = make_ha_ptr()
-    [5]int ints = ha_ptr.values
-    print(ints)
+    HasArray ha = *make_ha_ptr()
+    print(HasArray([1,2,3,4,5]))
     return 0
