@@ -28,8 +28,8 @@ from ir.ir import (
     IRStaticDataAddress,
     IRStore, Temp,
 )
-from ir.utils import COMPOSITE_KINDS, type_of, type_byte_width
-from parser import Node, ArrayLiteral, Call, Field, Index, Slice, Variable, NoneLiteral, Binary, BinaryOp
+from ir.utils import COMPOSITE_KINDS, is_composite_addressable, type_of, type_byte_width
+from parser import Node, ArrayLiteral, Call, Field, Index, Slice, Variable, NoneLiteral, Binary, BinaryOp, Unary, UnaryOp
 from semantic import TypeKind, Type
 
 
@@ -57,6 +57,14 @@ class ArraysSlicesMixin:
             return self._ir_index_address(expr)
         if isinstance(expr, Field):
             return self._ir_field_address(expr)
+        if isinstance(expr, Unary) and expr.op == UnaryOp.DEREFERENCE:
+            # `*p` (p: *[N]int) read as a whole ARRAY value -- p's own
+            # value already IS the address of its own pointee's bytes,
+            # the identical principle _ir_struct_address's own matching
+            # case uses (see its own docstring there for the fuller
+            # explanation, including why no narrowing concern reaches
+            # here either).
+            return self.gen_expr_ir(expr.operand)
         return None
 
     def _ir_slice_address(self, expr: Node):
@@ -79,6 +87,13 @@ class ArraysSlicesMixin:
             return self._ir_index_address(expr)
         if isinstance(expr, Field):
             return self._ir_field_address(expr)
+        if isinstance(expr, Unary) and expr.op == UnaryOp.DEREFERENCE:
+            # `*p` (p: *[]int) read as a whole SLICE value -- p's own
+            # value already IS the address of its own pointee's 24-
+            # byte descriptor, the identical principle _ir_struct_
+            # address's own matching case uses (see its own docstring
+            # there for the fuller explanation).
+            return self.gen_expr_ir(expr.operand)
         return None
 
     def _ir_materialize_composite_call(
@@ -211,7 +226,7 @@ class ArraysSlicesMixin:
                 addr_ir, addr_value = production
                 size_const = IRConst(base_type.size, Type.INT)
                 return addr_ir, addr_value, size_const, size_const
-            if not isinstance(expr, (Variable, Field, Index)):
+            if not is_composite_addressable(expr):
                 return None
             addr_result = self._ir_array_address(expr)
             if addr_result is None:
@@ -744,7 +759,7 @@ class ArraysSlicesMixin:
         below, same type on both sides, needing no widening logic."""
         if value_type.kind == TypeKind.SUM and type_of(value_expr).kind == TypeKind.STRUCT:
             return self._ir_write_sum_type_value_into(dst_address, value_expr, value_type)
-        if isinstance(value_expr, (Variable, Field, Index)):
+        if is_composite_addressable(value_expr):
             return self._ir_copy_into_address(dst_address, value_expr, value_type)
         if isinstance(value_expr, NoneLiteral):
             zero_ptr = IRConst(0, Type.INT64)

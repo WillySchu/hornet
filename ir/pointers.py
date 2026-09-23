@@ -12,7 +12,7 @@ not about `&`/`*` themselves."""
 
 from ir.errors import IRError
 from ir.ir import IRCopy, IRLoad, IRLocalAddress, IRStore, IRValue
-from ir.utils import COMPOSITE_KINDS, type_of
+from ir.utils import COMPOSITE_KINDS, is_composite_addressable, type_of
 from parser import Call, DerefAssign, Field, Index, Unary, Variable
 from semantic import TypeKind
 
@@ -146,7 +146,7 @@ class PointersMixin:
             value_ir, value = self.gen_expr_ir(stmt.value)
             return ptr_ir + value_ir + [IRStore(address=ptr_value, value=value, value_type=pointee_type)]
 
-        if pointee_type.kind == TypeKind.STRUCT and isinstance(stmt.value, (Variable, Field, Index)):
+        if pointee_type.kind == TypeKind.STRUCT and is_composite_addressable(stmt.value):
             src_ir, src_address = self._ir_struct_address(stmt.value)
             return ptr_ir + src_ir + [IRCopy(dst_address=ptr_value, src_address=src_address, value_type=pointee_type)]
 

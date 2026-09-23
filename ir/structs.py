@@ -12,7 +12,7 @@ arrays_slices.py."""
 from ir.errors import IRError
 from ir.ir import IRBinOp, IRConst, IRStore, IRLoad, IRLocalAddress, IRCall
 from ir.utils import COMPOSITE_KINDS, SUM_TYPE_TAG_WIDTH, type_byte_width, type_of
-from parser import Node, Variable, Field, Index, Call, BinaryOp
+from parser import Node, Variable, Field, Index, Call, BinaryOp, Unary, UnaryOp
 from semantic import TypeKind, Type
 
 
@@ -171,6 +171,25 @@ class StructsMixin:
             return self._ir_field_address(expr)
         if isinstance(expr, Index):
             return self._ir_index_address(expr)
+        if isinstance(expr, Unary) and expr.op == UnaryOp.DEREFERENCE:
+            # `*p` (p: *Circle) read as a whole STRUCT value -- the
+            # pointer's own value already IS the address of its own
+            # pointee's bytes, exactly the same principle the auto-
+            # deref case at the very top of this method already uses
+            # for a POINTER-typed Field/Index base (`b.next.value`):
+            # there, the base's own resolved_type being POINTER means
+            # ITS value, not ITS address, is what's needed; here,
+            # expr.operand IS that pointer expression directly, with
+            # no base/field indirection to unwrap first. No narrowing
+            # concern reaches here: semantic.py's own check_unary
+            # still rejects a SUM-typed pointee outright (see its own
+            # DEREFERENCE case), so struct_type here is never a sum
+            # type, and expr itself -- an internal Unary, never
+            # produced by _bind_local/_bind_param the way a narrowed
+            # Variable occurrence's own resolved_type comparison
+            # depends on -- has no slot of its own to compare against
+            # in the first place.
+            return self.gen_expr_ir(expr.operand)
         if self._is_ordinary_composite_call(expr):
             return self._ir_materialize_composite_call(expr, type_of(expr))
         raise IRError(f"Cannot compute a struct address for: {expr!r}")

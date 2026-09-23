@@ -23,7 +23,7 @@ from typing import List, Optional
 
 from codegen.escape_analysis import analyze_array_escapes, is_heap_allocated
 from ir.errors import IRError
-from ir.utils import COMPOSITE_KINDS, type_byte_width, type_of
+from ir.utils import COMPOSITE_KINDS, is_composite_addressable, type_byte_width, type_of
 from ir.ir import (
     IRBranch, IRCall, IRConst, IRCopy, IRFunction, IRJump, IRLocalAddress, IRReadArgument, IRReturn, IRStore, Temp,
 )
@@ -459,7 +459,7 @@ class IRFunctionBuilder(
                 reserve_type = arg_type
                 if param_types is not None and arg_type.kind == TypeKind.STRUCT and param_types[i].kind == TypeKind.SUM:
                     reserve_type = param_types[i]
-                if reserve_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM) and not isinstance(arg, (Variable, Index, Field)):
+                if reserve_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM) and not is_composite_addressable(arg):
                     self._reserve_argument_temp(arg, reserve_type, ir_fn)
         elif isinstance(expr, Binary):
             self._collect_argument_temps_in_expr(expr.left, ir_fn)

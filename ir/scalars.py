@@ -8,7 +8,7 @@ internally which actual width to operate on."""
 
 from ir.errors import IRError
 from ir.ir import IRBranch, IRJump, IRLabel, IRMove, IRConst, IRCall
-from ir.utils import type_of
+from ir.utils import is_composite_addressable, type_of
 from parser import Call, Binary, Variable, Field, Index, NoneLiteral, ArrayLiteral
 from semantic import Type, TypeKind
 
@@ -82,13 +82,13 @@ class ScalarsMixin:
                 arg_ir.extend(ir)
                 arg_values.append(addr_value)
             elif arg_type.kind == TypeKind.ARRAY:
-                if isinstance(arg, (Variable, Field, Index)):
+                if is_composite_addressable(arg):
                     result = self._ir_array_address(arg)
                     if result is None:
                         raise IRError(
                             f"_ir_array_address returned None for an ARRAY-typed "
-                            f"Variable/Field/Index argument ({arg!r}) -- expected to "
-                            f"always succeed for this shape")
+                            f"Variable/Field/Index/dereference argument ({arg!r}) -- "
+                            f"expected to always succeed for this shape")
                     ir, addr_value = result
                 elif isinstance(arg, ArrayLiteral):
                     result = self._ir_materialize_array_literal(arg)
@@ -108,13 +108,13 @@ class ScalarsMixin:
                 arg_ir.extend(ir)
                 arg_values.append(addr_value)
             elif arg_type.kind == TypeKind.STRUCT:
-                if isinstance(arg, (Variable, Field, Index)):
+                if is_composite_addressable(arg):
                     result = self._ir_struct_address(arg)
                     if result is None:
                         raise IRError(
                             f"_ir_struct_address returned None for a STRUCT-typed "
-                            f"Variable/Field/Index argument ({arg!r}) -- expected to "
-                            f"always succeed for this shape")
+                            f"Variable/Field/Index/dereference argument ({arg!r}) -- "
+                            f"expected to always succeed for this shape")
                     ir, addr_value = result
                 elif isinstance(arg, Call) and arg.name in self.ir_program.struct_registry:
                     result = self._ir_materialize_struct_literal(arg)

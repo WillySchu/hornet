@@ -7073,6 +7073,65 @@ class TestPointers:
             match="'\\*' requires a pointer operand, got int",
         )
 
+    def test_dereferencing_a_pointer_to_struct_as_a_value_is_accepted(self):
+        """Was rejected outright before this stage -- struct is now
+        one of the composite kinds a dereferenced pointer can be read
+        as a whole value through."""
+        ast = _parse(
+            self._CIRCLE +
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    *Circle p = &c\n"
+            "    Circle copy = *p\n"
+            "    return copy.radius\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_dereferencing_a_pointer_to_array_as_a_value_is_accepted(self):
+        ast = _parse(
+            "def int main():\n"
+            "    [3]int arr = [1, 2, 3]\n"
+            "    *[3]int p = &arr\n"
+            "    [3]int copy = *p\n"
+            "    return copy[0]\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_dereferencing_a_pointer_to_slice_as_a_value_is_accepted(self):
+        ast = _parse(
+            "def int main():\n"
+            "    [3]int arr = [1, 2, 3]\n"
+            "    []int s = arr[0:3]\n"
+            "    *[]int p = &s\n"
+            "    []int copy = *p\n"
+            "    return copy[0]\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_dereferencing_a_pointer_to_sum_type_as_a_value_is_still_rejected(self):
+        """The one composite kind still restricted -- narrowing's own
+        concern, not the same "not built yet" reason array/slice/
+        struct were until now: a synthesized `*p` read has no slot and
+        no narrowing history to compare a resolved_type against the
+        way a bare Variable occurrence does (see _ir_struct_address's
+        own docstring)."""
+        assert_program_semantic_error(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type Shape is Circle | Square\n"
+            "\n"
+            "def int main():\n"
+            "    Shape shape = Circle(5)\n"
+            "    *Shape p = &shape\n"
+            "    Shape copy = *p\n"
+            "    return 0\n",
+            match="'\\*' on a pointer to Shape \\(a sum type\\) isn't supported",
+        )
+
     def test_field_access_on_a_non_pointer_non_struct_is_still_rejected(self):
         """Regression check: auto-deref only fires for POINTER-to-
         STRUCT -- an ordinary non-struct, non-pointer base must still
@@ -7209,6 +7268,137 @@ class TestPointersCodegen:
             "    *Circle p2 = &Circle(9)\n"
             "    return p1.radius + p2.radius\n",
             expected=14,
+        )
+
+    def test_dereferencing_a_pointer_to_struct_as_a_vardecl_initializer(self):
+        assert_program_exit_code(
+            self._CIRCLE +
+            "def int main():\n"
+            "    Circle orig = Circle(5)\n"
+            "    *Circle p = &orig\n"
+            "    Circle copy = *p\n"
+            "    return copy.radius\n",
+            expected=5,
+        )
+
+    def test_dereferencing_a_pointer_to_struct_in_an_assign(self):
+        assert_program_exit_code(
+            self._CIRCLE +
+            "def int main():\n"
+            "    Circle orig = Circle(5)\n"
+            "    *Circle p = &orig\n"
+            "    Circle copy = Circle(0)\n"
+            "    copy = *p\n"
+            "    return copy.radius\n",
+            expected=5,
+        )
+
+    def test_dereferencing_a_pointer_to_struct_as_a_function_argument(self):
+        assert_program_exit_code(
+            self._CIRCLE +
+            "def int useCircle(Circle c):\n"
+            "    return c.radius\n"
+            "\n"
+            "def int main():\n"
+            "    Circle orig = Circle(5)\n"
+            "    *Circle p = &orig\n"
+            "    return useCircle(*p)\n",
+            expected=5,
+        )
+
+    def test_dereferencing_a_pointer_to_struct_as_a_return_value(self):
+        assert_program_exit_code(
+            self._CIRCLE +
+            "def Circle returnDeref(*Circle p):\n"
+            "    return *p\n"
+            "\n"
+            "def int main():\n"
+            "    Circle orig = Circle(7)\n"
+            "    *Circle p = &orig\n"
+            "    Circle result = returnDeref(p)\n"
+            "    return result.radius\n",
+            expected=7,
+        )
+
+    def test_dereferencing_two_pointers_to_struct_in_an_equality(self):
+        assert_program_exit_code(
+            self._CIRCLE +
+            "def int main():\n"
+            "    Circle a = Circle(7)\n"
+            "    Circle b = Circle(7)\n"
+            "    *Circle p = &a\n"
+            "    *Circle q = &b\n"
+            "    if *p == *q:\n"
+            "        return 1\n"
+            "    return 0\n",
+            expected=1,
+        )
+
+    def test_dereferencing_a_pointer_to_struct_in_an_index_assign(self):
+        assert_program_exit_code(
+            self._CIRCLE +
+            "def int main():\n"
+            "    Circle orig = Circle(9)\n"
+            "    *Circle p = &orig\n"
+            "    [2]Circle circles = [Circle(0), Circle(0)]\n"
+            "    circles[0] = *p\n"
+            "    return circles[0].radius\n",
+            expected=9,
+        )
+
+    def test_dereferencing_a_pointer_to_struct_in_a_field_assign(self):
+        assert_program_exit_code(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Holder struct:\n"
+            "    Circle c\n"
+            "\n"
+            "def int main():\n"
+            "    Circle orig = Circle(9)\n"
+            "    *Circle p = &orig\n"
+            "    Holder h = Holder(Circle(0))\n"
+            "    h.c = *p\n"
+            "    return h.c.radius\n",
+            expected=9,
+        )
+
+    def test_deref_assign_with_a_dereferenced_source(self):
+        """`*q = *p` -- a struct-typed DerefAssign whose own VALUE is
+        itself a dereferenced pointer, not just a bare Variable/Field/
+        Index -- exercises ir/pointers.py's own _ir_deref_assign case
+        specifically."""
+        assert_program_exit_code(
+            self._CIRCLE +
+            "def int main():\n"
+            "    Circle orig = Circle(9)\n"
+            "    *Circle p = &orig\n"
+            "    Circle target = Circle(0)\n"
+            "    *Circle q = &target\n"
+            "    *q = *p\n"
+            "    return target.radius\n",
+            expected=9,
+        )
+
+    def test_dereferencing_a_pointer_to_array_as_a_vardecl_initializer(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    [3]int arr = [10, 20, 30]\n"
+            "    *[3]int p = &arr\n"
+            "    [3]int copy = *p\n"
+            "    return copy[1]\n",
+            expected=20,
+        )
+
+    def test_dereferencing_a_pointer_to_slice_as_a_vardecl_initializer(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    [3]int arr = [10, 20, 30]\n"
+            "    []int s = arr[0:3]\n"
+            "    *[]int p = &s\n"
+            "    []int copy = *p\n"
+            "    return copy[2]\n",
+            expected=30,
         )
 
     def test_pointer_sees_a_later_mutation_of_the_pointee(self):

@@ -20,7 +20,7 @@ from ir.ir import (
     IRStaticDataAddress,
     IRStore,
 )
-from ir.utils import COMPOSITE_KINDS, type_of, type_byte_width
+from ir.utils import COMPOSITE_KINDS, is_composite_addressable, type_of, type_byte_width
 from parser import (
     ArrayLiteral,
     Assign,
@@ -156,7 +156,7 @@ class StatementsMixin:
             # from) -- via _ir_copy_into_address directly, this
             # function's own hidden pointer standing in for a freshly-
             # computed destination address.
-            if isinstance(stmt.value, (Variable, Field, Index)):
+            if is_composite_addressable(stmt.value):
                 value_type = type_of(stmt.value)
                 hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr(ir_fn)
                 copy_ir = self._ir_copy_into_address(hidden_ptr, stmt.value, value_type)
@@ -370,7 +370,7 @@ class StatementsMixin:
             # address to copy from) -- see _ir_copy_assign.
             if (
                     var_type.kind in COMPOSITE_KINDS
-                    and isinstance(stmt.init, (Variable, Field, Index))
+                    and is_composite_addressable(stmt.init)
             ):
                 slot = self._bind_local(stmt, ir_fn)
                 ir = []
@@ -586,7 +586,7 @@ class StatementsMixin:
             # allocation from declaration time, reused in place.
             if (
                     var_type.kind in COMPOSITE_KINDS
-                    and isinstance(stmt.value, (Variable, Field, Index))
+                    and is_composite_addressable(stmt.value)
             ):
                 return self._ir_copy_assign(Variable(name=stmt.name), stmt.value, var_type)
             # Same none-value case as VarDecl's own, just above -- no
@@ -696,7 +696,7 @@ class StatementsMixin:
                 return self._ir_index_assign(stmt, element_type)
             if (
                     element_type.kind in (TypeKind.STRUCT, TypeKind.SLICE, TypeKind.SUM)
-                    and isinstance(stmt.value, (Variable, Field, Index))
+                    and is_composite_addressable(stmt.value)
             ):
                 dst_expr = Index(array=stmt.array, index=stmt.index)
                 return self._ir_copy_assign(dst_expr, stmt.value, element_type)
@@ -761,7 +761,7 @@ class StatementsMixin:
                 return self._ir_field_assign(stmt, field_type)
             if (
                     field_type.kind in COMPOSITE_KINDS
-                    and isinstance(stmt.value, (Variable, Field, Index))
+                    and is_composite_addressable(stmt.value)
             ):
                 dst_expr = Field(base=stmt.base, name=stmt.name)
                 return self._ir_copy_assign(dst_expr, stmt.value, field_type)

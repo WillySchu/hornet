@@ -2361,27 +2361,24 @@ class SemanticAnalyzer:
                     expr,
                 )
             pointee_type = operand_type.element_type
-            if pointee_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT, TypeKind.SUM):
-                # Restricted to a SCALAR pointee for this first slice
-                # of pointer support -- not a structural limitation
-                # (unlike, say, `&` requiring a bare Variable, which
-                # reflects what escape analysis can currently reason
-                # about): reading a whole composite value out of a
-                # dereferenced pointer as a SOURCE (`Circle c = *p`,
-                # `someFunc(*p)`, `return *p`) would need every ir/
-                # statements.py call site that currently recognizes
-                # Variable/Field/Index as a composite-addressable
-                # shape to also recognize this one -- a dozen call
-                # sites across four files, a substantially larger
-                # change than everything else in this pointer slice
-                # combined. `p.field` (auto-deref, no explicit '*'
-                # needed) and `*p = value` (DerefAssign, overwriting
-                # the whole pointee) both already work regardless of
-                # the pointee's own kind -- this restriction is
-                # specifically about READING a composite value out
-                # through an explicit '*', nothing else.
+            if pointee_type.kind == TypeKind.SUM:
+                # Still restricted for a SUM pointee specifically --
+                # not the same "not built yet" reason ARRAY/SLICE/
+                # STRUCT were until now (see ir/structs.py's own _ir_
+                # struct_address, ir/arrays_slices.py's own _ir_array_
+                # address/_ir_slice_address, all three now recognizing
+                # this same shape). A sum type's own NARROWING is what
+                # blocks it: `is` narrows a bare Variable occurrence by
+                # comparing expr.resolved_type against the SLOT's own
+                # declared type (see _ir_struct_address's own docstring
+                # on this) -- a synthesized `*p` read has no slot and
+                # no narrowing history of its own to compare against,
+                # so "is this occurrence narrowed" has no answer here
+                # at all yet. A genuinely separate, later question from
+                # the array/slice/struct one this restriction used to
+                # also cover.
                 raise SemanticError(
-                    f"'*' on a pointer to {pointee_type} (a composite type) "
+                    f"'*' on a pointer to {pointee_type} (a sum type) "
                     f"isn't supported yet as a value -- write through it "
                     f"with '*p = value', or access a field directly "
                     f"(auto-deref already handles 'p.field')",

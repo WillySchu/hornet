@@ -5,7 +5,7 @@ Deliberately free of anything machine-level (a register, an
 assembly_ast operand, an x86 condition code) -- see codegen/utils.py
 for that half."""
 
-from parser import Node
+from parser import Node, Field, Index, Unary, UnaryOp, Variable
 from semantic import Type, TypeKind, StructInfo
 
 from ir.errors import IRError
@@ -24,6 +24,34 @@ from ir.errors import IRError
 # function; which two are passed as a single pointer argument in the
 # calling convention) and would be wrong to fold into this one.
 COMPOSITE_KINDS = {TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT, TypeKind.SUM}
+
+
+def is_composite_addressable(expr: Node) -> bool:
+    """Whether `expr` already has a real address an array/struct/
+    slice-typed value can be copied FROM directly, with no
+    construction (a literal) or hidden-output-pointer convention
+    (an ordinary composite-returning Call) involved: a Variable,
+    Field, or Index (see _ir_array_address/_ir_struct_address/_ir_
+    slice_address, whose own dispatch chains this exactly mirrors),
+    or, now, `*p` -- a pointer dereferenced for its own pointee's
+    whole value (Unary(DEREFERENCE, ...); semantic.py's own check_
+    unary still rejects a SUM-typed pointee, so this can only ever
+    be ARRAY/SLICE/STRUCT in practice).
+
+    Shared by every VarDecl/Assign/IndexAssign/FieldAssign/Return/
+    call-argument/equality-operand site that used to check `isinstance
+    (expr, (Variable, Field, Index))` directly before `*p` as a value
+    existed -- one shared predicate rather than repeating the same
+    added Unary/DEREFERENCE clause at each one individually. Each of
+    those three address functions already knows how to compute *p's
+    own address on its own (a one-line dispatch to gen_expr_ir(expr.
+    operand), added alongside this function -- the pointer's own value
+    already IS its pointee's address); this predicate exists purely so
+    each CALL SITE's own gating check recognizes the shape at all,
+    before ever reaching one of those three functions."""
+    if isinstance(expr, (Variable, Field, Index)):
+        return True
+    return isinstance(expr, Unary) and expr.op == UnaryOp.DEREFERENCE
 
 # A sum type's own memory shape: this many bytes of discriminant tag
 # (a plain int -- no variant count in reach anytime soon needs more

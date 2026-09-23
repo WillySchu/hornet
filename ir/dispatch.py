@@ -10,7 +10,7 @@ from ir.errors import IRError
 from ir.ir import (
     IRBinOp, IRValue, IRConst, IRLoad, IRMove, IRJump, IRLabel, IRStaticDataAddress, IRUnOp, IRCast
 )
-from ir.utils import COMPOSITE_KINDS, type_of
+from ir.utils import COMPOSITE_KINDS, is_composite_addressable, type_of
 from typing import Optional
 from parser import (
     ArrayLiteral,
@@ -194,7 +194,7 @@ class DispatchMixin:
         outright); an ordinary composite-returning Call (_ir_
         materialize_composite_call, shared by both ARRAY and
         STRUCT)."""
-        if isinstance(expr, (Variable, Field, Index)):
+        if is_composite_addressable(expr):
             address_fn = self._ir_array_address if value_type.kind == TypeKind.ARRAY else self._ir_struct_address
             return address_fn(expr)
         if value_type.kind == TypeKind.ARRAY and isinstance(expr, ArrayLiteral):
