@@ -52,6 +52,7 @@ from parser import (
     Return,
     Slice,
     Unary,
+    UnaryOp,
     VarDecl,
     Variable,
     While,
@@ -465,6 +466,33 @@ class IRFunctionBuilder(
             self._collect_argument_temps_in_expr(expr.right, ir_fn)
         elif isinstance(expr, Unary):
             self._collect_argument_temps_in_expr(expr.operand, ir_fn)
+            if (expr.op == UnaryOp.ADDRESS_OF and isinstance(expr.operand, Call)
+                    and expr.operand.name in self.ir_program.struct_registry):
+                # `&Circle(5)` -- semantic.py's own check_unary is the
+                # only place that allows a struct-literal ADDRESS_OF
+                # operand at all, so reaching this shape here already
+                # means the literal needs SOME real address, one way
+                # or another. Unlike an ordinary argument-temp (see
+                # _reserve_argument_temp's own docstring for why THAT
+                # one is never escape-driven -- it's always read
+                # exactly once, by a callee's own entry-time copy),
+                # this address might genuinely outlive this function
+                # (returned, stored, passed on) -- exactly the same
+                # question a named local's own address already answers
+                # via the full, escape-aware _is_heap_allocated, not
+                # the size-only is_heap_allocated function that lets
+                # every other argument-temp skip reservation for a
+                # large value instead of ever asking. id(expr.operand)
+                # is this literal's own synthetic decl_id -- the same
+                # identity scheme every other declaration already
+                # uses, and the exact one escape_analysis.py's own
+                # contribution() registers into _escaping_decl_ids
+                # under, via declare(), the first time this same node
+                # is seen there.
+                struct_type = type_of(expr.operand)
+                if not self._is_heap_allocated(id(expr.operand), struct_type):
+                    width = type_byte_width(struct_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+                    self._argument_temp_slots[id(expr.operand)] = self.ir_program.ids.new_slot(width, "struct_literal_address", ir_fn)
         elif isinstance(expr, Index):
             self._collect_argument_temps_in_expr(expr.array, ir_fn)
             self._collect_argument_temps_in_expr(expr.index, ir_fn)

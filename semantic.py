@@ -2298,7 +2298,18 @@ class SemanticAnalyzer:
         return Type.BOOL
 
     def check_unary(self, expr: Unary) -> Type:
-        operand_type = self.check_expr(expr.operand)
+        # _check_expr_allowing_struct_literal, not plain check_expr:
+        # ADDRESS_OF's own case just below needs a struct literal
+        # (`&Circle(5)`) to reach it rather than fail here first, at
+        # check_call's own generic rejection of one appearing outside
+        # its already-allowed positions. Every OTHER operator (NEGATE/
+        # COMPLEMENT/NOT/DEREFERENCE) already rejects a struct-typed
+        # operand_type on its own, with a clear, operator-specific
+        # message (e.g. "'-' requires an int... got Circle") -- so
+        # allowing it through here uniformly, rather than gating it to
+        # ADDRESS_OF specifically, doesn't let anything nonsensical
+        # through, just changes WHICH check catches it.
+        operand_type = self._check_expr_allowing_struct_literal(expr.operand)
         if expr.op in (UnaryOp.NEGATE, UnaryOp.COMPLEMENT):
             if operand_type not in _INTEGER_TYPES:
                 raise SemanticError(
@@ -2321,21 +2332,25 @@ class SemanticAnalyzer:
                 )
             return Type.BOOL
         if expr.op == UnaryOp.ADDRESS_OF:
-            # Restricted to a bare Variable for this first slice of
-            # pointer support -- see PointerTypeExpr's own docstring
-            # for the "widen later" framing this restriction shares
-            # with pointer-to-pointer's own. `&s.field`/`&arr[i]` are
-            # the natural next step (escape analysis already has a
-            # "slot" concept for aggregate members, from slices), not
-            # ruled out for a structural reason the way, say, `&(x +
-            # 1)` (no variable, nothing to take the address OF) would
-            # be -- just not built yet.
-            if not isinstance(expr.operand, Variable):
+            # Restricted to a bare Variable OR a struct literal for
+            # this slice of pointer support -- see PointerTypeExpr's
+            # own docstring for the "widen later" framing this
+            # restriction shares with pointer-to-pointer's own.
+            # `&s.field`/`&arr[i]` are the natural next step (escape
+            # analysis already has a "slot" concept for aggregate
+            # members, from slices), not ruled out for a structural
+            # reason the way, say, `&(x + 1)` (no variable, nothing to
+            # take the address OF) would be -- just not built yet.
+            # Array literals (`&[1, 2, 3]`) are the same shape as a
+            # struct literal here, deliberately not included yet
+            # either -- a separate, later follow-up.
+            is_struct_literal = isinstance(expr.operand, Call) and expr.operand.name in self.structs
+            if not (isinstance(expr.operand, Variable) or is_struct_literal):
                 raise SemanticError(
                     f"'&' can only take the address of a bare variable "
-                    f"for now, not {type(expr.operand).__name__} -- "
-                    f"struct fields and array/slice elements are planned, "
-                    f"not yet supported",
+                    f"or a struct literal for now, not "
+                    f"{type(expr.operand).__name__} -- struct fields and "
+                    f"array/slice elements are planned, not yet supported",
                     expr,
                 )
             return Type(TypeKind.POINTER, element_type=operand_type)

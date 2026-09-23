@@ -7033,6 +7033,37 @@ class TestPointers:
             match="'&' can only take the address of a bare variable",
         )
 
+    def test_address_of_a_struct_literal_is_accepted(self):
+        """The one case besides a bare Variable check_unary's own
+        ADDRESS_OF restriction allows: `&Circle(5)` -- a struct literal
+        has no bare-variable identity of its own, but is a legitimate,
+        common pattern (constructing a fresh value specifically to
+        take its own address) rather than a structural non-starter the
+        way `&(x + 1)` (nothing to take the address OF at all) is."""
+        ast = _parse(
+            self._CIRCLE +
+            "def int main():\n"
+            "    *Circle p = &Circle(5)\n"
+            "    return p.radius\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_address_of_a_non_struct_call_is_still_rejected(self):
+        """An ordinary function call, returning a scalar or a pointer,
+        is NOT the same shape as a struct literal -- `&someFn()` stays
+        rejected exactly like before, distinguished purely by registry
+        membership (expr.name in self.structs), the same disambiguation
+        check_call itself already uses."""
+        assert_program_semantic_error(
+            "def int makeFive():\n"
+            "    return 5\n"
+            "\n"
+            "def int main():\n"
+            "    *int p = &makeFive()\n"
+            "    return 0\n",
+            match="'&' can only take the address of a bare variable",
+        )
+
     def test_dereferencing_a_non_pointer_is_rejected(self):
         assert_program_semantic_error(
             "def int main():\n"
@@ -7135,6 +7166,49 @@ class TestPointersCodegen:
             "    int y = *p\n"
             "    return y\n",
             expected=5,
+        )
+
+    def test_address_of_a_struct_literal_purely_local(self):
+        """The non-escaping case, matching test_purely_local_pointer_is_
+        unaffected's own struct-literal counterpart: &Circle(5) never
+        leaves this function, so this should be exactly as simple as
+        a stack-allocated struct's own address always was, no malloc
+        involved at all."""
+        assert_program_exit_code(
+            self._CIRCLE +
+            "def int main():\n"
+            "    *Circle p = &Circle(5)\n"
+            "    return p.radius\n",
+            expected=5,
+        )
+
+    def test_address_of_a_struct_literal_with_multiple_fields(self):
+        """Exercises _ir_write_struct_literal_into's own multi-field
+        write path through this new address-of-a-literal route, not
+        just the one-field case every other test here happens to use."""
+        assert_program_exit_code(
+            "type Point struct:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    *Point p = &Point(3, 4)\n"
+            "    return p.x + p.y\n",
+            expected=7,
+        )
+
+    def test_address_of_two_distinct_struct_literals_in_one_function(self):
+        """Two different &Circle(...) occurrences in the same function
+        each get their own, distinct synthetic decl_id/slot (keyed by
+        id() of each literal's own, separate AST node) -- confirms
+        neither ever aliases the other's own storage."""
+        assert_program_exit_code(
+            self._CIRCLE +
+            "def int main():\n"
+            "    *Circle p1 = &Circle(5)\n"
+            "    *Circle p2 = &Circle(9)\n"
+            "    return p1.radius + p2.radius\n",
+            expected=14,
         )
 
     def test_pointer_sees_a_later_mutation_of_the_pointee(self):
@@ -7528,6 +7602,39 @@ class TestPointerEscapeAnalysis:
             "def *Circle makeCircle():\n"
             "    Circle c = Circle(5)\n"
             "    return &c\n"
+            "\n"
+            "def int clobber():\n"
+            "    int a = 111\n"
+            "    int b = 222\n"
+            "    int c = 333\n"
+            "    int d = 444\n"
+            "    return a + b + c + d\n"
+            "\n"
+            "def int main():\n"
+            "    *Circle p = makeCircle()\n"
+            "    int unused = clobber()\n"
+            "    return p.radius\n",
+            expected=5,
+        )
+
+    def test_address_of_a_struct_literal_escaping_is_genuinely_heap_safe(self):
+        """The struct-LITERAL counterpart to the test just above --
+        &Circle(5) here, rather than &c for a named local c. This is
+        exactly the case escape_analysis.py's own contribution() had a
+        real, silent bug for before this stage: value_expr.operand.name
+        doesn't crash on a Call operand (it has a .name field too, just
+        meaning the struct's own name, not a variable's), so the OLD
+        code would silently resolve to nothing and treat this literal
+        as never escaping at all -- a genuine dangling-pointer risk
+        that would only show up as a wrong answer here, not a clean
+        rejection or a crash. Same clobbering-call verification as
+        every other "genuinely safe" test in this class."""
+        assert_program_exit_code(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "def *Circle makeCircle():\n"
+            "    return &Circle(5)\n"
             "\n"
             "def int clobber():\n"
             "    int a = 111\n"

@@ -31,7 +31,7 @@ from parser import (
     While,
 )
 from semantic import type_from_name, Type, TypeKind, StructInfo
-from ir.utils import type_byte_width
+from ir.utils import type_byte_width, type_of
 
 
 # Fixed, hardcoded threshold for size-based stack safety. Any array-typed local
@@ -362,14 +362,31 @@ class EscapeAnalyzer:
                 if base_id in self.slice_decls:
                     return None, base_id
         elif isinstance(value_expr, Unary) and value_expr.op == UnaryOp.ADDRESS_OF:
-            # &x -- x is guaranteed a bare Variable by semantic.py's
-            # own check_unary restriction (see UnaryOp.ADDRESS_OF's
-            # own docstring there). x's own decl_id becomes this
-            # pointer VALUE's own "backing" declaration -- the
-            # identical role array_decl_id plays for a Slice above,
-            # generalized to any type: x can be scalar, struct, array,
-            # or sum-typed, not just array the way a Slice's own base
-            # always is.
+            if isinstance(value_expr.operand, Call):
+                # `&Circle(5)` -- the only OTHER shape semantic.py's own
+                # check_unary allows here, alongside a bare Variable
+                # (see UnaryOp.ADDRESS_OF's own docstring there). There's
+                # no pre-existing declaration to resolve() by name the
+                # way a Variable operand already has -- this literal IS
+                # its own, brand-new declaration, registered here, the
+                # first (and only) time this exact AST node is ever
+                # reached, keyed by id(value_expr.operand) exactly like
+                # a VarDecl/Param's own decl_id is keyed by id() of ITS
+                # node. ir/builder.py's own _collect_argument_temps_in_
+                # expr reads self._escaping_decl_ids under this same
+                # id() to decide whether to reserve a stack slot for
+                # this literal at all -- see its own comment for why
+                # that decision can't reuse the ordinary argument-temp
+                # path (never escape-driven there, by design).
+                self.declare("<struct literal>", id(value_expr.operand), type_of(value_expr.operand))
+                return id(value_expr.operand), None
+            # &x -- x is guaranteed a bare Variable here (the only
+            # remaining shape after the struct-literal case above).
+            # x's own decl_id becomes this pointer VALUE's own
+            # "backing" declaration -- the identical role array_decl_id
+            # plays for a Slice above, generalized to any type: x can
+            # be scalar, struct, array, or sum-typed, not just array
+            # the way a Slice's own base always is.
             base_id = self.resolve(value_expr.operand.name)
             if base_id is not None:
                 return base_id, None

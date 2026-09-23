@@ -56,11 +56,33 @@ class PointersMixin:
         it's excluded anyway, harmlessly, since IRLocalAddress still
         targets it.
 
-        expr.operand is guaranteed a bare Variable by semantic.py's
-        own check_unary (see UnaryOp.ADDRESS_OF's own docstring there
-        for why this first slice of pointer support restricts it that
-        way -- struct fields and array/slice elements are planned,
-        not yet reachable here)."""
+        expr.operand is guaranteed a bare Variable OR a struct literal
+        by semantic.py's own check_unary (see UnaryOp.ADDRESS_OF's own
+        docstring there for why this slice of pointer support restricts
+        it that way -- struct fields, array/slice elements, and array
+        literals are planned, not yet reachable here).
+
+        A struct-literal operand (`&Circle(5)`) is handled first,
+        entirely separately from the Variable case below: there's no
+        existing slot/decl_id to look anything up by -- see ir/
+        builder.py's own _collect_argument_temps_in_expr for where one
+        gets reserved (or not, for an escaping literal) ahead of time,
+        keyed by id(expr.operand) exactly like a named declaration's
+        own slot is keyed by id(its VarDecl/Param node). _ir_
+        materialize_struct_literal already knows how to build the
+        right IR either way (a reserved stack slot, or a fresh malloc
+        when none was reserved) -- its own returned address IS this
+        expression's own value, unlike the Variable case below, which
+        still needs its own extra heap-allocated indirection check."""
+        if isinstance(expr.operand, Call):
+            result = self._ir_materialize_struct_literal(expr.operand)
+            if result is None:
+                raise IRError(
+                    f"_ir_materialize_struct_literal returned None for a "
+                    f"struct-literal '&' operand ({expr.operand!r}) -- "
+                    f"expected to always succeed for a reachable shape"
+                )
+            return result
         if not isinstance(expr.operand, Variable):
             raise IRError(
                 f"IRError: '&' operand is {type(expr.operand).__name__}, not a "
