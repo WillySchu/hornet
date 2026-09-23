@@ -26,12 +26,11 @@ Updates:
 - Pass structs to FFI calls.
 - Separate the runtime code from codegen.
 - `IRBranch` peephole optimization to skip redundant unconditional jumps.
-- IRAddress
 - CSE pass optimization for array addresses and thus indexes.
 - `type` type.
 - `typeof`
 - Consider enabling struct literal syntax for aliases.
-- `fuction` type.
+- `function` type.
 - Add `byte` literal.
 - User defined types built off other types.
 - Change slice's zero type to an empty slice rather than `none`.
