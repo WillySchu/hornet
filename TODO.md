@@ -17,6 +17,7 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
+- Sum type support for non structs.
 - Spreading one package across multiple files.
 - A package-style in-file declaration decoupling the module's name from its filename.
 - Struct field/method-level visibility.
