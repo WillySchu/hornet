@@ -1,0 +1,15 @@
+intrinsic *byte _raw_ptr(str s)
+intrinsic int _raw_len(str s)
+intrinsic str _from_raw_parts(*byte p, int n)
+
+extern *byte calloc(int count, int size)
+extern *byte memcpy(*byte dst, *byte src, int n)
+extern int strlen(*byte s)
+
+def *byte to_cstring(str s):
+    *byte buf = calloc(_raw_len(s) + 1, 1)
+    memcpy(buf, _raw_ptr(s), _raw_len(s))
+    return buf
+
+def str from_cstring(*byte p):
+    return _from_raw_parts(p, strlen(p))

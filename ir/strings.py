@@ -331,6 +331,20 @@ class StringsMixin:
             return self._ir_string_concat(expr)
         if isinstance(expr, Slice):
             return self._ir_str_slice_into(expr)
+        if isinstance(expr, Call) and self.ir_program.intrinsic_original_names.get(expr.name) == '_from_raw_parts':
+            # from_raw_parts -- see IntrinsicDecl's own docstring in
+            # parser.py for the whole mechanism. Not an ordinary call
+            # at all: its own two arguments (a *byte, an int --
+            # already confirmed by semantic.py's own signature
+            # checking) already ARE a str's own {ptr, len} pair, by
+            # definition -- there's nothing to materialize or read
+            # back through a hidden return pointer the way an
+            # ordinary str-returning Call needs (the branch just
+            # below this one), just the two argument values evaluated
+            # and handed back directly as ptr_value/len_value.
+            ptr_ir, ptr_value = self.gen_expr_ir(expr.args[0])
+            len_ir, len_value = self.gen_expr_ir(expr.args[1])
+            return ptr_ir + len_ir, ptr_value, len_value
         result = self._ir_str_address(expr)
         if result is not None:
             addr_ir, addr_value = result

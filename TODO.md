@@ -17,7 +17,6 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
-- A real standard library.
 - Spreading one package across multiple files.
 - A package-style in-file declaration decoupling the module's name from its filename.
 - Struct field/method-level visibility.

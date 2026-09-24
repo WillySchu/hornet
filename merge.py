@@ -44,7 +44,7 @@ ordinary method call or struct field access.
 """
 
 from dataclasses import dataclass, fields
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from modules import DiscoveredModule
 from parser import (
@@ -98,7 +98,13 @@ def _own_top_level_names(program: Program) -> Set[str]:
     names' own docstring for why those are never mangled at all.
     Struct field/method names and local variable/parameter names are
     also deliberately NOT included here -- only genuinely top-level,
-    module-scoped names."""
+    module-scoped names.
+
+    Includes intrinsics: unlike extern, an intrinsic's own name IS
+    mangled -- see IntrinsicDecl's own docstring in parser.py for
+    why -- so a bare, in-module reference to one needs the identical
+    rewriting any other function/struct/alias/sum-type reference
+    already gets."""
     names: Set[str] = set()
     for fn in program.functions:
         names.add(fn.name)
@@ -108,6 +114,8 @@ def _own_top_level_names(program: Program) -> Set[str]:
         names.add(ta.name)
     for st in program.sum_types:
         names.add(st.name)
+    for ic in program.intrinsics:
+        names.add(ic.name)
     return names
 
 
@@ -394,6 +402,97 @@ def _validate_named_imports(
             _resolve_in_module(canonical_name, original_name, ctx, referencing_module, from_decl.line)
 
 
+# The complete, fixed set of intrinsics the compiler recognizes and
+# knows how to substitute IR for -- see IntrinsicDecl's own docstring
+# in parser.py for the whole mechanism. Never extended by anything a
+# user writes: this is a closed set of compiler-implemented
+# primitives, not a general extensibility mechanism, so an
+# intrinsic declaration with any other original_name is rejected
+# outright by _validate_intrinsics below, regardless of which file
+# declares it -- there's nothing special about the standard library's
+# own c.ht in particular; the check is purely name-and-signature-
+# based. Each entry: (return type, [param types]), using the exact
+# same string/PointerTypeExpr shapes parse_type itself would produce
+# -- see _signatures_match's own docstring for why a plain shape
+# comparison here is enough, no type_from_name resolution needed.
+_RECOGNIZED_INTRINSICS: Dict[str, Tuple[object, List[object]]] = {
+    '_raw_ptr': (PointerTypeExpr(pointee_type='byte'), ['str']),
+    '_raw_len': ('int', ['str']),
+    '_from_raw_parts': ('str', [PointerTypeExpr(pointee_type='byte'), 'int']),
+}
+
+# Every spelling type_from_name itself already treats as equivalent
+# (semantic.py's own BUILTIN_TYPE_ALIASES-style table) -- needed here
+# too, since this runs before type_from_name ever gets a chance to
+# canonicalize anything: `*byte` and `*uint8` have to compare equal
+# even though they're textually different strings at this stage.
+_TYPE_SPELLING_ALIASES = {'byte': 'uint8'}
+
+
+def _canonical_type_spelling(type_expr):
+    """Normalizes one type-expression shape (a bare string, or a
+    PointerTypeExpr wrapping one) through _TYPE_SPELLING_ALIASES, so
+    two textually-different but semantically-identical spellings
+    (`byte` and `uint8`) compare equal via plain `==` -- see
+    _RECOGNIZED_INTRINSICS' own docstring for why this check happens
+    here, at the plain-shape level, rather than after semantic.py's
+    own, later type resolution."""
+    if isinstance(type_expr, PointerTypeExpr):
+        return PointerTypeExpr(pointee_type=_canonical_type_spelling(type_expr.pointee_type))
+    if isinstance(type_expr, str):
+        return _TYPE_SPELLING_ALIASES.get(type_expr, type_expr)
+    return type_expr
+
+
+def _signatures_match(decl: 'IntrinsicDecl', expected: Tuple[object, List[object]]) -> bool:
+    """True if decl's own declared signature -- return type, and each
+    param's own type in order -- matches expected exactly, once each
+    side's own type spelling is canonicalized (see _canonical_type_
+    spelling's own docstring). A plain shape/string comparison is
+    enough for this: every recognized intrinsic's own signature is
+    built entirely from scalar/pointer-to-scalar types, which parse_
+    type already represents as a bare string or a PointerTypeExpr
+    wrapping one -- neither shape needs a struct/alias registry to
+    resolve, unlike a struct-typed signature would."""
+    expected_return, expected_params = expected
+    if _canonical_type_spelling(decl.return_type) != _canonical_type_spelling(expected_return):
+        return False
+    if len(decl.params) != len(expected_params):
+        return False
+    return all(
+        _canonical_type_spelling(p.type) == _canonical_type_spelling(e)
+        for p, e in zip(decl.params, expected_params)
+    )
+
+
+def _validate_intrinsics(program: Program) -> None:
+    """Run once per file (entry or module alike -- nothing about this
+    check is specific to the standard library itself), before any
+    mangling starts: rejects any intrinsic declaration whose own
+    original_name isn't one of _RECOGNIZED_INTRINSICS at all, or is
+    but whose declared signature doesn't match that name's own fixed,
+    expected one exactly. Checked here, against original_name, rather
+    than left for semantic.py to catch later against the (by then
+    already-mangled) name -- see IntrinsicDecl's own docstring for why
+    original_name has to be the one thing mangling never touches."""
+    for ic in program.intrinsics:
+        expected = _RECOGNIZED_INTRINSICS.get(ic.original_name)
+        if expected is None:
+            raise MergeError(
+                f"'{ic.original_name}' at line {ic.line} isn't a recognized intrinsic -- "
+                f"the compiler only implements a fixed set of these "
+                f"({', '.join(sorted(_RECOGNIZED_INTRINSICS))}), not a general "
+                f"extensibility mechanism"
+            )
+        if not _signatures_match(ic, expected):
+            expected_return, expected_params = expected
+            params_str = ', '.join(str(p) for p in expected_params)
+            raise MergeError(
+                f"'{ic.original_name}' at line {ic.line} doesn't match its own required "
+                f"signature -- expected ({params_str}) -> {expected_return}"
+            )
+
+
 def merge_programs(entry_program: Program, modules: Dict[str, DiscoveredModule]) -> Program:
     """Folds every module's own declarations into entry_program in
     place, mangled and with every qualified reference resolved (see
@@ -420,7 +519,14 @@ def merge_programs(entry_program: Program, modules: Dict[str, DiscoveredModule])
     collide as a duplicate declaration once merged; semantic.py's own,
     pre-existing "already declared" check catches that loudly rather
     than silently, and deduplicating identical extern declarations
-    across modules is left as a known, narrow gap for now."""
+    across modules is left as a known, narrow gap for now.
+
+    Intrinsic declarations, by contrast, ARE mangled, exactly like an
+    ordinary function -- see IntrinsicDecl's own docstring in parser.
+    py -- and are validated (see _validate_intrinsics) before that
+    mangling happens, in every file alike, entry included: nothing
+    about this check is specific to the standard library's own
+    modules."""
     entry_aliases = getattr(entry_program, 'import_aliases', {})
     entry_named = getattr(entry_program, 'named_imports', {})
     ctx = _MergeContext(
@@ -429,6 +535,7 @@ def merge_programs(entry_program: Program, modules: Dict[str, DiscoveredModule])
         all_extern_names={name: _own_extern_names(module.program) for name, module in modules.items()},
     )
 
+    _validate_intrinsics(entry_program)
     _validate_named_imports(entry_program, _own_top_level_names(entry_program), entry_named, ctx, None)
     entry_program.imports = []  # consumed above/below; nothing downstream needs the raw ImportDecls again
     entry_program.from_imports = []  # same
@@ -439,10 +546,12 @@ def merge_programs(entry_program: Program, modules: Dict[str, DiscoveredModule])
     entry_program.sum_types = _rewrite_node(entry_program.sum_types, set(), None, entry_aliases, entry_named, ctx)
     entry_program.extern_functions = _rewrite_node(
         entry_program.extern_functions, set(), None, entry_aliases, entry_named, ctx)
+    entry_program.intrinsics = _rewrite_node(entry_program.intrinsics, set(), None, entry_aliases, entry_named, ctx)
 
     for canonical_name, module in modules.items():
         own_names = ctx.all_own_names[canonical_name]
         program = module.program
+        _validate_intrinsics(program)
         _validate_named_imports(program, own_names, module.named_imports, ctx, canonical_name)
         program.functions = _rewrite_node(
             program.functions, own_names, canonical_name, module.import_aliases, module.named_imports, ctx)
@@ -454,6 +563,8 @@ def merge_programs(entry_program: Program, modules: Dict[str, DiscoveredModule])
             program.sum_types, own_names, canonical_name, module.import_aliases, module.named_imports, ctx)
         program.extern_functions = _rewrite_node(
             program.extern_functions, own_names, canonical_name, module.import_aliases, module.named_imports, ctx)
+        program.intrinsics = _rewrite_node(
+            program.intrinsics, own_names, canonical_name, module.import_aliases, module.named_imports, ctx)
 
         for fn in program.functions:
             fn.name = _mangle(canonical_name, fn.name)
@@ -470,5 +581,11 @@ def merge_programs(entry_program: Program, modules: Dict[str, DiscoveredModule])
         for ext in program.extern_functions:
             # Never mangled -- see _own_extern_names' own docstring.
             entry_program.extern_functions.append(ext)
+        for ic in program.intrinsics:
+            # original_name is deliberately left untouched -- only
+            # name is mangled -- see IntrinsicDecl's own docstring for
+            # why the two have to stay independent.
+            ic.name = _mangle(canonical_name, ic.name)
+            entry_program.intrinsics.append(ic)
 
     return entry_program

@@ -47,6 +47,7 @@ def build_ir_program(program: Program) -> IRProgram:
         type_alias_registry=program.type_alias_registry,
         sum_type_registry=program.sum_type_registry,
         function_registry=program.function_registry,
+        intrinsic_original_names=getattr(program, 'intrinsic_original_names', {}),
         ids=IdAllocator(),
     )
     ir_program.functions = [IRFunctionBuilder(ir_program).gen_function_ir(fn) for fn in program.functions]

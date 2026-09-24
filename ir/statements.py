@@ -149,6 +149,7 @@ class StatementsMixin:
                     isinstance(stmt.value, Call)
                     and stmt.value.name != 'append'
                     and stmt.value.name not in self.ir_program.struct_registry
+                    and stmt.value.name not in self.ir_program.intrinsic_original_names
             ):
                 hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr(ir_fn)
                 call_ir = self._ir_composite_call(hidden_ptr, stmt.value)

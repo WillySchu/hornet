@@ -677,3 +677,228 @@ def test_named_import_from_a_module_also_involved_in_a_circular_import():
         _write(tmpdir, "b.ht", "from 'a' import aValue\n\ndef int fromB():\n    return aValue() + 10\n")
         result = _compile_and_run(entry, tmpdir)
         assert result.returncode == 111  # (100 + 10) + 1
+
+
+def test_intrinsic_round_trips_a_str_through_raw_parts():
+    """The three intrinsics called directly, in the entry file (never
+    mangled) -- confirms both ir-building hook points (_raw_ptr/_raw_
+    len in the scalar-Call dispatch, _from_raw_parts inside _ir_str_
+    value's own dispatcher) work correctly together."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "intrinsic *byte _raw_ptr(str s)\n"
+            "intrinsic int _raw_len(str s)\n"
+            "intrinsic str _from_raw_parts(*byte p, int n)\n\n"
+            "def int main():\n"
+            "    str s = 'hello'\n"
+            "    *byte p = _raw_ptr(s)\n"
+            "    int n = _raw_len(s)\n"
+            "    str s2 = _from_raw_parts(p, n)\n"
+            "    if s2 == 'hello':\n"
+            "        return n\n"
+            "    return -1\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.returncode == 5
+
+
+def test_intrinsic_via_a_return_statement_directly():
+    """The specific bug found and fixed this arc: Return's own IR-
+    building has a separate fast path for 'a composite return whose
+    own value is an ordinary function call', forwarding the current
+    function's own hidden return pointer straight through -- which,
+    left unexcluded, would treat an intrinsic call exactly like an
+    ordinary one and try to emit a real call to a symbol that has no
+    compiled body anywhere, failing at LINK time, not compile time.
+    This is the direct regression test for that fix: a function whose
+    entire body is `return _from_raw_parts(...)`."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "intrinsic *byte _raw_ptr(str s)\n"
+            "intrinsic int _raw_len(str s)\n"
+            "intrinsic str _from_raw_parts(*byte p, int n)\n\n"
+            "def str identity(str s):\n"
+            "    return _from_raw_parts(_raw_ptr(s), _raw_len(s))\n\n"
+            "def int main():\n"
+            "    if identity('hello') == 'hello':\n"
+            "        return 1\n"
+            "    return 0\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.returncode == 1
+
+
+def test_intrinsic_with_unrecognized_name_is_rejected():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "intrinsic int _not_a_real_intrinsic(str s)\n\ndef int main():\n    return 0\n",
+        )
+        entry_program, modules = discover_modules(entry)
+        with pytest.raises(MergeError, match="isn't a recognized intrinsic"):
+            merge_programs(entry_program, modules)
+
+
+def test_intrinsic_with_mismatched_signature_is_rejected():
+    """Right name, wrong signature -- _raw_len is supposed to take a
+    str and return int; this one takes a bool instead."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "intrinsic int _raw_len(bool b)\n\ndef int main():\n    return 0\n",
+        )
+        entry_program, modules = discover_modules(entry)
+        with pytest.raises(MergeError, match="doesn't match its own required signature"):
+            merge_programs(entry_program, modules)
+
+
+def test_intrinsic_signature_accepts_either_byte_or_uint8_spelling():
+    """*byte and *uint8 are the same type (see lexer.py's own keyword
+    table) but textually different spellings at the AST-shape level
+    this validation runs at, before semantic.py's own type_from_name
+    ever canonicalizes anything -- confirms _canonical_type_spelling
+    treats them as equivalent rather than rejecting the less-common
+    spelling as a signature mismatch."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "intrinsic *uint8 _raw_ptr(str s)\n\ndef int main():\n    return 0\n",
+        )
+        entry_program, modules = discover_modules(entry)
+        merge_programs(entry_program, modules)  # should not raise
+
+
+def test_stdlib_c_module_round_trips_a_str_through_a_c_string():
+    """The real, shipped stdlib/c.ht, imported the ordinary way --
+    not a scratch reimplementation of it. Confirms to_cstring/from_
+    cstring actually work end to end through libc's own calloc/
+    memcpy/strlen, not just that the underlying intrinsics do."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "import 'c'\n\n"
+            "def int main():\n"
+            "    str s = 'hello world'\n"
+            "    *byte cstr = c.to_cstring(s)\n"
+            "    str back = c.from_cstring(cstr)\n"
+            "    if back == s:\n"
+            "        return 1\n"
+            "    return 0\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.returncode == 1
+
+
+def test_stdlib_c_module_round_trips_an_empty_string():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "import 'c'\n\n"
+            "def int main():\n"
+            "    str empty = ''\n"
+            "    *byte cstr = c.to_cstring(empty)\n"
+            "    str back = c.from_cstring(cstr)\n"
+            "    return len(back)\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.returncode == 0
+
+
+def test_stdlib_c_module_embedded_null_truncates_as_expected_for_c_strings():
+    """Not a bug -- an inherent, documented limitation of null-
+    terminated C strings, which can never represent an embedded null
+    at all. Confirms the round trip truncates predictably (at the
+    first null, via the real libc strlen) rather than crashing or
+    silently corrupting something."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "import 'c'\n\n"
+            "def int main():\n"
+            "    str withNul = 'abc\\0xyz'\n"
+            "    *byte cstr = c.to_cstring(withNul)\n"
+            "    str back = c.from_cstring(cstr)\n"
+            "    if back == 'abc':\n"
+            "        return 1\n"
+            "    return 0\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.returncode == 1
+
+
+def test_stdlib_c_modules_raw_intrinsics_are_hidden():
+    """Per the design decision to hide the raw three and expose only
+    to_cstring/from_cstring: a qualified reference to _raw_ptr from
+    OUTSIDE c.ht itself is rejected by the same visibility mechanism
+    any other '_'-prefixed name already gets -- no new code, just
+    ordinary leading-underscore hiding."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "import 'c'\n\n"
+            "def int main():\n"
+            "    str s = 'hello'\n"
+            "    *byte p = c._raw_ptr(s)\n"
+            "    return 0\n",
+        )
+        entry_program, modules = discover_modules(entry)
+        with pytest.raises(MergeError, match="not visible outside the module that defines it"):
+            merge_programs(entry_program, modules)
+
+
+def test_intrinsic_with_wrong_return_type_is_rejected():
+    """Right param, wrong return type -- _raw_len is supposed to
+    return int; this one declares bool instead."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "intrinsic bool _raw_len(str s)\n\ndef int main():\n    return 0\n",
+        )
+        entry_program, modules = discover_modules(entry)
+        with pytest.raises(MergeError, match="doesn't match its own required signature"):
+            merge_programs(entry_program, modules)
+
+
+def test_intrinsic_with_wrong_parameter_count_is_rejected():
+    """Right name, right types, but an extra parameter -- _raw_len
+    takes exactly one str, not a str plus anything else."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "intrinsic int _raw_len(str s, int extra)\n\ndef int main():\n    return 0\n",
+        )
+        entry_program, modules = discover_modules(entry)
+        with pytest.raises(MergeError, match="doesn't match its own required signature"):
+            merge_programs(entry_program, modules)
+
+
+def test_intrinsic_colliding_with_a_struct_of_the_same_name_is_rejected():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "type _raw_len struct:\n    int x\n\n"
+            "intrinsic int _raw_len(str s)\n\n"
+            "def int main():\n    return 0\n",
+        )
+        entry_program, modules = discover_modules(entry)
+        merged = merge_programs(entry_program, modules)
+        desugar_methods(merged)
+        with pytest.raises(SemanticError, match="collides with a struct"):
+            analyze(merged)
+
+
+def test_intrinsic_colliding_with_an_already_declared_function_is_rejected():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "def int _raw_len():\n    return 1\n\n"
+            "intrinsic int _raw_len(str s)\n\n"
+            "def int main():\n    return 0\n",
+        )
+        entry_program, modules = discover_modules(entry)
+        merged = merge_programs(entry_program, modules)
+        desugar_methods(merged)
+        with pytest.raises(SemanticError, match="is already declared"):
+            analyze(merged)

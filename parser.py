@@ -935,6 +935,53 @@ class ExternFunctionDecl(Node):
 
 
 @dataclass
+class IntrinsicDecl(Node):
+    """`intrinsic type NAME(params)` -- declares a signature with NO
+    body anywhere at all, not even one already compiled elsewhere the
+    way ExternFunctionDecl's own body lives in an already-linked C
+    binary: there's no `call` instruction to it at runtime whatsoever.
+    Its own "definition" is Python code inside the compiler itself, in
+    ir-building, that recognizes one of a small, fixed, hardcoded set
+    of intrinsics by NAME and substitutes in hand-written IR directly
+    at that call site, in place of ordinary call-lowering -- closer to
+    a compile-time macro than a function. See this feature's own
+    design discussion for why this needed its own mechanism at all:
+    neither an ordinary Function (no way to express "read a str's own
+    internal pointer field" in Hornet source) nor ExternFunctionDecl
+    (deliberately never mangled, and deliberately rejects str in its
+    own signature -- see check_extern_function_decl's own docstring)
+    fits what a small handful of privileged, compiler-implemented
+    primitives need.
+
+    Mirrors ExternFunctionDecl's own shape (and reuses parse_params(),
+    per its own docstring) with the two differences that matter: an
+    intrinsic's `name` DOES get mangled during merge, exactly like an
+    ordinary Function's -- it's meant to be reachable only through
+    real import machinery, not sitting in some separate, unmangled
+    namespace the way an extern's real C symbol has to -- and its own
+    signature is permitted to mention str, which extern's own
+    signature never can.
+
+    `original_name` is what makes that mangling safe to do at all: a
+    plain string, set ONCE here, at parse time, to the identical value
+    `name` starts with, and never touched again by anything -- merge.
+    py's own validation checks THIS field (not `name`) against the
+    fixed, recognized set, since by the time merge.py runs, `name`
+    itself may already need to become "c$raw_ptr"; semantic.py's own
+    check_intrinsic_decl reads it too, to know which of the fixed,
+    expected signatures a given declaration's own actual signature has
+    to match; and it's what gets stashed into a mangled-name ->
+    original-name registry ir-building later consults, since an
+    ir-building pass only ever sees a Call site's own (already-
+    mangled) name string, with no way to walk back to the declaration
+    that produced it on its own."""
+    name: str
+    original_name: str
+    return_type: Optional[Union[str, ArrayTypeExpr, SliceTypeExpr, PointerTypeExpr]]
+    params: List[Param] = field(default_factory=list)
+
+
+@dataclass
 class TypeAlias(Node):
     """`type Name = TargetType` -- introduces `Name` as an alternate
     spelling for an existing type, interchangeable with it everywhere
@@ -1054,6 +1101,7 @@ class Program(Node):
     extern_functions: List[ExternFunctionDecl] = field(default_factory=list)
     imports: List[ImportDecl] = field(default_factory=list)
     from_imports: List[FromImportDecl] = field(default_factory=list)
+    intrinsics: List[IntrinsicDecl] = field(default_factory=list)
 
     def __repr__(self) -> str:
         return self.pretty()
@@ -1309,6 +1357,7 @@ class Parser:
         extern_functions = []
         imports = []
         from_imports = []
+        intrinsics = []
         self.skip_newlines()
         while not self.at_end():
             if self.check(TokenType.STRUCT):
@@ -1328,6 +1377,8 @@ class Parser:
                     type_aliases.append(declaration)
             elif self.check(TokenType.EXTERN):
                 extern_functions.append(self.parse_extern_function())
+            elif self.check(TokenType.INTRINSIC):
+                intrinsics.append(self.parse_intrinsic())
             elif self.check(TokenType.IMPORT):
                 imports.append(self.parse_import())
             elif self.check(TokenType.FROM):
@@ -1338,6 +1389,25 @@ class Parser:
         return Program(
             functions=functions, structs=structs, type_aliases=type_aliases, sum_types=sum_types,
             extern_functions=extern_functions, imports=imports, from_imports=from_imports,
+            intrinsics=intrinsics,
+            line=start_tok.line, col=start_tok.col,
+        )
+
+    def parse_intrinsic(self) -> IntrinsicDecl:
+        """`intrinsic type NAME(params)` -- mirrors parse_extern_
+        function's own shape exactly (see its own docstring): no
+        colon, no body, terminated the same way any other top-level
+        statement is. original_name is set to the identical, just-
+        parsed name -- see IntrinsicDecl's own docstring for why this
+        needs to exist as its own field at all, separate from `name`."""
+        start_tok = self.expect(TokenType.INTRINSIC, "Expected 'intrinsic'")
+        return_type = self.parse_type() if self._check_starts_with_return_type() else None
+        name_tok = self.expect(TokenType.IDENTIFIER, "Expected a function name")
+        self.expect(TokenType.OPEN_PAREN, "Expected '(' after function name")
+        params = self.parse_params()
+        self.expect(TokenType.CLOSE_PAREN, "Expected ')' after parameter list")
+        return IntrinsicDecl(
+            name=name_tok.val, original_name=name_tok.val, return_type=return_type, params=params,
             line=start_tok.line, col=start_tok.col,
         )
 

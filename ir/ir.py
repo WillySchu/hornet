@@ -409,6 +409,15 @@ class IRProgram:
     type this IR's own Temps carry, is only fully interpretable
     alongside these registries.
 
+    intrinsic_original_names (mangled name -> original_name, also
+    stamped onto Program by semantic.analyze() -- see check_intrinsic_
+    decl's own docstring) is copied here for the identical reason: a
+    Call site's own gen_expr_ir only ever sees its own, already-
+    mangled name string, with no way back to the IntrinsicDecl that
+    produced it, so this is what lets it recognize "this mangled name
+    is one of the compiler's own, fixed intrinsics, specifically this
+    one" instead.
+
     ids (an IdAllocator -- see its own module docstring) is the
     single, live counter every Temp/label/slot this program's own
     build, lowering, and any optimization pass in between draws from.
@@ -423,5 +432,6 @@ class IRProgram:
     type_alias_registry: dict = field(default_factory=dict)
     sum_type_registry: dict = field(default_factory=dict)
     function_registry: dict = field(default_factory=dict)
+    intrinsic_original_names: dict = field(default_factory=dict)
     ids: object = None
     _empty_str_label: object = None

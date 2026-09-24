@@ -21,7 +21,7 @@ how many places import it or whether a cycle exists.
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 from lexer import lex
 from parser import Parser, Program
@@ -74,16 +74,42 @@ class DiscoveredModule:
     named_imports: Dict[str, Tuple[str, str]] = field(default_factory=dict)
 
 
-def _resolve_import_path(importer_dir: Path, path: str) -> Path:
-    """Resolves an ImportDecl's own `path` relative to the importing
-    file's own directory -- see this feature's own design discussion
-    for why: Hornet has no project-root/manifest concept yet, so the
-    importing file's own location is the only thing that exists to
-    resolve against -- into a canonical, absolute filesystem Path,
-    appending '.ht' when `path` doesn't already end with it (matching
-    Python's own `import foo` needing no '.py')."""
+_STDLIB_ROOT = Path(__file__).parent / 'stdlib'
+
+
+def _candidate_path(base_dir: Path, path: str) -> Path:
+    """Turns an ImportDecl's own `path` into a canonical, absolute
+    filesystem Path under base_dir, appending '.ht' when `path`
+    doesn't already end with it (matching Python's own `import foo`
+    needing no '.py'). Doesn't check the result actually exists --
+    that's _resolve_import_path's own job, trying this against more
+    than one base_dir in turn."""
     candidate = path if path.endswith('.ht') else f'{path}.ht'
-    return (importer_dir / candidate).resolve()
+    return (base_dir / candidate).resolve()
+
+
+def _resolve_import_path(importer_dir: Path, path: str) -> Optional[Path]:
+    """Resolves an ImportDecl's own `path`, trying the importing
+    file's own directory FIRST, falling back to Hornet's own standard
+    library location (_STDLIB_ROOT, a fixed directory bundled with the
+    compiler itself -- see this feature's own design discussion for
+    why fallback rather than a stricter scheme requiring a marker for
+    one or the other) only if nothing local matches. Relative
+    resolution takes unconditional priority: a same-named local file
+    is always what a bare import reaches, never silently shadowed by a
+    stdlib module of the same name -- the stdlib is only ever
+    consulted for a name nothing local answers to at all.
+
+    Returns None if NEITHER location has a matching file -- left for
+    the caller to turn into its own ModuleError, with whatever message
+    fits its own context."""
+    local = _candidate_path(importer_dir, path)
+    if local.is_file():
+        return local
+    stdlib_candidate = _candidate_path(_STDLIB_ROOT, path)
+    if stdlib_candidate.is_file():
+        return stdlib_candidate
+    return None
 
 
 def discover_modules(entry_path: str) -> Tuple[Program, Dict[str, DiscoveredModule]]:
@@ -141,10 +167,11 @@ def discover_modules(entry_path: str) -> Tuple[Program, Dict[str, DiscoveredModu
             (or in progress, as an ancestor of this very call -- a
             genuine cycle), and returns its own canonical_name."""
             resolved = _resolve_import_path(importer_dir, path)
-            if not resolved.is_file():
+            if resolved is None:
                 raise ModuleError(
                     f"Import {path!r} at line {at_line} doesn't resolve to a real "
-                    f"file (looked for {resolved})"
+                    f"file (looked for {_candidate_path(importer_dir, path)}, or in "
+                    f"the standard library)"
                 )
             if resolved in by_path:
                 return by_path[resolved]

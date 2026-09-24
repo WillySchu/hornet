@@ -150,7 +150,24 @@ class DispatchMixin:
             result = self._ir_len_call(expr)
             if result is not None:
                 return result
-        if isinstance(expr, Call) and expr.name not in ('print', 'len') and type_of(expr).kind not in COMPOSITE_KINDS:
+        if isinstance(expr, Call) and self.ir_program.intrinsic_original_names.get(expr.name) in ('_raw_ptr', '_raw_len'):
+            # raw_ptr/raw_len -- see IntrinsicDecl's own docstring in
+            # parser.py for the whole mechanism. Neither is an
+            # ordinary call at all: no calling convention, no argument
+            # register placement, no callee to jump to -- _ir_str_
+            # value already computes exactly the (ptr, len) pair every
+            # other string operation reads, so this just asks for that
+            # same pair and hands back whichever half was requested,
+            # discarding the other. expr.args[0] is str-typed (already
+            # confirmed by semantic.py's own argument-count/type
+            # checking against the registered intrinsic signature),
+            # so this always succeeds -- unlike _ir_len_call just
+            # above, there's no "out of scope, fall through" case here
+            # to handle.
+            original_name = self.ir_program.intrinsic_original_names[expr.name]
+            arg_ir, ptr_value, len_value = self._ir_str_value(expr.args[0])
+            return arg_ir, (ptr_value if original_name == '_raw_ptr' else len_value)
+        if isinstance(expr, Call) and expr.name not in ('print', 'len') and self.ir_program.intrinsic_original_names.get(expr.name) is None and type_of(expr).kind not in COMPOSITE_KINDS:
             return self._ir_call(expr)
         if isinstance(expr, Unary) and expr.op == UnaryOp.ADDRESS_OF:
             return self._ir_address_of(expr)

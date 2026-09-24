@@ -93,6 +93,7 @@ class TokenType(Enum):
     IMPORT = auto()
     FROM = auto()
     EXTERN = auto()
+    INTRINSIC = auto()
 
     # Special
     NEWLINE = auto()
@@ -181,6 +182,7 @@ class Lexer:
             'import': TokenType.IMPORT,
             'from': TokenType.FROM,
             'extern': TokenType.EXTERN,
+            'intrinsic': TokenType.INTRINSIC,
         }
 
         # Compile master regex pattern

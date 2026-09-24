@@ -220,6 +220,7 @@ from parser import (
     If,
     Index,
     IndexAssign,
+    IntrinsicDecl,
     IsCheck,
     Node,
     NoneLiteral,
@@ -697,6 +698,7 @@ class SemanticAnalyzer:
         #    via self.methods instead), but a mangled name can't
         #    collide with anything else here regardless.
         self.functions = {}
+        self.intrinsic_original_names = {}  # mangled name -> original_name; see check_intrinsic_decl's own docstring
         for fn in program.functions:
             if fn.name in _BUILTIN_FUNCTION_NAMES:
                 raise SemanticError(
@@ -746,6 +748,14 @@ class SemanticAnalyzer:
         #    permanent restriction.
         for ext in program.extern_functions:
             self.check_extern_function_decl(ext)
+
+        # 4.6. Collect every intrinsic's signature into this SAME
+        #    registry too -- see check_intrinsic_decl's own docstring
+        #    for the full reasoning, and for why (unlike extern) str
+        #    is allowed here.
+        for ic in program.intrinsics:
+            self.check_intrinsic_decl(ic)
+        program.intrinsic_original_names = self.intrinsic_original_names  # stashed for ir-building's own use
         program.function_registry = self.functions  # stashed for codegen.py's own use, mirroring struct_registry -- see ir/scalars.py's own argument-widening use
 
         # 5. Check each function's own body, including every
@@ -1179,6 +1189,69 @@ class SemanticAnalyzer:
             )
 
         self.functions[ext.name] = (param_types, return_type)
+
+    def check_intrinsic_decl(self, ic: IntrinsicDecl) -> None:
+        """Registers an `intrinsic` declaration into self.functions,
+        the exact same registry check_extern_function_decl's own
+        externs (and ordinary Function signatures) already live in --
+        check_call's own lookup never needs to know which of the
+        three it found, exactly like it already doesn't need to know
+        extern from ordinary. Mirrors check_extern_function_decl's own
+        collision checks (builtin, struct, alias, sum-type, already-
+        declared) exactly -- but deliberately has NO counterpart to
+        its scalar-or-pointer-only restriction: str is exactly what an
+        intrinsic's own signature is allowed, and by design meant, to
+        mention (see IntrinsicDecl's own docstring in parser.py) --
+        merge.py's own _validate_intrinsics already confirmed, before
+        this ever runs, that ic's own signature exactly matches one of
+        the fixed, recognized ones, so there's nothing further to
+        restrict here at all.
+
+        Also stashes (name -> ic.original_name) into self.intrinsic_
+        original_names, building up across every intrinsic this
+        program declares -- ir-building's own eventual substitution
+        (see this feature's own design discussion) only ever sees a
+        Call site's own, already-mangled name string, with no way to
+        walk back to the declaration that produced it on its own; this
+        registry is what lets it ask "is this mangled name one of the
+        three intrinsics, and if so, which" instead."""
+        if ic.name in _BUILTIN_FUNCTION_NAMES:
+            raise SemanticError(
+                f"'{ic.name}' is a builtin and can't be redefined as "
+                f"an intrinsic",
+                ic,
+            )
+        if ic.name in self.structs:
+            raise SemanticError(
+                f"Intrinsic '{ic.name}' collides with a struct "
+                f"of the same name -- struct and function names share "
+                f"one namespace and can never be the same, since "
+                f"'{ic.name}(...)' would otherwise be ambiguous "
+                f"between a call and a struct literal",
+                ic,
+            )
+        if ic.name in self.type_aliases:
+            raise SemanticError(
+                f"Intrinsic '{ic.name}' collides with a type "
+                f"alias of the same name -- function and type-alias "
+                f"names share one namespace and can never be the same",
+                ic,
+            )
+        if ic.name in self.sum_types:
+            raise SemanticError(
+                f"Intrinsic '{ic.name}' collides with a sum "
+                f"type of the same name -- function and sum-type "
+                f"names share one namespace and can never be the same",
+                ic,
+            )
+        if ic.name in self.functions:
+            raise SemanticError(f"Function '{ic.name}' is already declared", ic)
+
+        param_types = [type_from_name(p.type, self.structs, self.type_aliases, p, self.sum_types) for p in ic.params]
+        return_type = Type.VOID if ic.return_type is None else type_from_name(ic.return_type, self.structs, self.type_aliases, ic, self.sum_types)
+
+        self.functions[ic.name] = (param_types, return_type)
+        self.intrinsic_original_names[ic.name] = ic.original_name
 
     def analyze_function(self, fn: Function) -> None:
         self.scopes = [{}]  # fresh, single-level scope stack per function
