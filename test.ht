@@ -1,4 +1,4 @@
-import 'test2'
+from 'test2' import Node
 
 
 type HasArray struct:
@@ -50,6 +50,6 @@ def int8 main():
     # TODO(will): This should definitely work.
     #HasArray ha = *make_ha_ptr()
     #print(HasArray([1,2,3,4,5]))
-    test2.Node n = test2.Node(5)
+    Node n = Node(5)
     print(n)
     return 0

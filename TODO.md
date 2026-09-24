@@ -17,7 +17,6 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
-- Named imports and import * - the export-table design above is meant to make this additive later, not a redesign, but it's not being built now.
 - A real standard library.
 - Spreading one package across multiple files.
 - A package-style in-file declaration decoupling the module's name from its filename.
@@ -52,6 +51,7 @@ Updates:
 - Sorting.
 - Format strings.
 - Slice equality?
+- Import *?
 - Flow sensitive escape analysis.
 - Deduplicate emitted type descriptors when we call print()
 - Variadic functions.

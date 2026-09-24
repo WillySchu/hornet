@@ -562,3 +562,118 @@ def test_hidden_struct_in_qualified_narrowing_is_rejected():
         desugar_methods(merged)
         with pytest.raises(SemanticError):
             analyze(merged)
+
+
+def test_basic_named_import_function_call():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(tmpdir, "main.ht", "from 'utils' import add\n\ndef int main():\n    return add(2, 3)\n")
+        _write(tmpdir, "utils.ht", "def int add(int a, int b):\n    return a + b\n")
+        result = _compile_and_run(entry, tmpdir)
+        assert result.returncode == 5
+
+
+def test_named_import_with_as_renaming_for_a_struct_type_and_a_function():
+    """A renamed named import used both in TYPE position (as a
+    VarDecl's own type and as a construction call) and in ordinary
+    CALL position -- confirms _resolve_named is reached correctly from
+    both _rewrite_type_expr's own bare-string branch and _rewrite_
+    node's own bare-Call branch."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "from 'shapes' import Circle as C, radius as getRadius\n\n"
+            "def int main():\n"
+            "    C c = C(7)\n"
+            "    return getRadius(c)\n",
+        )
+        _write(
+            tmpdir, "shapes.ht",
+            "type Circle struct:\n    int radius\n\n"
+            "def int radius(Circle c):\n    return c.radius\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.returncode == 7
+
+
+def test_named_import_colliding_with_own_declaration_is_rejected():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "from 'utils' import helper\n\n"
+            "def int helper():\n"
+            "    return 1\n\n"
+            "def int main():\n"
+            "    return 0\n",
+        )
+        _write(tmpdir, "utils.ht", "def int helper():\n    return 2\n")
+        entry_program, modules = discover_modules(entry)
+        with pytest.raises(MergeError, match="collides with this file's own declaration"):
+            merge_programs(entry_program, modules)
+
+
+def test_unused_invalid_named_import_is_rejected_eagerly():
+    """The concrete case that motivates validating named imports up
+    front rather than only when a reference happens to use them:
+    'nonexistent' is never referenced anywhere in main.ht's own body
+    at all -- a purely lazy, rewrite-time-only check would never
+    encounter it, and would silently let this compile."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "from 'utils' import nonexistent\n\ndef int main():\n    return 0\n",
+        )
+        _write(tmpdir, "utils.ht", "def int helper():\n    return 1\n")
+        entry_program, modules = discover_modules(entry)
+        with pytest.raises(MergeError, match="is not declared in module 'utils'"):
+            merge_programs(entry_program, modules)
+
+
+def test_hidden_name_via_named_import_is_rejected():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "from 'utils' import _secret\n\ndef int main():\n    return 0\n",
+        )
+        _write(tmpdir, "utils.ht", "def int _secret():\n    return 1\n")
+        entry_program, modules = discover_modules(entry)
+        with pytest.raises(MergeError, match="not visible outside the module that defines it"):
+            merge_programs(entry_program, modules)
+
+
+def test_qualified_and_named_import_of_the_same_module_both_work():
+    """Per this feature's own design discussion: no good reason to
+    disallow a plain and a named import of the same module coexisting,
+    since they populate genuinely different namespaces (a qualifier
+    prefix vs. a bare name) -- confirmed end to end, both actually
+    being called."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "import 'utils'\n"
+            "from 'utils' import subtract\n\n"
+            "def int main():\n"
+            "    return utils.add(2, 3) + subtract(10, 4)\n",
+        )
+        _write(
+            tmpdir, "utils.ht",
+            "def int add(int a, int b):\n    return a + b\n\n"
+            "def int subtract(int a, int b):\n    return a - b\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.returncode == 11  # (2+3) + (10-4)
+
+
+def test_named_import_from_a_module_also_involved_in_a_circular_import():
+    """Named imports compose with the existing circular-import
+    support, not just plain qualified ones -- b named-imports a
+    (non-recursive) helper from a, while a and b still import each
+    other directly too. Deliberately NOT named-importing fromA itself
+    from within fromB -- fromB calling fromA, which itself calls
+    fromB, would be genuine infinite runtime recursion, not a
+    compile-time concern this test is meant to exercise at all."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(tmpdir, "main.ht", "import 'a'\n\ndef int main():\n    return a.fromA()\n")
+        _write(tmpdir, "a.ht", "import 'b'\n\ndef int fromA():\n    return b.fromB() + 1\n\ndef int aValue():\n    return 100\n")
+        _write(tmpdir, "b.ht", "from 'a' import aValue\n\ndef int fromB():\n    return aValue() + 10\n")
+        result = _compile_and_run(entry, tmpdir)
+        assert result.returncode == 111  # (100 + 10) + 1

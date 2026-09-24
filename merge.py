@@ -44,7 +44,7 @@ ordinary method call or struct field access.
 """
 
 from dataclasses import dataclass, fields
-from typing import Dict, Optional, Set
+from typing import Dict, Optional, Set, Tuple
 
 from modules import DiscoveredModule
 from parser import (
@@ -159,27 +159,19 @@ class _MergeContext:
     all_extern_names: Dict[str, Set[str]]
 
 
-def _resolve_qualified(
-        alias: str, name: str, import_aliases: Dict[str, str], ctx: _MergeContext,
-        referencing_module: Optional[str], at_line: int) -> Optional[str]:
-    """Resolves `alias.name` (as written in a file whose own import
-    list is import_aliases, itself either an imported module -- pass
-    its own canonical_name as referencing_module -- or the entry file
-    -- pass None) to the name it refers to, or returns None when
-    `alias` doesn't name an import at all (meaning this ISN'T a
-    qualified reference -- an ordinary struct field/method access,
-    left for semantic.py to resolve as it already does today).
+def _resolve_in_module(canonical_name: str, name: str, ctx: _MergeContext,
+                        referencing_module: Optional[str], at_line: int) -> str:
+    """Resolves `name`, one of canonical_name's own top-level
+    declarations, to what it actually becomes: its own mangled form,
+    or, for an extern function, its own unchanged bare name (see
+    _own_extern_names' own docstring for why). The shared core both
+    _resolve_qualified (given an ALIAS to look up a canonical_name
+    from first) and _resolve_named (given a canonical_name directly,
+    already resolved by modules.py's own discovery) delegate to, once
+    each has settled on its own canonical_name by whichever route.
 
-    An ordinary declaration resolves to its own mangled form; an
-    extern function resolves to its own BARE name instead, unchanged
-    -- see _own_extern_names' own docstring for why.
-
-    Raises MergeError if `alias` DOES name an import but `name` isn't
-    one of that module's own declarations, or is but is hidden (see
-    _check_visible)."""
-    canonical_name = import_aliases.get(alias)
-    if canonical_name is None:
-        return None
+    Raises MergeError if `name` isn't one of that module's own
+    declarations, or is but is hidden (see _check_visible)."""
     target = ctx.modules[canonical_name]
     if name in ctx.all_extern_names[canonical_name]:
         return name  # extern functions are never mangled -- see _own_extern_names
@@ -192,8 +184,44 @@ def _resolve_qualified(
     return _mangle(canonical_name, name)
 
 
+def _resolve_qualified(
+        alias: str, name: str, import_aliases: Dict[str, str], ctx: _MergeContext,
+        referencing_module: Optional[str], at_line: int) -> Optional[str]:
+    """Resolves `alias.name` (as written in a file whose own import
+    list is import_aliases, itself either an imported module -- pass
+    its own canonical_name as referencing_module -- or the entry file
+    -- pass None) to the name it refers to, or returns None when
+    `alias` doesn't name an import at all (meaning this ISN'T a
+    qualified reference -- an ordinary struct field/method access,
+    left for semantic.py to resolve as it already does today)."""
+    canonical_name = import_aliases.get(alias)
+    if canonical_name is None:
+        return None
+    return _resolve_in_module(canonical_name, name, ctx, referencing_module, at_line)
+
+
+def _resolve_named(
+        local_name: str, named_imports: Dict[str, Tuple[str, str]], ctx: _MergeContext,
+        referencing_module: Optional[str], at_line: int) -> Optional[str]:
+    """Resolves a BARE local_name (no receiver, no qualifier -- just
+    the name as written) against this file's own named-import table
+    (see DiscoveredModule's own docstring in modules.py for how that
+    table is built) -- returns None when local_name isn't one of them
+    at all, meaning it's something else entirely (this module's own
+    declaration, a builtin, a local variable, or genuinely
+    undeclared) -- left for own_names' own check, or ultimately
+    semantic.py, to resolve or reject, exactly like an unresolved
+    qualifier already falls through in _resolve_qualified."""
+    target = named_imports.get(local_name)
+    if target is None:
+        return None
+    canonical_name, original_name = target
+    return _resolve_in_module(canonical_name, original_name, ctx, referencing_module, at_line)
+
+
 def _rewrite_type_expr(type_expr, own_names: Set[str], canonical_module: Optional[str],
-                        import_aliases: Dict[str, str], ctx: _MergeContext):
+                        import_aliases: Dict[str, str], named_imports: Dict[str, Tuple[str, str]],
+                        ctx: _MergeContext):
     """Rewrites a type expression -- see _TYPE_FIELD_NAMES's own
     docstring for the shapes this covers -- recursively for the three
     nested wrapper kinds, and resolving a QualifiedTypeExpr into its
@@ -201,7 +229,14 @@ def _rewrite_type_expr(type_expr, own_names: Set[str], canonical_module: Optiona
     needs to STAY a QualifiedTypeExpr past this point, unlike Call/
     Field in expression position, which still need to exist as
     themselves for an ordinary, non-qualified method call or field
-    access)."""
+    access). A bare string not among own_names is checked against
+    named_imports next, before being left alone as a builtin/genuinely
+    unresolved name -- the same three-way order _rewrite_node's own
+    bare-Call handling uses, for the identical reason: own_names is
+    settled by merge_programs' own up-front collision check to never
+    overlap with named_imports, so which is checked first can't change
+    the outcome, only which error message a genuine collision would
+    have produced had that check not already run first."""
     if isinstance(type_expr, QualifiedTypeExpr):
         resolved = _resolve_qualified(type_expr.module, type_expr.name, import_aliases, ctx, canonical_module,
                                        type_expr.line)
@@ -213,16 +248,20 @@ def _rewrite_type_expr(type_expr, own_names: Set[str], canonical_module: Optiona
         return resolved
     if isinstance(type_expr, (ArrayTypeExpr, SliceTypeExpr, PointerTypeExpr)):
         field_name = 'pointee_type' if isinstance(type_expr, PointerTypeExpr) else 'element_type'
-        setattr(type_expr, field_name,
-                _rewrite_type_expr(getattr(type_expr, field_name), own_names, canonical_module, import_aliases, ctx))
+        setattr(type_expr, field_name, _rewrite_type_expr(
+            getattr(type_expr, field_name), own_names, canonical_module, import_aliases, named_imports, ctx))
         return type_expr
     if isinstance(type_expr, str) and type_expr in own_names:
         return _mangle(canonical_module, type_expr)
+    if isinstance(type_expr, str):
+        resolved = _resolve_named(type_expr, named_imports, ctx, canonical_module, 0)
+        if resolved is not None:
+            return resolved
     return type_expr
 
 
 def _rewrite_node(node, own_names: Set[str], canonical_module: Optional[str], import_aliases: Dict[str, str],
-                   ctx: _MergeContext):
+                   named_imports: Dict[str, Tuple[str, str]], ctx: _MergeContext):
     """Rewrites node (a Node, a list, or a scalar) and every one of
     its own descendants in place, mutating and returning the same
     object except where the rewritten VALUE has to be a different kind
@@ -238,18 +277,26 @@ def _rewrite_node(node, own_names: Set[str], canonical_module: Optional[str], im
     (see Field's own docstring in parser.py) -- telling them apart
     needs this function's own module-aware context (import_aliases),
     which the generic recursion has no way to thread through a bare
-    isinstance dispatch on its own. A Call with no receiver at all
-    still needs checking against own_names (a bare, in-module
-    reference to one of THIS module's own other top-level
-    declarations), the identical reasoning _TYPE_FIELD_NAMES's own
-    docstring gives for why a type name can't just be recursed into
-    generically either."""
+    isinstance dispatch on its own. A Call with no receiver at all is
+    checked against own_names first (a bare, in-module reference to
+    one of THIS module's own other top-level declarations) and then,
+    if that misses, against named_imports (a bare reference to a
+    DIFFERENT module's own declaration, brought in directly by a
+    `from ... import` -- see _resolve_named's own docstring) -- the
+    two can never both match for the same name, since merge_programs'
+    own up-front check already rejects that collision before any
+    rewriting starts, so the order between them here is not a
+    precedence decision, just which happens to be cheaper to check
+    first."""
     if isinstance(node, Call) and node.receiver is not None and isinstance(node.receiver, Variable):
         resolved = _resolve_qualified(node.receiver.name, node.name, import_aliases, ctx, canonical_module, node.line)
         if resolved is not None:
             node.name = resolved
             node.receiver = None
-            node.args = [_rewrite_node(a, own_names, canonical_module, import_aliases, ctx) for a in node.args]
+            node.args = [
+                _rewrite_node(a, own_names, canonical_module, import_aliases, named_imports, ctx)
+                for a in node.args
+            ]
             if node.kwargs is not None:
                 # A module-qualified struct construction using named
                 # fields (`module.Circle(radius=5)`) -- see parse_
@@ -265,15 +312,21 @@ def _rewrite_node(node, own_names: Set[str], canonical_module: Optional[str], im
                 # any, are instead rejected downstream by semantic.
                 # py's own _check_method_call).
                 node.kwargs = [
-                    (k, _rewrite_node(v, own_names, canonical_module, import_aliases, ctx)) for k, v in node.kwargs
+                    (k, _rewrite_node(v, own_names, canonical_module, import_aliases, named_imports, ctx))
+                    for k, v in node.kwargs
                 ]
             return node
     if isinstance(node, Field) and isinstance(node.base, Variable):
         resolved = _resolve_qualified(node.base.name, node.name, import_aliases, ctx, canonical_module, node.line)
         if resolved is not None:
             return Variable(name=resolved, line=node.line, col=node.col)
-    if isinstance(node, Call) and node.receiver is None and node.name in own_names:
-        node.name = _mangle(canonical_module, node.name)
+    if isinstance(node, Call) and node.receiver is None:
+        if node.name in own_names:
+            node.name = _mangle(canonical_module, node.name)
+        else:
+            resolved = _resolve_named(node.name, named_imports, ctx, canonical_module, node.line)
+            if resolved is not None:
+                node.name = resolved
 
     if isinstance(node, Node):
         for f in fields(node):
@@ -281,17 +334,64 @@ def _rewrite_node(node, own_names: Set[str], canonical_module: Optional[str], im
                 continue
             value = getattr(node, f.name)
             if f.name in _TYPE_FIELD_NAMES:
-                setattr(node, f.name, _rewrite_type_expr(value, own_names, canonical_module, import_aliases, ctx))
+                setattr(node, f.name, _rewrite_type_expr(
+                    value, own_names, canonical_module, import_aliases, named_imports, ctx))
             elif f.name == 'variants':  # SumTypeDef's own list of variant names, each possibly qualified
                 setattr(node, f.name, [
-                    _rewrite_type_expr(v, own_names, canonical_module, import_aliases, ctx) for v in value
+                    _rewrite_type_expr(v, own_names, canonical_module, import_aliases, named_imports, ctx)
+                    for v in value
                 ])
             else:
-                setattr(node, f.name, _rewrite_node(value, own_names, canonical_module, import_aliases, ctx))
+                setattr(node, f.name, _rewrite_node(
+                    value, own_names, canonical_module, import_aliases, named_imports, ctx))
         return node
     if isinstance(node, list):
-        return [_rewrite_node(item, own_names, canonical_module, import_aliases, ctx) for item in node]
+        return [
+            _rewrite_node(item, own_names, canonical_module, import_aliases, named_imports, ctx) for item in node
+        ]
     return node
+
+
+def _validate_named_imports(
+        program: Program, own_names: Set[str], named_imports: Dict[str, Tuple[str, str]], ctx: _MergeContext,
+        referencing_module: Optional[str]) -> None:
+    """Run once per file, before any rewriting starts, for two things
+    a purely lazy, rewrite-time-only check would miss:
+
+    1. A named import's own local alias colliding with one of this
+       SAME file's own top-level declarations. _rewrite_node's own
+       bare-Call/type dispatch checks own_names before named_imports,
+       which would just silently prefer the own declaration every
+       time rather than flagging the ambiguity -- rejected here
+       instead, matching this language's existing stance against
+       shadowing anywhere else (see this feature's own design
+       discussion, and modules.py's own identical reasoning for why a
+       plain-import qualifier and a named-import alias are checked
+       against each other too).
+
+    2. Every named import is validated -- existence in its own source
+       module, and visibility -- EAGERLY, here, rather than only the
+       moment some reference in this file's own body happens to use
+       it. Unlike a qualified reference (`module.name`), which is
+       inherently a use site the instant it's written, a named import
+       is a standalone declaration that could go entirely unused --
+       `from "utils" import nonexistent` would otherwise never be
+       caught at all if nothing in this file ever actually calls
+       `nonexistent`. This is also why _resolve_named's own call
+       inside _rewrite_type_expr's bare-string branch can safely pass
+       line 0 for its own error messages: by the time any rewriting
+       runs, every named import already resolved successfully once,
+       right here, with this function's own, real line number."""
+    for from_decl in program.from_imports:
+        for original_name, local_alias in from_decl.names:
+            if local_alias in own_names:
+                raise MergeError(
+                    f"'{local_alias}' at line {from_decl.line} collides with this file's "
+                    f"own declaration of that name -- rename the import with 'as', or "
+                    f"rename the declaration"
+                )
+            canonical_name, _ = named_imports[local_alias]
+            _resolve_in_module(canonical_name, original_name, ctx, referencing_module, from_decl.line)
 
 
 def merge_programs(entry_program: Program, modules: Dict[str, DiscoveredModule]) -> Program:
@@ -303,8 +403,8 @@ def merge_programs(entry_program: Program, modules: Dict[str, DiscoveredModule])
     nothing can ever import the entry file, so they need no
     globally-unique, mangled form; they stay exactly as parsed. Its
     own BODY is still rewritten, though, exactly like every module's
-    own, for any qualified references it makes into an imported
-    module.
+    own, for any qualified or named references it makes into an
+    imported module.
 
     Every module's own top-level names are collected FIRST, before
     any rewriting or renaming starts (see _resolve_qualified's own
@@ -321,30 +421,39 @@ def merge_programs(entry_program: Program, modules: Dict[str, DiscoveredModule])
     pre-existing "already declared" check catches that loudly rather
     than silently, and deduplicating identical extern declarations
     across modules is left as a known, narrow gap for now."""
-    entry_program.imports = []  # consumed here; nothing downstream needs the raw ImportDecls again
     entry_aliases = getattr(entry_program, 'import_aliases', {})
+    entry_named = getattr(entry_program, 'named_imports', {})
     ctx = _MergeContext(
         modules=modules,
         all_own_names={name: _own_top_level_names(module.program) for name, module in modules.items()},
         all_extern_names={name: _own_extern_names(module.program) for name, module in modules.items()},
     )
 
-    entry_program.functions = _rewrite_node(entry_program.functions, set(), None, entry_aliases, ctx)
-    entry_program.structs = _rewrite_node(entry_program.structs, set(), None, entry_aliases, ctx)
-    entry_program.type_aliases = _rewrite_node(entry_program.type_aliases, set(), None, entry_aliases, ctx)
-    entry_program.sum_types = _rewrite_node(entry_program.sum_types, set(), None, entry_aliases, ctx)
-    entry_program.extern_functions = _rewrite_node(entry_program.extern_functions, set(), None, entry_aliases, ctx)
+    _validate_named_imports(entry_program, _own_top_level_names(entry_program), entry_named, ctx, None)
+    entry_program.imports = []  # consumed above/below; nothing downstream needs the raw ImportDecls again
+    entry_program.from_imports = []  # same
+    entry_program.functions = _rewrite_node(entry_program.functions, set(), None, entry_aliases, entry_named, ctx)
+    entry_program.structs = _rewrite_node(entry_program.structs, set(), None, entry_aliases, entry_named, ctx)
+    entry_program.type_aliases = _rewrite_node(
+        entry_program.type_aliases, set(), None, entry_aliases, entry_named, ctx)
+    entry_program.sum_types = _rewrite_node(entry_program.sum_types, set(), None, entry_aliases, entry_named, ctx)
+    entry_program.extern_functions = _rewrite_node(
+        entry_program.extern_functions, set(), None, entry_aliases, entry_named, ctx)
 
     for canonical_name, module in modules.items():
         own_names = ctx.all_own_names[canonical_name]
         program = module.program
-        program.functions = _rewrite_node(program.functions, own_names, canonical_name, module.import_aliases, ctx)
-        program.structs = _rewrite_node(program.structs, own_names, canonical_name, module.import_aliases, ctx)
+        _validate_named_imports(program, own_names, module.named_imports, ctx, canonical_name)
+        program.functions = _rewrite_node(
+            program.functions, own_names, canonical_name, module.import_aliases, module.named_imports, ctx)
+        program.structs = _rewrite_node(
+            program.structs, own_names, canonical_name, module.import_aliases, module.named_imports, ctx)
         program.type_aliases = _rewrite_node(
-            program.type_aliases, own_names, canonical_name, module.import_aliases, ctx)
-        program.sum_types = _rewrite_node(program.sum_types, own_names, canonical_name, module.import_aliases, ctx)
+            program.type_aliases, own_names, canonical_name, module.import_aliases, module.named_imports, ctx)
+        program.sum_types = _rewrite_node(
+            program.sum_types, own_names, canonical_name, module.import_aliases, module.named_imports, ctx)
         program.extern_functions = _rewrite_node(
-            program.extern_functions, own_names, canonical_name, module.import_aliases, ctx)
+            program.extern_functions, own_names, canonical_name, module.import_aliases, module.named_imports, ctx)
 
         for fn in program.functions:
             fn.name = _mangle(canonical_name, fn.name)

@@ -91,6 +91,7 @@ class TokenType(Enum):
     MATCH = auto()
     AS = auto()
     IMPORT = auto()
+    FROM = auto()
     EXTERN = auto()
 
     # Special
@@ -178,6 +179,7 @@ class Lexer:
             'match': TokenType.MATCH,
             'as': TokenType.AS,
             'import': TokenType.IMPORT,
+            'from': TokenType.FROM,
             'extern': TokenType.EXTERN,
         }
 

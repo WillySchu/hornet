@@ -196,3 +196,96 @@ def test_same_module_imported_twice_with_same_alias_is_not_a_collision():
         assert set(modules.keys()) == {"a", "utils"}
         assert entry_program.import_aliases == {"a": "a", "utils": "utils"}
         assert modules["a"].import_aliases == {"utils": "utils"}
+
+
+def test_basic_named_import_is_discovered():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(tmpdir, "main.ht", "from 'utils' import helper\n\ndef int main():\n    return 0\n")
+        _write(tmpdir, "utils.ht", "def int helper():\n    return 42\n")
+        entry_program, modules = discover_modules(entry)
+        assert set(modules.keys()) == {"utils"}
+        assert entry_program.named_imports == {"helper": ("utils", "helper")}
+
+
+def test_named_import_with_as_renaming():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht", "from 'utils' import helper as h\n\ndef int main():\n    return 0\n")
+        _write(tmpdir, "utils.ht", "def int helper():\n    return 42\n")
+        entry_program, modules = discover_modules(entry)
+        # The MAPPING'S OWN target is unaffected by the local rename --
+        # it still points at "helper" (the name in utils.ht itself),
+        # just reachable under the local key "h".
+        assert entry_program.named_imports == {"h": ("utils", "helper")}
+
+
+def test_multiple_named_imports_in_one_statement():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "from 'utils' import helper, other as o\n\ndef int main():\n    return 0\n",
+        )
+        _write(tmpdir, "utils.ht", "def int helper():\n    return 1\n\ndef int other():\n    return 2\n")
+        entry_program, modules = discover_modules(entry)
+        assert entry_program.named_imports == {"helper": ("utils", "helper"), "o": ("utils", "other")}
+
+
+def test_named_import_alias_colliding_with_plain_import_qualifier_is_rejected():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "import 'a' as utils\nfrom 'b' import foo as utils\n\ndef int main():\n    return 0\n",
+        )
+        _write(tmpdir, "a.ht", "def int x():\n    return 1\n")
+        _write(tmpdir, "b.ht", "def int foo():\n    return 2\n")
+        with pytest.raises(ModuleError, match="collides with an 'import ... as utils'"):
+            discover_modules(entry)
+
+
+def test_plain_import_qualifier_colliding_with_earlier_named_import_is_rejected():
+    """The identical collision, in the opposite source order -- the
+    named import is written FIRST, the plain import SECOND. Confirmed
+    separately from the test above since discover_modules processes
+    every plain import before any named one, regardless of source
+    order, and this is the direction that could plausibly be missed
+    by an implementation that only checks in textual order."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "from 'b' import foo as utils\nimport 'a' as utils\n\ndef int main():\n    return 0\n",
+        )
+        _write(tmpdir, "a.ht", "def int x():\n    return 1\n")
+        _write(tmpdir, "b.ht", "def int foo():\n    return 2\n")
+        with pytest.raises(ModuleError, match="collides with an 'import ... as utils'"):
+            discover_modules(entry)
+
+
+def test_two_named_imports_colliding_on_alias_from_different_sources_is_rejected():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "from 'a' import x as shared\nfrom 'b' import foo as shared\n\ndef int main():\n    return 0\n",
+        )
+        _write(tmpdir, "a.ht", "def int x():\n    return 1\n")
+        _write(tmpdir, "b.ht", "def int foo():\n    return 2\n")
+        with pytest.raises(ModuleError, match="is imported more than once under that name"):
+            discover_modules(entry)
+
+
+def test_qualified_and_named_import_of_the_same_module_is_not_a_collision():
+    """import 'utils' (a plain qualifier) and from 'utils' import ...
+    (a named import) both targeting the SAME module -- this is a
+    genuinely different case from the collision tests above, since
+    the two don't actually share a local name at all (the qualifier
+    is "utils", the named import's own local alias is "add") -- only
+    a shared LOCAL NAME is ever a collision, not a shared source
+    module."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "import 'utils'\nfrom 'utils' import add\n\ndef int main():\n    return 0\n",
+        )
+        _write(tmpdir, "utils.ht", "def int add(int a, int b):\n    return a + b\n")
+        entry_program, modules = discover_modules(entry)
+        assert entry_program.import_aliases == {"utils": "utils"}
+        assert entry_program.named_imports == {"add": ("utils", "add")}

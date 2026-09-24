@@ -1014,6 +1014,38 @@ class ImportDecl(Node):
 
 
 @dataclass
+class FromImportDecl(Node):
+    """`from "path" import name1 [as alias1], name2 [as alias2], ...`
+    -- brings specific top-level declarations from another file
+    directly into scope as BARE names, unlike ImportDecl's own
+    qualifier-only access (`qualifier.someName`): a name imported here
+    is referenced directly, `someName`, no prefix at all. Its own,
+    separate node rather than an extension of ImportDecl -- the two
+    populate genuinely different things (a single qualifier vs. a list
+    of local bare-name aliases), the same reason Python itself keeps
+    `import` and `from...import` as distinct statement shapes rather
+    than one, optionally-configured one.
+
+    `path` is resolved identically to ImportDecl's own (see its own
+    docstring for why this is a plain, still-quoted string, and why
+    that's expected to change later without disturbing anything
+    downstream of it) -- modules.py's own path-resolution step is
+    fully shared between the two node kinds, not duplicated.
+
+    `names` is a list of (original_name, local_alias) pairs -- the
+    name as declared in the SOURCE module, and the bare name THIS
+    file will call it by, identical to each other unless `as` renames
+    it. Resolved eagerly here, at parse time, the same reasoning
+    ImportDecl's own `qualifier` already gives: purely a local,
+    string-level operation with nothing semantic-analysis-shaped left
+    to learn later. Existence, visibility, and mangling for each one
+    are still deferred to merge.py -- this node only records what was
+    WRITTEN, not what it resolves to."""
+    path: str
+    names: List[Tuple[str, str]] = field(default_factory=list)
+
+
+@dataclass
 class Program(Node):
     functions: List[Function] = field(default_factory=list)
     structs: List[StructDef] = field(default_factory=list)
@@ -1021,6 +1053,7 @@ class Program(Node):
     sum_types: List[SumTypeDef] = field(default_factory=list)
     extern_functions: List[ExternFunctionDecl] = field(default_factory=list)
     imports: List[ImportDecl] = field(default_factory=list)
+    from_imports: List[FromImportDecl] = field(default_factory=list)
 
     def __repr__(self) -> str:
         return self.pretty()
@@ -1275,6 +1308,7 @@ class Parser:
         sum_types = []
         extern_functions = []
         imports = []
+        from_imports = []
         self.skip_newlines()
         while not self.at_end():
             if self.check(TokenType.STRUCT):
@@ -1296,12 +1330,14 @@ class Parser:
                 extern_functions.append(self.parse_extern_function())
             elif self.check(TokenType.IMPORT):
                 imports.append(self.parse_import())
+            elif self.check(TokenType.FROM):
+                from_imports.append(self.parse_from_import())
             else:
                 functions.append(self.parse_function())
             self.skip_newlines()
         return Program(
             functions=functions, structs=structs, type_aliases=type_aliases, sum_types=sum_types,
-            extern_functions=extern_functions, imports=imports,
+            extern_functions=extern_functions, imports=imports, from_imports=from_imports,
             line=start_tok.line, col=start_tok.col,
         )
 
@@ -1330,6 +1366,32 @@ class Parser:
                     f"at line {start_tok.line}, column {start_tok.col}"
                 )
         return ImportDecl(path=path, qualifier=qualifier, line=start_tok.line, col=start_tok.col)
+
+    def parse_from_import(self) -> FromImportDecl:
+        """`from "path" import name1 [as alias1], name2 [as alias2],
+        ...` -- see FromImportDecl's own docstring for the full
+        design. `path` shares ImportDecl's own resolution exactly
+        (same STRING-token reuse, same reasoning); unlike ImportDecl,
+        there's no derived-default to validate here at all -- every
+        name is already a plain IDENTIFIER token, always a valid
+        Hornet name by construction, with no filename-derived
+        guessing involved the way ImportDecl's own bare qualifier
+        needs."""
+        start_tok = self.expect(TokenType.FROM, "Expected 'from'")
+        path_tok = self.expect(TokenType.STRING, "Expected a quoted path after 'from'")
+        path = _unescape_quoted_literal(path_tok.val)
+        self.expect(TokenType.IMPORT, "Expected 'import' after the path")
+        names: List[Tuple[str, str]] = []
+        while True:
+            name_tok = self.expect(TokenType.IDENTIFIER, "Expected a name to import")
+            if self.match(TokenType.AS):
+                alias_tok = self.expect(TokenType.IDENTIFIER, "Expected an alias name after 'as'")
+                names.append((name_tok.val, alias_tok.val))
+            else:
+                names.append((name_tok.val, name_tok.val))
+            if not self.match(TokenType.COMMA):
+                break
+        return FromImportDecl(path=path, names=names, line=start_tok.line, col=start_tok.col)
 
     def parse_type_declaration(self) -> Union[TypeAlias, StructDef, SumTypeDef]:
         """`type Name = TargetType` (an alias), `type Name struct:
