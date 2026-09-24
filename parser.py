@@ -800,7 +800,7 @@ class IsCheck(Node):
     through, not a same-shape but distinct one its own fresh id()
     could never match."""
     variable_name: str
-    type_name: str
+    type_name: Union[str, QualifiedTypeExpr]
     subject: Optional[Node] = None
     binding_decl: Optional[Node] = None
 
@@ -973,7 +973,7 @@ class SumTypeDef(Node):
     -- left to semantic.py, the same way a struct's own duplicate-
     field-name check is."""
     name: str
-    variants: List[str] = field(default_factory=list)
+    variants: List[Union[str, QualifiedTypeExpr]] = field(default_factory=list)
 
 
 @dataclass
@@ -1373,16 +1373,17 @@ class Parser:
         already draws between a structurally-empty declaration (a
         parser concern) and a duplicate or unresolvable name (a
         semantic one)."""
-        first_tok = self.expect(TokenType.IDENTIFIER, "Expected a variant name")
-        variants = [first_tok.val]
+        first_line_tok = self.current()
+        first_variant = self._parse_qualifiable_type_name("a variant name")
+        variants = [first_variant]
         while self.match(TokenType.PIPE):
-            variant_tok = self.expect(TokenType.IDENTIFIER, "Expected a variant name after '|'")
-            variants.append(variant_tok.val)
+            variant = self._parse_qualifiable_type_name("a variant name after '|'")
+            variants.append(variant)
         if len(variants) < 2:
             raise ParseError(
                 f"Expected at least one '|' and a second variant in sum type "
                 f"'{name_tok.val}' -- a sum type needs at least two variants "
-                f"at line {first_tok.line}, column {first_tok.col}"
+                f"at line {first_line_tok.line}, column {first_line_tok.col}"
             )
         self.expect(TokenType.NEWLINE, "Expected a newline after a sum type declaration")
         return SumTypeDef(name=name_tok.val, variants=variants, line=start_tok.line, col=start_tok.col)
@@ -1440,9 +1441,16 @@ class Parser:
         '(', never another identifier) -- the same two-vs-one-
         IDENTIFIER disambiguation parse_statement's struct-typed-
         VarDecl check needs, for the same reason (struct names aren't
-        reserved keywords)."""
+        reserved keywords). A QUALIFIED struct-typed return (`module.
+        Name`) needs the identical, one-qualifier-deeper shape parse_
+        statement's own qualified-VarDecl check also needs: IDENTIFIER
+        DOT IDENTIFIER IDENTIFIER, the def's own name always being the
+        fourth token there too."""
         return self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET, TokenType.STAR) or (
             self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.IDENTIFIER
+        ) or (
+            self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.DOT
+            and self.peek(2).type == TokenType.IDENTIFIER and self.peek(3).type == TokenType.IDENTIFIER
         )
 
     def parse_function(self) -> Function:
@@ -1833,17 +1841,17 @@ class Parser:
         if self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.IS:
             name_tok = self.advance()
             self.advance()  # consume 'is'
-            type_tok = self.expect(TokenType.IDENTIFIER, "Expected a type name after 'is'")
+            type_name = self._parse_qualifiable_type_name("a type name after 'is'")
             if self.check(TokenType.AS):
                 self.advance()  # consume 'as'
                 binding_tok = self.expect(TokenType.IDENTIFIER, "Expected a binding name after 'as'")
                 subject = Variable(name=name_tok.val, line=name_tok.line, col=name_tok.col)
-                return IsCheck(variable_name=binding_tok.val, type_name=type_tok.val, subject=subject, line=name_tok.line, col=name_tok.col)
-            return IsCheck(variable_name=name_tok.val, type_name=type_tok.val, line=name_tok.line, col=name_tok.col)
+                return IsCheck(variable_name=binding_tok.val, type_name=type_name, subject=subject, line=name_tok.line, col=name_tok.col)
+            return IsCheck(variable_name=name_tok.val, type_name=type_name, line=name_tok.line, col=name_tok.col)
         expr = self.parse_expression()
         if self.check(TokenType.IS):
             is_tok = self.advance()
-            type_tok = self.expect(TokenType.IDENTIFIER, "Expected a type name after 'is'")
+            type_name = self._parse_qualifiable_type_name("a type name after 'is'")
             self.expect(
                 TokenType.AS,
                 "Expected 'as NAME' after the type name -- a non-bare-variable "
@@ -1851,8 +1859,34 @@ class Parser:
                 "to narrow, since it has no existing name of its own",
             )
             binding_tok = self.expect(TokenType.IDENTIFIER, "Expected a binding name after 'as'")
-            return IsCheck(variable_name=binding_tok.val, type_name=type_tok.val, subject=expr, line=is_tok.line, col=is_tok.col)
+            return IsCheck(variable_name=binding_tok.val, type_name=type_name, subject=expr, line=is_tok.line, col=is_tok.col)
         return expr
+
+    def _parse_qualifiable_type_name(self, expected_message: str) -> Union[str, QualifiedTypeExpr]:
+        """Consumes a type name that MAY be module-qualified (`module.
+        Name`) -- for the four grammar positions that previously only
+        ever accepted a bare IDENTIFIER: _parse_if_condition's own two
+        shapes (both call this), parse_match's own arm parsing, and
+        _parse_sum_type_body's own per-variant parsing. `expected_
+        message` is this position's own "Expected ..." text if no
+        IDENTIFIER is found at all, matching each call site's own,
+        previously-inline wording exactly (e.g. "a type name after
+        'is'", "a variant name after '|'").
+
+        Reuses the identical shape parse_type's own IDENTIFIER case
+        already established for QualifiedTypeExpr (see its own
+        docstring) -- a '.' right after the first identifier means
+        qualified, parsed into its own node rather than a combined
+        string, for the same reason given there: real, separate
+        structure (which module, which name in it) a bare string
+        can't carry on its own."""
+        name_tok = self.expect(TokenType.IDENTIFIER, f"Expected {expected_message}")
+        if self.check(TokenType.DOT):
+            self.advance()
+            qualified_name_tok = self.expect(TokenType.IDENTIFIER, "Expected a type name after '.'")
+            return QualifiedTypeExpr(
+                module=name_tok.val, name=qualified_name_tok.val, line=name_tok.line, col=name_tok.col)
+        return name_tok.val
 
     def parse_match(self) -> If:
         """`match NAME:`, or `match EXPR as NAME:` for a non-bare-
@@ -1929,7 +1963,7 @@ class Parser:
         self.expect(TokenType.INDENT, "Expected an indented block")
         self.skip_newlines()
 
-        arms: List[Tuple[Token, str, List[Node]]] = []
+        arms: List[Tuple[Token, Union[str, QualifiedTypeExpr], List[Node]]] = []
         else_body: Optional[List[Node]] = None
         while not self.check(TokenType.DEDENT) and not self.at_end():
             if self.match(TokenType.ELSE):
@@ -1939,11 +1973,11 @@ class Parser:
                 self.skip_newlines()
                 break
             arm_tok = self.expect(TokenType.IS, "Expected 'is' (a match arm) or 'else'")
-            type_tok = self.expect(TokenType.IDENTIFIER, "Expected a type name after 'is'")
+            type_name = self._parse_qualifiable_type_name("a type name after 'is'")
             self.expect(TokenType.COLON, "Expected ':' to start this arm's body")
             self.expect(TokenType.NEWLINE, "Expected a newline after ':'")
             arm_body = self.parse_block()
-            arms.append((arm_tok, type_tok.val, arm_body))
+            arms.append((arm_tok, type_name, arm_body))
             self.skip_newlines()
 
         self.expect(TokenType.DEDENT, "Expected the match body to end")
@@ -2117,10 +2151,12 @@ class Parser:
         `.name`, or `.name(...)` suffixes. `[...]` is an index
         (`matrix[i][j]`, nested Index nodes -- see Index's own
         docstring) or a slice (see _parse_index_or_slice); `.name`
-        alone is a Field access; `.name(...)` is a method call, an
-        ordinary Call with `receiver` set to whatever preceded the '.'.
-        All four chain together freely (`a.b[0]`, `a.b.method(1)[0]`)
-        with no special-casing for order.
+        alone is a Field access; `.name(...)` is a method call OR a
+        module-qualified reference (`module.Name(...)`, resolved later
+        by merge.py -- see Call's own docstring), an ordinary Call
+        with `receiver` set to whatever preceded the '.'. All four
+        chain together freely (`a.b[0]`, `a.b.method(1)[0]`) with no
+        special-casing for order.
 
         Sits between parse_unary and parse_primary so these all bind
         TIGHTER than a prefix operator: `-arr[0]` means `-(arr[0])`,
@@ -2131,9 +2167,9 @@ class Parser:
             if self.match(TokenType.DOT):
                 name_tok = self.expect(TokenType.IDENTIFIER, "Expected a field name after '.'")
                 if self.match(TokenType.OPEN_PAREN):
-                    args = self.parse_positional_call_args()
-                    self.expect(TokenType.CLOSE_PAREN, "Expected ')' after method call arguments")
-                    expr = Call(name=name_tok.val, args=args, receiver=expr, line=expr.line, col=expr.col)
+                    args, kwargs = self.parse_receiver_call_args()
+                    self.expect(TokenType.CLOSE_PAREN, "Expected ')' after call arguments")
+                    expr = Call(name=name_tok.val, args=args, kwargs=kwargs, receiver=expr, line=expr.line, col=expr.col)
                 else:
                     expr = Field(base=expr, name=name_tok.val, line=expr.line, col=expr.col)
             else:
@@ -2141,18 +2177,61 @@ class Parser:
                 expr = self.parse_index_or_slice(expr)
         return expr
 
-    def parse_positional_call_args(self) -> List[Node]:
-        """A plain, comma-separated, purely positional argument list
-        for a method call -- unlike parse_call, no named-argument
-        support: that's scoped to struct literals (see Call's own
-        docstring), and method calls don't currently extend to it."""
+    def parse_receiver_call_args(self) -> Tuple[List[Node], Optional[List[Tuple[str, Node]]]]:
+        """`arg1, arg2, ...` or `f1=v1, f2=v2, ...` after a receiver's
+        own '.name(' -- OPEN_PAREN already consumed, CLOSE_PAREN not
+        yet. Same positional-vs-named disambiguation and mixing
+        rejection as parse_call's own (see its own docstring for the
+        one-token-of-lookahead reasoning) -- duplicated rather than
+        shared, since parse_call's own version is also responsible for
+        consuming the leading NAME and OPEN_PAREN this method's own
+        caller (parse_postfix) has already consumed differently, by
+        the time either method's own argument-parsing loop starts.
+
+        Needed for the identical reason parse_call's own kwarg support
+        is: this shape is ALSO how a module-qualified struct
+        construction is written (`module.Circle(radius=5)`), and the
+        parser has no symbol table to tell that apart from an ordinary
+        method call at parse time (same reasoning parse_type's own
+        docstring gives for its own, analogous ambiguity) -- so this
+        has to accept kwargs generically, for every receiver-based
+        call, even though an ORDINARY method call never actually uses
+        them; semantic.py's own _check_method_call explicitly rejects
+        a non-None kwargs there instead, with a clear message, rather
+        than this method trying to guess which shape it's parsing."""
         args: List[Node] = []
+        kwargs: Optional[List[Tuple[str, Node]]] = None
         if self.check(TokenType.CLOSE_PAREN):
-            return args
-        args.append(self.parse_expression())
-        while self.match(TokenType.COMMA):
-            args.append(self.parse_expression())
-        return args
+            return args, kwargs
+        while True:
+            start_tok = self.current()
+            if self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.ASSIGN:
+                field_name = self.advance().val
+                self.advance()  # consume '='
+                value = self.parse_expression()
+                if args:
+                    raise ParseError(
+                        f"Cannot mix positional and named arguments in "
+                        f"a call -- '{field_name}=...' follows a "
+                        f"positional argument at line {start_tok.line}, "
+                        f"column {start_tok.col}"
+                    )
+                if kwargs is None:
+                    kwargs = []
+                kwargs.append((field_name, value))
+            else:
+                value = self.parse_expression()
+                if kwargs is not None:
+                    raise ParseError(
+                        f"Cannot mix positional and named arguments in "
+                        f"a call -- a positional argument follows a "
+                        f"named one at line {start_tok.line}, column "
+                        f"{start_tok.col}"
+                    )
+                args.append(value)
+            if not self.match(TokenType.COMMA):
+                break
+        return args, kwargs
 
     def parse_index_or_slice(self, array_expr: Node) -> Node:
         """Parses the content of one `[...]` pair (OPEN_BRACKET

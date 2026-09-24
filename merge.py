@@ -251,21 +251,19 @@ def _rewrite_node(node, own_names: Set[str], canonical_module: Optional[str], im
             node.receiver = None
             node.args = [_rewrite_node(a, own_names, canonical_module, import_aliases, ctx) for a in node.args]
             if node.kwargs is not None:
-                # Currently unreachable: a receiver-set Call (this
-                # branch) only ever comes from parse_postfix's own
-                # receiver-based parsing, which uses parse_positional_
-                # call_args -- deliberately positional-only, unlike
-                # parse_call's own named-kwarg support (see Call's own
-                # docstring in parser.py) -- so `module.Name(x=1)`
-                # (a qualified struct construction using named
-                # fields) is a real, known grammar gap: it doesn't
-                # parse at all today, confirmed directly in test_
-                # merge.py's own test_qualified_struct_construction_
-                # with_named_kwargs. Kept here, rather than removed,
-                # so this rewrite is already correct the day that gap
-                # closes, instead of silently mis-rewriting kwargs
-                # whenever parse_postfix eventually grows support for
-                # them.
+                # A module-qualified struct construction using named
+                # fields (`module.Circle(radius=5)`) -- see parse_
+                # receiver_call_args' own docstring in parser.py for
+                # why a receiver-based Call can carry kwargs at all
+                # (the grammar accepts them generically, for every
+                # receiver-based call, since there's no symbol table
+                # at parse time to tell this apart from an ordinary
+                # method call -- which never actually reaches this
+                # branch, since node.receiver would already have
+                # resolved to None above only for a genuine qualified
+                # reference; an ordinary method call's own kwargs, if
+                # any, are instead rejected downstream by semantic.
+                # py's own _check_method_call).
                 node.kwargs = [
                     (k, _rewrite_node(v, own_names, canonical_module, import_aliases, ctx)) for k, v in node.kwargs
                 ]
@@ -284,9 +282,9 @@ def _rewrite_node(node, own_names: Set[str], canonical_module: Optional[str], im
             value = getattr(node, f.name)
             if f.name in _TYPE_FIELD_NAMES:
                 setattr(node, f.name, _rewrite_type_expr(value, own_names, canonical_module, import_aliases, ctx))
-            elif f.name == 'variants':  # SumTypeDef's own list of bare variant-struct names
+            elif f.name == 'variants':  # SumTypeDef's own list of variant names, each possibly qualified
                 setattr(node, f.name, [
-                    _mangle(canonical_module, v) if v in own_names else v for v in value
+                    _rewrite_type_expr(v, own_names, canonical_module, import_aliases, ctx) for v in value
                 ])
             else:
                 setattr(node, f.name, _rewrite_node(value, own_names, canonical_module, import_aliases, ctx))

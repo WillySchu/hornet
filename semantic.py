@@ -2230,7 +2230,29 @@ class SemanticAnalyzer:
         exact count, each checked via _check_expr_allowing_struct_
         literal against the method's declared parameter types -- the
         receiver is never counted, since it's never in the written
-        argument list."""
+        argument list.
+
+        expr.kwargs is rejected outright, before any of that: parse_
+        receiver_call_args accepts named arguments generically, for
+        every receiver-based call, since the parser can't yet tell a
+        genuine method call apart from a module-qualified struct
+        construction (`module.Circle(radius=5)`, ALSO a receiver-based
+        Call -- see its own docstring in parser.py) -- but an ordinary
+        method call itself never actually supports them, the same
+        restriction check_call's own, separate kwargs check already
+        applies to a plain function call. Checked here, first, rather
+        than left to fall through to the argument-count mismatch just
+        below: `obj.method(x=1)` on a method taking one parameter
+        would otherwise silently compare len(expr.args) (0, since x=1
+        parsed into kwargs, not args) against 1 and report a
+        confusing "expects 1 argument, got 0", never mentioning named
+        arguments at all."""
+        if expr.kwargs is not None:
+            raise SemanticError(
+                f"'{expr.name}(...)' uses named arguments, which are not "
+                f"supported for method calls",
+                expr,
+            )
         receiver_type = self.check_expr(expr.receiver)
         if receiver_type.kind == TypeKind.POINTER and receiver_type.element_type.kind == TypeKind.STRUCT:
             # Go-style auto-deref, mirroring _check_struct_and_field's

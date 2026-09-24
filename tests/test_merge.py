@@ -326,26 +326,52 @@ def test_array_of_qualified_struct_type():
 
 
 def test_qualified_struct_construction_with_named_kwargs():
-    """Named kwargs for a QUALIFIED struct construction aren't
-    supported at all today: `module.Name(...)` parses through the
-    SAME receiver-based Call shape as an ordinary method call (see
-    parse_postfix's own docstring), which only ever supports
-    positional arguments (parse_positional_call_args, deliberately
-    distinct from parse_call's own named-kwarg support) -- a real,
-    known grammar gap this feature inherits rather than one merge.py
-    itself introduces. Confirmed here as a ParseError, not silently
-    mis-parsed, so a future fix has a clear regression test to change
-    once qualified construction gains kwarg support of its own."""
-    src = (
-        "import 'shapes'\n\n"
-        "def int main():\n"
-        "    shapes.Circle c = shapes.Circle(radius=9)\n"
-        "    return c.radius\n"
-    )
+    """Exercises the kwargs-rewriting branch of a qualified Call --
+    struct construction using named fields, not positional args. See
+    _check_method_call_with_named_kwargs_is_rejected for the OTHER
+    half of this feature: an ordinary method call still can't use
+    named arguments, even though the grammar accepts them generically
+    for every receiver-based call (parse_receiver_call_args' own
+    docstring explains why it has to)."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        path = _write(tmpdir, "main.ht", src)
-        with pytest.raises(ParseError, match=r"Expected '\)' after method call arguments"):
-            Parser(lex(path)).parse_program()
+        entry = _write(
+            tmpdir, "main.ht",
+            "import 'shapes'\n\n"
+            "def int main():\n"
+            "    shapes.Circle c = shapes.Circle(radius=9)\n"
+            "    return c.radius\n",
+        )
+        _write(tmpdir, "shapes.ht", "type Circle struct:\n    int radius\n")
+        result = _compile_and_run(entry, tmpdir)
+        assert result.returncode == 9
+
+
+def test_method_call_with_named_kwargs_is_rejected():
+    """The other half of the fix: parse_receiver_call_args has to
+    accept named kwargs generically (no symbol table at parse time to
+    tell a qualified struct construction apart from an ordinary
+    method call), so this is caught downstream instead, by _check_
+    method_call's own explicit rejection -- confirmed here as a clear
+    SemanticError naming named arguments specifically, not the
+    confusing argument-count mismatch it would otherwise silently
+    fall through to (0 positional args vs. 1 expected, with the
+    named one nowhere mentioned)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "type Box struct:\n"
+            "    int width\n\n"
+            "    def int area(self):\n"
+            "        return self.width * self.width\n\n"
+            "def int main():\n"
+            "    Box b = Box(4)\n"
+            "    return b.area(x=1)\n",
+        )
+        entry_program, modules = discover_modules(entry)
+        merged = merge_programs(entry_program, modules)
+        desugar_methods(merged)
+        with pytest.raises(SemanticError, match="not supported for method calls"):
+            analyze(merged)
 
 
 def test_in_module_struct_field_referencing_another_struct_in_the_same_module():
@@ -370,7 +396,152 @@ def test_in_module_struct_field_referencing_another_struct_in_the_same_module():
         assert result.returncode == 7
 
 
-def test_bare_uncalled_qualified_function_reference_is_a_semantic_error_not_a_crash():
+def test_qualified_narrowing_with_as_binding_bare_subject():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "import 'shapes'\n\n"
+            "def int main():\n"
+            "    shapes.Thing t = shapes.Circle(5)\n"
+            "    if t is shapes.Circle as c:\n"
+            "        return c.radius\n"
+            "    return 0\n",
+        )
+        _write(
+            tmpdir, "shapes.ht",
+            "type Circle struct:\n    int radius\n\n"
+            "type Square struct:\n    int side\n\n"
+            "type Thing is Circle | Square\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.returncode == 5
+
+
+def test_qualified_narrowing_non_bare_subject():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "import 'shapes'\n\n"
+            "def shapes.Thing makeThing():\n"
+            "    return shapes.Circle(8)\n\n"
+            "def int main():\n"
+            "    if makeThing() is shapes.Circle as c:\n"
+            "        return c.radius\n"
+            "    return 0\n",
+        )
+        _write(
+            tmpdir, "shapes.ht",
+            "type Circle struct:\n    int radius\n\n"
+            "type Square struct:\n    int side\n\n"
+            "type Thing is Circle | Square\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.returncode == 8
+
+
+def test_sum_type_with_qualified_variants_declared_in_the_entry_file():
+    """The sum type ITSELF declared in the entry file, with its own
+    variants qualified references into an imported module -- the
+    mirror image of test_sum_type_variants_rewritten_correctly_
+    within_an_imported_module, which keeps everything in one module."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "import 'shapes'\n\n"
+            "type Thing is shapes.Circle | shapes.Square\n\n"
+            "def int main():\n"
+            "    Thing t = shapes.Circle(7)\n"
+            "    match t:\n"
+            "        is shapes.Circle:\n"
+            "            return t.radius\n"
+            "        is shapes.Square:\n"
+            "            return t.side\n",
+        )
+        _write(
+            tmpdir, "shapes.ht",
+            "type Circle struct:\n    int radius\n\ntype Square struct:\n    int side\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.returncode == 7
+
+
+def test_qualified_match_arm_selects_the_other_variant():
+    """The same program as above, but constructing the OTHER variant
+    -- confirms both qualified match arms resolve to their own,
+    correctly distinct mangled struct, not both accidentally matching
+    the same one."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "import 'shapes'\n\n"
+            "type Thing is shapes.Circle | shapes.Square\n\n"
+            "def int main():\n"
+            "    Thing t = shapes.Square(9)\n"
+            "    match t:\n"
+            "        is shapes.Circle:\n"
+            "            return t.radius\n"
+            "        is shapes.Square:\n"
+            "            return t.side\n",
+        )
+        _write(
+            tmpdir, "shapes.ht",
+            "type Circle struct:\n    int radius\n\ntype Square struct:\n    int side\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.returncode == 9
+
+
+def test_unknown_module_in_qualified_narrowing_is_rejected():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "def int main():\n"
+            "    int x = 5\n"
+            "    if x is notImported.Circle as c:\n"
+            "        return 1\n"
+            "    return 0\n",
+        )
+        entry_program, modules = discover_modules(entry)
+        with pytest.raises(MergeError, match="doesn't name an imported module"):
+            merge_programs(entry_program, modules)
+
+
+def test_hidden_struct_in_qualified_narrowing_is_rejected():
+    """Visibility applies to a qualified `is` target exactly like any
+    other qualified reference -- _rewrite_type_expr's own Qualified
+    TypeExpr case delegates to the SAME _resolve_qualified/_check_
+    visible machinery every other position already uses, so this
+    isn't a separate check to maintain, just a consequence of reusing
+    it. shapes.ht itself constructs the hidden variant (visible from
+    within its own module) and hands it back already boxed as a
+    Thing, so the ENTRY file's only qualified reference to the hidden
+    name at all is the `is` check itself -- isolating that one path,
+    rather than also tripping over a second violation at the
+    construction site."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "import 'shapes'\n\n"
+            "def int main():\n"
+            "    shapes.Thing t = shapes.makeHidden()\n"
+            "    if t is shapes._Circle as c:\n"
+            "        return c.radius\n"
+            "    return 0\n",
+        )
+        _write(
+            tmpdir, "shapes.ht",
+            "type _Circle struct:\n    int radius\n\n"
+            "type Square struct:\n    int side\n\n"
+            "type Thing is _Circle | Square\n\n"
+            "def Thing makeHidden():\n"
+            "    return _Circle(5)\n",
+        )
+        entry_program, modules = discover_modules(entry)
+        with pytest.raises(MergeError, match="not visible outside the module that defines it"):
+            merge_programs(entry_program, modules)
+
+
+
     """`utils.helper` with no call -- parses as a qualified Field
     access (see Field's own docstring), correctly rewritten to a bare
     Variable("utils$helper") by merge.py, and THEN correctly rejected
