@@ -51,7 +51,7 @@ Updates:
 - Sorting.
 - Format strings.
 - Slice equality?
-- Import *?
+- Import \*?
 - Flow sensitive escape analysis.
 - Deduplicate emitted type descriptors when we call print()
 - Variadic functions.
