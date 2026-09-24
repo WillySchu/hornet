@@ -10908,6 +10908,45 @@ class TestCastingCodegen:
             44,
         )
 
+    def test_widening_cast_of_a_literal_exceeding_int32_range_preserves_the_full_value(self):
+        """Bug fix: int64(1099511628211) used to truncate to 435
+        (32-bit reinterpretation of the literal) -- see check_cast
+        and gen_cast_narrowing_into's own docstrings. print(), not
+        return, since the exit code truncates to 8 bits regardless."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    print(int64(1099511628211))\n"
+            "    return 0\n",
+            "1099511628211\n",
+        )
+
+    def test_widening_cast_of_a_negative_literal_exceeding_int32_range(self):
+        """Same bug, via the Unary NEGATE literal shape (`-huge`)."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    print(int64(-1099511628211))\n"
+            "    return 0\n",
+            "-1099511628211\n",
+        )
+
+    def test_repeated_multiplication_by_a_large_int64_literal_constant_in_a_called_function(self):
+        """The real shape that surfaced this bug: an FNV-1a-style
+        hash step, called in a loop. Expected value computed
+        independently in Python."""
+        assert_program_stdout(
+            "def int64 fnvStep(int64 h, byte b):\n"
+            "    return (h ^ int64(b)) * int64(1099511628211)\n\n"
+            "def int main():\n"
+            "    int64 h = -3750763034362895579\n"
+            "    int64 i = 0\n"
+            "    while i < int64(8):\n"
+            "        h = fnvStep(h, byte(i))\n"
+            "        i = i + int64(1)\n"
+            "    print(h)\n"
+            "    return 0\n",
+            "-6567292918605886595\n",
+        )
+
 
 # ---------------------------------------------------------------------------
 # int64, step 1 of 4: the TYPE SYSTEM only -- lexer/parser keywords,

@@ -160,38 +160,20 @@ def fold_unary_op(op: UnaryOp, operand: int, result_type: Type) -> int:
     return _wrap(int(operand == 0), result_type)  # UnaryOp.NOT
 
 
-def fold_cast(target_type: Type, src: int) -> int:
-    """The value an explicit `target_type(expr)` cast computes at
-    compile time -- deliberately mirrors gen_cast_narrowing_into's own
-    lowering instruction for instruction, rather than independently
-    re-deriving "correct" cast semantics: that method's own docstring
-    is the actual spec for what a cast means on this compiler's own
-    hardware, so this has to match it exactly, quirks included, or a
-    folded cast could silently disagree with an unfolded one.
-
-    int8/uint8 targets: MovSX/MovZX's own low-byte reinterpretation --
-    _wrap already does exactly this for either type, regardless of
-    src's own width, since the low byte of a wider value is identical
-    to the low byte of its own 32-bit view.
-
-    An int64 target: MovSXD's own sign-extension of dst's 32-bit VIEW
-    specifically, not src's full value -- even when src is already
-    int64-typed (e.g. a same-type `int64(someInt64Expr)`), matching
-    gen_cast_narrowing_into's own unconditional behavior there exactly
-    (see its own docstring: \"correct regardless of whether the source
-    was int, int8, or uint8\" -- int64-to-int64 is simply never
-    exercised differently). Narrowing an int64 source down to int8/
-    uint8 needs the identical 32-bit truncation first, for the same
-    reason.
-
-    A plain int target: whatever the 32-bit view already holds, no
-    further change -- gen_cast_narrowing_into emits no instruction at
-    all for this case."""
+def fold_cast(target_type: Type, src: int, source_type: Type) -> int:
+    """Mirrors gen_cast_narrowing_into exactly (a folded cast must
+    agree with an unfolded one). int8/uint8: low-byte reinterpretation
+    via _wrap. int64: sign-extend src's 32-bit view -- UNLESS
+    source_type is already int64 (same-type, no-op cast), in which
+    case src passes through unchanged. Plain int: whatever the 32-bit
+    view holds."""
     if target_type == Type.INT8:
         return _wrap(src, Type.INT8)
     if target_type == Type.UINT8:
         return _wrap(src, Type.UINT8)
     if target_type == Type.INT64:
+        if source_type == Type.INT64:
+            return src
         return _wrap(_wrap(src, Type.INT), Type.INT64)
     return _wrap(src, Type.INT)  # target_type == Type.INT
 
@@ -212,5 +194,5 @@ def fold_constants(ir_fn: IRFunction) -> None:
             folded = fold_unary_op(instr.op, instr.operand.value, instr.dst.type)
             ir_fn.body[i] = IRMove(dst=instr.dst, src=IRConst(folded, instr.dst.type))
         elif isinstance(instr, IRCast) and isinstance(instr.src, IRConst):
-            folded = fold_cast(instr.dst.type, instr.src.value)
+            folded = fold_cast(instr.dst.type, instr.src.value, instr.src.type)
             ir_fn.body[i] = IRMove(dst=instr.dst, src=IRConst(folded, instr.dst.type))

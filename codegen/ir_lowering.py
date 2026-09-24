@@ -196,12 +196,12 @@ class InstructionSelector:
                 out.extend(self.host.gen_unary_op(instr.op, Register('eax'), operand_type=instr.operand.type))
                 out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
             elif isinstance(instr, IRCast):
-                # Same three-step shape as IRUnOp's own lowering just
-                # above -- load, apply gen_cast_narrowing_into, write
-                # back -- with dst.type (not an operand's own type) as
-                # what tells it which way to (re)narrow.
+                # dst.type says which way to (re)narrow; src.type is
+                # also needed now, so a source already int64 (a no-op
+                # cast) isn't destructively re-truncated -- see gen_
+                # cast_narrowing_into's own docstring.
                 out.extend(self._gen_load_value(instr.src, Register('eax')))
-                out.extend(self.host.gen_cast_narrowing_into(instr.dst.type, Register('eax')))
+                out.extend(self.host.gen_cast_narrowing_into(instr.dst.type, Register('eax'), instr.src.type))
                 out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
             elif isinstance(instr, IRLabel):
                 out.append(Label(instr.name))

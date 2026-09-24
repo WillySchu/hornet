@@ -1,0 +1,32 @@
+def int64 _fnv_offset_basis():
+    return -3750763034362895579  # 14695981039346656037, wrapped to int64's own bit pattern
+
+def int64 _fnv_step(int64 h, byte b):
+    return (h ^ int64(b)) * int64(1099511628211)  # FNV prime
+
+def int64 hash_int64(int64 x):
+    int64 h = _fnv_offset_basis()
+    int64 i = 0
+    while i < int64(8):
+        h = _fnv_step(h, byte((x >> (i * int64(8))) & int64(255)))
+        i = i + int64(1)
+    return h
+
+def int64 hash_str(str s):
+    int64 h = _fnv_offset_basis()
+    int i = 0
+    while i < len(s):
+        h = _fnv_step(h, s[i])
+        i = i + 1
+    return h
+
+def int64 hash_int(int x):
+    return hash_int64(int64(x))
+
+def int64 hash_bool(bool b):
+    if b:
+        return hash_int(1)
+    return hash_int(0)
+
+def int64 hash_byte(byte b):
+    return hash_int64(int64(b))

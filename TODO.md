@@ -44,7 +44,6 @@ Updates:
 - `cap` builtin?
 - Ternary.
 - For loops.
-- Hashing.
 - Dicts.
 - Sets.
 - Generics.

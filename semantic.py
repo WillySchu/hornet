@@ -2748,30 +2748,23 @@ class SemanticAnalyzer:
         raise SemanticError(f"No semantic rule for unary operator: {expr.op}", expr)
 
     def check_cast(self, expr: Cast) -> Type:
-        """`TYPE(expr)` -- an explicit numeric cast. Resolves target_
-        type via type_from_name, the same choke point every other
-        type-name resolution in this file uses.
+        """`TYPE(expr)` -- an explicit numeric cast; only int/int8/
+        uint8/int64 supported on either side.
 
-        The source is checked via plain check_expr, not the target-
-        aware _check_value_flowing_into a VarDecl/Assign uses -- a
-        cast's point is converting an ALREADY-typed value, unlike that
-        special case, which exists specifically because a cast didn't
-        yet exist as an alternative way to produce an int8/uint8 value.
-        A literal argument still gets ordinary Type.INT treatment here,
-        then converts like any other int-typed expression -- `int8(
-        200)` wraps to -56 with no compile-time range check, since
-        range-checking only makes sense for the "no other way to
-        produce this value" case _check_value_flowing_into covers.
-
-        Only int/int8/uint8/int64 are supported on either side; bool
-        and str are syntactically valid targets but rejected here
-        (bool is non-numeric everywhere else; str conversion is a
-        fundamentally different kind of operation, a separate, later
-        feature). A cast always produces exactly the type it names,
-        unlike arithmetic (where int8 stays int8) -- there's no
-        operand-dependent result to derive."""
+        Bug fix: a bare int literal cast directly to int64 (e.g.
+        `int64(1099511628211)`) is annotated int64 up front, instead
+        of getting check_expr's default Type.INT tag -- otherwise a
+        literal exceeding int32 range gets truncated to 32 bits before
+        IRCast's own widening ever sees it. Doesn't reuse
+        _check_value_flowing_into wholesale, since that would also
+        pull in its int8/uint8 range check and wrongly reject the
+        established int8(200) -> -56 wraparound below."""
         target_type = type_from_name(expr.target_type, self.structs, self.type_aliases, expr, self.sum_types)
-        source_type = self.check_expr(expr.expr)
+        if target_type == Type.INT64 and self._as_folded_int_literal(expr.expr) is not None:
+            self._annotate_literal_resolved_type(expr.expr, Type.INT64)
+            source_type = Type.INT64
+        else:
+            source_type = self.check_expr(expr.expr)
         if target_type not in _INTEGER_TYPES or source_type not in _INTEGER_TYPES:
             raise SemanticError(
                 f"Cannot cast {source_type} to {target_type} -- casting "

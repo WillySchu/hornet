@@ -185,45 +185,43 @@ def test_fold_cast_int_to_int8_positive_low_byte():
     """int(300) as int8: 300's low byte (0x2C) has its high bit
     clear, so sign-extension leaves it positive -- 44, matching gen_
     cast_narrowing_into's own docstring example exactly."""
-    assert 44 == fold_cast(Type.INT8, 300)
+    assert 44 == fold_cast(Type.INT8, 300, Type.INT)
 
 
 def test_fold_cast_int_to_int8_negative_low_byte():
     """int(200) as int8: 200's low byte (0xC8) has its high bit set,
     so sign-extension produces the negative two's-complement
     reinterpretation -- -56, the docstring's own other example."""
-    assert -56 == fold_cast(Type.INT8, 200)
+    assert -56 == fold_cast(Type.INT8, 200, Type.INT)
 
 
 def test_fold_cast_int_to_uint8():
-    assert 44 == fold_cast(Type.UINT8, 300)
+    assert 44 == fold_cast(Type.UINT8, 300, Type.INT)
 
 
 def test_fold_cast_narrow_to_int64_widens():
-    assert -5 == fold_cast(Type.INT64, -5)
+    assert -5 == fold_cast(Type.INT64, -5, Type.INT)
 
 
 def test_fold_cast_int64_to_int_truncates_to_32_bits_first():
     """Narrowing an int64 source down to int needs the identical
     32-bit truncation int64_to_int8/uint8 also goes through."""
     big = 5_000_000_000  # doesn't fit in a 32-bit int at all
-    assert fold_cast(Type.INT, big) == fold_cast(Type.INT, big % (2 ** 32))
+    assert fold_cast(Type.INT, big, Type.INT64) == fold_cast(Type.INT, big % (2 ** 32), Type.INT64)
 
 
-def test_fold_cast_int64_to_int64_still_truncates_through_32_bits():
-    """gen_cast_narrowing_into's own MovSXD always re-derives its
-    result from dst's 32-bit view, even for an already-int64 source --
-    fold_cast has to match that exactly, not "fix" it into a true no-
-    op, or a folded int64-to-int64 cast could silently disagree with
-    an unfolded one."""
+def test_fold_cast_int64_to_int64_is_a_true_no_op():
+    """Bug fix: fold_cast used to always re-derive via the 32-bit
+    view, even for an already-int64 source. Now matches gen_cast_
+    narrowing_into's corrected behavior: unchanged pass-through."""
     big = 5_000_000_000
-    assert big != fold_cast(Type.INT64, big)
+    assert big == fold_cast(Type.INT64, big, Type.INT64)
 
 
 def test_fold_cast_same_width_reinterpretation():
     """int8-to-uint8 (or back) is just a same-width reinterpretation
     -- take the low byte, reinterpret its sign convention."""
-    assert 200 == fold_cast(Type.UINT8, -56)
+    assert 200 == fold_cast(Type.UINT8, -56, Type.INT8)
 
 
 # -- fold_constants: in-place IR rewriting ------------------------------------

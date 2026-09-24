@@ -902,3 +902,118 @@ def test_intrinsic_colliding_with_an_already_declared_function_is_rejected():
         desugar_methods(merged)
         with pytest.raises(SemanticError, match="is already declared"):
             analyze(merged)
+
+
+def test_stdlib_hash_module_hash_int64_directly_with_value_exceeding_int32_range():
+    """Exercises hash_int64 with a value too large for int32 -- the
+    case the int64-literal-cast bug fix protects."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "import 'hash'\n\n"
+            "def int main():\n"
+            "    print(hash.hash_int64(9223372036854775000))\n"
+            "    return 0\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.stdout == "-434107886741263413\n"
+
+
+def test_stdlib_hash_module_hash_str_known_answer():
+    """Known-answer test against an independently-computed FNV-1a
+    64 reference."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "import 'hash'\n\n"
+            "def int main():\n"
+            "    print(hash.hash_str('hello'))\n"
+            "    return 0\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.stdout == "-6615550055289275125\n"
+
+
+def test_stdlib_hash_module_hash_str_empty_string():
+    """Empty string still hashes to FNV-1a's own offset basis."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "import 'hash'\n\n"
+            "def int main():\n"
+            "    print(hash.hash_str(''))\n"
+            "    return 0\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.stdout == "-3750763034362895579\n"
+
+
+def test_stdlib_hash_module_hash_int_positive_and_negative():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "import 'hash'\n\n"
+            "def int main():\n"
+            "    print(hash.hash_int(42))\n"
+            "    print(hash.hash_int(-42))\n"
+            "    return 0\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.stdout == "-55488592825689361\n-1247359464956196604\n"
+
+
+def test_stdlib_hash_module_hash_bool():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "import 'hash'\n\n"
+            "def int main():\n"
+            "    print(hash.hash_bool(true))\n"
+            "    print(hash.hash_bool(false))\n"
+            "    return 0\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.stdout == "-8517097267634966620\n-6284781860667377211\n"
+
+
+def test_stdlib_hash_module_hash_byte():
+    """Byte 0 and int 0 hash identically; byte 255 differs."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "import 'hash'\n\n"
+            "def int main():\n"
+            "    print(hash.hash_byte(\"\\xff\"))\n"
+            "    print(hash.hash_byte(\"\\x00\"))\n"
+            "    return 0\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.stdout == "-8064062821143829734\n-6284781860667377211\n"
+
+
+def test_stdlib_hash_module_equal_inputs_hash_equal():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "import 'hash'\n\n"
+            "def int main():\n"
+            "    if hash.hash_str('same') == hash.hash_str('same'):\n"
+            "        return 1\n"
+            "    return 0\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.returncode == 1
+
+
+def test_stdlib_hash_module_different_strings_hash_differently():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "import 'hash'\n\n"
+            "def int main():\n"
+            "    if hash.hash_str('abc') == hash.hash_str('abd'):\n"
+            "        return 0\n"
+            "    return 1\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.returncode == 1

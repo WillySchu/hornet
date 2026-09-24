@@ -206,54 +206,26 @@ class ScalarsLoweringMixin:
             ]
         raise CodegenError(f"No codegen rule for unary operator: {op}")
 
-    def gen_cast_narrowing_into(self, target_type: Type, dst: Register) -> list[Instruction]:
-        """The actual work behind an explicit `TYPE(expr)` cast:
-        re-narrows `dst`'s value to correctly represent target_type,
-        given that ir_lowering.py's own IRCast case has already loaded
-        the source expression into it (already correctly widened if the
-        source was int8/uint8-typed -- see _gen_read_scalar_into).
-
-        A target of int needs NOTHING further: the source's already-
-        widened 32-bit value already IS a valid int.
-
-        A target of int8 or uint8 needs exactly one more instruction:
-        MovSX (int8) or MovZX (uint8) applied to dst's own low-byte
-        alias, written back into dst -- a single, register-to-register
-        re-widening, no memory round-trip. This is DELIBERATE, not
-        just an optimization: a cast's result has to be correctly
-        narrowed immediately, not merely "correct once eventually
-        written to int8/uint8-typed storage" the way
-        _gen_write_scalar_from's truncation is -- `int8(300) + int8(5)`
-        needs 300 already wrapped to 44 BEFORE the addition happens,
-        since every later int8/uint8 operation assumes its operands
-        already correctly represent a narrow value.
-
-        This is correct regardless of the source type, not just for a
-        narrowing cast: re-extending whatever's in the low byte is
-        exactly as correct for a same-width REINTERPRETATION
-        (int8-to-uint8 or back) as for genuine narrowing, since both
-        are really "take the low byte, reinterpret it under a new sign
-        convention." E.g.: int(300) as int8 gives 44 (300's low byte,
-        0x2C, has its high bit clear, so sign-extension leaves it
-        positive); int(200) as int8 gives -56 (200's low byte, 0xC8,
-        has its high bit set, so sign-extension produces the negative
-        two's-complement reinterpretation).
-
-        A target of int64 needs one instruction too, in the opposite
-        direction: MovSXD, sign-extending dst's 32-bit view up into its
-        64-bit one -- correct regardless of whether the source was int,
-        int8, or uint8, since all three are already a correct,
-        non-negative 32-bit value by this point, so sign-extending
-        produces the same result zero-extending would. NARROWING out of
-        int64 (int64(x) targeting int, int8, or uint8) needs no new
-        instruction here: dst's 32-bit view is always simply the low
-        half of its 64-bit view, so falling through to the existing
-        int/int8/uint8 branches above is already correct."""
+    def gen_cast_narrowing_into(self, target_type: Type, dst: Register, source_type: Type) -> list[Instruction]:
+        """Re-narrows dst (already loaded with the source value) to
+        represent target_type. int8/uint8: MovSX/MovZX on dst's low
+        byte -- correct for narrowing OR same-width reinterpretation
+        alike (int(300)->int8 gives 44; int(200)->int8 gives -56).
+        int64: MovSXD sign-extends dst's 32-bit view -- UNLESS
+        source_type is already int64 (a same-type, no-op cast), in
+        which case dst already holds the full correct value and needs
+        no instruction at all. (Bug fix: previously this branch always
+        re-derived from the 32-bit view regardless of source_type,
+        silently truncating e.g. `int64(1099511628211)` to 435.)
+        Narrowing out of int64 needs nothing new: dst's 32-bit view is
+        already its low half."""
         if target_type == Type.INT8:
             return [MovSX(src=as_byte_register(dst), dst=dst)]
         if target_type == Type.UINT8:
             return [MovZX(src=as_byte_register(dst), dst=dst)]
         if target_type == Type.INT64:
+            if source_type == Type.INT64:
+                return []
             return [MovSXD(src=dst, dst=as_qword_register(dst))]
         return []
 
