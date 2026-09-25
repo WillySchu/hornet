@@ -11,10 +11,10 @@ structs.py instead (_ir_struct_address's own Variable case), not here
 not about `&`/`*` themselves."""
 
 from ir.errors import IRError
-from ir.ir import IRCopy, IRLoad, IRLocalAddress, IRStore, IRValue
-from ir.utils import COMPOSITE_KINDS, is_composite_addressable, type_of
-from parser import Call, DerefAssign, Field, Index, Unary, Variable
-from semantic import TypeKind
+from ir.ir import IRBinOp, IRConst, IRCopy, IRLoad, IRLocalAddress, IRStore, IRValue
+from ir.utils import COMPOSITE_KINDS, SUM_TYPE_TAG_WIDTH, is_composite_addressable, type_of
+from parser import BinaryOp, Call, DerefAssign, Field, Index, Unary, Variable
+from semantic import Type, TypeKind
 
 
 class PointersMixin:
@@ -33,14 +33,17 @@ class PointersMixin:
         case already applies: x's own slot holds a POINTER to x's real
         storage in that case, not x's data directly, so &x is that
         stored pointer (one more IRLoad through the slot's own
-        address), not the slot's own address itself. A scalar x is
-        never heap-allocated at all right now -- is_heap_allocated's
-        own size check is false for every scalar type, and a scalar
-        whose OWN address escapes is rejected outright by semantic.py
-        instead of ever reaching real-IR generation (see check_unary's
-        own ADDRESS_OF case) -- so this branch is unreachable for a
-        scalar x today, but written generally rather than assuming
-        that stays true forever.
+        address), not the slot's own address itself. An ORDINARY
+        (non-narrowed) scalar x is never heap-allocated at all right
+        now -- is_heap_allocated's own size check is false for every
+        scalar type, and a scalar whose OWN address escapes is
+        rejected outright by semantic.py instead of ever reaching
+        real-IR generation (see check_unary's own ADDRESS_OF case).
+        But a narrowed-to-scalar/pointer binding (`if m is int as n:
+        &n`) is a real exception: n's own slot is m's, a SUM-typed
+        one, which very much can be heap-allocated like any other
+        composite -- so this branch, unreachable for an ordinary
+        scalar, is genuinely reachable and needed for a narrowed one.
 
         This is exactly what register_allocator.py's own eligible_
         intervals (see its own docstring) keys off of to stay sound
@@ -128,13 +131,26 @@ class PointersMixin:
             )
         name = expr.operand.name
         slot = self._local_slot(name)
+        slot_type = self._local_type(name)
         slot_addr = self.ir_program.ids.new_temp(type_of(expr))
         ir = [IRLocalAddress(dst=slot_addr, slot=slot)]
-        if self._is_heap_allocated(self._local_decl_id(name), self._local_type(name)):
+        if self._is_heap_allocated(self._local_decl_id(name), slot_type):
             addr_temp = self.ir_program.ids.new_temp(type_of(expr))
             ir.append(IRLoad(dst=addr_temp, address=slot_addr))
-            return ir, addr_temp
-        return ir, slot_addr
+            base_addr = addr_temp
+        else:
+            base_addr = slot_addr
+        narrowed_type = expr.operand.resolved_type
+        if slot_type.kind == TypeKind.SUM and narrowed_type is not None and narrowed_type != slot_type:
+            # &n means n's own value's address, not the whole sum-
+            # typed slot's -- see this method's own docstring.
+            payload_addr = self.ir_program.ids.new_temp(type_of(expr))
+            ir.append(IRBinOp(
+                dst=payload_addr, op=BinaryOp.ADD,
+                left=base_addr, right=IRConst(SUM_TYPE_TAG_WIDTH, Type.INT64),
+            ))
+            return ir, payload_addr
+        return ir, base_addr
 
     def _ir_dereference(self, expr: Unary) -> tuple[list, IRValue]:
         """`*p` -- reads the pointee's own value: gen_expr_ir(expr.

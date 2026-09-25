@@ -6306,7 +6306,7 @@ class TestSumTypes:
             "\n"
             "def int main():\n"
             "    return 0\n",
-            match="isn't a declared struct or a valid scalar/str type",
+            match="isn't a declared struct or a valid scalar/str/array/slice/pointer type",
         )
 
     def test_duplicate_variant_is_rejected(self):
@@ -8115,6 +8115,412 @@ class TestScalarAndStrVariants:
             "        else:\n"
             "            return 0\n",
             match="tested more than once",
+        )
+
+# ---------------------------------------------------------------------------
+# Sum types, array/slice/pointer variants: extends TestScalarAndStrVariants'
+# own coverage to a variant that's an array, a slice, or a pointer. Widening
+# already needed no new code for any of these three (see the widening-
+# detection generalization done for scalar/str variants) -- these tests
+# exist mainly to prove the NARROWING side, which did need new work: _ir_
+# array_address/_ir_slice_address gained the identical sum-narrowing branch
+# _ir_struct_address already had, and _ir_indexable_base's own separate
+# slice-Variable leaf (used by print/arguments) had to be made to delegate
+# to it rather than duplicating the same logic a second time. _ir_address_
+# of (`&x`) also needed this branch, for `&n` on a narrowed scalar/pointer
+# binding -- a gap from the scalar/str arc, only surfaced by testing this
+# arc's own pointer variant.
+# ---------------------------------------------------------------------------
+
+class TestArraySliceAndPointerVariants:
+
+    _CIRCLE_MIXED_DECLS = (
+        "type Circle struct:\n"
+        "    int radius\n"
+        "\n"
+        "type Everything is Circle | int | str | [2]int | []int | *int\n"
+        "\n"
+    )
+
+    # -- accepted / rejected at the semantic level --------------------------
+
+    def test_array_slice_and_pointer_each_parse_and_resolve_as_variants(self):
+        assert_program_exit_code(
+            "type X is [3]int | []int | *int | str\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            expected=0,
+        )
+
+    def test_all_six_variant_kinds_mixed_in_one_sum_type(self):
+        assert_program_exit_code(
+            self._CIRCLE_MIXED_DECLS +
+            "def int main():\n"
+            "    return 0\n",
+            expected=0,
+        )
+
+    def test_identical_array_type_listed_twice_is_rejected(self):
+        assert_program_semantic_error(
+            "type X is [3]int | [3]int\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="more than once",
+        )
+
+    def test_arrays_of_different_size_are_distinct_variants(self):
+        """[3]int and [4]int are genuinely different Types -- not a
+        duplicate the way two spellings of the same type are."""
+        assert_program_exit_code(
+            "type X is [3]int | [4]int\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            expected=0,
+        )
+
+    def test_identical_slice_type_listed_twice_is_rejected(self):
+        assert_program_semantic_error(
+            "type X is []int | []int\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="more than once",
+        )
+
+    def test_identical_pointer_type_listed_twice_is_rejected(self):
+        assert_program_semantic_error(
+            "type X is *int | *int\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="more than once",
+        )
+
+    def test_pointers_to_different_types_are_distinct_variants(self):
+        assert_program_exit_code(
+            "type X is *int | *bool\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            expected=0,
+        )
+
+    def test_array_of_a_sum_type_as_a_variant_is_rejected(self):
+        """A sum type can't be reached as a variant even through array
+        wrapping -- the identical restriction a struct field already
+        has, inherited for free since type_from_name's own recursive
+        element_type resolution passes the same sum_types=None
+        _resolve_sum_types itself passes at the top level."""
+        assert_program_semantic_error(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type Shape is Circle | Square\n"
+            "\n"
+            "type Nested is [2]Shape | int\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="Unknown type 'Shape'",
+        )
+
+    def test_a_sum_type_named_bare_as_a_variant_is_rejected(self):
+        """The same restriction as the array-wrapped case above, but
+        for a sum type named directly (not through any wrapping) --
+        _resolve_sum_types's own dedicated check for this shape,
+        rather than type_from_name's generic "Unknown type"."""
+        assert_program_semantic_error(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int side\n"
+            "\n"
+            "type Shape is Circle | Square\n"
+            "\n"
+            "type Nested is Shape | int\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="is itself a sum type",
+        )
+
+    # -- widening -------------------------------------------------------
+
+    def test_widening_an_array_literal(self):
+        assert_program_exit_code(
+            "type Thing is [3]int | str\n"
+            "\n"
+            "def int main():\n"
+            "    Thing t = [1, 2, 3]\n"
+            "    if t is [3]int as arr:\n"
+            "        return arr[0] + arr[1] + arr[2]\n"
+            "    return -1\n",
+            expected=6,
+        )
+
+    def test_widening_a_slice(self):
+        assert_program_exit_code(
+            "type Thing is []int | str\n"
+            "\n"
+            "def int main():\n"
+            "    [3]int a = [1, 2, 3]\n"
+            "    Thing t = a[0:2]\n"
+            "    if t is []int as s:\n"
+            "        return s[0] + s[1]\n"
+            "    return -1\n",
+            expected=3,
+        )
+
+    def test_widening_a_pointer(self):
+        assert_program_exit_code(
+            "type Thing is *int | str\n"
+            "\n"
+            "def int main():\n"
+            "    int x = 42\n"
+            "    Thing t = &x\n"
+            "    if t is *int as p:\n"
+            "        return *p\n"
+            "    return -1\n",
+            expected=42,
+        )
+
+    def test_widening_an_array_function_argument(self):
+        assert_program_stdout(
+            "type Thing is [2]int | str\n"
+            "\n"
+            "def int describe(Thing t):\n"
+            "    if t is [2]int as arr:\n"
+            "        print(arr[0] + arr[1])\n"
+            "    return 0\n"
+            "\n"
+            "def int main():\n"
+            "    describe([4, 5])\n"
+            "    return 0\n",
+            "9\n",
+        )
+
+    def test_widening_an_array_return_value(self):
+        assert_program_stdout(
+            "type Thing is [3]int | str\n"
+            "\n"
+            "def Thing makeArr():\n"
+            "    return [7, 8, 9]\n"
+            "\n"
+            "def int main():\n"
+            "    Thing t = makeArr()\n"
+            "    if t is [3]int as arr:\n"
+            "        print(arr[0] + arr[1] + arr[2])\n"
+            "    return 0\n",
+            "24\n",
+        )
+
+    def test_widening_a_slice_function_argument_and_return_value(self):
+        assert_program_stdout(
+            "type Thing is []int | str\n"
+            "\n"
+            "def int sumIt(Thing t):\n"
+            "    if t is []int as s:\n"
+            "        int total = 0\n"
+            "        int i = 0\n"
+            "        while i < len(s):\n"
+            "            total = total + s[i]\n"
+            "            i = i + 1\n"
+            "        return total\n"
+            "    return -1\n"
+            "\n"
+            "def Thing makeSlice():\n"
+            "    [3]int a = [7, 8, 9]\n"
+            "    return a[0:2]\n"
+            "\n"
+            "def int main():\n"
+            "    [3]int a = [1, 2, 3]\n"
+            "    print(sumIt(a[0:3]))\n"
+            "    print(sumIt(makeSlice()))\n"
+            "    return 0\n",
+            "6\n15\n",
+        )
+
+    def test_widening_a_pointer_function_argument_and_return_value(self):
+        assert_program_stdout(
+            "type Thing is *int | str\n"
+            "\n"
+            "def int readIt(Thing t):\n"
+            "    if t is *int as p:\n"
+            "        print(*p)\n"
+            "    return 0\n"
+            "\n"
+            "def Thing makePtr():\n"
+            "    int x = 55\n"
+            "    return &x\n"
+            "\n"
+            "def int main():\n"
+            "    int y = 33\n"
+            "    readIt(&y)\n"
+            "    readIt(makePtr())\n"
+            "    return 0\n",
+            "33\n55\n",
+        )
+
+    # -- narrowing --------------------------------------------------------
+
+    def test_false_branch_when_narrowing_to_array_but_actual_variant_differs(self):
+        assert_program_exit_code(
+            "type Thing is [3]int | int\n"
+            "\n"
+            "def int main():\n"
+            "    Thing t = 42\n"
+            "    if t is [3]int as arr:\n"
+            "        return 1\n"
+            "    return 0\n",
+            expected=0,
+        )
+
+    def test_narrowing_a_non_bare_variable_subject_to_an_array(self):
+        assert_program_exit_code(
+            "type Thing is [2]int | str\n"
+            "\n"
+            "def Thing makeThing():\n"
+            "    return [7, 8]\n"
+            "\n"
+            "def int main():\n"
+            "    if makeThing() is [2]int as arr:\n"
+            "        return arr[0] + arr[1]\n"
+            "    return -1\n",
+            expected=15,
+        )
+
+    def test_narrowing_a_non_bare_variable_subject_to_a_slice(self):
+        assert_program_exit_code(
+            "type Thing is []int | str\n"
+            "\n"
+            "def Thing makeThing():\n"
+            "    [3]int a = [4, 5, 6]\n"
+            "    return a[0:2]\n"
+            "\n"
+            "def int main():\n"
+            "    if makeThing() is []int as s:\n"
+            "        return s[0] + s[1]\n"
+            "    return -1\n",
+            expected=9,
+        )
+
+    def test_narrowing_a_non_bare_variable_subject_to_a_pointer(self):
+        assert_program_exit_code(
+            "type Thing is *int | str\n"
+            "\n"
+            "def Thing makeThing():\n"
+            "    int x = 77\n"
+            "    return &x\n"
+            "\n"
+            "def int main():\n"
+            "    if makeThing() is *int as p:\n"
+            "        return *p\n"
+            "    return -1\n",
+            expected=77,
+        )
+
+    def test_narrowing_to_slice_when_the_sum_type_is_heap_promoted(self):
+        """A sum type large enough to trigger heap promotion (its own
+        widest variant, [5000]int, well over the stack-array
+        threshold), narrowed to its OTHER, small slice variant --
+        exercises _ir_slice_address's own heap-allocated branch, not
+        just its stack-resident fast path."""
+        assert_program_exit_code(
+            "type Thing is [5000]int | []int\n"
+            "\n"
+            "def int main():\n"
+            "    [3]int a = [1, 2, 3]\n"
+            "    Thing t = a[0:2]\n"
+            "    if t is []int as s:\n"
+            "        return s[0] + s[1]\n"
+            "    return -1\n",
+            expected=3,
+        )
+
+    def test_address_of_a_narrowed_scalar_binding(self):
+        """Regression test for a gap from the scalar/str arc, only
+        surfaced while testing this one: _ir_address_of's own bare-
+        Variable case had no sum-narrowing awareness at all, so `&n`
+        on a narrowed-to-int binding returned the address of the
+        WHOLE sum-typed slot (its own discriminant tag), not n's own
+        value past it."""
+        assert_program_exit_code(
+            "type Mixed is int | str\n"
+            "\n"
+            "def int main():\n"
+            "    Mixed m = 42\n"
+            "    if m is int as n:\n"
+            "        int p = *&n\n"
+            "        return p\n"
+            "    return -1\n",
+            expected=42,
+        )
+
+    def test_address_of_a_narrowed_array_binding(self):
+        assert_program_exit_code(
+            "type Thing is [3]int | str\n"
+            "\n"
+            "def int main():\n"
+            "    Thing t = [10, 20, 30]\n"
+            "    if t is [3]int as arr:\n"
+            "        *[3]int p = &arr\n"
+            "        return (*p)[1]\n"
+            "    return -1\n",
+            expected=20,
+        )
+
+    # -- match / exhaustiveness --------------------------------------------
+
+    def test_match_with_all_six_variant_kinds(self):
+        assert_program_stdout(
+            self._CIRCLE_MIXED_DECLS +
+            "def int describe(Everything e):\n"
+            "    match e:\n"
+            "        is Circle:\n"
+            "            return e.radius\n"
+            "        is int:\n"
+            "            return e * 10\n"
+            "        is str:\n"
+            "            return len(e)\n"
+            "        is [2]int:\n"
+            "            return e[0] + e[1]\n"
+            "        is []int:\n"
+            "            return len(e)\n"
+            "        is *int:\n"
+            "            return *e\n"
+            "\n"
+            "def int main():\n"
+            "    print(describe(Circle(3)))\n"
+            "    print(describe(42))\n"
+            "    print(describe('hello'))\n"
+            "    print(describe([5, 6]))\n"
+            "    [4]int a = [1, 2, 3, 4]\n"
+            "    print(describe(a[0:3]))\n"
+            "    int x = 99\n"
+            "    print(describe(&x))\n"
+            "    return 0\n",
+            "3\n420\n5\n11\n3\n99\n",
+        )
+
+    def test_match_missing_a_pointer_arm_is_rejected_as_non_exhaustive(self):
+        assert_program_semantic_error(
+            "type Thing is [3]int | []int | *int\n"
+            "\n"
+            "def int f(Thing t):\n"
+            "    match t:\n"
+            "        is [3]int:\n"
+            "            return 1\n"
+            "        is []int:\n"
+            "            return 2\n"
+            "    return 0\n",
+            match=r"missing: \*int",
         )
 
 # ---------------------------------------------------------------------------

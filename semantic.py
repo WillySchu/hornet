@@ -826,16 +826,28 @@ class SemanticAnalyzer:
                 try:
                     variant_type = type_from_name(variant_name, structs, self.type_aliases, std)
                 except SemanticError:
+                    # Reworded only for a bare-string variant_name (a
+                    # simple typo) -- naming what IS allowed is more
+                    # useful than the generic "Unknown type" here. For
+                    # a compound one ([2]Shape, *OtherSum, ...), type_
+                    # from_name's own error already names whatever
+                    # INNER piece failed (e.g. "Unknown type 'Shape'"),
+                    # more specific than anything sayable about the
+                    # outer, un-stringifiable AST node -- left to
+                    # propagate unchanged instead.
+                    if not isinstance(variant_name, str):
+                        raise
                     raise SemanticError(
                         f"Sum type '{std.name}' names '{variant_name}' as "
                         f"a variant, but '{variant_name}' isn't a declared "
-                        f"struct or a valid scalar/str type",
+                        f"struct or a valid scalar/str/array/slice/pointer "
+                        f"type",
                         std,
                     )
                 if variant_type in resolved_variants:
                     raise SemanticError(
-                        f"Sum type '{std.name}' lists '{variant_name}' "
-                        f"({variant_type}) as a variant more than once",
+                        f"Sum type '{std.name}' lists '{variant_type}' "
+                        f"as a variant more than once",
                         std,
                     )
                 resolved_variants.append(variant_type)

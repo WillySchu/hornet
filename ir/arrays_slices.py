@@ -28,7 +28,7 @@ from ir.ir import (
     IRStaticDataAddress,
     IRStore, Temp,
 )
-from ir.utils import COMPOSITE_KINDS, is_composite_addressable, type_of, type_byte_width
+from ir.utils import COMPOSITE_KINDS, SUM_TYPE_TAG_WIDTH, is_composite_addressable, type_of, type_byte_width
 from parser import Node, ArrayLiteral, Call, Field, Index, Slice, Variable, NoneLiteral, Binary, BinaryOp, Unary, UnaryOp
 from semantic import TypeKind, Type
 
@@ -41,6 +41,13 @@ class ArraysSlicesMixin:
         offset via IRLocalAddress plus an IRLoad through it), Index/
         Field recurse into _ir_index_address/_ir_field_address.
 
+        The Variable case also needs _ir_struct_address's own sum-type
+        narrowing branch now that an array can itself be a sum type's
+        own variant: without it, a narrowed array read starts
+        SUM_TYPE_TAG_WIDTH bytes too early, into the discriminant tag
+        itself (see _ir_struct_address's own docstring for the fuller
+        reasoning).
+
         Returns None for an ArrayLiteral (construction, not an
         existing address -- see _ir_materialize_array_literal)."""
         if isinstance(expr, Variable):
@@ -51,8 +58,17 @@ class ArraysSlicesMixin:
             if self._is_heap_allocated(self._local_decl_id(expr.name), array_type):
                 addr_temp = self.ir_program.ids.new_temp(Type.INT64)
                 ir.append(IRLoad(dst=addr_temp, address=slot_addr))
-                return ir, addr_temp
-            return ir, slot_addr
+                base_addr = addr_temp
+            else:
+                base_addr = slot_addr
+            if array_type.kind == TypeKind.SUM and expr.resolved_type is not None and expr.resolved_type != array_type:
+                payload_addr = self.ir_program.ids.new_temp(Type.INT64)
+                ir.append(IRBinOp(
+                    dst=payload_addr, op=BinaryOp.ADD,
+                    left=base_addr, right=IRConst(SUM_TYPE_TAG_WIDTH, Type.INT64),
+                ))
+                return ir, payload_addr
+            return ir, base_addr
         if isinstance(expr, Index):
             return self._ir_index_address(expr)
         if isinstance(expr, Field):
@@ -69,20 +85,47 @@ class ArraysSlicesMixin:
 
     def _ir_slice_address(self, expr: Node):
         """Mirrors _ir_array_address's own shape for a slice-typed
-        expr, but simpler: a slice variable is never heap-allocated --
-        a slice's own 24-byte descriptor is always a small, fixed-size,
-        stack-resident value -- so the Variable leaf is just a single
-        LeaQFrame, no heap-vs-stack branch needed. Index/Field recurse
-        into _ir_index_address/_ir_field_address exactly like _ir_
-        array_address's own do.
+        expr, but simpler: a GENUINELY slice-typed variable is never
+        heap-allocated -- a slice's own 24-byte descriptor is always a
+        small, fixed-size, stack-resident value -- so that Variable
+        leaf is just a single LeaQFrame, no heap-vs-stack branch
+        needed. Index/Field recurse into _ir_index_address/_ir_field_
+        address exactly like _ir_array_address's own do.
+
+        A slice-NARROWED occurrence of a sum-typed variable is
+        different on both counts, needing _ir_array_address's own
+        fuller shape instead: the SLOT's own declared type is SUM, not
+        SLICE, so it CAN be heap-allocated like any other composite;
+        and its real bytes start SUM_TYPE_TAG_WIDTH into the slot's
+        own address, past the discriminant tag (see _ir_struct_
+        address's own docstring for the fuller narrowing reasoning).
 
         Returns None for a Slice (`arr[a:b]`, slice production) or a
         Call (a slice-returning function call) -- both out of scope
         for this method."""
         if isinstance(expr, Variable):
+            slot_type = self._local_type(expr.name)
+            if slot_type.kind != TypeKind.SUM:
+                slot = self._local_slot(expr.name)
+                addr_temp = self.ir_program.ids.new_temp(Type.INT64)
+                return [IRLocalAddress(dst=addr_temp, slot=slot)], addr_temp
             slot = self._local_slot(expr.name)
-            addr_temp = self.ir_program.ids.new_temp(Type.INT64)
-            return [IRLocalAddress(dst=addr_temp, slot=slot)], addr_temp
+            slot_addr = self.ir_program.ids.new_temp(Type.INT64)
+            ir = [IRLocalAddress(dst=slot_addr, slot=slot)]
+            if self._is_heap_allocated(self._local_decl_id(expr.name), slot_type):
+                addr_temp = self.ir_program.ids.new_temp(Type.INT64)
+                ir.append(IRLoad(dst=addr_temp, address=slot_addr))
+                base_addr = addr_temp
+            else:
+                base_addr = slot_addr
+            if expr.resolved_type is not None and expr.resolved_type != slot_type:
+                payload_addr = self.ir_program.ids.new_temp(Type.INT64)
+                ir.append(IRBinOp(
+                    dst=payload_addr, op=BinaryOp.ADD,
+                    left=base_addr, right=IRConst(SUM_TYPE_TAG_WIDTH, Type.INT64),
+                ))
+                return ir, payload_addr
+            return ir, base_addr
         if isinstance(expr, Index):
             return self._ir_index_address(expr)
         if isinstance(expr, Field):
@@ -272,10 +315,12 @@ class ArraysSlicesMixin:
             return addr_ir, addr_value, size_const, size_const
         if base_type.kind == TypeKind.SLICE:
             if isinstance(expr, Variable):
-                slot = self._local_slot(expr.name)
-                descriptor_addr = self.ir_program.ids.new_temp(Type.INT64)
+                addr_result = self._ir_slice_address(expr)
+                if addr_result is None:
+                    return None
+                addr_ir, descriptor_addr = addr_result
                 ir, ptr_temp, len_temp, cap_temp = self._ir_read_slice_descriptor_from_address(descriptor_addr)
-                return [IRLocalAddress(dst=descriptor_addr, slot=slot)] + ir, ptr_temp, len_temp, cap_temp
+                return addr_ir + ir, ptr_temp, len_temp, cap_temp
             if isinstance(expr, (Field, Index)):
                 addr_result = self._ir_field_address(expr) if isinstance(expr, Field) else self._ir_index_address(expr)
                 if addr_result is None:

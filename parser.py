@@ -801,7 +801,7 @@ class IsCheck(Node):
     through, not a same-shape but distinct one its own fresh id()
     could never match."""
     variable_name: str
-    type_name: Union[str, QualifiedTypeExpr]
+    type_name: Union[str, QualifiedTypeExpr, ArrayTypeExpr, SliceTypeExpr, PointerTypeExpr]
     subject: Optional[Node] = None
     binding_decl: Optional[Node] = None
 
@@ -1025,7 +1025,7 @@ class SumTypeDef(Node):
     questions the parser can't answer -- left to semantic.py, the same
     way a struct's own duplicate-field-name check is."""
     name: str
-    variants: List[Union[str, QualifiedTypeExpr]] = field(default_factory=list)
+    variants: List[Union[str, QualifiedTypeExpr, ArrayTypeExpr, SliceTypeExpr, PointerTypeExpr]] = field(default_factory=list)
 
 
 @dataclass
@@ -1999,20 +1999,28 @@ class Parser:
             return IsCheck(variable_name=binding_tok.val, type_name=type_name, subject=expr, line=is_tok.line, col=is_tok.col)
         return expr
 
-    def _parse_qualifiable_type_name(self, expected_message: str) -> Union[str, QualifiedTypeExpr]:
+    def _parse_qualifiable_type_name(self, expected_message: str) -> Union[str, QualifiedTypeExpr, ArrayTypeExpr, SliceTypeExpr, PointerTypeExpr]:
         """Consumes a type name that MAY be module-qualified (`module.
-        Name`), or a built-in scalar/str type keyword -- for the four
-        grammar positions that previously only ever accepted a bare
-        IDENTIFIER (a struct or sum-type name): _parse_if_condition's
-        own two shapes (both call this), parse_match's own arm
-        parsing, and _parse_sum_type_body's own per-variant parsing.
-        `expected_message` is this position's own "Expected ..." text
-        if neither is found at all, matching each call site's own,
-        previously-inline wording exactly (e.g. "a type name after
-        'is'", "a variant name after '|'").
+        Name`), a built-in scalar/str type keyword, or an array/slice/
+        pointer type -- for the four grammar positions that previously
+        only ever accepted a bare IDENTIFIER (a struct or sum-type
+        name): _parse_if_condition's own two shapes (both call this),
+        parse_match's own arm parsing, and _parse_sum_type_body's own
+        per-variant parsing. `expected_message` is this position's own
+        "Expected ..." text if none of these is found at all, matching
+        each call site's own, previously-inline wording exactly (e.g.
+        "a type name after 'is'", "a variant name after '|'").
+
+        A leading '*' or '[' unambiguously means an array/slice/
+        pointer type -- neither can ever start an identifier or a
+        type keyword -- so this delegates straight to parse_type's own
+        existing, full recursive grammar rather than reimplementing it
+        here. semantic.py's own type_from_name is what still rejects a
+        sum type reached this way (`[3]Shape`, `*OtherSum`), the same
+        way it already rejects one as a struct field's own type.
 
         A type keyword (int/int8/uint8/int64/bool/str) is checked
-        FIRST, and returned as its own bare string exactly like parse_
+        NEXT, and returned as its own bare string exactly like parse_
         type's own identical keyword case -- never qualifiable (there's
         no such thing as `module.int`), so this returns immediately
         rather than falling into the identifier branch's own '.'
@@ -2025,6 +2033,8 @@ class Parser:
         combined string, for the same reason given there: real,
         separate structure (which module, which name in it) a bare
         string can't carry on its own."""
+        if self.check(TokenType.STAR, TokenType.OPEN_BRACKET):
+            return self.parse_type()
         if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR):
             return self.advance().val
         name_tok = self.expect(TokenType.IDENTIFIER, f"Expected {expected_message}")
