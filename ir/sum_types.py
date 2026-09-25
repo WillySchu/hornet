@@ -35,32 +35,41 @@ any other same-type value already uses."""
 
 from ir.errors import IRError
 from ir.ir import IRBinOp, IRCall, IRConst, IRLoad, IRLocalAddress, IRStore
-from ir.utils import SUM_TYPE_TAG_WIDTH, type_byte_width, type_of
+from ir.utils import COMPOSITE_KINDS, SUM_TYPE_TAG_WIDTH, type_byte_width, type_of
 from parser import IsCheck, Node, BinaryOp, Variable
-from semantic import Type, TypeKind
+from semantic import Type, TypeKind, type_from_name
 
 
 class SumTypesMixin:
     def _ir_write_sum_type_value_into(self, dst_address, value_expr: Node, sum_type: Type):
-        """Builds (without lowering) a struct value widening into a
-        sum-typed dst_address as real IR: the tag, then the struct's
-        own value one level under it. Returns None only when the
-        struct's own value is out of scope for _ir_write_composite_
-        value_into (a named/partial struct literal, chiefly) -- the
-        identical, mutual-recursion fallback every other composite
-        case here already has.
+        """Builds (without lowering) a value widening into a sum-typed
+        dst_address as real IR: the tag, then the value itself one
+        level under it. Returns None only when the value is out of
+        scope for _ir_write_composite_value_into (a named/partial
+        struct literal, chiefly) -- the identical, mutual-recursion
+        fallback every other composite case here already has; never
+        returned for a scalar payload, which has no such "out of
+        scope" shape.
 
         `sum_type` is the TARGET's own type -- sum_type_registry is
-        what supplies the variant list a plain struct type alone
-        can't; source_struct_type (value_expr's own type, already
-        resolved by semantic.py) is what's actually being widened, and
-        the ONE thing that decides which discriminant gets written:
-        its own index in sum_type's variant list, the same order
-        SumTypeDef.variants -- and this program's own sum_type_
-        registry, copied from it unchanged -- already preserves."""
-        source_struct_type = type_of(value_expr)
+        what supplies the variant list a plain source type alone
+        can't; source_type (value_expr's own type, already resolved by
+        semantic.py) is what's actually being widened, and the ONE
+        thing that decides which discriminant gets written: its own
+        index in sum_type's variant list, the same order SumTypeDef.
+        variants -- and this program's own sum_type_registry, copied
+        from it unchanged -- already preserves.
+
+        The payload write itself splits in two: a composite source
+        (struct or str) still goes through _ir_write_composite_value_
+        into, exactly as before -- but a scalar source (int, int8,
+        uint8, int64, bool) has no address of its own to copy FROM the
+        way a composite's mutual-recursion dispatch assumes, so it's
+        evaluated as an ordinary scalar value instead and IRStored
+        directly, at its own width."""
+        source_type = type_of(value_expr)
         variants = self.ir_program.sum_type_registry[sum_type.sum_type_name].variants
-        discriminant = variants.index(source_struct_type.struct_name)
+        discriminant = variants.index(source_type)
 
         tag_ir = [IRStore(address=dst_address, value=IRConst(discriminant, Type.INT), value_type=Type.INT)]
 
@@ -70,9 +79,13 @@ class SumTypesMixin:
             left=dst_address, right=IRConst(SUM_TYPE_TAG_WIDTH, Type.INT64),
         )]
 
-        payload_ir = self._ir_write_composite_value_into(payload_addr, value_expr, source_struct_type)
-        if payload_ir is None:
-            return None
+        if source_type.kind in COMPOSITE_KINDS:
+            payload_ir = self._ir_write_composite_value_into(payload_addr, value_expr, source_type)
+            if payload_ir is None:
+                return None
+        else:
+            value_ir, value = self.gen_expr_ir(value_expr)
+            payload_ir = value_ir + [IRStore(address=payload_addr, value=value, value_type=source_type)]
         return tag_ir + payload_addr_ir + payload_ir
 
     def _ir_materialize_sum_type_value(self, expr: Node, sum_type: Type):
@@ -137,7 +150,11 @@ class SumTypesMixin:
         declared variant list -- the identical computation _ir_write_
         sum_type_value_into already uses to WRITE this same tag in the
         first place, so the two stay consistent by construction, not
-        by coincidence."""
+        by coincidence. TypeName itself (expr.type_name, a bare string
+        -- semantic.py's own check_is_check already confirmed it names
+        a real variant) is resolved into the same Type the variant
+        list itself holds via type_from_name, exactly the choke point
+        every other type-name resolution in this codebase uses."""
         sum_type = self._local_type(expr.variable_name)
         result = self._ir_struct_address(Variable(name=expr.variable_name))
         if result is None:
@@ -151,7 +168,8 @@ class SumTypesMixin:
         load_ir = [IRLoad(dst=tag_temp, address=addr_value)]
 
         variants = self.ir_program.sum_type_registry[sum_type.sum_type_name].variants
-        discriminant = variants.index(expr.type_name)
+        narrowed_type = type_from_name(expr.type_name, self.ir_program.struct_registry, self.ir_program.type_alias_registry)
+        discriminant = variants.index(narrowed_type)
 
         result_temp = self.ir_program.ids.new_temp(Type.BOOL)
         compare_ir = [IRBinOp(dst=result_temp, op=BinaryOp.EQUAL, left=tag_temp, right=IRConst(discriminant, Type.INT))]

@@ -90,7 +90,20 @@ class DispatchMixin:
         if isinstance(expr, BoolLiteral):
             return [], IRConst(1 if expr.value else 0, Type.BOOL)
         if isinstance(expr, Variable):
-            if self._is_heap_allocated(self._local_decl_id(expr.name), self._local_type(expr.name)):
+            slot_type = self._local_type(expr.name)
+            if slot_type.kind == TypeKind.SUM and expr.resolved_type is not None and expr.resolved_type != slot_type:
+                # Narrowed-to-SCALAR (`if n is int: print(n)`): the
+                # persistent Temp below holds the WHOLE sum-typed
+                # value, not the scalar alone, so that fast path is
+                # wrong here. _ir_struct_address's own narrowing
+                # branch already computes the correct payload address
+                # for any narrowed type; this just adds the load a
+                # struct-narrowed occurrence doesn't need. str never
+                # reaches here -- it has its own address/value path
+                # (ir/strings.py) that never calls this method at all.
+                addr_ir, addr_value = self._ir_struct_address(expr)
+                return self._ir_load(addr_ir, addr_value, expr.resolved_type)
+            if self._is_heap_allocated(self._local_decl_id(expr.name), slot_type):
                 # This variable's own address escaped past this
                 # function (see _bind_local/_bind_param's own,
                 # identical check) -- its permanent Temp holds a
@@ -100,7 +113,7 @@ class DispatchMixin:
                 # own _ir_address_of) reads this exact Temp directly,
                 # unchanged -- it's already the pointer this case
                 # dereferences.
-                return self._ir_load([], self._local_temp(expr.name), self._local_type(expr.name))
+                return self._ir_load([], self._local_temp(expr.name), slot_type)
             return [], self._local_temp(expr.name)
         if isinstance(expr, Index) and type_of(expr.array).kind == TypeKind.STR:
             # Checked BEFORE the generic scalar-Index case just below,

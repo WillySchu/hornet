@@ -46,21 +46,26 @@ class StructsMixin:
 
         A NARROWED occurrence needs one more step: expr.resolved_type
         (set by semantic.py's own analyze_if, e.g. Circle for a `shape
-        is Circle` branch) differing from struct_type (_local_type --
-        the SLOT's own, unchanging declared type, e.g. Shape, decided
+        is Circle` branch, or a scalar/str type for a scalar/str
+        variant) differing from struct_type (_local_type -- the
+        SLOT's own, unchanging declared type, e.g. Shape, decided
         once at _bind_local time and never re-shadowed here the way
         semantic.py's OWN scopes are) means this occurrence is
-        narrowed: the struct's real bytes start SUM_TYPE_TAG_WIDTH
+        narrowed: the payload's real bytes start SUM_TYPE_TAG_WIDTH
         into the slot's own address (the discriminant tag sits at the
-        front), not at its start. A genuinely sum-typed reference --
-        every OTHER caller of this same Variable case, from before
-        narrowing existed: widening a struct INTO this slot, print(),
-        an ordinary argument or return -- has resolved_type ==
-        struct_type (both the same sum type) and takes the unchanged,
-        no-offset path, exactly as it always has; deliberately NOT
-        decided by struct_type.kind == SUM alone, which would
-        incorrectly add the offset for every one of those other,
-        already-working cases too.
+        front), not at its start -- this method still only ever
+        returns that ADDRESS, so a scalar/str-narrowed caller (gen_
+        expr_ir's own Variable case, _ir_str_address's own) still has
+        to load or read through it itself; only a struct-narrowed
+        occurrence can use the address as-is. A genuinely sum-typed
+        reference -- every OTHER caller of this same Variable case,
+        from before narrowing existed: widening a value INTO this
+        slot, print(), an ordinary argument or return -- has
+        resolved_type == struct_type (both the same sum type) and
+        takes the unchanged, no-offset path, exactly as it always has;
+        deliberately NOT decided by struct_type.kind == SUM alone,
+        which would incorrectly add the offset for every one of those
+        other, already-working cases too.
 
         Read directly off expr.resolved_type, not through type_of --
         an internal Variable node synthesized purely for IR building
@@ -154,11 +159,12 @@ class StructsMixin:
                 narrowed_type = expr.resolved_type
                 if narrowed_type is None or narrowed_type == struct_type:
                     return ir, base_addr  # genuinely sum-typed (or an internal, always-whole-value node), not narrowed
-                if narrowed_type.kind != TypeKind.STRUCT:
+                if narrowed_type not in self.ir_program.sum_type_registry[struct_type.sum_type_name].variants:
                     raise IRError(
                         f"Variable '{expr.name}' has sum type {struct_type} but its own "
                         f"resolved_type {narrowed_type} is neither that same sum type nor "
-                        f"a struct -- expected only these two shapes for a sum-typed name"
+                        f"one of its own declared variants -- expected only these shapes "
+                        f"for a sum-typed name"
                     )
                 payload_addr = self.ir_program.ids.new_temp(Type.INT64)
                 ir.append(IRBinOp(

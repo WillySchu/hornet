@@ -34,11 +34,11 @@ class ScalarsMixin:
         materialize_struct_literal, then an ordinary composite-
         returning Call again -- UNLESS `callee_name`'s own declared
         parameter type at this position is a SUM type that lists this
-        struct as a variant, in which case it's WIDENING, not an
-        ordinary struct argument at all: _ir_materialize_sum_type_
-        value (ir/sum_types.py), sized and tagged for the wider sum
-        type, not the narrower struct this argument's own expression
-        actually is.
+        argument's own type as one of its variants (a struct, a
+        scalar, or str), in which case it's WIDENING, not an ordinary
+        argument at all: _ir_materialize_sum_type_value (ir/sum_types.
+        py), sized and tagged for the wider sum type, not the narrower
+        variant this argument's own expression actually is.
 
         SUM-typed argument (already sum-typed, no widening needed --
         `takesShape(s)`, s already Shape): the identical Variable/
@@ -67,8 +67,8 @@ class ScalarsMixin:
             arg_type = type_of(arg)
             is_widening = (
                 param_types is not None
-                and arg_type.kind == TypeKind.STRUCT
                 and param_types[i].kind == TypeKind.SUM
+                and arg_type.kind != TypeKind.SUM
             )
             if is_widening:
                 result = self._ir_materialize_sum_type_value(arg, param_types[i])

@@ -114,8 +114,8 @@ def type_byte_width(t: Type, structs: dict[str, StructInfo], sum_types: dict) ->
         return sum(type_byte_width(field_type, structs, sum_types) for field_type in structs[t.struct_name].fields.values())
     if t.kind == TypeKind.SUM:
         variant_widths = (
-            type_byte_width(Type(TypeKind.STRUCT, struct_name=variant_name), structs, sum_types)
-            for variant_name in sum_types[t.sum_type_name].variants
+            type_byte_width(variant_type, structs, sum_types)
+            for variant_type in sum_types[t.sum_type_name].variants
         )
         return SUM_TYPE_TAG_WIDTH + max(variant_widths)
     if t.kind == TypeKind.POINTER:

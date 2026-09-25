@@ -762,13 +762,14 @@ class IsCheck(Node):
     parse_expression's own precedence climbing at all.
 
     `variable_name` must already be an in-scope, sum-typed variable,
-    and `type_name` must be a struct that's actually one of that sum
-    type's own declared variants -- both checked by semantic.py, which
-    also narrows `variable_name`'s own type to `type_name` within the
-    If's then_body specifically (never its else_body -- see semantic.
-    py's own analyze_if). The parser here only recognizes the SHAPE
-    (IDENTIFIER 'is' IDENTIFIER), not whether either name refers to
-    anything real.
+    and `type_name` must resolve to a real type that's actually one of
+    that sum type's own declared variants (a struct, a scalar, or str)
+    -- both checked by semantic.py, which also narrows `variable_
+    name`'s own type to `type_name` within the If's then_body
+    specifically (never its else_body -- see semantic.py's own
+    analyze_if). The parser here only recognizes the SHAPE (IDENTIFIER
+    'is' IDENTIFIER-or-type-keyword), not whether either name refers
+    to anything real.
 
     `subject`, when not None, is an arbitrary expression (an Index, a
     Call, a Field once sum-typed fields exist, ...) evaluated ONCE and
@@ -1003,22 +1004,26 @@ class TypeAlias(Node):
 class SumTypeDef(Node):
     """`type Name is Variant | Variant (| Variant)*` -- declares a new,
     nominal type whose value is EXACTLY ONE of its listed variants at
-    any given time, each an already-declared struct name (not a
-    literal payload of its own -- there's no separate variant-
-    constructor syntax; a variant is constructed exactly like any
-    other struct, e.g. `Circle(5)`, and becomes a Shape purely through
-    being assigned into one). `variants` preserves declaration order,
-    since that's what decides the discriminant each variant is
+    any given time, each an already-declared struct name, a scalar or
+    str type keyword, or (module-qualified) a struct from another
+    file -- never another sum type (not a literal payload of its own
+    either -- there's no separate variant-constructor syntax; a struct
+    variant is constructed exactly like any other struct, e.g.
+    `Circle(5)`, and becomes a Shape purely through being assigned
+    into one; a scalar/str variant becomes one the same way, from an
+    ordinary int/str-typed value). `variants` preserves declaration
+    order, since that's what decides the discriminant each variant is
     assigned at codegen time.
 
     At least two variants are required -- parse_type_declaration
     itself enforces this (a single bare name with no `|` at all is a
     parse error, not a one-variant SumTypeDef), the same way
     _parse_struct_body already requires at least one field. Two
-    variants sharing a name, and whether each name actually refers to
-    a declared struct, are semantic questions the parser can't answer
-    -- left to semantic.py, the same way a struct's own duplicate-
-    field-name check is."""
+    variants resolving to the same type (by spelling or not -- `byte`
+    and `uint8` are the identical variant), and whether each name
+    actually resolves to a valid variant type at all, are semantic
+    questions the parser can't answer -- left to semantic.py, the same
+    way a struct's own duplicate-field-name check is."""
     name: str
     variants: List[Union[str, QualifiedTypeExpr]] = field(default_factory=list)
 
@@ -1996,22 +2001,32 @@ class Parser:
 
     def _parse_qualifiable_type_name(self, expected_message: str) -> Union[str, QualifiedTypeExpr]:
         """Consumes a type name that MAY be module-qualified (`module.
-        Name`) -- for the four grammar positions that previously only
-        ever accepted a bare IDENTIFIER: _parse_if_condition's own two
-        shapes (both call this), parse_match's own arm parsing, and
-        _parse_sum_type_body's own per-variant parsing. `expected_
-        message` is this position's own "Expected ..." text if no
-        IDENTIFIER is found at all, matching each call site's own,
+        Name`), or a built-in scalar/str type keyword -- for the four
+        grammar positions that previously only ever accepted a bare
+        IDENTIFIER (a struct or sum-type name): _parse_if_condition's
+        own two shapes (both call this), parse_match's own arm
+        parsing, and _parse_sum_type_body's own per-variant parsing.
+        `expected_message` is this position's own "Expected ..." text
+        if neither is found at all, matching each call site's own,
         previously-inline wording exactly (e.g. "a type name after
         'is'", "a variant name after '|'").
 
-        Reuses the identical shape parse_type's own IDENTIFIER case
-        already established for QualifiedTypeExpr (see its own
-        docstring) -- a '.' right after the first identifier means
-        qualified, parsed into its own node rather than a combined
-        string, for the same reason given there: real, separate
-        structure (which module, which name in it) a bare string
-        can't carry on its own."""
+        A type keyword (int/int8/uint8/int64/bool/str) is checked
+        FIRST, and returned as its own bare string exactly like parse_
+        type's own identical keyword case -- never qualifiable (there's
+        no such thing as `module.int`), so this returns immediately
+        rather than falling into the identifier branch's own '.'
+        check below.
+
+        Otherwise reuses the identical shape parse_type's own
+        IDENTIFIER case already established for QualifiedTypeExpr (see
+        its own docstring) -- a '.' right after the first identifier
+        means qualified, parsed into its own node rather than a
+        combined string, for the same reason given there: real,
+        separate structure (which module, which name in it) a bare
+        string can't carry on its own."""
+        if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR):
+            return self.advance().val
         name_tok = self.expect(TokenType.IDENTIFIER, f"Expected {expected_message}")
         if self.check(TokenType.DOT):
             self.advance()

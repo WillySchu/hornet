@@ -82,7 +82,7 @@ def test_type_from_name_unknown():
 # ---------------------------------------------------------------------------
 
 def test_type_from_name_sum_type_resolves_when_passed():
-    sum_types = {'Shape': semantic.SumTypeInfo(name='Shape', variants=['Circle', 'Square'])}
+    sum_types = {'Shape': semantic.SumTypeInfo(name='Shape', variants=[semantic.Type(kind=semantic.TypeKind.STRUCT, struct_name='Circle'), semantic.Type(kind=semantic.TypeKind.STRUCT, struct_name='Square')])}
     expected = semantic.Type(kind=semantic.TypeKind.SUM, sum_type_name='Shape')
     assert expected == semantic.type_from_name('Shape', {}, {}, sum_types=sum_types)
 
@@ -92,7 +92,7 @@ def test_type_from_name_sum_type_unknown_when_omitted():
     unknown -- not silently resolved -- at a call site that doesn't
     pass sum_types at all, exactly like _resolve_struct_fields's own
     call site (struct fields can't be sum-typed yet)."""
-    sum_types = {'Shape': semantic.SumTypeInfo(name='Shape', variants=['Circle', 'Square'])}
+    sum_types = {'Shape': semantic.SumTypeInfo(name='Shape', variants=[semantic.Type(kind=semantic.TypeKind.STRUCT, struct_name='Circle'), semantic.Type(kind=semantic.TypeKind.STRUCT, struct_name='Square')])}
     with pytest.raises(semantic.SemanticError, match="Unknown type 'Shape'"):
         semantic.type_from_name('Shape', {}, {})  # sum_types omitted
 
@@ -101,7 +101,7 @@ def test_type_from_name_sum_type_array_element():
     """A sum type as an array's own element type, recursing through
     ArrayTypeExpr -- exercises sum_types being threaded through the
     recursive call, not just the top-level one."""
-    sum_types = {'Shape': semantic.SumTypeInfo(name='Shape', variants=['Circle', 'Square'])}
+    sum_types = {'Shape': semantic.SumTypeInfo(name='Shape', variants=[semantic.Type(kind=semantic.TypeKind.STRUCT, struct_name='Circle'), semantic.Type(kind=semantic.TypeKind.STRUCT, struct_name='Square')])}
     type_expr = parser.ArrayTypeExpr(size=3, element_type='Shape')
     expected = semantic.Type(
         kind=semantic.TypeKind.ARRAY,

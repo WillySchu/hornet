@@ -211,7 +211,10 @@ def test_type_byte_width_sum_type_is_tag_plus_largest_variant():
         'Circle': semantic.StructInfo(name='Circle', fields={'radius': semantic.Type(kind=semantic.TypeKind.INT)}),
         'Square': semantic.StructInfo(name='Square', fields={'side': semantic.Type(kind=semantic.TypeKind.INT64)}),
     }
-    sum_types = {'Shape': semantic.SumTypeInfo(name='Shape', variants=['Circle', 'Square'])}
+    sum_types = {'Shape': semantic.SumTypeInfo(name='Shape', variants=[
+        semantic.Type(kind=semantic.TypeKind.STRUCT, struct_name='Circle'),
+        semantic.Type(kind=semantic.TypeKind.STRUCT, struct_name='Square'),
+    ])}
     t = semantic.Type(kind=semantic.TypeKind.SUM, sum_type_name='Shape')
     expected = SUM_TYPE_TAG_WIDTH + 8  # 4 + 8 = 12
     assert expected == type_byte_width(t, structs, sum_types)
@@ -225,7 +228,10 @@ def test_type_byte_width_sum_type_variant_order_does_not_affect_width():
         'Circle': semantic.StructInfo(name='Circle', fields={'radius': semantic.Type(kind=semantic.TypeKind.INT)}),
         'Square': semantic.StructInfo(name='Square', fields={'side': semantic.Type(kind=semantic.TypeKind.INT64)}),
     }
-    sum_types = {'Shape': semantic.SumTypeInfo(name='Shape', variants=['Square', 'Circle'])}
+    sum_types = {'Shape': semantic.SumTypeInfo(name='Shape', variants=[
+        semantic.Type(kind=semantic.TypeKind.STRUCT, struct_name='Square'),
+        semantic.Type(kind=semantic.TypeKind.STRUCT, struct_name='Circle'),
+    ])}
     t = semantic.Type(kind=semantic.TypeKind.SUM, sum_type_name='Shape')
     expected = SUM_TYPE_TAG_WIDTH + 8
     assert expected == type_byte_width(t, structs, sum_types)

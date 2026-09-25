@@ -6278,8 +6278,13 @@ class TestSumTypes:
             match="Cannot initialize 's'",
         )
 
-    def test_variant_naming_an_alias_instead_of_a_struct_is_rejected(self):
-        assert_program_semantic_error(
+    def test_variant_naming_an_alias_that_resolves_to_a_scalar_is_accepted(self):
+        """type_from_name resolves aliases transparently, the same
+        choke point every other variant name goes through -- so an
+        alias for a valid scalar variant type works for free, with no
+        dedicated alias-specific handling needed in _resolve_sum_types
+        at all."""
+        assert_program_exit_code(
             "type Circle struct:\n"
             "    int radius\n"
             "\n"
@@ -6289,7 +6294,7 @@ class TestSumTypes:
             "\n"
             "def int main():\n"
             "    return 0\n",
-            match="not a declared struct",
+            0,
         )
 
     def test_unknown_variant_name_is_rejected(self):
@@ -6301,7 +6306,7 @@ class TestSumTypes:
             "\n"
             "def int main():\n"
             "    return 0\n",
-            match="not a declared struct",
+            match="isn't a declared struct or a valid scalar/str type",
         )
 
     def test_duplicate_variant_is_rejected(self):
@@ -6951,7 +6956,7 @@ class TestNarrowing:
             match="is not one of Shape's own declared variants",
         )
 
-    def test_undeclared_struct_name_is_rejected(self):
+    def test_undeclared_type_name_is_rejected(self):
         assert_program_semantic_error(
             self._SHAPE_DECLS +
             "def int main():\n"
@@ -6959,7 +6964,7 @@ class TestNarrowing:
             "    if s is Nonexistent:\n"
             "        return 0\n"
             "    return 0\n",
-            match="is not a declared struct",
+            match="Unknown type 'Nonexistent'",
         )
 
     def test_non_sum_typed_left_side_is_rejected(self):
@@ -7796,6 +7801,321 @@ class TestNarrowingNonBareVariable:
             expected=4 * 10 + 7,
         )
 
+
+# ---------------------------------------------------------------------------
+# Sum types, scalar/str variants: extends TestSumTypes/TestNarrowing/
+# TestExhaustiveMatching's own struct-only coverage to a variant that's a
+# scalar (int/int8/uint8/int64/bool) or str, mixed freely with struct
+# variants in the same sum type. Widening/narrowing/match/exhaustiveness
+# are all the SAME mechanism regardless of variant kind (see semantic.py's
+# own _types_compatible and ir/sum_types.py's own module docstring) --
+# these tests exist to prove that generalization actually holds, not to
+# re-litigate behavior TestSumTypes already covers for structs.
+# ---------------------------------------------------------------------------
+
+class TestScalarAndStrVariants:
+
+    _MIXED_DECLS = (
+        "type Circle struct:\n"
+        "    int radius\n"
+        "\n"
+        "type Mixed is Circle | int | str\n"
+        "\n"
+    )
+
+    # -- accepted / rejected at the semantic level --------------------------
+
+    def test_two_scalar_variants_parses_and_resolves(self):
+        assert_program_exit_code(
+            "type Number is int | str\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            expected=0,
+        )
+
+    def test_duplicate_scalar_variant_by_identical_spelling_is_rejected(self):
+        assert_program_semantic_error(
+            "type Number is int | int\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="more than once",
+        )
+
+    def test_duplicate_scalar_variant_by_different_spelling_is_rejected(self):
+        """`byte` and `uint8` are the identical Type -- rejected exactly
+        like `int | int`, not treated as two distinct variants just
+        because they're spelled differently."""
+        assert_program_semantic_error(
+            "type Number is byte | uint8\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            match="more than once",
+        )
+
+    def test_every_scalar_kind_is_a_valid_variant(self):
+        """int8/uint8/int64/bool alongside int/str -- not just the two
+        kinds the rest of this class focuses on."""
+        assert_program_exit_code(
+            "type Anything is int | int8 | uint8 | int64 | bool | str\n"
+            "\n"
+            "def int main():\n"
+            "    return 0\n",
+            expected=0,
+        )
+
+    def test_struct_and_scalar_and_str_mixed_in_one_sum_type(self):
+        assert_program_exit_code(
+            self._MIXED_DECLS +
+            "def int main():\n"
+            "    return 0\n",
+            expected=0,
+        )
+
+    # -- widening -------------------------------------------------------
+
+    def test_widening_an_int_literal_prints_correctly(self):
+        assert_program_stdout(
+            self._MIXED_DECLS +
+            "def int main():\n"
+            "    Mixed m = 42\n"
+            "    print(m)\n"
+            "    return 0\n",
+            "42\n",
+        )
+
+    def test_widening_a_str_literal_prints_correctly(self):
+        """A str variant, printed as part of a sum-typed container,
+        quotes correctly -- the identical convention a struct's own
+        str field already follows (see TestSumTypesPrint)."""
+        assert_program_stdout(
+            self._MIXED_DECLS +
+            "def int main():\n"
+            "    Mixed m = 'hello'\n"
+            "    print(m)\n"
+            "    return 0\n",
+            "'hello'\n",
+        )
+
+    def test_widening_via_assign_not_just_var_decl(self):
+        assert_program_stdout(
+            self._MIXED_DECLS +
+            "def int main():\n"
+            "    Mixed m = Circle(1)\n"
+            "    m = 7\n"
+            "    print(m)\n"
+            "    return 0\n",
+            "7\n",
+        )
+
+    def test_widening_an_array_element(self):
+        assert_program_stdout(
+            self._MIXED_DECLS +
+            "def int main():\n"
+            "    [3]Mixed arr = [Circle(1), 2, 'three']\n"
+            "    print(arr[1])\n"
+            "    return 0\n",
+            "2\n",
+        )
+
+    def test_widening_a_scalar_function_argument(self):
+        """Regression test: the argument-marshaling loop's own
+        widening check used to fire only for a STRUCT-typed argument,
+        so a scalar argument passed to a sum-typed parameter never got
+        tagged at all -- it was passed as a raw scalar where the
+        callee expected a pointer to a tagged, sized box, corrupting
+        memory instead of raising a clean error."""
+        assert_program_stdout(
+            self._MIXED_DECLS +
+            "def int describe(Mixed m):\n"
+            "    print(m)\n"
+            "    return 0\n"
+            "\n"
+            "def int main():\n"
+            "    describe(42)\n"
+            "    return 0\n",
+            "42\n",
+        )
+
+    def test_widening_a_scalar_return_value(self):
+        """Regression test: Return's own is_composite_return gate
+        decided whether to even consider the hidden-pointer widening
+        path at all based on the VALUE's own type, never the
+        function's declared return type -- so `return 99` from a
+        function declared to return a sum type took the ordinary
+        scalar-return path (returning 99 in a register) instead of
+        writing a tagged value through the hidden pointer the caller
+        expected, silently leaving the caller's own memory untouched
+        (read back as whatever was already there -- in practice, an
+        all-zero Circle)."""
+        assert_program_stdout(
+            self._MIXED_DECLS +
+            "def Mixed makeInt():\n"
+            "    return 99\n"
+            "\n"
+            "def int main():\n"
+            "    Mixed m = makeInt()\n"
+            "    print(m)\n"
+            "    return 0\n",
+            "99\n",
+        )
+
+    def test_widening_a_str_return_value(self):
+        assert_program_stdout(
+            self._MIXED_DECLS +
+            "def Mixed makeStr():\n"
+            "    return 'hi'\n"
+            "\n"
+            "def int main():\n"
+            "    Mixed m = makeStr()\n"
+            "    print(m)\n"
+            "    return 0\n",
+            "'hi'\n",
+        )
+
+    # -- narrowing --------------------------------------------------------
+
+    def test_narrowing_to_int_reads_back_a_usable_value(self):
+        assert_program_exit_code(
+            self._MIXED_DECLS +
+            "def int main():\n"
+            "    Mixed m = 42\n"
+            "    if m is int:\n"
+            "        return m + 1\n"
+            "    return -1\n",
+            expected=43,
+        )
+
+    def test_narrowing_to_str_reads_back_a_usable_value(self):
+        assert_program_exit_code(
+            self._MIXED_DECLS +
+            "def int main():\n"
+            "    Mixed m = 'hello'\n"
+            "    if m is str:\n"
+            "        return len(m)\n"
+            "    return -1\n",
+            expected=5,
+        )
+
+    def test_false_branch_when_narrowing_to_int_but_actual_variant_differs(self):
+        assert_program_exit_code(
+            self._MIXED_DECLS +
+            "def int main():\n"
+            "    Mixed m = Circle(9)\n"
+            "    if m is int:\n"
+            "        return 1\n"
+            "    return 0\n",
+            expected=0,
+        )
+
+    def test_narrowing_a_function_parameter_to_a_scalar(self):
+        assert_program_exit_code(
+            self._MIXED_DECLS +
+            "def int describe(Mixed m):\n"
+            "    if m is int:\n"
+            "        return m * 10\n"
+            "    return -1\n"
+            "\n"
+            "def int main():\n"
+            "    return describe(6)\n",
+            expected=60,
+        )
+
+    def test_narrowing_a_non_bare_variable_subject_to_a_scalar(self):
+        assert_program_exit_code(
+            self._MIXED_DECLS +
+            "def int main():\n"
+            "    [2]Mixed arr = [1, Circle(2)]\n"
+            "    if arr[0] is int as n:\n"
+            "        return n\n"
+            "    return -1\n",
+            expected=1,
+        )
+
+    def test_all_three_variant_kinds_narrowed_across_array_elements(self):
+        """Struct, int, and str variants side by side in one array,
+        each correctly narrowed and read back in turn."""
+        assert_program_stdout(
+            self._MIXED_DECLS +
+            "def int main():\n"
+            "    [3]Mixed arr = [Circle(5), 6, 'seven']\n"
+            "    int i = 0\n"
+            "    while i < 3:\n"
+            "        if arr[i] is Circle as c:\n"
+            "            print(c.radius)\n"
+            "        if arr[i] is int as n:\n"
+            "            print(n)\n"
+            "        if arr[i] is str as s:\n"
+            "            print(s)\n"
+            "        i = i + 1\n"
+            "    return 0\n",
+            "5\n6\nseven\n",
+        )
+
+    def test_equality_between_a_narrowed_int_and_a_plain_int(self):
+        assert_program_exit_code(
+            self._MIXED_DECLS +
+            "def int main():\n"
+            "    Mixed m = 99\n"
+            "    if m is int:\n"
+            "        if m == 99:\n"
+            "            return 1\n"
+            "    return 0\n",
+            expected=1,
+        )
+
+    # -- match / exhaustiveness --------------------------------------------
+
+    def test_match_with_a_branch_per_variant_kind(self):
+        assert_program_stdout(
+            self._MIXED_DECLS +
+            "def int describe(Mixed m):\n"
+            "    match m:\n"
+            "        is Circle:\n"
+            "            return m.radius\n"
+            "        is int:\n"
+            "            return m * 10\n"
+            "        is str:\n"
+            "            return len(m)\n"
+            "\n"
+            "def int main():\n"
+            "    print(describe(Circle(5)))\n"
+            "    print(describe(42))\n"
+            "    print(describe('hello'))\n"
+            "    return 0\n",
+            "5\n420\n5\n",
+        )
+
+    def test_match_missing_a_scalar_arm_is_rejected_as_non_exhaustive(self):
+        assert_program_semantic_error(
+            self._MIXED_DECLS +
+            "def int f(Mixed m):\n"
+            "    match m:\n"
+            "        is Circle:\n"
+            "            return 1\n"
+            "        is int:\n"
+            "            return 2\n"
+            "    return 0\n",
+            match="missing: str",
+        )
+
+    def test_match_testing_the_same_scalar_variant_twice_is_rejected(self):
+        assert_program_semantic_error(
+            self._MIXED_DECLS +
+            "def int f(Mixed m):\n"
+            "    match m:\n"
+            "        is int:\n"
+            "            return 1\n"
+            "        is int:\n"
+            "            return 2\n"
+            "        is str:\n"
+            "            return 3\n"
+            "        else:\n"
+            "            return 0\n",
+            match="tested more than once",
+        )
 
 # ---------------------------------------------------------------------------
 # Pointers, stage 2: semantic analysis only. Go-style pointers -- safe by

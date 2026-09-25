@@ -41,7 +41,7 @@ against hornet_print and the static descriptor data it reads."""
 
 from ir.errors import IRError
 from ir.ir import IRBinOp, IRBoundsCheck, IRBranch, IRConst, IRCall, IRJump, IRLabel, IRSliceBoundsCheck, IRStaticDataAddress, IRLocalAddress, IRLoad, IRMove, IRStore
-from ir.utils import type_byte_width, type_of
+from ir.utils import SUM_TYPE_TAG_WIDTH, type_byte_width, type_of
 from parser import Call, Binary, Field, Index, Node, Slice, StringLiteral, Unary, UnaryOp, Variable, BinaryOp
 from semantic import Type, TypeKind
 
@@ -148,8 +148,8 @@ class StringsMixin:
             # deduplicated here.
             sum_type_info = self.ir_program.sum_type_registry[t.sum_type_name]
             variant_desc_labels = [
-                self._get_or_build_type_descriptor(Type(TypeKind.STRUCT, struct_name=variant_name), in_progress)
-                for variant_name in sum_type_info.variants
+                self._get_or_build_type_descriptor(variant_type, in_progress)
+                for variant_type in sum_type_info.variants
             ]
             self.ir_program.type_descriptors.append((label, [_TYPEDESC_SUM, len(variant_desc_labels)] + variant_desc_labels))
         elif t.kind == TypeKind.POINTER:
@@ -191,18 +191,33 @@ class StringsMixin:
         genuinely can still escape past this function, exactly the
         way an int/bool/pointer local's already can (see codegen/
         escape_analysis.py). Mirrors _ir_struct_address's own Variable
-        case for this reason -- minus its sum-type narrowing branch,
-        since str can never itself be sum-typed, so there is nothing
-        to narrow."""
+        case, sum-type narrowing branch included -- str can now itself
+        be a sum type's own variant, so a str-narrowed occurrence
+        needs the identical SUM_TYPE_TAG_WIDTH payload offset. Unlike
+        a scalar-narrowed occurrence (gen_expr_ir's own Variable
+        case), which still has to LOAD through the address, a str-
+        narrowed one doesn't: this method only ever builds an ADDRESS,
+        and _ir_read_str_descriptor_from_address already reads the
+        {ptr, len} pair off whatever address it's given."""
         if isinstance(expr, Variable):
+            slot_type = self._local_type(expr.name)
             slot = self._local_slot(expr.name)
             slot_addr = self.ir_program.ids.new_temp(Type.INT64)
             ir = [IRLocalAddress(dst=slot_addr, slot=slot)]
-            if self._is_heap_allocated(self._local_decl_id(expr.name), self._local_type(expr.name)):
+            if self._is_heap_allocated(self._local_decl_id(expr.name), slot_type):
                 addr_temp = self.ir_program.ids.new_temp(Type.INT64)
                 ir.append(IRLoad(dst=addr_temp, address=slot_addr))
-                return ir, addr_temp
-            return ir, slot_addr
+                base_addr = addr_temp
+            else:
+                base_addr = slot_addr
+            if slot_type.kind == TypeKind.SUM and expr.resolved_type is not None and expr.resolved_type != slot_type:
+                payload_addr = self.ir_program.ids.new_temp(Type.INT64)
+                ir.append(IRBinOp(
+                    dst=payload_addr, op=BinaryOp.ADD,
+                    left=base_addr, right=IRConst(SUM_TYPE_TAG_WIDTH, Type.INT64),
+                ))
+                return ir, payload_addr
+            return ir, base_addr
         if isinstance(expr, Field):
             return self._ir_field_address(expr)
         if isinstance(expr, Index):
