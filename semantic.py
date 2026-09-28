@@ -2890,7 +2890,7 @@ class SemanticAnalyzer:
         """Unwraps a chain of Field/Index nodes down to whatever bare
         Variable, if any, ultimately sits underneath -- `s.field`,
         `arr[i]`, `outer.inner[0].field`, arbitrary depth alike. The
-        semantic-level counterpart to codegen/escape_analysis.py's own
+        semantic-level counterpart to escape_analysis.py's own
         root_variable_name (that one also unwraps Slice, which never
         reaches here: check_unary's own ADDRESS_OF case is the only
         caller, and `&s[a:b]` -- taking the address of a SLICE

@@ -90,7 +90,7 @@ class PointersMixin:
         own value too, no extra heap-allocated indirection check
         needed here either: whichever named variable this chain is
         ultimately rooted in is what escape analysis's own new ADDRESS_
-        OF case (contribution(), codegen/escape_analysis.py) already
+        OF case (contribution(), escape_analysis.py) already
         attributes THIS address to, so if it escapes, is_heap_
         allocated already reports that ROOT declaration as heap-
         allocated -- and _ir_field_address/_ir_index_address already

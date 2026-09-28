@@ -21,7 +21,7 @@ allocation, lowering)."""
 
 from typing import List, Optional
 
-from codegen.escape_analysis import analyze_array_escapes, is_heap_allocated
+from escape_analysis import analyze_array_escapes, is_heap_allocated
 from ir.errors import IRError
 from ir.utils import COMPOSITE_KINDS, is_composite_addressable, type_byte_width, type_of
 from ir.ir import (

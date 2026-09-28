@@ -5738,7 +5738,7 @@ class TestMethods:
 # support for free, with no changes needed at any of them beyond passing the
 # new registry through. This did, however, turn out to be a genuinely wide
 # (if shallow) mechanical change: type_from_name is called from semantic.py,
-# codegen.py, AND codegen/escape_analysis.py (a third, easy-to-miss call
+# codegen.py, AND escape_analysis.py (a third, easy-to-miss call
 # site found only by re-running the full suite after the first two files
 # were updated and seeing escape analysis's own tests still failing).
 #
