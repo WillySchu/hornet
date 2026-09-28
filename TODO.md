@@ -17,6 +17,9 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
+- Dict literal as return value.
+- Dict literal as call argument.
+- Dict literal as equality operand.
 - `for in` loop.
 - Dict literal as nested value (I think fixes the next three).
 - Dict of dicts.

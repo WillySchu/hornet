@@ -47,6 +47,12 @@ def int8 main():
     # TODO(will): Should this work?
     #int8 b = 15
     #print(b == 15)
-    # TODO(will): This should definitely work.
-    #HasArray ha = *make_ha_ptr()
+
+    # TODO(will): These should evaluate the same.
+    #dict[str]str d = dict[str]str{'asdf': 'asdf'}
+    #dict[str]str d2 = dict[str]str{'asdf': 'asdf'}
+    #print(d == d2)
+    #[]str s = ['1', '2']
+    #[]str s2 = ['2', '3']
+    #print(s == s2)
     return 0
