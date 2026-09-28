@@ -3661,13 +3661,13 @@ class TestLen:
     def test_len_on_int_is_rejected(self):
         assert_semantic_error(
             "    return len(5)",
-            match="requires an array, slice, or str",
+            match="requires an array, slice, str, or dict",
         )
 
     def test_len_on_bool_is_rejected(self):
         assert_semantic_error(
             "    return len(true)",
-            match="requires an array, slice, or str",
+            match="requires an array, slice, str, or dict",
         )
 
     def test_len_of_a_string_literal(self):
@@ -9006,6 +9006,65 @@ class TestDicts:
             "    print(codes)\n"
             "    return 0\n",
             "dict[int]str{2: 'two'}\n",
+        )
+
+    # -- stage 4 (partial): len(d) -- iteration itself still awaits `for` --
+
+    def test_len_reflects_insert_and_delete(self):
+        """count (what len reads) means LIVE entries specifically,
+        unaffected by tombstones -- del must actually decrease what
+        len reports, not just leave a dead slot len still counts."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]int ages = dict[str]int{'alice': 25, 'bob': 17}\n"
+            "    print(len(ages))\n"
+            "    ages['carol'] = 30\n"
+            "    print(len(ages))\n"
+            "    del(ages, 'alice')\n"
+            "    print(len(ages))\n"
+            "    return 0\n",
+            "2\n3\n2\n",
+        )
+
+    def test_len_of_an_empty_dict_literal(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]int empty = dict[str]int{}\n"
+            "    print(len(empty))\n"
+            "    return 0\n",
+            "0\n",
+        )
+
+    def test_len_stays_correct_across_growth(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[int]int nums = dict[int]int{0: 0}\n"
+            "    int i = 1\n"
+            "    while i < 50:\n"
+            "        nums[i] = i\n"
+            "        i = i + 1\n"
+            "    print(len(nums))\n"
+            "    return 0\n",
+            "50\n",
+        )
+
+    def test_len_on_a_non_bare_variable_dict_base(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]int a = dict[str]int{'x': 1, 'y': 2}\n"
+            "    [1]dict[str]int arr = [a]\n"
+            "    print(len(arr[0]))\n"
+            "    return 0\n",
+            "2\n",
+        )
+
+    def test_len_requires_an_array_slice_str_or_dict_argument(self):
+        assert_program_semantic_error(
+            "def int main():\n"
+            "    dict[str]int ages = dict[str]int{'alice': 25}\n"
+            "    print(len(true))\n"
+            "    return 0\n",
+            match="requires an array, slice, str, or dict",
         )
 
 # ---------------------------------------------------------------------------

@@ -1166,8 +1166,27 @@ class ArraysSlicesMixin:
         IRConst (x's declared size, never read out of x at runtime);
         for a SLICE base, an ordinary INT Temp holding a runtime
         value read from x's own descriptor -- either way, exactly
-        _ir_indexable_base's own second return value, unchanged."""
+        _ir_indexable_base's own second return value, unchanged.
+
+        A DICT base is handled first, entirely separately, for the
+        identical reason str is: dict isn't indexable/sliceable
+        either. Reads count straight out of x's own descriptor
+        (offset 8 -- see runtime.c's own dict_tombstones docstring for
+        why count specifically already means LIVE entries, no
+        tombstone adjustment needed) via _ir_dict_address, so any side
+        effect or bounds check buried in x still genuinely runs."""
         arg = expr.args[0]
+        if type_of(arg).kind == TypeKind.DICT:
+            result = self._ir_dict_address(arg)
+            if result is None:
+                return None
+            dict_ir, descriptor_addr = result
+            count_addr = self.ir_program.ids.new_temp(Type.INT64)
+            length = self.ir_program.ids.new_temp(Type.INT)
+            return dict_ir + [
+                IRBinOp(dst=count_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(8, Type.INT64)),
+                IRLoad(dst=length, address=count_addr),
+            ], length
         if type_of(arg).kind == TypeKind.STR:
             result = self._ir_str_value(arg)
             if result is None:

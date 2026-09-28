@@ -2652,16 +2652,19 @@ class SemanticAnalyzer:
         return Type.VOID
 
     def check_len_call(self, expr: Call) -> Type:
-        """`len(x)`: x must be array-, slice-, or str-typed; every
-        other type is rejected by this same, single check, where
-        print's own much more permissive one needs several carve-outs.
+        """`len(x)`: x must be array-, slice-, str-, or dict-typed;
+        every other type is rejected by this same, single check,
+        where print's own much more permissive one needs several
+        carve-outs.
 
         str joined array/slice once it became a {ptr, len} descriptor
         with a real length FIELD rather than null-terminated bytes
         needing a runtime scan (see ir/strings.py's own module
-        docstring) -- len(s) is now exactly as cheap as len(arr): a
-        plain field read, no different in kind from reading a slice's
-        own length out of its descriptor.
+        docstring) -- len(s) is now exactly as cheap as len(arr).
+        dict is the identical story once more: its own count field
+        (see runtime.c's own dict_tombstones docstring for why count
+        specifically means LIVE entries, unaffected by any tombstone)
+        is just as directly readable as a slice's own len.
 
         x is fully type-checked via check_expr regardless of whether
         codegen needs its computed value (an array's length is a
@@ -2677,9 +2680,9 @@ class SemanticAnalyzer:
                 expr,
             )
         arg_type = self.check_expr(expr.args[0])
-        if arg_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STR):
+        if arg_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STR, TypeKind.DICT):
             raise SemanticError(
-                f"'len' requires an array, slice, or str argument, got {arg_type}",
+                f"'len' requires an array, slice, str, or dict argument, got {arg_type}",
                 expr.args[0],
             )
         return Type.INT
