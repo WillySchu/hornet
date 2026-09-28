@@ -17,6 +17,7 @@ from parser import (
     ExprStmt,
     Field,
     FieldAssign,
+    For,
     Function,
     If,
     Index,
@@ -581,6 +582,24 @@ class EscapeAnalyzer:
                 self.scan_expr_for_escaping_calls(stmt.condition)
                 self.scopes.append({})
                 self.walk_statements(stmt.body)
+                self.scopes.pop()
+            elif isinstance(stmt, For):
+                # ONE scope spans init through increment, matching
+                # analyze_for's own reasoning in semantic.py exactly:
+                # init's own variable needs to stay visible for cond/
+                # body/increment, and nothing declared anywhere in any
+                # of those four should survive past this scope's own
+                # pop -- a single shared scope already gives both,
+                # with no need for a second, nested one just for body.
+                # init/increment each wrapped in a list, reusing this
+                # same method's own VarDecl/Assign branches (the top
+                # of this loop, above) rather than duplicating them
+                # here.
+                self.scopes.append({})
+                self.walk_statements([stmt.init])
+                self.scan_expr_for_escaping_calls(stmt.condition)
+                self.walk_statements(stmt.body)
+                self.walk_statements([stmt.increment])
                 self.scopes.pop()
             # Break, Continue: nothing to do.
 

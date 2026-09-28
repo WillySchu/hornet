@@ -1803,6 +1803,174 @@ class TestWhileLoops:
         )
 
 
+class TestForLoops:
+    pytestmark = GCC_SKIP
+
+    def test_counts_to_ten(self):
+        assert_exit_code(
+            "    int total = 0\n"
+            "    for int i = 0; i < 10; i += 1:\n"
+            "        total = total + i\n"
+            "    return total",
+            sum(range(10)),
+        )
+
+    def test_condition_false_immediately_zero_iterations(self):
+        assert_exit_code(
+            "    int count = 0\n"
+            "    for int i = 10; i < 5; i += 1:\n"
+            "        count = count + 1\n"
+            "    return count",
+            0,
+        )
+
+    def test_break_exits_immediately(self):
+        assert_exit_code(
+            "    int last = -1\n"
+            "    for int i = 0; i < 10; i += 1:\n"
+            "        if i == 3:\n"
+            "            break\n"
+            "        last = i\n"
+            "    return last",
+            2,
+        )
+
+    def test_continue_still_runs_the_increment(self):
+        """Regression test for a real bug: the increment clause was
+        originally reached only by falling through from the body's own
+        last instruction -- an implicit fallthrough this codebase's
+        own IR never allows (see ir.ir's own module docstring) -- so
+        the IR verifier itself caught the missing terminator before
+        this could ever miscompile silently. Behaviorally, the risk a
+        naive fix could still get wrong is continue reusing While's
+        own start_label directly, which would skip the increment
+        every time and infinite-loop here (i never advancing past 0,
+        `0 % 2 == 0` staying true forever) rather than just skip one
+        addition -- so this asserts the FULL sum, not just that the
+        program terminates."""
+        assert_exit_code(
+            "    int total = 0\n"
+            "    for int i = 0; i < 10; i += 1:\n"
+            "        if i % 2 == 0:\n"
+            "            continue\n"
+            "        total = total + i\n"
+            "    return total",
+            sum(i for i in range(10) if i % 2 != 0),
+        )
+
+    def test_nested_for_loops(self):
+        assert_exit_code(
+            "    int count = 0\n"
+            "    for int i = 0; i < 3; i += 1:\n"
+            "        for int j = 0; j < 3; j += 1:\n"
+            "            count = count + 1\n"
+            "    return count",
+            9,
+        )
+
+    def test_nested_for_loops_break_only_exits_innermost(self):
+        assert_exit_code(
+            "    int count = 0\n"
+            "    for int i = 0; i < 3; i += 1:\n"
+            "        for int j = 0; j < 10; j += 1:\n"
+            "            if j == 1:\n"
+            "                break\n"
+            "            count = count + 1\n"
+            "    return count",
+            3,
+        )
+
+    def test_struct_typed_counter(self):
+        """Exercises _parse_for_init_clause's own two-consecutive-
+        IDENTIFIERs struct-type detection, not just the scalar-keyword
+        path every other test here uses. The increment clause is a
+        plain reassignment (`p = Point(...)`), not a field-assignment
+        (`p.x += 1`) -- the latter is FieldAssign, one of the node
+        kinds _parse_for_increment_clause deliberately doesn't accept
+        yet (see its own docstring)."""
+        assert_program_exit_code(
+            "type Point struct:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    int total = 0\n"
+            "    for Point p = Point(0, 0); p.x < 3; p = Point(p.x + 1, 0):\n"
+            "        total = total + p.x\n"
+            "    return total\n",
+            0 + 1 + 2,
+        )
+
+    def test_increment_accepts_plain_assignment_too(self):
+        """`i = i + 1`, not `i += 1` -- parse_assign desugars the two
+        into the identical AST shape (see _parse_for_increment_clause's
+        own docstring for why accepting only one of them would be an
+        arbitrary distinction based on which operator token was used,
+        not on any real difference in behavior)."""
+        assert_exit_code(
+            "    int total = 0\n"
+            "    for int i = 0; i < 5; i = i + 1:\n"
+            "        total = total + i\n"
+            "    return total",
+            sum(range(5)),
+        )
+
+    def test_loop_variable_does_not_leak_past_the_loop(self):
+        assert_semantic_error(
+            "    for int i = 0; i < 10; i += 1:\n"
+            "        print(i)\n"
+            "    print(i)\n"
+            "    return 0",
+            match="undeclared variable 'i'",
+        )
+
+    def test_non_bool_condition_is_rejected(self):
+        assert_semantic_error(
+            "    for int i = 0; i; i += 1:\n"
+            "        print(i)\n"
+            "    return 0",
+            match="'for' condition must be bool, got int",
+        )
+
+    def test_init_clause_must_be_a_var_decl(self):
+        """`for i = 0; ...`, reassigning an already-existing i, rather
+        than `for int i = 0; ...` declaring a fresh one -- rejected for
+        now, per _parse_for_init_clause's own documented, deliberate
+        narrowness (a future broadening, not a permanent ceiling)."""
+        with pytest.raises(ParseError, match="Expected a variable declaration"):
+            _parse(
+                "def int main():\n"
+                "    int i = 0\n"
+                "    for i = 0; i < 10; i += 1:\n"
+                "        print(i)\n"
+                "    return 0\n"
+            )
+
+    def test_increment_clause_must_be_an_assignment(self):
+        """`arr[i] = 5` as the increment clause -- an IndexAssign,
+        rejected for the identical, deliberate-narrowness reason a
+        FieldAssign is (see test_struct_typed_counter's own
+        docstring)."""
+        with pytest.raises(ParseError, match="Expected an assignment"):
+            _parse(
+                "def int main():\n"
+                "    [3]int arr = [1, 2, 3]\n"
+                "    for int i = 0; i < 3; arr[i] = 5:\n"
+                "        print(i)\n"
+                "    return 0\n"
+            )
+
+    def test_break_and_continue_still_rejected_outside_any_loop(self):
+        """Not really a for-loop-specific test at all -- loop_depth is
+        a single, shared counter for every loop kind (see semantic.
+        py's own loop_depth field) -- but worth pinning explicitly now
+        that a second loop KIND exists, so a future refactor that
+        accidentally gave For its own separate counter would be
+        caught here rather than only inside an actual for body."""
+        assert_semantic_error("    break\n    return 0", match="'break' outside of a loop")
+        assert_semantic_error("    continue\n    return 0", match="'continue' outside of a loop")
+
+
 # ---------------------------------------------------------------------------
 # str: literals, equality/inequality, and concatenation.
 #

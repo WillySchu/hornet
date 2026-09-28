@@ -17,6 +17,8 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
+- `in` keyword.
+- `for in` loop.
 - Declared but uninitialized dicts.
 - Dict of dicts.
 - Dict as struct field.
@@ -44,10 +46,8 @@ Updates:
 - Change slice's zero type to an empty slice rather than `none`.
 - Disallow untyped array literals from anything except assignment to a typed variable / parameter / return.
 - `assert`
-- `in` keyword.
 - `cap` builtin?
 - Ternary.
-- For loops.
 - Sets.
 - Generics.
 - Sorting.

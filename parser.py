@@ -902,6 +902,41 @@ class While(Node):
 
 
 @dataclass
+class For(Node):
+    """`for init; cond; increment: <body>` -- e.g. `for int i = 0;
+    i < 10; i += 1:`. The three semicolon-separated clauses are the
+    ONE place this language uses `;` at all: Go's own for-loop kept
+    semicolons for the identical reason, after dropping them as a
+    general statement terminator everywhere else, since nothing else
+    reads as unambiguously as this one specific job.
+
+    init runs exactly once, before the loop begins; cond is
+    (re-)checked before every iteration including the first, exactly
+    like While's own; increment runs after the body, on every
+    iteration that runs at all, INCLUDING one a `continue` cut short
+    -- see _ir_continue's own docstring in ir/statements.py for why
+    that needs its own dedicated IR label, unlike While's own continue.
+
+    init and increment are deliberately narrow for now, each a single
+    fixed node kind rather than Go's own fully general "any simple
+    statement" in both positions: init is always a VarDecl, increment
+    always an Assign (see _parse_for_init_clause/_parse_for_increment_
+    clause's own docstrings for exactly what each accepts and why). A
+    deliberate seam, not a permanent ceiling: parse_for calls out to
+    those two functions specifically so broadening what each accepts
+    later touches only them, not this node, parse_for itself, or
+    anything downstream -- semantic.py's analyze_for and ir/
+    statements.py's gen_statement_ir already dispatch on whatever
+    concrete node init/increment turn out to be via the SAME analyze_
+    statement/gen_statement_ir every top-level statement already goes
+    through, so accepting more node kinds here needs no change there."""
+    init: Node
+    condition: Node
+    increment: Node
+    body: List[Node]
+
+
+@dataclass
 class Break(Node):
     """`break` -- exits the *innermost* enclosing loop immediately.
     Only valid inside a while body; semantic.py rejects one that isn't."""
@@ -1881,6 +1916,8 @@ class Parser:
             return self.parse_match()
         if self.check(TokenType.WHILE):
             return self.parse_while()
+        if self.check(TokenType.FOR):
+            return self.parse_for()
         if self.check(TokenType.BREAK):
             return self.parse_break()
         if self.check(TokenType.CONTINUE):
@@ -1927,6 +1964,76 @@ class Parser:
         self.expect(TokenType.NEWLINE, "Expected a newline after ':'")
         body = self.parse_block()
         return While(condition=condition, body=body, line=start_tok.line, col=start_tok.col)
+
+    def parse_for(self) -> For:
+        """`for init; cond; increment: <body>`. The two semicolons are
+        the only place this parser ever expects TokenType.SEMICOLON --
+        everywhere else, a NEWLINE ends a statement -- but a for-
+        header's three clauses live on one logical line, so there's no
+        ambiguity: just two more required separators marking where one
+        clause ends and the next begins (see For's own docstring)."""
+        start_tok = self.expect(TokenType.FOR, "Expected 'for'")
+        init = self._parse_for_init_clause()
+        self.expect(TokenType.SEMICOLON, "Expected ';' after the for-loop's own init clause")
+        condition = self.parse_expression()
+        self.expect(TokenType.SEMICOLON, "Expected ';' after the for-loop's own condition")
+        increment = self._parse_for_increment_clause()
+        self.expect(TokenType.COLON, "Expected ':' to start the for body")
+        self.expect(TokenType.NEWLINE, "Expected a newline after ':'")
+        body = self.parse_block()
+        return For(init=init, condition=condition, increment=increment, body=body, line=start_tok.line, col=start_tok.col)
+
+    def _parse_for_init_clause(self) -> Node:
+        """The for-loop's own init clause -- for now, always a fresh
+        VarDecl (`for int i = 0; ...`), never a plain assignment to an
+        already-existing variable the way Go's own more general init
+        clause also allows (see For's own docstring for why this is a
+        deliberate, narrower-for-now seam).
+
+        Recognizes a VarDecl via the same unambiguous, no-backtracking
+        type-starting tokens parse_statement's own dispatch already
+        uses for the cases needing no speculative parsing: a scalar
+        type keyword, an array/slice type (`[`), a dict type, or a
+        struct type (two consecutive IDENTIFIERs). Deliberately
+        EXCLUDES parse_statement's own `*`-prefixed pointer-type case,
+        which needs real speculative parsing/backtracking to tell a
+        pointer TYPE apart from a DEREFERENCE expression -- a pointer-
+        typed loop counter is enough of an edge case that copying that
+        machinery here isn't worth it yet."""
+        start_tok = self.current()
+        if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR,
+                       TokenType.OPEN_BRACKET, TokenType.DICT):
+            parsed_type = self.parse_type()
+            return self.parse_var_decl(var_type=parsed_type, start_tok=start_tok)
+        if self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.IDENTIFIER:
+            parsed_type = self.parse_type()
+            return self.parse_var_decl(var_type=parsed_type, start_tok=start_tok)
+        raise ParseError(
+            f"Expected a variable declaration (e.g. `int i = 0`) as the for-loop's "
+            f"own init clause at line {start_tok.line}, column {start_tok.col}"
+        )
+
+    def _parse_for_increment_clause(self) -> Node:
+        """The for-loop's own increment clause -- for now, always an
+        assignment to an already-existing, bare variable (`i += 1` or
+        the equivalent, un-sugared `i = i + 1`), never an index/field/
+        deref-assignment or a bare call the way Go's own more general
+        post-statement also allows (see For's own docstring).
+
+        Plain `=` is accepted alongside every compound form: parse_
+        assign already desugars `i += 1` into the exact same Assign(
+        name, Binary(ADD, Variable(name), value)) shape `i = i + 1`
+        produces directly, so the two are indistinguishable once
+        parsed -- rejecting one while accepting the other would be an
+        arbitrary distinction based on which operator token was used,
+        not on any real difference in behavior."""
+        start_tok = self.current()
+        if self.check(TokenType.IDENTIFIER) and self.peek(1).type in _ASSIGNMENT_TOKENS:
+            return self.parse_assign()
+        raise ParseError(
+            f"Expected an assignment (e.g. `i += 1`) as the for-loop's own "
+            f"increment clause at line {start_tok.line}, column {start_tok.col}"
+        )
 
     def parse_break(self) -> Break:
         tok = self.expect(TokenType.BREAK, "Expected 'break'")

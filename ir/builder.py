@@ -44,6 +44,7 @@ from parser import (
     ExprStmt,
     Field,
     FieldAssign,
+    For,
     Function,
     If,
     Index,
@@ -75,7 +76,7 @@ class IRFunctionBuilder(
 
     def __init__(self, ir_program):
         self.ir_program = ir_program
-        self.loop_labels: List[tuple] = []  # stack of (start_label, end_label), innermost last
+        self.loop_labels: List[tuple] = []  # stack of (continue_label, end_label), innermost last
 
     def gen_function_ir(self, fn: Function) -> IRFunction:
         """Builds this function's own codegen artifacts up through its
@@ -417,6 +418,17 @@ class IRFunctionBuilder(
                     self._collect_locals(stmt.else_body, ir_fn)
             elif isinstance(stmt, While):
                 self._collect_locals(stmt.body, ir_fn)
+            elif isinstance(stmt, For):
+                # stmt.init is always a VarDecl right now (see For's
+                # own docstring in parser.py) -- wrapped in a list so
+                # this reuses the exact same VarDecl branch just above
+                # rather than duplicating _allocate_local_slot's own
+                # call here. Recurses into stmt.body for the identical
+                # reason If/While's own bodies do; stmt.increment
+                # needs no slot-reservation at all -- an Assign never
+                # introduces a new binding.
+                self._collect_locals([stmt.init], ir_fn)
+                self._collect_locals(stmt.body, ir_fn)
 
     def _collect_argument_temps(self, statements: List[Node], ir_fn: IRFunction) -> None:
         """Recursively walks `statements` -- including into every If's
@@ -490,6 +502,16 @@ class IRFunctionBuilder(
             elif isinstance(stmt, While):
                 self._collect_argument_temps_in_expr(stmt.condition, ir_fn)
                 self._collect_argument_temps(stmt.body, ir_fn)
+            elif isinstance(stmt, For):
+                # init/increment each wrapped in a list, reusing this
+                # same method's own VarDecl/Assign branches rather than
+                # duplicating them here -- see this method's own While
+                # case just above for the condition/body half, which
+                # For's own needs are identical to.
+                self._collect_argument_temps([stmt.init], ir_fn)
+                self._collect_argument_temps_in_expr(stmt.condition, ir_fn)
+                self._collect_argument_temps(stmt.body, ir_fn)
+                self._collect_argument_temps([stmt.increment], ir_fn)
             elif isinstance(stmt, ExprStmt):
                 self._collect_argument_temps_in_expr(stmt.expr, ir_fn)
                 if isinstance(stmt.expr, Call) and stmt.expr.name in self.ir_program.struct_registry:

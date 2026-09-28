@@ -33,6 +33,7 @@ from parser import (
     ExprStmt,
     Field,
     FieldAssign,
+    For,
     If,
     Index,
     IndexAssign,
@@ -319,6 +320,33 @@ class StatementsMixin:
             self.loop_labels.pop()
             ir.append(IRJump(start_label))
             ir.append(IRLabel(end_label))
+            return ir
+        elif isinstance(stmt, For):
+            # ONE scope spans init through increment (pushed before
+            # _ir_for_head runs, so init's own binding is already
+            # visible when the condition's own gen_expr_ir call needs
+            # to resolve it) -- matching analyze_for's own reasoning.
+            #
+            # increment_label is DISTINCT from start_label, existing
+            # specifically so `continue` has somewhere to land that
+            # still runs increment before looping back -- see _ir_
+            # continue's own docstring.
+            start_label = self.ir_program.ids.new_label("for_start")
+            body_label = self.ir_program.ids.new_label("for_body")
+            increment_label = self.ir_program.ids.new_label("for_increment")
+            end_label = self.ir_program.ids.new_label("for_end")
+            self._push_scope()
+            ir = self._ir_for_head(stmt, start_label, body_label, end_label, ir_fn)
+            self.loop_labels.append((increment_label, end_label))
+            for s in stmt.body:
+                ir.extend(self.gen_statement_ir(s, ir_fn))
+            self.loop_labels.pop()
+            ir.append(IRJump(increment_label))
+            ir.append(IRLabel(increment_label))
+            ir.extend(self.gen_statement_ir(stmt.increment, ir_fn))
+            ir.append(IRJump(start_label))
+            ir.append(IRLabel(end_label))
+            self._pop_scope()
             return ir
         elif isinstance(stmt, VarDecl):
             # A scalar VarDecl, WITH or without an initializer: bind
@@ -1308,6 +1336,30 @@ class StatementsMixin:
             IRLabel(body_label),
         ]
 
+    def _ir_for_head(self, stmt: For, start_label: str, body_label: str, end_label: str, ir_fn) -> list:
+        """Builds (without lowering) init's own IR, then the start-
+        label/condition/branch IR landing at the given body label --
+        the caller (gen_statement_ir's own For case) handles the body,
+        the increment clause and its own dedicated label, and the
+        trailing jump/end-label.
+
+        init is generated via gen_statement_ir itself -- the same
+        dispatch every top-level statement goes through -- so its own
+        variable is bound exactly like any other VarDecl's would be.
+        The caller's own scope push happens BEFORE this method runs so
+        that binding is already visible when gen_expr_ir(stmt.
+        condition) needs to resolve it.
+
+        Otherwise identical to _ir_while_head's own shape (see its own
+        docstring for why the leading IRJump exists), just generated
+        immediately after init's own IR instead of first."""
+        init_ir = self.gen_statement_ir(stmt.init, ir_fn)
+        cond_ir, cond_value = self.gen_expr_ir(stmt.condition)
+        return init_ir + [IRJump(start_label), IRLabel(start_label)] + cond_ir + [
+            IRBranch(cond=cond_value, true_label=body_label, false_label=end_label),
+            IRLabel(body_label),
+        ]
+
     def _ir_break(self) -> list:
         """Builds real IR for a bare `break`: the innermost loop's own
         end label (see loop_labels), raising IRError if none is
@@ -1318,13 +1370,21 @@ class StatementsMixin:
         return [IRJump(end_label)]
 
     def _ir_continue(self) -> list:
-        """Builds real IR for a bare `continue`: the innermost loop's
-        own start label (see loop_labels), raising IRError if
-        none is currently open -- an ordinary IRJump to it."""
+        """Builds real IR for a bare `continue`: jumps to the
+        innermost loop's own CONTINUE target (see loop_labels), raising
+        IRError if none is currently open.
+
+        For a While, this is the SAME label _ir_while_head's own
+        condition re-check starts at -- nothing else to run first. For
+        a For, it's instead a dedicated label placed right before the
+        increment clause's own IR -- continue still has to run
+        increment before looping back, like every three-clause for-
+        loop's own continue does; reusing While's own single label
+        would silently skip the increment every time."""
         if not self.loop_labels:
             raise IRError("'continue' outside of a loop")
-        start_label, _ = self.loop_labels[-1]
-        return [IRJump(start_label)]
+        continue_label, _ = self.loop_labels[-1]
+        return [IRJump(continue_label)]
 
 
 

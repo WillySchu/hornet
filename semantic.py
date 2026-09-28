@@ -218,6 +218,7 @@ from parser import (
     ExternFunctionDecl,
     Field,
     FieldAssign,
+    For,
     Function,
     If,
     Index,
@@ -1405,6 +1406,8 @@ class SemanticAnalyzer:
             self.analyze_if(stmt, return_type)
         elif isinstance(stmt, While):
             self.analyze_while(stmt, return_type)
+        elif isinstance(stmt, For):
+            self.analyze_for(stmt, return_type)
         elif isinstance(stmt, Break):
             self.analyze_break(stmt)
         elif isinstance(stmt, Continue):
@@ -2077,6 +2080,47 @@ class SemanticAnalyzer:
             self.analyze_statement(s, return_type)
         self._pop_scope()
         self.loop_depth -= 1
+
+    def analyze_for(self, stmt: For, return_type: Type) -> None:
+        """`for init; cond; increment: <body>`. ONE scope wraps init
+        through increment, not a separate nested one for just the body
+        -- init's own variable needs to stay visible in cond, body,
+        AND increment, and nothing declared in any of those four
+        should leak out past the for statement once it's done, both
+        already true of one shared scope with no need for a nested one
+        inside it.
+
+        init and increment are each just handed to analyze_statement,
+        the same per-statement-kind dispatch every top-level statement
+        already goes through -- not a bespoke check written just for
+        this method. Two consequences: (1) this needs no changes if
+        _parse_for_init_clause/_parse_for_increment_clause are ever
+        broadened to accept more node kinds later (see For's own
+        docstring in parser.py); (2) the already-existing compound-
+        assignment type check (via analyze_assign) is what rejects
+        `d += 1` for a dict-typed d in the increment clause -- no
+        separate, narrower restriction needs writing here.
+
+        cond is checked for bool exactly like while's own, after init
+        but before body/increment -- loop_depth only wraps the BODY,
+        matching while's own scope, since increment (an ordinary
+        assignment) can never contain a break/continue."""
+        self._push_scope()
+        self.analyze_statement(stmt.init, return_type)
+        condition_type = self.check_expr(stmt.condition)
+        if condition_type != Type.BOOL:
+            raise SemanticError(
+                f"'for' condition must be bool, got {condition_type} "
+                f"(no implicit int-to-bool conversion -- try `x != 0` "
+                f"instead of `x`)",
+                stmt.condition,
+            )
+        self.loop_depth += 1
+        for s in stmt.body:
+            self.analyze_statement(s, return_type)
+        self.loop_depth -= 1
+        self.analyze_statement(stmt.increment, return_type)
+        self._pop_scope()
 
     def analyze_break(self, stmt: Break) -> None:
         if self.loop_depth == 0:

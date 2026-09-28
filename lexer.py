@@ -33,6 +33,7 @@ class TokenType(Enum):
                           # braces have never been needed before now.
     CLOSE_BRACE = auto()
     COLON = auto()
+    SEMICOLON = auto()
     COMMA = auto()
     DOT = auto()
 
@@ -85,7 +86,7 @@ class TokenType(Enum):
     IF = auto()
     ELSE = auto()
     ELIF = auto()
-    # FOR = auto()
+    FOR = auto()
     WHILE = auto()
     BREAK = auto()
     CONTINUE = auto()
@@ -182,7 +183,7 @@ class Lexer:
             'if': TokenType.IF,
             'else': TokenType.ELSE,
             'elif': TokenType.ELIF,
-            # 'for': TokenType.FOR,
+            'for': TokenType.FOR,
             'while': TokenType.WHILE,
             'break': TokenType.BREAK,
             'continue': TokenType.CONTINUE,
@@ -245,6 +246,7 @@ class Lexer:
             ('GREATER_THAN',  r'>'),
             ('LESS_THAN',     r'<'),
             ('COLON',         r':'),               # Colon
+            ('SEMICOLON',     r';'),               # For-loop clause separator
             ('COMMA',         r','),
             ('ASSIGN',        r'='),               # Assignment operator
             ('PLUS',          r'\+'),              # Add
@@ -382,6 +384,8 @@ class Lexer:
                 self.bracket_depth -= 1
             elif kind == 'COLON':
                 self.tokens.append(Token(TokenType.COLON, value, self.line, column))
+            elif kind == 'SEMICOLON':
+                self.tokens.append(Token(TokenType.SEMICOLON, value, self.line, column))
             elif kind == 'COMMA':
                 self.tokens.append(Token(TokenType.COMMA, value, self.line, column))
             elif kind == 'PLUS':
