@@ -88,6 +88,18 @@ class IRFunctionBuilder(
         # fresh per function; see _collect_argument_temps.
         self._argument_temp_slots = {}
         ir_fn = IRFunction(name=fn.name)
+        # This function's own IRFunction, reachable from any method on
+        # self without threading it through every intervening
+        # caller's own signature -- safe since a fresh IRFunctionBuilder
+        # is created per function (program_builder.py's own list
+        # comprehension), so self is already scoped to one function at
+        # a time, exactly like self._argument_temp_slots above. Needed
+        # by _ir_write_composite_value_into's own DICT case (a nested
+        # dict literal reserves its own per-entry scratch slots via
+        # _ir_write_dict_literal_into, which needs to know which
+        # function's own frame those belong to) -- every OTHER caller
+        # of that method already gets by without it.
+        self.ir_fn = ir_fn
         ir_fn.return_type = Type.VOID if fn.return_type is None else type_from_name(
             fn.return_type, self.ir_program.struct_registry, self.ir_program.type_alias_registry, sum_types=self.ir_program.sum_type_registry)
         return_type = ir_fn.return_type

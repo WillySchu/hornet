@@ -29,7 +29,7 @@ from ir.ir import (
     IRStore, Temp,
 )
 from ir.utils import COMPOSITE_KINDS, SUM_TYPE_TAG_WIDTH, is_composite_addressable, type_of, type_byte_width
-from parser import Node, ArrayLiteral, Call, Field, Index, Slice, Variable, NoneLiteral, Binary, BinaryOp, Unary, UnaryOp
+from parser import Node, ArrayLiteral, Call, DictLiteral, Field, Index, Slice, Variable, NoneLiteral, Binary, BinaryOp, Unary, UnaryOp
 from semantic import TypeKind, Type
 
 
@@ -804,9 +804,9 @@ class ArraysSlicesMixin:
         slice_descriptor_into_address), an ordinary composite-
         returning Call (_ir_composite_call), or nested literal
         construction itself -- recursing back into _ir_write_array_
-        literal_into/_ir_write_struct_literal_into, which call back
-        into THIS dispatcher for any of their own composite elements/
-        fields in turn.
+        literal_into/_ir_write_struct_literal_into/_ir_write_dict_
+        literal_into, which call back into THIS dispatcher for any of
+        their own composite elements/fields/values in turn.
 
         `append` is checked, and handled, BEFORE the generic ordinary-
         Call case below -- append is a Call whose own name is never in
@@ -864,6 +864,16 @@ class ArraysSlicesMixin:
                 return None
             slice_ir, ptr_value, len_value, cap_value = production
             return slice_ir + self._ir_write_slice_descriptor_into_address(dst_address, ptr_value, len_value, cap_value)
+        if value_type.kind == TypeKind.DICT and isinstance(value_expr, DictLiteral):
+            # _ir_write_dict_literal_into (ir/dicts.py) already exists
+            # and is already fully general -- dst_address is a plain
+            # parameter, not tied to any particular variable or slot --
+            # so this is wiring, not new construction logic. Its own
+            # ir_fn parameter comes from self.ir_fn (set once per
+            # function in gen_function_ir) rather than threaded
+            # through this method's own signature and its three other
+            # callers, none of which otherwise need it.
+            return self._ir_write_dict_literal_into(dst_address, value_expr, value_type, self.ir_fn)
         if value_type.kind == TypeKind.STR:
             # The one str-typed shape none of the cases above already
             # cover: a StringLiteral or a Binary(ADD) concatenation --

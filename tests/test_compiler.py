@@ -9839,6 +9839,78 @@ class TestDicts:
         with pytest.raises(IRError, match="DICT equality operand"):
             generate_asm(ast, platform=ASM_PLATFORM)
 
+    # -- dict literal as a nested value -----------------------------------
+
+    def test_dict_literal_as_a_struct_field_argument(self):
+        """The bug this pins: _ir_write_composite_value_into (the one
+        shared dispatcher struct/array-literal field/element recursion
+        already goes through) had no DictLiteral case at all, so a
+        dict literal used directly as a struct-literal field argument
+        crashed. _ir_write_dict_literal_into itself already existed
+        and was already fully general (dst_address, not tied to any
+        particular variable) -- this was purely a wiring gap, not
+        missing construction logic."""
+        assert_program_stdout(
+            "type Wrapper struct:\n"
+            "    dict[str]int d\n"
+            "    int tag\n"
+            "\n"
+            "def int main():\n"
+            "    Wrapper w = Wrapper(d=dict[str]int{'a': 1, 'b': 2}, tag=99)\n"
+            "    print(w.d['a'])\n"
+            "    print(w.d['b'])\n"
+            "    print(w.tag)\n"
+            "    return 0\n",
+            "1\n2\n99\n",
+        )
+
+    def test_dict_literal_as_an_array_element(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    [2]dict[str]int arr = [dict[str]int{'a': 1}, dict[str]int{'b': 2}]\n"
+            "    print(arr[0]['a'])\n"
+            "    print(arr[1]['b'])\n"
+            "    return 0\n",
+            "1\n2\n",
+        )
+
+    def test_dict_of_dict(self):
+        """A dict literal whose own VALUE type is itself dict -- goes
+        through the identical recursion (_ir_write_dict_literal_into's
+        own per-entry _ir_materialize_value_into_scratch call, which
+        already dispatched generically on COMPOSITE_KINDS) as struct-
+        of-dict already did before this fix; only the reverse
+        direction (dict-of-X, X containing a nested dict LITERAL
+        specifically) was ever missing."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]dict[str]int d = dict[str]dict[str]int{\n"
+            "        'outer1': dict[str]int{'inner1': 10, 'inner2': 20},\n"
+            "        'outer2': dict[str]int{'inner3': 30},\n"
+            "    }\n"
+            "    print(d['outer1']['inner1'])\n"
+            "    print(d['outer1']['inner2'])\n"
+            "    print(d['outer2']['inner3'])\n"
+            "    return 0\n",
+            "10\n20\n30\n",
+        )
+
+    def test_three_level_nesting_struct_array_dict(self):
+        """Struct containing an array of dicts, each itself a nested
+        literal -- confirms the recursion genuinely composes across
+        multiple levels, not just the three specific shapes above."""
+        assert_program_stdout(
+            "type Bundle struct:\n"
+            "    [2]dict[str]int items\n"
+            "\n"
+            "def int main():\n"
+            "    Bundle b = Bundle(items=[dict[str]int{'a': 1}, dict[str]int{'b': 2}])\n"
+            "    print(b.items[0]['a'])\n"
+            "    print(b.items[1]['b'])\n"
+            "    return 0\n",
+            "1\n2\n",
+        )
+
 # ---------------------------------------------------------------------------
 # Pointers, stage 2: semantic analysis only. Go-style pointers -- safe by
 # construction via escape analysis (not yet built; that's stage 3), no
