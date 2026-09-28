@@ -9498,6 +9498,115 @@ class TestDicts:
             "dict[str]int{'a': 1}\n",
         )
 
+    # -- dict-typed function/method return values -----------------------------
+
+    def test_dict_typed_function_return_parses_and_works(self):
+        """The bug this pins: _check_starts_with_return_type's own
+        one-token type-starting check never included TokenType.DICT,
+        so `def dict[str]int foo():` failed to parse at all -- 'dict'
+        was silently treated as if it could only ever start the def's
+        own name, never a return type. Once past parsing, everything
+        else already worked: dict was already in COMPOSITE_KINDS, so
+        the hidden-pointer-return convention already knew how to
+        handle it."""
+        assert_program_stdout(
+            "def dict[str]int make_dict():\n"
+            "    dict[str]int d = dict[str]int{'a': 1}\n"
+            "    return d\n"
+            "\n"
+            "def int main():\n"
+            "    dict[str]int d = make_dict()\n"
+            "    print(d['a'])\n"
+            "    return 0\n",
+            "1\n",
+        )
+
+    def test_dict_typed_function_return_with_parameters(self):
+        assert_program_stdout(
+            "def dict[str]int make_dict(int value):\n"
+            "    dict[str]int d = dict[str]int{'a': value}\n"
+            "    return d\n"
+            "\n"
+            "def int main():\n"
+            "    dict[str]int d = make_dict(42)\n"
+            "    print(d['a'])\n"
+            "    return 0\n",
+            "42\n",
+        )
+
+    def test_chained_dict_returning_function_calls(self):
+        assert_program_stdout(
+            "def dict[str]int base_dict():\n"
+            "    dict[str]int d = dict[str]int{'a': 1}\n"
+            "    return d\n"
+            "\n"
+            "def dict[str]int extended_dict(int extra):\n"
+            "    dict[str]int d = base_dict()\n"
+            "    d['b'] = extra\n"
+            "    return d\n"
+            "\n"
+            "def int main():\n"
+            "    dict[str]int d = extended_dict(99)\n"
+            "    print(d['a'])\n"
+            "    print(d['b'])\n"
+            "    return 0\n",
+            "1\n99\n",
+        )
+
+    def test_dict_typed_method_return(self):
+        """parse_method_def shares _check_starts_with_return_type
+        with parse_function -- this confirms the fix actually applies
+        there too, not just to ordinary top-level functions."""
+        assert_program_stdout(
+            "type Counter struct:\n"
+            "    int start\n"
+            "    def dict[str]int make_dict(c):\n"
+            "        dict[str]int d = dict[str]int{'count': c.start}\n"
+            "        return d\n"
+            "\n"
+            "def int main():\n"
+            "    Counter c = Counter(start=5)\n"
+            "    dict[str]int cd = c.make_dict()\n"
+            "    print(cd['count'])\n"
+            "    return 0\n",
+            "5\n",
+        )
+
+    def test_nil_dict_returned_from_a_function(self):
+        """Combines this fix with the earlier nil-dict one: a nil
+        dict survives being returned by value from one function and
+        used correctly (bootstrapped by a write) in another."""
+        assert_program_stdout(
+            "def dict[int]int make_nil_dict():\n"
+            "    dict[int]int d\n"
+            "    return d\n"
+            "\n"
+            "def int main():\n"
+            "    dict[int]int b = make_nil_dict()\n"
+            "    print(len(b))\n"
+            "    b[1] = 100\n"
+            "    print(b[1])\n"
+            "    return 0\n",
+            "0\n100\n",
+        )
+
+    def test_returning_a_dict_literal_directly_is_a_known_separate_gap(self):
+        """`return dict[str]int{...}` -- a DIRECT literal, not routed
+        through a local variable first -- still isn't supported: the
+        SAME root cause as dict-literal-as-struct-field-argument and
+        dict-literal-as-array-element (_ir_write_composite_value_into
+        never learned DictLiteral), not a new or separate bug, and
+        not something this particular fix (the return-TYPE parsing
+        gap) touches at all. Pinned here explicitly so it's not
+        mistaken for a regression if it's still failing later --
+        returning a dict via a local variable first, as every other
+        test in this section already does, remains the correct
+        workaround until that shared root cause is addressed."""
+        ast = _parse("def dict[str]int make_dict():\n    return dict[str]int{'a': 1}\n")
+        analyze(ast)
+        with pytest.raises(IRError, match="No real-IR case for statement of type Return"):
+            generate_asm(ast, platform=ASM_PLATFORM)
+
 # ---------------------------------------------------------------------------
 # Pointers, stage 2: semantic analysis only. Go-style pointers -- safe by
 # construction via escape analysis (not yet built; that's stage 3), no

@@ -18,10 +18,11 @@ Documentation:
 
 Updates:
 - `for in` loop.
-- Dict return type from functions.
 - Dict type as function argument.
+- Dict literal as nested value (I think fixes the next three).
 - Dict of dicts.
 - Dict as struct field.
+- Dict literal as return type.
 - Dicts as sum types.
 - `in` checking for arrays/slices.
 - `in` checking for strings.

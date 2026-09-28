@@ -1647,7 +1647,7 @@ class Parser:
     def _check_starts_with_return_type(self) -> bool:
         """True if the current position starts an optional return type
         before a def's name -- shared by parse_function/parse_method_
-        def. A type keyword, '[', or '*' starts a return type
+        def. A type keyword, '[', 'dict', or '*' starts a return type
         unambiguously with one token of lookahead (a pointer return
         type has none of parse_statement's own '*'-vs-dereference
         ambiguity: there's no expression position here at all, only a
@@ -1665,7 +1665,7 @@ class Parser:
         statement's own qualified-VarDecl check also needs: IDENTIFIER
         DOT IDENTIFIER IDENTIFIER, the def's own name always being the
         fourth token there too."""
-        return self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET, TokenType.STAR) or (
+        return self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET, TokenType.STAR, TokenType.DICT) or (
             self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.IDENTIFIER
         ) or (
             self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.DOT
