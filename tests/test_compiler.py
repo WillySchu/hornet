@@ -9590,22 +9590,84 @@ class TestDicts:
             "0\n100\n",
         )
 
-    def test_returning_a_dict_literal_directly_is_a_known_separate_gap(self):
-        """`return dict[str]int{...}` -- a DIRECT literal, not routed
-        through a local variable first -- still isn't supported: the
-        SAME root cause as dict-literal-as-struct-field-argument and
-        dict-literal-as-array-element (_ir_write_composite_value_into
-        never learned DictLiteral), not a new or separate bug, and
-        not something this particular fix (the return-TYPE parsing
-        gap) touches at all. Pinned here explicitly so it's not
-        mistaken for a regression if it's still failing later --
-        returning a dict via a local variable first, as every other
-        test in this section already does, remains the correct
-        workaround until that shared root cause is addressed."""
-        ast = _parse("def dict[str]int make_dict():\n    return dict[str]int{'a': 1}\n")
-        analyze(ast)
-        with pytest.raises(IRError, match="No real-IR case for statement of type Return"):
-            generate_asm(ast, platform=ASM_PLATFORM)
+    def test_returning_a_dict_literal_directly_now_works(self):
+        """Was a pinned, known-separate gap (same root cause as dict-
+        literal-as-struct-field-argument and dict-literal-as-array-
+        element: _ir_write_composite_value_into never learned
+        DictLiteral) -- now fixed via a dedicated Return-statement
+        case (ir/statements.py), since Return's own composite dispatch
+        never routed through that shared writer at all, even for
+        array/struct literals, so this needed its own wiring rather
+        than falling out of that other fix automatically."""
+        assert_program_stdout(
+            "def dict[str]int make_dict():\n"
+            "    return dict[str]int{'a': 1, 'b': 2}\n"
+            "\n"
+            "def int main():\n"
+            "    dict[str]int d = make_dict()\n"
+            "    print(d['a'])\n"
+            "    print(d['b'])\n"
+            "    return 0\n",
+            "1\n2\n",
+        )
+
+    def test_returning_a_nested_dict_literal_directly(self):
+        """Combines this fix with the earlier nested-value one: the
+        returned literal's own entries are themselves composite
+        (dict-of-dict and struct-valued dict), exercising _ir_write_
+        dict_literal_into's own existing recursion through the new
+        Return-statement wiring, not just a flat, all-scalar literal
+        like the test above."""
+        assert_program_stdout(
+            "def dict[str]dict[str]int make_nested():\n"
+            "    return dict[str]dict[str]int{'outer': dict[str]int{'inner': 42}}\n"
+            "\n"
+            "type Point struct:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def dict[str]Point make_points():\n"
+            "    return dict[str]Point{'a': Point(x=3, y=4)}\n"
+            "\n"
+            "def int main():\n"
+            "    dict[str]dict[str]int nested = make_nested()\n"
+            "    print(nested['outer']['inner'])\n"
+            "    dict[str]Point points = make_points()\n"
+            "    print(points['a'].x)\n"
+            "    print(points['a'].y)\n"
+            "    return 0\n",
+            "42\n3\n4\n",
+        )
+
+    def test_returning_a_dict_literal_directly_from_a_method(self):
+        assert_program_stdout(
+            "type Factory struct:\n"
+            "    int seed\n"
+            "    def dict[str]int make(f):\n"
+            "        return dict[str]int{'seed': f.seed}\n"
+            "\n"
+            "def int main():\n"
+            "    Factory factory = Factory(seed=7)\n"
+            "    dict[str]int made = factory.make()\n"
+            "    print(made['seed'])\n"
+            "    return 0\n",
+            "7\n",
+        )
+
+    def test_returning_an_empty_dict_literal_directly(self):
+        assert_program_stdout(
+            "def dict[str]int make_empty():\n"
+            "    return dict[str]int{}\n"
+            "\n"
+            "def int main():\n"
+            "    dict[str]int d = make_empty()\n"
+            "    print(len(d))\n"
+            "    d['x'] = 1\n"
+            "    print(d['x'])\n"
+            "    return 0\n",
+            "0\n1\n",
+        )
+
 
     # -- dict-typed function/method arguments ----------------------------------
 
@@ -9727,12 +9789,12 @@ class TestDicts:
         """`foo(dict[str]int{...})` -- a DIRECT literal argument, not
         routed through a local variable first -- still isn't
         supported: the identical, already-tracked _ir_write_
-        composite_value_into gap dict-literal-as-struct-field-argument,
-        dict-literal-as-array-element, and returning a dict literal
-        directly all share, not a new bug and not something this
-        argument-passing fix takes on. Passing an existing dict
-        variable, as every other test in this section does, remains
-        the correct workaround."""
+        composite_value_into gap dict-literal-as-struct-field-argument
+        and dict-literal-as-array-element share (returning a dict
+        literal directly was the same gap too, but has since been
+        given its own separate fix in Return's own dispatch). Passing
+        an existing dict variable, as every other test in this
+        section does, remains the correct workaround."""
         ast = _parse(
             "def int lookup(dict[str]int d, str key):\n"
             "    return d[key]\n"
@@ -9824,10 +9886,12 @@ class TestDicts:
         routed through a local variable first -- isn't supported: the
         same, already-tracked _ir_write_composite_value_into gap
         dict-literal-as-struct-field-argument, dict-literal-as-array-
-        element, returning a dict literal directly, and a dict literal
-        as a direct call argument all share. Comparing an already-
-        declared dict variable, as every other test in this section
-        does, remains the correct workaround."""
+        element, and a dict literal as a direct call argument share
+        (returning a dict literal directly was the same gap too, but
+        has since been given its own separate fix in Return's own
+        dispatch). Comparing an already-declared dict variable, as
+        every other test in this section does, remains the correct
+        workaround."""
         ast = _parse(
             "def int main():\n"
             "    dict[str]int d = dict[str]int{'a': 1}\n"

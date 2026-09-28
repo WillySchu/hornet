@@ -192,14 +192,17 @@ class StatementsMixin:
                 return hidden_ptr_ir + value_ir + write_ir + [IRReturn(value=None)]
             # A composite return whose own value is an array literal,
             # a bare bracketed-list literal resolved to SLICE by this
-            # function's own declared return type, or a POSITIONAL
-            # struct literal, with every element/field scalar -- writes
-            # directly through the hidden pointer via _ir_write_array_
-            # literal_into/_ir_slice_literal/_ir_write_struct_literal_
-            # into. All return None when out of scope: a nested
-            # composite element/field, or named/partial (kwargs)
-            # struct construction -- both still need their own
-            # recursive real-IR treatment, a separate, later step.
+            # function's own declared return type, a dict literal, or
+            # a POSITIONAL struct literal, with every element/field/
+            # entry scalar -- writes directly through the hidden
+            # pointer via _ir_write_array_literal_into/_ir_slice_
+            # literal/_ir_write_dict_literal_into/_ir_write_struct_
+            # literal_into. Array/slice/struct return None when out of
+            # scope: a nested composite element/field, or named/
+            # partial (kwargs) struct construction -- both still need
+            # their own recursive real-IR treatment, a separate, later
+            # step (dict's own out-of-scope case raises IRError
+            # directly instead -- see the DICT case just below).
             if isinstance(stmt.value, ArrayLiteral):
                 # Dispatches on ir_fn.return_type (this function's own
                 # DECLARED return type), NOT type_of(stmt.value): the
@@ -220,6 +223,21 @@ class StatementsMixin:
                         write_ir = self._ir_write_slice_descriptor_into_address(
                             hidden_ptr, ptr_value, len_value, cap_value)
                         return hidden_ptr_ir + slice_ir + write_ir + [IRReturn(value=None)]
+            if isinstance(stmt.value, DictLiteral):
+                # No ARRAY-vs-SLICE-style ambiguity to dispatch on here
+                # -- a DictLiteral (unlike a bracketed-list literal)
+                # always carries its own key_type/value_type explicitly,
+                # so type_of(stmt.value) is unambiguously DICT-kind on
+                # its own; ir_fn.return_type is used only for
+                # consistency with the ArrayLiteral case just above.
+                # _ir_write_dict_literal_into never returns None (it
+                # raises IRError directly for an out-of-scope entry
+                # instead -- see its own caller in ir/dicts.py), so,
+                # unlike every case above, no "if write_ir is not None"
+                # guard is needed before returning.
+                hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr(ir_fn)
+                write_ir = self._ir_write_dict_literal_into(hidden_ptr, stmt.value, ir_fn.return_type, ir_fn)
+                return hidden_ptr_ir + write_ir + [IRReturn(value=None)]
             if isinstance(stmt.value, Call) and stmt.value.name in self.ir_program.struct_registry:
                 value_type = type_of(stmt.value)
                 hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr(ir_fn)
