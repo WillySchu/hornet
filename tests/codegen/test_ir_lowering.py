@@ -6,8 +6,8 @@ compile-and-run integration tests in tests/test_compiler.py."""
 
 from codegen.codegen import CodeGenerator
 from codegen.assembly_ast import Mov, MovQ, Register
-from codegen.id_allocator import IdAllocator
 from codegen.ir_lowering import InstructionSelector
+from ir.id_allocator import IdAllocator
 from ir.ir import IRFunction, IRProgram, IRSliceGrow, Temp
 from semantic import Type
 

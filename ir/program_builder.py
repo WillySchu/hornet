@@ -9,8 +9,8 @@ multiple methods, unlike IRFunctionBuilder.
 Separate from CodeGenerator.generate() so optimize() can run between
 them (see compile_to_asm)."""
 
-from codegen.id_allocator import IdAllocator
 from ir.errors import IRError
+from ir.id_allocator import IdAllocator
 from ir.ir import IRProgram
 from ir.builder import IRFunctionBuilder
 from ir.verify import verify_program
