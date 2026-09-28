@@ -12,6 +12,7 @@ wouldn't cover nearly as much of what actually matters.
 """
 
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -51,13 +52,18 @@ def _write(tmpdir: str, name: str, content: str) -> str:
     return str(path)
 
 
-def _compile_and_run(entry_path: str, tmpdir: str, args: list = None) -> subprocess.CompletedProcess:
+def _compile_and_run(entry_path: str, tmpdir: str, args: list = None, stdin: str = None) -> subprocess.CompletedProcess:
     """The full pipeline: discover, merge, desugar, analyze, codegen,
     assemble, link, run -- returning the finished process so callers
     can assert on returncode and/or stdout. `args` (default none) are
     passed through to the compiled binary itself as its own argv[1:]
     -- for a program that reads its own command-line arguments (e.g.
-    stdlib/os.ht's own get_args), not the compiler's own invocation."""
+    stdlib/os.ht's own get_args), not the compiler's own invocation.
+    `stdin` (default none, meaning the binary's own stdin is left
+    disconnected from anything -- an immediate EOF, exactly like
+    running it with input redirected from /dev/null) is piped into
+    the binary's own stdin -- for a program that reads it (e.g.
+    stdlib/os.ht's own read_stdin)."""
     entry_program, modules = discover_modules(entry_path)
     merged = merge_programs(entry_program, modules)
     desugar_methods(merged)
@@ -80,7 +86,7 @@ def _compile_and_run(entry_path: str, tmpdir: str, args: list = None) -> subproc
     gcc_cmd += [str(asm_path), str(runtime_o), "-o", str(binary)]
     link = subprocess.run(gcc_cmd, capture_output=True, text=True)
     assert link.returncode == 0, f"link failed:\n{link.stderr}\n--- asm ---\n{asm}"
-    return subprocess.run([str(binary), *(args or [])], capture_output=True, text=True)
+    return subprocess.run([str(binary), *(args or [])], input=stdin or "", capture_output=True, text=True)
 
 
 def test_cross_module_function_call():
@@ -1075,3 +1081,113 @@ def test_stdlib_os_module_get_args_preserves_an_argument_containing_spaces():
         )
         result = _compile_and_run(entry, tmpdir, args=["hello world"])
         assert result.stdout == "hello world\n"
+
+
+def test_stdlib_os_module_read_file_reads_a_real_file():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        data_path = _write(tmpdir, "data.txt", "line one\nline two\nline three")
+        entry = _write(
+            tmpdir, "main.ht",
+            "from 'os' import read_file\n\n"
+            "def int main():\n"
+            f"    str contents = read_file('{data_path}')\n"
+            "    print(len(contents))\n"
+            "    print(contents)\n"
+            "    return 0\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.stdout == "28\nline one\nline two\nline three\n"
+
+
+def test_stdlib_os_module_read_file_handles_a_file_larger_than_one_chunk():
+    """read_all_from_fd's own chunk size is 65536 bytes -- this file
+    is deliberately several times that, to prove the loop-until-EOF
+    logic actually spans multiple read() calls correctly, not just
+    the single-chunk case every other test here happens to exercise."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        big_content = "".join(f"line {i}\n" for i in range(20000))
+        data_path = _write(tmpdir, "big.txt", big_content)
+        entry = _write(
+            tmpdir, "main.ht",
+            "from 'os' import read_file\n\n"
+            "def int main():\n"
+            f"    str contents = read_file('{data_path}')\n"
+            "    print(len(contents))\n"
+            "    return 0\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.stdout == f"{len(big_content)}\n"
+
+
+def test_stdlib_os_module_read_file_panics_on_a_missing_file():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        missing_path = str(Path(tmpdir) / "does_not_exist.txt")
+        entry = _write(
+            tmpdir, "main.ht",
+            "from 'os' import read_file\n\n"
+            "def int main():\n"
+            f"    str contents = read_file('{missing_path}')\n"
+            "    return 0\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.returncode == -signal.SIGABRT
+        assert "could not open file" in result.stdout
+
+
+def test_stdlib_os_module_read_stdin_reads_piped_input():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "from 'os' import read_stdin\n\n"
+            "def int main():\n"
+            "    str contents = read_stdin()\n"
+            "    print(len(contents))\n"
+            "    print(contents)\n"
+            "    return 0\n",
+        )
+        result = _compile_and_run(entry, tmpdir, stdin="hello from stdin")
+        assert result.stdout == "16\nhello from stdin\n"
+
+
+def test_stdlib_os_module_read_stdin_with_no_input_reads_empty():
+    """No stdin piped in at all -- read() sees an immediate EOF (0),
+    the ordinary end of a genuinely empty stream, not an error."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "from 'os' import read_stdin\n\n"
+            "def int main():\n"
+            "    str contents = read_stdin()\n"
+            "    print(len(contents))\n"
+            "    return 0\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.stdout == "0\n"
+
+
+def test_stdlib_os_module_read_file_and_read_stdin_share_read_all_from_fd():
+    """The same content, read once from a file and once from stdin,
+    must come back identical -- read_all_from_fd's own {>0, 0, <0}
+    read() loop genuinely doesn't know or care which kind of fd it
+    was handed."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        content = "shared content\nacross both paths\n"
+        data_path = _write(tmpdir, "data.txt", content)
+        entry = _write(
+            tmpdir, "main.ht",
+            "from 'os' import read_file, read_stdin, get_args\n\n"
+            "def int main(int argc, *byte argv):\n"
+            "    []str args = get_args(argc, argv)\n"
+            "    str contents = ''\n"
+            "    if len(args) > 1:\n"
+            "        contents = read_file(args[1])\n"
+            "    else:\n"
+            "        contents = read_stdin()\n"
+            "    print(contents)\n"
+            "    return 0\n",
+        )
+        from_file = _compile_and_run(entry, tmpdir, args=[data_path])
+        from_stdin = _compile_and_run(entry, tmpdir, stdin=content)
+        assert from_file.stdout == content + "\n"
+        assert from_stdin.stdout == content + "\n"
+
