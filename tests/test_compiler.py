@@ -9745,6 +9745,100 @@ class TestDicts:
         with pytest.raises(IRError, match="direct dict literal argument isn't supported yet"):
             generate_asm(ast, platform=ASM_PLATFORM)
 
+    # -- dict equality: mirrors slice's own none-comparison, otherwise false --
+
+    def test_nil_dict_equals_none(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]int d\n"
+            "    if d == none:\n"
+            "        print('equal')\n"
+            "    if d != none:\n"
+            "        print('not equal (WRONG)')\n"
+            "    return 0\n",
+            "equal\n",
+        )
+
+    def test_non_nil_dict_does_not_equal_none(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]int d = dict[str]int{'a': 1}\n"
+            "    if d == none:\n"
+            "        print('equal (WRONG)')\n"
+            "    if d != none:\n"
+            "        print('not equal')\n"
+            "    return 0\n",
+            "not equal\n",
+        )
+
+    def test_dict_equality_is_always_false_even_for_identical_contents(self):
+        """Per this feature's own confirmed design: dict has no real,
+        per-entry content equality (unlike array/struct's own _ir_
+        composite_equal) -- two dicts holding the exact same entries
+        still compare as NOT equal, always, since there's no byte-for-
+        byte shortcut the way array's own fixed layout gives array
+        equality (two dicts with identical contents can have entirely
+        different bucket layouts depending on insertion/deletion
+        history)."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]int a = dict[str]int{'x': 1}\n"
+            "    dict[str]int b = dict[str]int{'x': 1}\n"
+            "    if a == b:\n"
+            "        print('equal (WRONG)')\n"
+            "    if a != b:\n"
+            "        print('not equal')\n"
+            "    return 0\n",
+            "not equal\n",
+        )
+
+    def test_dict_equality_still_evaluates_both_operands_for_side_effects(self):
+        """The comparison's own RESULT never inspects either dict's
+        contents, but both operand expressions must still genuinely
+        run -- `f() == g()`, f/g each dict-returning with a side
+        effect of their own, must call both, exactly like array/
+        struct equality already has to (_ir_composite_operand_
+        address)."""
+        assert_program_stdout(
+            "def dict[str]int make_a():\n"
+            "    print('making a')\n"
+            "    dict[str]int d = dict[str]int{'a': 1}\n"
+            "    return d\n"
+            "\n"
+            "def dict[str]int make_b():\n"
+            "    print('making b')\n"
+            "    dict[str]int d = dict[str]int{'b': 2}\n"
+            "    return d\n"
+            "\n"
+            "def int main():\n"
+            "    if make_a() == make_b():\n"
+            "        print('equal (WRONG)')\n"
+            "    else:\n"
+            "        print('not equal')\n"
+            "    return 0\n",
+            "making a\nmaking b\nnot equal\n",
+        )
+
+    def test_dict_literal_as_a_direct_equality_operand_is_a_known_separate_gap(self):
+        """`dict[str]int{...} == d` -- a DIRECT literal operand, not
+        routed through a local variable first -- isn't supported: the
+        same, already-tracked _ir_write_composite_value_into gap
+        dict-literal-as-struct-field-argument, dict-literal-as-array-
+        element, returning a dict literal directly, and a dict literal
+        as a direct call argument all share. Comparing an already-
+        declared dict variable, as every other test in this section
+        does, remains the correct workaround."""
+        ast = _parse(
+            "def int main():\n"
+            "    dict[str]int d = dict[str]int{'a': 1}\n"
+            "    if dict[str]int{'a': 1} == d:\n"
+            "        print('equal')\n"
+            "    return 0\n"
+        )
+        analyze(ast)
+        with pytest.raises(IRError, match="DICT equality operand"):
+            generate_asm(ast, platform=ASM_PLATFORM)
+
 # ---------------------------------------------------------------------------
 # Pointers, stage 2: semantic analysis only. Go-style pointers -- safe by
 # construction via escape analysis (not yet built; that's stage 3), no

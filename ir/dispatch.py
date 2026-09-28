@@ -238,22 +238,25 @@ class DispatchMixin:
         return addr_ir + [IRLoad(dst=t, address=addr_value)], t
 
     def _ir_composite_operand_address(self, expr: Node, value_type: Type):
-        """Builds (without lowering) an ARRAY- or STRUCT-typed
+        """Builds (without lowering) an ARRAY-, STRUCT-, or DICT-typed
         equality operand's own address as real IR -- returns (ir,
         address), or None when out of scope. Both of _ir_expr_binary's
         own equality operands need this identical dispatch, so it's
         factored out here.
 
         In dispatch order: a Variable/Field/Index (an existing
-        address, via _ir_array_address/_ir_struct_address); a bare
-        bracketed-list literal (ARRAY only -- _ir_materialize_array_
-        literal; a struct literal can never be compared this way at
-        all, since semantic.py rejects it as a Binary operand
-        outright); an ordinary composite-returning Call (_ir_
-        materialize_composite_call, shared by both ARRAY and
-        STRUCT)."""
+        address, via _ir_array_address/_ir_dict_address/_ir_struct_
+        address); a bare bracketed-list literal (ARRAY only -- _ir_
+        materialize_array_literal; a struct or dict literal can never
+        be compared this way -- semantic.py rejects a struct literal
+        as a Binary operand outright, and dict equality's own
+        "otherwise false" design never needs a dict literal's own
+        address at all, just its side effects, see _ir_dict_equal's
+        own docstring); an ordinary composite-returning Call (_ir_
+        materialize_composite_call, shared by all three kinds)."""
         if is_composite_addressable(expr):
-            address_fn = self._ir_array_address if value_type.kind == TypeKind.ARRAY else self._ir_struct_address
+            address_fn = {TypeKind.ARRAY: self._ir_array_address, TypeKind.DICT: self._ir_dict_address}.get(
+                value_type.kind, self._ir_struct_address)
             return address_fn(expr)
         if value_type.kind == TypeKind.ARRAY and isinstance(expr, ArrayLiteral):
             return self._ir_materialize_array_literal(expr)
@@ -264,13 +267,16 @@ class DispatchMixin:
     def _ir_expr_binary(self, expr: Binary) -> tuple[list, IRValue]:
         """Builds real IR for every Binary shape this compiler
         supports: short-circuit AND/OR (_ir_short_circuit), slice-vs-
-        none comparison (_ir_slice_none_comparison), string concat/
-        compare (_ir_string_concat/_ir_string_compare), array/struct
-        equality (_ir_composite_operand_address/_ir_composite_equal,
+        none and dict-vs-none comparison (_ir_slice_none_comparison/
+        _ir_dict_none_comparison), string concat/compare (_ir_string_
+        concat/_ir_string_compare), array/struct/dict equality (array/
+        struct via _ir_composite_operand_address/_ir_composite_equal,
         for a Variable/Field/Index, a bare bracketed-list literal
         (ARRAY only), or an ordinary composite-returning Call, in any
-        combination on either side), or the ordinary arithmetic/
-        comparison case (_ir_binary)."""
+        combination on either side -- dict via _ir_dict_equal instead,
+        which never actually compares contents at all, see its own
+        docstring), or the ordinary arithmetic/comparison case (_ir_
+        binary)."""
         if expr.op == BinaryOp.AND:
             return self._ir_short_circuit(expr, short_circuit_value=0, label_prefix="and")
         if expr.op == BinaryOp.OR:
@@ -304,6 +310,24 @@ class DispatchMixin:
                         f"none comparison ({expr.left!r} {expr.op} {expr.right!r}) "
                         f"-- expected to always succeed for a reachable slice-typed base")
                 return result
+            if type_of(expr.left).kind == TypeKind.DICT or type_of(expr.right).kind == TypeKind.DICT:
+                # `d == none`/`d != none` (either order) mirrors the
+                # SLICE case just above exactly -- see _ir_dict_none_
+                # comparison's own docstring. Otherwise (an ACTUAL
+                # dict on both sides, neither none -- the only other
+                # shape semantic.py's own check_binary allows to reach
+                # here at all) this feature's own confirmed design
+                # means there's no per-entry comparison to build at
+                # all: see _ir_dict_equal's own docstring for why.
+                if type_of(expr.left) == Type.NONE or type_of(expr.right) == Type.NONE:
+                    result = self._ir_dict_none_comparison(expr)
+                    if result is None:
+                        raise IRError(
+                            f"_ir_dict_none_comparison returned None for a dict-vs-"
+                            f"none comparison ({expr.left!r} {expr.op} {expr.right!r}) "
+                            f"-- expected to always succeed for a reachable dict-typed base")
+                    return result
+                return self._ir_dict_equal(expr)
             if type_of(expr.left).kind in (TypeKind.ARRAY, TypeKind.STRUCT):
                 value_type = type_of(expr.left)
                 left_result = self._ir_composite_operand_address(expr.left, value_type)

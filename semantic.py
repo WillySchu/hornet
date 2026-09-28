@@ -3094,16 +3094,19 @@ class SemanticAnalyzer:
             return Type.BOOL
 
         if op in _EQUALITY_OPS:
-            # A slice OR a pointer compared to `none` (either order)
-            # is checked first, since it's meaningful and allowed --
-            # both share the same "absent" zero/nil value, and this is
-            # the one place equality doesn't have a fixed "target"
-            # side the way _types_compatible's other callers do, so
-            # its own none-vs-slice/pointer carve-out is checked
-            # directly here rather than through that shared helper.
+            # A slice, pointer, OR dict compared to `none` (either
+            # order) is checked first, since it's meaningful and
+            # allowed -- all three share the same "absent" zero/nil
+            # value (see analyze_var_decl's own VarDecl-with-no-
+            # initializer handling for dict's own nil zero value), and
+            # this is the one place equality doesn't have a fixed
+            # "target" side the way _types_compatible's other callers
+            # do, so its own none-vs-slice/pointer/dict carve-out is
+            # checked directly here rather than through that shared
+            # helper.
             none_vs_nilable = (
-                (left_type == Type.NONE and right_type.kind in (TypeKind.SLICE, TypeKind.POINTER)) or
-                (right_type == Type.NONE and left_type.kind in (TypeKind.SLICE, TypeKind.POINTER))
+                (left_type == Type.NONE and right_type.kind in (TypeKind.SLICE, TypeKind.POINTER, TypeKind.DICT)) or
+                (right_type == Type.NONE and left_type.kind in (TypeKind.SLICE, TypeKind.POINTER, TypeKind.DICT))
             )
             if none_vs_nilable:
                 return Type.BOOL

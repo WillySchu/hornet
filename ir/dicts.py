@@ -494,3 +494,63 @@ class DictsMixin:
             args=[descriptor_addr, IRConst(key_width, Type.INT64), IRConst(value_width, Type.INT64), scratch_addr],
         )]
         return dict_ir + key_ir + call_ir, None
+
+    def _ir_dict_none_comparison(self, expr):
+        """Builds (without lowering) `dict_expr == none` or `dict_expr
+        != none` (in either operand order) as real IR -- returns (ir,
+        value), or None when dict_expr's own base is out of scope.
+        Mirrors _ir_slice_none_comparison's own shape (ir/arrays_
+        slices.py) exactly, just reading buckets_ptr (offset 0 of the
+        24-byte descriptor -- see runtime.c's own dict_tombstones
+        docstring for the full layout) through _ir_dict_address rather
+        than a slice's own {ptr, len, cap} triple _ir_indexable_base
+        already unpacks for free: a nil dict (ir/statements.py's own
+        VarDecl-with-no-initializer case) and only a nil dict has
+        buckets_ptr == 0, the identical "check ptr specifically"
+        reasoning slice's own comparison already uses."""
+        dict_expr = expr.left if type_of(expr.left).kind == TypeKind.DICT else expr.right
+        result = self._ir_dict_address(dict_expr)
+        if result is None:
+            return None
+        addr_ir, addr = result
+        ptr_value = self.ir_program.ids.new_temp(Type.INT64)
+        load_ir = [IRLoad(dst=ptr_value, address=addr)]
+        t_result = self.ir_program.ids.new_temp(Type.BOOL)
+        check = IRBinOp(dst=t_result, op=expr.op, left=ptr_value, right=IRConst(0, Type.INT64))
+        return addr_ir + load_ir + [check], t_result
+
+    def _ir_dict_equal(self, expr):
+        """Builds (without lowering) `dict_expr == dict_expr` or `!=`
+        for two ACTUAL dicts (neither side none -- _ir_expr_binary's
+        own dispatch already routed a none-involving comparison to
+        _ir_dict_none_comparison instead) -- per this feature's own
+        confirmed design, real per-entry content equality isn't
+        implemented (unlike array/struct's own _ir_composite_equal:
+        two dicts holding identical entries can have completely
+        different bucket layouts depending on their own insertion/
+        deletion history, so there's no byte-for-byte shortcut the way
+        an array's own fixed layout gives array equality), so this
+        always answers FALSE for '==' / TRUE for '!=' -- a real,
+        working operator, just one that never inspects either dict's
+        own contents.
+
+        Both operands are still evaluated for their own side effects
+        (via _ir_composite_operand_address, the identical dispatch
+        array/struct equality already shares) -- `f() == g()`, f/g
+        each dict-returning with a side effect of their own, must
+        still run both. Their own computed addresses are otherwise
+        unused; a direct dict literal operand isn't accepted here any
+        more than as a call argument or return value -- the same,
+        separately tracked _ir_write_composite_value_into gap."""
+        value_type = type_of(expr.left)
+        left_result = self._ir_composite_operand_address(expr.left, value_type)
+        right_result = self._ir_composite_operand_address(expr.right, value_type)
+        if left_result is None or right_result is None:
+            raise IRError(
+                f"_ir_composite_operand_address returned None for a DICT "
+                f"equality operand ({expr.left!r} or {expr.right!r})"
+            )
+        left_ir, _ = left_result
+        right_ir, _ = right_result
+        result_value = 1 if expr.op == BinaryOp.NOT_EQUAL else 0
+        return left_ir + right_ir, IRConst(result_value, Type.BOOL)
