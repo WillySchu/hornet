@@ -289,6 +289,55 @@ class DictsMixin:
         )]
         return dict_ir + key_ir + call_ir, result_addr
 
+    def _ir_dict_contains(self, key_expr: Node, dict_expr: Node, dict_type: Type):
+        """`key_expr in dict_expr` -- builds (without lowering) a
+        BOOL-typed Temp: whether key_expr's own value is a LIVE (not
+        tombstoned) entry in dict_expr. Mirrors _ir_dict_lookup's own
+        key handling exactly, but calls runtime.c's own hornet_dict_
+        contains_scalar_key/hornet_dict_contains_str_key instead of a
+        lookup one -- these never panic on a miss (absence is the
+        ordinary, expected FALSE result of a membership test, not an
+        error) and return an int (0 or 1) rather than an address.
+
+        That raw C int is converted to a real Hornet BOOL via an
+        ordinary IRBinOp NOT_EQUAL against 0, the same two-step shape
+        ir/strings.py's own string-equality lowering already uses for
+        a C call's own int-valued result -- keeping this consistent
+        with every other C-call-backed boolean result here, rather
+        than being the one place that skips the conversion step."""
+        key_type = dict_type.key_type
+        value_width = type_byte_width(
+            dict_type.element_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+        result = self._ir_dict_address(dict_expr)
+        if result is None:
+            raise IRError(
+                f"_ir_dict_address returned None for 'in's own dict operand "
+                f"({dict_expr!r}) -- expected to always succeed for a reachable base"
+            )
+        dict_ir, descriptor_addr = result
+        raw_result = self.ir_program.ids.new_temp(Type.INT)
+        if key_type.kind == TypeKind.STR:
+            key_ir, key_ptr, key_len = self._ir_str_value(key_expr)
+            call_ir = [IRCall(
+                dst=raw_result, name='hornet_dict_contains_str_key',
+                args=[descriptor_addr, IRConst(value_width, Type.INT64), key_ptr, key_len],
+            )]
+        else:
+            key_width = type_byte_width(key_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+            key_value_ir, key_value = self.gen_expr_ir(key_expr)
+            scratch_addr = self.ir_program.ids.new_temp(Type.INT64)
+            key_ir = key_value_ir + [
+                IRLocalAddress(dst=scratch_addr, slot=self._dict_key_scratch_slot),
+                IRStore(address=scratch_addr, value=key_value, value_type=key_type),
+            ]
+            call_ir = [IRCall(
+                dst=raw_result, name='hornet_dict_contains_scalar_key',
+                args=[descriptor_addr, IRConst(key_width, Type.INT64), IRConst(value_width, Type.INT64), scratch_addr],
+            )]
+        bool_result = self.ir_program.ids.new_temp(Type.BOOL)
+        convert_ir = [IRBinOp(dst=bool_result, op=BinaryOp.NOT_EQUAL, left=raw_result, right=IRConst(0, Type.INT))]
+        return dict_ir + key_ir + call_ir + convert_ir, bool_result
+
     def _ir_dict_set(self, dict_expr: Node, key_expr: Node, value_expr: Node, dict_type: Type, ir_fn) -> list:
         """`dict_expr[key_expr] = value_expr` -- via runtime.c's own
         hornet_dict_set_scalar_key/hornet_dict_set_str_key, which grow

@@ -3197,6 +3197,38 @@ class SemanticAnalyzer:
                 )
             return Type.BOOL
 
+        if op == BinaryOp.IN:
+            # `key in d` -- dict membership only for now; array,
+            # slice, and str membership are real, wanted features but
+            # each needs its own, substantially different mechanism
+            # (str is substring search, not "is this exact value an
+            # element" -- sharing almost nothing with array/dict
+            # membership), so none of the three is built yet.
+            #
+            # left_type/right_type are already computed above,
+            # unconditionally -- unlike _check_indexable_and_index's
+            # own base-then-index order (which checks the index AFTER
+            # learning the base's own type, letting an int8-keyed dict
+            # accept a bare literal key via _check_value_flowing_
+            # into's own narrowing), so that narrowing isn't available
+            # here: _types_compatible requires an EXACT type match,
+            # same as every other check_binary case comparing two
+            # already-independently-typed operands -- `int8(5) in d`,
+            # not bare `5 in d`, for an int8-keyed dict.
+            if right_type.kind != TypeKind.DICT:
+                raise SemanticError(
+                    f"'in' requires a dict as its right operand, got {right_type} "
+                    f"-- array, slice, and str membership aren't supported yet",
+                    expr.right,
+                )
+            if not self._types_compatible(left_type, right_type.key_type):
+                raise SemanticError(
+                    f"Dict declares key type {right_type.key_type}, but 'in's "
+                    f"own left operand is {left_type}",
+                    expr.left,
+                )
+            return Type.BOOL
+
         if op in _LOGICAL_OPS:
             self._require_type(left_type, Type.BOOL, op, expr)
             self._require_type(right_type, Type.BOOL, op, expr)

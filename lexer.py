@@ -94,6 +94,7 @@ class TokenType(Enum):
     STRUCT = auto()
     TYPE = auto()
     IS = auto()
+    IN = auto()
     MATCH = auto()
     AS = auto()
     IMPORT = auto()
@@ -191,6 +192,7 @@ class Lexer:
             'struct': TokenType.STRUCT,
             'type': TokenType.TYPE,
             'is': TokenType.IS,
+            'in': TokenType.IN,
             'match': TokenType.MATCH,
             'as': TokenType.AS,
             'import': TokenType.IMPORT,

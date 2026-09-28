@@ -9235,6 +9235,157 @@ class TestDicts:
             match="requires an array, slice, str, or dict",
         )
 
+    # -- 'in' / 'not in': dict membership only for now -----------------------
+
+    def test_in_reports_present_and_absent_keys(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]int ages = dict[str]int{'alice': 25, 'bob': 17}\n"
+            "    if 'alice' in ages:\n"
+            "        print('alice found')\n"
+            "    if 'carol' in ages:\n"
+            "        print('carol found (WRONG)')\n"
+            "    return 0\n",
+            "alice found\n",
+        )
+
+    def test_in_respects_left_operand_precedence(self):
+        """`2 * 3 not in d` -- '*' has a HIGHER precedence than 'in'/
+        'not in' (both tier 6, the same as '=='), so this must parse
+        as `(2 * 3) not in d`, not `2 * (3 not in d)` (which wouldn't
+        even type-check, '*' rejecting a bool operand). This is what
+        actually exercises parse_binary's own precedence-respecting
+        `break` inside its 'not in' special case -- the branch that
+        stops a too-deep recursive call from swallowing 'not in' at
+        the wrong precedence level, letting the OUTER call consume it
+        against the already-folded `2 * 3` instead."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[int]int d = dict[int]int{6: 1}\n"
+            "    bool x = 2 * 3 not in d\n"
+            "    print(x)\n"
+            "    return 0\n",
+            "false\n",
+        )
+
+    def test_not_in_reports_present_and_absent_keys(self):
+        """'not in' builds Unary(NOT, Binary(IN, ...)) at parse time,
+        not a separate BinaryOp.NOT_IN -- this is the end-to-end proof
+        that composition actually works correctly, not just that it
+        parses."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]int ages = dict[str]int{'alice': 25}\n"
+            "    if 'alice' not in ages:\n"
+            "        print('alice missing (WRONG)')\n"
+            "    if 'carol' not in ages:\n"
+            "        print('carol missing (correct)')\n"
+            "    return 0\n",
+            "carol missing (correct)\n",
+        )
+
+    def test_in_reflects_delete(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]int ages = dict[str]int{'alice': 25}\n"
+            "    del(ages, 'alice')\n"
+            "    if 'alice' in ages:\n"
+            "        print('still there (WRONG)')\n"
+            "    if 'alice' not in ages:\n"
+            "        print('gone (correct)')\n"
+            "    return 0\n",
+            "gone (correct)\n",
+        )
+
+    def test_in_as_an_ordinary_bool_expression(self):
+        """Not just usable as an if-condition -- an ordinary, composable
+        BOOL-valued expression, assignable to a variable like any other
+        comparison's own result."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]int ages = dict[str]int{'alice': 25}\n"
+            "    bool exists = 'alice' in ages\n"
+            "    print(exists)\n"
+            "    return 0\n",
+            "true\n",
+        )
+
+    def test_in_with_a_scalar_key(self):
+        """test_in_reports_present_and_absent_keys's own str-keyed
+        version only exercises hornet_dict_contains_str_key's own call
+        site inside _ir_dict_contains -- this covers the scalar-keyed
+        one (hornet_dict_contains_scalar_key) separately."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[int]str codes = dict[int]str{1: 'one'}\n"
+            "    bool exists = 1 in codes\n"
+            "    bool missing = 2 in codes\n"
+            "    print(exists)\n"
+            "    print(missing)\n"
+            "    return 0\n",
+            "true\nfalse\n",
+        )
+
+    def test_in_skips_past_tombstones_rather_than_stopping_at_them(self):
+        """The identical tombstone-correctness property test_tombstone_
+        does_not_break_lookup_for_a_key_that_probed_past_it already
+        proves for lookup, proved here for 'in' specifically: 100 int
+        keys inserted (guaranteeing real hash collisions), every EVEN
+        key deleted, then EVERY key from 0..99 tested with 'in' --
+        every surviving odd key must still report present despite
+        however many tombstones its own probe chain now passes
+        through, and every deleted even key must report absent. A
+        naive contains check that stopped at the first TOMBSTONE
+        (instead of skipping past it, the way EMPTY correctly IS a
+        stopping point) would incorrectly report an odd key absent
+        whenever a deleted even key happened to sit earlier in its
+        own probe chain."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[int]int nums = dict[int]int{0: 0}\n"
+            "    int i = 1\n"
+            "    while i < 100:\n"
+            "        nums[i] = i * 10\n"
+            "        i = i + 1\n"
+            "    i = 0\n"
+            "    while i < 100:\n"
+            "        if i % 2 == 0:\n"
+            "            del(nums, i)\n"
+            "        i = i + 1\n"
+            "    int found_odd = 0\n"
+            "    int found_even = 0\n"
+            "    i = 0\n"
+            "    while i < 100:\n"
+            "        if i in nums:\n"
+            "            if i % 2 == 1:\n"
+            "                found_odd = found_odd + 1\n"
+            "            else:\n"
+            "                found_even = found_even + 1\n"
+            "        i = i + 1\n"
+            "    print(found_odd)\n"
+            "    print(found_even)\n"
+            "    return 0\n",
+            "50\n0\n",
+        )
+
+    def test_in_key_type_mismatch_is_rejected(self):
+        assert_program_semantic_error(
+            "def int main():\n"
+            "    dict[str]int ages = dict[str]int{'alice': 25}\n"
+            "    bool x = 5 in ages\n"
+            "    return 0\n",
+            match="Dict declares key type str, but 'in's own left operand is int",
+        )
+
+    def test_in_requires_a_dict_right_operand(self):
+        assert_program_semantic_error(
+            "def int main():\n"
+            "    int y = 5\n"
+            "    bool x = 'a' in y\n"
+            "    return 0\n",
+            match="'in' requires a dict as its right operand",
+        )
+
 # ---------------------------------------------------------------------------
 # Pointers, stage 2: semantic analysis only. Go-style pointers -- safe by
 # construction via escape analysis (not yet built; that's stage 3), no

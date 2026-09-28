@@ -60,7 +60,8 @@ def test_hornet_runtime_entry_points_are_the_only_external_symbols():
     hornet_dict_insert_scalar_key/hornet_dict_insert_str_key/hornet_
     dict_set_scalar_key/hornet_dict_set_str_key/hornet_dict_lookup_
     scalar_key/hornet_dict_lookup_str_key/hornet_dict_delete_scalar_
-    key/hornet_dict_delete_str_key are the twelve functions meant to
+    key/hornet_dict_delete_str_key/hornet_dict_contains_scalar_key/
+    hornet_dict_contains_str_key are the fourteen functions meant to
     be called from outside this file; hornet_stringify, every buffer/
     read helper, and every dict_* descriptor-field accessor/growth
     helper are internal implementation details (static linkage) that
@@ -82,6 +83,7 @@ def test_hornet_runtime_entry_points_are_the_only_external_symbols():
         # the expected names need the identical leading underscore on
         # macOS, not just when Hornet-generated code refers to them.
         names = [
+            "hornet_dict_contains_scalar_key", "hornet_dict_contains_str_key",
             "hornet_dict_delete_scalar_key", "hornet_dict_delete_str_key",
             "hornet_dict_insert_scalar_key", "hornet_dict_insert_str_key",
             "hornet_dict_lookup_scalar_key", "hornet_dict_lookup_str_key",

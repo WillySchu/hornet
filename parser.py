@@ -99,6 +99,8 @@ class BinaryOp(Enum):
     EQUAL = auto()      # '=='
     NOT_EQUAL = auto()  # '!='
 
+    IN = auto()  # 'in' -- dict membership (`key in d`); see check_binary's own docstring in semantic.py for scope
+
     BITWISE_AND = auto()  # '&'
     BITWISE_XOR = auto()  # '^'
     BITWISE_OR = auto()   # '|'
@@ -121,6 +123,7 @@ class BinaryOp(Enum):
             BinaryOp.GREATER_THAN_OR_EQUAL: '>=',
             BinaryOp.EQUAL: '==',
             BinaryOp.NOT_EQUAL: '!=',
+            BinaryOp.IN: 'in',
             BinaryOp.BITWISE_AND: '&',
             BinaryOp.BITWISE_XOR: '^',
             BinaryOp.BITWISE_OR: '|',
@@ -1350,6 +1353,7 @@ _BINARY_OPS = {
 
     TokenType.EQUAL:     OperatorInfo(BinaryOp.EQUAL,     precedence=6, associativity=Associativity.LEFT),
     TokenType.NOT_EQUAL: OperatorInfo(BinaryOp.NOT_EQUAL, precedence=6, associativity=Associativity.LEFT),
+    TokenType.IN:         OperatorInfo(BinaryOp.IN,        precedence=6, associativity=Associativity.LEFT),
 
     TokenType.AMPERSAND: OperatorInfo(BinaryOp.BITWISE_AND, precedence=5, associativity=Associativity.LEFT),
     TokenType.CARET:     OperatorInfo(BinaryOp.BITWISE_XOR, precedence=4, associativity=Associativity.LEFT),
@@ -2439,9 +2443,29 @@ class Parser:
           - RIGHT-associative recurses with `precedence` unchanged, so
             that call keeps consuming further same-precedence
             operators itself: `2 ^ 3 ^ 2` -> `2 ^ (3 ^ 2)`.
-        """
+
+        `not in` is the one operator here spelled with TWO tokens, so
+        it's checked for explicitly, before the ordinary single-token
+        lookup below: TokenType.NOT is never otherwise valid in this
+        infix position (its only other job is a unary PREFIX operator,
+        checked by parse_unary before this loop starts), so this can't
+        misfire on any currently-valid program. No separate BinaryOp.
+        NOT_IN exists: `key not in d` builds the identical Unary(NOT,
+        Binary(IN, key, d)) shape writing `not (key in d)` by hand
+        would, reusing NOT's own negation and IN's own membership-
+        checking independently, rather than duplicating either."""
         left = self.parse_unary()
         while True:
+            if self.check(TokenType.NOT) and self.peek(1).type == TokenType.IN:
+                in_info = _BINARY_OPS[TokenType.IN]
+                if in_info.precedence < min_prec:
+                    break
+                not_tok = self.advance()  # consume 'not'
+                self.advance()  # consume 'in'
+                right = self.parse_binary(in_info.precedence + 1)
+                membership = Binary(op=BinaryOp.IN, left=left, right=right, line=left.line, col=left.col)
+                left = Unary(op=UnaryOp.NOT, operand=membership, line=not_tok.line, col=not_tok.col)
+                continue
             op_info = _BINARY_OPS.get(self.current().type)
             if op_info is None or op_info.precedence < min_prec:
                 break

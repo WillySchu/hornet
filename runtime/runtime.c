@@ -846,6 +846,55 @@ void *hornet_dict_lookup_str_key(void *descriptor, int64_t value_width, const vo
     }
 }
 
+// `key in d` -- probes exactly like hornet_dict_lookup_scalar_key's
+// own read side (skipping past a tombstone rather than stopping
+// there), but never panics and never returns an address: a truly
+// EMPTY slot reached with no match found simply means the key is
+// ABSENT, an ordinary, fully-expected outcome for a membership test
+// (unlike a lookup, where absence is a hard error) -- so this
+// returns 0 rather than calling hornet_panic. value_width is only
+// ever used to compute bucket_stride correctly; the value's own
+// bytes are never read at all, since a membership test has nothing
+// to do with the value on either a hit or a miss.
+int hornet_dict_contains_scalar_key(void *descriptor, int64_t key_width, int64_t value_width, const void *key_ptr) {
+    void *buckets = dict_buckets(descriptor);
+    int64_t capacity = dict_capacity(descriptor);
+    int64_t bucket_stride = 1 + key_width + value_width;
+    int64_t index = hornet_hash_bytes(key_ptr, key_width) & (capacity - 1);
+    while (1) {
+        unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
+        if (bucket[0] == HORNET_DICT_BUCKET_EMPTY) {
+            return 0;
+        }
+        if (bucket[0] == HORNET_DICT_BUCKET_OCCUPIED && memcmp(bucket + 1, key_ptr, (size_t)key_width) == 0) {
+            return 1;
+        }
+        index = (index + 1) & (capacity - 1);
+    }
+}
+
+int hornet_dict_contains_str_key(void *descriptor, int64_t value_width, const void *key_ptr, int64_t key_len) {
+    const int64_t key_region_width = 16;
+    void *buckets = dict_buckets(descriptor);
+    int64_t capacity = dict_capacity(descriptor);
+    int64_t bucket_stride = 1 + key_region_width + value_width;
+    int64_t index = hornet_hash_bytes(key_ptr, key_len) & (capacity - 1);
+    while (1) {
+        unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
+        if (bucket[0] == HORNET_DICT_BUCKET_EMPTY) {
+            return 0;
+        }
+        if (bucket[0] == HORNET_DICT_BUCKET_OCCUPIED) {
+            void *stored_ptr = *(void **)(bucket + 1);
+            int32_t stored_len = *(int32_t *)(bucket + 1 + sizeof(void *));
+            if (stored_len == key_len && memcmp(stored_ptr, key_ptr, (size_t)key_len) == 0) {
+                return 1;
+            }
+        }
+        index = (index + 1) & (capacity - 1);
+    }
+}
+
 // `del(d, key)` -- probes exactly like a lookup (skipping tombstones,
 // panicking on a truly EMPTY slot with no match found), but on a
 // match, marks the bucket a TOMBSTONE instead of reading its own
