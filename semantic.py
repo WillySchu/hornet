@@ -620,7 +620,7 @@ def contains_reachable_break(statements: List[Node]) -> bool:
 # Builtins, not ordinary user-definable functions -- see check_call.
 # Kept as a set so adding another is "a name plus its own check_*/
 # gen_* pair", not a search-and-replace.
-_BUILTIN_FUNCTION_NAMES = {'print', 'len', 'append'}
+_BUILTIN_FUNCTION_NAMES = {'print', 'len', 'append', 'del'}
 
 
 # ---------------------------------------------------------------------------
@@ -2578,6 +2578,8 @@ class SemanticAnalyzer:
             return self.check_len_call(expr)
         if expr.name == 'append':
             return self.check_append_call(expr)
+        if expr.name == 'del':
+            return self.check_del_call(expr)
         if expr.name not in self.functions:
             raise SemanticError(f"Call to undeclared function '{expr.name}'", expr)
         param_types, return_type = self.functions[expr.name]
@@ -2723,6 +2725,40 @@ class SemanticAnalyzer:
                 value_arg,
             )
         return slice_type
+
+    def check_del_call(self, expr: Call) -> Type:
+        """`del(d, key)` -- removes key's own entry from d, mutating
+        it IN PLACE (unlike append, which returns a possibly-new slice
+        for reassignment, since a dict's own backing bucket array
+        moving on growth is already handled the same way d[key] = ...
+        already handles it -- through d's own address, not by value).
+        Panics if key isn't present, for the identical reason a bare
+        read (`x = d[key]`) already does: a missing key is a hard
+        error here, not a silent no-op (Go's own `delete` convention),
+        by this feature's own confirmed design.
+
+        Type.VOID, like print -- del has nothing meaningful to return,
+        the same reasoning print's own docstring already gives."""
+        if len(expr.args) != 2:
+            raise SemanticError(
+                f"'del' expects exactly 2 arguments, got {len(expr.args)}",
+                expr,
+            )
+        dict_arg, key_arg = expr.args
+        dict_type = self.check_expr(dict_arg)
+        if dict_type.kind != TypeKind.DICT:
+            raise SemanticError(
+                f"'del' requires a dict as its first argument, got {dict_type}",
+                dict_arg,
+            )
+        key_type = self._check_value_flowing_into(key_arg, dict_type.key_type)
+        if not self._types_compatible(key_type, dict_type.key_type):
+            raise SemanticError(
+                f"'del' cannot look up a key of type {key_type} in a "
+                f"{dict_type} (key type {dict_type.key_type})",
+                key_arg,
+            )
+        return Type.VOID
 
     def check_constant(self, expr: Constant) -> Type:
         if isinstance(expr.value, float) and not expr.value.is_integer():

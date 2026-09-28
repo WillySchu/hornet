@@ -27,6 +27,27 @@
 
 #include "hornet_typedesc_tags.h"
 
+// Bucket state byte -- each dict bucket's own first byte. TOMBSTONE
+// (a deleted entry) is a real, separate state from EMPTY: linear-
+// probed deletion can't just reset a bucket to EMPTY, since that
+// would silently break lookup for any OTHER key that happened to
+// probe PAST this same bucket during its own insertion (lookup stops
+// probing at the first EMPTY slot it finds -- an incorrectly-reset
+// bucket would look like "the probe chain ends here", hiding
+// whatever key was placed one step further along). Insert instead
+// reuses the FIRST tombstone it passes over if the key turns out to
+// be new (see hornet_dict_insert_scalar_key's own probing loop);
+// lookup, delete, and hornet_stringify's own DICT case all skip PAST
+// a tombstone, never stopping there or printing it. Defined here,
+// ahead of hornet_stringify below, since a #define (unlike a
+// function) has no forward declaration -- it has to already be in
+// effect at every one of its own use sites in this file, not just
+// the dict-specific functions further down that this shape is really
+// about.
+#define HORNET_DICT_BUCKET_EMPTY 0
+#define HORNET_DICT_BUCKET_OCCUPIED 1
+#define HORNET_DICT_BUCKET_TOMBSTONE 2
+
 // The print machinery's own growable byte buffer -- distinct from,
 // and simpler than, a Hornet-level slice's own {ptr, len, cap}
 // descriptor (which is {ptr: 8 bytes, len: 4 bytes, cap: 4 bytes} --
@@ -289,7 +310,7 @@ static void hornet_stringify(
             int printed_any = 0;
             for (int64_t i = 0; i < capacity; i++) {
                 unsigned char *bucket = (unsigned char *)buckets + i * bucket_stride;
-                if (bucket[0] == 0) {
+                if (bucket[0] != HORNET_DICT_BUCKET_OCCUPIED) {
                     continue;
                 }
                 if (printed_any) {
@@ -493,41 +514,54 @@ int64_t hornet_hash_bytes(const void *ptr, int64_t len) {
 // own bucket array, for a SCALAR-keyed dict (int/int8/uint8/int64/
 // bool) -- str keys go through hornet_dict_insert_str_key instead,
 // since they need content-based hashing/comparison, not a flat byte
-// compare. Each bucket is 1 (state: 0 empty, 1 occupied) + key_width
-// + value_width bytes, contiguous, no padding -- bucket_stride is the
-// caller's own already-computed total. capacity is ALWAYS a power of
-// two (the caller's own job to guarantee), letting probing use a
-// cheap bitwise AND instead of a modulo.
+// compare. Each bucket is 1 (state byte) + key_width + value_width
+// bytes, contiguous, no padding -- bucket_stride is the caller's own
+// already-computed total. capacity is ALWAYS a power of two, letting
+// probing use a cheap bitwise AND instead of a modulo.
 //
 // key_ptr/value_ptr point at the actual bytes to store -- key_ptr is
 // typically a scratch stack slot's own address (see hornet_hash_
 // bytes's own docstring for why a scalar key needs one at all).
 //
-// Returns 1 if this inserted a genuinely NEW entry (the caller's own
-// count should increment), or 0 if an existing entry with the
-// identical key was found and its value simply overwritten (count
-// unchanged) -- ordinary, expected last-write-wins dict semantics for
-// a runtime-computed key that happens to collide with one already
-// present, not an error condition.
+// The FIRST tombstone passed over during probing is remembered: if
+// the key turns out to be genuinely new (an EMPTY slot reached with
+// no match), that tombstone is reused instead, whenever one was seen
+// -- this is what reclaims a deleted slot's own space.
+//
+// Returns 0 if an existing entry with the identical key was found and
+// overwritten (count unchanged, ordinary last-write-wins, not an
+// error). Otherwise a genuinely NEW entry was inserted: 1 into a
+// fresh EMPTY slot (count++, tombstones unchanged), or 2 into a
+// reused tombstone (count++ AND tombstones--).
 //
 // No growth check here at all: by the time this runs, the caller
-// (ir/dicts.py) has already guaranteed capacity leaves enough headroom
-// that an empty slot always exists somewhere along the probe
-// sequence -- unbounded linear probing is therefore safe, not an
-// infinite-loop risk.
+// (ir/dicts.py, or hornet_dict_set_scalar_key's own growth check) has
+// already guaranteed capacity leaves enough headroom that an empty
+// slot always exists somewhere along the probe sequence -- unbounded
+// linear probing is therefore safe, not an infinite-loop risk.
 int hornet_dict_insert_scalar_key(
     void *buckets, int64_t capacity, int64_t bucket_stride,
     const void *key_ptr, int64_t key_width,
     const void *value_ptr, int64_t value_width
 ) {
     int64_t index = hornet_hash_bytes(key_ptr, key_width) & (capacity - 1);
+    int64_t tombstone_index = -1;
     while (1) {
         unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
-        if (bucket[0] == 0) {
-            bucket[0] = 1;
-            memcpy(bucket + 1, key_ptr, (size_t)key_width);
-            memcpy(bucket + 1 + key_width, value_ptr, (size_t)value_width);
-            return 1;
+        if (bucket[0] == HORNET_DICT_BUCKET_EMPTY) {
+            int64_t target = (tombstone_index >= 0) ? tombstone_index : index;
+            unsigned char *target_bucket = (unsigned char *)buckets + target * bucket_stride;
+            target_bucket[0] = HORNET_DICT_BUCKET_OCCUPIED;
+            memcpy(target_bucket + 1, key_ptr, (size_t)key_width);
+            memcpy(target_bucket + 1 + key_width, value_ptr, (size_t)value_width);
+            return (tombstone_index >= 0) ? 2 : 1;
+        }
+        if (bucket[0] == HORNET_DICT_BUCKET_TOMBSTONE) {
+            if (tombstone_index < 0) {
+                tombstone_index = index;
+            }
+            index = (index + 1) & (capacity - 1);
+            continue;
         }
         if (memcmp(bucket + 1, key_ptr, (size_t)key_width) == 0) {
             memcpy(bucket + 1 + key_width, value_ptr, (size_t)value_width);
@@ -555,6 +589,9 @@ int hornet_dict_insert_scalar_key(
 // own real-IR version: two different lengths can never be equal, so
 // memcmp only ever runs once they're already known equal, never
 // risking a read past either buffer's own true size.
+//
+// Return value and tombstone-reuse: identical tri-state contract as
+// hornet_dict_insert_scalar_key's own -- see its own docstring.
 int hornet_dict_insert_str_key(
     void *buckets, int64_t capacity, int64_t bucket_stride,
     const void *key_ptr, int64_t key_len,
@@ -566,18 +603,28 @@ int hornet_dict_insert_str_key(
     // the actual string's own length.
     const int64_t key_region_width = 16;
     int64_t index = hornet_hash_bytes(key_ptr, key_len) & (capacity - 1);
+    int64_t tombstone_index = -1;
     while (1) {
         unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
-        void **stored_ptr = (void **)(bucket + 1);
-        int32_t *stored_len = (int32_t *)(bucket + 1 + sizeof(void *));
-        if (bucket[0] == 0) {
-            bucket[0] = 1;
-            *stored_ptr = (void *)key_ptr;
-            *stored_len = (int32_t)key_len;
-            memcpy(bucket + 1 + key_region_width, value_ptr, (size_t)value_width);
-            return 1;
+        if (bucket[0] == HORNET_DICT_BUCKET_EMPTY) {
+            int64_t target = (tombstone_index >= 0) ? tombstone_index : index;
+            unsigned char *target_bucket = (unsigned char *)buckets + target * bucket_stride;
+            target_bucket[0] = HORNET_DICT_BUCKET_OCCUPIED;
+            *(void **)(target_bucket + 1) = (void *)key_ptr;
+            *(int32_t *)(target_bucket + 1 + sizeof(void *)) = (int32_t)key_len;
+            memcpy(target_bucket + 1 + key_region_width, value_ptr, (size_t)value_width);
+            return (tombstone_index >= 0) ? 2 : 1;
         }
-        if (*stored_len == key_len && memcmp(*stored_ptr, key_ptr, (size_t)key_len) == 0) {
+        if (bucket[0] == HORNET_DICT_BUCKET_TOMBSTONE) {
+            if (tombstone_index < 0) {
+                tombstone_index = index;
+            }
+            index = (index + 1) & (capacity - 1);
+            continue;
+        }
+        void *stored_ptr = *(void **)(bucket + 1);
+        int32_t stored_len = *(int32_t *)(bucket + 1 + sizeof(void *));
+        if (stored_len == key_len && memcmp(stored_ptr, key_ptr, (size_t)key_len) == 0) {
             memcpy(bucket + 1 + key_region_width, value_ptr, (size_t)value_width);
             return 0;
         }
@@ -608,19 +655,55 @@ static void dict_bump_count(void *descriptor) {
     *count += 1;
 }
 
-// Shared growth policy: doubles capacity once count would exceed 75%
-// of it, rehashing every existing bucket via the identical hornet_
-// dict_insert_*_key this file's own literal-construction path
-// already uses (a rehashing insert can never find a "matching
-// existing key" -- every key in the old array is already distinct --
-// so reuse is exactly as correct as inserting a brand-new key). The
-// stale old buckets array is never freed, matching this compiler's
-// own "never free, only leak" story throughout (no GC yet).
+// tombstones lives in what was, before delete existed, 4 bytes of
+// pure padding between count (4 bytes, offset 8) and capacity (8
+// bytes, offset 16) -- kept there deliberately so the descriptor
+// stays exactly 24 bytes, with buckets/count/capacity's own existing
+// offsets (0/8/16) completely unchanged; ir/dicts.py's own
+// construction code already writes a 0 here explicitly now (see its
+// own comment), since this address is otherwise just whatever
+// garbage was already on the stack.
+//
+// count itself keeps meaning exactly what it always has -- LIVE
+// entries only, unaffected by tombstones -- since that's what a
+// future len() (not yet built) will want to read directly, with no
+// adjustment needed. tombstones is tracked separately purely so the
+// GROWTH check (see dict_grow_scalar_key_if_needed's own docstring)
+// can count it alongside count without needing a full bucket-array
+// scan on every single insert.
+static int32_t dict_tombstones(void *descriptor) { return read_i32((char *)descriptor + 12); }
+static void dict_set_tombstones(void *descriptor, int32_t tombstones) {
+    *(int32_t *)((char *)descriptor + 12) = tombstones;
+}
+static void dict_bump_tombstones(void *descriptor, int32_t delta) {
+    dict_set_tombstones(descriptor, dict_tombstones(descriptor) + delta);
+}
+
+// Shared growth policy: doubles capacity once count+tombstones would
+// exceed 75% of it, rehashing every LIVE (OCCUPIED) bucket -- never a
+// tombstone, and never an already-EMPTY one -- into the fresh, zeroed
+// array via the identical hornet_dict_insert_*_key this file's own
+// literal-construction path already uses (a rehashing insert can
+// never find a "matching existing key" -- every key in the old array
+// is already distinct -- so reuse is exactly as correct as inserting
+// a brand-new key). Counting tombstones alongside live entries here,
+// not just live entries alone, is what actually bounds a pathological
+// insert/delete/insert/delete... churn pattern: without it, a table
+// could fill entirely with tombstones while its own live count stays
+// tiny, degrading every future lookup toward scanning the whole
+// table before ever reaching an EMPTY slot. A grow-triggered rehash
+// starts the new array with ZERO tombstones (nothing dead is ever
+// copied over), so dict_set_tombstones(descriptor, 0) at the end is
+// always correct regardless of how many tombstones the OLD array had
+// accumulated. The stale old buckets array is never freed, matching
+// this compiler's own "never free, only leak" story throughout (no
+// GC yet).
 static void dict_grow_scalar_key_if_needed(void *descriptor, int64_t key_width, int64_t value_width) {
     int64_t capacity = dict_capacity(descriptor);
     int32_t count = read_i32((char *)descriptor + 8);
-    if ((count + 1) * 4 <= capacity * 3) {
-        return;  // (count + 1) / capacity <= 0.75, room for one more
+    int32_t tombstones = dict_tombstones(descriptor);
+    if ((count + tombstones + 1) * 4 <= capacity * 3) {
+        return;  // (count + tombstones + 1) / capacity <= 0.75, room for one more
     }
     int64_t bucket_stride = 1 + key_width + value_width;
     int64_t new_capacity = capacity * 2;
@@ -628,7 +711,7 @@ static void dict_grow_scalar_key_if_needed(void *descriptor, int64_t key_width, 
     void *old_buckets = dict_buckets(descriptor);
     for (int64_t i = 0; i < capacity; i++) {
         unsigned char *bucket = (unsigned char *)old_buckets + i * bucket_stride;
-        if (bucket[0] == 0) {
+        if (bucket[0] != HORNET_DICT_BUCKET_OCCUPIED) {
             continue;
         }
         hornet_dict_insert_scalar_key(
@@ -637,13 +720,15 @@ static void dict_grow_scalar_key_if_needed(void *descriptor, int64_t key_width, 
     }
     dict_set_buckets(descriptor, new_buckets);
     dict_set_capacity(descriptor, new_capacity);
+    dict_set_tombstones(descriptor, 0);
 }
 
 static void dict_grow_str_key_if_needed(void *descriptor, int64_t value_width) {
     const int64_t key_region_width = 16;  // see hornet_dict_insert_str_key's own comment
     int64_t capacity = dict_capacity(descriptor);
     int32_t count = read_i32((char *)descriptor + 8);
-    if ((count + 1) * 4 <= capacity * 3) {
+    int32_t tombstones = dict_tombstones(descriptor);
+    if ((count + tombstones + 1) * 4 <= capacity * 3) {
         return;
     }
     int64_t bucket_stride = 1 + key_region_width + value_width;
@@ -652,7 +737,7 @@ static void dict_grow_str_key_if_needed(void *descriptor, int64_t value_width) {
     void *old_buckets = dict_buckets(descriptor);
     for (int64_t i = 0; i < capacity; i++) {
         unsigned char *bucket = (unsigned char *)old_buckets + i * bucket_stride;
-        if (bucket[0] == 0) {
+        if (bucket[0] != HORNET_DICT_BUCKET_OCCUPIED) {
             continue;
         }
         void *stored_ptr = *(void **)(bucket + 1);
@@ -663,28 +748,34 @@ static void dict_grow_str_key_if_needed(void *descriptor, int64_t value_width) {
     }
     dict_set_buckets(descriptor, new_buckets);
     dict_set_capacity(descriptor, new_capacity);
+    dict_set_tombstones(descriptor, 0);
 }
 
 // The stage-2 (`d[key] = value`) counterpart to this file's own
 // stage-1 hornet_dict_insert_scalar_key/hornet_dict_insert_str_key,
 // used by a dict LITERAL's own fixed, pre-sized construction: grows
 // first if needed (see the two functions just above), THEN inserts
-// via the identical probe logic, finally bumping descriptor's own
-// count field itself if this was a genuinely new entry (the literal-
-// construction path instead threads that decision back through IR as
-// a chain of ADDs, since it has no persistent descriptor to mutate
-// yet at that point in its own construction).
+// via the identical probe logic, finally updating descriptor's own
+// count/tombstones fields itself based on the tri-state result (see
+// hornet_dict_insert_scalar_key's own docstring for what each of the
+// three return values means) -- the literal-construction path
+// instead threads that decision back through IR as a chain of ADDs,
+// since it has no persistent descriptor to mutate yet at that point
+// in its own construction, and never has tombstones to begin with.
 void hornet_dict_set_scalar_key(
     void *descriptor, int64_t key_width, int64_t value_width,
     const void *key_ptr, const void *value_ptr
 ) {
     dict_grow_scalar_key_if_needed(descriptor, key_width, value_width);
     int64_t bucket_stride = 1 + key_width + value_width;
-    int inserted_new = hornet_dict_insert_scalar_key(
+    int result = hornet_dict_insert_scalar_key(
         dict_buckets(descriptor), dict_capacity(descriptor), bucket_stride,
         key_ptr, key_width, value_ptr, value_width);
-    if (inserted_new) {
+    if (result != 0) {
         dict_bump_count(descriptor);
+    }
+    if (result == 2) {
+        dict_bump_tombstones(descriptor, -1);
     }
 }
 
@@ -695,22 +786,27 @@ void hornet_dict_set_str_key(
     dict_grow_str_key_if_needed(descriptor, value_width);
     const int64_t key_region_width = 16;
     int64_t bucket_stride = 1 + key_region_width + value_width;
-    int inserted_new = hornet_dict_insert_str_key(
+    int result = hornet_dict_insert_str_key(
         dict_buckets(descriptor), dict_capacity(descriptor), bucket_stride,
         key_ptr, key_len, value_ptr, value_width);
-    if (inserted_new) {
+    if (result != 0) {
         dict_bump_count(descriptor);
+    }
+    if (result == 2) {
+        dict_bump_tombstones(descriptor, -1);
     }
 }
 
-// `x = d[key]` -- probes for a matching key exactly like hornet_
-// dict_insert_scalar_key's own read side, but never writes: returns
-// the matching bucket's own VALUE address for the caller to read
-// from, or -- a key genuinely absent, an empty slot reached with no
-// match along the way -- panics outright (see hornet_panic's own
-// unconditional abort()) rather than returning anything at all, per
-// this feature's own confirmed design: a missing key is a hard error,
-// not a silent zero value.
+// `x = d[key]` -- probes for a matching key, SKIPPING PAST a
+// tombstone rather than stopping there (a tombstone means "something
+// used to live here, keep looking", not "the probe chain ends here"
+// -- see HORNET_DICT_BUCKET_TOMBSTONE's own docstring) -- but never
+// writes: returns the matching bucket's own VALUE address for the
+// caller to read from, or -- a key genuinely absent, a truly EMPTY
+// slot reached with no match along the way -- panics outright (see
+// hornet_panic's own unconditional abort()) rather than returning
+// anything at all, per this feature's own confirmed design: a missing
+// key is a hard error, not a silent zero value.
 void *hornet_dict_lookup_scalar_key(void *descriptor, int64_t key_width, int64_t value_width, const void *key_ptr) {
     void *buckets = dict_buckets(descriptor);
     int64_t capacity = dict_capacity(descriptor);
@@ -718,10 +814,10 @@ void *hornet_dict_lookup_scalar_key(void *descriptor, int64_t key_width, int64_t
     int64_t index = hornet_hash_bytes(key_ptr, key_width) & (capacity - 1);
     while (1) {
         unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
-        if (bucket[0] == 0) {
+        if (bucket[0] == HORNET_DICT_BUCKET_EMPTY) {
             hornet_panic("dict lookup: key not found");
         }
-        if (memcmp(bucket + 1, key_ptr, (size_t)key_width) == 0) {
+        if (bucket[0] == HORNET_DICT_BUCKET_OCCUPIED && memcmp(bucket + 1, key_ptr, (size_t)key_width) == 0) {
             return bucket + 1 + key_width;
         }
         index = (index + 1) & (capacity - 1);
@@ -736,13 +832,69 @@ void *hornet_dict_lookup_str_key(void *descriptor, int64_t value_width, const vo
     int64_t index = hornet_hash_bytes(key_ptr, key_len) & (capacity - 1);
     while (1) {
         unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
-        if (bucket[0] == 0) {
+        if (bucket[0] == HORNET_DICT_BUCKET_EMPTY) {
             hornet_panic("dict lookup: key not found");
         }
-        void *stored_ptr = *(void **)(bucket + 1);
-        int32_t stored_len = *(int32_t *)(bucket + 1 + sizeof(void *));
-        if (stored_len == key_len && memcmp(stored_ptr, key_ptr, (size_t)key_len) == 0) {
-            return bucket + 1 + key_region_width;
+        if (bucket[0] == HORNET_DICT_BUCKET_OCCUPIED) {
+            void *stored_ptr = *(void **)(bucket + 1);
+            int32_t stored_len = *(int32_t *)(bucket + 1 + sizeof(void *));
+            if (stored_len == key_len && memcmp(stored_ptr, key_ptr, (size_t)key_len) == 0) {
+                return bucket + 1 + key_region_width;
+            }
+        }
+        index = (index + 1) & (capacity - 1);
+    }
+}
+
+// `del(d, key)` -- probes exactly like a lookup (skipping tombstones,
+// panicking on a truly EMPTY slot with no match found), but on a
+// match, marks the bucket a TOMBSTONE instead of reading its own
+// value: decrements count (one fewer LIVE entry) and increments
+// tombstones (one more dead slot future inserts may eventually reuse,
+// and future growth checks must account for -- see dict_grow_*_key_
+// if_needed's own docstring).
+void hornet_dict_delete_scalar_key(void *descriptor, int64_t key_width, int64_t value_width, const void *key_ptr) {
+    void *buckets = dict_buckets(descriptor);
+    int64_t capacity = dict_capacity(descriptor);
+    int64_t bucket_stride = 1 + key_width + value_width;
+    int64_t index = hornet_hash_bytes(key_ptr, key_width) & (capacity - 1);
+    while (1) {
+        unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
+        if (bucket[0] == HORNET_DICT_BUCKET_EMPTY) {
+            hornet_panic("dict delete: key not found");
+        }
+        if (bucket[0] == HORNET_DICT_BUCKET_OCCUPIED && memcmp(bucket + 1, key_ptr, (size_t)key_width) == 0) {
+            bucket[0] = HORNET_DICT_BUCKET_TOMBSTONE;
+            int32_t *count = (int32_t *)((char *)descriptor + 8);
+            *count -= 1;
+            dict_bump_tombstones(descriptor, 1);
+            return;
+        }
+        index = (index + 1) & (capacity - 1);
+    }
+}
+
+void hornet_dict_delete_str_key(void *descriptor, int64_t value_width, const void *key_ptr, int64_t key_len) {
+    const int64_t key_region_width = 16;
+    void *buckets = dict_buckets(descriptor);
+    int64_t capacity = dict_capacity(descriptor);
+    int64_t bucket_stride = 1 + key_region_width + value_width;
+    int64_t index = hornet_hash_bytes(key_ptr, key_len) & (capacity - 1);
+    while (1) {
+        unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
+        if (bucket[0] == HORNET_DICT_BUCKET_EMPTY) {
+            hornet_panic("dict delete: key not found");
+        }
+        if (bucket[0] == HORNET_DICT_BUCKET_OCCUPIED) {
+            void *stored_ptr = *(void **)(bucket + 1);
+            int32_t stored_len = *(int32_t *)(bucket + 1 + sizeof(void *));
+            if (stored_len == key_len && memcmp(stored_ptr, key_ptr, (size_t)key_len) == 0) {
+                bucket[0] = HORNET_DICT_BUCKET_TOMBSTONE;
+                int32_t *count = (int32_t *)((char *)descriptor + 8);
+                *count -= 1;
+                dict_bump_tombstones(descriptor, 1);
+                return;
+            }
         }
         index = (index + 1) & (capacity - 1);
     }

@@ -154,6 +154,13 @@ class DispatchMixin:
             # second argument -- a type descriptor -- has no
             # corresponding Hornet expression to run gen_expr_ir on.
             return self._ir_print_call(expr)
+        if isinstance(expr, Call) and expr.name == 'del':
+            # del(d, key) -- Type.VOID, like print, and similarly
+            # never reaches _ir_call's own ordinary-function dispatch
+            # (see _ir_del_call's own docstring for why returning
+            # (ir, None) here is correct despite every OTHER case
+            # returning a real value).
+            return self._ir_del_call(expr)
         if isinstance(expr, Call) and expr.name == 'len':
             # No calling convention, no argument-register placement --
             # falls through to the ordinary catch-all below when out

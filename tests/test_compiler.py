@@ -8881,6 +8881,133 @@ class TestDicts:
             "5\n99\n",
         )
 
+    # -- stage 3: del(d, key) -- panic-on-miss, tombstones ------------------
+
+    def test_del_removes_only_the_given_key(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]int ages = dict[str]int{'alice': 25, 'bob': 17}\n"
+            "    del(ages, 'alice')\n"
+            "    print(ages)\n"
+            "    return 0\n",
+            "dict[str]int{'bob': 17}\n",
+        )
+
+    def test_del_on_a_missing_key_panics(self):
+        assert_crashes_with_sigabrt(
+            "    dict[str]int ages = dict[str]int{'alice': 25}\n"
+            "    del(ages, 'nonexistent')\n"
+            "    return 0\n"
+        )
+
+    def test_lookup_after_del_panics(self):
+        """A deleted key is gone for lookup purposes too, not just for
+        printing -- del's own tombstone must actually be treated as
+        absent by hornet_dict_lookup_scalar_key/hornet_dict_lookup_
+        str_key, not just skipped by hornet_stringify."""
+        assert_crashes_with_sigabrt(
+            "    dict[str]int ages = dict[str]int{'alice': 25}\n"
+            "    del(ages, 'alice')\n"
+            "    print(ages['alice'])\n"
+            "    return 0\n"
+        )
+
+    def test_del_requires_a_dict_first_argument(self):
+        assert_program_semantic_error(
+            "def int main():\n"
+            "    int x = 5\n"
+            "    del(x, 'alice')\n"
+            "    return 0\n",
+            match="'del' requires a dict as its first argument",
+        )
+
+    def test_del_with_wrong_argument_count_is_rejected(self):
+        assert_program_semantic_error(
+            "def int main():\n"
+            "    dict[str]int ages = dict[str]int{'alice': 25}\n"
+            "    del(ages)\n"
+            "    return 0\n",
+            match="'del' expects exactly 2 arguments, got 1",
+        )
+
+    def test_del_key_type_mismatch_is_rejected(self):
+        assert_program_semantic_error(
+            "def int main():\n"
+            "    dict[str]int ages = dict[str]int{'alice': 25}\n"
+            "    del(ages, 42)\n"
+            "    return 0\n",
+            match="'del' cannot look up a key of type int",
+        )
+
+    def test_tombstone_does_not_break_lookup_for_a_key_that_probed_past_it(self):
+        """The core tombstone-correctness property: 100 int keys
+        inserted into an initially small-capacity dict (guaranteeing
+        real hash collisions along the way), every EVEN key then
+        deleted, every ODD key then read back by lookup -- summed to
+        confirm every single one survived. A naive delete (resetting
+        a bucket straight to EMPTY instead of a tombstone) would
+        silently break lookup for any odd key that happened to probe
+        PAST one of the deleted even keys' own buckets during its own
+        original insertion."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[int]int nums = dict[int]int{0: 0}\n"
+            "    int i = 1\n"
+            "    while i < 100:\n"
+            "        nums[i] = i * 10\n"
+            "        i = i + 1\n"
+            "    i = 0\n"
+            "    while i < 100:\n"
+            "        if i % 2 == 0:\n"
+            "            del(nums, i)\n"
+            "        i = i + 1\n"
+            "    int total = 0\n"
+            "    i = 1\n"
+            "    while i < 100:\n"
+            "        if i % 2 == 1:\n"
+            "            total = total + nums[i]\n"
+            "        i = i + 2\n"
+            "    print(total)\n"
+            "    return 0\n",
+            f"{sum(i * 10 for i in range(1, 100, 2))}\n",
+        )
+
+    def test_repeated_insert_delete_churn_reuses_tombstone_slots(self):
+        """Inserting and deleting the SAME key 20 times in a row --
+        each iteration's own insert should reuse the tombstone left by
+        the previous iteration's own delete, not accumulate 20 fresh
+        tombstones (which the load-factor growth check would
+        otherwise eventually have to compensate for). A pre-existing,
+        never-deleted key survives the whole churn undisturbed."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]int d = dict[str]int{'a': 1}\n"
+            "    int i = 0\n"
+            "    while i < 20:\n"
+            "        d['churn'] = i\n"
+            "        del(d, 'churn')\n"
+            "        i = i + 1\n"
+            "    d['churn'] = 999\n"
+            "    print(d['churn'])\n"
+            "    print(d['a'])\n"
+            "    return 0\n",
+            "999\n1\n",
+        )
+
+    def test_del_with_a_scalar_key(self):
+        """test_del_removes_only_the_given_key's own str-keyed version
+        only exercises hornet_dict_delete_str_key's own call site
+        inside _ir_del_call -- this covers the scalar-keyed one
+        (hornet_dict_delete_scalar_key) separately."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[int]str codes = dict[int]str{1: 'one', 2: 'two'}\n"
+            "    del(codes, 1)\n"
+            "    print(codes)\n"
+            "    return 0\n",
+            "dict[int]str{2: 'two'}\n",
+        )
+
 # ---------------------------------------------------------------------------
 # Pointers, stage 2: semantic analysis only. Go-style pointers -- safe by
 # construction via escape analysis (not yet built; that's stage 3), no

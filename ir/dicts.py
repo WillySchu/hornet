@@ -41,8 +41,8 @@ named source-level variable.
 
 from ir.errors import IRError
 from ir.ir import IRBinOp, IRCall, IRConst, IRLoad, IRLocalAddress, IRStore
-from ir.utils import COMPOSITE_KINDS, type_byte_width
-from parser import BinaryOp, DictLiteral, Field, Index, Node, Unary, UnaryOp, Variable
+from ir.utils import COMPOSITE_KINDS, type_byte_width, type_of
+from parser import BinaryOp, Call, DictLiteral, Field, Index, Node, Unary, UnaryOp, Variable
 from semantic import Type, TypeKind
 
 
@@ -199,15 +199,39 @@ class DictsMixin:
                           key_addr, IRConst(key_width, Type.INT64), value_addr, IRConst(value_width, Type.INT64)],
                 ))
             new_count = self.ir_program.ids.new_temp(Type.INT)
+            # insert_result is 0 (overwrote an existing key -- a
+            # runtime-computed key CAN still collide in value even
+            # when semantic.py's own compile-time duplicate check
+            # found nothing, see check_dict_literal's own docstring),
+            # 1 (a fresh entry into an EMPTY slot), or -- runtime.c's
+            # own hornet_dict_insert_*_key, tombstone-aware since del
+            # exists now -- 2 (a fresh entry reusing a TOMBSTONE's own
+            # slot instead). Adding it directly to count_value like
+            # this is only correct because this bucket array is
+            # FRESHLY calloc'd, never having held a tombstone at all
+            # -- insert_result can therefore never actually BE 2 here,
+            # only 0 or 1, both of which already mean exactly "how
+            # much to add to count" on their own.
             ir.append(IRBinOp(dst=new_count, op=BinaryOp.ADD, left=count_value, right=insert_result))
             count_value = new_count
 
         count_addr = self.ir_program.ids.new_temp(Type.INT64)
+        tombstones_addr = self.ir_program.ids.new_temp(Type.INT64)
         capacity_addr = self.ir_program.ids.new_temp(Type.INT64)
         ir.extend([
             IRStore(address=dst_address, value=buckets_addr, value_type=Type.INT64),
             IRBinOp(dst=count_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(8, Type.INT64)),
             IRStore(address=count_addr, value=count_value, value_type=Type.INT),
+            # tombstones (offset 12, the 4 bytes of padding between
+            # count and capacity -- see runtime.c's own dict_
+            # tombstones docstring) is always 0 for a freshly-
+            # constructed literal (nothing has ever been deleted from
+            # it yet), but still needs writing explicitly: this
+            # address is otherwise whatever garbage was already on
+            # the stack, not zeroed for free the way a fresh calloc's
+            # own memory is.
+            IRBinOp(dst=tombstones_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(12, Type.INT64)),
+            IRStore(address=tombstones_addr, value=IRConst(0, Type.INT), value_type=Type.INT),
             IRBinOp(dst=capacity_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(16, Type.INT64)),
             IRStore(address=capacity_addr, value=IRConst(capacity, Type.INT64), value_type=Type.INT64),
         ])
@@ -372,3 +396,52 @@ class DictsMixin:
                       key_addr, result_addr],
             )]
         return lookup_ir + load_ir + rhs_ir + binop_ir + store_result_ir + dict_ir + key_ir + set_ir
+
+    def _ir_del_call(self, expr: Call) -> tuple:
+        """`del(d, key)` -- mirrors _ir_dict_lookup's own address/key
+        handling exactly (a scalar key materialized into the same
+        shared scratch slot; a str key's own {ptr, len} content used
+        directly), but calls runtime.c's own hornet_dict_delete_
+        scalar_key/hornet_dict_delete_str_key instead of a lookup one
+        -- void, mutating d's own bucket array in place (marking the
+        matching bucket a tombstone) rather than returning an address,
+        and panicking on a missing key for the identical reason a
+        lookup already does (see check_del_call's own docstring in
+        semantic.py for the confirmed design this matches).
+
+        Returns (ir, None) -- del is Type.VOID, gen_expr_ir's own sole
+        caller (its 'del' dispatch, mirroring 'print's) never reads
+        the second half of this tuple, but every gen_expr_ir case
+        still returns a pair, so this does too rather than being a
+        special exception."""
+        dict_expr, key_expr = expr.args
+        dict_type = type_of(dict_expr)
+        key_type = dict_type.key_type
+        value_width = type_byte_width(
+            dict_type.element_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+        result = self._ir_dict_address(dict_expr)
+        if result is None:
+            raise IRError(
+                f"_ir_dict_address returned None for del()'s own dict argument "
+                f"({dict_expr!r}) -- expected to always succeed for a reachable base"
+            )
+        dict_ir, descriptor_addr = result
+        if key_type.kind == TypeKind.STR:
+            key_ir, key_ptr, key_len = self._ir_str_value(key_expr)
+            call_ir = [IRCall(
+                dst=None, name='hornet_dict_delete_str_key',
+                args=[descriptor_addr, IRConst(value_width, Type.INT64), key_ptr, key_len],
+            )]
+            return dict_ir + key_ir + call_ir, None
+        key_width = type_byte_width(key_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+        key_value_ir, key_value = self.gen_expr_ir(key_expr)
+        scratch_addr = self.ir_program.ids.new_temp(Type.INT64)
+        key_ir = key_value_ir + [
+            IRLocalAddress(dst=scratch_addr, slot=self._dict_key_scratch_slot),
+            IRStore(address=scratch_addr, value=key_value, value_type=key_type),
+        ]
+        call_ir = [IRCall(
+            dst=None, name='hornet_dict_delete_scalar_key',
+            args=[descriptor_addr, IRConst(key_width, Type.INT64), IRConst(value_width, Type.INT64), scratch_addr],
+        )]
+        return dict_ir + key_ir + call_ir, None
