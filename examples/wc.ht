@@ -1,0 +1,63 @@
+from 'os' import get_args, read_file, read_stdin
+from 'fmt' import int_to_str
+
+# A deliberately simple wc: always prints lines, words, and bytes (no
+# -l/-w/-c flag support yet, and no column-aligned output the way the
+# real coreutils wc has) -- with any number of file arguments summed
+# into a trailing "total" line, or stdin if none are given.
+
+def bool is_whitespace(byte b):
+    return b == " " or b == "\t" or b == "\n"
+
+def int count_lines(str s):
+    int count = 0
+    for int i = 0; i < len(s); i += 1:
+        if s[i] == "\n":
+            count = count + 1
+    return count
+
+def int count_words(str s):
+    # A word is a maximal run of non-whitespace bytes -- count() only
+    # bumps on the FIRST byte of each run (in_word false -> true),
+    # not on every byte inside one.
+    int count = 0
+    bool in_word = false
+    for int i = 0; i < len(s); i += 1:
+        if is_whitespace(s[i]):
+            in_word = false
+        else:
+            if not in_word:
+                count = count + 1
+            in_word = true
+    return count
+
+def str format_counts(int lines, int words, int byte_count, str label):
+    str result = int_to_str(lines) + ' ' + int_to_str(words) + ' ' + int_to_str(byte_count)
+    if len(label) > 0:
+        result = result + ' ' + label
+    return result
+
+def int main(int argc, *byte argv):
+    []str args = get_args(argc, argv)
+
+    if len(args) <= 1:
+        str contents = read_stdin()
+        print(format_counts(count_lines(contents), count_words(contents), len(contents), ''))
+        return 0
+
+    int total_lines = 0
+    int total_words = 0
+    int total_bytes = 0
+    for int i = 1; i < len(args); i += 1:
+        str contents = read_file(args[i])
+        int lines = count_lines(contents)
+        int words = count_words(contents)
+        int byte_count = len(contents)
+        print(format_counts(lines, words, byte_count, args[i]))
+        total_lines = total_lines + lines
+        total_words = total_words + words
+        total_bytes = total_bytes + byte_count
+
+    if len(args) > 2:
+        print(format_counts(total_lines, total_words, total_bytes, 'total'))
+    return 0

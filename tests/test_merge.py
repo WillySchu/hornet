@@ -1191,3 +1191,53 @@ def test_stdlib_os_module_read_file_and_read_stdin_share_read_all_from_fd():
         assert from_file.stdout == content + "\n"
         assert from_stdin.stdout == content + "\n"
 
+
+def test_stdlib_fmt_module_int_to_str_known_values():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "from 'fmt' import int_to_str\n\n"
+            "def int main():\n"
+            "    print(int_to_str(0))\n"
+            "    print(int_to_str(7))\n"
+            "    print(int_to_str(42))\n"
+            "    print(int_to_str(100))\n"
+            "    print(int_to_str(999999999))\n"
+            "    return 0\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.stdout == "0\n7\n42\n100\n999999999\n"
+
+
+def test_stdlib_fmt_module_int_to_str_result_is_an_ordinary_str():
+    """Concatenable with other strings, like any other str value --
+    not a special, only-printable result."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "from 'fmt' import int_to_str\n\n"
+            "def int main():\n"
+            "    print(int_to_str(3) + ' lines')\n"
+            "    return 0\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.stdout == "3 lines\n"
+
+
+def test_stdlib_fmt_module_int_to_str_panics_on_a_negative_number():
+    """Non-negative only for now -- see int_to_str's own comment in
+    stdlib/fmt.ht for why (no current caller needs a negative sign,
+    and where it would even go is a genuinely separate question)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "from 'fmt' import int_to_str\n\n"
+            "def int main():\n"
+            "    print(int_to_str(0 - 5))\n"
+            "    return 0\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.returncode == -signal.SIGABRT
+        assert "negative numbers are not supported yet" in result.stdout
+
+
