@@ -18,7 +18,8 @@ Documentation:
 
 Updates:
 - `for in` loop.
-- Declared but uninitialized dicts.
+- Dict return type from functions.
+- Dict type as function argument.
 - Dict of dicts.
 - Dict as struct field.
 - Dicts as sum types.
@@ -55,6 +56,7 @@ Updates:
 - Format strings.
 - Write through addressing for dicts (d[key].field = value)?
 - Slice equality?
+- Dict equality?
 - Import \*?
 - Flow sensitive escape analysis.
 - Deduplicate emitted type descriptors when we call print()

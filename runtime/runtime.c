@@ -706,7 +706,16 @@ static void dict_grow_scalar_key_if_needed(void *descriptor, int64_t key_width, 
         return;  // (count + tombstones + 1) / capacity <= 0.75, room for one more
     }
     int64_t bucket_stride = 1 + key_width + value_width;
-    int64_t new_capacity = capacity * 2;
+    // capacity == 0 means a nil dict's own first write (see ir/
+    // statements.py's own VarDecl-with-no-initializer case) --
+    // doubling zero would stay zero forever, the identical trap
+    // slice's own append growth policy already documents and floors
+    // (codegen/arrays_slices_lowering.py's own _gen_new_cap_into:
+    // "doubling zero forever stays zero, so that case needs its own
+    // explicit floor"). 8 matches dict literal construction's own
+    // starting capacity (ir/dicts.py's own _next_pow2_at_least(max(8,
+    // ...))), not a new, separately-chosen number.
+    int64_t new_capacity = capacity == 0 ? 8 : capacity * 2;
     void *new_buckets = calloc((size_t)new_capacity, (size_t)bucket_stride);
     void *old_buckets = dict_buckets(descriptor);
     for (int64_t i = 0; i < capacity; i++) {
@@ -732,7 +741,10 @@ static void dict_grow_str_key_if_needed(void *descriptor, int64_t value_width) {
         return;
     }
     int64_t bucket_stride = 1 + key_region_width + value_width;
-    int64_t new_capacity = capacity * 2;
+    // capacity == 0 means a nil dict's own first write -- see the
+    // identical comment on dict_grow_scalar_key_if_needed's own
+    // matching line just above for the full reasoning.
+    int64_t new_capacity = capacity == 0 ? 8 : capacity * 2;
     void *new_buckets = calloc((size_t)new_capacity, (size_t)bucket_stride);
     void *old_buckets = dict_buckets(descriptor);
     for (int64_t i = 0; i < capacity; i++) {
@@ -810,6 +822,16 @@ void hornet_dict_set_str_key(
 void *hornet_dict_lookup_scalar_key(void *descriptor, int64_t key_width, int64_t value_width, const void *key_ptr) {
     void *buckets = dict_buckets(descriptor);
     int64_t capacity = dict_capacity(descriptor);
+    if (capacity == 0) {
+        // A nil dict (see ir/statements.py's own VarDecl-with-no-
+        // initializer case) -- capacity - 1 below would be -1 (every
+        // bit set), making the mask a no-op and letting an arbitrary,
+        // out-of-bounds hash value through as a probe index into a
+        // NULL buckets pointer. Every key is absent by construction
+        // here, so this is exactly the ordinary miss case, just
+        // reached before ever touching buckets at all.
+        hornet_panic("dict lookup: key not found");
+    }
     int64_t bucket_stride = 1 + key_width + value_width;
     int64_t index = hornet_hash_bytes(key_ptr, key_width) & (capacity - 1);
     while (1) {
@@ -828,6 +850,10 @@ void *hornet_dict_lookup_str_key(void *descriptor, int64_t value_width, const vo
     const int64_t key_region_width = 16;
     void *buckets = dict_buckets(descriptor);
     int64_t capacity = dict_capacity(descriptor);
+    if (capacity == 0) {
+        // See hornet_dict_lookup_scalar_key's own identical check.
+        hornet_panic("dict lookup: key not found");
+    }
     int64_t bucket_stride = 1 + key_region_width + value_width;
     int64_t index = hornet_hash_bytes(key_ptr, key_len) & (capacity - 1);
     while (1) {
@@ -859,6 +885,12 @@ void *hornet_dict_lookup_str_key(void *descriptor, int64_t value_width, const vo
 int hornet_dict_contains_scalar_key(void *descriptor, int64_t key_width, int64_t value_width, const void *key_ptr) {
     void *buckets = dict_buckets(descriptor);
     int64_t capacity = dict_capacity(descriptor);
+    if (capacity == 0) {
+        // A nil dict has no keys at all -- see hornet_dict_lookup_
+        // scalar_key's own identical check for why capacity == 0
+        // must be caught before ever computing a probe index.
+        return 0;
+    }
     int64_t bucket_stride = 1 + key_width + value_width;
     int64_t index = hornet_hash_bytes(key_ptr, key_width) & (capacity - 1);
     while (1) {
@@ -877,6 +909,10 @@ int hornet_dict_contains_str_key(void *descriptor, int64_t value_width, const vo
     const int64_t key_region_width = 16;
     void *buckets = dict_buckets(descriptor);
     int64_t capacity = dict_capacity(descriptor);
+    if (capacity == 0) {
+        // See hornet_dict_contains_scalar_key's own identical check.
+        return 0;
+    }
     int64_t bucket_stride = 1 + key_region_width + value_width;
     int64_t index = hornet_hash_bytes(key_ptr, key_len) & (capacity - 1);
     while (1) {
@@ -905,6 +941,12 @@ int hornet_dict_contains_str_key(void *descriptor, int64_t value_width, const vo
 void hornet_dict_delete_scalar_key(void *descriptor, int64_t key_width, int64_t value_width, const void *key_ptr) {
     void *buckets = dict_buckets(descriptor);
     int64_t capacity = dict_capacity(descriptor);
+    if (capacity == 0) {
+        // A nil dict has no keys at all -- see hornet_dict_lookup_
+        // scalar_key's own identical check for why capacity == 0
+        // must be caught before ever computing a probe index.
+        hornet_panic("dict delete: key not found");
+    }
     int64_t bucket_stride = 1 + key_width + value_width;
     int64_t index = hornet_hash_bytes(key_ptr, key_width) & (capacity - 1);
     while (1) {
@@ -927,6 +969,10 @@ void hornet_dict_delete_str_key(void *descriptor, int64_t value_width, const voi
     const int64_t key_region_width = 16;
     void *buckets = dict_buckets(descriptor);
     int64_t capacity = dict_capacity(descriptor);
+    if (capacity == 0) {
+        // See hornet_dict_delete_scalar_key's own identical check.
+        hornet_panic("dict delete: key not found");
+    }
     int64_t bucket_stride = 1 + key_region_width + value_width;
     int64_t index = hornet_hash_bytes(key_ptr, key_len) & (capacity - 1);
     while (1) {

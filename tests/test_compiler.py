@@ -9386,6 +9386,118 @@ class TestDicts:
             match="'in' requires a dict as its right operand",
         )
 
+    # -- nil (declared-but-uninitialized) dicts -------------------------------
+
+    def test_nil_dict_len_and_membership(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]int d\n"
+            "    print(len(d))\n"
+            "    print('x' in d)\n"
+            "    return 0\n",
+            "0\nfalse\n",
+        )
+
+    def test_nil_dict_prints_as_empty(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]int d\n"
+            "    print(d)\n"
+            "    return 0\n",
+            "dict[str]int{}\n",
+        )
+
+    def test_nil_dict_read_panics(self):
+        assert_crashes_with_sigabrt(
+            "    dict[str]int d\n"
+            "    print(d['missing'])\n"
+            "    return 0\n"
+        )
+
+    def test_nil_dict_del_panics(self):
+        assert_crashes_with_sigabrt(
+            "    dict[str]int d\n"
+            "    del(d, 'missing')\n"
+            "    return 0\n"
+        )
+
+    def test_nil_dict_write_bootstraps_a_real_dict(self):
+        """The first d[key] = value on a nil dict must allocate a
+        real backing array from scratch (see runtime.c's own capacity
+        == 0 growth floor, matching the identical fix slice's own
+        append growth policy already needed) -- confirmed here by
+        reading the value straight back out afterward, not just by
+        the write not crashing."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]int d\n"
+            "    d['a'] = 1\n"
+            "    print(d)\n"
+            "    print(len(d))\n"
+            "    print(d['a'])\n"
+            "    return 0\n",
+            "dict[str]int{'a': 1}\n1\n1\n",
+        )
+
+    def test_nil_dict_with_a_scalar_key(self):
+        """test_nil_dict_write_bootstraps_a_real_dict's own str-keyed
+        version only exercises the str-keyed C functions' own capacity
+        == 0 guards -- this covers the scalar-keyed ones separately."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[int]str d\n"
+            "    print(len(d))\n"
+            "    print(5 in d)\n"
+            "    d[5] = 'hello'\n"
+            "    print(d[5])\n"
+            "    print(len(d))\n"
+            "    return 0\n",
+            "0\nfalse\nhello\n1\n",
+        )
+
+    def test_nil_dict_grows_correctly_across_many_insertions(self):
+        """100 sequential inserts starting from a NIL dict (capacity
+        0), not a literal's own pre-sized capacity 8 -- proves the
+        capacity == 0 growth floor bootstraps correctly and every
+        subsequent grow-and-rehash cycle still works starting from
+        that bootstrapped size."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[int]int d\n"
+            "    for int i = 0; i < 100; i += 1:\n"
+            "        d[i] = i * 10\n"
+            "    int total = 0\n"
+            "    for int i = 0; i < 100; i += 1:\n"
+            "        total = total + d[i]\n"
+            "    print(len(d))\n"
+            "    print(total)\n"
+            "    return 0\n",
+            f"100\n{sum(i * 10 for i in range(100))}\n",
+        )
+
+    def test_nil_dict_escaping_its_own_function_still_works(self):
+        """Mirrors test_escaping_dict_variable_survives_past_its_own_
+        function from stage 1 (the heap-allocation bug that test was
+        written to catch), but starting from a NIL dict specifically
+        -- exercises the VarDecl-with-no-initializer case's own
+        is_heap_allocated branch (self._ir_malloc_and_store), since a
+        dict whose own address escapes via `&d` needs its descriptor
+        heap-allocated from the start, same as any other escaping
+        local, regardless of whether it started nil or literal-
+        constructed."""
+        assert_program_stdout(
+            "def *dict[str]int make_nil_dict():\n"
+            "    dict[str]int d\n"
+            "    return &d\n"
+            "\n"
+            "def int main():\n"
+            "    *dict[str]int p = make_nil_dict()\n"
+            "    (*p)['a'] = 1\n"
+            "    print(*p)\n"
+            "    return 0\n",
+            "dict[str]int{'a': 1}\n",
+        )
+
 # ---------------------------------------------------------------------------
 # Pointers, stage 2: semantic analysis only. Go-style pointers -- safe by
 # construction via escape analysis (not yet built; that's stage 3), no

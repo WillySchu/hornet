@@ -25,6 +25,7 @@ from ir.utils import COMPOSITE_KINDS, is_composite_addressable, type_of, type_by
 from parser import (
     ArrayLiteral,
     Assign,
+    BinaryOp,
     Break,
     Call,
     Continue,
@@ -639,6 +640,42 @@ class StatementsMixin:
                 zero_ptr = IRConst(0, Type.INT64)
                 zero_int = IRConst(0, Type.INT)
                 return self._ir_write_slice_descriptor(Variable(name=stmt.name), zero_ptr, zero_int, zero_int)
+            # A dict-typed VarDecl with NO initializer at all -- its
+            # implicit zero value is the nil dict (buckets_ptr=0,
+            # count=0, tombstones=0, capacity=0), the identical "no
+            # computation needed, just write zeroed fields" shape
+            # slice's own case just above already has. runtime.c's own
+            # dict_grow_*_key_if_needed and the six read-path C
+            # functions all now explicitly special-case capacity == 0,
+            # so a nil dict genuinely behaves like an empty one
+            # everywhere: len() reads count (already 0, free), in/
+            # lookup/del treat it as "no keys present" without ever
+            # touching the null buckets pointer, and the first d[key]
+            # = value bootstraps a real backing array via the SAME
+            # growth floor slice's own append already established for
+            # its own identical cap==0 case.
+            if var_type.kind == TypeKind.DICT and stmt.init is None:
+                slot = self._bind_local(stmt, ir_fn)
+                ir = []
+                if self._is_heap_allocated(id(stmt), var_type):
+                    ir.extend(self._ir_malloc_and_store(var_type, slot))
+                dst_ir, dst_address = self._ir_dict_address(Variable(name=stmt.name))
+                ir.extend(dst_ir)
+                zero64 = IRConst(0, Type.INT64)
+                zero32 = IRConst(0, Type.INT)
+                count_addr = self.ir_program.ids.new_temp(Type.INT64)
+                tombstones_addr = self.ir_program.ids.new_temp(Type.INT64)
+                capacity_addr = self.ir_program.ids.new_temp(Type.INT64)
+                ir.extend([
+                    IRStore(address=dst_address, value=zero64, value_type=Type.INT64),
+                    IRBinOp(dst=count_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(8, Type.INT64)),
+                    IRStore(address=count_addr, value=zero32, value_type=Type.INT),
+                    IRBinOp(dst=tombstones_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(12, Type.INT64)),
+                    IRStore(address=tombstones_addr, value=zero32, value_type=Type.INT),
+                    IRBinOp(dst=capacity_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(16, Type.INT64)),
+                    IRStore(address=capacity_addr, value=zero64, value_type=Type.INT64),
+                ])
+                return ir
             # An array- or struct-typed VarDecl with NO initializer at
             # all -- its implicit zero value is now real IR too, via
             # _ir_write_zero_value_into (a TOTAL function -- see its
