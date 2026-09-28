@@ -1,0 +1,19 @@
+from 'c' import from_cstring
+
+# The ONE place a raw pointer from argv is ever touched: runtime.c's
+# own hornet_argv_get does the actual C-side `argv[index]` indexing,
+# since this language deliberately has no pointer arithmetic or
+# pointer indexing of its own (a considered choice, not a gap -- see
+# this feature's own design discussion). get_args below is what
+# every program actually calls: it converts the raw {argc, argv} pair
+# main receives straight from the OS into an ordinary []str, exactly
+# once, so nothing past this one function ever sees a raw pointer at
+# all -- every ordinary slice operation (indexing, len, a for loop)
+# already applies to its own result from there on.
+extern *byte hornet_argv_get(*byte argv, int index)
+
+def []str get_args(int argc, *byte argv):
+    []str args = none
+    for int i = 0; i < argc; i += 1:
+        args = append(args, from_cstring(hornet_argv_get(argv, i)))
+    return args

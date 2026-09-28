@@ -51,10 +51,13 @@ def _write(tmpdir: str, name: str, content: str) -> str:
     return str(path)
 
 
-def _compile_and_run(entry_path: str, tmpdir: str) -> subprocess.CompletedProcess:
+def _compile_and_run(entry_path: str, tmpdir: str, args: list = None) -> subprocess.CompletedProcess:
     """The full pipeline: discover, merge, desugar, analyze, codegen,
     assemble, link, run -- returning the finished process so callers
-    can assert on returncode and/or stdout."""
+    can assert on returncode and/or stdout. `args` (default none) are
+    passed through to the compiled binary itself as its own argv[1:]
+    -- for a program that reads its own command-line arguments (e.g.
+    stdlib/os.ht's own get_args), not the compiler's own invocation."""
     entry_program, modules = discover_modules(entry_path)
     merged = merge_programs(entry_program, modules)
     desugar_methods(merged)
@@ -77,7 +80,7 @@ def _compile_and_run(entry_path: str, tmpdir: str) -> subprocess.CompletedProces
     gcc_cmd += [str(asm_path), str(runtime_o), "-o", str(binary)]
     link = subprocess.run(gcc_cmd, capture_output=True, text=True)
     assert link.returncode == 0, f"link failed:\n{link.stderr}\n--- asm ---\n{asm}"
-    return subprocess.run([str(binary)], capture_output=True, text=True)
+    return subprocess.run([str(binary), *(args or [])], capture_output=True, text=True)
 
 
 def test_cross_module_function_call():
@@ -1017,3 +1020,58 @@ def test_stdlib_hash_module_different_strings_hash_differently():
         )
         result = _compile_and_run(entry, tmpdir)
         assert result.returncode == 1
+
+
+def test_stdlib_os_module_get_args_count_and_values():
+    """The program's own name (whatever argv[0] the OS hands it,
+    unrelated to and independent of the source file's own name here)
+    always occupies args[0] -- matching the C convention get_args'
+    own underlying argc/argv already come from -- so three EXTRA
+    arguments means len(args) == 4."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "from 'os' import get_args\n\n"
+            "def int main(int argc, *byte argv):\n"
+            "    []str args = get_args(argc, argv)\n"
+            "    print(len(args))\n"
+            "    for int i = 1; i < len(args); i += 1:\n"
+            "        print(args[i])\n"
+            "    return 0\n",
+        )
+        result = _compile_and_run(entry, tmpdir, args=["alpha", "beta", "gamma"])
+        assert result.stdout == "4\nalpha\nbeta\ngamma\n"
+
+
+def test_stdlib_os_module_get_args_with_no_extra_arguments():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "from 'os' import get_args\n\n"
+            "def int main(int argc, *byte argv):\n"
+            "    []str args = get_args(argc, argv)\n"
+            "    print(len(args))\n"
+            "    return 0\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.stdout == "1\n"
+
+
+def test_stdlib_os_module_get_args_preserves_an_argument_containing_spaces():
+    """A single shell-quoted argument with an embedded space must
+    still arrive as ONE args[] entry, not be split on whitespace --
+    get_args itself never touches an argument's own content at all
+    (hornet_argv_get returns the OS's own already-split argv[i]
+    unchanged), so this is really confirming the round-trip through
+    from_cstring preserves it, not get_args' own indexing logic."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(
+            tmpdir, "main.ht",
+            "from 'os' import get_args\n\n"
+            "def int main(int argc, *byte argv):\n"
+            "    []str args = get_args(argc, argv)\n"
+            "    print(args[1])\n"
+            "    return 0\n",
+        )
+        result = _compile_and_run(entry, tmpdir, args=["hello world"])
+        assert result.stdout == "hello world\n"

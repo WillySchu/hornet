@@ -948,3 +948,17 @@ void hornet_dict_delete_str_key(void *descriptor, int64_t value_width, const voi
         index = (index + 1) & (capacity - 1);
     }
 }
+
+// stdlib/os.ht's own get_args is the ONLY caller this is meant for --
+// see its own comment for why: Hornet itself deliberately has no
+// pointer arithmetic or pointer indexing (a considered design choice,
+// not a gap), so `argv[index]` -- ordinary, unavoidable C-side
+// pointer indexing into the raw array the OS's own startup code hands
+// main -- has to happen somewhere outside Hornet's own reach. This is
+// that one place, kept to exactly this one line: get_args calls it
+// once per argument, converts each result to a real Hornet str via
+// from_cstring, and every program past that point works only with an
+// ordinary, safe []str, never a raw pointer.
+char *hornet_argv_get(char **argv, int64_t index) {
+    return argv[index];
+}
