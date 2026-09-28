@@ -147,6 +147,37 @@ class DictsMixin:
         ir.append(IRStore(address=addr, value=value, value_type=value_type))
         return ir, addr
 
+    def _ir_materialize_dict_literal(self, expr: DictLiteral):
+        """Builds (without lowering) a dict-literal expression's own
+        materialized address as real IR -- returns (ir, address).
+        The dict-literal counterpart to _ir_materialize_struct_literal
+        (ir/structs.py), sharing its same skeleton (a reserved slot,
+        or malloc when none was reserved) -- unlike that one, this
+        never returns None: _ir_write_dict_literal_into itself never
+        does either (see its own docstring), so there's no out-of-
+        scope case here to propagate.
+
+        No value_type ambiguity here, unlike an ArrayLiteral: a
+        DictLiteral always carries its own key_type/value_type
+        explicitly (see DictLiteral's own docstring in parser.py), so
+        type_of(expr) is simply, always correct. ir_fn (needed by
+        _ir_write_dict_literal_into to reserve each entry's own key/
+        value scratch slots) comes from self.ir_fn -- see gen_
+        function_ir's own docstring for why that's how every caller
+        of _ir_write_dict_literal_into gets it now, not a parameter
+        threaded through this method's own signature."""
+        dict_type = type_of(expr)
+        if id(expr) in self._argument_temp_slots:
+            slot = self._argument_temp_slots[id(expr)]
+            addr = self.ir_program.ids.new_temp(Type.INT64)
+            addr_ir = [IRLocalAddress(dst=addr, slot=slot)]
+        else:
+            addr = self.ir_program.ids.new_temp(Type.INT64)
+            size = type_byte_width(dict_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+            addr_ir = [IRCall(dst=addr, name='malloc', args=[IRConst(size, Type.INT64)])]
+        write_ir = self._ir_write_dict_literal_into(addr, expr, dict_type, self.ir_fn)
+        return addr_ir + write_ir, addr
+
     def _ir_write_dict_literal_into(self, dst_address, expr: DictLiteral, dict_type: Type, ir_fn) -> list:
         """Writes a dict literal's own {buckets_ptr, count, capacity}
         descriptor through dst_address: a fresh, calloc'd bucket array

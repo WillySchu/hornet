@@ -17,9 +17,6 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
-- Dict literal as return value.
-- Dict literal as call argument.
-- Dict literal as equality operand.
 - `for in` loop.
 - Dicts as sum types.
 - `in` checking for arrays/slices.
@@ -55,6 +52,7 @@ Updates:
 - Format strings.
 - Write through addressing for dicts (d[key].field = value)?
 - Slice equality?
+- Dict literal as equality operand.
 - Dict equality?
 - Import \*?
 - Flow sensitive escape analysis.

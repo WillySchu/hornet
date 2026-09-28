@@ -9785,27 +9785,66 @@ class TestDicts:
             "101\n",
         )
 
-    def test_dict_literal_as_a_direct_argument_is_a_known_separate_gap(self):
-        """`foo(dict[str]int{...})` -- a DIRECT literal argument, not
-        routed through a local variable first -- still isn't
-        supported: the identical, already-tracked _ir_write_
-        composite_value_into gap dict-literal-as-struct-field-argument
-        and dict-literal-as-array-element share (returning a dict
-        literal directly was the same gap too, but has since been
-        given its own separate fix in Return's own dispatch). Passing
-        an existing dict variable, as every other test in this
-        section does, remains the correct workaround."""
-        ast = _parse(
+    def test_dict_literal_as_a_direct_argument_now_works(self):
+        """Was a pinned, known-separate gap -- now fixed via _ir_
+        materialize_dict_literal (ir/dicts.py), mirroring _ir_
+        materialize_struct_literal's own reserve-or-malloc skeleton,
+        wired into _ir_call_arguments' own DICT case (ir/scalars.py).
+        Multiple direct-literal arguments in one call each need their
+        own independent address -- see the second call below, not
+        just the flat single-argument case."""
+        assert_program_stdout(
             "def int lookup(dict[str]int d, str key):\n"
             "    return d[key]\n"
             "\n"
             "def int main():\n"
-            "    print(lookup(dict[str]int{'a': 1}, 'a'))\n"
-            "    return 0\n"
+            "    print(lookup(dict[str]int{'a': 1, 'b': 2}, 'a'))\n"
+            "    print(lookup(dict[str]int{'a': 1, 'b': 2}, 'b'))\n"
+            "    return 0\n",
+            "1\n2\n",
         )
-        analyze(ast)
-        with pytest.raises(IRError, match="direct dict literal argument isn't supported yet"):
-            generate_asm(ast, platform=ASM_PLATFORM)
+
+    def test_two_dict_literal_arguments_in_one_call(self):
+        """Both arguments are direct literals in the SAME call --
+        confirms _reserve_argument_temp's own id(expr)-keyed slot
+        reservation (ir/builder.py's own _collect_argument_temps_in_
+        expr pre-pass) correctly gives each literal its own distinct
+        slot rather than the two colliding."""
+        assert_program_stdout(
+            "def int combine(dict[str]int a, dict[str]int b, str key1, str key2):\n"
+            "    return a[key1] + b[key2]\n"
+            "\n"
+            "def int main():\n"
+            "    print(combine(dict[str]int{'p': 10}, dict[str]int{'q': 20}, 'p', 'q'))\n"
+            "    return 0\n",
+            "30\n",
+        )
+
+    def test_nested_dict_literal_as_a_direct_argument(self):
+        assert_program_stdout(
+            "def int deep_lookup(dict[str]dict[str]int d, str outer, str inner):\n"
+            "    return d[outer][inner]\n"
+            "\n"
+            "def int main():\n"
+            "    print(deep_lookup(dict[str]dict[str]int{'x': dict[str]int{'y': 42}}, 'x', 'y'))\n"
+            "    return 0\n",
+            "42\n",
+        )
+
+    def test_dict_literal_argument_to_a_method(self):
+        assert_program_stdout(
+            "type Wrapper struct:\n"
+            "    int tag\n"
+            "    def int lookup(w, dict[str]int d, str key):\n"
+            "        return d[key] + w.tag\n"
+            "\n"
+            "def int main():\n"
+            "    Wrapper w = Wrapper(tag=100)\n"
+            "    print(w.lookup(dict[str]int{'a': 1}, 'a'))\n"
+            "    return 0\n",
+            "101\n",
+        )
+
 
     # -- dict equality: mirrors slice's own none-comparison, otherwise false --
 
@@ -9885,13 +9924,13 @@ class TestDicts:
         """`dict[str]int{...} == d` -- a DIRECT literal operand, not
         routed through a local variable first -- isn't supported: the
         same, already-tracked _ir_write_composite_value_into gap
-        dict-literal-as-struct-field-argument, dict-literal-as-array-
-        element, and a dict literal as a direct call argument share
-        (returning a dict literal directly was the same gap too, but
-        has since been given its own separate fix in Return's own
-        dispatch). Comparing an already-declared dict variable, as
-        every other test in this section does, remains the correct
-        workaround."""
+        dict-literal-as-struct-field-argument and dict-literal-as-
+        array-element share -- but here _ir_composite_operand_address
+        (unlike _ir_call_arguments) has no dict-literal case wired in
+        at all yet, not merely a materializer left unbuilt, so this
+        one's own fix is still open. Comparing an already-declared
+        dict variable, as every other test in this section does,
+        remains the correct workaround."""
         ast = _parse(
             "def int main():\n"
             "    dict[str]int d = dict[str]int{'a': 1}\n"
