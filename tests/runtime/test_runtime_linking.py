@@ -56,8 +56,9 @@ def test_runtime_and_caller_link_and_run_correctly():
 
 
 def test_hornet_runtime_entry_points_are_the_only_external_symbols():
-    """hornet_print/hornet_panic/hornet_slice_grow are the three
-    functions meant to be called from outside this file;
+    """hornet_print/hornet_panic/hornet_slice_grow/hornet_hash_bytes/
+    hornet_dict_insert_scalar_key/hornet_dict_insert_str_key are the
+    six functions meant to be called from outside this file;
     hornet_stringify and every buffer/read helper are internal
     implementation details (static linkage) that shouldn't leak into
     whatever links against this object file."""
@@ -78,7 +79,9 @@ def test_hornet_runtime_entry_points_are_the_only_external_symbols():
         # the expected names need the identical leading underscore on
         # macOS, not just when Hornet-generated code refers to them.
         expected_names = (
-            ["_hornet_panic", "_hornet_print", "_hornet_slice_grow"] if HOST_IS_MACOS
-            else ["hornet_panic", "hornet_print", "hornet_slice_grow"]
+            ["_hornet_dict_insert_scalar_key", "_hornet_dict_insert_str_key", "_hornet_hash_bytes",
+             "_hornet_panic", "_hornet_print", "_hornet_slice_grow"] if HOST_IS_MACOS
+            else ["hornet_dict_insert_scalar_key", "hornet_dict_insert_str_key", "hornet_hash_bytes",
+                  "hornet_panic", "hornet_print", "hornet_slice_grow"]
         )
         assert sorted(external_symbols) == expected_names

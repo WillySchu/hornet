@@ -23,7 +23,7 @@ from ir.errors import IRError
 # (which two kinds share a bare literal syntax with its own address
 # function; which two are passed as a single pointer argument in the
 # calling convention) and would be wrong to fold into this one.
-COMPOSITE_KINDS = {TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT, TypeKind.SUM, TypeKind.STR}
+COMPOSITE_KINDS = {TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT, TypeKind.SUM, TypeKind.STR, TypeKind.DICT}
 
 
 def is_composite_addressable(expr: Node) -> bool:
@@ -120,6 +120,14 @@ def type_byte_width(t: Type, structs: dict[str, StructInfo], sum_types: dict) ->
         return SUM_TYPE_TAG_WIDTH + max(variant_widths)
     if t.kind == TypeKind.POINTER:
         return 8  # one machine address, regardless of the pointee's own width
+    if t.kind == TypeKind.DICT:
+        return 24  # {buckets_ptr, count, capacity} -- the same 3-word
+                   # descriptor shape SLICE already has (ptr/len/cap),
+                   # fixed regardless of key_type/element_type -- the
+                   # actual bucket array is a wholly separate, always-
+                   # malloc'd allocation this descriptor merely points
+                   # at, exactly the relationship a slice's own ptr
+                   # already has to ITS backing array.
     return 4  # INT, BOOL
 
 

@@ -298,15 +298,19 @@ def test_type_of_array():
     assert array_type == type_of(node)
 
 
-def test_composite_kinds_is_exactly_array_slice_struct_sum_str():
+def test_composite_kinds_is_exactly_array_slice_struct_sum_str_dict():
     """Pinned exactly, not just checked for a subset/superset: every
     call site that switched to this shared constant (ir/statements.py,
     ir/arrays_slices.py, ir/builder.py, ir/dispatch.py, ir/structs.py)
     relies on it meaning precisely "composite, address-based value
     type" -- no more, no less. str joined this set once it became a
     16-byte {ptr, len} descriptor rather than a single 8-byte pointer
-    -- see ir/strings.py's own module docstring."""
+    -- see ir/strings.py's own module docstring. dict joined it for
+    the identical reason slice did: a fixed-size {ptr, count, cap}
+    descriptor, address-based like every other member here, even
+    though what it points at (the bucket array) is managed very
+    differently from a slice's own backing array."""
     assert COMPOSITE_KINDS == {
         semantic.TypeKind.ARRAY, semantic.TypeKind.SLICE, semantic.TypeKind.STRUCT,
-        semantic.TypeKind.SUM, semantic.TypeKind.STR,
+        semantic.TypeKind.SUM, semantic.TypeKind.STR, semantic.TypeKind.DICT,
     }

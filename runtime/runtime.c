@@ -257,6 +257,52 @@ static void hornet_stringify(
             hornet_buf_append_byte(buf, ']');
             break;
         }
+        case HORNET_TYPEDESC_DICT: {
+            // Descriptor shape: [tag, name_ptr, key_type_desc_ptr,
+            // key_width, value_type_desc_ptr, value_width].
+            // bucket_stride is recomputed here from the two widths,
+            // exactly the same formula ir/dicts.py's own construction
+            // code already used to build this dict in the first
+            // place -- the two sides have to keep agreeing on it, the
+            // same ABI-boundary care this whole file's own module
+            // docstring already calls out.
+            //
+            // value_addr points at the dict's own {buckets_ptr, count,
+            // capacity} descriptor -- capacity (not count) decides how
+            // many bucket SLOTS to walk over, since occupied ones can
+            // be scattered anywhere among them; count only decides how
+            // many commas to print (skip an empty bucket's own state
+            // byte entirely, never recursing into its unwritten key/
+            // value bytes).
+            const char *name = (const char *)read_desc_word(type_desc, 1);
+            const unsigned char *key_desc = (const unsigned char *)read_desc_word(type_desc, 2);
+            int64_t key_width = (int64_t)read_desc_word(type_desc, 3);
+            const unsigned char *value_desc = (const unsigned char *)read_desc_word(type_desc, 4);
+            int64_t value_width = (int64_t)read_desc_word(type_desc, 5);
+            int64_t bucket_stride = 1 + key_width + value_width;
+
+            void *buckets = read_ptr(value_addr);
+            int64_t capacity = read_i64((char *)value_addr + 16);
+
+            hornet_buf_append_cstr(buf, name);
+            hornet_buf_append_byte(buf, '{');
+            int printed_any = 0;
+            for (int64_t i = 0; i < capacity; i++) {
+                unsigned char *bucket = (unsigned char *)buckets + i * bucket_stride;
+                if (bucket[0] == 0) {
+                    continue;
+                }
+                if (printed_any) {
+                    hornet_buf_append_bytes(buf, ", ", 2);
+                }
+                printed_any = 1;
+                hornet_stringify(bucket + 1, key_desc, 1, buf);
+                hornet_buf_append_bytes(buf, ": ", 2);
+                hornet_stringify(bucket + 1 + key_width, value_desc, 1, buf);
+            }
+            hornet_buf_append_byte(buf, '}');
+            break;
+        }
         case HORNET_TYPEDESC_STRUCT: {
             // Descriptor shape: [tag, name_ptr, field_count, then
             // field_count fixed-size triples of (field_name_ptr,
@@ -414,4 +460,127 @@ void *hornet_slice_grow(const void *old_ptr, int32_t len, int32_t new_cap, int32
     void *new_ptr = malloc((size_t)new_cap * (size_t)element_width);
     memcpy(new_ptr, old_ptr, (size_t)len * (size_t)element_width);
     return new_ptr;
+}
+
+// FNV-1a 64-bit over an arbitrary byte range. Used to hash a dict's
+// own key, whatever kind it is: for a scalar key, ptr/len is a
+// scratch stack slot holding the key's own value (materialized there
+// specifically so it HAS an address to hash from at all -- an
+// ordinary scalar otherwise just lives in a register); for a str key,
+// ptr/len is the string's own CONTENT bytes directly (never its own
+// {ptr, len} descriptor's address -- two different string views with
+// identical content, but different underlying buffers, must hash
+// identically, the same correctness requirement _ir_string_compare
+// already has for equality). This one function suffices for every
+// supported key kind -- there's no per-kind hash logic anywhere else,
+// only per-kind ADDRESSING of what to hash (decided in Python, at IR-
+// build time, by ir/dicts.py).
+//
+// Purely an internal, compiler-managed implementation detail -- never
+// exposed to Hornet code, so there's no correctness requirement to
+// match hash.ht's own (independent, Hornet-level) FNV-1a output.
+int64_t hornet_hash_bytes(const void *ptr, int64_t len) {
+    uint64_t h = 0xcbf29ce484222325ULL;  // FNV-1a 64-bit offset basis
+    const unsigned char *bytes = (const unsigned char *)ptr;
+    for (int64_t i = 0; i < len; i++) {
+        h ^= bytes[i];
+        h *= 0x100000001b3ULL;  // FNV prime
+    }
+    return (int64_t)h;
+}
+
+// Inserts one entry into an open-addressed (linear probing) dict's
+// own bucket array, for a SCALAR-keyed dict (int/int8/uint8/int64/
+// bool) -- str keys go through hornet_dict_insert_str_key instead,
+// since they need content-based hashing/comparison, not a flat byte
+// compare. Each bucket is 1 (state: 0 empty, 1 occupied) + key_width
+// + value_width bytes, contiguous, no padding -- bucket_stride is the
+// caller's own already-computed total. capacity is ALWAYS a power of
+// two (the caller's own job to guarantee), letting probing use a
+// cheap bitwise AND instead of a modulo.
+//
+// key_ptr/value_ptr point at the actual bytes to store -- key_ptr is
+// typically a scratch stack slot's own address (see hornet_hash_
+// bytes's own docstring for why a scalar key needs one at all).
+//
+// Returns 1 if this inserted a genuinely NEW entry (the caller's own
+// count should increment), or 0 if an existing entry with the
+// identical key was found and its value simply overwritten (count
+// unchanged) -- ordinary, expected last-write-wins dict semantics for
+// a runtime-computed key that happens to collide with one already
+// present, not an error condition.
+//
+// No growth check here at all: by the time this runs, the caller
+// (ir/dicts.py) has already guaranteed capacity leaves enough headroom
+// that an empty slot always exists somewhere along the probe
+// sequence -- unbounded linear probing is therefore safe, not an
+// infinite-loop risk.
+int hornet_dict_insert_scalar_key(
+    void *buckets, int64_t capacity, int64_t bucket_stride,
+    const void *key_ptr, int64_t key_width,
+    const void *value_ptr, int64_t value_width
+) {
+    int64_t index = hornet_hash_bytes(key_ptr, key_width) & (capacity - 1);
+    while (1) {
+        unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
+        if (bucket[0] == 0) {
+            bucket[0] = 1;
+            memcpy(bucket + 1, key_ptr, (size_t)key_width);
+            memcpy(bucket + 1 + key_width, value_ptr, (size_t)value_width);
+            return 1;
+        }
+        if (memcmp(bucket + 1, key_ptr, (size_t)key_width) == 0) {
+            memcpy(bucket + 1 + key_width, value_ptr, (size_t)value_width);
+            return 0;
+        }
+        index = (index + 1) & (capacity - 1);
+    }
+}
+
+// hornet_dict_insert_scalar_key's own str-keyed counterpart: key_ptr/
+// key_len are the incoming string's own CONTENT bytes (see hornet_
+// hash_bytes's own docstring), stored in each bucket's own key region
+// as a fresh {ptr, len} pair -- 8 bytes for ptr, then a 32-bit (not
+// 64-bit) len, matching str's own existing runtime descriptor layout
+// exactly (_ir_write_str_descriptor_into_address's own len field is
+// Type.INT, 4 bytes, at offset 8 -- see its own docstring), padded to
+// 16 bytes total to match type_byte_width(str) exactly, the width
+// bucket_stride already assumes for this key region. key_len itself
+// is accepted as a wider int64_t purely because that's this whole
+// file's own general convention for a byte count -- SysV's own
+// calling convention already zero-extends a 32-bit argument into its
+// full 64-bit register on the caller's own side, so no truncation
+// risk exists passing one of Hornet's own Type.INT length values in
+// here. Length-first comparison, exactly like _ir_string_compare's
+// own real-IR version: two different lengths can never be equal, so
+// memcmp only ever runs once they're already known equal, never
+// risking a read past either buffer's own true size.
+int hornet_dict_insert_str_key(
+    void *buckets, int64_t capacity, int64_t bucket_stride,
+    const void *key_ptr, int64_t key_len,
+    const void *value_ptr, int64_t value_width
+) {
+    // 16 == type_byte_width(str) on the Python side (an 8-byte ptr
+    // plus a 4-byte len, padded to 16) -- the fixed width of this
+    // bucket's own key region whenever key_type is str, regardless of
+    // the actual string's own length.
+    const int64_t key_region_width = 16;
+    int64_t index = hornet_hash_bytes(key_ptr, key_len) & (capacity - 1);
+    while (1) {
+        unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
+        void **stored_ptr = (void **)(bucket + 1);
+        int32_t *stored_len = (int32_t *)(bucket + 1 + sizeof(void *));
+        if (bucket[0] == 0) {
+            bucket[0] = 1;
+            *stored_ptr = (void *)key_ptr;
+            *stored_len = (int32_t)key_len;
+            memcpy(bucket + 1 + key_region_width, value_ptr, (size_t)value_width);
+            return 1;
+        }
+        if (*stored_len == key_len && memcmp(*stored_ptr, key_ptr, (size_t)key_len) == 0) {
+            memcpy(bucket + 1 + key_region_width, value_ptr, (size_t)value_width);
+            return 0;
+        }
+        index = (index + 1) & (capacity - 1);
+    }
 }

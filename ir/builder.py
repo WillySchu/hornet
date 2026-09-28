@@ -28,6 +28,7 @@ from ir.ir import (
     IRBranch, IRCall, IRConst, IRCopy, IRFunction, IRJump, IRLocalAddress, IRReadArgument, IRReturn, IRStore, Temp,
 )
 from ir.arrays_slices import ArraysSlicesMixin
+from ir.dicts import DictsMixin
 from ir.dispatch import DispatchMixin
 from ir.pointers import PointersMixin
 from ir.scalars import ScalarsMixin
@@ -63,6 +64,7 @@ from semantic import type_from_name, Type, TypeKind
 
 class IRFunctionBuilder(
         ArraysSlicesMixin,
+        DictsMixin,
         DispatchMixin,
         PointersMixin,
         ScalarsMixin,
@@ -122,6 +124,11 @@ class IRFunctionBuilder(
         # is fully consumed before any subsequent one writes to it
         # again, the same way a call stack's frames nest.
         self._unnamed_slice_temp_slot = self.ir_program.ids.new_slot(24, "unnamed_slice_temp", ir_fn)
+
+        # A dict's own {buckets_ptr, count, capacity} counterpart to
+        # the slice slot just above -- identical reasoning, identical
+        # 24-byte width (both are three-word descriptors).
+        self._unnamed_dict_temp_slot = self.ir_program.ids.new_slot(24, "unnamed_dict_temp", ir_fn)
 
         # A third, 8-byte scratch slot, also reserved unconditionally
         # -- used by _ir_print_call for a non-Variable scalar argument

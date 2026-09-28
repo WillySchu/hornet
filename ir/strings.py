@@ -61,6 +61,7 @@ _TYPEDESC_UINT8 = 7
 _TYPEDESC_INT64 = 8
 _TYPEDESC_SUM = 9
 _TYPEDESC_POINTER = 10
+_TYPEDESC_DICT = 11
 
 
 class StringsMixin:
@@ -163,6 +164,25 @@ class StringsMixin:
             # already have, for the identical reason: all four print
             # as one raw value, not a structured container.
             self.ir_program.type_descriptors.append((label, [_TYPEDESC_POINTER]))
+        elif t.kind == TypeKind.DICT:
+            # Descriptor shape: [tag, name_label, key_label, key_
+            # width, value_label, value_width] -- key_width/value_
+            # width are needed here (unlike ARRAY's own single elem_
+            # width, which SLICE also carries) because hornet_
+            # stringify has to walk this dict's own bucket array
+            # itself, computing bucket_stride = 1 + key_width + value_
+            # width to step from one bucket to the next -- there's no
+            # separate registry to look either width up from at
+            # runtime the way ir/dicts.py's own construction code
+            # already can in Python.
+            name_label = self.ir_program.ids.new_label("typedesc_name")
+            self.ir_program.string_literals.append((name_label, str(t)))
+            key_label = self._get_or_build_type_descriptor(t.key_type, in_progress)
+            key_width = type_byte_width(t.key_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+            value_label = self._get_or_build_type_descriptor(t.element_type, in_progress)
+            value_width = type_byte_width(t.element_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+            self.ir_program.type_descriptors.append(
+                (label, [_TYPEDESC_DICT, name_label, key_label, key_width, value_label, value_width]))
         else:
             raise IRError(f"No type descriptor rule for: {t}")
 
@@ -556,6 +576,29 @@ class StringsMixin:
             value_addr_ir.extend(
                 self._ir_write_slice_descriptor_into_address(slice_addr, ptr_value, len_value, cap_value))
             value_addr = slice_addr
+        elif arg_type.kind == TypeKind.DICT:
+            # Unlike str/slice, no "unify every reachable shape into
+            # raw values, then write them into a scratch slot" dance
+            # needed: a dict's own ALREADY-existing address (via _ir_
+            # dict_address) is exactly the {buckets_ptr, count,
+            # capacity} descriptor hornet_print needs, with no
+            # reassembly required -- the same reasoning the ARRAY/
+            # STRUCT/SUM branch above already relies on. Scoped for
+            # now to whatever _ir_dict_address itself already covers
+            # (a bare Variable, or a Field/Index rooted in one) --
+            # nothing produces a dict value any OTHER way yet at this
+            # stage (no dict-returning functions, no dict literal used
+            # directly as an argument), so there's nothing broader to
+            # cover here today.
+            result = self._ir_dict_address(arg)
+            if result is None:
+                raise IRError(
+                    f"_ir_dict_address returned None for print()'s own dict-typed "
+                    f"argument ({arg!r}) -- only a bare variable (or a field/element "
+                    f"access rooted in one) is supported as a dict-typed print() "
+                    f"argument at this stage"
+                )
+            value_addr_ir, value_addr = result
         else:
             expr_ir, value = self.gen_expr_ir(arg)
             scalar_addr = self.ir_program.ids.new_temp(Type.INT64)

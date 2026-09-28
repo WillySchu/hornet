@@ -29,6 +29,7 @@ from parser import (
     Call,
     Continue,
     DerefAssign,
+    DictLiteral,
     ExprStmt,
     Field,
     FieldAssign,
@@ -580,6 +581,22 @@ class StatementsMixin:
                 write_ir = writer(dst_address, stmt.init, var_type)
                 if write_ir is not None:
                     return ir + write_ir
+            # A dict-typed VarDecl initialized from a dict literal --
+            # the identical shape as the ARRAY/STRUCT case just above,
+            # except _ir_write_dict_literal_into needs ir_fn too (a
+            # scratch stack slot for each scalar key/value -- see its
+            # own module docstring), which no OTHER "write literal
+            # into" method here needs, so this stays its own separate
+            # branch rather than trying to fit dict into that shared
+            # writer-dispatch dict above.
+            if var_type.kind == TypeKind.DICT and isinstance(stmt.init, DictLiteral):
+                slot = self._bind_local(stmt, ir_fn)
+                ir = []
+                if self._is_heap_allocated(id(stmt), var_type):
+                    ir.extend(self._ir_malloc_and_store(var_type, slot))
+                dst_ir, dst_address = self._ir_dict_address(Variable(name=stmt.name))
+                ir.extend(dst_ir)
+                return ir + self._ir_write_dict_literal_into(dst_address, stmt.init, var_type, ir_fn)
             # A slice-typed VarDecl with NO initializer at all -- its
             # implicit zero value is the nil slice (ptr=0, len=0,
             # cap=0), needing no computation whatsoever: three

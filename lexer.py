@@ -27,6 +27,11 @@ class TokenType(Enum):
     CLOSE_PAREN = auto()
     OPEN_BRACKET = auto()
     CLOSE_BRACKET = auto()
+    OPEN_BRACE = auto()  # dict literal only -- `dict[K]V{...}` (see
+                          # parser.py's own DictLiteral) -- this
+                          # language's blocks are indentation-based, so
+                          # braces have never been needed before now.
+    CLOSE_BRACE = auto()
     COLON = auto()
     COMMA = auto()
     DOT = auto()
@@ -94,6 +99,7 @@ class TokenType(Enum):
     FROM = auto()
     EXTERN = auto()
     INTRINSIC = auto()
+    DICT = auto()
 
     # Special
     NEWLINE = auto()
@@ -141,6 +147,13 @@ class Lexer:
         self.indent_stack = [0]
         self.at_line_start = True
 
+        # Depth of currently-open '(' / '[' / '{' -- while > 0, a
+        # newline is a mere line continuation (no NEWLINE token, no
+        # indentation measurement), letting a multi-line call,
+        # array/dict literal, or grouped expression span several
+        # source lines. See tokenize()'s own NEWLINE case.
+        self.bracket_depth = 0
+
         # Define keywords mapping
         self.keywords = {
             'def': TokenType.DEF,
@@ -183,6 +196,7 @@ class Lexer:
             'from': TokenType.FROM,
             'extern': TokenType.EXTERN,
             'intrinsic': TokenType.INTRINSIC,
+            'dict': TokenType.DICT,
         }
 
         # Compile master regex pattern
@@ -226,6 +240,8 @@ class Lexer:
             ('CLOSE_PAREN',   r'\)'),              # Close paren
             ('OPEN_BRACKET',  r'\['),              # Array type/literal/index open
             ('CLOSE_BRACKET', r'\]'),              # Array type/literal/index close
+            ('OPEN_BRACE',    r'\{'),              # Dict literal open
+            ('CLOSE_BRACE',   r'\}'),              # Dict literal close
             ('GREATER_THAN',  r'>'),
             ('LESS_THAN',     r'<'),
             ('COLON',         r':'),               # Colon
@@ -327,18 +343,43 @@ class Lexer:
             elif kind == 'ASSIGN':
                 self.tokens.append(Token(TokenType.ASSIGN, value, self.line, column))
             elif kind == 'NEWLINE':
-                self.tokens.append(Token(TokenType.NEWLINE, value, self.line, column))
                 self.line += 1
                 self.line_start = match.end()
-                self.at_line_start = True
+                if self.bracket_depth == 0:
+                    self.tokens.append(Token(TokenType.NEWLINE, value, self.line - 1, column))
+                    self.at_line_start = True
+                # Inside an open '(', '[', or '{' (bracket_depth > 0),
+                # this newline is suppressed entirely -- no NEWLINE
+                # token, and at_line_start stays false, so the next
+                # token's own column never triggers _handle_
+                # indentation. This is the standard "logical line
+                # continues across a physical one while some bracket
+                # is still open" approach every indentation-sensitive
+                # language needs (Python's own tokenizer does the
+                # identical thing) -- without it, a multi-line dict
+                # literal's own entries would each look like a
+                # fresh, differently-indented logical line to the
+                # parser, which expects INDENT/DEDENT to mean actual
+                # block structure, not "this expression happens to
+                # span several source lines."
             elif kind == 'OPEN_PAREN':
                 self.tokens.append(Token(TokenType.OPEN_PAREN, value, self.line, column))
+                self.bracket_depth += 1
             elif kind == 'CLOSE_PAREN':
                 self.tokens.append(Token(TokenType.CLOSE_PAREN, value, self.line, column))
+                self.bracket_depth -= 1
             elif kind == 'OPEN_BRACKET':
                 self.tokens.append(Token(TokenType.OPEN_BRACKET, value, self.line, column))
+                self.bracket_depth += 1
             elif kind == 'CLOSE_BRACKET':
                 self.tokens.append(Token(TokenType.CLOSE_BRACKET, value, self.line, column))
+                self.bracket_depth -= 1
+            elif kind == 'OPEN_BRACE':
+                self.tokens.append(Token(TokenType.OPEN_BRACE, value, self.line, column))
+                self.bracket_depth += 1
+            elif kind == 'CLOSE_BRACE':
+                self.tokens.append(Token(TokenType.CLOSE_BRACE, value, self.line, column))
+                self.bracket_depth -= 1
             elif kind == 'COLON':
                 self.tokens.append(Token(TokenType.COLON, value, self.line, column))
             elif kind == 'COMMA':

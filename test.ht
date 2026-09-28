@@ -49,7 +49,4 @@ def int8 main():
     #print(b == 15)
     # TODO(will): This should definitely work.
     #HasArray ha = *make_ha_ptr()
-    #print(HasArray([1,2,3,4,5]))
-    Node n = Node(5)
-    print(n)
     return 0

@@ -368,6 +368,30 @@ class ArrayLiteral(Node):
 
 
 @dataclass
+class DictLiteral(Node):
+    """`dict[key_type]value_type{k1: v1, k2: v2, ...}` -- unlike
+    ArrayLiteral, which is only EVER preceded by an explicit type at
+    its own outermost occurrence (an inner element recurses with
+    type_expr left None), a DictLiteral ALWAYS carries its own
+    key_type/value_type explicitly, every occurrence, parsed as part
+    of the literal itself rather than inferred from surrounding
+    context (a VarDecl's own declared type, say) -- see parse_dict_
+    literal's own docstring for why: a bare `{...}` form with no type
+    prefix at all is a deliberately deferred, separate piece of syntax
+    (inference from context, or from the entries themselves), not
+    this node's own concern yet.
+
+    entries preserves source order -- comma-separated key:value pairs,
+    each side an arbitrary expression (not just a literal), with a
+    trailing comma before the closing '}' allowed (see the user's own
+    example in the conversation that asked for this feature)."""
+    key_type: Union[str, 'ArrayTypeExpr', 'SliceTypeExpr', 'PointerTypeExpr', 'DictTypeExpr']
+    value_type: Union[str, 'ArrayTypeExpr', 'SliceTypeExpr', 'PointerTypeExpr', 'DictTypeExpr']
+    entries: List[Tuple[Node, Node]] = field(default_factory=list)
+    resolved_type: Optional[Any] = None
+
+
+@dataclass
 class Index(Node):
     """`array[index]` -- reads a single element (or, for a multi-
     dimensional array not yet fully indexed, a sub-array). Multi-
@@ -569,6 +593,25 @@ class PointerTypeExpr(Node):
     one reflects a narrower notion of what `is` even MEANS, not
     "simplest implementation for now")."""
     pointee_type: Union[str, ArrayTypeExpr, SliceTypeExpr, 'PointerTypeExpr']
+
+
+@dataclass
+class DictTypeExpr(Node):
+    """`dict[key_type]value_type` in type position, e.g.
+    `dict[str]int`. Sibling to ArrayTypeExpr/SliceTypeExpr/
+    PointerTypeExpr -- the `dict` keyword unambiguously starts this
+    shape (see parse_type's own DICT case), so no lookahead trick like
+    ArrayTypeExpr/SliceTypeExpr's own NUMBER-vs-immediate-']' is
+    needed to tell it apart from anything else.
+
+    key_type and value_type each recurse exactly like every other
+    wrapper kind's own nested type does -- semantic.py's own type_
+    from_name is where key_type actually gets restricted to a fixed
+    set of hashable/comparable types (int/int8/uint8/int64/bool/str),
+    not the grammar here, matching how pointer-to-pointer is
+    similarly a semantic.py restriction, not a parse-time one."""
+    key_type: Union[str, ArrayTypeExpr, SliceTypeExpr, PointerTypeExpr, 'DictTypeExpr']
+    value_type: Union[str, ArrayTypeExpr, SliceTypeExpr, PointerTypeExpr, 'DictTypeExpr']
 
 
 @dataclass
@@ -1666,7 +1709,7 @@ class Parser:
         name_tok = self.expect(TokenType.IDENTIFIER, "Expected a parameter name")
         return Param(name=name_tok.val, type=param_type, line=start_tok.line, col=start_tok.col)
 
-    def parse_type(self) -> Union[str, ArrayTypeExpr, SliceTypeExpr, PointerTypeExpr]:
+    def parse_type(self) -> Union[str, ArrayTypeExpr, SliceTypeExpr, PointerTypeExpr, DictTypeExpr]:
         # A type keyword ('int'/'bool'/'str'/...), OR '[' NUMBER ']'
         # followed by another type recursively (ArrayTypeExpr -- each
         # bracket pair peels off one more wrapping whatever parse_type
@@ -1681,6 +1724,17 @@ class Parser:
         # (PointerTypeExpr -- see its own docstring for why this
         # doesn't reject `**int` itself, unlike the other two forms
         # above, which each validate their own syntax immediately).
+        # OR the 'dict' keyword, unambiguous on its own (no lookahead
+        # needed the way ArrayTypeExpr/SliceTypeExpr's own '['
+        # requires), followed by '[' key_type ']' value_type
+        # (DictTypeExpr).
+        if self.check(TokenType.DICT):
+            dict_tok = self.advance()
+            self.expect(TokenType.OPEN_BRACKET, "Expected '[' after 'dict'")
+            key_type = self.parse_type()
+            self.expect(TokenType.CLOSE_BRACKET, "Expected ']' after a dict's own key type")
+            value_type = self.parse_type()
+            return DictTypeExpr(key_type=key_type, value_type=value_type, line=dict_tok.line, col=dict_tok.col)
         if self.check(TokenType.STAR):
             star_tok = self.advance()
             pointee_type = self.parse_type()
@@ -1800,7 +1854,7 @@ class Parser:
             if parsed_type is not None and self.check(TokenType.IDENTIFIER):
                 return self.parse_var_decl(var_type=parsed_type, start_tok=start_tok)
             self.pos = saved_pos
-        if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET):
+        if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET, TokenType.DICT):
             # A type-starting token could mean a VarDecl or a bare,
             # fully-typed array/slice-literal statement (`[3]int[1, 2,
             # 3]`) -- both start with the same type, so parse it once
@@ -2443,6 +2497,13 @@ class Parser:
             return ByteLiteral(value=ord(resolved), line=tok.line, col=tok.col)
         if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR) and self.peek(1).type == TokenType.OPEN_PAREN:
             return self.parse_cast()
+        if self.check(TokenType.DICT):
+            # Unlike '[', which is ambiguous with an untyped/single-
+            # element array literal (see _looks_like_typed_literal),
+            # the 'dict' keyword unambiguously starts exactly one
+            # shape here -- no bounded lookahead needed.
+            parsed_type = self.parse_type()
+            return self.parse_dict_literal(parsed_type)
         if self._looks_like_typed_literal():
             parsed_type = self.parse_type()
             return self._parse_bracketed_literal(parsed_type)
@@ -2539,6 +2600,47 @@ class Parser:
                 elements.append(self.parse_expression())
         self.expect(TokenType.CLOSE_BRACKET, "Expected ']' to close array literal")
         return ArrayLiteral(elements=elements, type_expr=type_expr, line=open_tok.line, col=open_tok.col)
+
+    def parse_dict_literal(self, dict_type: DictTypeExpr) -> DictLiteral:
+        """`dict[key_type]value_type{k1: v1, k2: v2, ...}` -- dict_
+        type is already fully parsed by the time this is called (by
+        parse_primary, right after parse_type() returns it), since
+        this literal always carries its own explicit type prefix (see
+        DictLiteral's own docstring for why) rather than being handed
+        one the way parse_array_literal sometimes is.
+
+        Unlike parse_array_literal, this allows a trailing comma
+        before the closing '}' (checked right after each comma, before
+        trying to parse another entry) and skips newlines around
+        entries -- multi-line dict literals are the expected common
+        case for anything beyond a couple of entries, not an edge
+        case, so this doesn't lean on this file's own general
+        statement-level newline handling the way most other constructs
+        do."""
+        open_tok = self.expect(TokenType.OPEN_BRACE)
+        self.skip_newlines()
+        entries = []
+        if not self.check(TokenType.CLOSE_BRACE):
+            entries.append(self._parse_dict_entry())
+            self.skip_newlines()
+            while self.match(TokenType.COMMA):
+                self.skip_newlines()
+                if self.check(TokenType.CLOSE_BRACE):
+                    break
+                entries.append(self._parse_dict_entry())
+                self.skip_newlines()
+        self.expect(TokenType.CLOSE_BRACE, "Expected '}' to close dict literal")
+        return DictLiteral(
+            key_type=dict_type.key_type, value_type=dict_type.value_type,
+            entries=entries, line=open_tok.line, col=open_tok.col,
+        )
+
+    def _parse_dict_entry(self) -> Tuple[Node, Node]:
+        """One `key: value` pair inside a dict literal's own braces."""
+        key = self.parse_expression()
+        self.expect(TokenType.COLON, "Expected ':' between a dict entry's key and value")
+        value = self.parse_expression()
+        return key, value
 
     def parse_call(self) -> Call:
         """`name(arg1, arg2, ...)` or `name(f1=v1, f2=v2, ...)` -- see

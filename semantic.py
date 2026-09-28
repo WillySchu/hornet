@@ -212,6 +212,8 @@ from parser import (
     Constant,
     Continue,
     DerefAssign,
+    DictLiteral,
+    DictTypeExpr,
     ExprStmt,
     ExternFunctionDecl,
     Field,
@@ -259,6 +261,8 @@ class TypeKind(Enum):
     STRUCT = auto()
     SUM = auto()   # see SumTypeInfo's own docstring
     POINTER = auto()  # see Type's own docstring below
+    DICT = auto()  # see Type's own docstring below -- the one kind
+                   # needing TWO nested types, not one
     VOID = auto()  # see Type.VOID's own docstring below -- purely internal
     NONE = auto()  # see Type.NONE's own docstring below -- user-writable
                    # (via the `none` literal), but never as a DECLARED type
@@ -274,12 +278,18 @@ class Type:
     declared name, element_type/size both None -- field layout lives
     in the struct registry, not duplicated here), a sum type (kind=
     SUM, sum_type_name the declared name -- variant list lives in the
-    sum-type registry, the same split STRUCT already has), or a
-    pointer (kind=POINTER, element_type one level down -- REUSING
-    ARRAY/SLICE's own field, since "the type this points to" is the
+    sum-type registry, the same split STRUCT already has), a pointer
+    (kind=POINTER, element_type one level down -- REUSING ARRAY/
+    SLICE's own field, since "the type this points to" is the
     identical shape as "the type this contains"; no dedicated field of
     its own, the same way SLICE doesn't get one just because it isn't
-    called "element_type" in its own vocabulary).
+    called "element_type" in its own vocabulary), or a dict (kind=
+    DICT, key_type its own dedicated field, element_type REUSED once
+    more -- this time for the VALUE type, not "what this contains" in
+    the array/slice/pointer sense, but conceptually close enough that
+    a second, dict-only field just for this would be pure duplication
+    for the one kind that happens to need two nested types instead of
+    one).
 
     Frozen to get structural equality/hashing for free: `Type(ARRAY,
     Type.INT, 3) == Type(ARRAY, Type.INT, 3)` is correctly True for
@@ -297,13 +307,19 @@ class Type:
     makes `*Circle == *Circle` a real, meaningful check (are these
     pointers even the SAME kind of pointer) distinct from the runtime
     question check_binary's equality branch answers separately (do
-    these two same-typed pointers hold the same address).
+    these two same-typed pointers hold the same address). A dict's own
+    equality is structural on BOTH key_type and element_type -- `dict[
+    str]int == dict[str]int` but not `dict[str]int == dict[int]int` --
+    the identical "two independent fields, both compared" shape a
+    struct's own name+fields comparison already has, just via dataclass
+    equality directly rather than a registry lookup.
     """
     kind: TypeKind
-    element_type: Optional['Type'] = None  # set when kind == ARRAY, SLICE, or POINTER
+    element_type: Optional['Type'] = None  # ARRAY/SLICE/POINTER's own pointee-or-contained type; DICT's own VALUE type
     size: Optional[int] = None             # only set when kind == ARRAY
     struct_name: Optional[str] = None      # only set when kind == STRUCT
     sum_type_name: Optional[str] = None    # only set when kind == SUM
+    key_type: Optional['Type'] = None      # only set when kind == DICT
 
     def __str__(self) -> str:
         if self.kind == TypeKind.ARRAY:
@@ -316,6 +332,8 @@ class Type:
             return self.sum_type_name
         if self.kind == TypeKind.POINTER:
             return f"*{self.element_type}"
+        if self.kind == TypeKind.DICT:
+            return f"dict[{self.key_type}]{self.element_type}"
         return self.kind.name.lower()
 
 
@@ -471,6 +489,29 @@ def type_from_name(
                 node,
             )
         return Type(TypeKind.POINTER, element_type=pointee)
+    if isinstance(type_expr, DictTypeExpr):
+        # No cycle concern the way a sum-typed struct field has --
+        # exactly like a pointer, a dict is a fixed-size (24-byte)
+        # descriptor regardless of what it holds, so sum_types is
+        # threaded through unchanged for BOTH key_type and value_type,
+        # same as every other wrapper kind here. key_type is then
+        # restricted, though, to a fixed set of hashable/comparable
+        # types (_VALID_DICT_KEY_TYPES: int/int8/uint8/int64/bool/str)
+        # -- unlike a struct or another dict, none of these need a
+        # user-defined '==' or hash to work, both of which this
+        # compiler doesn't have a story for yet. value_type has no
+        # such restriction: any type at all works as a dict's VALUE,
+        # the same as an array/slice/struct field's own element type.
+        key_type = type_from_name(type_expr.key_type, structs, aliases, node, sum_types)
+        value_type = type_from_name(type_expr.value_type, structs, aliases, node, sum_types)
+        if key_type not in _VALID_DICT_KEY_TYPES:
+            raise SemanticError(
+                f"'{key_type}' can't be a dict's own key type -- only "
+                f"int, int8, uint8, int64, bool, and str are supported "
+                f"as dict keys right now",
+                node,
+            )
+        return Type(TypeKind.DICT, key_type=key_type, element_type=value_type)
     if type_expr in _TYPE_NAMES:
         return _TYPE_NAMES[type_expr]
     if type_expr in aliases:
@@ -628,6 +669,7 @@ _LOGICAL_OPS = {BinaryOp.AND, BinaryOp.OR}
 # mixing (int8 + uint8, int8 + int, ...) is rejected exactly like
 # bool + int already is.
 _INTEGER_TYPES = {Type.INT, Type.INT8, Type.UINT8, Type.INT64}
+_VALID_DICT_KEY_TYPES = _INTEGER_TYPES | {Type.BOOL, Type.STR}  # see type_from_name's own DictTypeExpr case
 
 # int8/uint8's own literal ranges (two's-complement / unsigned, both
 # 256 values wide) -- used only by _check_value_flowing_into's literal-
@@ -637,6 +679,26 @@ _NARROW_INT_RANGES = {
     Type.INT8: (-128, 127),
     Type.UINT8: (0, 255),
 }
+
+
+def _constant_key_value(expr: Node):
+    """The Python-level value a dict literal's own compile-time-
+    constant key expression represents -- (kind, value) so an int 5
+    and a bool True, say, are never confused for the same key just
+    because Python itself considers 5 == True (this compiler's own
+    types keep those genuinely distinct, and this dedup check has to
+    match that). Returns None for anything else (a variable, a call,
+    an arithmetic expression, ...) -- check_dict_literal's own caller
+    treats that as "not compile-time-checkable", not as an error."""
+    if isinstance(expr, Constant):
+        return ('int', expr.value)
+    if isinstance(expr, StringLiteral):
+        return ('str', expr.value)
+    if isinstance(expr, BoolLiteral):
+        return ('bool', expr.value)
+    if isinstance(expr, ByteLiteral):
+        return ('byte', expr.value)
+    return None
 
 
 class SemanticAnalyzer:
@@ -2042,6 +2104,8 @@ class SemanticAnalyzer:
             result = self.check_variable(expr)
         elif isinstance(expr, ArrayLiteral):
             result = self.check_array_literal(expr)
+        elif isinstance(expr, DictLiteral):
+            result = self.check_dict_literal(expr)
         elif isinstance(expr, Index):
             result = self.check_index(expr)
         elif isinstance(expr, Field):
@@ -2062,6 +2126,68 @@ class SemanticAnalyzer:
             raise SemanticError(f"No semantic rule for expression: {expr!r}", expr)
         expr.resolved_type = result
         return result
+
+    def check_dict_literal(self, expr: DictLiteral) -> Type:
+        """`dict[key_type]value_type{k1: v1, k2: v2, ...}` -- unlike
+        ArrayLiteral, this always carries its own explicit key_type/
+        value_type (see DictLiteral's own docstring in parser.py), so
+        there's no untyped-inference path to write here at all, unlike
+        check_array_literal's own three-way split.
+
+        key_type/value_type are resolved via type_from_name exactly
+        like any other ordinary type position (a VarDecl's own type,
+        say) -- sum_types passed through, since a dict is a fixed-size
+        descriptor with no struct-field-style cycle concern (see type_
+        from_name's own DictTypeExpr case for the fuller reasoning,
+        and for where key_type's own restriction to a fixed hashable/
+        comparable set actually lives).
+
+        Each entry's key is checked via _check_value_flowing_into (not
+        the struct-literal-allowing version -- a struct can never be a
+        valid key type at all, so there's nothing for that extra
+        allowance to do here), letting a bare int literal correctly
+        widen into an int8/int64/etc.-keyed dict the same way it
+        already would flowing into an ordinary VarDecl of that type.
+        Each entry's value goes through the struct-literal-allowing
+        version instead, since a value's own type is unrestricted.
+
+        A DUPLICATE key is only checked when BOTH sides of the
+        comparison are themselves compile-time constants (a Constant/
+        StringLiteral/BoolLiteral/ByteLiteral) -- a computed key
+        expression (a variable, a call, ...) can't be compared this
+        way at compile time at all, and silently skipping the check
+        for those rather than raising is deliberate: last-write-wins
+        for a genuine runtime collision is ordinary, expected dict
+        behavior, not a bug, so this only ever catches the case that
+        really is almost certainly a mistake -- the same literal
+        spelled twice."""
+        key_type = type_from_name(expr.key_type, self.structs, self.type_aliases, expr, self.sum_types)
+        value_type = type_from_name(expr.value_type, self.structs, self.type_aliases, expr, self.sum_types)
+        seen_constant_keys = set()
+        for key_expr, value_expr in expr.entries:
+            actual_key_type = self._check_value_flowing_into(key_expr, key_type)
+            if not self._types_compatible(actual_key_type, key_type):
+                raise SemanticError(
+                    f"Dict literal declares key type {key_type}, but a "
+                    f"key is {actual_key_type}",
+                    key_expr,
+                )
+            actual_value_type = self._check_value_flowing_into_allowing_struct_literal(value_expr, value_type)
+            if not self._types_compatible(actual_value_type, value_type):
+                raise SemanticError(
+                    f"Dict literal declares value type {value_type}, but a "
+                    f"value is {actual_value_type}",
+                    value_expr,
+                )
+            constant_key = _constant_key_value(key_expr)
+            if constant_key is not None:
+                if constant_key in seen_constant_keys:
+                    raise SemanticError(
+                        f"Dict literal lists the key {constant_key[1]!r} more than once",
+                        key_expr,
+                    )
+                seen_constant_keys.add(constant_key)
+        return Type(TypeKind.DICT, key_type=key_type, element_type=value_type)
 
     def check_array_literal(self, expr: ArrayLiteral, expected_element_type: Optional[Type] = None) -> Type:
         """`[e1, e2, ...]`, or the fully-typed `[N]TYPE[e1, e2, ...]`

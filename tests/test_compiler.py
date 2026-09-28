@@ -8524,6 +8524,194 @@ class TestArraySliceAndPointerVariants:
         )
 
 # ---------------------------------------------------------------------------
+# Dict, stage 1: grammar, type system, and literal construction --
+# dict[K]V ages = dict[K]V{k1: v1, k2: v2, ...}. No indexing/lookup yet
+# (that's stage 2), so print() is the only way these tests can verify a
+# literal's own contents ended up correct. Key type is restricted to a
+# fixed, hashable/comparable set (int/int8/uint8/int64/bool/str); value
+# type is unrestricted, same as an array's own element type.
+# ---------------------------------------------------------------------------
+
+class TestDicts:
+
+    def test_dict_type_and_literal_parse_and_resolve(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    dict[str]int ages = dict[str]int{\n"
+            "        'alice': 25,\n"
+            "        'bob': 17,\n"
+            "    }\n"
+            "    return 0\n",
+            expected=0,
+        )
+
+    def test_dict_literal_with_no_trailing_comma_still_parses(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    dict[str]int ages = dict[str]int{\n"
+            "        'alice': 25,\n"
+            "        'bob': 17\n"
+            "    }\n"
+            "    return 0\n",
+            expected=0,
+        )
+
+    def test_single_line_dict_literal(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    dict[str]int ages = dict[str]int{'alice': 25, 'bob': 17}\n"
+            "    return 0\n",
+            expected=0,
+        )
+
+    def test_empty_dict_literal(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    dict[str]int ages = dict[str]int{}\n"
+            "    return 0\n",
+            expected=0,
+        )
+
+    # -- rejected at the semantic level -------------------------------------
+
+    def test_value_type_mismatch_is_rejected(self):
+        assert_program_semantic_error(
+            "def int main():\n"
+            "    dict[str]int ages = dict[str]int{'alice': 'oops'}\n"
+            "    return 0\n",
+            match="declares value type int, but a value is str",
+        )
+
+    def test_key_type_mismatch_is_rejected(self):
+        assert_program_semantic_error(
+            "def int main():\n"
+            "    dict[str]int ages = dict[str]int{42: 25}\n"
+            "    return 0\n",
+            match="declares key type str, but a key is int",
+        )
+
+    def test_duplicate_literal_key_is_rejected(self):
+        assert_program_semantic_error(
+            "def int main():\n"
+            "    dict[str]int ages = dict[str]int{'alice': 25, 'alice': 30}\n"
+            "    return 0\n",
+            match="lists the key 'alice' more than once",
+        )
+
+    def test_slice_key_type_is_rejected(self):
+        assert_program_semantic_error(
+            "def int main():\n"
+            "    dict[[]int]str x\n"
+            "    return 0\n",
+            match="can't be a dict's own key type",
+        )
+
+    def test_struct_key_type_is_rejected(self):
+        assert_program_semantic_error(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "def int main():\n"
+            "    dict[Circle]str x\n"
+            "    return 0\n",
+            match="can't be a dict's own key type",
+        )
+
+    def test_every_valid_key_kind_is_accepted(self):
+        assert_program_exit_code(
+            "def int main():\n"
+            "    dict[int]int a = dict[int]int{1: 1}\n"
+            "    dict[int8]int b = dict[int8]int{1: 1}\n"
+            "    dict[uint8]int c = dict[uint8]int{1: 1}\n"
+            "    dict[int64]int d = dict[int64]int{1: 1}\n"
+            "    dict[bool]int e = dict[bool]int{true: 1}\n"
+            "    dict[str]int f = dict[str]int{'x': 1}\n"
+            "    return 0\n",
+            expected=0,
+        )
+
+    # -- codegen: construction + print ---------------------------------------
+
+    def test_str_keyed_dict_prints_correctly(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]int ages = dict[str]int{'alice': 25}\n"
+            "    print(ages)\n"
+            "    return 0\n",
+            "dict[str]int{'alice': 25}\n",
+        )
+
+    def test_int_keyed_dict_prints_correctly(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[int]str codes = dict[int]str{1: 'one'}\n"
+            "    print(codes)\n"
+            "    return 0\n",
+            "dict[int]str{1: 'one'}\n",
+        )
+
+    def test_bool_keyed_dict_prints_correctly(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[bool]int flags = dict[bool]int{true: 100, false: 200}\n"
+            "    print(flags)\n"
+            "    return 0\n",
+            "dict[bool]int{true: 100, false: 200}\n",
+        )
+
+    def test_struct_valued_dict_prints_correctly(self):
+        assert_program_stdout(
+            "type Point struct:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    dict[str]Point points = dict[str]Point{'origin': Point(0, 0)}\n"
+            "    print(points)\n"
+            "    return 0\n",
+            "dict[str]Point{'origin': Point(x: 0, y: 0)}\n",
+        )
+
+    def test_multiple_entries_all_present_regardless_of_print_order(self):
+        """A hash table has no guaranteed iteration order -- this
+        checks both entries are PRESENT (each 'key': value substring
+        appears somewhere), not their relative order."""
+        result = compile_and_run(
+            "def int main():\n"
+            "    dict[str]int ages = dict[str]int{\n"
+            "        'alice': 25,\n"
+            "        'bob': 17,\n"
+            "    }\n"
+            "    print(ages)\n"
+            "    return 0\n"
+        )
+        assert "'alice': 25" in result.stdout
+        assert "'bob': 17" in result.stdout
+
+    def test_escaping_dict_variable_survives_past_its_own_function(self):
+        """Regression test for a real bug: _ir_dict_address's own
+        'ordinary' branch originally never checked heap-allocation
+        status at all, copied from _ir_slice_address's own fast path,
+        which gets away without one only because &s for a slice never
+        actually reaches that method (handled entirely within _ir_
+        address_of instead). A dict's own address, unlike a slice's,
+        CAN escape via `&d` and still reaches _ir_dict_address
+        afterward -- so skipping the check left an escaping dict's own
+        descriptor stack-allocated, printing as `dict[str]int{}`
+        (empty) instead of its real contents."""
+        assert_program_stdout(
+            "def *dict[str]int makeDictPtr():\n"
+            "    dict[str]int d = dict[str]int{'x': 1}\n"
+            "    return &d\n"
+            "\n"
+            "def int main():\n"
+            "    *dict[str]int p = makeDictPtr()\n"
+            "    print(*p)\n"
+            "    return 0\n",
+            "dict[str]int{'x': 1}\n",
+        )
+
+# ---------------------------------------------------------------------------
 # Pointers, stage 2: semantic analysis only. Go-style pointers -- safe by
 # construction via escape analysis (not yet built; that's stage 3), no
 # borrow checker, uniformly nullable via the existing `none` literal,

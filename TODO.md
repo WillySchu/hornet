@@ -17,8 +17,8 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
-- Dicts.
-- Multi line array literals.
+- Declared but uninitialized dicts.
+- Dicts as sum types.
 - Sum type support for nested sum types?
 - Spreading one package across multiple files.
 - A package-style in-file declaration decoupling the module's name from its filename.
@@ -50,6 +50,7 @@ Updates:
 - Generics.
 - Sorting.
 - Format strings.
+- Write through addressing for dicts (d[key].field = value)?
 - Slice equality?
 - Import \*?
 - Flow sensitive escape analysis.
