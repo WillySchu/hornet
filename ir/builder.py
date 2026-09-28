@@ -130,6 +130,18 @@ class IRFunctionBuilder(
         # 24-byte width (both are three-word descriptors).
         self._unnamed_dict_temp_slot = self.ir_program.ids.new_slot(24, "unnamed_dict_temp", ir_fn)
 
+        # An 8-byte scratch slot for a scalar dict KEY, materialized
+        # so it has an address to hash/compare from at all -- needed
+        # specifically for a dict READ (`x = d[key]`, ir/dicts.py's
+        # own _ir_dict_lookup, reached via _ir_index_address with no
+        # ir_fn in scope to allocate a fresh one the way a dict WRITE
+        # can via _ir_materialize_value_into_scratch). Shared, not
+        # per-call: every valid scalar key type is at most 8 bytes
+        # (int64's own width), and a fully-consumed-before-reuse
+        # lifetime is exactly what a shared slot already means for
+        # every OTHER one reserved here.
+        self._dict_key_scratch_slot = self.ir_program.ids.new_slot(8, "dict_key_scratch", ir_fn)
+
         # A third, 8-byte scratch slot, also reserved unconditionally
         # -- used by _ir_print_call for a non-Variable scalar argument
         # (`print(x + 1)`), the same shared-slot reasoning as above.

@@ -544,6 +544,7 @@ class StatementsMixin:
                     TypeKind.ARRAY: self._ir_array_address,
                     TypeKind.STRUCT: self._ir_struct_address,
                     TypeKind.SLICE: self._ir_slice_address,
+                    TypeKind.DICT: self._ir_dict_address,
                     TypeKind.SUM: self._ir_struct_address,  # generic address computation -- see its own docstring
                 }[var_type.kind]
                 dst_ir, dst_address = address_fn(Variable(name=stmt.name))
@@ -748,6 +749,7 @@ class StatementsMixin:
                     TypeKind.ARRAY: self._ir_array_address,
                     TypeKind.STRUCT: self._ir_struct_address,
                     TypeKind.SLICE: self._ir_slice_address,
+                    TypeKind.DICT: self._ir_dict_address,
                     TypeKind.SUM: self._ir_struct_address,  # generic address computation -- see its own docstring
                     # STR deliberately absent, unlike this same dict in
                     # FieldAssign/IndexAssign's own analogous cases:
@@ -785,6 +787,20 @@ class StatementsMixin:
             # FieldAssign, whose own case below explains the
             # contrast).
             element_type = type_of(stmt.array).element_type
+            # A dict-typed base (`ages['bob'] = 17`) -- checked FIRST,
+            # before any of the array/slice-specific logic below, none
+            # of which applies here at all: a dict has no fixed
+            # per-element offset to compute an address for in the
+            # first place (hash+probe instead), and stmt.array's own
+            # type here is DICT, not ARRAY/SLICE, so element_type
+            # (dict's own reuse of that field for its VALUE type) is
+            # exactly the right thing checked_indexable_and_index
+            # already validated stmt.value's own type against.
+            if type_of(stmt.array).kind == TypeKind.DICT:
+                if stmt.compound_op is not None:
+                    return self._ir_dict_compound_assign(
+                        stmt.array, stmt.index, stmt.compound_op, stmt.value, type_of(stmt.array), ir_fn)
+                return self._ir_dict_set(stmt.array, stmt.index, stmt.value, type_of(stmt.array), ir_fn)
             # A sum-typed element -- only for GENUINE widening (stmt.
             # value's own type is one of element_type's own declared
             # variants -- a struct, a scalar, or str); `shapes[0] = t`,
@@ -1176,6 +1192,7 @@ class StatementsMixin:
             TypeKind.ARRAY: self._ir_array_address,
             TypeKind.STRUCT: self._ir_struct_address,
             TypeKind.SLICE: self._ir_slice_address,
+            TypeKind.DICT: self._ir_dict_address,
             TypeKind.SUM: self._ir_struct_address,  # generic address computation -- see its own docstring
             TypeKind.STR: self._ir_str_address,
         }[value_type.kind]
@@ -1205,6 +1222,7 @@ class StatementsMixin:
             TypeKind.ARRAY: self._ir_array_address,
             TypeKind.STRUCT: self._ir_struct_address,
             TypeKind.SLICE: self._ir_slice_address,
+            TypeKind.DICT: self._ir_dict_address,
             TypeKind.SUM: self._ir_struct_address,  # generic address computation -- see its own docstring
             TypeKind.STR: self._ir_str_address,
         }[value_type.kind]

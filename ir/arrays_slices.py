@@ -395,12 +395,24 @@ class ArraysSlicesMixin:
         Returns None when expr.array's own base is out of scope for
         real IR -- see _ir_indexable_base.
 
+        A dict-typed base (`ages['bob']`) is checked FIRST, before any
+        of this -- delegated straight to _ir_dict_lookup, whose own
+        hash-and-probe mechanics have nothing in common with an array/
+        slice's own fixed-stride arithmetic below. Checking here,
+        rather than only in gen_expr_ir's own dispatch, is what lets a
+        COMPOSITE-valued dict entry (a dict of structs, say) work too:
+        every composite-address method already delegates an Index base
+        to this one method, so this is the single choke point a dict
+        lookup's own result needs to reach through.
+
         The bounds check aside (IRBoundsCheck), the actual arithmetic
         is ordinary IRBinOp: multiply the index by the element's own
         stride, add to the base. The bounds check guarantees a small,
         non-negative index, so a 32-bit multiply is safe, and its own
         write zero-extends into the full 64-bit register the
         following ADD reads."""
+        if type_of(expr.array).kind == TypeKind.DICT:
+            return self._ir_dict_lookup(expr.array, expr.index, type_of(expr.array))
         base = self._ir_indexable_base(expr.array)
         if base is None:
             return None

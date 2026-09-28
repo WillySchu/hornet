@@ -584,3 +584,166 @@ int hornet_dict_insert_str_key(
         index = (index + 1) & (capacity - 1);
     }
 }
+
+// hornet_dict_set_scalar_key/hornet_dict_set_str_key's own shared
+// descriptor field accessors -- offsets match ir/dicts.py's own
+// _ir_write_dict_literal_into exactly: buckets_ptr at 0, count (a
+// plain 32-bit int, not int64 -- padded to the same 8-byte slot) at
+// 8, capacity at 16. descriptor is always the dict's own 24-byte
+// value's address (from _ir_dict_address on the Python side), never
+// a bare buckets pointer -- these functions need to update count and
+// (on growth) buckets/capacity too, which a bare buckets pointer
+// alone has nowhere to write back through.
+static void *dict_buckets(void *descriptor) { return read_ptr(descriptor); }
+static int64_t dict_capacity(void *descriptor) { return read_i64((char *)descriptor + 16); }
+
+static void dict_set_buckets(void *descriptor, void *buckets) {
+    *(void **)descriptor = buckets;
+}
+static void dict_set_capacity(void *descriptor, int64_t capacity) {
+    *(int64_t *)((char *)descriptor + 16) = capacity;
+}
+static void dict_bump_count(void *descriptor) {
+    int32_t *count = (int32_t *)((char *)descriptor + 8);
+    *count += 1;
+}
+
+// Shared growth policy: doubles capacity once count would exceed 75%
+// of it, rehashing every existing bucket via the identical hornet_
+// dict_insert_*_key this file's own literal-construction path
+// already uses (a rehashing insert can never find a "matching
+// existing key" -- every key in the old array is already distinct --
+// so reuse is exactly as correct as inserting a brand-new key). The
+// stale old buckets array is never freed, matching this compiler's
+// own "never free, only leak" story throughout (no GC yet).
+static void dict_grow_scalar_key_if_needed(void *descriptor, int64_t key_width, int64_t value_width) {
+    int64_t capacity = dict_capacity(descriptor);
+    int32_t count = read_i32((char *)descriptor + 8);
+    if ((count + 1) * 4 <= capacity * 3) {
+        return;  // (count + 1) / capacity <= 0.75, room for one more
+    }
+    int64_t bucket_stride = 1 + key_width + value_width;
+    int64_t new_capacity = capacity * 2;
+    void *new_buckets = calloc((size_t)new_capacity, (size_t)bucket_stride);
+    void *old_buckets = dict_buckets(descriptor);
+    for (int64_t i = 0; i < capacity; i++) {
+        unsigned char *bucket = (unsigned char *)old_buckets + i * bucket_stride;
+        if (bucket[0] == 0) {
+            continue;
+        }
+        hornet_dict_insert_scalar_key(
+            new_buckets, new_capacity, bucket_stride,
+            bucket + 1, key_width, bucket + 1 + key_width, value_width);
+    }
+    dict_set_buckets(descriptor, new_buckets);
+    dict_set_capacity(descriptor, new_capacity);
+}
+
+static void dict_grow_str_key_if_needed(void *descriptor, int64_t value_width) {
+    const int64_t key_region_width = 16;  // see hornet_dict_insert_str_key's own comment
+    int64_t capacity = dict_capacity(descriptor);
+    int32_t count = read_i32((char *)descriptor + 8);
+    if ((count + 1) * 4 <= capacity * 3) {
+        return;
+    }
+    int64_t bucket_stride = 1 + key_region_width + value_width;
+    int64_t new_capacity = capacity * 2;
+    void *new_buckets = calloc((size_t)new_capacity, (size_t)bucket_stride);
+    void *old_buckets = dict_buckets(descriptor);
+    for (int64_t i = 0; i < capacity; i++) {
+        unsigned char *bucket = (unsigned char *)old_buckets + i * bucket_stride;
+        if (bucket[0] == 0) {
+            continue;
+        }
+        void *stored_ptr = *(void **)(bucket + 1);
+        int32_t stored_len = *(int32_t *)(bucket + 1 + sizeof(void *));
+        hornet_dict_insert_str_key(
+            new_buckets, new_capacity, bucket_stride,
+            stored_ptr, stored_len, bucket + 1 + key_region_width, value_width);
+    }
+    dict_set_buckets(descriptor, new_buckets);
+    dict_set_capacity(descriptor, new_capacity);
+}
+
+// The stage-2 (`d[key] = value`) counterpart to this file's own
+// stage-1 hornet_dict_insert_scalar_key/hornet_dict_insert_str_key,
+// used by a dict LITERAL's own fixed, pre-sized construction: grows
+// first if needed (see the two functions just above), THEN inserts
+// via the identical probe logic, finally bumping descriptor's own
+// count field itself if this was a genuinely new entry (the literal-
+// construction path instead threads that decision back through IR as
+// a chain of ADDs, since it has no persistent descriptor to mutate
+// yet at that point in its own construction).
+void hornet_dict_set_scalar_key(
+    void *descriptor, int64_t key_width, int64_t value_width,
+    const void *key_ptr, const void *value_ptr
+) {
+    dict_grow_scalar_key_if_needed(descriptor, key_width, value_width);
+    int64_t bucket_stride = 1 + key_width + value_width;
+    int inserted_new = hornet_dict_insert_scalar_key(
+        dict_buckets(descriptor), dict_capacity(descriptor), bucket_stride,
+        key_ptr, key_width, value_ptr, value_width);
+    if (inserted_new) {
+        dict_bump_count(descriptor);
+    }
+}
+
+void hornet_dict_set_str_key(
+    void *descriptor, int64_t value_width,
+    const void *key_ptr, int64_t key_len, const void *value_ptr
+) {
+    dict_grow_str_key_if_needed(descriptor, value_width);
+    const int64_t key_region_width = 16;
+    int64_t bucket_stride = 1 + key_region_width + value_width;
+    int inserted_new = hornet_dict_insert_str_key(
+        dict_buckets(descriptor), dict_capacity(descriptor), bucket_stride,
+        key_ptr, key_len, value_ptr, value_width);
+    if (inserted_new) {
+        dict_bump_count(descriptor);
+    }
+}
+
+// `x = d[key]` -- probes for a matching key exactly like hornet_
+// dict_insert_scalar_key's own read side, but never writes: returns
+// the matching bucket's own VALUE address for the caller to read
+// from, or -- a key genuinely absent, an empty slot reached with no
+// match along the way -- panics outright (see hornet_panic's own
+// unconditional abort()) rather than returning anything at all, per
+// this feature's own confirmed design: a missing key is a hard error,
+// not a silent zero value.
+void *hornet_dict_lookup_scalar_key(void *descriptor, int64_t key_width, int64_t value_width, const void *key_ptr) {
+    void *buckets = dict_buckets(descriptor);
+    int64_t capacity = dict_capacity(descriptor);
+    int64_t bucket_stride = 1 + key_width + value_width;
+    int64_t index = hornet_hash_bytes(key_ptr, key_width) & (capacity - 1);
+    while (1) {
+        unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
+        if (bucket[0] == 0) {
+            hornet_panic("dict lookup: key not found");
+        }
+        if (memcmp(bucket + 1, key_ptr, (size_t)key_width) == 0) {
+            return bucket + 1 + key_width;
+        }
+        index = (index + 1) & (capacity - 1);
+    }
+}
+
+void *hornet_dict_lookup_str_key(void *descriptor, int64_t value_width, const void *key_ptr, int64_t key_len) {
+    const int64_t key_region_width = 16;
+    void *buckets = dict_buckets(descriptor);
+    int64_t capacity = dict_capacity(descriptor);
+    int64_t bucket_stride = 1 + key_region_width + value_width;
+    int64_t index = hornet_hash_bytes(key_ptr, key_len) & (capacity - 1);
+    while (1) {
+        unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
+        if (bucket[0] == 0) {
+            hornet_panic("dict lookup: key not found");
+        }
+        void *stored_ptr = *(void **)(bucket + 1);
+        int32_t stored_len = *(int32_t *)(bucket + 1 + sizeof(void *));
+        if (stored_len == key_len && memcmp(stored_ptr, key_ptr, (size_t)key_len) == 0) {
+            return bucket + 1 + key_region_width;
+        }
+        index = (index + 1) & (capacity - 1);
+    }
+}

@@ -1735,20 +1735,28 @@ class SemanticAnalyzer:
 
     def _check_indexable_and_index(self, base_expr: Node, index_expr: Node) -> Type:
         """Shared by check_index (`base[index]`, but ONLY for an
-        array/slice base -- check_index handles a str base itself,
-        entirely separately, never reaching this method with one at
-        all) and analyze_index_assign (`base[index] = value`, every
-        base type alike, str included): validates `base_expr` is
-        array- or slice-typed and `index_expr` is int-typed, returning
-        the element type. Recurses correctly for multi-dimensional
-        access for free: for `matrix[i][j]`, the outer call's base_expr
-        is itself an Index node, so checking it via check_expr runs
-        this same method again, returning the row's own element type.
+        array/slice/dict base -- check_index handles a str base
+        itself, entirely separately, never reaching this method with
+        one at all) and analyze_index_assign (`base[index] = value`,
+        every base type alike, str included): validates `base_expr` is
+        array-, slice-, or dict-typed and `index_expr` is a compatible
+        index (int-typed for array/slice, base's own key_type for
+        dict), returning the element type. Recurses correctly for
+        multi-dimensional access for free: for `matrix[i][j]`, the
+        outer call's base_expr is itself an Index node, so checking it
+        via check_expr runs this same method again, returning the
+        row's own element type.
 
         Named for what it accepts, not just arrays -- `s[i]` on a
         Slice uses this same check, since indexing a slice works
         identically to indexing an array from this file's point of
-        view; only codegen differs in where it finds the address.
+        view; only codegen differs in where it finds the address. A
+        dict base is checked via _types_compatible rather than plain
+        equality, the same literal-widening convenience every other
+        typed position gets (`ages[5]` into an int64-keyed dict, say),
+        and produces base_type's own VALUE type (element_type, dict's
+        own reuse of that field -- see Type's own docstring), not a
+        pointee the way array/slice's identical field means.
 
         A str base reaching this method at all can only mean index-
         ASSIGNMENT (`s[i] = someByte`) -- str itself DOES support
@@ -1766,10 +1774,19 @@ class SemanticAnalyzer:
                 "so `s[i] = ...` isn't allowed",
                 base_expr,
             )
+        if base_type.kind == TypeKind.DICT:
+            index_type = self._check_value_flowing_into(index_expr, base_type.key_type)
+            if not self._types_compatible(index_type, base_type.key_type):
+                raise SemanticError(
+                    f"Dict declares key type {base_type.key_type}, but the "
+                    f"index is {index_type}",
+                    index_expr,
+                )
+            return base_type.element_type
         if base_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE):
             raise SemanticError(
                 f"Cannot index into a value of type {base_type} -- "
-                f"only arrays, slices, and str support indexing",
+                f"only arrays, slices, str, and dict support indexing",
                 base_expr,
             )
         index_type = self.check_expr(index_expr)

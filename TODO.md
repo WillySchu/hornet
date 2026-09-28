@@ -18,6 +18,8 @@ Documentation:
 
 Updates:
 - Declared but uninitialized dicts.
+- Dict of dicts.
+- Dict as struct field.
 - Dicts as sum types.
 - Sum type support for nested sum types?
 - Spreading one package across multiple files.

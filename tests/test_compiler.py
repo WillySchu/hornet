@@ -2791,7 +2791,7 @@ class TestStringIndexing:
         assert_semantic_error(
             "    int x = 5\n"
             "    return x[0]",
-            match="only arrays, slices, and str support indexing",
+            match="only arrays, slices, str, and dict support indexing",
         )
 
 
@@ -8709,6 +8709,176 @@ class TestDicts:
             "    print(*p)\n"
             "    return 0\n",
             "dict[str]int{'x': 1}\n",
+        )
+
+    # -- stage 2: indexing (read/write), panic-on-miss, growth --------------
+
+    def test_read_and_write_and_overwrite(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]int ages = dict[str]int{'alice': 25, 'bob': 17}\n"
+            "    print(ages['alice'])\n"
+            "    print(ages['bob'])\n"
+            "    ages['carol'] = 30\n"
+            "    print(ages['carol'])\n"
+            "    ages['alice'] = 26\n"
+            "    print(ages['alice'])\n"
+            "    return 0\n",
+            "25\n17\n30\n26\n",
+        )
+
+    def test_read_a_missing_key_panics(self):
+        assert_crashes_with_sigabrt(
+            "    dict[str]int ages = dict[str]int{'alice': 25}\n"
+            "    print(ages['nonexistent'])\n"
+            "    return 0\n"
+        )
+
+    def test_int_keyed_read_and_write(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[int]str codes = dict[int]str{1: 'one'}\n"
+            "    codes[2] = 'two'\n"
+            "    print(codes[1])\n"
+            "    print(codes[2])\n"
+            "    return 0\n",
+            "one\ntwo\n",
+        )
+
+    def test_bool_keyed_read_and_write(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[bool]str labels = dict[bool]str{true: 'yes'}\n"
+            "    labels[false] = 'no'\n"
+            "    print(labels[true])\n"
+            "    print(labels[false])\n"
+            "    return 0\n",
+            "yes\nno\n",
+        )
+
+    def test_struct_valued_read_and_write(self):
+        assert_program_stdout(
+            "type Point struct:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    dict[str]Point points = dict[str]Point{'origin': Point(0, 0)}\n"
+            "    points['unit'] = Point(1, 1)\n"
+            "    print(points['unit'])\n"
+            "    print(points['origin'])\n"
+            "    Point p = points['unit']\n"
+            "    print(p.x + p.y)\n"
+            "    return 0\n",
+            "Point(x: 1, y: 1)\nPoint(x: 0, y: 0)\n2\n",
+        )
+
+    def test_compound_assignment(self):
+        """Regression test for a real bug: the dict-specific
+        IndexAssign branch originally never checked stmt.compound_op
+        at all, unconditionally overwriting with the raw RHS -- `d[k]
+        += 10` on an existing entry of 1 produced 10 (the raw RHS),
+        not 11 (1 + 10)."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]int counts = dict[str]int{'a': 1}\n"
+            "    counts['a'] += 10\n"
+            "    print(counts['a'])\n"
+            "    return 0\n",
+            "11\n",
+        )
+
+    def test_compound_assignment_with_a_scalar_key(self):
+        """test_compound_assignment's own str-keyed version only
+        exercises hornet_dict_set_str_key's own call site inside _ir_
+        dict_compound_assign -- this covers the scalar-keyed one
+        (hornet_dict_set_scalar_key) separately."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[int]int counts = dict[int]int{1: 5}\n"
+            "    counts[1] += 10\n"
+            "    print(counts[1])\n"
+            "    return 0\n",
+            "15\n",
+        )
+
+    def test_compound_assignment_on_a_missing_key_panics(self):
+        """`d[k] += 1` needs an existing entry to add to -- the
+        identical panic-on-miss a bare read already has, since the
+        write side's own read-modify-write starts with exactly that
+        same read."""
+        assert_crashes_with_sigabrt(
+            "    dict[str]int counts = dict[str]int{'a': 1}\n"
+            "    counts['nonexistent'] += 10\n"
+            "    return 0\n"
+        )
+
+    def test_growth_and_rehash_across_many_insertions(self):
+        """100 sequential inserts, starting from a literal of just one
+        entry (capacity 8) -- forces several grow-and-rehash cycles
+        (8 -> 16 -> 32 -> 64 -> 128), then reads every single one back
+        out by key to confirm rehashing preserved all of them
+        correctly, not just the ones that happened to land in
+        buckets untouched by any particular resize."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[int]int nums = dict[int]int{0: 0}\n"
+            "    int i = 1\n"
+            "    while i < 100:\n"
+            "        nums[i] = i * 10\n"
+            "        i = i + 1\n"
+            "    i = 0\n"
+            "    int total = 0\n"
+            "    while i < 100:\n"
+            "        total = total + nums[i]\n"
+            "        i = i + 1\n"
+            "    print(total)\n"
+            "    return 0\n",
+            f"{sum(i * 10 for i in range(100))}\n",
+        )
+
+    def test_non_bare_variable_dict_base(self):
+        """`arr[0][key]` -- exercises _ir_dict_address's own Index
+        delegation, not just the bare-Variable leaf every other test
+        here reaches. Each dict is its own, separately-declared
+        variable, not a literal placed directly as an array element --
+        that specific combination (a DictLiteral as another
+        composite's own nested entry) is a known, separate, still-
+        deferred gap (_ir_write_composite_value_into doesn't yet know
+        how to handle one), unrelated to indexing itself."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]int a = dict[str]int{'a': 1}\n"
+            "    dict[str]int b = dict[str]int{'b': 2}\n"
+            "    [2]dict[str]int arr = [a, b]\n"
+            "    print(arr[0]['a'])\n"
+            "    print(arr[1]['b'])\n"
+            "    arr[0]['a'] = 100\n"
+            "    print(arr[0]['a'])\n"
+            "    return 0\n",
+            "1\n2\n100\n",
+        )
+
+    def test_non_bare_field_dict_base(self):
+        """`b.contents[key]` -- exercises _ir_dict_address's own Field
+        delegation. The dict is again its own, separately-declared
+        variable passed into Box's own constructor, for the identical
+        reason test_non_bare_variable_dict_base's own dict elements
+        are -- a DictLiteral placed directly as a struct-literal's own
+        argument is the same still-deferred gap, not specific to
+        arrays."""
+        assert_program_stdout(
+            "type Box struct:\n"
+            "    dict[str]int contents\n"
+            "\n"
+            "def int main():\n"
+            "    dict[str]int d = dict[str]int{'x': 5}\n"
+            "    Box b = Box(d)\n"
+            "    print(b.contents['x'])\n"
+            "    b.contents['x'] = 99\n"
+            "    print(b.contents['x'])\n"
+            "    return 0\n",
+            "5\n99\n",
         )
 
 # ---------------------------------------------------------------------------
@@ -16994,14 +17164,14 @@ class TestSemanticErrors:
         assert_semantic_error(
             "    int x = 5\n"
             "    return x[0]",
-            match="only arrays, slices, and str support indexing",
+            match="only arrays, slices, str, and dict support indexing",
         )
 
     def test_indexing_past_available_dimensions_is_rejected(self):
         assert_semantic_error(
             "    [2][3]int matrix = [[1, 2, 3], [4, 5, 6]]\n"
             "    return matrix[0][0][0]",
-            match="only arrays, slices, and str support indexing",
+            match="only arrays, slices, str, and dict support indexing",
         )
 
     def test_wrong_element_type_in_index_assignment_is_rejected(self):

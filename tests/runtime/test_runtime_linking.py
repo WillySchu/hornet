@@ -57,11 +57,14 @@ def test_runtime_and_caller_link_and_run_correctly():
 
 def test_hornet_runtime_entry_points_are_the_only_external_symbols():
     """hornet_print/hornet_panic/hornet_slice_grow/hornet_hash_bytes/
-    hornet_dict_insert_scalar_key/hornet_dict_insert_str_key are the
-    six functions meant to be called from outside this file;
-    hornet_stringify and every buffer/read helper are internal
-    implementation details (static linkage) that shouldn't leak into
-    whatever links against this object file."""
+    hornet_dict_insert_scalar_key/hornet_dict_insert_str_key/hornet_
+    dict_set_scalar_key/hornet_dict_set_str_key/hornet_dict_lookup_
+    scalar_key/hornet_dict_lookup_str_key are the ten functions meant
+    to be called from outside this file; hornet_stringify, every
+    buffer/read helper, and every dict_* descriptor-field accessor/
+    growth helper are internal implementation details (static
+    linkage) that shouldn't leak into whatever links against this
+    object file."""
     with tempfile.TemporaryDirectory() as tmpdir:
         runtime_o = f"{tmpdir}/runtime.o"
         arch_flags = ["-arch", "x86_64"] if HOST_IS_MACOS else []
@@ -78,10 +81,11 @@ def test_hornet_runtime_entry_points_are_the_only_external_symbols():
         # method) -- nm reports that mangled name here directly, so
         # the expected names need the identical leading underscore on
         # macOS, not just when Hornet-generated code refers to them.
-        expected_names = (
-            ["_hornet_dict_insert_scalar_key", "_hornet_dict_insert_str_key", "_hornet_hash_bytes",
-             "_hornet_panic", "_hornet_print", "_hornet_slice_grow"] if HOST_IS_MACOS
-            else ["hornet_dict_insert_scalar_key", "hornet_dict_insert_str_key", "hornet_hash_bytes",
-                  "hornet_panic", "hornet_print", "hornet_slice_grow"]
-        )
-        assert sorted(external_symbols) == expected_names
+        names = [
+            "hornet_dict_insert_scalar_key", "hornet_dict_insert_str_key",
+            "hornet_dict_lookup_scalar_key", "hornet_dict_lookup_str_key",
+            "hornet_dict_set_scalar_key", "hornet_dict_set_str_key",
+            "hornet_hash_bytes", "hornet_panic", "hornet_print", "hornet_slice_grow",
+        ]
+        expected_names = [f"_{n}" for n in names] if HOST_IS_MACOS else names
+        assert sorted(external_symbols) == sorted(expected_names)

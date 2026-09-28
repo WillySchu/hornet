@@ -212,3 +212,163 @@ class DictsMixin:
             IRStore(address=capacity_addr, value=IRConst(capacity, Type.INT64), value_type=Type.INT64),
         ])
         return ir
+
+    def _ir_dict_lookup(self, dict_expr: Node, key_expr: Node, dict_type: Type):
+        """`dict_expr[key_expr]`, as a READ -- builds (without
+        lowering) the address of the matching entry's own VALUE, via
+        runtime.c's own hornet_dict_lookup_scalar_key/hornet_dict_
+        lookup_str_key, which panic outright (never returning) if the
+        key isn't present, per this feature's own confirmed design.
+        Returns (ir, address) -- _ir_index_address, the sole caller,
+        either loads a scalar from this address (an ordinary Index
+        read) or hands the address on unchanged for a COMPOSITE-
+        valued entry (a dict of structs, say), exactly the same split
+        every other composite-address method's own Index delegation
+        already has no special awareness of at all.
+
+        A scalar key needs its own value materialized into a small,
+        SHARED scratch slot first (_dict_key_scratch_slot, reserved
+        once per function -- see ir/builder.py's own reservation
+        comment for why a shared slot is safe here specifically,
+        unlike a dict WRITE's own per-call one) so it has an address
+        to hash/compare from at all; a str key instead uses its own
+        {ptr, len} CONTENT directly, no scratch slot needed (see
+        runtime.c's own hornet_hash_bytes docstring for why)."""
+        key_type = dict_type.key_type
+        value_type = dict_type.element_type
+        value_width = type_byte_width(value_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+        result = self._ir_dict_address(dict_expr)
+        if result is None:
+            raise IRError(
+                f"_ir_dict_address returned None for a dict lookup's own base "
+                f"({dict_expr!r}) -- expected to always succeed for a reachable base"
+            )
+        dict_ir, descriptor_addr = result
+        result_addr = self.ir_program.ids.new_temp(Type.INT64)
+        if key_type.kind == TypeKind.STR:
+            key_ir, key_ptr, key_len = self._ir_str_value(key_expr)
+            call_ir = [IRCall(
+                dst=result_addr, name='hornet_dict_lookup_str_key',
+                args=[descriptor_addr, IRConst(value_width, Type.INT64), key_ptr, key_len],
+            )]
+            return dict_ir + key_ir + call_ir, result_addr
+        key_width = type_byte_width(key_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+        key_value_ir, key_value = self.gen_expr_ir(key_expr)
+        scratch_addr = self.ir_program.ids.new_temp(Type.INT64)
+        key_ir = key_value_ir + [
+            IRLocalAddress(dst=scratch_addr, slot=self._dict_key_scratch_slot),
+            IRStore(address=scratch_addr, value=key_value, value_type=key_type),
+        ]
+        call_ir = [IRCall(
+            dst=result_addr, name='hornet_dict_lookup_scalar_key',
+            args=[descriptor_addr, IRConst(key_width, Type.INT64), IRConst(value_width, Type.INT64), scratch_addr],
+        )]
+        return dict_ir + key_ir + call_ir, result_addr
+
+    def _ir_dict_set(self, dict_expr: Node, key_expr: Node, value_expr: Node, dict_type: Type, ir_fn) -> list:
+        """`dict_expr[key_expr] = value_expr` -- via runtime.c's own
+        hornet_dict_set_scalar_key/hornet_dict_set_str_key, which grow
+        (double capacity, rehash every existing entry) the dict's own
+        backing bucket array first if inserting one more would exceed
+        a 75% load factor, then insert-or-overwrite via the identical
+        probe logic this file's own literal-construction path already
+        uses. Unlike _ir_dict_lookup's own read side, ir_fn IS
+        available here (gen_statement_ir's own IndexAssign case, the
+        sole caller, already has it) -- so both key and value are
+        materialized via _ir_materialize_value_into_scratch's own
+        fresh-slot-per-call, rather than needing a shared one the way
+        the read side's own scalar key does."""
+        key_type = dict_type.key_type
+        value_type = dict_type.element_type
+        value_width = type_byte_width(value_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+        result = self._ir_dict_address(dict_expr)
+        if result is None:
+            raise IRError(
+                f"_ir_dict_address returned None for a dict assignment's own base "
+                f"({dict_expr!r}) -- expected to always succeed for a reachable base"
+            )
+        dict_ir, descriptor_addr = result
+        value_ir, value_addr = self._ir_materialize_value_into_scratch(value_expr, value_type, ir_fn, "dict_set_value")
+        if key_type.kind == TypeKind.STR:
+            key_ir, key_ptr, key_len = self._ir_str_value(key_expr)
+            call_ir = [IRCall(
+                dst=None, name='hornet_dict_set_str_key',
+                args=[descriptor_addr, IRConst(value_width, Type.INT64), key_ptr, key_len, value_addr],
+            )]
+            return dict_ir + value_ir + key_ir + call_ir
+        key_width = type_byte_width(key_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+        key_ir, key_addr = self._ir_materialize_value_into_scratch(key_expr, key_type, ir_fn, "dict_set_key")
+        call_ir = [IRCall(
+            dst=None, name='hornet_dict_set_scalar_key',
+            args=[descriptor_addr, IRConst(key_width, Type.INT64), IRConst(value_width, Type.INT64),
+                  key_addr, value_addr],
+        )]
+        return dict_ir + value_ir + key_ir + call_ir
+
+    def _ir_dict_compound_assign(self, dict_expr: Node, key_expr: Node, compound_op, value_expr: Node,
+                                  dict_type: Type, ir_fn) -> list:
+        """`dict_expr[key_expr] OP= value_expr` -- unlike _ir_compound_
+        assign_through_address's own shared array/field/deref version,
+        a dict's own read and write sides aren't the same address
+        reused twice: writing back goes through _ir_dict_set's own
+        full grow-then-probe machinery again, not a bare IRStore. So
+        key_expr is evaluated ONCE, up front for the lookup, and its
+        VALUE (not the expression itself) reused for the write --
+        re-evaluating it a second time would be a real bug for a key
+        expression with a side effect, not just wasted work.
+
+        Reading first via _ir_dict_lookup also means a compound
+        assignment on a missing key panics, like a bare read already
+        does. The write back can only ever be overwriting that SAME,
+        already-confirmed-present key, so hornet_dict_set_*_key's own
+        growth check can never actually find a reason to grow here."""
+        key_type = dict_type.key_type
+        value_type = dict_type.element_type
+        value_width = type_byte_width(value_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+
+        lookup_ir, value_addr = self._ir_dict_lookup(dict_expr, key_expr, dict_type)
+        current = self.ir_program.ids.new_temp(value_type)
+        load_ir = [IRLoad(dst=current, address=value_addr)]
+        rhs_ir, rhs_value = self.gen_expr_ir(value_expr)
+        combined = self.ir_program.ids.new_temp(value_type)
+        binop_ir = [IRBinOp(dst=combined, op=compound_op, left=current, right=rhs_value)]
+
+        # combined is already a computed IRValue, not an expression
+        # with its own AST node _ir_dict_set could re-evaluate -- so
+        # it's materialized into its own scratch slot directly here,
+        # then hornet_dict_set_scalar_key/hornet_dict_set_str_key
+        # called directly (bypassing _ir_dict_set itself, which would
+        # otherwise re-evaluate key_expr a second time -- see this
+        # method's own docstring for why that's wrong, not just
+        # wasteful).
+        result_slot = self.ir_program.ids.new_slot(value_width, "dict_compound_result", ir_fn)
+        result_addr = self.ir_program.ids.new_temp(Type.INT64)
+        store_result_ir = [
+            IRLocalAddress(dst=result_addr, slot=result_slot),
+            IRStore(address=result_addr, value=combined, value_type=value_type),
+        ]
+
+        addr_result = self._ir_dict_address(dict_expr)
+        if addr_result is None:
+            raise IRError(
+                f"_ir_dict_address returned None for a dict compound assignment's "
+                f"own base ({dict_expr!r}) -- expected to always succeed for a "
+                f"reachable base"
+            )
+        dict_ir, descriptor_addr = addr_result
+        if key_type.kind == TypeKind.STR:
+            key_ir, key_ptr, key_len = self._ir_str_value(key_expr)
+            set_ir = [IRCall(
+                dst=None, name='hornet_dict_set_str_key',
+                args=[descriptor_addr, IRConst(value_width, Type.INT64), key_ptr, key_len, result_addr],
+            )]
+        else:
+            key_width = type_byte_width(key_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+            key_ir, key_addr = self._ir_materialize_value_into_scratch(
+                key_expr, key_type, ir_fn, "dict_compound_key")
+            set_ir = [IRCall(
+                dst=None, name='hornet_dict_set_scalar_key',
+                args=[descriptor_addr, IRConst(key_width, Type.INT64), IRConst(value_width, Type.INT64),
+                      key_addr, result_addr],
+            )]
+        return lookup_ir + load_ir + rhs_ir + binop_ir + store_result_ir + dict_ir + key_ir + set_ir
