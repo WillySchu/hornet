@@ -18,7 +18,6 @@ Documentation:
 
 Updates:
 - `for in` loop.
-- Dict type as function argument.
 - Dict literal as nested value (I think fixes the next three).
 - Dict of dicts.
 - Dict as struct field.

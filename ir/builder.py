@@ -255,7 +255,7 @@ class IRFunctionBuilder(
                 ir.append(IRReadArgument(dst=len_value, index=reg_index + 1))
                 reg_index += 2
                 captured.append((ptr_value, len_value))
-            elif p_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM):
+            elif p_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM, TypeKind.DICT):
                 caller_ptr = self.ir_program.ids.new_temp(Type.INT64)
                 ir.append(IRReadArgument(dst=caller_ptr, index=reg_index))
                 reg_index += 1
@@ -318,7 +318,7 @@ class IRFunctionBuilder(
                     param_addr = self.ir_program.ids.new_temp(Type.INT64)
                     ir.append(IRLocalAddress(dst=param_addr, slot=slot))
                     ir.extend(self._ir_write_str_descriptor_into_address(param_addr, ptr_value, len_value))
-            elif p_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM):
+            elif p_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM, TypeKind.DICT):
                 caller_ptr = cap
                 slot = self._bind_param(p, ir_fn)
                 param_addr = self.ir_program.ids.new_temp(Type.INT64)
@@ -567,7 +567,7 @@ class IRFunctionBuilder(
                 reserve_type = arg_type
                 if param_types is not None and arg_type.kind == TypeKind.STRUCT and param_types[i].kind == TypeKind.SUM:
                     reserve_type = param_types[i]
-                if reserve_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM) and not is_composite_addressable(arg):
+                if reserve_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM, TypeKind.DICT) and not is_composite_addressable(arg):
                     self._reserve_argument_temp(arg, reserve_type, ir_fn)
         elif isinstance(expr, Binary):
             self._collect_argument_temps_in_expr(expr.left, ir_fn)

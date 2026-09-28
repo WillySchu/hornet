@@ -46,6 +46,13 @@ class ScalarsMixin:
         a literal-Call case -- there's no sum-type literal syntax to
         parse into one (see SumTypeDef's own docstring in parser.py).
 
+        DICT-typed argument: the identical Variable/Field/Index /
+        ordinary-composite-call shape SUM has -- but here the missing
+        literal-Call case isn't because no such literal syntax exists
+        (DictLiteral very much does), just that _ir_write_composite_
+        value_into was never taught it, the same gap dict-literal-as-
+        struct-field-argument and dict-literal-as-array-element share.
+
         `callee_name` is None-able for the one case that means there's
         no declared signature to consult at all: a builtin (print/len/
         append never appear in function_registry, and none has a sum-
@@ -131,6 +138,33 @@ class ScalarsMixin:
                     raise IRError(
                         f"No codegen rule for a STRUCT-typed call argument of shape "
                         f"{type(arg).__name__}: {arg!r}")
+                arg_ir.extend(ir)
+                arg_values.append(addr_value)
+            elif arg_type.kind == TypeKind.DICT:
+                # Identical shape to STRUCT just above, minus the
+                # literal-Call case: a DIRECT dict literal argument
+                # (`foo(dict[str]int{...})`) hits the same, separately
+                # tracked _ir_write_composite_value_into gap dict-
+                # literal-as-struct-field-argument and dict-literal-
+                # as-array-element already do, so it falls through to
+                # the IRError below instead, like every other
+                # unhandled shape here already does.
+                if is_composite_addressable(arg):
+                    result = self._ir_dict_address(arg)
+                    if result is None:
+                        raise IRError(
+                            f"_ir_dict_address returned None for a DICT-typed "
+                            f"Variable/Field/Index/dereference argument ({arg!r}) -- "
+                            f"expected to always succeed for this shape")
+                    ir, addr_value = result
+                elif self._is_ordinary_composite_call(arg):
+                    ir, addr_value = self._ir_materialize_composite_call(arg, arg_type)
+                else:
+                    raise IRError(
+                        f"No codegen rule for a DICT-typed call argument of shape "
+                        f"{type(arg).__name__}: {arg!r} -- a direct dict literal "
+                        f"argument isn't supported yet; assign it to a variable "
+                        f"first")
                 arg_ir.extend(ir)
                 arg_values.append(addr_value)
             elif arg_type.kind == TypeKind.SUM:

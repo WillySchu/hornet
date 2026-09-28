@@ -9607,6 +9607,144 @@ class TestDicts:
         with pytest.raises(IRError, match="No real-IR case for statement of type Return"):
             generate_asm(ast, platform=ASM_PLATFORM)
 
+    # -- dict-typed function/method arguments ----------------------------------
+
+    def test_dict_typed_function_argument_works(self):
+        """The bug this pins: _ir_call_arguments' own dispatch had no
+        DICT case at all, so a dict-typed argument fell through to the
+        generic scalar fallback (gen_expr_ir) -- which, for a Variable,
+        just returns that variable's own permanent Temp unchanged. For
+        a composite type that Temp is never actually DEFINED by any
+        real IR (a dict's own value is always accessed through its
+        address, never loaded into one Temp), so this crashed IR
+        verification outright: 'Temp used... but never defined.'"""
+        assert_program_stdout(
+            "def int lookup(dict[str]int d, str key):\n"
+            "    return d[key]\n"
+            "\n"
+            "def int main():\n"
+            "    dict[str]int d = dict[str]int{'a': 1}\n"
+            "    print(lookup(d, 'a'))\n"
+            "    return 0\n",
+            "1\n",
+        )
+
+    def test_dict_returning_call_used_directly_as_an_argument(self):
+        """`lookup(make_dict(), 'a')` -- exercises a second, separate
+        bug fixed alongside the first: _collect_argument_temps_in_
+        expr's own pre-pass (which reserves a stack slot for a non-
+        addressable composite argument like this one, so _ir_
+        materialize_composite_call doesn't fall back to a fresh malloc
+        every time) also had no DICT case, using a hard-coded (ARRAY,
+        STRUCT, SUM) tuple instead of the shared COMPOSITE_KINDS set.
+        Fixed for consistency with array/struct's own treatment, even
+        though the fallback (malloc) would have still been correct,
+        just less efficient."""
+        assert_program_stdout(
+            "def dict[str]int make_dict():\n"
+            "    dict[str]int d = dict[str]int{'a': 1}\n"
+            "    return d\n"
+            "\n"
+            "def int lookup(dict[str]int d, str key):\n"
+            "    return d[key]\n"
+            "\n"
+            "def int main():\n"
+            "    print(lookup(make_dict(), 'a'))\n"
+            "    return 0\n",
+            "1\n",
+        )
+
+    def test_multiple_dict_arguments_to_one_function(self):
+        assert_program_stdout(
+            "def int combine(dict[str]int a, dict[str]int b, str key1, str key2):\n"
+            "    return a[key1] + b[key2]\n"
+            "\n"
+            "def int main():\n"
+            "    dict[str]int x = dict[str]int{'p': 10}\n"
+            "    dict[str]int y = dict[str]int{'q': 20}\n"
+            "    print(combine(x, y, 'p', 'q'))\n"
+            "    return 0\n",
+            "30\n",
+        )
+
+    def test_nil_dict_passed_as_an_argument(self):
+        assert_program_stdout(
+            "def int lookup_or_default(dict[int]int d, int key):\n"
+            "    if key in d:\n"
+            "        return d[key]\n"
+            "    return -1\n"
+            "\n"
+            "def int main():\n"
+            "    dict[int]int d\n"
+            "    print(lookup_or_default(d, 5))\n"
+            "    return 0\n",
+            "-1\n",
+        )
+
+    def test_dict_parameter_whose_address_escapes(self):
+        """A THIRD site needing the same fix, found while testing:
+        _ir_param_setup's own two-pass argument-capture code (ir/
+        builder.py) had the identical hard-coded (ARRAY, STRUCT, SUM)
+        tuple, missing DICT, in both its own incoming-argument-capture
+        pass and its own copy-into-the-local-slot pass -- a dict
+        parameter fell through to the plain-scalar path there too,
+        treating its own caller-provided ADDRESS as if it were the
+        24-byte descriptor's own raw bytes directly, corrupting the
+        local copy and segfaulting on first use. This test exercises
+        the heap-allocated-parameter branch of that same fix
+        specifically (the parameter's own address is taken and
+        returned), not just the ordinary stack-copy case every other
+        test in this section already covers."""
+        assert_program_stdout(
+            "def *dict[str]int get_ref(dict[str]int d):\n"
+            "    return &d\n"
+            "\n"
+            "def int main():\n"
+            "    dict[str]int d = dict[str]int{'a': 1}\n"
+            "    *dict[str]int p = get_ref(d)\n"
+            "    (*p)['b'] = 2\n"
+            "    print(*p)\n"
+            "    return 0\n",
+            "dict[str]int{'a': 1, 'b': 2}\n",
+        )
+
+    def test_dict_typed_method_argument(self):
+        assert_program_stdout(
+            "type Wrapper struct:\n"
+            "    int tag\n"
+            "    def int lookup(w, dict[str]int d, str key):\n"
+            "        return d[key] + w.tag\n"
+            "\n"
+            "def int main():\n"
+            "    Wrapper w = Wrapper(tag=100)\n"
+            "    dict[str]int d = dict[str]int{'a': 1}\n"
+            "    print(w.lookup(d, 'a'))\n"
+            "    return 0\n",
+            "101\n",
+        )
+
+    def test_dict_literal_as_a_direct_argument_is_a_known_separate_gap(self):
+        """`foo(dict[str]int{...})` -- a DIRECT literal argument, not
+        routed through a local variable first -- still isn't
+        supported: the identical, already-tracked _ir_write_
+        composite_value_into gap dict-literal-as-struct-field-argument,
+        dict-literal-as-array-element, and returning a dict literal
+        directly all share, not a new bug and not something this
+        argument-passing fix takes on. Passing an existing dict
+        variable, as every other test in this section does, remains
+        the correct workaround."""
+        ast = _parse(
+            "def int lookup(dict[str]int d, str key):\n"
+            "    return d[key]\n"
+            "\n"
+            "def int main():\n"
+            "    print(lookup(dict[str]int{'a': 1}, 'a'))\n"
+            "    return 0\n"
+        )
+        analyze(ast)
+        with pytest.raises(IRError, match="direct dict literal argument isn't supported yet"):
+            generate_asm(ast, platform=ASM_PLATFORM)
+
 # ---------------------------------------------------------------------------
 # Pointers, stage 2: semantic analysis only. Go-style pointers -- safe by
 # construction via escape analysis (not yet built; that's stage 3), no
