@@ -5,8 +5,8 @@ Every block ends in exactly one terminator (IRJump, IRBranch, IRReturn); no fall
 from dataclasses import dataclass, field
 from typing import Optional, Union
 
-from parser import BinaryOp, UnaryOp
-from semantic import Type
+from ops import BinaryOp, UnaryOp
+from typesys import Type
 
 
 @dataclass(frozen=True)

@@ -7,79 +7,14 @@ from enum import auto, Enum
 from typing import Any, List, Optional, Tuple, Union
 
 from lexer import Token, TokenType, lex
+from ops import BinaryOp, UnaryOp
 
 
 # AST nodes
 
-class UnaryOp(Enum):
-    NEGATE = auto()
-    COMPLEMENT = auto()
-    NOT = auto()
-    ADDRESS_OF = auto()
-    DEREFERENCE = auto()  # shares STAR with pointer types and multiply
-
-    def symbol(self) -> str:
-        return {
-            UnaryOp.NEGATE: '-',
-            UnaryOp.COMPLEMENT: '~',
-            UnaryOp.NOT: 'not',
-            UnaryOp.ADDRESS_OF: '&',
-            UnaryOp.DEREFERENCE: '*',
-        }[self]
-
-
-class BinaryOp(Enum):
-    ADD = auto()
-    SUBTRACT = auto()
-    MULTIPLY = auto()
-    DIVIDE = auto()
-    MODULO = auto()
-
-    SHIFT_LEFT = auto()
-    SHIFT_RIGHT = auto()
-
-    LESS_THAN = auto()
-    GREATER_THAN = auto()
-    LESS_THAN_OR_EQUAL = auto()
-    GREATER_THAN_OR_EQUAL = auto()
-
-    EQUAL = auto()
-    NOT_EQUAL = auto()
-
-    IN = auto()
-
-    BITWISE_AND = auto()
-    BITWISE_XOR = auto()
-    BITWISE_OR = auto()
-
-    AND = auto()
-    OR = auto()
-
-    def symbol(self) -> str:
-        return {
-            BinaryOp.ADD: '+',
-            BinaryOp.SUBTRACT: '-',
-            BinaryOp.MULTIPLY: '*',
-            BinaryOp.DIVIDE: '/',
-            BinaryOp.MODULO: '%',
-            BinaryOp.SHIFT_LEFT: '<<',
-            BinaryOp.SHIFT_RIGHT: '>>',
-            BinaryOp.LESS_THAN: '<',
-            BinaryOp.GREATER_THAN: '>',
-            BinaryOp.LESS_THAN_OR_EQUAL: '<=',
-            BinaryOp.GREATER_THAN_OR_EQUAL: '>=',
-            BinaryOp.EQUAL: '==',
-            BinaryOp.NOT_EQUAL: '!=',
-            BinaryOp.IN: 'in',
-            BinaryOp.BITWISE_AND: '&',
-            BinaryOp.BITWISE_XOR: '^',
-            BinaryOp.BITWISE_OR: '|',
-            BinaryOp.AND: 'and',
-            BinaryOp.OR: 'or',
-        }[self]
-
-
 _PRETTY_MAX_WIDTH = 88
+# Set by semantic analysis; omitted from pretty().
+_SEMANTIC_FIELDS = {'resolved_type', 'line', 'col', 'decl_id', 'narrowed_type', 'resolved_return_type', 'binding_types'}
 _PRETTY_INDENT = "    "
 
 
@@ -115,7 +50,7 @@ def _pretty_list(items: list, indent: int) -> str:
 def _pretty_node(node: 'Node', indent: int) -> str:
     """Render `ClassName(field=value, ...)` via dataclasses.fields."""
     class_name = type(node).__name__
-    field_names = [f.name for f in fields(node) if f.name not in ('resolved_type', 'line', 'col')]
+    field_names = [f.name for f in fields(node) if f.name not in _SEMANTIC_FIELDS]
     if not field_names:
         return f"{class_name}()"
 
@@ -178,6 +113,7 @@ class Variable(Node):
     """Variable reference."""
     name: str
     resolved_type: Optional[Any] = None
+    decl_id: Any = field(default=None, compare=False, repr=False)
 
 
 @dataclass
@@ -292,6 +228,7 @@ class VarDecl(Node):
     name: str
     var_type: Union[str, ArrayTypeExpr, SliceTypeExpr]
     init: Optional[Node] = None
+    resolved_type: Any = field(default=None, compare=False, repr=False)
 
 
 @dataclass
@@ -299,6 +236,7 @@ class Assign(Node):
     """`name = value`."""
     name: str
     value: Node
+    decl_id: Any = field(default=None, compare=False, repr=False)
 
 
 @dataclass
@@ -373,6 +311,8 @@ class IsCheck(Node):
     type_name: Union[str, QualifiedTypeExpr, ArrayTypeExpr, SliceTypeExpr, PointerTypeExpr]
     subject: Optional[Node] = None
     binding_decl: Optional[Node] = None
+    decl_id: Any = field(default=None, compare=False, repr=False)
+    narrowed_type: Any = field(default=None, compare=False, repr=False)
 
 
 @dataclass
@@ -407,6 +347,7 @@ class ForIn(Node):
     binding_names: List[str]
     iterable: Node
     body: List[Node]
+    binding_types: Any = field(default=None, compare=False, repr=False)
 
 
 @dataclass
@@ -424,6 +365,7 @@ class Param(Node):
     """Parameter `T name`."""
     name: str
     type: Union[str, ArrayTypeExpr, SliceTypeExpr]
+    resolved_type: Any = field(default=None, compare=False, repr=False)
 
 
 @dataclass
@@ -433,6 +375,7 @@ class Function(Node):
     return_type: Optional[Union[str, ArrayTypeExpr, SliceTypeExpr]]
     params: List[Param] = field(default_factory=list)
     body: List[Node] = field(default_factory=list)
+    resolved_return_type: Any = field(default=None, compare=False, repr=False)
 
 
 @dataclass

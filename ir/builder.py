@@ -4,7 +4,8 @@ from typing import List, Optional
 
 from escape_analysis import analyze_array_escapes, is_heap_allocated
 from ir.errors import IRError
-from ir.utils import COMPOSITE_KINDS, is_composite_addressable, type_byte_width, type_of, for_in_binding_types
+from ir.utils import COMPOSITE_KINDS, is_composite_addressable, type_of
+from typesys import type_byte_width
 from ir.ir import (
     IRBranch, IRCall, IRConst, IRCopy, IRFunction, IRJump, IRLocalAddress, IRReadArgument, IRReturn, IRStore, Temp,
 )
@@ -37,12 +38,12 @@ from parser import (
     Return,
     Slice,
     Unary,
-    UnaryOp,
     VarDecl,
     Variable,
     While,
 )
-from semantic import type_from_name, Type, TypeKind
+from ops import UnaryOp
+from typesys import Type, TypeKind
 
 
 class IRFunctionBuilder(
@@ -65,14 +66,12 @@ class IRFunctionBuilder(
         self._argument_temp_slots = {}
         ir_fn = IRFunction(name=fn.name)
         self.ir_fn = ir_fn
-        ir_fn.return_type = Type.VOID if fn.return_type is None else type_from_name(
-            fn.return_type, self.ir_program.struct_registry, self.ir_program.type_alias_registry, sum_types=self.ir_program.sum_type_registry)
+        ir_fn.return_type = fn.resolved_return_type
         return_type = ir_fn.return_type
-        param_types = [type_from_name(p.type, self.ir_program.struct_registry, self.ir_program.type_alias_registry, sum_types=self.ir_program.sum_type_registry) for p in fn.params]
+        param_types = [p.resolved_type for p in fn.params]
 
         # Declarations needing heap storage (size or escape).
-        self._escaping_decl_ids = analyze_array_escapes(
-            fn, param_types, self.ir_program.struct_registry, self.ir_program.type_alias_registry, self.ir_program.sum_type_registry)
+        self._escaping_decl_ids = analyze_array_escapes(fn, self.ir_program.struct_registry)
 
         # Composite returns take a hidden result pointer as argument 0.
         arg_shift = 0
@@ -94,7 +93,7 @@ class IRFunctionBuilder(
         self._collect_params(fn.params, ir_fn)
         self._collect_locals(fn.body, ir_fn)
         self._collect_argument_temps(fn.body, ir_fn)
-        self.scopes = [{}]
+        self.locals = {}
 
         param_setup_ir = self._ir_param_setup(fn, param_types, arg_shift, ir_fn)
 
@@ -193,21 +192,21 @@ class IRFunctionBuilder(
     def _collect_params(self, params: List[Param], ir_fn: IRFunction) -> None:
         """One slot per parameter; heap-allocated params get an 8-byte pointer slot."""
         for p in params:
-            p_type = type_from_name(p.type, self.ir_program.struct_registry, self.ir_program.type_alias_registry, sum_types=self.ir_program.sum_type_registry)
+            p_type = p.resolved_type
             width = 8 if self._is_heap_allocated(id(p), p_type) else type_byte_width(p_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
             ir_fn.var_slots[id(p)] = self.ir_program.ids.new_slot(width, f"param:{p.name}", ir_fn)
 
     def _bind_param(self, p: Param, ir_fn: IRFunction) -> int:
         """Bind `p` in scope to its slot and Temp."""
         slot = ir_fn.var_slots[id(p)]
-        p_type = type_from_name(p.type, self.ir_program.struct_registry, self.ir_program.type_alias_registry, sum_types=self.ir_program.sum_type_registry)
+        p_type = p.resolved_type
         temp_type = Type(TypeKind.POINTER, element_type=p_type) if self._is_heap_allocated(id(p), p_type) else p_type
-        self.scopes[-1][p.name] = (slot, p_type, id(p), self.ir_program.ids.temp_at_offset(temp_type, slot))
+        self.locals[id(p)] = (slot, p_type, id(p), self.ir_program.ids.temp_at_offset(temp_type, slot))
         return slot
 
     def _allocate_local_slot(self, stmt: VarDecl, ir_fn: IRFunction) -> None:
         """Allocate a VarDecl's slot (also used for IsCheck binding_decl)."""
-        var_type = type_from_name(stmt.var_type, self.ir_program.struct_registry, self.ir_program.type_alias_registry, sum_types=self.ir_program.sum_type_registry)
+        var_type = stmt.resolved_type
         width = 8 if self._is_heap_allocated(
             id(stmt), var_type) else type_byte_width(var_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
         ir_fn.var_slots[id(stmt)] = self.ir_program.ids.new_slot(width, f"local:{stmt.name}", ir_fn)
@@ -233,8 +232,7 @@ class IRFunctionBuilder(
             elif isinstance(stmt, While):
                 self._collect_locals(stmt.body, ir_fn)
             elif isinstance(stmt, ForIn):
-                iterable_type = type_of(stmt.iterable)
-                for i, binding_type in enumerate(for_in_binding_types(stmt, iterable_type)):
+                for i, binding_type in enumerate(stmt.binding_types):
                     self._allocate_for_in_binding_slot(stmt, i, binding_type, ir_fn)
                 self._collect_locals(stmt.body, ir_fn)
             elif isinstance(stmt, For):
@@ -340,55 +338,54 @@ class IRFunctionBuilder(
         width = type_byte_width(t, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
         self._argument_temp_slots[id(expr)] = self.ir_program.ids.new_slot(width, "argument_temp", ir_fn)
 
-    def _push_scope(self) -> None:
-        self.scopes.append({})
-
-    def _pop_scope(self) -> None:
-        self.scopes.pop()
-
     def _bind_local(self, stmt: VarDecl, ir_fn: IRFunction) -> int:
         """Bind `stmt` in scope to its slot and Temp."""
         slot = ir_fn.var_slots[id(stmt)]
-        var_type = type_from_name(stmt.var_type, self.ir_program.struct_registry, self.ir_program.type_alias_registry, sum_types=self.ir_program.sum_type_registry)
+        var_type = stmt.resolved_type
         temp_type = Type(TypeKind.POINTER, element_type=var_type) if self._is_heap_allocated(id(stmt), var_type) else var_type
-        self.scopes[-1][stmt.name] = (slot, var_type, id(stmt), self.ir_program.ids.temp_at_offset(temp_type, slot))
+        self.locals[id(stmt)] = (slot, var_type, id(stmt), self.ir_program.ids.temp_at_offset(temp_type, slot))
         return slot
 
     def _bind_for_in_binding(self, stmt: ForIn, index: int, binding_type: Type, ir_fn: IRFunction) -> int:
         """Bind a ForIn binding in scope."""
         slot = ir_fn.var_slots[(id(stmt), index)]
         temp_type = Type(TypeKind.POINTER, element_type=binding_type) if self._is_heap_allocated((id(stmt), index), binding_type) else binding_type
-        name = stmt.binding_names[index]
-        self.scopes[-1][name] = (slot, binding_type, (id(stmt), index), self.ir_program.ids.temp_at_offset(temp_type, slot))
+        self.locals[(id(stmt), index)] = (slot, binding_type, (id(stmt), index), self.ir_program.ids.temp_at_offset(temp_type, slot))
         return slot
 
-    def _local_slot(self, name: str) -> int:
-        """Slot of variable `name`."""
-        for scope in reversed(self.scopes):
-            if name in scope:
-                return scope[name][0]
-        raise IRError(f"Reference to undeclared variable '{name}'")
+    def _decl(self, ref) -> object:
+        """Decl id of `ref`: a decl id, VarDecl, Param, or a node annotated with decl_id."""
+        if isinstance(ref, (int, tuple)):
+            return ref
+        if isinstance(ref, (VarDecl, Param)):
+            return id(ref)
+        decl_id = getattr(ref, 'decl_id', None)
+        if decl_id is None:
+            raise IRError(f"{ref!r} has no decl_id -- semantic.analyze() must run first")
+        return decl_id
 
-    def _local_type(self, name: str) -> Type:
-        """Declared type of variable `name`."""
-        for scope in reversed(self.scopes):
-            if name in scope:
-                return scope[name][1]
-        raise IRError(f"Reference to undeclared variable '{name}'")
+    def _var_ref(self, stmt) -> Variable:
+        """A Variable naming the local a VarDecl declares or an Assign targets."""
+        return Variable(name=stmt.name, decl_id=self._decl(stmt))
 
-    def _local_decl_id(self, name: str) -> int:
-        """id() of the declaration `name` resolves to."""
-        for scope in reversed(self.scopes):
-            if name in scope:
-                return scope[name][2]
-        raise IRError(f"Reference to undeclared variable '{name}'")
+    def _local(self, ref) -> tuple:
+        """(slot, declared type, decl id, Temp) of a local."""
+        decl_id = self._decl(ref)
+        if decl_id not in self.locals:
+            raise IRError(f"Local {ref!r} is not bound")
+        return self.locals[decl_id]
 
-    def _local_temp(self, name: str) -> Temp:
-        """Persistent Temp of variable `name`."""
-        for scope in reversed(self.scopes):
-            if name in scope:
-                return scope[name][3]
-        raise IRError(f"Reference to undeclared variable '{name}'")
+    def _local_slot(self, ref) -> int:
+        return self._local(ref)[0]
+
+    def _local_type(self, ref) -> Type:
+        return self._local(ref)[1]
+
+    def _local_decl_id(self, ref) -> object:
+        return self._local(ref)[2]
+
+    def _local_temp(self, ref) -> Temp:
+        return self._local(ref)[3]
 
     def _is_heap_allocated(self, decl_id: int, t: Type) -> bool:
         """Heap-allocated by size or escape analysis."""

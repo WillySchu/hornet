@@ -4,7 +4,7 @@ from ir.errors import IRError
 from ir.ir import IRBranch, IRJump, IRLabel, IRMove, IRConst, IRCall
 from ir.utils import is_composite_addressable, type_of
 from parser import Call, Binary, Variable, Field, Index, NoneLiteral, ArrayLiteral, DictLiteral
-from semantic import Type, TypeKind
+from typesys import Type, TypeKind
 
 
 class ScalarsMixin:

@@ -690,7 +690,7 @@ from typing import Optional
 
 import pytest
 
-from codegen.codegen import generate_asm
+from compile import generate_asm
 from codegen.errors import CodegenError
 from ir.errors import IRError
 from build import RUNTIME_C_PATH

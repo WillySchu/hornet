@@ -1,16 +1,19 @@
 """Semantic analysis: name resolution, type checking, and control-flow checks.
 
 Strict typing: no implicit conversions; integer operands must match exactly. Blocks
-scope lexically and may shadow. Non-void functions must return on all paths. Annotates
-each expression's resolved_type and stashes registries on Program for IR building.
+scope lexically and may shadow. Non-void functions must return on all paths.
+
+Later passes rely on these annotations instead of re-resolving: resolved_type on expressions,
+VarDecls, and Params; decl_id on Variable/Assign/IsCheck (id() of the declaring VarDecl/Param,
+or (id(ForIn), index)); resolved_return_type, binding_types, narrowed_type; and the registries
+stashed on Program.
 """
 
 import argparse
-from dataclasses import dataclass
-from enum import auto, Enum
 from typing import Dict, List, Optional, Set, Tuple
 
 from lexer import lex
+from typesys import StructInfo, SumTypeInfo, Type, TypeKind
 from desugar import mangle_method_name
 from parser import (
     ArrayLiteral,
@@ -42,7 +45,6 @@ from parser import (
     IsCheck,
     Node,
     NoneLiteral,
-    Param,
     Parser,
     PointerTypeExpr,
     Program,
@@ -61,65 +63,6 @@ from parser import (
 )
 
 
-# Types
-
-class TypeKind(Enum):
-    INT = auto()
-    INT8 = auto()
-    UINT8 = auto()
-    INT64 = auto()
-    BOOL = auto()
-    STR = auto()
-    ARRAY = auto()
-    SLICE = auto()
-    STRUCT = auto()
-    SUM = auto()
-    POINTER = auto()
-    DICT = auto()
-    VOID = auto()
-    NONE = auto()
-
-
-@dataclass(frozen=True)
-class Type:
-    """A type. Scalars use kind alone; ARRAY/SLICE/POINTER use element_type (ARRAY also size);
-    DICT uses key_type and element_type (value); STRUCT/SUM are nominal by name.
-    Frozen for structural equality and hashing.
-    """
-    kind: TypeKind
-    element_type: Optional['Type'] = None  # ARRAY/SLICE/POINTER pointee; DICT value
-    size: Optional[int] = None  # ARRAY only
-    struct_name: Optional[str] = None  # STRUCT only
-    sum_type_name: Optional[str] = None  # SUM only
-    key_type: Optional['Type'] = None  # DICT only
-
-    def __str__(self) -> str:
-        if self.kind == TypeKind.ARRAY:
-            return f"[{self.size}]{self.element_type}"
-        if self.kind == TypeKind.SLICE:
-            return f"[]{self.element_type}"
-        if self.kind == TypeKind.STRUCT:
-            return self.struct_name
-        if self.kind == TypeKind.SUM:
-            return self.sum_type_name
-        if self.kind == TypeKind.POINTER:
-            return f"*{self.element_type}"
-        if self.kind == TypeKind.DICT:
-            return f"dict[{self.key_type}]{self.element_type}"
-        return self.kind.name.lower()
-
-
-Type.INT = Type(TypeKind.INT)
-Type.INT8 = Type(TypeKind.INT8)
-Type.UINT8 = Type(TypeKind.UINT8)
-Type.INT64 = Type(TypeKind.INT64)
-Type.BOOL = Type(TypeKind.BOOL)
-Type.STR = Type(TypeKind.STR)
-# VOID (no declared return) and NONE (`none`) have no source spelling.
-Type.VOID = Type(TypeKind.VOID)
-Type.NONE = Type(TypeKind.NONE)
-
-
 _TYPE_NAMES = {
     'int': Type.INT,
     'int8': Type.INT8,
@@ -130,20 +73,6 @@ _TYPE_NAMES = {
     'bool': Type.BOOL,
     'str': Type.STR,
 }
-
-
-@dataclass
-class StructInfo:
-    """A struct's name and ordered fields; order fixes layout."""
-    name: str
-    fields: Dict[str, Type]
-
-
-@dataclass
-class SumTypeInfo:
-    """A sum type's name and ordered variants; index is the discriminant. Variants are structs, scalars, or str."""
-    name: str
-    variants: List[Type]
 
 
 def type_from_name(
@@ -291,7 +220,7 @@ class SemanticAnalyzer:
     """Type- and scope-checks a Program."""
 
     def __init__(self):
-        self.scopes: List[Dict[str, Type]] = []
+        self.scopes: List[Dict[str, Tuple[Type, object]]] = []  # name -> (type, decl id)
         self.loop_depth = 0  # enclosing loop count
         self.functions: Dict[str, tuple] = {}  # name -> (param types, return type)
         self.structs: Dict[str, StructInfo] = {}
@@ -680,8 +609,10 @@ class SemanticAnalyzer:
         self.loop_depth = 0
         # Params are locals; _declare also catches duplicates.
         for p in fn.params:
-            self._declare(p.name, type_from_name(p.type, self.structs, self.type_aliases, p, self.sum_types), p)
+            p.resolved_type = type_from_name(p.type, self.structs, self.type_aliases, p, self.sum_types)
+            self._declare(p.name, p.resolved_type, p, id(p))
         return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.structs, self.type_aliases, fn, self.sum_types)
+        fn.resolved_return_type = return_type
         for stmt in fn.body:
             self.analyze_statement(stmt, return_type)
         # Void functions may fall off the end.
@@ -699,18 +630,22 @@ class SemanticAnalyzer:
     def _pop_scope(self) -> None:
         self.scopes.pop()
 
-    def _declare(self, name: str, type_: Type, node: Optional[Node] = None) -> None:
-        """Declare in the innermost scope; shadowing outer scopes is allowed."""
+    def _declare(self, name: str, type_: Type, node: Optional[Node], decl_id) -> None:
+        """Declare in the innermost scope; shadowing outer scopes is allowed.
+        decl_id identifies the storage: id() of a VarDecl/Param, or (id(ForIn), index)."""
         if name in self.scopes[-1]:
             raise SemanticError(f"Variable '{name}' is already declared in this scope", node)
-        self.scopes[-1][name] = type_
+        self.scopes[-1][name] = (type_, decl_id)
 
-    def _lookup(self, name: str, node: Optional[Node] = None) -> Type:
-        """Resolve `name` innermost-first."""
+    def _resolve(self, name: str, node: Optional[Node] = None) -> Tuple[Type, object]:
+        """(type, decl id) of `name`, innermost-first."""
         for scope in reversed(self.scopes):
             if name in scope:
                 return scope[name]
         raise SemanticError(f"Reference to undeclared variable '{name}'", node)
+
+    def _lookup(self, name: str, node: Optional[Node] = None) -> Type:
+        return self._resolve(name, node)[0]
 
 
     def analyze_statement(self, stmt: Node, return_type: Type) -> None:
@@ -823,7 +758,8 @@ class SemanticAnalyzer:
                     f"with a value of type {init_type}",
                     stmt,
                 )
-        self._declare(stmt.name, declared_type, stmt)
+        stmt.resolved_type = declared_type
+        self._declare(stmt.name, declared_type, stmt, id(stmt))
 
     def analyze_assign(self, stmt: Assign) -> None:
         if stmt.name in self._narrowed_names:
@@ -833,7 +769,7 @@ class SemanticAnalyzer:
                 f"variable instead",
                 stmt,
             )
-        declared_type = self._lookup(stmt.name, stmt)
+        declared_type, stmt.decl_id = self._resolve(stmt.name, stmt)
         value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, declared_type)
         if not self._types_compatible(value_type, declared_type):
             raise SemanticError(
@@ -990,7 +926,6 @@ class SemanticAnalyzer:
         if has_binding:
             self._push_scope()
             subject_type = self.check_expr(stmt.condition.subject)
-            self._declare(stmt.condition.variable_name, subject_type, stmt.condition)
             # binding_decl is built once here; see IsCheck.
             if subject_type.kind == TypeKind.SUM:
                 stmt.condition.binding_decl = VarDecl(
@@ -1000,6 +935,8 @@ class SemanticAnalyzer:
                     line=stmt.condition.line,
                     col=stmt.condition.col,
                 )
+                stmt.condition.binding_decl.resolved_type = subject_type
+            self._declare(stmt.condition.variable_name, subject_type, stmt.condition, id(stmt.condition.binding_decl))
 
         condition_type = self.check_expr(stmt.condition)
         if condition_type != Type.BOOL:
@@ -1019,7 +956,8 @@ class SemanticAnalyzer:
         if isinstance(stmt.condition, IsCheck):
             narrowed_name = stmt.condition.variable_name
             narrowed_type = type_from_name(stmt.condition.type_name, self.structs, self.type_aliases, stmt.condition)
-            self._declare(narrowed_name, narrowed_type, stmt.condition)
+            stmt.condition.narrowed_type = narrowed_type
+            self._declare(narrowed_name, narrowed_type, stmt.condition, stmt.condition.decl_id)
             self._narrowed_names.add(narrowed_name)
         for s in stmt.then_body:
             self.analyze_statement(s, return_type)
@@ -1136,9 +1074,10 @@ class SemanticAnalyzer:
             binding_types = [iterable_type.key_type, iterable_type.element_type][:num_bindings]
         else:
             binding_types = [Type.INT, iterable_type.element_type] if num_bindings == 2 else [iterable_type.element_type]
+        stmt.binding_types = binding_types
         self._push_scope()
-        for name, binding_type in zip(stmt.binding_names, binding_types):
-            self._declare(name, binding_type, stmt)
+        for i, (name, binding_type) in enumerate(zip(stmt.binding_names, binding_types)):
+            self._declare(name, binding_type, stmt, (id(stmt), i))
         self.loop_depth += 1
         for s in stmt.body:
             self.analyze_statement(s, return_type)
@@ -1560,11 +1499,12 @@ class SemanticAnalyzer:
         return Type.INT
 
     def check_variable(self, expr: Variable) -> Type:
-        return self._lookup(expr.name, expr)
+        t, expr.decl_id = self._resolve(expr.name, expr)
+        return t
 
     def check_is_check(self, expr: IsCheck) -> Type:
         """`NAME is T` / `EXPR is T as NAME`; T must be a variant."""
-        variable_type = self._lookup(expr.variable_name, expr)
+        variable_type, expr.decl_id = self._resolve(expr.variable_name, expr)
         if variable_type.kind != TypeKind.SUM:
             if expr.subject is not None:
                 raise SemanticError(

@@ -2,7 +2,6 @@
 
 from codegen.assembly_ast import (
     Add,
-    AddQ,
     CallInstr,
     Cmp,
     Imm,
@@ -20,9 +19,9 @@ from codegen.assembly_ast import (
     Register,
     ShiftRightArithmetic,
 )
-from ir.utils import type_byte_width, leaf_type
+from typesys import leaf_type, type_byte_width
 from codegen.utils import as_byte_register
-from semantic import Type
+from typesys import Type
 
 
 class ArraysSlicesLoweringMixin:

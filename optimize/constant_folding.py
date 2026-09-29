@@ -1,8 +1,8 @@
 """Constant folding: IRBinOp/IRUnOp/IRCast with all-constant operands -> IRMove. Results match runtime semantics (wraparound, truncating division)."""
 
 from ir.ir import IRBinOp, IRCast, IRConst, IRFunction, IRMove, IRUnOp
-from parser import BinaryOp, UnaryOp
-from semantic import Type
+from ops import BinaryOp, UnaryOp
+from typesys import Type
 
 
 def _wrap(value: int, t: Type) -> int:

@@ -1,8 +1,8 @@
 """Identity reduction: IRBinOp with an identity or absorbing constant operand (x + 0, x * 1, x * 0, ...) -> IRMove."""
 
 from ir.ir import IRBinOp, IRConst, IRFunction, IRMove, IRValue
-from parser import BinaryOp
-from semantic import Type
+from ops import BinaryOp
+from typesys import Type
 
 
 def reduce_binary_op(op: BinaryOp, left: IRValue, right: IRValue, result_type: Type) -> "IRValue | None":

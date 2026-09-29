@@ -14,14 +14,13 @@ from ir.ir import (
     IRLocalAddress,
     IRMove,
     IRReturn,
-    IRStaticDataAddress,
     IRStore,
 )
-from ir.utils import COMPOSITE_KINDS, is_composite_addressable, type_of, type_byte_width
+from ir.utils import COMPOSITE_KINDS, is_composite_addressable, type_of
+from typesys import type_byte_width
 from parser import (
     ArrayLiteral,
     Assign,
-    BinaryOp,
     Break,
     Call,
     Continue,
@@ -41,10 +40,10 @@ from parser import (
     Return,
     Slice,
     VarDecl,
-    Variable,
     While,
 )
-from semantic import TypeKind, Type, type_from_name
+from ops import BinaryOp
+from typesys import Type, TypeKind
 
 
 class StatementsMixin:
@@ -137,25 +136,18 @@ class StatementsMixin:
             has_binding = isinstance(stmt.condition, IsCheck) and stmt.condition.binding_decl is not None
             ir = []
             if has_binding:
-                self._push_scope()
                 ir.extend(self.gen_statement_ir(stmt.condition.binding_decl, ir_fn))
             ir.extend(self._ir_if_head(stmt, then_label, else_label))
-            self._push_scope()
             for s in stmt.then_body:
                 ir.extend(self.gen_statement_ir(s, ir_fn))
-            self._pop_scope()
             ir.append(IRJump(end_label))
             ir.append(IRLabel(else_label))
             if stmt.else_body is not None:
-                self._push_scope()
                 for s in stmt.else_body:
                     ir.extend(self.gen_statement_ir(s, ir_fn))
-                self._pop_scope()
             # Needed for else-less Ifs too: blocks can't fall through.
             ir.append(IRJump(end_label))
             ir.append(IRLabel(end_label))
-            if has_binding:
-                self._pop_scope()
             return ir
         elif isinstance(stmt, While):
             start_label = self.ir_program.ids.new_label("while_start")
@@ -163,21 +155,17 @@ class StatementsMixin:
             end_label = self.ir_program.ids.new_label("while_end")
             ir = self._ir_while_head(stmt, start_label, body_label, end_label)
             self.loop_labels.append((start_label, end_label))
-            self._push_scope()
             for s in stmt.body:
                 ir.extend(self.gen_statement_ir(s, ir_fn))
-            self._pop_scope()
             self.loop_labels.pop()
             ir.append(IRJump(start_label))
             ir.append(IRLabel(end_label))
             return ir
         elif isinstance(stmt, For):
-            # One scope spans init through increment.
             start_label = self.ir_program.ids.new_label("for_start")
             body_label = self.ir_program.ids.new_label("for_body")
             increment_label = self.ir_program.ids.new_label("for_increment")
             end_label = self.ir_program.ids.new_label("for_end")
-            self._push_scope()
             ir = self._ir_for_head(stmt, start_label, body_label, end_label, ir_fn)
             self.loop_labels.append((increment_label, end_label))
             for s in stmt.body:
@@ -188,7 +176,6 @@ class StatementsMixin:
             ir.extend(self.gen_statement_ir(stmt.increment, ir_fn))
             ir.append(IRJump(start_label))
             ir.append(IRLabel(end_label))
-            self._pop_scope()
             return ir
         elif isinstance(stmt, ForIn):
             # Dispatch on iterable type (array, slice, or dict).
@@ -197,7 +184,7 @@ class StatementsMixin:
             return self._ir_for_in_array_slice(stmt, ir_fn)
         elif isinstance(stmt, VarDecl):
             # Scalar VarDecl.
-            var_type = type_from_name(stmt.var_type, self.ir_program.struct_registry, self.ir_program.type_alias_registry, sum_types=self.ir_program.sum_type_registry)
+            var_type = stmt.resolved_type
             if var_type.kind not in COMPOSITE_KINDS:
                 # Also covers `none` for pointers.
                 self._bind_local(stmt, ir_fn)
@@ -215,7 +202,7 @@ class StatementsMixin:
                 ir = []
                 if self._is_heap_allocated(id(stmt), var_type):
                     ir.extend(self._ir_malloc_and_store(var_type, slot))
-                dst_ir, dst_address = self._ir_struct_address(Variable(name=stmt.name))
+                dst_ir, dst_address = self._ir_struct_address(self._var_ref(stmt))
                 ir.extend(dst_ir)
                 write_ir = self._ir_write_sum_type_value_into(dst_address, stmt.init, var_type)
                 if write_ir is not None:
@@ -231,7 +218,7 @@ class StatementsMixin:
                 if var_type.kind != TypeKind.SLICE and self._is_heap_allocated(id(stmt), var_type):
                     # New destination: allocate before writing.
                     ir.extend(self._ir_malloc_and_store(var_type, slot))
-                return ir + self._ir_copy_assign(Variable(name=stmt.name), stmt.init, var_type)
+                return ir + self._ir_copy_assign(self._var_ref(stmt), stmt.init, var_type)
             # Non-addressable str initializer.
             if var_type.kind == TypeKind.STR:
                 slot = self._bind_local(stmt, ir_fn)
@@ -242,13 +229,13 @@ class StatementsMixin:
                     value_ir, ptr_value, len_value = self._ir_str_value(stmt.init)
                 else:
                     value_ir, ptr_value, len_value = self._ir_zero_str_value()
-                return ir + value_ir + self._ir_write_str_descriptor(Variable(name=stmt.name), ptr_value, len_value)
+                return ir + value_ir + self._ir_write_str_descriptor(self._var_ref(stmt), ptr_value, len_value)
             # `none` slice.
             if var_type.kind == TypeKind.SLICE and isinstance(stmt.init, NoneLiteral):
                 nil_ir, ptr_value, len_value, cap_value = self._ir_nil_slice()
                 self._bind_local(stmt, ir_fn)
                 return nil_ir + self._ir_write_slice_descriptor(
-                    Variable(name=stmt.name), ptr_value, len_value, cap_value)
+                    self._var_ref(stmt), ptr_value, len_value, cap_value)
             # Slice production.
             if var_type.kind == TypeKind.SLICE and isinstance(stmt.init, Slice):
                 production = self._ir_slice_into(stmt.init)
@@ -256,7 +243,7 @@ class StatementsMixin:
                     slice_ir, ptr_value, len_value, cap_value = production
                     self._bind_local(stmt, ir_fn)
                     return slice_ir + self._ir_write_slice_descriptor(
-                        Variable(name=stmt.name), ptr_value, len_value, cap_value)
+                        self._var_ref(stmt), ptr_value, len_value, cap_value)
             # Slice literal.
             if var_type.kind == TypeKind.SLICE and isinstance(stmt.init, ArrayLiteral):
                 production = self._ir_slice_literal(stmt.init)
@@ -264,7 +251,7 @@ class StatementsMixin:
                     slice_ir, ptr_value, len_value, cap_value = production
                     self._bind_local(stmt, ir_fn)
                     return slice_ir + self._ir_write_slice_descriptor(
-                        Variable(name=stmt.name), ptr_value, len_value, cap_value)
+                        self._var_ref(stmt), ptr_value, len_value, cap_value)
             # append.
             if var_type.kind == TypeKind.SLICE and isinstance(stmt.init, Call) and stmt.init.name == 'append':
                 production = self._ir_append_call(stmt.init)
@@ -272,7 +259,7 @@ class StatementsMixin:
                     append_ir, ptr_value, len_value, cap_value = production
                     self._bind_local(stmt, ir_fn)
                     return append_ir + self._ir_write_slice_descriptor(
-                        Variable(name=stmt.name), ptr_value, len_value, cap_value)
+                        self._var_ref(stmt), ptr_value, len_value, cap_value)
             # Composite-returning call: write through the variable's address.
             if (
                     var_type.kind in COMPOSITE_KINDS
@@ -290,7 +277,7 @@ class StatementsMixin:
                     TypeKind.DICT: self._ir_dict_address,
                     TypeKind.SUM: self._ir_struct_address,
                 }[var_type.kind]
-                dst_ir, dst_address = address_fn(Variable(name=stmt.name))
+                dst_ir, dst_address = address_fn(self._var_ref(stmt))
                 ir.extend(dst_ir)
                 return ir + self._ir_composite_call(dst_address, stmt.init)
             # Array or struct literal.
@@ -303,7 +290,7 @@ class StatementsMixin:
                 if self._is_heap_allocated(id(stmt), var_type):
                     ir.extend(self._ir_malloc_and_store(var_type, slot))
                 address_fn = self._ir_array_address if var_type.kind == TypeKind.ARRAY else self._ir_struct_address
-                dst_ir, dst_address = address_fn(Variable(name=stmt.name))
+                dst_ir, dst_address = address_fn(self._var_ref(stmt))
                 ir.extend(dst_ir)
                 if isinstance(stmt.init, ArrayLiteral):
                     writer = self._ir_write_array_literal_into
@@ -318,7 +305,7 @@ class StatementsMixin:
                 ir = []
                 if self._is_heap_allocated(id(stmt), var_type):
                     ir.extend(self._ir_malloc_and_store(var_type, slot))
-                dst_ir, dst_address = self._ir_dict_address(Variable(name=stmt.name))
+                dst_ir, dst_address = self._ir_dict_address(self._var_ref(stmt))
                 ir.extend(dst_ir)
                 return ir + self._ir_write_dict_literal_into(dst_address, stmt.init, var_type, ir_fn)
             # Nil slice.
@@ -326,14 +313,14 @@ class StatementsMixin:
                 self._bind_local(stmt, ir_fn)
                 zero_ptr = IRConst(0, Type.INT64)
                 zero_int = IRConst(0, Type.INT)
-                return self._ir_write_slice_descriptor(Variable(name=stmt.name), zero_ptr, zero_int, zero_int)
+                return self._ir_write_slice_descriptor(self._var_ref(stmt), zero_ptr, zero_int, zero_int)
             # Nil dict.
             if var_type.kind == TypeKind.DICT and stmt.init is None:
                 slot = self._bind_local(stmt, ir_fn)
                 ir = []
                 if self._is_heap_allocated(id(stmt), var_type):
                     ir.extend(self._ir_malloc_and_store(var_type, slot))
-                dst_ir, dst_address = self._ir_dict_address(Variable(name=stmt.name))
+                dst_ir, dst_address = self._ir_dict_address(self._var_ref(stmt))
                 ir.extend(dst_ir)
                 zero64 = IRConst(0, Type.INT64)
                 zero32 = IRConst(0, Type.INT)
@@ -357,21 +344,21 @@ class StatementsMixin:
                 if self._is_heap_allocated(id(stmt), var_type):
                     ir.extend(self._ir_malloc_and_store(var_type, slot))
                 address_fn = self._ir_array_address if var_type.kind == TypeKind.ARRAY else self._ir_struct_address
-                dst_ir, dst_address = address_fn(Variable(name=stmt.name))
+                dst_ir, dst_address = address_fn(self._var_ref(stmt))
                 ir.extend(dst_ir)
                 return ir + self._ir_write_zero_value_into(dst_address, var_type)
         elif isinstance(stmt, Assign):
             # Scalar Assign.
-            var_type = self._local_type(stmt.name)
+            var_type = self._local_type(stmt)
             if var_type.kind not in COMPOSITE_KINDS:
                 ir, value = self.gen_expr_ir(stmt.value)
-                if self._is_heap_allocated(self._local_decl_id(stmt.name), var_type):
+                if self._is_heap_allocated(self._local_decl_id(stmt), var_type):
                     # Heap-promoted: store through the existing box.
-                    return ir + [IRStore(address=self._local_temp(stmt.name), value=value, value_type=var_type)]
-                return ir + [IRMove(dst=self._local_temp(stmt.name), src=value)]
+                    return ir + [IRStore(address=self._local_temp(stmt), value=value, value_type=var_type)]
+                return ir + [IRMove(dst=self._local_temp(stmt), src=value)]
             # Widen a variant into a sum.
             if var_type.kind == TypeKind.SUM and type_of(stmt.value).kind != TypeKind.SUM:
-                dst_ir, dst_address = self._ir_struct_address(Variable(name=stmt.name))
+                dst_ir, dst_address = self._ir_struct_address(self._var_ref(stmt))
                 write_ir = self._ir_write_sum_type_value_into(dst_address, stmt.value, var_type)
                 if write_ir is not None:
                     return dst_ir + write_ir
@@ -380,37 +367,37 @@ class StatementsMixin:
                     var_type.kind in COMPOSITE_KINDS
                     and is_composite_addressable(stmt.value)
             ):
-                return self._ir_copy_assign(Variable(name=stmt.name), stmt.value, var_type)
+                return self._ir_copy_assign(self._var_ref(stmt), stmt.value, var_type)
             # Non-addressable str value.
             if var_type.kind == TypeKind.STR:
                 value_ir, ptr_value, len_value = self._ir_str_value(stmt.value)
-                return value_ir + self._ir_write_str_descriptor(Variable(name=stmt.name), ptr_value, len_value)
+                return value_ir + self._ir_write_str_descriptor(self._var_ref(stmt), ptr_value, len_value)
             # `none` slice.
             if var_type.kind == TypeKind.SLICE and isinstance(stmt.value, NoneLiteral):
                 nil_ir, ptr_value, len_value, cap_value = self._ir_nil_slice()
                 return nil_ir + self._ir_write_slice_descriptor(
-                    Variable(name=stmt.name), ptr_value, len_value, cap_value)
+                    self._var_ref(stmt), ptr_value, len_value, cap_value)
             # Slice production.
             if var_type.kind == TypeKind.SLICE and isinstance(stmt.value, Slice):
                 production = self._ir_slice_into(stmt.value)
                 if production is not None:
                     slice_ir, ptr_value, len_value, cap_value = production
                     return slice_ir + self._ir_write_slice_descriptor(
-                        Variable(name=stmt.name), ptr_value, len_value, cap_value)
+                        self._var_ref(stmt), ptr_value, len_value, cap_value)
             # Slice literal.
             if var_type.kind == TypeKind.SLICE and isinstance(stmt.value, ArrayLiteral):
                 production = self._ir_slice_literal(stmt.value)
                 if production is not None:
                     slice_ir, ptr_value, len_value, cap_value = production
                     return slice_ir + self._ir_write_slice_descriptor(
-                        Variable(name=stmt.name), ptr_value, len_value, cap_value)
+                        self._var_ref(stmt), ptr_value, len_value, cap_value)
             # append.
             if var_type.kind == TypeKind.SLICE and isinstance(stmt.value, Call) and stmt.value.name == 'append':
                 production = self._ir_append_call(stmt.value)
                 if production is not None:
                     append_ir, ptr_value, len_value, cap_value = production
                     return append_ir + self._ir_write_slice_descriptor(
-                        Variable(name=stmt.name), ptr_value, len_value, cap_value)
+                        self._var_ref(stmt), ptr_value, len_value, cap_value)
             # Composite-returning call.
             if (
                     var_type.kind in COMPOSITE_KINDS
@@ -424,7 +411,7 @@ class StatementsMixin:
                     TypeKind.SLICE: self._ir_slice_address,
                     TypeKind.DICT: self._ir_dict_address,
                     TypeKind.SUM: self._ir_struct_address,
-                }[var_type.kind](Variable(name=stmt.name))
+                }[var_type.kind](self._var_ref(stmt))
                 return dst_ir + self._ir_composite_call(dst_address, stmt.value)
             # Array or struct literal.
             if (
@@ -433,7 +420,7 @@ class StatementsMixin:
                          or (isinstance(stmt.value, Call) and stmt.value.name in self.ir_program.struct_registry))
             ):
                 address_fn = self._ir_array_address if var_type.kind == TypeKind.ARRAY else self._ir_struct_address
-                dst_ir, dst_address = address_fn(Variable(name=stmt.name))
+                dst_ir, dst_address = address_fn(self._var_ref(stmt))
                 if isinstance(stmt.value, ArrayLiteral):
                     writer = self._ir_write_array_literal_into
                 else:
@@ -657,13 +644,13 @@ class StatementsMixin:
     def _ir_finish_scalar_var_decl(self, name: str, decl_id: int, var_type, value) -> list:
         """First write of a scalar VarDecl, boxing it if heap-promoted."""
         if not self._is_heap_allocated(decl_id, var_type):
-            return [IRMove(dst=self._local_temp(name), src=value)]
+            return [IRMove(dst=self._local_temp(decl_id), src=value)]
         size = type_byte_width(var_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
         ptr = self.ir_program.ids.new_temp(Type.INT64)
         return [
             IRCall(dst=ptr, name='malloc', args=[IRConst(size, Type.INT64)]),
             IRStore(address=ptr, value=value, value_type=var_type),
-            IRMove(dst=self._local_temp(name), src=ptr),
+            IRMove(dst=self._local_temp(decl_id), src=ptr),
         ]
 
     def _ir_compound_assign_through_address(self, addr_value, compound_op, value_expr, scalar_type) -> list:

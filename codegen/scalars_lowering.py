@@ -42,9 +42,9 @@ from codegen.assembly_ast import (
 )
 from codegen.errors import CodegenError
 from codegen.utils import as_qword_register, COMPARISON_CONDITION_CODES, as_byte_register
-from ir.utils import is_wide_type
-from parser import BinaryOp, UnaryOp
-from semantic import Type
+from typesys import is_wide_type
+from ops import BinaryOp, UnaryOp
+from typesys import Type
 
 
 class ScalarsLoweringMixin:

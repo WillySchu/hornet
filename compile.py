@@ -3,10 +3,12 @@
 import argparse
 import sys
 
-from codegen.codegen import generate_asm
+from codegen.codegen import lower_to_asm
 from desugar import desugar_methods
+from ir.program_builder import build_ir_program
 from merge import merge_programs
 from modules import discover_modules
+from optimize.optimizer import optimize
 from semantic import analyze
 
 # gcc on Apple Silicon defaults to arm64; match build.py's host detection.
@@ -29,6 +31,11 @@ def main():
             f.write(asm)
     else:
         sys.stdout.buffer.write(asm.encode('latin-1'))
+
+
+def generate_asm(program, platform: str = 'macos') -> str:
+    """Build IR from an analyzed Program, optimize, and lower to assembly."""
+    return lower_to_asm(optimize(build_ir_program(program)), platform)
 
 
 def compile_to_asm(source: str, platform: str = 'macos') -> str:

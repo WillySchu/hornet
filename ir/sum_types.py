@@ -4,9 +4,11 @@ No constructor syntax: a variant widens to a sum on assignment.
 
 from ir.errors import IRError
 from ir.ir import IRBinOp, IRCall, IRConst, IRLoad, IRLocalAddress, IRStore
-from ir.utils import COMPOSITE_KINDS, SUM_TYPE_TAG_WIDTH, type_byte_width, type_of
-from parser import IsCheck, Node, BinaryOp, Variable
-from semantic import Type, TypeKind, type_from_name
+from ir.utils import COMPOSITE_KINDS, type_of
+from typesys import SUM_TYPE_TAG_WIDTH, type_byte_width
+from parser import IsCheck, Node, Variable
+from ops import BinaryOp
+from typesys import Type
 
 
 class SumTypesMixin:
@@ -50,8 +52,8 @@ class SumTypesMixin:
 
     def _ir_is_check(self, expr: IsCheck) -> tuple[list, object]:
         """`x is T`: compare the tag."""
-        sum_type = self._local_type(expr.variable_name)
-        result = self._ir_struct_address(Variable(name=expr.variable_name))
+        sum_type = self._local_type(expr)
+        result = self._ir_struct_address(Variable(name=expr.variable_name, decl_id=expr.decl_id))
         if result is None:
             raise IRError(
                 f"_ir_struct_address returned None for an IsCheck's own variable "
@@ -63,7 +65,7 @@ class SumTypesMixin:
         load_ir = [IRLoad(dst=tag_temp, address=addr_value)]
 
         variants = self.ir_program.sum_type_registry[sum_type.sum_type_name].variants
-        narrowed_type = type_from_name(expr.type_name, self.ir_program.struct_registry, self.ir_program.type_alias_registry)
+        narrowed_type = expr.narrowed_type
         discriminant = variants.index(narrowed_type)
 
         result_temp = self.ir_program.ids.new_temp(Type.BOOL)

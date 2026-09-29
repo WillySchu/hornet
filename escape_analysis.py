@@ -13,13 +13,41 @@ Escaping locations may in turn hold EXT (callee writes)."""
 from typing import Optional, Union
 
 from parser import (
-    ArrayLiteral, Assign, Binary, BoolLiteral, Break, ByteLiteral, Call, Cast,
-    Constant, Continue, DerefAssign, DictLiteral, ExprStmt, Field, FieldAssign,
-    For, ForIn, Function, If, Index, IndexAssign, IsCheck, Node, NoneLiteral,
-    Return, Slice, StringLiteral, Unary, UnaryOp, VarDecl, Variable, While,
+    ArrayLiteral,
+    Assign,
+    Binary,
+    BoolLiteral,
+    Break,
+    ByteLiteral,
+    Call,
+    Cast,
+    Constant,
+    Continue,
+    DerefAssign,
+    DictLiteral,
+    ExprStmt,
+    Field,
+    FieldAssign,
+    For,
+    ForIn,
+    Function,
+    If,
+    Index,
+    IndexAssign,
+    IsCheck,
+    Node,
+    NoneLiteral,
+    Return,
+    Slice,
+    StringLiteral,
+    Unary,
+    VarDecl,
+    Variable,
+    While,
 )
-from semantic import Type, TypeKind, StructInfo
-from ir.utils import type_byte_width
+from ops import UnaryOp
+from typesys import StructInfo, Type, TypeKind
+from typesys import type_byte_width
 
 # Composites larger than this are heap-allocated regardless of escape.
 _STACK_ARRAY_LIMIT_BYTES = 16384
@@ -28,19 +56,6 @@ _STACK_ARRAY_LIMIT_BYTES = 16384
 def is_heap_allocated(t: Type, structs: dict[str, StructInfo], sum_types: dict) -> bool:
     """Size-based promotion only; see IRFunctionBuilder._is_heap_allocated."""
     return t.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM) and type_byte_width(t, structs, sum_types) > _STACK_ARRAY_LIMIT_BYTES
-
-
-def _unwrap_slices(expr: Node) -> Node:
-    while isinstance(expr, Slice):
-        expr = expr.array
-    return expr
-
-
-def root_variable_name(expr: Node) -> Optional[str]:
-    """Name of the Variable under an Index/Slice/Field chain, if any."""
-    while isinstance(expr, (Index, Slice, Field)):
-        expr = expr.base if isinstance(expr, Field) else expr.array
-    return expr.name if isinstance(expr, Variable) else None
 
 
 # id() of a VarDecl/Param/`&S()` Call, or (id(ForIn), binding index).
@@ -55,23 +70,17 @@ def _heap(node: Node) -> tuple:
 
 
 class EscapeAnalyzer:
-    def __init__(self, fn: Function, param_types: list[Type], structs: dict[str, StructInfo], aliases: dict[str, Type], sum_types: dict):
+    def __init__(self, fn: Function, structs: dict[str, StructInfo]):
         self.fn = fn
-        self.param_types = param_types
         self.structs = structs
-        self.aliases = aliases
-        self.sum_types = sum_types
         self.H: dict = {EXT: {EXT}}
         self.esc: set = {EXT}
         self.changed = False
-        self.scopes: list[dict[str, DeclId]] = []
 
     def analyze(self) -> set[DeclId]:
         while True:
             self.changed = False
-            self.scopes = [{}]
             for p in self.fn.params:
-                self.scopes[-1][p.name] = id(p)
                 self._add(id(p), {EXT})
             self.walk_statements(self.fn.body)
             self._close_escapes()
@@ -118,18 +127,6 @@ class EscapeAnalyzer:
                     self.changed = True
                     stack.append(u)
 
-    # -- names
-
-    def declare(self, name: str, decl_id: DeclId) -> None:
-        self.scopes[-1][name] = decl_id
-        self.H.setdefault(decl_id, set())
-
-    def resolve(self, name: str) -> Optional[DeclId]:
-        for scope in reversed(self.scopes):
-            if name in scope:
-                return scope[name]
-        return None
-
     # -- expressions
 
     @staticmethod
@@ -140,8 +137,7 @@ class EscapeAnalyzer:
     def loc(self, expr: Node) -> set:
         """Locations `expr`'s storage may reside in."""
         if isinstance(expr, Variable):
-            d = self.resolve(expr.name)
-            return {d} if d is not None else {EXT}
+            return {expr.decl_id} if expr.decl_id is not None else {EXT}
         if isinstance(expr, Field):
             if self._kind(expr.base) == TypeKind.POINTER:
                 return self.vals(expr.base)
@@ -247,19 +243,14 @@ class EscapeAnalyzer:
             self.walk_statement(stmt)
 
     def _block(self, body) -> None:
-        if body is None:
-            return
-        self.scopes.append({})
-        self.walk_statements(body)
-        self.scopes.pop()
+        if body is not None:
+            self.walk_statements(body)
 
     def walk_statement(self, stmt: Node) -> None:
         if isinstance(stmt, VarDecl):
-            v = self.vals(stmt.init) if stmt.init is not None else set()
-            self.declare(stmt.name, id(stmt))
-            self._add(id(stmt), v)
+            self._add(id(stmt), self.vals(stmt.init) if stmt.init is not None else set())
         elif isinstance(stmt, Assign):
-            self._store(self.loc(Variable(name=stmt.name)), self.vals(stmt.value))
+            self._store({stmt.decl_id} if stmt.decl_id is not None else {EXT}, self.vals(stmt.value))
         elif isinstance(stmt, IndexAssign):
             self._store(self.loc(Index(array=stmt.array, index=stmt.index)), self.vals(stmt.value))
         elif isinstance(stmt, FieldAssign):
@@ -271,7 +262,6 @@ class EscapeAnalyzer:
         elif isinstance(stmt, ExprStmt):
             self.vals(stmt.expr)
         elif isinstance(stmt, If):
-            self.scopes.append({})
             cond = stmt.condition
             if isinstance(cond, IsCheck) and cond.binding_decl is not None:
                 self.walk_statement(cond.binding_decl)
@@ -279,34 +269,27 @@ class EscapeAnalyzer:
                 self.vals(cond)
             self._block(stmt.then_body)
             self._block(stmt.else_body)
-            self.scopes.pop()
         elif isinstance(stmt, While):
             self.vals(stmt.condition)
             self._block(stmt.body)
         elif isinstance(stmt, For):
-            self.scopes.append({})
             self.walk_statement(stmt.init)
             self.vals(stmt.condition)
             self._block(stmt.body)
             self.walk_statement(stmt.increment)
-            self.scopes.pop()
         elif isinstance(stmt, ForIn):
             k = self._kind(stmt.iterable)
             it = self.vals(stmt.iterable)
             elems = it if k == TypeKind.ARRAY else self._contents(it)
-            self.scopes.append({})
-            for i, name in enumerate(stmt.binding_names):
-                self.declare(name, (id(stmt), i))
+            for i in range(len(stmt.binding_names)):
                 self._add((id(stmt), i), elems)
             self.walk_statements(stmt.body)
-            self.scopes.pop()
         elif isinstance(stmt, (Break, Continue)):
             pass
         else:
             self.vals(stmt)
 
 
-def analyze_array_escapes(
-        fn: Function, param_types: list[Type], structs: dict[str, StructInfo], aliases: dict[str, Type], sum_types: dict) -> set[DeclId]:
-    """DeclIds in `fn` whose storage must be heap-allocated."""
-    return EscapeAnalyzer(fn, param_types, structs, aliases, sum_types).analyze()
+def analyze_array_escapes(fn: Function, structs: dict[str, StructInfo]) -> set[DeclId]:
+    """DeclIds in `fn` whose storage must be heap-allocated. Requires semantic analysis."""
+    return EscapeAnalyzer(fn, structs).analyze()

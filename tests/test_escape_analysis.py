@@ -8,6 +8,7 @@ import pytest
 
 import desugar
 import escape_analysis as ea
+import ir.utils as ir_utils
 import parser
 import semantic
 from lexer import lex
@@ -86,23 +87,6 @@ def test_is_heap_allocated_array_str_heap():
 # TODO(will): Test Structs.
 
 
-def test_unwrap_slices():
-    tcs = [
-        {
-            'expr': parser.Variable(name='arr'),
-            'expected': parser.Variable(name='arr'),
-        },
-        {
-            'expr': parser.Slice(array=parser.Variable(name='arr')),
-            'expected': parser.Variable(name='arr'),
-        },
-        # TODO(will): Expand this testing.
-    ]
-
-    for tc in tcs:
-        assert tc['expected'] == ea._unwrap_slices(tc['expr'])
-
-
 def test_root_variable_name():
     tcs = [
         {
@@ -145,13 +129,14 @@ def test_root_variable_name():
         },
     ]
     for tc in tcs:
-        assert tc['name'] == ea.root_variable_name(tc['expr'])
+        root = ir_utils.root_variable(tc['expr'])
+        assert tc['name'] == (root.name if root is not None else None)
 
 
 def test_analyze_array_escapes_empty():
     fn = parser.Function(name='main', return_type=None)
     expected = set()
-    res = ea.analyze_array_escapes(fn, [], {}, {}, {})
+    res = ea.analyze_array_escapes(fn, {})
     assert expected == res
 
 
@@ -173,7 +158,7 @@ def test_analyze_array_escapes_fn_on_uninitialized_slice():
         ],
     )
     expected = set()
-    res = ea.analyze_array_escapes(fn, [], {}, {}, {})
+    res = ea.analyze_array_escapes(fn, {})
     assert expected == res
 
 
@@ -199,7 +184,7 @@ def test_analyze_array_escapes_fn_on_initialized_slice():
         ],
     )
     expected = set()
-    res = ea.analyze_array_escapes(fn, [], {}, {}, {})
+    res = ea.analyze_array_escapes(fn, {})
     assert expected == res
 
 
@@ -225,7 +210,7 @@ def test_analyze_array_escapes_return_initialized_slice():
     )
     _analyze(fn)
     expected = set()
-    res = ea.analyze_array_escapes(fn, [], {}, {}, {})
+    res = ea.analyze_array_escapes(fn, {})
     assert expected == res
 
 
@@ -267,7 +252,7 @@ def test_analyze_array_escapes_return_sliced_array():
         ],
     )
     _analyze(fn)
-    res = ea.analyze_array_escapes(fn, [], {}, {}, {})
+    res = ea.analyze_array_escapes(fn, {})
     assert len(res) == 1
 
 
@@ -283,9 +268,9 @@ def print_ints([]int ints):
     print(ints)
 '''
     ast = parse_and_analyze(source)
-    main_res = ea.analyze_array_escapes(ast.functions[0], [], {}, {}, {})
+    main_res = ea.analyze_array_escapes(ast.functions[0], {})
     assert main_res == set()
-    print_ints_res = ea.analyze_array_escapes(ast.functions[1], [semantic.Type(kind=semantic.TypeKind.SLICE)], {}, {}, {})
+    print_ints_res = ea.analyze_array_escapes(ast.functions[1], {})
     assert print_ints_res == set()
 
 
@@ -311,23 +296,16 @@ def test_test2():
     )
 
     ast = parse_and_analyze(source)
-    sliceints_res = ea.analyze_array_escapes(
-        ast.functions[0],
-        [semantic.Type(kind=semantic.TypeKind.ARRAY, element_type='int')],
-        {},
-        {},
-        {},
-    )
+    sliceints_res = ea.analyze_array_escapes(ast.functions[0], {})
     assert len(sliceints_res) == 1
-    assert set() == ea.analyze_array_escapes(ast.functions[1], [semantic.Type(kind=semantic.TypeKind.INT)], {}, {}, {})
-    assert set() == ea.analyze_array_escapes(ast.functions[2], [], {}, {}, {})
+    assert set() == ea.analyze_array_escapes(ast.functions[1], {})
+    assert set() == ea.analyze_array_escapes(ast.functions[2], {})
 
 
 def _escapes(source: str, fn_index: int = 0) -> tuple:
     ast = parse_and_analyze(source)
     fn = ast.functions[fn_index]
-    param_types = [semantic.type_from_name(p.type, ast.struct_registry, ast.type_alias_registry, sum_types=ast.sum_type_registry) for p in fn.params]
-    return fn, ea.analyze_array_escapes(fn, param_types, ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+    return fn, ea.analyze_array_escapes(fn, ast.struct_registry)
 
 
 def test_store_through_pointer_param_escapes():
@@ -431,7 +409,7 @@ def test_address_of_a_struct_local_returned_directly_escapes():
     )
     fn = ast.functions[0]
     c_decl_id = id(fn.body[0])
-    result = ea.analyze_array_escapes(fn, [], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+    result = ea.analyze_array_escapes(fn, ast.struct_registry)
     assert c_decl_id in result
 
 
@@ -447,7 +425,7 @@ def test_address_of_a_struct_local_never_escapes_stays_out_of_the_result():
     )
     fn = ast.functions[0]
     c_decl_id = id(fn.body[0])
-    result = ea.analyze_array_escapes(fn, [], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+    result = ea.analyze_array_escapes(fn, ast.struct_registry)
     assert c_decl_id not in result
 
 
@@ -462,7 +440,7 @@ def test_address_of_a_scalar_local_returned_directly_is_now_heap_promoted():
     )
     fn = ast.functions[0]
     x_decl_id = id(fn.body[0])
-    result = ea.analyze_array_escapes(fn, [], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+    result = ea.analyze_array_escapes(fn, ast.struct_registry)
     assert x_decl_id in result
 
 
@@ -485,7 +463,7 @@ def test_address_of_a_scalar_local_wrapped_in_a_returned_struct_is_now_heap_prom
     )
     fn = ast.functions[0]
     x_decl_id = id(fn.body[0])
-    result = ea.analyze_array_escapes(fn, [], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+    result = ea.analyze_array_escapes(fn, ast.struct_registry)
     assert x_decl_id in result
 
 
@@ -504,7 +482,7 @@ def test_address_of_a_scalar_local_passed_as_a_call_argument_is_now_heap_promote
     )
     fn = ast.functions[1]  # caller, not useIt
     x_decl_id = id(fn.body[0])
-    result = ea.analyze_array_escapes(fn, [], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+    result = ea.analyze_array_escapes(fn, ast.struct_registry)
     assert x_decl_id in result
 
 
@@ -524,7 +502,7 @@ def test_address_of_a_field_resolves_to_the_containing_struct():
     )
     fn = ast.functions[0]
     s_decl_id = id(fn.body[0])
-    result = ea.analyze_array_escapes(fn, [], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+    result = ea.analyze_array_escapes(fn, ast.struct_registry)
     assert s_decl_id in result
 
 
@@ -537,7 +515,7 @@ def test_address_of_an_element_resolves_to_the_containing_array():
     )
     fn = ast.functions[0]
     arr_decl_id = id(fn.body[0])
-    result = ea.analyze_array_escapes(fn, [], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+    result = ea.analyze_array_escapes(fn, ast.struct_registry)
     assert arr_decl_id in result
 
 
@@ -561,7 +539,7 @@ def test_address_of_a_field_through_an_auto_dereferenced_pointer_does_not_escape
     )
     fn = ast.functions[0]
     p_decl_id = id(fn.params[0])
-    result = ea.analyze_array_escapes(fn, [semantic.Type(semantic.TypeKind.POINTER, element_type=semantic.Type(semantic.TypeKind.STRUCT, struct_name='Circle'))], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+    result = ea.analyze_array_escapes(fn, ast.struct_registry)
     assert p_decl_id not in result
 
 
@@ -583,7 +561,7 @@ def test_address_of_via_reassignment_not_just_var_decl_init():
     )
     fn = ast.functions[0]
     c_decl_id = id(fn.body[0])
-    result = ea.analyze_array_escapes(fn, [], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+    result = ea.analyze_array_escapes(fn, ast.struct_registry)
     assert c_decl_id in result
 
 
@@ -608,6 +586,6 @@ def test_pointer_aliasing_through_a_struct_field_assign_propagates():
     )
     fn = ast.functions[0]
     c_decl_id = id(fn.body[0])
-    result = ea.analyze_array_escapes(fn, [], ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+    result = ea.analyze_array_escapes(fn, ast.struct_registry)
     assert c_decl_id in result
 

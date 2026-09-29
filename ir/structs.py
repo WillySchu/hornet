@@ -2,9 +2,11 @@
 
 from ir.errors import IRError
 from ir.ir import IRBinOp, IRConst, IRStore, IRLoad, IRLocalAddress, IRCall
-from ir.utils import COMPOSITE_KINDS, SUM_TYPE_TAG_WIDTH, type_byte_width, type_of
-from parser import Node, Variable, Field, Index, Call, BinaryOp, Unary, UnaryOp
-from semantic import TypeKind, Type
+from ir.utils import COMPOSITE_KINDS, type_of
+from typesys import SUM_TYPE_TAG_WIDTH, type_byte_width
+from parser import Node, Variable, Field, Index, Call, Unary
+from ops import BinaryOp, UnaryOp
+from typesys import Type, TypeKind
 
 
 class StructsMixin:
@@ -23,15 +25,15 @@ class StructsMixin:
             # Auto-deref a pointer-typed field base.
             return self.gen_expr_ir(expr)
         if isinstance(expr, Variable):
-            var_type = self._local_type(expr.name)
+            var_type = self._local_type(expr)
             if var_type.kind == TypeKind.POINTER:
                 # Auto-deref: use the pointer's value.
                 return self.gen_expr_ir(expr)
-            slot = self._local_slot(expr.name)
+            slot = self._local_slot(expr)
             struct_type = var_type
             slot_addr = self.ir_program.ids.new_temp(Type.INT64)
             ir = [IRLocalAddress(dst=slot_addr, slot=slot)]
-            if self._is_heap_allocated(self._local_decl_id(expr.name), struct_type):
+            if self._is_heap_allocated(self._local_decl_id(expr), struct_type):
                 addr_temp = self.ir_program.ids.new_temp(Type.INT64)
                 ir.append(IRLoad(dst=addr_temp, address=slot_addr))
                 base_addr = addr_temp

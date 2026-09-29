@@ -68,7 +68,7 @@ def _compile_and_run(entry_path: str, tmpdir: str, args: list = None, stdin: str
     merged = merge_programs(entry_program, modules)
     desugar_methods(merged)
     analyze(merged)
-    from codegen.codegen import generate_asm
+    from compile import generate_asm
     asm = generate_asm(merged, platform=ASM_PLATFORM)
 
     asm_path = Path(tmpdir) / "program.s"

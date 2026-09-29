@@ -1,0 +1,119 @@
+"""Semantic types shared by the frontend, IR, and backend."""
+
+from dataclasses import dataclass
+from enum import auto, Enum
+from typing import Dict, List, Optional
+
+
+class TypeKind(Enum):
+    INT = auto()
+    INT8 = auto()
+    UINT8 = auto()
+    INT64 = auto()
+    BOOL = auto()
+    STR = auto()
+    ARRAY = auto()
+    SLICE = auto()
+    STRUCT = auto()
+    SUM = auto()
+    POINTER = auto()
+    DICT = auto()
+    VOID = auto()
+    NONE = auto()
+
+
+@dataclass(frozen=True)
+class Type:
+    """A type. Scalars use kind alone; ARRAY/SLICE/POINTER use element_type (ARRAY also size);
+    DICT uses key_type and element_type (value); STRUCT/SUM are nominal by name.
+    Frozen for structural equality and hashing.
+    """
+    kind: TypeKind
+    element_type: Optional['Type'] = None  # ARRAY/SLICE/POINTER pointee; DICT value
+    size: Optional[int] = None  # ARRAY only
+    struct_name: Optional[str] = None  # STRUCT only
+    sum_type_name: Optional[str] = None  # SUM only
+    key_type: Optional['Type'] = None  # DICT only
+
+    def __str__(self) -> str:
+        if self.kind == TypeKind.ARRAY:
+            return f"[{self.size}]{self.element_type}"
+        if self.kind == TypeKind.SLICE:
+            return f"[]{self.element_type}"
+        if self.kind == TypeKind.STRUCT:
+            return self.struct_name
+        if self.kind == TypeKind.SUM:
+            return self.sum_type_name
+        if self.kind == TypeKind.POINTER:
+            return f"*{self.element_type}"
+        if self.kind == TypeKind.DICT:
+            return f"dict[{self.key_type}]{self.element_type}"
+        return self.kind.name.lower()
+
+
+Type.INT = Type(TypeKind.INT)
+Type.INT8 = Type(TypeKind.INT8)
+Type.UINT8 = Type(TypeKind.UINT8)
+Type.INT64 = Type(TypeKind.INT64)
+Type.BOOL = Type(TypeKind.BOOL)
+Type.STR = Type(TypeKind.STR)
+# VOID (no declared return) and NONE (`none`) have no source spelling.
+Type.VOID = Type(TypeKind.VOID)
+Type.NONE = Type(TypeKind.NONE)
+
+
+@dataclass
+class StructInfo:
+    """A struct's name and ordered fields; order fixes layout."""
+    name: str
+    fields: Dict[str, Type]
+
+
+@dataclass
+class SumTypeInfo:
+    """A sum type's name and ordered variants; index is the discriminant. Variants are structs, scalars, or str."""
+    name: str
+    variants: List[Type]
+
+
+# Sum layout: 4-byte tag, then the largest variant's payload.
+SUM_TYPE_TAG_WIDTH = 4
+
+
+def type_byte_width(t: Type, structs: dict[str, StructInfo], sum_types: dict) -> int:
+    """Storage size of `t` in bytes."""
+    if t == Type.INT8 or t == Type.UINT8:
+        return 1
+    if t == Type.INT64:
+        return 8
+    if t.kind == TypeKind.ARRAY:
+        return t.size * type_byte_width(t.element_type, structs, sum_types)
+    if t.kind == TypeKind.SLICE:
+        return 24
+    if t.kind == TypeKind.STR:
+        return 16  # {ptr, len}
+    if t.kind == TypeKind.STRUCT:
+        return sum(type_byte_width(field_type, structs, sum_types) for field_type in structs[t.struct_name].fields.values())
+    if t.kind == TypeKind.SUM:
+        variant_widths = (
+            type_byte_width(variant_type, structs, sum_types)
+            for variant_type in sum_types[t.sum_type_name].variants
+        )
+        return SUM_TYPE_TAG_WIDTH + max(variant_widths)
+    if t.kind == TypeKind.POINTER:
+        return 8  # pointer
+    if t.kind == TypeKind.DICT:
+        return 24  # {buckets_ptr, count, capacity}
+    return 4  # INT, BOOL
+
+
+def is_wide_type(t: Type) -> bool:
+    """Whether `t` needs 8-byte moves (int64, pointer)."""
+    return t in (Type.INT64,) or t.kind == TypeKind.POINTER
+
+
+def leaf_type(t: Type) -> Type:
+    """Innermost non-array element type."""
+    while t.kind == TypeKind.ARRAY:
+        t = t.element_type
+    return t

@@ -1,9 +1,4 @@
-"""Tests for ir/utils.py's own semantic-level helpers (type_byte_
-width, leaf_type, type_of) -- split out of tests/codegen/test_utils.py
-alongside the module split itself (see ir/utils.py's own module
-docstring for why): codegen/utils.py's own remaining, machine-level
-half (as_byte_register/as_qword_register/escape_for_asciz) keeps its
-own tests there."""
+"""Tests for ir/utils.py and the typesys layout helpers."""
 
 import re
 
@@ -12,7 +7,8 @@ import pytest
 import parser
 import semantic
 from ir.errors import IRError
-from ir.utils import COMPOSITE_KINDS, SUM_TYPE_TAG_WIDTH, leaf_type, type_byte_width, type_of
+from ir.utils import COMPOSITE_KINDS, type_of
+from typesys import SUM_TYPE_TAG_WIDTH, leaf_type, type_byte_width
 
 
 def test_type_byte_width_int():

@@ -2,7 +2,7 @@
 
 from codegen.assembly_ast import Operand, Register
 from codegen.errors import CodegenError
-from parser import BinaryOp
+from ops import BinaryOp
 
 
 # BinaryOp -> setcc suffix for Cmp(src=right, dst=left).

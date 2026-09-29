@@ -25,13 +25,9 @@ from codegen.assembly_ast import (
 from codegen.calling_convention import CALLEE_SAVED_SCRATCH_REGISTERS
 from codegen.emitter import Emitter
 from ir.ir import IRCall, IRFunction, IRProgram
-from ir.builder import IRFunctionBuilder
-from ir.program_builder import build_ir_program
-from optimize.optimizer import optimize
 from codegen.ir_lowering import InstructionSelector
 from codegen.register_allocator import allocate_registers
 from codegen.scalars_lowering import ScalarsLoweringMixin
-from parser import Function, Parser, Program
 
 
 # IR -> assembly AST
@@ -148,9 +144,6 @@ class CodeGenerator(
 
 # Entry points
 
-def generate_asm(program: Program, platform: str = 'macos') -> str:
-    """Build IR, optimize, lower, emit."""
-    ir_program = build_ir_program(program)
-    ir_program = optimize(ir_program)
-    asm_program = CodeGenerator().generate(ir_program)
-    return Emitter(platform=platform).emit(asm_program)
+def lower_to_asm(ir_program: IRProgram, platform: str = 'macos') -> str:
+    """Lower an optimized IRProgram to assembly text."""
+    return Emitter(platform=platform).emit(CodeGenerator().generate(ir_program))

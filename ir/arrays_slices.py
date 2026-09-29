@@ -20,21 +20,35 @@ from ir.ir import (
     IRStaticDataAddress,
     IRStore, Temp,
 )
-from ir.utils import COMPOSITE_KINDS, SUM_TYPE_TAG_WIDTH, is_composite_addressable, type_of, type_byte_width, for_in_binding_types
-from parser import Node, ArrayLiteral, Call, DictLiteral, Field, ForIn, Index, Slice, Variable, NoneLiteral, Binary, BinaryOp, Unary, UnaryOp
-from semantic import TypeKind, Type
-from escape_analysis import root_variable_name
+from ir.utils import COMPOSITE_KINDS, is_composite_addressable, root_variable, type_of
+from typesys import SUM_TYPE_TAG_WIDTH, type_byte_width
+from parser import (
+    Node,
+    ArrayLiteral,
+    Call,
+    DictLiteral,
+    Field,
+    ForIn,
+    Index,
+    Slice,
+    Variable,
+    NoneLiteral,
+    Binary,
+    Unary,
+)
+from ops import BinaryOp, UnaryOp
+from typesys import Type, TypeKind
 
 
 class ArraysSlicesMixin:
     def _ir_array_address(self, expr: Node):
         """Address of an array-typed expression."""
         if isinstance(expr, Variable):
-            slot = self._local_slot(expr.name)
-            array_type = self._local_type(expr.name)
+            slot = self._local_slot(expr)
+            array_type = self._local_type(expr)
             slot_addr = self.ir_program.ids.new_temp(Type.INT64)
             ir = [IRLocalAddress(dst=slot_addr, slot=slot)]
-            if self._is_heap_allocated(self._local_decl_id(expr.name), array_type):
+            if self._is_heap_allocated(self._local_decl_id(expr), array_type):
                 addr_temp = self.ir_program.ids.new_temp(Type.INT64)
                 ir.append(IRLoad(dst=addr_temp, address=slot_addr))
                 base_addr = addr_temp
@@ -60,15 +74,15 @@ class ArraysSlicesMixin:
     def _ir_slice_address(self, expr: Node):
         """Address of a slice descriptor; slice variables are never heap-allocated."""
         if isinstance(expr, Variable):
-            slot_type = self._local_type(expr.name)
+            slot_type = self._local_type(expr)
             if slot_type.kind != TypeKind.SUM:
-                slot = self._local_slot(expr.name)
+                slot = self._local_slot(expr)
                 addr_temp = self.ir_program.ids.new_temp(Type.INT64)
                 return [IRLocalAddress(dst=addr_temp, slot=slot)], addr_temp
-            slot = self._local_slot(expr.name)
+            slot = self._local_slot(expr)
             slot_addr = self.ir_program.ids.new_temp(Type.INT64)
             ir = [IRLocalAddress(dst=slot_addr, slot=slot)]
-            if self._is_heap_allocated(self._local_decl_id(expr.name), slot_type):
+            if self._is_heap_allocated(self._local_decl_id(expr), slot_type):
                 addr_temp = self.ir_program.ids.new_temp(Type.INT64)
                 ir.append(IRLoad(dst=addr_temp, address=slot_addr))
                 base_addr = addr_temp
@@ -514,7 +528,7 @@ class ArraysSlicesMixin:
                 TypeKind.SUM: self._ir_struct_address,
                 TypeKind.STR: self._ir_str_address,
             }[binding_type.kind]
-            dst_ir, dst_addr = address_of(Variable(name=stmt.binding_names[binding_index]))
+            dst_ir, dst_addr = address_of(Variable(name=stmt.binding_names[binding_index], decl_id=decl_id))
             ir.extend(dst_ir)
             ir.append(IRCopy(dst_address=dst_addr, src_address=source_addr, value_type=binding_type))
             return ir
@@ -545,16 +559,16 @@ class ArraysSlicesMixin:
         recheck_base = base_addr
         if is_slice and not isinstance(stmt.iterable, ArrayLiteral):
             if isinstance(stmt.iterable, Slice):
-                root_name = root_variable_name(stmt.iterable)
-                if root_name is None:
+                root = root_variable(stmt.iterable)
+                if root is None:
                     raise IRError(
-                        f"root_variable_name returned None for a Slice-"
+                        f"root_variable returned None for a Slice-"
                         f"shaped 'for ... in' iterable ({stmt.iterable!r}) "
                         f"-- expected to always succeed, semantic.py's own "
                         f"analyze_for_in already having confirmed a real "
                         f"root variable exists before this method ever runs")
-                if self._local_type(root_name).kind == TypeKind.SLICE:
-                    descriptor_expr = Variable(name=root_name)
+                if self._local_type(root).kind == TypeKind.SLICE:
+                    descriptor_expr = root
             else:
                 descriptor_expr = stmt.iterable
 
@@ -580,8 +594,7 @@ class ArraysSlicesMixin:
         continue_label = self.ir_program.ids.new_label("for_in_continue")
         end_label = self.ir_program.ids.new_label("for_in_end")
 
-        self._push_scope()
-        binding_types = for_in_binding_types(stmt, iterable_type)
+        binding_types = stmt.binding_types
         slots = [self._bind_for_in_binding(stmt, idx, bt, ir_fn) for idx, bt in enumerate(binding_types)]
 
         ir = ir + [
@@ -636,7 +649,6 @@ class ArraysSlicesMixin:
         ir.append(IRMove(dst=i, src=next_i))
         ir.append(IRJump(start_label))
         ir.append(IRLabel(end_label))
-        self._pop_scope()
         return ir
 
     def _ir_write_composite_value_into(self, dst_address, value_expr: Node, value_type: Type):

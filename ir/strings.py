@@ -4,9 +4,21 @@ Copies copy the descriptor only. Also print and its runtime type descriptors.
 
 from ir.errors import IRError
 from ir.ir import IRBinOp, IRBoundsCheck, IRBranch, IRConst, IRCall, IRJump, IRLabel, IRSliceBoundsCheck, IRStaticDataAddress, IRLocalAddress, IRLoad, IRMove, IRStore
-from ir.utils import SUM_TYPE_TAG_WIDTH, type_byte_width, type_of
-from parser import Call, Binary, Field, Index, Node, Slice, StringLiteral, Unary, UnaryOp, Variable, BinaryOp
-from semantic import Type, TypeKind
+from ir.utils import type_of
+from typesys import SUM_TYPE_TAG_WIDTH, type_byte_width
+from parser import (
+    Call,
+    Binary,
+    Field,
+    Index,
+    Node,
+    Slice,
+    StringLiteral,
+    Unary,
+    Variable,
+)
+from ops import BinaryOp, UnaryOp
+from typesys import Type, TypeKind
 
 
 # Kind tags for print's type descriptors; source of truth for runtime/generate_typedesc_header.py.
@@ -99,11 +111,11 @@ class StringsMixin:
     def _ir_str_address(self, expr: Node):
         """Address of a str descriptor."""
         if isinstance(expr, Variable):
-            slot_type = self._local_type(expr.name)
-            slot = self._local_slot(expr.name)
+            slot_type = self._local_type(expr)
+            slot = self._local_slot(expr)
             slot_addr = self.ir_program.ids.new_temp(Type.INT64)
             ir = [IRLocalAddress(dst=slot_addr, slot=slot)]
-            if self._is_heap_allocated(self._local_decl_id(expr.name), slot_type):
+            if self._is_heap_allocated(self._local_decl_id(expr), slot_type):
                 addr_temp = self.ir_program.ids.new_temp(Type.INT64)
                 ir.append(IRLoad(dst=addr_temp, address=slot_addr))
                 base_addr = addr_temp

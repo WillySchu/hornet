@@ -5,9 +5,20 @@ Hashing, probing, and growth live in runtime.c.
 
 from ir.errors import IRError
 from ir.ir import IRBinOp, IRBranch, IRCall, IRConst, IRJump, IRLabel, IRLoad, IRLocalAddress, IRMove, IRStaticDataAddress, IRStore
-from ir.utils import COMPOSITE_KINDS, type_byte_width, type_of, for_in_binding_types
-from parser import BinaryOp, Call, DictLiteral, Field, ForIn, Index, Node, Unary, UnaryOp, Variable
-from semantic import Type, TypeKind
+from ir.utils import COMPOSITE_KINDS, type_of
+from typesys import type_byte_width
+from parser import (
+    Call,
+    DictLiteral,
+    Field,
+    ForIn,
+    Index,
+    Node,
+    Unary,
+    Variable,
+)
+from ops import BinaryOp, UnaryOp
+from typesys import Type, TypeKind
 
 
 def _next_pow2_at_least(n: int) -> int:
@@ -22,11 +33,11 @@ class DictsMixin:
     def _ir_dict_address(self, expr: Node):
         """Address of a dict descriptor."""
         if isinstance(expr, Variable):
-            slot_type = self._local_type(expr.name)
-            slot = self._local_slot(expr.name)
+            slot_type = self._local_type(expr)
+            slot = self._local_slot(expr)
             addr_temp = self.ir_program.ids.new_temp(Type.INT64)
             ir = [IRLocalAddress(dst=addr_temp, slot=slot)]
-            if self._is_heap_allocated(self._local_decl_id(expr.name), slot_type):
+            if self._is_heap_allocated(self._local_decl_id(expr), slot_type):
                 loaded = self.ir_program.ids.new_temp(Type.INT64)
                 ir.append(IRLoad(dst=loaded, address=addr_temp))
                 return ir, loaded
@@ -366,8 +377,7 @@ class DictsMixin:
         continue_label = self.ir_program.ids.new_label("for_in_continue")
         end_label = self.ir_program.ids.new_label("for_in_end")
 
-        self._push_scope()
-        binding_types = for_in_binding_types(stmt, dict_type)
+        binding_types = stmt.binding_types
         for idx, binding_type in enumerate(binding_types):
             self._bind_for_in_binding(stmt, idx, binding_type, ir_fn)
 
@@ -433,5 +443,4 @@ class DictsMixin:
         ir.append(IRMove(dst=i, src=next_i))
         ir.append(IRJump(start_label))
         ir.append(IRLabel(end_label))
-        self._pop_scope()
         return ir

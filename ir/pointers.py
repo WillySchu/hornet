@@ -2,9 +2,11 @@
 
 from ir.errors import IRError
 from ir.ir import IRBinOp, IRConst, IRCopy, IRLoad, IRLocalAddress, IRStore, IRValue
-from ir.utils import COMPOSITE_KINDS, SUM_TYPE_TAG_WIDTH, is_composite_addressable, type_of
-from parser import BinaryOp, Call, DerefAssign, Field, Index, Unary, Variable
-from semantic import Type, TypeKind
+from ir.utils import COMPOSITE_KINDS, is_composite_addressable, type_of
+from typesys import SUM_TYPE_TAG_WIDTH
+from parser import Call, DerefAssign, Field, Index, Unary, Variable
+from ops import BinaryOp
+from typesys import Type, TypeKind
 
 
 class PointersMixin:
@@ -43,12 +45,11 @@ class PointersMixin:
                 f"Variable -- semantic.py's own check_unary should have already "
                 f"rejected this before real-IR generation ever runs"
             )
-        name = expr.operand.name
-        slot = self._local_slot(name)
-        slot_type = self._local_type(name)
+        slot = self._local_slot(expr.operand)
+        slot_type = self._local_type(expr.operand)
         slot_addr = self.ir_program.ids.new_temp(type_of(expr))
         ir = [IRLocalAddress(dst=slot_addr, slot=slot)]
-        if self._is_heap_allocated(self._local_decl_id(name), slot_type):
+        if self._is_heap_allocated(self._local_decl_id(expr.operand), slot_type):
             addr_temp = self.ir_program.ids.new_temp(type_of(expr))
             ir.append(IRLoad(dst=addr_temp, address=slot_addr))
             base_addr = addr_temp

@@ -2,14 +2,21 @@
 
 from ir.errors import IRError
 from ir.ir import (
-    IRBinOp, IRValue, IRConst, IRLoad, IRMove, IRJump, IRLabel, IRStaticDataAddress, IRUnOp, IRCast
+    IRBinOp,
+    IRValue,
+    IRConst,
+    IRLoad,
+    IRMove,
+    IRJump,
+    IRLabel,
+    IRUnOp,
+    IRCast,
 )
 from ir.utils import COMPOSITE_KINDS, is_composite_addressable, type_of
 from typing import Optional
 from parser import (
     ArrayLiteral,
     Binary,
-    BinaryOp,
     BoolLiteral,
     ByteLiteral,
     Call,
@@ -20,12 +27,11 @@ from parser import (
     IsCheck,
     Node,
     NoneLiteral,
-    StringLiteral,
     Unary,
-    UnaryOp,
     Variable,
 )
-from semantic import Type, TypeKind
+from ops import BinaryOp, UnaryOp
+from typesys import Type, TypeKind
 
 
 class DispatchMixin:
@@ -38,15 +44,15 @@ class DispatchMixin:
         if isinstance(expr, BoolLiteral):
             return [], IRConst(1 if expr.value else 0, Type.BOOL)
         if isinstance(expr, Variable):
-            slot_type = self._local_type(expr.name)
+            slot_type = self._local_type(expr)
             if slot_type.kind == TypeKind.SUM and expr.resolved_type is not None and expr.resolved_type != slot_type:
                 # A narrowed sum variable's Temp holds the whole sum; load the payload through its address.
                 addr_ir, addr_value = self._ir_struct_address(expr)
                 return self._ir_load(addr_ir, addr_value, expr.resolved_type)
-            if self._is_heap_allocated(self._local_decl_id(expr.name), slot_type):
+            if self._is_heap_allocated(self._local_decl_id(expr), slot_type):
                 # Heap-promoted: the Temp holds a pointer.
-                return self._ir_load([], self._local_temp(expr.name), slot_type)
-            return [], self._local_temp(expr.name)
+                return self._ir_load([], self._local_temp(expr), slot_type)
+            return [], self._local_temp(expr)
         if isinstance(expr, Index) and type_of(expr.array).kind == TypeKind.STR:
             # str indexing, checked before the generic scalar index.
             result = self._ir_str_index_into(expr)

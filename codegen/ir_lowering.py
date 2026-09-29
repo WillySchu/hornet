@@ -44,9 +44,9 @@ from ir.ir import (
     IRValue,
     Temp,
 )
-from ir.utils import is_wide_type, type_byte_width
+from typesys import is_wide_type, type_byte_width
 from codegen.utils import as_qword_register, ARG_REGISTERS_32, ARG_REGISTERS_64
-from semantic import Type
+from typesys import Type
 
 
 class InstructionSelector:

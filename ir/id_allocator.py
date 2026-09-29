@@ -3,7 +3,7 @@
 from typing import Dict
 
 from ir.ir import IRFunction, Temp
-from semantic import Type
+from typesys import Type
 
 
 class IdAllocator:

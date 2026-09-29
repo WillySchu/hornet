@@ -17,8 +17,8 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
-- calling\_convention.py's total\_arg\_slots is never called.
 - hornet\_panic currently writes to stdout, not stderr.
+- Add symbol table to replace IR builder's use if id() as declaration keys.
 - Pointer receivers for methods.
 - Dicts as sum types.
 - `in` checking for strings.
