@@ -9920,27 +9920,57 @@ class TestDicts:
             "making a\nmaking b\nnot equal\n",
         )
 
-    def test_dict_literal_as_a_direct_equality_operand_is_a_known_separate_gap(self):
-        """`dict[str]int{...} == d` -- a DIRECT literal operand, not
-        routed through a local variable first -- isn't supported: the
-        same, already-tracked _ir_write_composite_value_into gap
-        dict-literal-as-struct-field-argument and dict-literal-as-
-        array-element share -- but here _ir_composite_operand_address
-        (unlike _ir_call_arguments) has no dict-literal case wired in
-        at all yet, not merely a materializer left unbuilt, so this
-        one's own fix is still open. Comparing an already-declared
-        dict variable, as every other test in this section does,
-        remains the correct workaround."""
-        ast = _parse(
+    def test_dict_literal_as_a_direct_equality_operand_now_works(self):
+        """Was a pinned, known-separate gap -- now fixed by wiring the
+        already-existing _ir_materialize_dict_literal (built for the
+        call-argument fix) into _ir_composite_operand_address's own
+        dispatch, one new isinstance(expr, DictLiteral) case. Per
+        dict equality's own confirmed "otherwise false" design (see
+        _ir_dict_equal's own docstring), the comparison itself is
+        still always false/true -- this only means a DIRECT literal
+        operand no longer crashes getting there."""
+        assert_program_stdout(
             "def int main():\n"
             "    dict[str]int d = dict[str]int{'a': 1}\n"
             "    if dict[str]int{'a': 1} == d:\n"
-            "        print('equal')\n"
-            "    return 0\n"
+            "        print('equal (WRONG)')\n"
+            "    if dict[str]int{'a': 1} != d:\n"
+            "        print('not equal')\n"
+            "    return 0\n",
+            "not equal\n",
         )
-        analyze(ast)
-        with pytest.raises(IRError, match="DICT equality operand"):
-            generate_asm(ast, platform=ASM_PLATFORM)
+
+    def test_two_dict_literals_as_both_equality_operands(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    if dict[str]int{'a': 1} == dict[str]int{'a': 1}:\n"
+            "        print('equal (WRONG)')\n"
+            "    else:\n"
+            "        print('not equal')\n"
+            "    return 0\n",
+            "not equal\n",
+        )
+
+    def test_dict_literal_equality_operand_still_evaluates_its_own_entries_for_side_effects(self):
+        """A nested call inside the literal's own entry still runs,
+        even though the comparison result itself never uses it --
+        the identical side-effect-preservation guarantee _ir_dict_
+        equal already gives an ordinary dict-variable operand,
+        extended here to a direct literal operand's own entries."""
+        assert_program_stdout(
+            "def int make_value():\n"
+            "    print('computing value')\n"
+            "    return 1\n"
+            "\n"
+            "def int main():\n"
+            "    if dict[str]int{'a': make_value()} == dict[str]int{'b': 2}:\n"
+            "        print('equal (WRONG)')\n"
+            "    else:\n"
+            "        print('not equal')\n"
+            "    return 0\n",
+            "computing value\nnot equal\n",
+        )
+
 
     # -- dict literal as a nested value -----------------------------------
 

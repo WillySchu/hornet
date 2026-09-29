@@ -21,6 +21,7 @@ from parser import (
     Call,
     Cast,
     Constant,
+    DictLiteral,
     Field,
     Index,
     IsCheck,
@@ -247,19 +248,24 @@ class DispatchMixin:
         In dispatch order: a Variable/Field/Index (an existing
         address, via _ir_array_address/_ir_dict_address/_ir_struct_
         address); a bare bracketed-list literal (ARRAY only -- _ir_
-        materialize_array_literal; a struct or dict literal can never
-        be compared this way -- semantic.py rejects a struct literal
-        as a Binary operand outright, and dict equality's own
-        "otherwise false" design never needs a dict literal's own
-        address at all, just its side effects, see _ir_dict_equal's
-        own docstring); an ordinary composite-returning Call (_ir_
-        materialize_composite_call, shared by all three kinds)."""
+        materialize_array_literal; a struct literal can never be
+        compared this way -- semantic.py rejects a struct literal as
+        a Binary operand outright); a DIRECT dict literal (DICT only
+        -- _ir_materialize_dict_literal, the identical materializer
+        _ir_call_arguments' own DICT case already uses -- feeding
+        _ir_dict_equal's own "otherwise false" design an address it
+        never actually reads from, but still needs for its own side
+        effects, e.g. a nested entry that's itself a call); an
+        ordinary composite-returning Call (_ir_materialize_composite_
+        call, shared by all three kinds)."""
         if is_composite_addressable(expr):
             address_fn = {TypeKind.ARRAY: self._ir_array_address, TypeKind.DICT: self._ir_dict_address}.get(
                 value_type.kind, self._ir_struct_address)
             return address_fn(expr)
         if value_type.kind == TypeKind.ARRAY and isinstance(expr, ArrayLiteral):
             return self._ir_materialize_array_literal(expr)
+        if value_type.kind == TypeKind.DICT and isinstance(expr, DictLiteral):
+            return self._ir_materialize_dict_literal(expr)
         if self._is_ordinary_composite_call(expr):
             return self._ir_materialize_composite_call(expr, value_type)
         return None
