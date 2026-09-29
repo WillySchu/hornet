@@ -2498,8 +2498,16 @@ class SemanticAnalyzer:
         auto-deref, mirroring this one for the identical reason: `.`
         should mean the same thing whether it's a field or a method),
         go through code that ultimately resolves a struct-typed base
-        this same way."""
-        base_type = self.check_expr(base_expr)
+        this same way.
+
+        _check_expr_allowing_struct_literal, not plain check_expr:
+        `Circle(5).radius` (and, for the FieldAssign caller, `Circle(5)
+        .radius = 10` -- pointless, since the freshly-constructed
+        literal is discarded immediately after, but harmless, and not
+        worth excluding separately from this one, shared check) both
+        need it. ir/structs.py's own _ir_struct_address needs the
+        matching IR-building case -- see its own docstring."""
+        base_type = self._check_expr_allowing_struct_literal(base_expr)
         if base_type.kind == TypeKind.POINTER and base_type.element_type.kind == TypeKind.STRUCT:
             base_type = base_type.element_type
         if base_type.kind != TypeKind.STRUCT:
@@ -2534,12 +2542,16 @@ class SemanticAnalyzer:
         position that allows a struct literal directly: analyze_var_
         decl/analyze_assign/analyze_index_assign/analyze_field_assign
         (via the shared helper), check_call's own argument loop,
-        analyze_return, check_array_literal's own element loop, and
-        this method's own argument loop recursively. Every OTHER
-        position (a Binary operand, a Field-access base, ...) funnels
+        analyze_return, check_array_literal's own element loop,
+        _check_struct_and_field's own base (shared by check_field and
+        analyze_field_assign), _check_method_call's own receiver,
+        check_binary's own two operands, and this method's own
+        argument loop recursively. Every OTHER position (an Index/
+        Slice base, a Cast's own expression, ...) still funnels
         through check_expr's ordinary dispatch into check_call, which
-        rejects a struct-name Call -- the entire mechanism keeping
-        struct literals scoped narrower than an ordinary call.
+        rejects a struct-name Call -- the mechanism keeping struct
+        literals scoped narrower than an ordinary call, for whatever
+        positions haven't individually been given this same allowance.
         Annotates expr.resolved_type directly, bypassing check_expr's
         own dispatch and its annotation step.
 
@@ -2622,14 +2634,40 @@ class SemanticAnalyzer:
         the matching mangled function (see Call's own docstring in
         parser.py for why an in-place rewrite).
 
-        The receiver's type is checked via plain check_expr, not
-        _check_expr_allowing_struct_literal -- a struct literal used
-        directly as a receiver is already rejected by check_call's own
-        guard; a struct-returning call as a receiver type-checks fine
-        here but is later rejected by codegen's gen_struct_address_into
-        (the same "assign to a variable first" restriction several
-        other unnamed-struct positions already have), gotten for free
-        by simply not special-casing the receiver.
+        The receiver's type is checked via _check_expr_allowing_
+        struct_literal, not plain check_expr: `Circle(5).area()` needs
+        the identical allowance check_field's own base already has
+        (see _check_struct_and_field's own docstring) -- a method
+        receiver and a field-access base are the same kind of position
+        semantically, `.` meaning the same thing either way, so
+        neither should be more restrictive than the other. desugar_
+        methods has already given the matching mangled function's own
+        receiver parameter a plain, VALUE struct type (never a
+        pointer -- see MethodDef's own docstring in parser.py), so a
+        struct literal's own type, always a plain struct value itself,
+        lines up directly with no further handling needed here. ir/
+        scalars.py's own _ir_call_arguments already had the matching
+        IR-building case before this method's own restriction was even
+        lifted: a struct-literal Call as a STRUCT-typed argument
+        already routes through _ir_materialize_struct_literal, and by
+        the time IR-building ever sees this call, the receiver is
+        already just expr.args[0] of an ordinary Call -- no separate
+        "method receiver" concept survives past this rewrite at all,
+        so no separate IR-building change was needed for this specific
+        gap.
+
+        An ordinary, struct-RETURNING call as a receiver (`makeCircle()
+        .area()`, distinct from a struct LITERAL one) was never
+        restricted by this method at all -- confirmed directly: it
+        already compiles and runs correctly. An earlier version of
+        this docstring claimed otherwise, citing a codegen.py-era
+        function (gen_struct_address_into) that no longer exists
+        anywhere in this codebase; that claim was already stale before
+        this struct-literal gap was ever closed, since ir/structs.py's
+        own _ir_struct_address already handles an ordinary composite-
+        returning Call as a base, via _is_ordinary_composite_call --
+        this correction belongs here regardless of the change just
+        made above.
 
         Argument checking mirrors check_call's ordinary-function loop:
         exact count, each checked via _check_expr_allowing_struct_
@@ -2658,7 +2696,7 @@ class SemanticAnalyzer:
                 f"supported for method calls",
                 expr,
             )
-        receiver_type = self.check_expr(expr.receiver)
+        receiver_type = self._check_expr_allowing_struct_literal(expr.receiver)
         if receiver_type.kind == TypeKind.POINTER and receiver_type.element_type.kind == TypeKind.STRUCT:
             # Go-style auto-deref, mirroring _check_struct_and_field's
             # own identical decision for field access -- `.` means the
@@ -2712,13 +2750,16 @@ class SemanticAnalyzer:
             raise SemanticError(
                 f"'{expr.name}(...)' is a struct literal, which is only "
                 f"allowed as a variable's initializer, a plain "
-                f"assignment's value, a direct function-call argument, "
-                f"a direct return value, an array literal's own "
+                f"assignment's value, a direct function-call or "
+                f"method-call argument, a method-call receiver, a "
+                f"direct return value, an array literal's own "
                 f"element, an IndexAssign's own element, a "
-                f"FieldAssign's own field, or a bare statement -- not "
-                f"most other kinds of expressions (a Binary operand, a "
-                f"Field-access base, ...); assign it to a variable "
-                f"first if you need it in one of those positions",
+                f"FieldAssign's own field or base, a field-access "
+                f"base, a binary operand, or a bare statement -- not "
+                f"most other kinds of expressions (an Index/Slice "
+                f"base, a Cast's own expression, ...); assign it to a "
+                f"variable first if you need it in one of those "
+                f"positions",
                 expr,
             )
         if expr.kwargs is not None:
@@ -3202,8 +3243,23 @@ class SemanticAnalyzer:
         return True  # INT, BOOL, STR, POINTER
 
     def check_binary(self, expr: Binary) -> Type:
-        left_type = self.check_expr(expr.left)
-        right_type = self.check_expr(expr.right)
+        # _check_expr_allowing_struct_literal, not plain check_expr,
+        # for BOTH operands: `Circle(5) == c` needs it on the left,
+        # `c == Circle(5)` on the right, and either side could equally
+        # be the struct literal in a chain of comparisons -- no fixed
+        # "target" side the way a VarDecl/Assign/argument's own
+        # declared type gives one. Only EQUAL/NOT_EQUAL ever do
+        # anything meaningful with a struct-typed operand at all (see
+        # _is_comparable_type); every other operator's own, existing
+        # type rules below already reject one regardless of whether
+        # it's a literal or an ordinary struct-typed variable, so
+        # widening both operands here can't let anything new and
+        # wrong through for ADD/SUBTRACT/AND/OR/... -- it only ever
+        # matters for the one pair of operators it's meant for. ir/
+        # dispatch.py's own _ir_composite_operand_address needs the
+        # matching IR-building case -- see its own docstring.
+        left_type = self._check_expr_allowing_struct_literal(expr.left)
+        right_type = self._check_expr_allowing_struct_literal(expr.right)
         op = expr.op
 
         if op == BinaryOp.ADD:

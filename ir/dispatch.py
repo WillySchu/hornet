@@ -247,9 +247,10 @@ class DispatchMixin:
         In dispatch order: a Variable/Field/Index (an existing
         address, via _ir_array_address/_ir_struct_address); a bare
         bracketed-list literal (ARRAY only -- _ir_materialize_array_
-        literal; a struct literal can never be compared this way at
-        all, since semantic.py rejects it as a Binary operand
-        outright); an ordinary composite-returning Call (_ir_
+        literal); a STRUCT-typed struct-literal Call (_ir_materialize_
+        struct_literal -- `Circle(5) == c`, semantic.py's own
+        check_binary having lifted the restriction this docstring used
+        to cite here); an ordinary composite-returning Call (_ir_
         materialize_composite_call, shared by both ARRAY and
         STRUCT)."""
         if is_composite_addressable(expr):
@@ -257,6 +258,8 @@ class DispatchMixin:
             return address_fn(expr)
         if value_type.kind == TypeKind.ARRAY and isinstance(expr, ArrayLiteral):
             return self._ir_materialize_array_literal(expr)
+        if value_type.kind == TypeKind.STRUCT and isinstance(expr, Call) and expr.name in self.ir_program.struct_registry:
+            return self._ir_materialize_struct_literal(expr)
         if self._is_ordinary_composite_call(expr):
             return self._ir_materialize_composite_call(expr, value_type)
         return None
@@ -269,12 +272,13 @@ class DispatchMixin:
         concat/_ir_string_compare), array/struct equality (_ir_
         composite_operand_address/_ir_composite_equal, for a
         Variable/Field/Index, a bare bracketed-list literal (ARRAY
-        only), or an ordinary composite-returning Call, in any
-        combination on either side -- a bare dict-vs-dict comparison
-        has no equivalent case at all: semantic.py's own check_binary
-        rejects it outright, mirroring slice's own rejection, so a
-        dict-typed operand reaching here is always paired with none),
-        or the ordinary arithmetic/comparison case (_ir_binary)."""
+        only), a struct-literal Call (STRUCT only), or an ordinary
+        composite-returning Call, in any combination on either side --
+        a bare dict-vs-dict comparison has no equivalent case at all:
+        semantic.py's own check_binary rejects it outright, mirroring
+        slice's own rejection, so a dict-typed operand reaching here
+        is always paired with none), or the ordinary arithmetic/
+        comparison case (_ir_binary)."""
         if expr.op == BinaryOp.AND:
             return self._ir_short_circuit(expr, short_circuit_value=0, label_prefix="and")
         if expr.op == BinaryOp.OR:

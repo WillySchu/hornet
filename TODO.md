@@ -17,7 +17,6 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
-- Struct literal restrictions in semantic analysis?
 - Pointer receivers for methods.
 - Dicts as sum types.
 - `in` checking for strings.

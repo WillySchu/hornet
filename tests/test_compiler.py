@@ -5300,11 +5300,11 @@ class TestStructEquality:
 # through the exact same argument-materialization machinery (_collect_
 # argument_temps / _gen_materialize_argument_temp_into) already built for
 # struct-literal and struct-returning-call ARGUMENTS -- meaning a struct-
-# returning call works directly as a method receiver with no extra code,
-# even though a struct LITERAL receiver is still rejected (for an unrelated
-# reason: it's simply not one of the positions struct literals are allowed
-# to appear in at all, an existing restriction with nothing method-specific
-# about it).
+# returning call works directly as a method receiver with no extra code.
+# test_struct_literal_as_receiver_works confirms the identical thing for a
+# struct LITERAL receiver, once semantic.py's own restriction (never
+# specific to methods at all) was lifted -- see check_call's own error
+# message for the full, current list of allowed positions.
 # ---------------------------------------------------------------------------
 
 class TestMethods:
@@ -5574,9 +5574,9 @@ class TestMethods:
         seem it should be -- because the receiver, once rewritten into
         an ordinary first argument, is materialized by the exact same
         machinery already built for struct-returning calls used as
-        ordinary function arguments. See this class's own module
-        comment for why a struct LITERAL receiver is different (still
-        rejected, but for an unrelated, pre-existing reason)."""
+        ordinary function arguments. See test_struct_literal_as_
+        receiver_works just below for the identical confirmation with
+        a struct LITERAL receiver instead."""
         assert_program_exit_code(
             "type A struct:\n"
             "    int v\n"
@@ -5591,14 +5591,20 @@ class TestMethods:
             9,
         )
 
-    def test_struct_literal_as_receiver_is_rejected(self):
-        """Not a method-specific restriction: a struct literal used
-        directly as a method call's own receiver simply isn't one of
-        the positions struct literals are allowed to appear in at all
-        (see check_struct_literal's own docstring for the full list),
-        so this is rejected by the existing position-restriction
-        system with no new code needed for methods specifically."""
-        assert_program_semantic_error(
+    def test_struct_literal_as_receiver_works(self):
+        """A real gap, found and closed after this arc first shipped:
+        a struct literal used directly as a method call's own receiver
+        (`A(1).foo()`) is now allowed -- the same kind of position a
+        field-access base already is (`A(1).v`), `.` meaning the same
+        thing whether what follows is a field or a method. Needed no
+        IR-building change of its own: method-call desugaring already
+        rewrites the receiver into an ordinary call's first argument
+        before IR-building ever runs, and ir/scalars.py's own _ir_
+        call_arguments already had the matching STRUCT-typed-argument
+        case for a struct-literal Call, built for an already-supported
+        position -- only semantic.py's own restriction needed
+        lifting."""
+        assert_program_exit_code(
             "type A struct:\n"
             "    int v\n"
             "    def int foo(s):\n"
@@ -5606,7 +5612,7 @@ class TestMethods:
             "\n"
             "def int main():\n"
             "    return A(1).foo()\n",
-            match="only allowed as a variable's initializer",
+            1,
         )
 
     def test_duplicate_method_name_on_the_same_struct_is_rejected(self):
@@ -22748,13 +22754,73 @@ class TestPrintStructLiterals:
             "Circle(radius: 1)\nCircle(radius: 2)\n",
         )
 
-    def test_struct_literal_as_a_binary_operand_is_still_rejected(self):
-        """Confirms the deliberately-unrelated restriction this
-        change must NOT loosen: _ir_composite_operand_address is
-        shared with Binary equality, and a struct literal still isn't
-        a valid operand there -- semantic.py's own check_call rejects
-        it before codegen ever runs, exactly as before this arc."""
+    def test_struct_literal_as_a_field_access_base_works(self):
+        """A real gap, found and closed after this arc first shipped:
+        `Circle(5).radius` -- a struct literal directly as a field-
+        access base, no variable needed first. ir/structs.py's own
+        _ir_struct_address needed a new case for this (materializing
+        via _ir_materialize_struct_literal, mirroring the ordinary-
+        composite-returning-Call case it already had) -- unlike the
+        method-call-receiver gap, this one genuinely needed new IR-
+        building, not just a semantic.py restriction lift."""
+        assert_program_stdout(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "def int main():\n"
+            "    print(Circle(5).radius)\n"
+            "    return 0\n",
+            "5\n",
+        )
+
+    def test_struct_literal_field_assign_base_is_allowed_though_pointless(self):
+        """The write-side companion to the test just above --
+        _check_struct_and_field is shared by check_field (read) and
+        analyze_field_assign (write), so lifting the restriction once
+        allows both. Writing into a freshly-constructed, immediately-
+        discarded literal's own field is pointless (nothing can ever
+        read it back) but harmless, and not worth excluding separately
+        from the one, shared check both routes go through -- this
+        just confirms it doesn't crash or misbehave."""
+        assert_program_exit_code(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "def int main():\n"
+            "    Circle(10).radius = 999\n"
+            "    return 0\n",
+            0,
+        )
+
+    def test_struct_literal_as_an_index_base_is_still_rejected(self):
+        """Confirms the generic rejection this arc's own three fixes
+        carved allowances OUT of is still very much alive for every
+        position that hasn't individually been given one -- an Index
+        base here, still funneling through check_expr's plain
+        dispatch into check_call's own struct-literal guard, exactly
+        as a Binary operand and a Field-access base themselves used to
+        before this arc."""
         assert_program_semantic_error(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "def int main():\n"
+            "    return Circle(5)[0]\n",
+            match="is a struct literal, which is only allowed",
+        )
+
+    def test_struct_literal_as_a_binary_operand_works(self):
+        """A real gap, found and closed after this arc first shipped:
+        a struct literal is now a valid equality operand, on either
+        side -- _ir_composite_operand_address's own new STRUCT case
+        (ir/dispatch.py) materializes it via _ir_materialize_struct_
+        literal, the same primitive the field-access and method-
+        receiver gaps closed alongside this one both use. _is_
+        comparable_type already supported STRUCT equality generically
+        (recursing field by field) before this arc -- only the
+        literal-as-operand SHAPE was ever missing, not the underlying
+        comparison logic itself."""
+        assert_program_exit_code(
             "type Circle struct:\n"
             "    int radius\n"
             "\n"
@@ -22763,7 +22829,39 @@ class TestPrintStructLiterals:
             "    if c == Circle(5):\n"
             "        return 1\n"
             "    return 0\n",
-            match="is a struct literal, which is only allowed",
+            1,
+        )
+
+    def test_struct_literal_as_a_binary_operand_on_the_left_works(self):
+        """The mirror image of the test just above -- either side of
+        `==` could be the struct literal, with no fixed "target" side
+        the way a VarDecl/argument's own declared type gives one, so
+        both operands needed the identical allowance in check_binary."""
+        assert_program_exit_code(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "def int main():\n"
+            "    Circle c = Circle(5)\n"
+            "    if Circle(5) == c:\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
+        )
+
+    def test_two_struct_literals_compared_directly_works(self):
+        """Both sides a struct literal at once -- confirms this isn't
+        just "one side may be a literal if the other is an ordinary
+        variable", but a genuinely symmetric allowance."""
+        assert_program_exit_code(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "def int main():\n"
+            "    if Circle(5) == Circle(5):\n"
+            "        return 1\n"
+            "    return 0\n",
+            1,
         )
 
 

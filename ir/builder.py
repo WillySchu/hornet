@@ -661,7 +661,17 @@ class IRFunctionBuilder(
         elif isinstance(expr, Field):
             self._collect_argument_temps_in_expr(expr.base, ir_fn)
             base_type = type_of(expr.base)
-            if base_type.kind == TypeKind.STRUCT and self._is_ordinary_composite_call(expr.base):
+            # A struct-literal Call (`Circle(5).radius`) alongside the
+            # already-existing ordinary-composite-call case -- the
+            # identical STRUCT-typed, not-already-addressable shape
+            # _ir_call_arguments' own Call case already reserves a
+            # slot for at an argument position; Field's own base is
+            # the same kind of position, so it gets the same
+            # treatment, now that semantic.py's own _check_struct_and_
+            # field allows a struct literal to reach here at all.
+            if base_type.kind == TypeKind.STRUCT and (
+                    self._is_ordinary_composite_call(expr.base)
+                    or (isinstance(expr.base, Call) and expr.base.name in self.ir_program.struct_registry)):
                 self._reserve_argument_temp(expr.base, base_type, ir_fn)
         elif isinstance(expr, Slice):
             self._collect_argument_temps_in_expr(expr.array, ir_fn)

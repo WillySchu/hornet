@@ -31,12 +31,14 @@ class StructsMixin:
 
     def _ir_struct_address(self, expr: Node) -> tuple[list, object]:
         """Builds (without lowering) the address of a struct-typed
-        expr -- Variable, Field, Index, or an ordinary composite-
-        returning Call (materialized via _ir_materialize_composite_
-        call) -- as real IR. Field/Index delegate to _ir_field_
-        address/_ir_index_address, which call back into this method
-        for their own STRUCT-typed base, so a chain of arbitrary depth
-        (`a.b.c`, `rows[0].f`) falls out with no special-casing.
+        expr -- Variable, Field, Index, a struct-literal Call
+        (materialized via _ir_materialize_struct_literal), or an
+        ordinary composite-returning Call (materialized via _ir_
+        materialize_composite_call) -- as real IR. Field/Index
+        delegate to _ir_field_address/_ir_index_address, which call
+        back into this method for their own STRUCT-typed base, so a
+        chain of arbitrary depth (`a.b.c`, `rows[0].f`) falls out with
+        no special-casing.
 
         The Variable case is the one genuine leaf: a named struct
         variable's own address is either a fixed %rbp-relative offset
@@ -198,6 +200,28 @@ class StructsMixin:
             return self.gen_expr_ir(expr.operand)
         if self._is_ordinary_composite_call(expr):
             return self._ir_materialize_composite_call(expr, type_of(expr))
+        if isinstance(expr, Call) and expr.name in self.ir_program.struct_registry:
+            # `Circle(5).radius` (Field's own base), `Circle(5).area()`
+            # (a method-call receiver, already just expr.args[0] of an
+            # ordinary Call by the time IR-building ever sees it, and
+            # already handled there by _ir_call_arguments's own,
+            # pre-existing STRUCT-typed argument case -- reaching HERE
+            # specifically is the field-access shape, semantic.py's
+            # own analyze_for_in-adjacent restriction having been
+            # lifted from _check_struct_and_field). Checked after
+            # _is_ordinary_composite_call, not before: that check
+            # already excludes a struct-literal Call on its own (see
+            # its own docstring), so the ordering here doesn't matter
+            # for correctness, only for which of the two, mutually
+            # exclusive branches actually runs.
+            result = self._ir_materialize_struct_literal(expr)
+            if result is None:
+                raise IRError(
+                    f"_ir_materialize_struct_literal returned None for a "
+                    f"struct-literal Call used as a struct address "
+                    f"({expr!r}) -- some field is out of scope for real "
+                    f"IR, with no old-style fallback remaining to catch it")
+            return result
         raise IRError(f"Cannot compute a struct address for: {expr!r}")
 
     def _ir_field_address(self, expr: Field) -> tuple[list, object]:
