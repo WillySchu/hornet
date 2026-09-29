@@ -18,6 +18,7 @@ Documentation:
 
 Updates:
 - `for in` loop.
+- `for in` loops on non addressable base (literals, function returns, etc.).
 - Dicts as sum types.
 - `in` checking for strings.
 - Sum type equality.
@@ -54,6 +55,7 @@ Updates:
 - Slice equality?
 - Dict equality?
 - Import \*?
+- Borrow checker for modifying dicts / slices in for ... in ... loops?
 - Flow sensitive escape analysis.
 - Deduplicate emitted type descriptors when we call print()
 - Variadic functions.
@@ -78,3 +80,4 @@ Updates:
 - Target different architectures?
 - Link to non libc functions for FFI?
 - Call hornet code from C?
+- for-loop binding variables (both the existing three-clause form and the new for x in y form) currently share one stack slot for the entire loop, not a fresh one per iteration — so &x taken inside the body always points at whatever the final iteration left there, regardless of which iteration actually took the address. This matches Go's pre-1.22 behavior, which Go itself changed after years of this being a recurring bug source. Revisit: should each iteration get its own binding instead?
