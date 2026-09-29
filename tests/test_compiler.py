@@ -23227,30 +23227,120 @@ class TestForInSemantics:
         )
         analyze(ast)  # should not raise
 
-    def test_address_of_a_for_in_binding_is_rejected(self):
-        """Was a real, constructed memory-corruption bug before this
-        restriction existed: a for-in binding's own stack slot is
-        shared across every iteration and escape_analysis.py doesn't
-        yet track its own address escaping, so heap-promoting it
-        correctly isn't safe yet -- rejecting `&x` outright avoids
-        silently miscompiling it (returning it from the enclosing
-        function read back garbage, confirmed directly, not assumed)
-        until that tracking is extended to cover it properly."""
-        assert_semantic_error(
-            "    [3]int arr = [1, 2, 3]\n"
+    def test_address_of_a_for_in_binding_is_now_supported(self):
+        """Was a real, constructed memory-corruption bug, rejected
+        outright at the semantic level until escape_analysis.py's own
+        for-in binding decl_id scheme was brought in line with ir/
+        builder.py's own (see escape_analysis.py's own ForIn case in
+        walk_statements for the full story: both files independently
+        invented a synthetic id for the same binding, but different,
+        incompatible ones, so an escaping binding was correctly
+        IDENTIFIED by escape_analysis.py yet never actually FOUND by
+        ir/builder.py's own _is_heap_allocated lookup). Once the two
+        ids matched, no further change was needed anywhere else: the
+        exact same heap-promotion machinery every ordinary VarDecl/
+        Param already goes through just started working for a for-in
+        binding too. This mirrors the original failing repro exactly
+        -- &x taken inside the loop, stored in a variable, returned
+        from the enclosing function -- and confirms it now reads back
+        the correct value instead of corrupted memory."""
+        assert_program_stdout(
+            "def *int last_element_address([]int arr):\n"
+            "    *int p = none\n"
             "    for x in arr:\n"
-            "        *int p = &x\n"
+            "        p = &x\n"
+            "    return p\n"
+            "\n"
+            "def int main():\n"
+            "    []int s = [10, 20, 30]\n"
+            "    *int p = last_element_address(s)\n"
+            "    print(*p)\n"
             "    return 0\n",
-            match="'&' cannot take the address of 'x', a 'for ... in' loop binding",
+            "30\n",
+        )
+
+    def test_escaping_for_in_binding_gets_a_fresh_allocation_per_iteration(self):
+        """A binding's own storage is still SHARED across iterations
+        when its address never escapes the enclosing function (see
+        test_for_in_binding_address_not_escaping_the_function_still_
+        shares_one_slot just below -- that part of the design is
+        untouched by this fix, and deliberately so). But the moment
+        &x's own resulting value genuinely escapes -- passed to
+        another function, here, rather than merely copied into a
+        different local within the SAME function -- _ir_finish_
+        scalar_var_decl's own malloc runs fresh every time it's
+        called, which for a for-in binding is once per iteration:
+        each escaping capture gets its own, independent box, not a
+        pointer to the one, shared slot every ordinary (non-escaping)
+        iteration still uses. Confirmed here by capturing &x at two
+        DIFFERENT iterations (i == 0 and i == 2) through an ordinary
+        helper function (identity -- deliberately not append, whose
+        own arguments escape_analysis.py's scan_expr_for_escaping_
+        calls doesn't track as escaping at all) and reading back the
+        two DISTINCT values each iteration actually saw, not the
+        final iteration's value twice over."""
+        assert_program_stdout(
+            "def *int identity(*int p):\n"
+            "    return p\n"
+            "\n"
+            "def int main():\n"
+            "    []int s = [1, 2, 3]\n"
+            "    *int p1 = none\n"
+            "    *int p2 = none\n"
+            "    for i, x in s:\n"
+            "        if i == 0:\n"
+            "            p1 = identity(&x)\n"
+            "        if i == 2:\n"
+            "            p2 = identity(&x)\n"
+            "    print(*p1)\n"
+            "    print(*p2)\n"
+            "    return 0\n",
+            "1\n3\n",
+        )
+
+    def test_for_in_binding_address_not_escaping_the_function_still_shares_one_slot(self):
+        """The companion case to the test just above, confirming this
+        fix is narrowly scoped to the escaping case and doesn't
+        change the still-open, still-deliberate "shared slot" design
+        (see ForIn's own docstring in parser.py) for anything else.
+        Here &x is taken at two different iterations but never
+        leaves main at all -- just copied into two other LOCAL
+        pointer variables, never returned or passed to another
+        function -- so escape_analysis.py correctly determines
+        neither capture needs heap promotion (nothing escapes main's
+        own stack frame while it's still executing), and both
+        correctly read back the SAME, final value: x's one, shared
+        stack slot's own last-written contents, exactly as it
+        already behaved for the non-escaping case before this fix,
+        and exactly as an equivalent explicit while-loop with one
+        int declared outside it and reused every iteration already
+        would."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    []int s = [1, 2, 3]\n"
+            "    *int p1 = none\n"
+            "    *int p2 = none\n"
+            "    for i, x in s:\n"
+            "        if i == 0:\n"
+            "            p1 = &x\n"
+            "        if i == 2:\n"
+            "            p2 = &x\n"
+            "    print(*p1)\n"
+            "    print(*p2)\n"
+            "    return 0\n",
+            "3\n3\n",
         )
 
     def test_address_of_a_shadowed_name_inside_the_body_is_still_allowed(self):
-        """The rejection is scope-aware, not a blanket ban on the
-        NAME: an ordinary, nested VarDecl that shadows the binding
-        name (inside its own, separately-pushed scope -- an `if`
-        here) is a genuinely different declaration, with its own,
-        ordinary stack slot -- taking ITS address is completely
-        safe and must not be rejected."""
+        """Shadowing-correctness was never actually about the (now-
+        removed) rejection this once accompanied -- it's ordinary
+        scope resolution, unrelated to whether &x on the OUTER
+        binding itself is allowed. An inner VarDecl that shadows the
+        binding name (inside its own, separately-pushed scope -- an
+        `if` here) is a genuinely different declaration, with its own
+        decl_id and its own escape-analysis treatment, entirely
+        independent of the outer for-in binding's own -- taking ITS
+        address is unaffected by anything about the outer name."""
         ast = _parse(
             "def int main():\n"
             "    [3]int arr = [1, 2, 3]\n"
@@ -23264,9 +23354,8 @@ class TestForInSemantics:
 
 
 # ---------------------------------------------------------------------------
-# for x in y / for x, y in z -- Stage 2: array/slice IR-building. dict (Stage
-# 3) isn't implemented yet -- see gen_statement_ir's own ForIn case, which
-# raises a clear IRError for a dict-typed iterable rather than crashing.
+# for x in y / for x, y in z -- IR-building. Stage 2 (array/slice) and Stage
+# 3 (dict) are both implemented -- see gen_statement_ir's own ForIn case.
 # ---------------------------------------------------------------------------
 
 class TestForInArraySlice:

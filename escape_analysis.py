@@ -7,7 +7,7 @@ unioned into one combined "what might this be backed by" answer,
 extended to cover slices stored as elements of an array-of-slices or
 a struct field (see analyze_array_escapes for the full algorithm)."""
 
-from typing import Optional
+from typing import Optional, Union
 
 from parser import (
     ArrayLiteral,
@@ -91,6 +91,21 @@ def root_variable_name(expr: Node) -> Optional[str]:
     return expr.name if isinstance(expr, Variable) else None
 
 
+# A declaration id is either a real AST node's own id() (an ordinary
+# VarDecl or Param -- always positive in CPython), or one of two
+# synthetic shapes with no real node to key by: a plain negative int
+# (slot_node_id's own aggregate-slot ids, disjoint by always being
+# negative), or an (id(stmt), index) pair for one binding of a ForIn
+# statement -- deliberately the exact tuple ir/builder.py's own _bind_
+# for_in_binding already uses for the same binding, which is what
+# lets _is_heap_allocated's own self._escaping_decl_ids lookup there
+# ever find what this analysis determines here (see the ForIn case in
+# walk_statements for the full reasoning). A tuple can never collide
+# with either int shape -- different types are never `==` to one
+# another in Python regardless of value.
+DeclId = Union[int, tuple]
+
+
 class EscapeAnalyzer:
     def __init__(self, fn: Function, param_types: list[Type], structs: dict[str, StructInfo], aliases: dict[str, Type], sum_types: dict):
         self.fn = fn
@@ -98,34 +113,21 @@ class EscapeAnalyzer:
         self.aliases = aliases
         self.sum_types = sum_types
 
-        self.array_decls: set[int] = set()
-        self.slice_decls: set[int] = set()
-        self.pointer_decls: set[int] = set()
-        self.decl_types: dict[int, Type] = {}
-        self.decl_names: dict[int, str] = {}
-        self.direct_backing: dict[int, set[int]] = {}
-        self.slice_deps: dict[int, set[int]] = {}
-        self.escaping_address_holders: set[int] = set()
-        self.escaping_decls: set[int] = set()
-        self.aggregate_slot_ids: dict[tuple[int, str], int] = {}
+        self.array_decls: set[DeclId] = set()
+        self.slice_decls: set[DeclId] = set()
+        self.pointer_decls: set[DeclId] = set()
+        self.decl_types: dict[DeclId, Type] = {}
+        self.decl_names: dict[DeclId, str] = {}
+        self.direct_backing: dict[DeclId, set[DeclId]] = {}
+        self.slice_deps: dict[DeclId, set[DeclId]] = {}
+        self.escaping_address_holders: set[DeclId] = set()
+        self.escaping_decls: set[DeclId] = set()
+        self.aggregate_slot_ids: dict[tuple[DeclId, str], int] = {}
 
-        self.scopes: list[dict[str, int]] = [{}]
+        self.scopes: list[dict[str, DeclId]] = [{}]
 
         for p, p_type in zip(fn.params, param_types):
             self.declare(p.name, id(p), p_type)
-
-        self._next_for_in_binding_id = -(10 ** 9)  # a large, negative
-        # starting point for ForIn's own synthetic decl ids -- disjoint
-        # from both id() (always positive in CPython) and slot_node_
-        # id's own, much smaller negative range (-1, -2, ... one per
-        # aggregate slot actually seen), so this can never collide with
-        # either. Needed because there's no real AST node id() to key a
-        # ForIn binding by (see ForIn's own docstring in parser.py for
-        # why) -- unlike slot_node_id's own synthetic ids, which always
-        # represent a slice/pointer-shaped aggregate slot specifically,
-        # a ForIn binding can be ANY type, so it goes through declare
-        # normally (below) rather than slot_node_id's own unconditional
-        # "this is slice-shaped" bookkeeping.
 
         self._AGGREGATE_ELEMENTS_SLOT = '[]'  # the one shared slot for a WHOLE
         # aggregate declaration -- an array-/slice-of-slices (used by
@@ -138,12 +140,12 @@ class EscapeAnalyzer:
         # Hornet identifier, so this can never collide with a real
         # field name.
 
-    def analyze(self) -> set[int]:
+    def analyze(self) -> set[DeclId]:
         self.walk_statements(self.fn.body)
 
-        result: set[int] = set(self.escaping_decls)
-        visited: set[int] = set()
-        stack: list[int] = list(self.escaping_address_holders)
+        result: set[DeclId] = set(self.escaping_decls)
+        visited: set[DeclId] = set()
+        stack: list[DeclId] = list(self.escaping_address_holders)
         while stack:
             node_id = stack.pop()
             if node_id in visited:
@@ -169,7 +171,8 @@ class EscapeAnalyzer:
         # own named frame slot, which needs an extra IRLoad through it.
         return result
 
-    def declare(self, name: str, decl_id: int, decl_type: Type) -> None:
+
+    def declare(self, name: str, decl_id: DeclId, decl_type: Type) -> None:
         self.scopes[-1][name] = decl_id
         self.decl_types[decl_id] = decl_type
         self.decl_names[decl_id] = name
@@ -190,13 +193,13 @@ class EscapeAnalyzer:
             self.direct_backing.setdefault(decl_id, set())
             self.slice_deps.setdefault(decl_id, set())
 
-    def resolve(self, name: str) -> Optional[int]:
+    def resolve(self, name: str) -> Optional[DeclId]:
         for scope in reversed(self.scopes):
             if name in scope:
                 return scope[name]
         return None
 
-    def slot_node_id(self, container_id: int, slot: str) -> int:
+    def slot_node_id(self, container_id: DeclId, slot: str) -> int:
         """Gives each distinct (container_id, slot) pair a unique node id,
         synthesizing one the first time that exact pair is seen and returning
         the same one every time after."""
@@ -210,15 +213,6 @@ class EscapeAnalyzer:
             self.direct_backing.setdefault(node_id, set())
             self.slice_deps.setdefault(node_id, set())
         return self.aggregate_slot_ids[key]
-
-    def _fresh_for_in_binding_id(self) -> int:
-        """A fresh, unique synthetic decl id for one ForIn binding --
-        see __init__'s own comment on self._next_for_in_binding_id for
-        why this needs its own, disjoint counter rather than reusing
-        slot_node_id's own."""
-        node_id = self._next_for_in_binding_id
-        self._next_for_in_binding_id -= 1
-        return node_id
 
     def indexed_slot_of(self, base_expr: Node) -> Optional[int]:
         """Recognizes `base_expr` as something that, indexed ONE more
@@ -284,7 +278,7 @@ class EscapeAnalyzer:
             return None
         return self.whole_value_node_of(root_name)
 
-    def whole_value_node_of(self, name: str) -> Optional[int]:
+    def whole_value_node_of(self, name: str) -> Optional[DeclId]:
         """Resolves `name` to the node id tracking its value, if it's a
         slice or pointer, or contains one. Returns None if `name`
         doesn't resolve to anything, or resolves to a type that isn't
@@ -341,7 +335,7 @@ class EscapeAnalyzer:
             return any(self._contains_address_holder(field_type) for field_type in struct_info.fields.values())
         return False
 
-    def contribution(self, value_expr: Node) -> tuple[Optional[int], Optional[int]]:
+    def contribution(self, value_expr: Node) -> tuple[Optional[DeclId], Optional[DeclId]]:
         """Returns (backing_decl_id, derived_from_decl_id) -- whichever
         ONE of the two value_expr's aliasing actually resolves to
         (never both), or (None, None) if it isn't backed by any of
@@ -609,23 +603,44 @@ class EscapeAnalyzer:
             elif isinstance(stmt, ForIn):
                 # ONE scope spans the binding(s) and body, matching
                 # analyze_for_in's own reasoning in semantic.py.
-                # binding(s) each get a FRESH synthetic decl id (see
-                # _fresh_for_in_binding_id's own docstring for why --
-                # no real VarDecl node exists to key by id(), unlike
-                # For's own init variable just below), then the
-                # identical "does this variable's own value derive
-                # from a slice/pointer-shaped source" tracking the
-                # VarDecl case above gives an ordinary declaration's
-                # own init expression -- here, every binding's own
-                # value derives from stmt.iterable as a whole (a safe
-                # over-approximation: treating an ELEMENT as if it
-                # derives from the WHOLE collection can only cause an
-                # unnecessary heap promotion, never a missed one, the
-                # one direction that's actually safe to get wrong).
+                # binding(s) each get a decl id of (id(stmt), i) --
+                # deliberately the EXACT SAME pair ir/builder.py's own
+                # _allocate_for_in_binding_slot/_bind_for_in_binding
+                # already key their own var_slots/scope entries by
+                # (there's no real VarDecl node to key by id() alone,
+                # unlike For's own init variable just below, so both
+                # files independently need a synthetic key -- and
+                # since both walk the SAME parsed stmt within one
+                # compilation pass, id(stmt) is already identical in
+                # both places for free). This match matters: it's the
+                # only thing that lets _is_heap_allocated's own decl_id
+                # in self._escaping_decl_ids check in ir/builder.py
+                # ever actually find what this pass determines here.
+                # An earlier version of this code used its own,
+                # separate synthetic counter instead -- individually
+                # sound (disjoint from every other id in use), but a
+                # DIFFERENT key for the same logical binding than ir/
+                # builder.py's own, so a binding whose address escaped
+                # was correctly identified here yet never actually
+                # reached _escaping_decl_ids under a key ir/builder.py
+                # would ever look up -- confirmed as the reason &x on a
+                # for-in binding produced corrupted memory rather than
+                # a correctly heap-promoted copy, before this fix.
+                #
+                # Otherwise identical to the VarDecl case above's own
+                # "does this variable's own value derive from a slice/
+                # pointer-shaped source" tracking, given an ordinary
+                # declaration's own init expression -- here, every
+                # binding's own value derives from stmt.iterable as a
+                # whole (a safe over-approximation: treating an
+                # ELEMENT as if it derives from the WHOLE collection
+                # can only cause an unnecessary heap promotion, never
+                # a missed one, the one direction that's actually safe
+                # to get wrong).
                 self.scopes.append({})
                 iterable_type = type_of(stmt.iterable)
-                for name, binding_type in zip(stmt.binding_names, for_in_binding_types(stmt, iterable_type)):
-                    decl_id = self._fresh_for_in_binding_id()
+                for i, (name, binding_type) in enumerate(zip(stmt.binding_names, for_in_binding_types(stmt, iterable_type))):
+                    decl_id = (id(stmt), i)
                     self.declare(name, decl_id, binding_type)
                     target_node = self.whole_value_node_of(name)
                     if target_node is not None:
@@ -637,6 +652,7 @@ class EscapeAnalyzer:
                 self.scan_expr_for_escaping_calls(stmt.iterable)
                 self.walk_statements(stmt.body)
                 self.scopes.pop()
+
             elif isinstance(stmt, For):
                 # ONE scope spans init through increment, matching
                 # analyze_for's own reasoning in semantic.py exactly:

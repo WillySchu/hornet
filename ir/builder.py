@@ -802,16 +802,22 @@ class IRFunctionBuilder(
         raise IRError(f"Reference to undeclared variable '{name}'")
 
     def _is_heap_allocated(self, decl_id: int, t: Type) -> bool:
-        """Whether the specific array- or struct-typed declaration
-        identified by decl_id needs to be heap-allocated: is_heap_
-        allocated's pure size check, OR analyze_array_escapes's result
-        (cached in self._escaping_decl_ids -- a declaration of ANY
-        type can appear here now, not just array: a pointer's own
-        target isn't restricted to arrays the way a slice's own
-        backing storage always is, since `&x` can target a scalar,
-        struct, array, or sum-typed x. This method itself is still
-        only ever CALLED for array/struct/sum-typed decl_ids -- a
-        scalar whose address escapes is rejected outright at semantic
-        analysis instead of reaching here at all; see check_unary's
-        own ADDRESS_OF case)."""
+        """Whether the specific declaration identified by decl_id
+        needs to be heap-allocated: is_heap_allocated's pure size
+        check, OR analyze_array_escapes's result (cached in self.
+        _escaping_decl_ids -- a declaration of ANY type can appear
+        here, scalar included: a pointer's own target isn't
+        restricted to arrays the way a slice's own backing storage
+        always is, since `&x` can target a scalar, struct, array, or
+        sum-typed x, and _ir_finish_scalar_var_decl already checks
+        this for every scalar VarDecl, not just ones whose address
+        happens to escape -- most simply get False back.
+
+        decl_id itself is int-typed here only in the historical
+        sense: a 'for ... in' binding's own decl_id (see ir/builder.
+        py's own _bind_for_in_binding) is the SAME (id(stmt), index)
+        tuple escape_analysis.py's own EscapeAnalyzer keys it by --
+        deliberately, so a for-in binding's own escaping address is
+        found here exactly like any ordinary VarDecl/Param's is, with
+        no separate handling needed in this method at all."""
         return is_heap_allocated(t, self.ir_program.struct_registry, self.ir_program.sum_type_registry) or decl_id in self._escaping_decl_ids
