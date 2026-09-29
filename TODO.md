@@ -17,6 +17,7 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
+- int8/uint8 arithmetic isn't truncated in registers. uint8 c = 200; uint8 d = c + c; print(d > uint8(150)) prints true; d should be 144.
 - Per function dict scratch slot is allocated but never used?
 - Update TextMate and Vim grammers.
 - Module errors have a line but no column.
