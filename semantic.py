@@ -3173,6 +3173,20 @@ class SemanticAnalyzer:
             # two Shapes being equal is nonsensical the way comparing
             # a void result would be.
             #
+            # A bare dict-vs-dict comparison (neither side none -- see
+            # none_vs_nilable above, checked first) is ALSO rejected
+            # outright, for a related but distinct reason: two dicts
+            # holding identical entries can have completely different
+            # bucket layouts depending on their own insertion/deletion
+            # history, so there's no byte-for-byte shortcut the way an
+            # array's own fixed layout gives array equality, and no
+            # well-defined per-entry comparison either yet (unordered
+            # keys, so it isn't a simple pairwise walk the way ARRAY's
+            # own equality is) -- a real feature to consider later,
+            # not implemented yet, exactly like slice's own case just
+            # above, not a "some dict is trivially never equal to
+            # another" design choice.
+            #
             # VOID is rejected because it's structurally nonsensical,
             # not a missing feature: `foo() == bar()`, neither with a
             # declared return type, would otherwise trivially type-
@@ -3185,11 +3199,11 @@ class SemanticAnalyzer:
             # NONE is rejected for the same reason, except the case
             # already handled above -- equality has no fixed target
             # side the way _types_compatible's other callers do.
-            if left_type.kind in (TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE, TypeKind.SUM) or right_type.kind in (TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE, TypeKind.SUM):
+            if left_type.kind in (TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE, TypeKind.SUM, TypeKind.DICT) or right_type.kind in (TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE, TypeKind.SUM, TypeKind.DICT):
                 raise SemanticError(
                     f"'{op.symbol()}' does not support slice, void, sum "
-                    f"type, or none operands, except comparing a slice "
-                    f"or pointer to none",
+                    f"type, dict, or none operands, except comparing a "
+                    f"slice, pointer, or dict to none",
                     expr,
                 )
             if left_type != right_type:

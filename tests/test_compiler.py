@@ -3445,7 +3445,7 @@ class TestFunctionsWithNoDeclaredReturnType:
             "    return log(1) == log(2)\n"
         )
         ast = _parse(source)
-        with pytest.raises(SemanticError, match="does not support slice, void, sum type, or none operands"):
+        with pytest.raises(SemanticError, match="does not support slice, void, sum type, dict, or none operands"):
             analyze(ast)
 
 
@@ -6564,7 +6564,7 @@ class TestSumTypes:
             "    if s == t:\n"
             "        return 1\n"
             "    return 0\n",
-            match="does not support slice, void, sum type, or none operands",
+            match="does not support slice, void, sum type, dict, or none operands",
         )
 
     def test_sum_type_name_colliding_with_a_struct_is_rejected(self):
@@ -9846,7 +9846,7 @@ class TestDicts:
         )
 
 
-    # -- dict equality: mirrors slice's own none-comparison, otherwise false --
+    # -- dict equality: mirrors slice's own none-comparison and rejection --
 
     def test_nil_dict_equals_none(self):
         assert_program_stdout(
@@ -9872,103 +9872,38 @@ class TestDicts:
             "not equal\n",
         )
 
-    def test_dict_equality_is_always_false_even_for_identical_contents(self):
-        """Per this feature's own confirmed design: dict has no real,
-        per-entry content equality (unlike array/struct's own _ir_
-        composite_equal) -- two dicts holding the exact same entries
-        still compare as NOT equal, always, since there's no byte-for-
-        byte shortcut the way array's own fixed layout gives array
-        equality (two dicts with identical contents can have entirely
+    def test_dict_vs_dict_equality_is_rejected(self):
+        """Mirrors slice's own bare-slice-vs-slice rejection: real
+        per-entry dict equality isn't implemented (unordered keys, and
+        two dicts holding identical entries can have completely
         different bucket layouts depending on insertion/deletion
-        history)."""
-        assert_program_stdout(
-            "def int main():\n"
+        history, so there's no byte-for-byte shortcut the way array's
+        own fixed layout gives array equality) and isn't even fully
+        designed yet, so a bare dict-vs-dict comparison (neither side
+        none) is rejected at the semantic level rather than silently
+        always answering false -- a real feature to consider later,
+        not a "dicts are trivially never equal" design choice."""
+        assert_semantic_error(
             "    dict[str]int a = dict[str]int{'x': 1}\n"
             "    dict[str]int b = dict[str]int{'x': 1}\n"
             "    if a == b:\n"
-            "        print('equal (WRONG)')\n"
-            "    if a != b:\n"
-            "        print('not equal')\n"
+            "        return 1\n"
             "    return 0\n",
-            "not equal\n",
+            match="does not support slice, void, sum type, dict, or none operands",
         )
 
-    def test_dict_equality_still_evaluates_both_operands_for_side_effects(self):
-        """The comparison's own RESULT never inspects either dict's
-        contents, but both operand expressions must still genuinely
-        run -- `f() == g()`, f/g each dict-returning with a side
-        effect of their own, must call both, exactly like array/
-        struct equality already has to (_ir_composite_operand_
-        address)."""
-        assert_program_stdout(
-            "def dict[str]int make_a():\n"
-            "    print('making a')\n"
-            "    dict[str]int d = dict[str]int{'a': 1}\n"
-            "    return d\n"
-            "\n"
-            "def dict[str]int make_b():\n"
-            "    print('making b')\n"
-            "    dict[str]int d = dict[str]int{'b': 2}\n"
-            "    return d\n"
-            "\n"
-            "def int main():\n"
-            "    if make_a() == make_b():\n"
-            "        print('equal (WRONG)')\n"
-            "    else:\n"
-            "        print('not equal')\n"
-            "    return 0\n",
-            "making a\nmaking b\nnot equal\n",
-        )
-
-    def test_dict_literal_as_a_direct_equality_operand_now_works(self):
-        """Was a pinned, known-separate gap -- now fixed by wiring the
-        already-existing _ir_materialize_dict_literal (built for the
-        call-argument fix) into _ir_composite_operand_address's own
-        dispatch, one new isinstance(expr, DictLiteral) case. Per
-        dict equality's own confirmed "otherwise false" design (see
-        _ir_dict_equal's own docstring), the comparison itself is
-        still always false/true -- this only means a DIRECT literal
-        operand no longer crashes getting there."""
-        assert_program_stdout(
-            "def int main():\n"
+    def test_dict_literal_vs_dict_equality_is_also_rejected(self):
+        """The rejection applies regardless of either operand's own
+        shape -- a direct dict literal on one or both sides is
+        rejected exactly like two plain dict variables are."""
+        assert_semantic_error(
             "    dict[str]int d = dict[str]int{'a': 1}\n"
             "    if dict[str]int{'a': 1} == d:\n"
-            "        print('equal (WRONG)')\n"
-            "    if dict[str]int{'a': 1} != d:\n"
-            "        print('not equal')\n"
-            "    return 0\n",
-            "not equal\n",
-        )
-
-    def test_two_dict_literals_as_both_equality_operands(self):
-        assert_program_stdout(
-            "def int main():\n"
+            "        return 1\n"
             "    if dict[str]int{'a': 1} == dict[str]int{'a': 1}:\n"
-            "        print('equal (WRONG)')\n"
-            "    else:\n"
-            "        print('not equal')\n"
+            "        return 1\n"
             "    return 0\n",
-            "not equal\n",
-        )
-
-    def test_dict_literal_equality_operand_still_evaluates_its_own_entries_for_side_effects(self):
-        """A nested call inside the literal's own entry still runs,
-        even though the comparison result itself never uses it --
-        the identical side-effect-preservation guarantee _ir_dict_
-        equal already gives an ordinary dict-variable operand,
-        extended here to a direct literal operand's own entries."""
-        assert_program_stdout(
-            "def int make_value():\n"
-            "    print('computing value')\n"
-            "    return 1\n"
-            "\n"
-            "def int main():\n"
-            "    if dict[str]int{'a': make_value()} == dict[str]int{'b': 2}:\n"
-            "        print('equal (WRONG)')\n"
-            "    else:\n"
-            "        print('not equal')\n"
-            "    return 0\n",
-            "computing value\nnot equal\n",
+            match="does not support slice, void, sum type, dict, or none operands",
         )
 
 
@@ -17615,14 +17550,14 @@ class TestNone:
         exception (see check_binary's own comment)."""
         assert_semantic_error(
             "    return none == none",
-            match="does not support slice, void, sum type, or none operands",
+            match="does not support slice, void, sum type, dict, or none operands",
             return_type="bool",
         )
 
     def test_comparing_int_to_none_is_rejected(self):
         assert_semantic_error(
             "    return 5 == none",
-            match="does not support slice, void, sum type, or none operands",
+            match="does not support slice, void, sum type, dict, or none operands",
             return_type="bool",
         )
 

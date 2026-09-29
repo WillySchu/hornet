@@ -21,6 +21,7 @@ Updates:
 - Dicts as sum types.
 - `in` checking for arrays/slices.
 - `in` checking for strings.
+- Sum type equality.
 - Sum type support for nested sum types?
 - Spreading one package across multiple files.
 - A package-style in-file declaration decoupling the module's name from its filename.
@@ -52,7 +53,6 @@ Updates:
 - Format strings.
 - Write through addressing for dicts (d[key].field = value)?
 - Slice equality?
-- Dict literal as equality operand.
 - Dict equality?
 - Import \*?
 - Flow sensitive escape analysis.
