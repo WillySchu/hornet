@@ -32,6 +32,7 @@ Updates:
 - else-branch narrowing — even the "exactly two variants, so else means the other one" case.
 - Narrowing inside a while condition. Excluded by construction in v1 (only if is recognized), but worth its own tracked item since loop bodies raise questions v1 never has to answer — what does narrowing across iterations even mean once reassignment is disallowed anyway.
 - Cleanup remaining IR/backend coupling.
+- `*p = v` where `p` is `*[]T`: semantic accepts, IR raises.
 - Pass structs to FFI calls.
 - Separate the runtime code from codegen.
 - `IRBranch` peephole optimization to skip redundant unconditional jumps.

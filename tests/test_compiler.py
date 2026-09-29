@@ -24322,3 +24322,217 @@ class TestForInDict:
             "    return 0\n",
             "a\n1\nb\n2\n",
         )
+
+
+_ESCAPE_PRELUDE = (
+    "type S struct:\n"
+    "    []int s\n"
+    "type C struct:\n"
+    "    []int s\n"
+    "type D struct:\n"
+    "    int k\n"
+    "type U is C | D\n"
+    "def int noise(int a):\n"
+    "    [32]int z = [a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a]\n"
+    "    return z[3]\n"
+)
+
+# Each program returns a slice of a small local array through some
+# indirection, clobbers the stack, then prints it.
+_ESCAPE_CASES = {
+    'pointer_param_field': (
+        "def fill(*S out):\n"
+        "    [3]int a = [1,2,3]\n"
+        "    out.s = a[:]\n"
+        "def int main():\n"
+        "    S v = S(none)\n"
+        "    fill(&v)\n"
+        "    noise(9)\n"
+        "    print(v.s)\n"
+        "    return 0\n",
+        "[]int[1, 2, 3]\n"),
+    'dict_param': (
+        "def put(dict[int][]int d):\n"
+        "    [3]int b = [1,2,3]\n"
+        "    d[0] = b[:]\n"
+        "def int main():\n"
+        "    dict[int][]int d = dict[int][]int{}\n"
+        "    put(d)\n"
+        "    noise(9)\n"
+        "    print(d[0])\n"
+        "    return 0\n",
+        "[]int[1, 2, 3]\n"),
+    'slice_param': (
+        "def put([][]int rows):\n"
+        "    [3]int b = [1,2,3]\n"
+        "    rows[0] = b[:]\n"
+        "def int main():\n"
+        "    [][]int r = [][]int[none]\n"
+        "    put(r)\n"
+        "    noise(9)\n"
+        "    print(r[0])\n"
+        "    return 0\n",
+        "[]int[1, 2, 3]\n"),
+    'append_element': (
+        "def [][]int f():\n"
+        "    [3]int a = [1,2,3]\n"
+        "    [][]int s = none\n"
+        "    s = append(s, a[:])\n"
+        "    return s\n"
+        "def int main():\n"
+        "    [][]int r = f()\n"
+        "    noise(9)\n"
+        "    print(r)\n"
+        "    return 0\n",
+        "[][]int[[]int[1, 2, 3]]\n"),
+    'slice_literal_returned': (
+        "def [][]int f():\n"
+        "    [3]int a = [1,2,3]\n"
+        "    return [][]int[a[:]]\n"
+        "def int main():\n"
+        "    [][]int r = f()\n"
+        "    noise(9)\n"
+        "    print(r)\n"
+        "    return 0\n",
+        "[][]int[[]int[1, 2, 3]]\n"),
+    'slice_literal_via_var': (
+        "def [][]int f():\n"
+        "    [3]int a = [1,2,3]\n"
+        "    [][]int x = [][]int[a[:]]\n"
+        "    return x\n"
+        "def int main():\n"
+        "    [][]int r = f()\n"
+        "    noise(9)\n"
+        "    print(r)\n"
+        "    return 0\n",
+        "[][]int[[]int[1, 2, 3]]\n"),
+    'sum_variable': (
+        "def U f():\n"
+        "    [3]int a = [1,2,3]\n"
+        "    C c = C(none)\n"
+        "    c.s = a[:]\n"
+        "    U u = c\n"
+        "    return u\n"
+        "def int main():\n"
+        "    U r = f()\n"
+        "    noise(9)\n"
+        "    print(r)\n"
+        "    return 0\n",
+        "C(s: []int[1, 2, 3])\n"),
+    'narrowing_binding': (
+        "def []int f():\n"
+        "    [3]int a = [1,2,3]\n"
+        "    C c0 = C(none)\n"
+        "    c0.s = a[:]\n"
+        "    [1]U us = [c0]\n"
+        "    if us[0] is C as c:\n"
+        "        return c.s\n"
+        "    return none\n"
+        "def int main():\n"
+        "    []int r = f()\n"
+        "    noise(9)\n"
+        "    print(r)\n"
+        "    return 0\n",
+        "[]int[1, 2, 3]\n"),
+    'narrowed_variable': (
+        "def []int f():\n"
+        "    [3]int a = [1,2,3]\n"
+        "    C c0 = C(none)\n"
+        "    c0.s = a[:]\n"
+        "    U u = c0\n"
+        "    if u is C:\n"
+        "        return u.s\n"
+        "    return none\n"
+        "def int main():\n"
+        "    []int r = f()\n"
+        "    noise(9)\n"
+        "    print(r)\n"
+        "    return 0\n",
+        "[]int[1, 2, 3]\n"),
+    'local_pointer_store': (
+        "def S f():\n"
+        "    [3]int a = [1,2,3]\n"
+        "    S v = S(none)\n"
+        "    *S q = &v\n"
+        "    q.s = a[:]\n"
+        "    return v\n"
+        "def int main():\n"
+        "    S r = f()\n"
+        "    noise(9)\n"
+        "    print(r)\n"
+        "    return 0\n",
+        "S(s: []int[1, 2, 3])\n"),
+    'dict_literal': (
+        "def dict[int][]int f():\n"
+        "    [3]int a = [1,2,3]\n"
+        "    return dict[int][]int{0: a[:]}\n"
+        "def int main():\n"
+        "    dict[int][]int r = f()\n"
+        "    noise(9)\n"
+        "    print(r)\n"
+        "    return 0\n",
+        "dict[int][]int{0: []int[1, 2, 3]}\n"),
+    'deref_array_param': (
+        "def put(*[1][]int p):\n"
+        "    [3]int b = [1,2,3]\n"
+        "    (*p)[0] = b[:]\n"
+        "def int main():\n"
+        "    [1][]int r = [none]\n"
+        "    put(&r)\n"
+        "    noise(9)\n"
+        "    print(r)\n"
+        "    return 0\n",
+        "[1][]int[[]int[1, 2, 3]]\n"),
+    'for_in_binding': (
+        "def [][]int f():\n"
+        "    [3]int a = [1,2,3]\n"
+        "    [2][]int rows = [none, none]\n"
+        "    [][]int out = none\n"
+        "    rows[0] = a[:]\n"
+        "    for row in rows:\n"
+        "        out = append(out, row)\n"
+        "    return out\n"
+        "def int main():\n"
+        "    [][]int r = f()\n"
+        "    noise(9)\n"
+        "    print(r)\n"
+        "    return 0\n",
+        "[][]int[[]int[1, 2, 3], []int[]]\n"),
+    'call_inside_cast': (
+        "def int keep([]int s, *S w):\n"
+        "    w.s = s\n"
+        "    return 1\n"
+        "def int g(*S w):\n"
+        "    [3]int a = [1,2,3]\n"
+        "    return int(int64(keep(a[:], w)))\n"
+        "def int main():\n"
+        "    S w = S(none)\n"
+        "    int k = g(&w)\n"
+        "    noise(9)\n"
+        "    print(w.s)\n"
+        "    return 0\n",
+        "[]int[1, 2, 3]\n"),
+    'pointer_chain': (
+        "type N struct:\n"
+        "    *N next\n"
+        "    []int s\n"
+        "def N f():\n"
+        "    [3]int a = [1,2,3]\n"
+        "    N inner = N(none, a[:])\n"
+        "    N outer = N(&inner, none)\n"
+        "    return outer\n"
+        "def int main():\n"
+        "    N r = f()\n"
+        "    noise(9)\n"
+        "    print(r.next.s)\n"
+        "    return 0\n",
+        "[]int[1, 2, 3]\n"),
+}
+
+
+class TestEscapeSoundness:
+
+    @pytest.mark.parametrize('name', sorted(_ESCAPE_CASES))
+    def test_no_dangling_slice(self, name):
+        source, expected = _ESCAPE_CASES[name]
+        assert_program_stdout(_ESCAPE_PRELUDE + source, expected)

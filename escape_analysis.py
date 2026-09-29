@@ -1,197 +1,128 @@
-"""Decides which stack-allocated arrays actually need to be heap-
-allocated because a slice backed by them might outlive the function
-that declared them -- the memory-safety gap size-based promotion
-alone can't close. An intraprocedural, flow-insensitive analysis:
-every assignment to a slice variable anywhere in the function is
-unioned into one combined "what might this be backed by" answer,
-extended to cover slices stored as elements of an array-of-slices or
-a struct field (see analyze_array_escapes for the full algorithm)."""
+"""Escape analysis: which locals must live on the heap.
+
+Flow-insensitive, field-insensitive points-to analysis over one
+function. Each storage location t (local, param, for-in binding, `&S()`
+literal, heap literal, or EXT = memory not owned by this frame) has
+H[t]: the locations whose addresses may be stored inside t. An
+expression's value is the set of locations it may point into.
+
+Escaping: returned values, call arguments, anything stored into EXT,
+and, transitively, anything stored inside an escaping location.
+Escaping locations may in turn hold EXT (callee writes)."""
 
 from typing import Optional, Union
 
 from parser import (
-    ArrayLiteral,
-    Assign,
-    Binary,
-    Call,
-    ExprStmt,
-    Field,
-    FieldAssign,
-    For,
-    ForIn,
-    Function,
-    If,
-    Index,
-    IndexAssign,
-    Node,
-    Return,
-    Slice,
-    Unary,
-    UnaryOp,
-    VarDecl,
-    Variable,
-    While,
+    ArrayLiteral, Assign, Binary, BoolLiteral, Break, ByteLiteral, Call, Cast,
+    Constant, Continue, DerefAssign, DictLiteral, ExprStmt, Field, FieldAssign,
+    For, ForIn, Function, If, Index, IndexAssign, IsCheck, Node, NoneLiteral,
+    Return, Slice, StringLiteral, Unary, UnaryOp, VarDecl, Variable, While,
 )
-from semantic import type_from_name, Type, TypeKind, StructInfo
-from ir.utils import type_byte_width, type_of, for_in_binding_types
+from semantic import Type, TypeKind, StructInfo
+from ir.utils import type_byte_width
 
-
-# Fixed, hardcoded threshold for size-based stack safety. Any array-typed local
-# or parameter whose total flattened footprint (type_byte_width) exceeds this
-# many bytes is heap-allocated instead of living inline in its own stack slot.
-#
-# 16KB, not the more "principled" 4KB single-page size: generous enough that
-# ordinary matrix-shaped code (e.g. a [50][50]int, exactly 10000 bytes) isn't
-# quietly promoted to the heap by surprise, while leaving a wide safety margin
-# against the default ~8MB stack budget even under moderate recursion.
+# Composites larger than this are heap-allocated regardless of escape.
 _STACK_ARRAY_LIMIT_BYTES = 16384
 
 
 def is_heap_allocated(t: Type, structs: dict[str, StructInfo], sum_types: dict) -> bool:
-    """Whether a value of type `t` is heap-allocated rather than stored
-    inline in its own stack slot purely because of its OWN size -- true
-    for an ARRAY, STRUCT, or SUM type whose total footprint (type_byte_
-    width) exceeds _STACK_ARRAY_LIMIT_BYTES, false for every scalar
-    type and every array/struct/sum type under the limit. A struct (or
-    sum type) gets the same size-based treatment an array does -- all
-    three are value types whose footprint is a genuine, unbounded
-    property of their own declared shape (a sum type's is its largest
-    variant's own, which is exactly as unbounded as that variant
-    struct's own footprint already is), so the identical risk (one
-    huge local or parameter blowing the stack) applies equally to all
-    three. Purely a function of the type itself, never stored anywhere
-    -- anywhere codegen has the Type, it can just call this directly.
-
-    This is NOT the only reason a particular array ends up heap-
-    allocated -- see analyze_array_escapes below for the other,
-    independent trigger (a small array backing a slice that escapes
-    the function still needs to survive past its return, regardless of
-    size) -- so a caller deciding whether a SPECIFIC, NAMED variable
-    needs heap allocation should go through
-    CodeGenerator._is_heap_allocated instead, which combines this size
-    check with that escape-analysis result."""
+    """Size-based promotion only; see IRFunctionBuilder._is_heap_allocated."""
     return t.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM) and type_byte_width(t, structs, sum_types) > _STACK_ARRAY_LIMIT_BYTES
 
 
 def _unwrap_slices(expr: Node) -> Node:
-    """Unwraps a chain of Slice nodes (re-slicing, `s[0:3][0:2]`)
-    down to whatever is actually being sliced underneath -- a bare
-    Variable, an Index (reading an element out of an aggregate),
-    or a Field (reading a struct field)."""
     while isinstance(expr, Slice):
         expr = expr.array
     return expr
 
 
 def root_variable_name(expr: Node) -> Optional[str]:
-    """Unwraps a chain of Index, Slice, AND Field nodes down to
-    whatever bare Variable, if any, ultimately sits underneath."""
+    """Name of the Variable under an Index/Slice/Field chain, if any."""
     while isinstance(expr, (Index, Slice, Field)):
         expr = expr.base if isinstance(expr, Field) else expr.array
     return expr.name if isinstance(expr, Variable) else None
 
 
-# A declaration id is either a real AST node's own id() (an ordinary
-# VarDecl or Param -- always positive in CPython), or one of two
-# synthetic shapes with no real node to key by: a plain negative int
-# (slot_node_id's own aggregate-slot ids, disjoint by always being
-# negative), or an (id(stmt), index) pair for one binding of a ForIn
-# statement -- deliberately the exact tuple ir/builder.py's own _bind_
-# for_in_binding already uses for the same binding, which is what
-# lets _is_heap_allocated's own self._escaping_decl_ids lookup there
-# ever find what this analysis determines here (see the ForIn case in
-# walk_statements for the full reasoning). A tuple can never collide
-# with either int shape -- different types are never `==` to one
-# another in Python regardless of value.
+# id() of a VarDecl/Param/`&S()` Call, or (id(ForIn), binding index).
 DeclId = Union[int, tuple]
+
+
+EXT = 'EXT'
+
+
+def _heap(node: Node) -> tuple:
+    return ('heap', id(node))
 
 
 class EscapeAnalyzer:
     def __init__(self, fn: Function, param_types: list[Type], structs: dict[str, StructInfo], aliases: dict[str, Type], sum_types: dict):
         self.fn = fn
+        self.param_types = param_types
         self.structs = structs
         self.aliases = aliases
         self.sum_types = sum_types
-
-        self.array_decls: set[DeclId] = set()
-        self.slice_decls: set[DeclId] = set()
-        self.pointer_decls: set[DeclId] = set()
-        self.decl_types: dict[DeclId, Type] = {}
-        self.decl_names: dict[DeclId, str] = {}
-        self.direct_backing: dict[DeclId, set[DeclId]] = {}
-        self.slice_deps: dict[DeclId, set[DeclId]] = {}
-        self.escaping_address_holders: set[DeclId] = set()
-        self.escaping_decls: set[DeclId] = set()
-        self.aggregate_slot_ids: dict[tuple[DeclId, str], int] = {}
-
-        self.scopes: list[dict[str, DeclId]] = [{}]
-
-        for p, p_type in zip(fn.params, param_types):
-            self.declare(p.name, id(p), p_type)
-
-        self._AGGREGATE_ELEMENTS_SLOT = '[]'  # the one shared slot for a WHOLE
-        # aggregate declaration -- an array-/slice-of-slices (used by
-        # indexed_slot_of) or a struct containing a slice- or pointer-
-        # typed field (used by field_slot_of), at any nesting depth --
-        # regardless of which specific index or field is involved. The
-        # SAME sentinel serves all of these, since a given declaration
-        # is always either array/slice-shaped or struct-shaped, never
-        # both. Chosen because '[' and ']' can never appear in a
-        # Hornet identifier, so this can never collide with a real
-        # field name.
+        self.H: dict = {EXT: {EXT}}
+        self.esc: set = {EXT}
+        self.changed = False
+        self.scopes: list[dict[str, DeclId]] = []
 
     def analyze(self) -> set[DeclId]:
-        self.walk_statements(self.fn.body)
+        while True:
+            self.changed = False
+            self.scopes = [{}]
+            for p in self.fn.params:
+                self.scopes[-1][p.name] = id(p)
+                self._add(id(p), {EXT})
+            self.walk_statements(self.fn.body)
+            self._close_escapes()
+            if not self.changed:
+                break
+        return {t for t in self.esc
+                if t != EXT and not (isinstance(t, tuple) and isinstance(t[0], str))}
 
-        result: set[DeclId] = set(self.escaping_decls)
-        visited: set[DeclId] = set()
-        stack: list[DeclId] = list(self.escaping_address_holders)
+    # -- lattice helpers
+
+    def _add(self, t, vals: set) -> None:
+        cur = self.H.setdefault(t, set())
+        if not vals <= cur:
+            cur |= vals
+            self.changed = True
+
+    def _escape(self, vals: set) -> None:
+        if not vals <= self.esc:
+            self.esc |= vals
+            self.changed = True
+
+    def _store(self, targets: set, vals: set) -> None:
+        for t in targets:
+            if t == EXT:
+                self._escape(vals)
+            else:
+                self._add(t, vals)
+
+    def _contents(self, targets: set) -> set:
+        out = set()
+        for t in targets:
+            out |= self.H.get(t, set())
+        return out
+
+    def _close_escapes(self) -> None:
+        stack = list(self.esc)
         while stack:
-            node_id = stack.pop()
-            if node_id in visited:
-                continue
-            visited.add(node_id)
-            result |= self.direct_backing.get(node_id, set())
-            for dep in self.slice_deps.get(node_id, set()):
-                if dep not in visited:
-                    stack.append(dep)
+            t = stack.pop()
+            if t != EXT:
+                self._add(t, {EXT})
+            for u in self.H.get(t, ()):
+                if u not in self.esc:
+                    self.esc.add(u)
+                    self.changed = True
+                    stack.append(u)
 
-        # Every declaration in `result`, scalar or composite, now gets
-        # the identical heap-promotion treatment: _is_heap_allocated's
-        # own escape check was already written generically (see its
-        # own docstring -- "a declaration of ANY type can appear here
-        # now, not just array"), and every scalar read/write/param-
-        # binding/VarDecl-init site now checks it too (see ir/
-        # statements.py's own VarDecl/Assign cases, ir/dispatch.py's
-        # own Variable case, and ir/builder.py's own _bind_local/_bind_
-        # param). &x itself needs no new indirection at all for a
-        # heap-promoted SCALAR specifically -- see _ir_address_of's
-        # own docstring for why a scalar's permanent Temp already IS
-        # its own address once it holds a pointer, unlike a composite's
-        # own named frame slot, which needs an extra IRLoad through it.
-        return result
+    # -- names
 
-
-    def declare(self, name: str, decl_id: DeclId, decl_type: Type) -> None:
+    def declare(self, name: str, decl_id: DeclId) -> None:
         self.scopes[-1][name] = decl_id
-        self.decl_types[decl_id] = decl_type
-        self.decl_names[decl_id] = name
-        if decl_type.kind == TypeKind.ARRAY:
-            self.array_decls.add(decl_id)
-        if decl_type.kind == TypeKind.SLICE:
-            self.slice_decls.add(decl_id)
-            self.direct_backing.setdefault(decl_id, set())
-            self.slice_deps.setdefault(decl_id, set())
-        if decl_type.kind == TypeKind.POINTER:
-            # A pointer-typed declaration is ALWAYS a trackable node,
-            # exactly like a slice-typed one -- both are inherently
-            # address-holding values, whether or not this specific
-            # one's own address is ever taken (which would be a
-            # DIFFERENT declaration's own concern -- see contribution's
-            # own ADDRESS_OF case).
-            self.pointer_decls.add(decl_id)
-            self.direct_backing.setdefault(decl_id, set())
-            self.slice_deps.setdefault(decl_id, set())
+        self.H.setdefault(decl_id, set())
 
     def resolve(self, name: str) -> Optional[DeclId]:
         for scope in reversed(self.scopes):
@@ -199,607 +130,183 @@ class EscapeAnalyzer:
                 return scope[name]
         return None
 
-    def slot_node_id(self, container_id: DeclId, slot: str) -> int:
-        """Gives each distinct (container_id, slot) pair a unique node id,
-        synthesizing one the first time that exact pair is seen and returning
-        the same one every time after."""
-        key = (container_id, slot)
-        if key not in self.aggregate_slot_ids:
-            node_id = -(len(self.aggregate_slot_ids) + 1)  # always negative;
-            # id() is always a positive address in CPython, so this can
-            # never collide with a real declaration's own node id.
-            self.aggregate_slot_ids[key] = node_id
-            self.slice_decls.add(node_id)
-            self.direct_backing.setdefault(node_id, set())
-            self.slice_deps.setdefault(node_id, set())
-        return self.aggregate_slot_ids[key]
+    # -- expressions
 
-    def indexed_slot_of(self, base_expr: Node) -> Optional[int]:
-        """Recognizes `base_expr` as something that, indexed ONE more
-        time, produces a slice or a pointer. Resolves it to whatever
-        ROOT Variable underlies the whole chain (see
-        root_variable_name), returning that root's shared indexed-
-        elements slot id (see slot_node_id).
+    @staticmethod
+    def _kind(expr: Node) -> Optional[TypeKind]:
+        t = getattr(expr, 'resolved_type', None)
+        return t.kind if t is not None else None
 
-        Returns None if base_expr's type isn't an array or slice, if
-        indexing it one more time wouldn't yield a slice or pointer, or
-        if the chain doesn't resolve to a bare Variable at its root."""
-        base_type = base_expr.resolved_type
-        if base_type is None or base_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE):
-            return None
-        element_type = base_type.element_type
-        if element_type is None or element_type.kind not in (TypeKind.SLICE, TypeKind.POINTER):
-            return None
-        root_name = root_variable_name(base_expr)
-        if root_name is None:
-            return None
-        return self.whole_value_node_of(root_name)
+    def loc(self, expr: Node) -> set:
+        """Locations `expr`'s storage may reside in."""
+        if isinstance(expr, Variable):
+            d = self.resolve(expr.name)
+            return {d} if d is not None else {EXT}
+        if isinstance(expr, Field):
+            if self._kind(expr.base) == TypeKind.POINTER:
+                return self.vals(expr.base)
+            return self.loc(expr.base)
+        if isinstance(expr, Index):
+            self.vals(expr.index)
+            if self._kind(expr.array) == TypeKind.ARRAY:
+                return self.loc(expr.array)
+            return self.vals(expr.array)
+        if isinstance(expr, Unary) and expr.op == UnaryOp.DEREFERENCE:
+            return self.vals(expr.operand)
+        if isinstance(expr, Call) and expr.name in self.structs:
+            t = id(expr)
+            self._add(t, self.vals(expr))
+            return {t}
+        # Rvalue: materialized in fresh, non-promotable storage.
+        t = _heap(expr)
+        self._add(t, self.vals(expr))
+        return {t}
 
-    def field_slot_of(self, field_expr: Field) -> Optional[int]:
-        """Recognizes field_expr as a struct field access whose value
-        needs this analysis's tracking: the field is slice- or
-        pointer-typed, or is an aggregate containing one at some depth
-        (see _contains_address_holder). Resolves to the ROOT Variable
-        underlying the whole access chain (see root_variable_name) and
-        returns that root's shared aggregate-elements slot id (see
-        slot_node_id) -- the SAME slot indexed_slot_of gives an array/
-        slice-of-slices declaration.
-
-        Deliberately ONE combined slot per root declaration, not one
-        per distinct field path (`p.a` and `p.b` share it, even though
-        a field name, unlike a dynamic index, could in principle get
-        its own precise slot): per-field precision would need a
-        struct-to-struct copy of just one field (`i = outer.inner`) to
-        propagate only that field's own slots to `i`'s -- correct, but
-        a larger mechanism than this analysis's "resolve to exactly one
-        node" shape supports without a bigger refactor. Lumping every
-        field into one shared slot is sound (a write into any field
-        still makes the WHOLE declaration escape when it needs to),
-        just coarser than necessary for two logically-independent
-        slice or pointer fields on the same struct.
-
-        Returns None if field_expr's base isn't struct-typed, the
-        struct is unknown, or the field doesn't exist (all three
-        already guaranteed impossible by the time semantic analysis
-        has passed -- this stays defensive rather than assuming), if
-        the field's type doesn't contain a slice or pointer, or if the
-        chain doesn't resolve to a bare Variable at its root."""
-        base_type = field_expr.base.resolved_type
-        if base_type is None or base_type.kind != TypeKind.STRUCT:
-            return None
-        struct_info = self.structs.get(base_type.struct_name)
-        if struct_info is None or field_expr.name not in struct_info.fields:
-            return None
-        field_type = struct_info.fields[field_expr.name]
-        if not self._contains_address_holder(field_type):
-            return None
-        root_name = root_variable_name(field_expr)
-        if root_name is None:
-            return None
-        return self.whole_value_node_of(root_name)
-
-    def whole_value_node_of(self, name: str) -> Optional[DeclId]:
-        """Resolves `name` to the node id tracking its value, if it's a
-        slice or pointer, or contains one. Returns None if `name`
-        doesn't resolve to anything, or resolves to a type that isn't
-        a slice or pointer and doesn't contain one."""
-        decl_id = self.resolve(name)
-        if decl_id is None:
-            return None
-        decl_type = self.decl_types.get(decl_id)
-        if decl_type is not None:
-            if decl_type.kind in (TypeKind.ARRAY, TypeKind.SLICE):
-                element_type = decl_type.element_type
-                if element_type is not None and self._contains_address_holder(element_type):
-                    return self.slot_node_id(decl_id, self._AGGREGATE_ELEMENTS_SLOT)
-            elif decl_type.kind == TypeKind.STRUCT and self._contains_address_holder(decl_type):
-                return self.slot_node_id(decl_id, self._AGGREGATE_ELEMENTS_SLOT)
-        if decl_id in self.slice_decls or decl_id in self.pointer_decls:
-            return decl_id
-        return None
-
-    def _contains_address_holder(self, t: Type) -> bool:
-        """True if `t` is itself a slice or pointer, or contains one at
-        ANY depth of further nesting.
-
-        Recursing into a STRUCT's fields is safe from infinite
-        recursion even for a self-referential struct: the SLICE and
-        POINTER cases below are always checked first and return True
-        immediately without recursing FURTHER -- crucially, the
-        POINTER case never recurses into t.element_type (the pointee's
-        own type) at all, which is what makes a genuinely self-
-        referential struct through a pointer field (`type Node struct:
-        int value; *Node next`) safe here: nothing ever looks at what
-        `next` points AT, only that `next` itself is a pointer, so
-        there's no cycle to walk into in the first place.
-
-        For the SLICE case specifically, semantic.py's own cycle
-        detection guarantees the only way a struct could reach itself
-        THROUGH RECURSION here is through a slice field (a direct or
-        array-embedded self-reference is rejected), so any cycle
-        reachable by actually recursing is guaranteed to pass through
-        a slice-typed field first, stopping immediately there. Pointer
-        fields need no such argument at all, for the reason above --
-        they're never recursed through regardless of what they point
-        at, self-referential or not."""
-        if t.kind == TypeKind.SLICE:
-            return True
-        if t.kind == TypeKind.POINTER:
-            return True
-        if t.kind == TypeKind.ARRAY:
-            return self._contains_address_holder(t.element_type)
-        if t.kind == TypeKind.STRUCT:
-            struct_info = self.structs.get(t.struct_name)
-            if struct_info is None:
-                return False
-            return any(self._contains_address_holder(field_type) for field_type in struct_info.fields.values())
-        return False
-
-    def contribution(self, value_expr: Node) -> tuple[Optional[DeclId], Optional[DeclId]]:
-        """Returns (backing_decl_id, derived_from_decl_id) -- whichever
-        ONE of the two value_expr's aliasing actually resolves to
-        (never both), or (None, None) if it isn't backed by any of
-        this function's declarations at all (a fresh literal, `none`,
-        an ordinary user-function call's return value, ...).
-        backing_decl_id can be ANY type now, not just array -- &x's
-        own target isn't restricted the way a Slice's own base always
-        is, since it can be a scalar, struct, array, or sum-typed x.
-        An aggregate's slot id (see AGGREGATES AND SLOTS in
-        analyze_array_escapes) is returned as the second element here
-        exactly like a bare slice or pointer Variable's id would be --
-        callers don't need to know it came from indexing into an
-        aggregate rather than reading a plain slice/pointer variable
-        directly."""
-        if isinstance(value_expr, Slice):
-            # Re-slicing never changes what backs a value, so unwrap
-            # any further re-slicing FIRST (`s[0:3][0:2]`) down to
-            # whatever's actually being sliced. This stops at, rather
-            # than through, an Index or Field: those need indexed_
-            # slot_of's/field_slot_of's aggregate-slot resolution tried
-            # first, falling back to the plain root-declaration check
-            # below when that doesn't apply -- e.g. `matrix[1][0:2]`
-            # (slicing a plain sub-array row, no slices involved) has
-            # inner = Index(matrix, 1), but indexed_slot_of(matrix)
-            # correctly returns None (indexing matrix once more yields
-            # another array, not a slice), so this falls through to
-            # resolving matrix itself, like the plain-Variable case
-            # below.
-            inner = _unwrap_slices(value_expr.array)
-            slot_id = None
-            if isinstance(inner, Index):
-                slot_id = self.indexed_slot_of(inner.array)
-            elif isinstance(inner, Field):
-                slot_id = self.field_slot_of(inner)
-            if slot_id is not None:
-                return None, slot_id
-            base_name = root_variable_name(inner)
-            if base_name is not None:
-                base_id = self.resolve(base_name)
-                if base_id in self.array_decls:
-                    return base_id, None
-                if base_id in self.slice_decls:
-                    return None, base_id
-        elif isinstance(value_expr, Unary) and value_expr.op == UnaryOp.ADDRESS_OF:
-            if isinstance(value_expr.operand, Call):
-                # `&Circle(5)` -- the only OTHER shape semantic.py's own
-                # check_unary allows here, alongside a bare Variable
-                # (see UnaryOp.ADDRESS_OF's own docstring there). There's
-                # no pre-existing declaration to resolve() by name the
-                # way a Variable operand already has -- this literal IS
-                # its own, brand-new declaration, registered here, the
-                # first (and only) time this exact AST node is ever
-                # reached, keyed by id(value_expr.operand) exactly like
-                # a VarDecl/Param's own decl_id is keyed by id() of ITS
-                # node. ir/builder.py's own _collect_argument_temps_in_
-                # expr reads self._escaping_decl_ids under this same
-                # id() to decide whether to reserve a stack slot for
-                # this literal at all -- see its own comment for why
-                # that decision can't reuse the ordinary argument-temp
-                # path (never escape-driven there, by design).
-                self.declare("<struct literal>", id(value_expr.operand), type_of(value_expr.operand))
-                return id(value_expr.operand), None
-            if isinstance(value_expr.operand, (Field, Index)):
-                # `&s.field`/`&arr[i]` -- the other two shapes semantic.
-                # py's own check_unary allows here (see UnaryOp.ADDRESS_
-                # OF's own docstring, and _root_variable_of there, which
-                # this mirrors). Unlike a bare Variable, this doesn't
-                # back the pointer value with the field/element itself
-                # -- there's no separate box for one field to escape
-                # into on its own; a field/element's address is always
-                # its OWN containing declaration's base address plus a
-                # fixed offset, so if this address needs to survive
-                # past this function, the WHOLE containing declaration
-                # has to (the existing composite heap-promotion
-                # machinery, unchanged, once its own decl_id is in
-                # result -- see _is_heap_allocated).
-                #
-                # One real exception: if the chain's own base is
-                # POINTER-typed (auto-deref -- `p.field`, p: *Circle),
-                # there's nothing here to track at all. p's own pointee
-                # is already, independently safe -- heap-allocated (or
-                # otherwise valid) wherever p itself first came from,
-                # entirely outside this function's own control -- and
-                # &p.field is just that already-valid address plus an
-                # offset, exactly as safe as p itself already was.
-                # Marking p's OWN decl_id as escaping here instead would
-                # be actively wrong: p is an ordinary, freely-copied
-                # pointer VALUE, not something that itself needs heap
-                # promotion. field_slot_of's own, identical check (its
-                # own docstring: "Returns None if field_expr's base
-                # isn't struct-typed") is exactly this same guard,
-                # reused here for the identical reason -- checking only
-                # the IMMEDIATE base is already sufficient regardless of
-                # chain depth, since auto-deref can only ever happen at
-                # the one field/index access immediately following it.
-                immediate_base = value_expr.operand.base if isinstance(value_expr.operand, Field) else value_expr.operand.array
-                base_type = immediate_base.resolved_type
-                if base_type is not None and base_type.kind == TypeKind.POINTER:
-                    return None, None
-                root_name = root_variable_name(value_expr.operand)
-                if root_name is not None:
-                    base_id = self.resolve(root_name)
-                    if base_id is not None:
-                        return base_id, None
-                return None, None
-            # &x -- x is guaranteed a bare Variable here (the only
-            # remaining shape after the struct-literal/Field/Index
-            # cases above).
-            # x's own decl_id becomes this pointer VALUE's own
-            # "backing" declaration -- the identical role array_decl_id
-            # plays for a Slice above, generalized to any type: x can
-            # be scalar, struct, array, or sum-typed, not just array
-            # the way a Slice's own base always is.
-            base_id = self.resolve(value_expr.operand.name)
-            if base_id is not None:
-                return base_id, None
-        elif isinstance(value_expr, Variable):
-            node_id = self.whole_value_node_of(value_expr.name)
-            if node_id is not None:
-                return None, node_id
-        elif isinstance(value_expr, Index):
-            # Reading an element back out of a declared aggregate --
-            # `rows[i]` -- resolves to that aggregate's indexed-
-            # elements slot.
-            slot_id = self.indexed_slot_of(value_expr.array)
-            if slot_id is not None:
-                return None, slot_id
-        elif isinstance(value_expr, Field):
-            # Reading a slice- or pointer-typed (or such-containing)
-            # field back out of a declared struct -- `p.values` --
-            # resolves to that struct's combined aggregate-elements
-            # slot, structurally identical to the Index case above.
-            slot_id = self.field_slot_of(value_expr)
-            if slot_id is not None:
-                return None, slot_id
-        elif isinstance(value_expr, Call) and value_expr.name == 'append':
-            # append's first argument might reuse ITS OWN backing
-            # storage (the reuse path -- see _ir_append_call), so
-            # whatever that argument resolves to is this call's
-            # contribution too. Recursing here means append's first
-            # argument gets the same treatment any other slice-valued
-            # expression does -- an aggregate element, an unnamed slice
-            # expression, or another append call's result -- not just
-            # a named slice variable.
-            return self.contribution(value_expr.args[0])
-        return None, None
-
-    def scan_expr_for_escaping_calls(self, expr: Node) -> None:
+    def vals(self, expr: Node) -> set:
+        """Locations `expr`'s value may point into. Evaluates every
+        subexpression, so escaping call arguments are always recorded."""
+        if expr is None:
+            return set()
+        if isinstance(expr, Variable):
+            return self._contents(self.loc(expr))
+        if isinstance(expr, Field):
+            if self._kind(expr.base) == TypeKind.POINTER:
+                return self._contents(self.vals(expr.base))
+            return self.vals(expr.base)
+        if isinstance(expr, Index):
+            self.vals(expr.index)
+            k = self._kind(expr.array)
+            if k == TypeKind.ARRAY:
+                return self.vals(expr.array)
+            if k == TypeKind.STR:
+                self.vals(expr.array)
+                return set()
+            return self._contents(self.vals(expr.array))
+        if isinstance(expr, Slice):
+            self.vals(expr.low)
+            self.vals(expr.high)
+            if self._kind(expr.array) == TypeKind.ARRAY:
+                return self.loc(expr.array)
+            return self.vals(expr.array)
+        if isinstance(expr, Unary):
+            if expr.op == UnaryOp.ADDRESS_OF:
+                return self.loc(expr.operand)
+            if expr.op == UnaryOp.DEREFERENCE:
+                return self._contents(self.vals(expr.operand))
+            self.vals(expr.operand)
+            return set()
+        if isinstance(expr, Binary):
+            self.vals(expr.left)
+            self.vals(expr.right)
+            return set()
+        if isinstance(expr, Cast):
+            return self.vals(expr.expr)
+        if isinstance(expr, ArrayLiteral):
+            t = _heap(expr)
+            elems = set()
+            for e in expr.elements:
+                elems |= self.vals(e)
+            self._add(t, elems)
+            return {t} | elems
+        if isinstance(expr, DictLiteral):
+            t = _heap(expr)
+            for k, v in expr.entries:
+                self._add(t, self.vals(k) | self.vals(v))
+            return {t}
         if isinstance(expr, Call):
-            if expr.name not in ('print', 'len', 'append'):
-                for arg in expr.args:
-                    backing_id, derived_from_id = self.contribution(arg)
-                    if backing_id is not None:
-                        self.escaping_decls.add(backing_id)
-                    if derived_from_id is not None:
-                        self.escaping_address_holders.add(derived_from_id)
-            for arg in expr.args:
-                self.scan_expr_for_escaping_calls(arg)
-        elif isinstance(expr, Binary):
-            self.scan_expr_for_escaping_calls(expr.left)
-            self.scan_expr_for_escaping_calls(expr.right)
-        elif isinstance(expr, Unary):
-            self.scan_expr_for_escaping_calls(expr.operand)
-        elif isinstance(expr, Index):
-            self.scan_expr_for_escaping_calls(expr.array)
-            self.scan_expr_for_escaping_calls(expr.index)
-        elif isinstance(expr, Slice):
-            self.scan_expr_for_escaping_calls(expr.array)
-            if expr.low is not None:
-                self.scan_expr_for_escaping_calls(expr.low)
-            if expr.high is not None:
-                self.scan_expr_for_escaping_calls(expr.high)
-        elif isinstance(expr, ArrayLiteral):
-            for element in expr.elements:
-                self.scan_expr_for_escaping_calls(element)
-        elif isinstance(expr, Field):
-            # A pre-existing gap this closes alongside the struct-
-            # field escape work: `foo(bar()).x` (a nested call under a
-            # Field access) needs bar()'s own argument-escaping check
-            # just as much as any other sub-expression -- never reached
-            # before, regardless of whether the field itself ends up
-            # being slice-relevant.
-            self.scan_expr_for_escaping_calls(expr.base)
-        # Variable, Constant, BoolLiteral, StringLiteral, NoneLiteral:
-        # leaves, nothing further to recurse into.
+            return self._call(expr)
+        if isinstance(expr, IsCheck):
+            self.vals(expr.subject)
+            return set()
+        if isinstance(expr, (Constant, BoolLiteral, NoneLiteral, StringLiteral, ByteLiteral)):
+            return set()
+        raise TypeError(f"escape analysis: unhandled expression {type(expr).__name__}")
+
+    def _call(self, expr: Call) -> set:
+        args = list(expr.args) + [v for _, v in (expr.kwargs or [])]
+        arg_vals = [self.vals(a) for a in args]
+        if expr.name in self.structs:
+            return set().union(*arg_vals)
+        if expr.name in ('print', 'len', 'del'):
+            return set()
+        if expr.name == 'append':
+            t = _heap(expr)
+            old = arg_vals[0]
+            self._add(t, self._contents(old))
+            elems = set().union(*arg_vals[1:])
+            self._store(old | {t}, elems)
+            return old | {t}
+        for v in arg_vals:
+            self._escape(v)
+        return {EXT}
+
+    # -- statements
 
     def walk_statements(self, statements: list[Node]) -> None:
         for stmt in statements:
-            if isinstance(stmt, VarDecl):
-                var_type = type_from_name(stmt.var_type, self.structs, self.aliases, sum_types=self.sum_types)
-                self.declare(stmt.name, id(stmt), var_type)
-                if stmt.init is not None:
-                    target_node = self.whole_value_node_of(stmt.name)
-                    if target_node is not None:
-                        backing_id, derived_from_id = self.contribution(stmt.init)
-                        if backing_id is not None:
-                            self.direct_backing[target_node].add(backing_id)
-                        if derived_from_id is not None:
-                            self.slice_deps[target_node].add(derived_from_id)
-                    self.scan_expr_for_escaping_calls(stmt.init)
-            elif isinstance(stmt, Assign):
-                target_node = self.whole_value_node_of(stmt.name)
-                if target_node is not None:
-                    backing_id, derived_from_id = self.contribution(stmt.value)
-                    if backing_id is not None:
-                        self.direct_backing[target_node].add(backing_id)
-                    if derived_from_id is not None:
-                        self.slice_deps[target_node].add(derived_from_id)
-                self.scan_expr_for_escaping_calls(stmt.value)
-            elif isinstance(stmt, IndexAssign):
-                slot_id = self.indexed_slot_of(stmt.array)
-                if slot_id is not None:
-                    backing_id, derived_from_id = self.contribution(stmt.value)
-                    if backing_id is not None:
-                        self.direct_backing[slot_id].add(backing_id)
-                    if derived_from_id is not None:
-                        self.slice_deps[slot_id].add(derived_from_id)
-                self.scan_expr_for_escaping_calls(stmt.array)
-                self.scan_expr_for_escaping_calls(stmt.index)
-                self.scan_expr_for_escaping_calls(stmt.value)
-            elif isinstance(stmt, FieldAssign):
-                # Mirrors IndexAssign one kind of access over --
-                # field_slot_of needs an actual Field node, not stmt
-                # directly: root_variable_name's isinstance check only
-                # recognizes Index/Slice/Field, not FieldAssign, so
-                # duck-typing stmt.base/stmt.name through it silently
-                # fails to unwrap anything, always returning None -- a
-                # real bug this construction fixes, found by testing (a
-                # struct escaping via return, with a slice field
-                # previously written through FieldAssign, failed to
-                # promote its backing array) rather than by inspection.
-                slot_id = self.field_slot_of(Field(base=stmt.base, name=stmt.name))
-                if slot_id is not None:
-                    backing_id, derived_from_id = self.contribution(stmt.value)
-                    if backing_id is not None:
-                        self.direct_backing[slot_id].add(backing_id)
-                    if derived_from_id is not None:
-                        self.slice_deps[slot_id].add(derived_from_id)
-                self.scan_expr_for_escaping_calls(stmt.base)
-                self.scan_expr_for_escaping_calls(stmt.value)
-            elif isinstance(stmt, Return):
-                if stmt.value is not None:
-                    backing_id, derived_from_id = self.contribution(stmt.value)
-                    if backing_id is not None:
-                        self.escaping_decls.add(backing_id)
-                    if derived_from_id is not None:
-                        self.escaping_address_holders.add(derived_from_id)
-                    self.scan_expr_for_escaping_calls(stmt.value)
-            elif isinstance(stmt, ExprStmt):
-                self.scan_expr_for_escaping_calls(stmt.expr)
-            elif isinstance(stmt, If):
-                self.scan_expr_for_escaping_calls(stmt.condition)
-                self.scopes.append({})
-                self.walk_statements(stmt.then_body)
-                self.scopes.pop()
-                if stmt.else_body is not None:
-                    self.scopes.append({})
-                    self.walk_statements(stmt.else_body)
-                    self.scopes.pop()
-            elif isinstance(stmt, While):
-                self.scan_expr_for_escaping_calls(stmt.condition)
-                self.scopes.append({})
-                self.walk_statements(stmt.body)
-                self.scopes.pop()
-            elif isinstance(stmt, ForIn):
-                # ONE scope spans the binding(s) and body, matching
-                # analyze_for_in's own reasoning in semantic.py.
-                # binding(s) each get a decl id of (id(stmt), i) --
-                # deliberately the EXACT SAME pair ir/builder.py's own
-                # _allocate_for_in_binding_slot/_bind_for_in_binding
-                # already key their own var_slots/scope entries by
-                # (there's no real VarDecl node to key by id() alone,
-                # unlike For's own init variable just below, so both
-                # files independently need a synthetic key -- and
-                # since both walk the SAME parsed stmt within one
-                # compilation pass, id(stmt) is already identical in
-                # both places for free). This match matters: it's the
-                # only thing that lets _is_heap_allocated's own decl_id
-                # in self._escaping_decl_ids check in ir/builder.py
-                # ever actually find what this pass determines here.
-                # An earlier version of this code used its own,
-                # separate synthetic counter instead -- individually
-                # sound (disjoint from every other id in use), but a
-                # DIFFERENT key for the same logical binding than ir/
-                # builder.py's own, so a binding whose address escaped
-                # was correctly identified here yet never actually
-                # reached _escaping_decl_ids under a key ir/builder.py
-                # would ever look up -- confirmed as the reason &x on a
-                # for-in binding produced corrupted memory rather than
-                # a correctly heap-promoted copy, before this fix.
-                #
-                # Otherwise identical to the VarDecl case above's own
-                # "does this variable's own value derive from a slice/
-                # pointer-shaped source" tracking, given an ordinary
-                # declaration's own init expression -- here, every
-                # binding's own value derives from stmt.iterable as a
-                # whole (a safe over-approximation: treating an
-                # ELEMENT as if it derives from the WHOLE collection
-                # can only cause an unnecessary heap promotion, never
-                # a missed one, the one direction that's actually safe
-                # to get wrong).
-                self.scopes.append({})
-                iterable_type = type_of(stmt.iterable)
-                for i, (name, binding_type) in enumerate(zip(stmt.binding_names, for_in_binding_types(stmt, iterable_type))):
-                    decl_id = (id(stmt), i)
-                    self.declare(name, decl_id, binding_type)
-                    target_node = self.whole_value_node_of(name)
-                    if target_node is not None:
-                        backing_id, derived_from_id = self.contribution(stmt.iterable)
-                        if backing_id is not None:
-                            self.direct_backing[target_node].add(backing_id)
-                        if derived_from_id is not None:
-                            self.slice_deps[target_node].add(derived_from_id)
-                self.scan_expr_for_escaping_calls(stmt.iterable)
-                self.walk_statements(stmt.body)
-                self.scopes.pop()
+            self.walk_statement(stmt)
 
-            elif isinstance(stmt, For):
-                # ONE scope spans init through increment, matching
-                # analyze_for's own reasoning in semantic.py exactly:
-                # init's own variable needs to stay visible for cond/
-                # body/increment, and nothing declared anywhere in any
-                # of those four should survive past this scope's own
-                # pop -- a single shared scope already gives both,
-                # with no need for a second, nested one just for body.
-                # init/increment each wrapped in a list, reusing this
-                # same method's own VarDecl/Assign branches (the top
-                # of this loop, above) rather than duplicating them
-                # here.
-                self.scopes.append({})
-                self.walk_statements([stmt.init])
-                self.scan_expr_for_escaping_calls(stmt.condition)
-                self.walk_statements(stmt.body)
-                self.walk_statements([stmt.increment])
-                self.scopes.pop()
-            # Break, Continue: nothing to do.
+    def _block(self, body) -> None:
+        if body is None:
+            return
+        self.scopes.append({})
+        self.walk_statements(body)
+        self.scopes.pop()
+
+    def walk_statement(self, stmt: Node) -> None:
+        if isinstance(stmt, VarDecl):
+            v = self.vals(stmt.init) if stmt.init is not None else set()
+            self.declare(stmt.name, id(stmt))
+            self._add(id(stmt), v)
+        elif isinstance(stmt, Assign):
+            self._store(self.loc(Variable(name=stmt.name)), self.vals(stmt.value))
+        elif isinstance(stmt, IndexAssign):
+            self._store(self.loc(Index(array=stmt.array, index=stmt.index)), self.vals(stmt.value))
+        elif isinstance(stmt, FieldAssign):
+            self._store(self.loc(Field(base=stmt.base, name=stmt.name)), self.vals(stmt.value))
+        elif isinstance(stmt, DerefAssign):
+            self._store(self.vals(stmt.pointer), self.vals(stmt.value))
+        elif isinstance(stmt, Return):
+            self._escape(self.vals(stmt.value))
+        elif isinstance(stmt, ExprStmt):
+            self.vals(stmt.expr)
+        elif isinstance(stmt, If):
+            self.scopes.append({})
+            cond = stmt.condition
+            if isinstance(cond, IsCheck) and cond.binding_decl is not None:
+                self.walk_statement(cond.binding_decl)
+            else:
+                self.vals(cond)
+            self._block(stmt.then_body)
+            self._block(stmt.else_body)
+            self.scopes.pop()
+        elif isinstance(stmt, While):
+            self.vals(stmt.condition)
+            self._block(stmt.body)
+        elif isinstance(stmt, For):
+            self.scopes.append({})
+            self.walk_statement(stmt.init)
+            self.vals(stmt.condition)
+            self._block(stmt.body)
+            self.walk_statement(stmt.increment)
+            self.scopes.pop()
+        elif isinstance(stmt, ForIn):
+            k = self._kind(stmt.iterable)
+            it = self.vals(stmt.iterable)
+            elems = it if k == TypeKind.ARRAY else self._contents(it)
+            self.scopes.append({})
+            for i, name in enumerate(stmt.binding_names):
+                self.declare(name, (id(stmt), i))
+                self._add((id(stmt), i), elems)
+            self.walk_statements(stmt.body)
+            self.scopes.pop()
+        elif isinstance(stmt, (Break, Continue)):
+            pass
+        else:
+            self.vals(stmt)
 
 
 def analyze_array_escapes(
-        fn: Function, param_types: list[Type], structs: dict[str, StructInfo], aliases: dict[str, Type], sum_types: dict) -> set[int]:
-    """Returns the set of id()s -- of this function's VarDecl or Param
-    nodes -- for array-typed declarations that need to be heap-
-    allocated because a slice backed by them might outlive this
-    function's call, REGARDLESS of their own size. This closes the
-    memory-safety gap size-based heap promotion alone leaves open: a
-    small, stack-allocated array, sliced and returned (directly, via a
-    named slice variable, or after an `append` that reused its backing
-    storage), leaves the returned slice's pointer dangling into a
-    torn-down stack frame.
-
-    An intraprocedural, FLOW-INSENSITIVE analysis: it doesn't reason
-    about execution order or which branch actually runs -- every
-    assignment to a given slice variable anywhere in the function is
-    unioned into one combined "what might this be backed by" answer.
-    This is a deliberate simplification (a variable reused for two
-    logically-unrelated slices gets treated as if it could be either
-    one everywhere), avoiding a genuine fixed-point dataflow pass over
-    branches and loops for a precision level ordinary code doesn't
-    often need. The same treatment covers a slice stored as an element
-    of an AGGREGATE (an array-/slice-of-slices, or a struct with a
-    slice field -- see AGGREGATES AND SLOTS below), composing
-    correctly at any depth (`matrix[i][j] = arr[:]`, `s1[0:3][0:2]`).
-
-    Two further limitations, deliberately out of scope:
-      - Purely INTRAprocedural: a slice passed to any user-defined
-        function call is conservatively treated as escaping
-        unconditionally, without looking at what the callee does with
-        it. A real interprocedural version would need a per-function
-        escape summary computed via fixed-point iteration over the
-        call graph (Hornet allows recursion) -- a substantially larger
-        undertaking, left for its own follow-up.
-      - A slice stored through indirection this language doesn't
-        actually have (e.g. a pointer) was never in scope.
-
-    ALGORITHM, two phases:
-      1. Walk the function body once (recursing into If/While bodies
-         with a scope stack, so shadowed names resolve correctly),
-         building:
-           - direct_backing: for each trackable node (a slice- or
-             pointer-typed declaration, or an aggregate's slot), which
-             declaration(s) it's ever directly sliced from or taken
-             the address of -- ANY type, for the pointer case (`&x`
-             can target a scalar, struct, array, or sum-typed x, not
-             just an array the way slicing's own base always is).
-           - slice_deps: for each trackable node, which OTHER
-             trackable node(s) it might be derived from (re-slicing, a
-             slice-to-slice or pointer-to-pointer copy, `append`, or
-             reading an aggregate element back out).
-           - escaping_address_holders / escaping_decls: nodes directly
-             marked escaping, from a `return` value or a slice/pointer/
-             array argument to a user-defined call (found via a full
-             recursive scan of every sub-expression, not just top-
-             level ones -- `return foo(bar(s))` still needs `s`
-             checked as bar's argument).
-
-         AGGREGATES AND SLOTS: an "aggregate" is any declaration that
-         can hold MULTIPLE independently-accessed values, at least one
-         possibly slice-typed -- an array-/slice-of-slices, or a
-         struct. A "slot" identifies which part is being accessed;
-         slot_node_id gives every distinct (declaration, slot) pair a
-         stable synthesized node id, registered in the same
-         slice_decls/direct_backing/slice_deps structures a bare slice
-         declaration uses -- nothing downstream needs to know whether
-         a node id came from a real declaration or a slot.
-
-         Only one KIND of slot exists: indexed_slot_of recognizes
-         `rows[i]` or any chain of Index/Slice steps where indexing the
-         base ONE more time would yield a slice, and maps the root
-         declaration to a single SHARED slot (_AGGREGATE_ELEMENTS_SLOT)
-         regardless of which index is involved -- the same "one
-         combined blob per declaration" treatment a bare slice variable
-         gets, extended to an aggregate's elements. The "one more level
-         would yield a slice" guard checks the immediate base's own
-         element_type directly, NOT a recursive "does this eventually
-         contain a slice" walk -- conflating the two was a real bug:
-         for `rows[0][0]` where rows: [1][]int, the outer Index's base
-         (`rows[0]`) is itself slice-typed, and indexing it once more
-         yields an INT, not a slice -- reading a plain int has nothing
-         to do with rows' role as a slice-holder, and must NOT resolve
-         to rows' slot just because rows contains a slice somewhere.
-         whole_value_node_of's own "contains a slice at any depth"
-         check (see _contains_slice) is the right question for a
-         WHOLE-VALUE read (`return rows`); indexed_slot_of's narrower,
-         one-level check is right for "would indexing this once more
-         give a slice" -- both are needed, for different callers.
-
-         WHOLE-VALUE READS OF AN AGGREGATE GO THROUGH THE SAME SLOT,
-         not a separate one: `return rows`, `rows2 = rows`, and `rows`
-         as a call argument all resolve to indexed_slot_of's own node
-         (via whole_value_node_of). This matters concretely:
-         `rows`/`rows2` alias the same backing storage (a slice
-         descriptor copy is shallow), so a later `rows[0] = arr[:]`
-         must stay visible through `rows2[0]` and through a bare
-         `return rows2` for this analysis to stay sound. An earlier
-         version gave whole-aggregate reads their own separate node
-         instead of sharing indexed_slot_of's, and `return rows` (with
-         nothing ever indexing into it) silently stopped resolving to
-         anything -- caught by testing, not inspection.
-
-         FIELD access (`s.my_ints`) got its own analogous function,
-         field_slot_of, doing the same recognition one kind of access
-         over. It deliberately does NOT give each field its own precise
-         slot -- `s.a` and `s.b` share one slot, the same "one combined
-         blob" treatment array elements get. Per-field precision was
-         the original plan, but a struct-to-struct copy of just PART
-         of a struct (`i = outer.inner`) would need to precisely
-         propagate only that field's own slots -- correct, but a
-         larger mechanism than contribution()'s "resolve to exactly
-         one node" shape supports without a bigger refactor.
-         whole_value_node_of got the analogous extension: a bare
-         Variable referring to a struct falls back to it exactly like
-         an aggregate-of-slices does.
-
-         An array-typed aggregate (`[N][]int`) is registered in BOTH
-         array_decls (its unrelated existing role, e.g. `rows[0:2]`)
-         and, via its slot(s), the slice-tracking structure -- two
-         independent roles a single declaration can have.
-      2. Compute the transitive closure from escaping_address_holders,
-         following slice_deps edges (BFS via an explicit stack, not
-         recursion, so it can't stack-overflow on a pathological
-         chain), unioning in direct_backing at every node reached,
-         plus escaping_decls found directly. The result is exactly the
-         set of declarations -- of any type, not just array -- that
-         need to survive past this function's return.
-    """
-    analyzer = EscapeAnalyzer(fn, param_types, structs, aliases, sum_types)
-    return analyzer.analyze()
+        fn: Function, param_types: list[Type], structs: dict[str, StructInfo], aliases: dict[str, Type], sum_types: dict) -> set[DeclId]:
+    """DeclIds in `fn` whose storage must be heap-allocated."""
+    return EscapeAnalyzer(fn, param_types, structs, aliases, sum_types).analyze()

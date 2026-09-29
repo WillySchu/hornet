@@ -323,387 +323,76 @@ def test_test2():
     assert set() == ea.analyze_array_escapes(ast.functions[2], [], {}, {}, {})
 
 
-def test_escape_analyzer_declare():
-    fn = parser.Function(name='main', return_type=None)
-
-    tcs = [
-        {
-            'declarations': [],
-            'expected': {
-                'scopes': [{}],
-                'decl_types': {},
-                'array_decls': set(),
-                'slice_decls': set(),
-                'direct_backing': {},
-                'slice_deps': {},
-            }
-        },
-        {
-            'declarations': [('var1', 1, semantic.Type(kind=semantic.TypeKind.INT))],
-            'expected': {
-                'scopes': [{'var1': 1}],
-                'decl_types': {1: semantic.Type(kind=semantic.TypeKind.INT)},
-                'array_decls': set(),
-                'slice_decls': set(),
-                'direct_backing': {},
-                'slice_deps': {},
-            }
-        },
-        # TODO(will): This is incredible simple, but probably throw a few more tests here.
-    ]
-
-    for tc in tcs:
-        analyzer = ea.EscapeAnalyzer(fn, [], {}, {}, {})
-        for decl in tc['declarations']:
-            analyzer.declare(*decl)
-        assert tc['expected']['scopes'] == analyzer.scopes
-        assert tc['expected']['decl_types'] == analyzer.decl_types
-        assert tc['expected']['array_decls'] == analyzer.array_decls
-        assert tc['expected']['slice_decls'] == analyzer.slice_decls
-        assert tc['expected']['direct_backing'] == analyzer.direct_backing
-        assert tc['expected']['slice_deps'] == analyzer.slice_deps
-
-
-def test_escape_analyzer_resolve():
-    fn = parser.Function(name='main', return_type=None)
-
-    tcs = [
-        {
-            'scopes': [],
-            'expected': None,
-            'name': 'var1',
-        },
-        {
-            'scopes': [{}],
-            'expected': None,
-            'name': 'var1',
-        },
-        {
-            'scopes': [{'var2': 1}],
-            'expected': None,
-            'name': 'var1',
-        },
-        {
-            'scopes': [{'var1': 1}],
-            'expected': 1,
-            'name': 'var1',
-        },
-        {
-            'scopes': [{'var1': 1}, {}],
-            'expected': 1,
-            'name': 'var1',
-        },
-        {
-            'scopes': [{'var1': 1}, {'var2': 2}],
-            'expected': 1,
-            'name': 'var1',
-        },
-        {
-            'scopes': [{'var1': 1}, {'var2': 2, 'var1': 3}],
-            'expected': 3,
-            'name': 'var1',
-        },
-    ]
-
-    for tc in tcs:
-        analyzer = ea.EscapeAnalyzer(fn, [], {}, {}, {})
-        analyzer.scopes = tc['scopes']
-        assert tc['expected'] == analyzer.resolve(tc['name'])
-
-
-# TODO(will): Hand roll some functions for testing resolve to ensure that scopes are built correctly.
-
-
-def test_escape_analyzer_slot_node_id():
-    fn = parser.Function(name='main', return_type=None)
-    analyzer = ea.EscapeAnalyzer(fn, [], {}, {}, {})
-
-    tcs = [
-        {
-            'expected': -1,
-            'id': 1,
-            'slot': '1',
-        },
-        {
-            'expected': -1,
-            'id': 1,
-            'slot': '1',
-        },
-        {
-            'expected': -2,
-            'id': 2,
-            'slot': '1',
-        },
-        {
-            'expected': -3,
-            'id': 1,
-            'slot': '2',
-        },
-        {
-            'expected': -4,
-            'id': 2,
-            'slot': '2',
-        },
-        {
-            'expected': -2,
-            'id': 2,
-            'slot': '1',
-        },
-    ]
-
-    for tc in tcs:
-        assert tc['expected'] == analyzer.slot_node_id(tc['id'], tc['slot'])
-
-
-def test_escape_analyzer_contains_address_holder():
-    fn = parser.Function(name='main', return_type=None)
-
-    tcs = [
-        {
-            'type': semantic.Type(kind=semantic.TypeKind.SLICE),
-            'structs': {},
-            'res': True,
-        },
-        {
-            'type': semantic.Type(kind=semantic.TypeKind.POINTER, element_type=semantic.Type.INT),
-            'structs': {},
-            'res': True,
-        },
-        {
-            'type': semantic.Type.INT,
-            'structs': {},
-            'res': False,
-        },
-        # TODO(will): Finish these tests.
-    ]
-
-    for tc in tcs:
-        analyzer = ea.EscapeAnalyzer(fn, [], tc['structs'], {}, {})
-        assert tc['res'] == analyzer._contains_address_holder(tc['type'])
-
-
-def test_escape_analyzer_whole_value_node_of_empty():
-    fn = parser.Function(name='main', return_type=None)
-    analyzer = ea.EscapeAnalyzer(fn, [], {}, {}, {})
-    assert analyzer.whole_value_node_of('var1') is None
-
-
-def test_escape_analyzer_whole_value_node_of_param_not_slice():
-    fn = parser.Function(name='main', params=[parser.Param(name='x', type='int')], return_type=None)
-    analyzer = ea.EscapeAnalyzer(fn, [semantic.Type(kind=semantic.TypeKind.INT)], {}, {}, {})
-    assert analyzer.whole_value_node_of('x') is None
-
-
-def test_escape_analyzer_whole_value_node_of_param_slice():
-    fn = parser.Function(
-        name='main',
-        params=[parser.Param(name='x', type=parser.SliceTypeExpr(element_type='int'))],
-        return_type=None,
-    )
-    analyzer = ea.EscapeAnalyzer(fn, [semantic.Type(kind=semantic.TypeKind.SLICE)], {}, {}, {})
-    # TODO(will): ids aren't deterministic, but would love a better way of testing this.
-    assert analyzer.whole_value_node_of('x') is not None
-
-
-def test_escape_analyzer_whole_value_node_of_variable_no_slice():
-    fn = parser.Function(
-        name='main',
-        params=[],
-        body=[
-            parser.VarDecl(
-                name='x',
-                var_type='int',
-                init=parser.Constant(value=1),
-            ),
-            parser.Return()
-        ],
-        return_type=None,
-    )
-    analyzer = ea.EscapeAnalyzer(fn, [], {}, {}, {})
-    assert analyzer.whole_value_node_of('x') is None
-    analyzer.walk_statements([fn])
-    assert analyzer.whole_value_node_of('x') is None
-
-
-def test_escape_analyzer_whole_value_node_of_variable_slice():
-    fn = parser.Function(
-        name='main',
-        params=[],
-        body=[
-            parser.VarDecl(
-                name='sl',
-                var_type=parser.SliceTypeExpr(element_type='int'),
-                init=parser.ArrayLiteral(
-                    elements=[
-                        parser.Constant(value=1),
-                        parser.Constant(value=2),
-                        parser.Constant(value=3),
-                    ],
-                ),
-            ),
-            parser.Return(),
-        ],
-        return_type=None,
-    )
-    analyzer = ea.EscapeAnalyzer(fn, [], {}, {}, {})
-    assert analyzer.whole_value_node_of('sl') is None
-    analyzer.walk_statements(fn.body)
-    assert analyzer.whole_value_node_of('sl') is not None
-
-
-def test_escape_analyzer_whole_value_node_of_variable_struct_no_slice():
-    fn = parser.Function(
-        name='main',
-        params=[],
-        body=[
-            parser.VarDecl(
-                name='a',
-                var_type='A',
-            ),
-            parser.FieldAssign(base=parser.Variable('a'), name='x', value=parser.Constant(value=1)),
-            parser.FieldAssign(base=parser.Variable('a'), name='y', value=parser.StringLiteral(value='asdf')),
-            parser.Return(),
-        ],
-        return_type=None,
-    )
-    structs = {'A': semantic.StructInfo(
-        name='A',
-        fields={
-            'x': semantic.Type(kind=semantic.TypeKind.INT),
-            'y': semantic.Type(kind=semantic.TypeKind.STR),
-        },
-    )}
-    analyzer = ea.EscapeAnalyzer(fn, [], structs, {}, {})
-    analyzer.walk_statements(fn.body)
-    assert analyzer.whole_value_node_of('a') is None
-
-
-def test_escape_analyzer_whole_value_node_of_variable_struct_slice():
-    source = """
-type A struct:
-    int x
-    str y
-    []int sl
-
-def helper():
-    A a
-    a.x = 1
-    a.y = 'asdf'
-    return
-"""
+def _escapes(source: str, fn_index: int = 0) -> tuple:
     ast = parse_and_analyze(source)
-    print(ast)
-    fn = parser.Function(
-        name='main',
-        params=[],
-        body=[
-            parser.VarDecl(
-                name='a',
-                var_type='A',
-            ),
-            parser.FieldAssign(base=parser.Variable('a'), name='x', value=parser.Constant(value=1)),
-            parser.FieldAssign(base=parser.Variable('a'), name='y', value=parser.StringLiteral(value='asdf')),
-            parser.Return(),
-        ],
-        return_type=None,
+    fn = ast.functions[fn_index]
+    param_types = [semantic.type_from_name(p.type, ast.struct_registry, ast.type_alias_registry, sum_types=ast.sum_type_registry) for p in fn.params]
+    return fn, ea.analyze_array_escapes(fn, param_types, ast.struct_registry, ast.type_alias_registry, ast.sum_type_registry)
+
+
+def test_store_through_pointer_param_escapes():
+    fn, res = _escapes(
+        "type S struct:\n"
+        "    []int s\n"
+        "def fill(*S out):\n"
+        "    [3]int a = [1, 2, 3]\n"
+        "    out.s = a[:]\n"
     )
-    structs = {'A': semantic.StructInfo(
-        name='A',
-        fields={
-            'x': semantic.Type(kind=semantic.TypeKind.INT),
-            'y': semantic.Type(kind=semantic.TypeKind.STR),
-            'sl': semantic.Type(kind=semantic.TypeKind.SLICE),
-        },
-    )}
-    analyzer = ea.EscapeAnalyzer(fn, [], structs, {}, {})
-    analyzer.walk_statements(fn.body)
-    assert analyzer.whole_value_node_of('a') == -1
+    assert id(fn.body[0]) in res
 
 
-def test_escape_analyzer_indexed_slot_of_no_base_type():
-    fn = parser.Function(name='main', return_type=None)
-    node = parser.Constant(value=1)
-    analyzer = ea.EscapeAnalyzer(fn, [], {}, {}, {})
-    assert analyzer.indexed_slot_of(node) is None
-
-
-def test_escape_analyzer_indexed_slot_of_base_type_not_array_or_slice():
-    fn = parser.Function(name='main', return_type=None)
-    node = parser.Constant(value=1, resolved_type=semantic.Type(kind=semantic.TypeKind.INT))
-    analyzer = ea.EscapeAnalyzer(fn, [], {}, {}, {})
-    assert analyzer.indexed_slot_of(node) is None
-
-
-def test_escape_analyzer_indexed_slot_of_no_element_type():
-    fn = parser.Function(name='main', return_type=None)
-    node = parser.ArrayLiteral(resolved_type=semantic.Type(kind=semantic.TypeKind.ARRAY))
-    analyzer = ea.EscapeAnalyzer(fn, [], {}, {}, {})
-    assert analyzer.indexed_slot_of(node) is None
-
-
-def test_escape_analyzer_indexed_slot_of_element_type_not_slice():
-    fn = parser.Function(name='main', return_type=None)
-    node = parser.ArrayLiteral(
-        resolved_type=semantic.Type(
-            kind=semantic.TypeKind.ARRAY,
-            element_type=semantic.Type(kind=semantic.TypeKind.INT),
-        ),
+def test_store_into_dict_param_escapes():
+    fn, res = _escapes(
+        "def put(dict[int][]int d):\n"
+        "    [3]int a = [1, 2, 3]\n"
+        "    d[0] = a[:]\n"
     )
-    analyzer = ea.EscapeAnalyzer(fn, [], {}, {}, {})
-    assert analyzer.indexed_slot_of(node) is None
+    assert id(fn.body[0]) in res
 
 
-def test_escape_analyzer_indexed_slot_of_no_root_variable():
-    fn = parser.Function(name='main', return_type=None)
-    node = parser.ArrayLiteral(
-        resolved_type=semantic.Type(
-            kind=semantic.TypeKind.ARRAY,
-            element_type=semantic.Type(
-                kind=semantic.TypeKind.SLICE,
-            ),
-        ),
+def test_store_into_slice_param_escapes():
+    fn, res = _escapes(
+        "def put([][]int rows):\n"
+        "    [3]int a = [1, 2, 3]\n"
+        "    rows[0] = a[:]\n"
     )
-    analyzer = ea.EscapeAnalyzer(fn, [], {}, {}, {})
-    assert analyzer.indexed_slot_of(node) is None
+    assert id(fn.body[0]) in res
 
 
-def test_escape_analyzer_indexed_slot():
-    fn = parser.Function(name='main', return_type=None)
-    node = parser.Slice(
-        array=parser.Slice(
-            array=parser.Field(base=parser.Variable(name='sl'), name='x')
-        ),
-        resolved_type=semantic.Type(
-            kind=semantic.TypeKind.SLICE,
-            element_type=semantic.Type(kind=semantic.TypeKind.SLICE),
-        ),
+def test_append_element_escapes_with_result():
+    fn, res = _escapes(
+        "def [][]int f():\n"
+        "    [3]int a = [1, 2, 3]\n"
+        "    [][]int s = none\n"
+        "    s = append(s, a[:])\n"
+        "    return s\n"
     )
-    analyzer = ea.EscapeAnalyzer(fn, [], {}, {}, {})
-    analyzer.whole_value_node_of = mock.MagicMock()
-    analyzer.whole_value_node_of.return_value = -1
-    assert analyzer.indexed_slot_of(node) == -1
-    analyzer.whole_value_node_of.assert_called_with('sl')
+    assert id(fn.body[0]) in res
 
 
-def test_escape_analyzer_field_slot_of():
-    # TODO(will): Finish.
-    ...
+def test_local_only_aggregate_stays_on_stack():
+    fn, res = _escapes(
+        "def int f():\n"
+        "    [3]int a = [1, 2, 3]\n"
+        "    [][]int rows = [][]int[a[:]]\n"
+        "    return len(rows[0])\n"
+    )
+    assert id(fn.body[0]) not in res
 
 
-def test_escape_analyzer_contribution():
-    # TODO(will): Finish.
-    ...
-
-
-def test_escape_analyzer_scan_expr_for_escaping_calls():
-    # TODO(will): Finish.
-    ...
-
-
-def test_escape_analyzer_walk_statements():
-    # TODO(will): Finsh.
-    ...
-
+def test_store_into_local_via_pointer_then_return_escapes():
+    fn, res = _escapes(
+        "type S struct:\n"
+        "    []int s\n"
+        "def S f():\n"
+        "    [3]int a = [1, 2, 3]\n"
+        "    S v = S(none)\n"
+        "    *S q = &v\n"
+        "    q.s = a[:]\n"
+        "    return v\n"
+    )
+    assert id(fn.body[0]) in res
+    assert id(fn.body[1]) not in res
 
 # ---------------------------------------------------------------------------
 # Pointers: `&x` as a second way to produce a direct_backing edge,
