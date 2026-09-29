@@ -1,10 +1,6 @@
 from 'c' import panic
 
-# One digit (0-9) as its own single-character str -- a plain, boring
-# if-chain rather than any byte-arithmetic/pointer trick, deliberately:
-# this is meant to be obviously correct at a glance, not clever, and
-# it keeps int_to_str below from needing anything beyond ordinary str
-# literals and concatenation.
+# Single digit 0-9 as a str.
 def str _digit_to_str(int d):
     if d == 0:
         return '0'
@@ -27,15 +23,7 @@ def str _digit_to_str(int d):
     return '9'
 
 def str int_to_str(int n):
-    # Non-negative only for now -- every current caller (wc's own
-    # counts, all of which are >= 0) only ever needs this, and a
-    # negative sign is a genuinely separate concern (where does it
-    # go, does it change how padding/alignment would eventually work)
-    # not worth deciding before there's a real caller that needs it.
-    # A future `str(n)`-style cast is the planned, more ergonomic
-    # replacement for calling this by name at all -- deferred until
-    # there's more than one caller's worth of experience with what
-    # that should look like.
+    # Non-negative only.
     if n < 0:
         panic('int_to_str: negative numbers are not supported yet')
     if n == 0:

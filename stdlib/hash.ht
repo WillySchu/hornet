@@ -1,5 +1,5 @@
 def int64 _fnv_offset_basis():
-    return -3750763034362895579  # 14695981039346656037, wrapped to int64's own bit pattern
+    return -3750763034362895579  # FNV offset basis as int64
 
 def int64 _fnv_step(int64 h, byte b):
     return (h ^ int64(b)) * int64(1099511628211)  # FNV prime

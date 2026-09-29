@@ -16,12 +16,7 @@ def str from_cstring(*byte p):
     return _from_raw_parts(p, strlen(p))
 
 def str from_raw_parts(*byte p, int n):
-    # The public counterpart to from_cstring, for when the caller
-    # already knows the exact byte count and the data isn't
-    # necessarily NUL-terminated at all (raw bytes read from a file
-    # or socket, say, which could contain an embedded NUL well before
-    # its own true end) -- from_cstring's own strlen-based length
-    # would silently truncate at the first one instead.
+    # Like from_cstring, but with an explicit length; data may contain NULs.
     return _from_raw_parts(p, n)
 
 def panic(str msg):

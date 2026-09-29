@@ -1,10 +1,4 @@
-"""Scalar value production and storage -- int, int8, uint8, int64, and bool. _gen_read_scalar_into/_gen_write_scalar_from are the one choke
-point for every scalar memory access in this compiler, so int8/uint8
-being genuinely 1 byte and int64 genuinely 8 only ever needed teaching
-to these two methods, not rediscovered at each read/write site: every
-caller passes a value's ordinary 32-bit-named register, and these
-(along with gen_binary_op/gen_unary_op/gen_cast_narrowing_into) decide
-internally which actual width to operate on."""
+"""Scalar values: int, int8, uint8, int64, bool."""
 
 from ir.errors import IRError
 from ir.ir import IRBranch, IRJump, IRLabel, IRMove, IRConst, IRCall
@@ -15,58 +9,7 @@ from semantic import Type, TypeKind
 
 class ScalarsMixin:
     def _ir_call_arguments(self, args: list, callee_name: str) -> tuple:
-        """The shared per-argument marshaling loop between _ir_call
-        and _ir_composite_call, returning (arg_ir, arg_values) rather
-        than building the final IRCall itself -- the two callers
-        differ only in that: an ordinary dst Temp vs. a hidden-pointer
-        argument with dst=None.
-
-        ARRAY-typed argument: a Variable/Field/Index (an existing
-        address, via _ir_array_address), a bare bracketed-list literal
-        (_ir_materialize_array_literal), or an ordinary composite-
-        returning Call (_ir_materialize_composite_call). Every ARRAY-
-        typed expression is one of these three shapes -- an unmatched
-        shape, or either still-possible None return, raises IRError
-        rather than leaving `ir`/`addr_value` unbound or stale.
-
-        STRUCT-typed argument: identical shape, just Variable/Field/
-        Index via _ir_struct_address, a struct-literal Call via _ir_
-        materialize_struct_literal, then an ordinary composite-
-        returning Call again -- UNLESS `callee_name`'s own declared
-        parameter type at this position is a SUM type that lists this
-        argument's own type as one of its variants (a struct, a
-        scalar, or str), in which case it's WIDENING, not an ordinary
-        argument at all: _ir_materialize_sum_type_value (ir/sum_types.
-        py), sized and tagged for the wider sum type, not the narrower
-        variant this argument's own expression actually is.
-
-        SUM-typed argument (already sum-typed, no widening needed --
-        `takesShape(s)`, s already Shape): the identical Variable/
-        Field/Index / ordinary-composite-call shape STRUCT has, minus
-        a literal-Call case -- there's no sum-type literal syntax to
-        parse into one (see SumTypeDef's own docstring in parser.py).
-
-        DICT-typed argument: the identical Variable/Field/Index /
-        ordinary-composite-call shape SUM has, plus a DIRECT dict-
-        literal argument (_ir_materialize_dict_literal) -- DictLiteral
-        is its own dedicated AST node, never a Call the way a struct
-        literal is, so this checks isinstance(arg, DictLiteral) rather
-        than a struct registry membership test.
-
-        `callee_name` is None-able for the one case that means there's
-        no declared signature to consult at all: a builtin (print/len/
-        append never appear in function_registry, and none has a sum-
-        typed parameter to widen into regardless) -- when None, or
-        when the callee just isn't found (shouldn't happen for a real
-        call, but this stays a plain lookup miss rather than a raise),
-        every argument is treated exactly as it was before sum types
-        existed.
-
-        `ir`/`addr_value` are plain local variables, reused across
-        every argument -- leaving them unbound on a second argument
-        (after an earlier one already assigned them) would silently
-        reuse that earlier argument's own address for this one instead
-        of crashing; the explicit IRError above closes that."""
+        """Marshal call arguments; returns (arg_ir, arg_values)."""
         param_types = self.ir_program.function_registry[callee_name][0] if callee_name in self.ir_program.function_registry else None
         arg_ir = []
         arg_values = []
@@ -141,14 +84,6 @@ class ScalarsMixin:
                 arg_ir.extend(ir)
                 arg_values.append(addr_value)
             elif arg_type.kind == TypeKind.DICT:
-                # Now the identical shape STRUCT has, in full: a
-                # Variable/Field/Index (_ir_dict_address), a DIRECT
-                # dict-literal argument (_ir_materialize_dict_literal,
-                # STRUCT's own literal-Call counterpart -- DictLiteral
-                # is its own dedicated AST node, never a Call the way
-                # a struct literal is, so this checks isinstance(arg,
-                # DictLiteral) rather than arg.name membership), or an
-                # ordinary composite-returning Call.
                 if is_composite_addressable(arg):
                     result = self._ir_dict_address(arg)
                     if result is None:
@@ -169,7 +104,7 @@ class ScalarsMixin:
                 arg_values.append(addr_value)
             elif arg_type.kind == TypeKind.SUM:
                 if isinstance(arg, (Variable, Field, Index)):
-                    result = self._ir_struct_address(arg)  # generic address computation -- see its own docstring
+                    result = self._ir_struct_address(arg)
                     if result is None:
                         raise IRError(
                             f"_ir_struct_address returned None for a SUM-typed "
@@ -185,8 +120,6 @@ class ScalarsMixin:
                 arg_ir.extend(ir)
                 arg_values.append(addr_value)
             elif arg_type.kind == TypeKind.STR:
-                # Exactly the SLICE case just below, minus the cap
-                # field -- see ir/strings.py's own module docstring.
                 result = self._ir_str_value(arg)
                 if result is None:
                     raise IRError(
@@ -197,36 +130,7 @@ class ScalarsMixin:
                 arg_ir.extend(ir)
                 arg_values.extend([ptr_value, len_value])
             elif arg_type.kind == TypeKind.SLICE or (isinstance(arg, NoneLiteral) and param_types is not None and param_types[i].kind == TypeKind.SLICE):
-                # A bare `none` argument is ambiguous on its own --
-                # type_of(NoneLiteral) is Type.NONE, neither SLICE nor
-                # POINTER -- so which shape it needs can only be read
-                # off the PARAMETER it's actually flowing into, via
-                # param_types[i], the same lookup is_widening just
-                # above already uses. A real, constructed bug before
-                # this gate existed: an unconditional `or isinstance(
-                # arg, NoneLiteral)` here routed a `none` argument
-                # through _ir_slice_arg regardless of the parameter's
-                # own declared type, always producing THREE IR values
-                # (a nil slice's own {ptr, len, cap} triple) even for a
-                # POINTER-typed parameter expecting exactly one. For
-                # the pointer parameter's OWN value this happened to
-                # look harmless -- ptr=0 is the correct null pointer
-                # too -- but the two EXTRA, spurious values (len=0,
-                # cap=0) still got passed into the call's own argument
-                # list, silently shifting every SUBSEQUENT parameter's
-                # own intended value one register late: confirmed
-                # directly, not assumed -- check(none, 42) with check's
-                # own second parameter reading back 0 instead of 42.
-                # param_types is None only for a builtin (print/len/
-                # append, none of which ever reach this method at all
-                # -- see gen_expr_ir's own Call dispatch and _ir_write_
-                # composite_value_into's own docstring) or an
-                # unresolved callee ("shouldn't happen for a real
-                # call" -- see this method's own docstring); either
-                # way, falling through to the ordinary scalar case
-                # below is always correct there too, matching how a
-                # pointer-typed parameter's own `none` argument is
-                # already handled once this condition is False.
+                # `none`'s shape depends on the parameter type.
                 result = self._ir_slice_arg(arg)
                 if result is None:
                     raise IRError(
@@ -243,21 +147,7 @@ class ScalarsMixin:
         return arg_ir, arg_values
 
     def _ir_call(self, expr: Call) -> tuple[list, object]:
-        """Builds (without lowering) an ordinary function call's IR.
-        Each argument's own shape (scalar, array/struct address, or a
-        slice's own {ptr, len, cap} triple) is computed independently
-        into its own Temp(s) first; IRCall's own lowering places the
-        first 6 into argument registers and any beyond that into the
-        outgoing-stack-arguments region lower_function reserves for
-        this call's own containing function, sized from this exact
-        IRCall's own args list once IR-building is done (see its own
-        comment in codegen.py), together, immediately before the
-        call. No slot count is too large here anymore -- that's a
-        lowering-time reservation now, not an IR-build-time limit.
-
-        See _ir_call_arguments for the per-argument dispatch (shared
-        with _ir_composite_call). Returns (ir, t_result), t_result
-        being None for a void call."""
+        """Ordinary call IR."""
         result_type = type_of(expr)
         t_result = None if result_type == Type.VOID else self.ir_program.ids.new_temp(result_type)
         arg_ir, arg_values = self._ir_call_arguments(expr.args, expr.name)
@@ -265,35 +155,12 @@ class ScalarsMixin:
         return ir, t_result
 
     def _ir_composite_call(self, dst_address, call_expr: Call) -> list:
-        """Builds (without lowering) a composite-returning function
-        call's IR, writing its result through dst_address (however the
-        caller already has it -- a freshly-computed address, or the
-        current function's own received hidden pointer for a
-        forwarding `return someFn()`).
-
-        The hidden-pointer convention is just "dst_address as args[0],
-        every genuine argument shifted one register position later,
-        dst=None" -- which IRCall's own, already-generic lowering
-        already produces, with no changes needed to IRCall itself.
-        dst=None here means "nothing to capture from %eax," not "this
-        call is void" -- the call is not void at the Hornet-language
-        level, it just has no scalar result for %eax to hold.
-
-        Reuses _ir_call_arguments for the genuine arguments, then
-        prepends dst_address as the actual first argument value. No
-        slot count is too large here -- see _ir_call's own docstring."""
+        """Composite-returning call; result written through dst_address."""
         arg_ir, arg_values = self._ir_call_arguments(call_expr.args, call_expr.name)
         return arg_ir + [IRCall(dst=None, name=call_expr.name, args=[dst_address] + arg_values)]
 
     def _ir_short_circuit(self, expr: Binary, *, short_circuit_value: int, label_prefix: str) -> tuple[list, object]:
-        """Builds (without lowering) the shared IR for AND/OR -- mirror
-        images: each evaluates its left side and branches on it,
-        jumping past the right side entirely if that alone already
-        decides the answer -- AND with short_circuit_value=0, OR with
-        short_circuit_value=1. This is what makes `0 and (1 / 0)`
-        return 0 instead of crashing: the division is real IR, built
-        and lowered like any other, but control flow jumps clean over
-        it. Returns (ir, t_result)."""
+        """AND/OR with short-circuit branches."""
         fallthrough_value = 1 - short_circuit_value
         rhs_label = self.ir_program.ids.new_label(f"{label_prefix}_rhs")
         short_label = self.ir_program.ids.new_label(f"{label_prefix}_short")
@@ -301,9 +168,7 @@ class ScalarsMixin:
         end_label = self.ir_program.ids.new_label(f"{label_prefix}_end")
 
         def targets(continue_label: str) -> tuple[str, str]:
-            # (true_target, false_target): whichever outcome matches
-            # short_circuit_value goes to `short_label`; the other
-            # goes to `continue_label`.
+            # whichever outcome short-circuits jumps to short_label
             if short_circuit_value == 1:
                 return short_label, continue_label
             return continue_label, short_label

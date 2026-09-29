@@ -1,36 +1,8 @@
-"""Checks a handful of structural invariants this IR is supposed to
-hold by construction (see ir.ir's own module docstring), mechanically
-rather than by inspection -- catching a bug in an IR-to-IR transform
-(an optimization pass) as an immediate, specific IRVerificationError
-naming the exact function and op responsible, rather than a failure at
-the assembler, the linker, or a wrong answer at runtime.
-
-Checks, in the order verify_function runs them:
-- body is non-empty.
-- No two IRLabels in the same function share a name.
-- Every block (the run of ops between one IRLabel, or the start of
-  body, and the next) ends in exactly one terminator (IRJump, IRBranch,
-  IRReturn) -- no implicit fallthrough into a label or off the end of
-  body.
-- Every IRJump/IRBranch target names a real IRLabel in the same
-  function.
-- Every IRLocalAddress.slot, and hidden_return_ptr_slot when set,
-  names a real entry in slot_widths.
-- Every Temp read by some op (through any IRValue-typed field) was
-  written by some op earlier in the SAME function (an IRReadArgument,
-  or any op with a dst, counts as a write) -- "defined somewhere at
-  all," not a dominance-based def-before-use analysis; enough to catch
-  a transform deleting or renaming a Temp's own producer while
-  something else still reads it.
-
-Deliberately NOT checked: type consistency between an op and its own
-operands (IRBinOp.left/right agreeing on width, say) -- easy to get
-subtly wrong and worse than not checking at all if it produces false
-positives; and whether IRCall.name refers to a real function -- user
-Hornet functions and runtime/libc symbols (malloc, strcmp,
-hornet_print, ...) share this field with no registry of valid names to
-check against, and a bad name is already caught at link time
-regardless."""
+"""Structural IR invariants, checked after building and after optimization:
+non-empty body; unique labels; every block ends in one terminator; jump targets exist;
+slots exist; every read Temp is written somewhere in the function.
+Not checked: operand type consistency, call target existence.
+"""
 
 from ir.ir import (
     IRBinOp,
@@ -60,14 +32,11 @@ _TERMINATORS = (IRJump, IRBranch, IRReturn)
 
 
 class IRVerificationError(Exception):
-    """Raised by verify_function/verify_program on the first structural
-    problem found. Distinct from CodegenError: this signals a bug in
-    the IR itself, never a mistake in how the compiler was invoked."""
+    """IR invariant violated; a compiler bug."""
 
 
 def _op_defs(op) -> list:
-    """The Temp id(s) `op` writes to -- 0, 1 (the common case), or 2
-    (IRSliceGrow alone)."""
+    """Temp ids written by `op`."""
     if isinstance(op, (
             IRMove, IRBinOp, IRUnOp, IRCast, IRReadArgument, IRLoad, IRLocalAddress, IRStaticDataAddress)):
         return [op.dst.id]
@@ -79,9 +48,7 @@ def _op_defs(op) -> list:
 
 
 def _op_uses(op) -> list:
-    """The Temp id(s) `op` reads -- every IRValue-typed field it has,
-    with any IRConst operand filtered back out (only a Temp has an id
-    at all)."""
+    """Temp ids read by `op`."""
     if isinstance(op, IRMove):
         values = [op.src]
     elif isinstance(op, IRBinOp):
@@ -114,9 +81,7 @@ def _op_uses(op) -> list:
 
 
 def verify_function(ir_fn: IRFunction) -> None:
-    """See this module's own docstring for the checks and their order.
-    Each error names ir_fn.name and, where there's one specific op
-    responsible, that op's own repr."""
+    """Check `ir_fn`; see module docstring."""
     if not ir_fn.body:
         raise IRVerificationError(f"{ir_fn.name}: empty body -- every function must end in a terminator")
 
@@ -165,7 +130,5 @@ def verify_function(ir_fn: IRFunction) -> None:
 
 
 def verify_program(ir_program: IRProgram) -> None:
-    """verify_function, for every function in ir_program -- see its
-    own docstring for what's actually checked."""
     for ir_fn in ir_program.functions:
         verify_function(ir_fn)

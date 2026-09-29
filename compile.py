@@ -1,4 +1,4 @@
-"""Entry point into the compiler."""
+"""Compiler CLI: .ht -> assembly."""
 
 import argparse
 import sys
@@ -9,16 +9,7 @@ from merge import merge_programs
 from modules import discover_modules
 from semantic import analyze
 
-# Same convention build.py's own HOST_IS_MACOS/DEFAULT_PLATFORM and
-# tests/test_compiler.py's own HOST_IS_MACOS/ASM_PLATFORM already use --
-# see build.py's own comment for why this matters (gcc's default
-# target on Apple Silicon is arm64, which can't assemble this
-# compiler's x86-64 AT&T-syntax output at all). This CLI's own
-# --platform default previously just hardcoded 'linux' regardless of
-# host, unlike either of those -- a macOS user invoking this file
-# directly, with no --platform given, would silently get Linux-shaped
-# assembly (no leading underscore on symbols) their own host's gcc/as
-# can't consume correctly.
+# gcc on Apple Silicon defaults to arm64; match build.py's host detection.
 HOST_IS_MACOS = sys.platform == "darwin"
 DEFAULT_PLATFORM = "macos" if HOST_IS_MACOS else "linux"
 
@@ -32,17 +23,7 @@ def main():
     args = parser.parse_args()
 
     asm = compile_to_asm(args.file, args.platform)
-    # Latin-1, not the default UTF-8: an emitted str literal's own raw
-    # bytes (see ir/strings.py's own module docstring -- str is a byte
-    # sequence, not Unicode text) can legitimately include any 0-255
-    # value now that string/byte literals support \xNN escapes (see
-    # parser.py's own _unescape_quoted_literal) -- Latin-1 is the one
-    # encoding where every code point 0-255 maps to exactly that one
-    # byte, so this is the only choice that keeps the emitted .data
-    # byte count matching len()'s own, compile-time-computed value
-    # exactly, for every byte, not just the ASCII ones. UTF-8 would
-    # silently re-encode anything >= 128 into two or more bytes,
-    # corrupting that byte-for-byte correspondence.
+    # Latin-1: str literals are raw bytes 0-255; UTF-8 would re-encode >= 128.
     if args.output:
         with open(args.output, 'w', encoding='latin-1') as f:
             f.write(asm)
@@ -51,20 +32,11 @@ def main():
 
 
 def compile_to_asm(source: str, platform: str = 'macos') -> str:
-    """`source` is the entry file -- discover_modules resolves and
-    parses it, and every file it transitively imports (see modules.py
-    and merge.py's own module docstrings for the full design); merge_
-    programs folds all of that into one, single, unqualified Program,
-    exactly what this function's own pipeline already expected before
-    imports existed at all. Everything from here down is completely
-    unchanged and unaware modules exist: desugar_methods/analyze/
-    generate_asm all still see one flat Program, the same one they've
-    always seen for a single file -- that's the whole point of the
-    merge model (see modules.py's own module docstring for why)."""
+    """Discover, merge, desugar, analyze, and lower `source` to assembly."""
     entry_program, discovered_modules = discover_modules(source)
     ast = merge_programs(entry_program, discovered_modules)
-    desugar_methods(ast)  # must run before analyze() -- see its own module docstring for why
-    analyze(ast)  # raises SemanticError before any code is generated
+    desugar_methods(ast)  # Must precede analyze().
+    analyze(ast)
     return generate_asm(ast, platform=platform)
 
 

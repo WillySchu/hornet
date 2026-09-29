@@ -1,40 +1,5 @@
-"""Lowers a list of ir.py instructions into assembly_ast.py
-Instructions -- the "instruction selection" step of this pipeline.
-v1, deliberately: every Temp gets its own permanent frame slot,
-assigned the first time it's referenced here (see _temp_mem; the same
-host.ids.new_slot allocator _collect_locals/_reserve_argument_temp
-already share) -- allocating a Temp itself (host.ids.new_temp) makes
-no storage decision at all. An op that combines two values
-loads them into scratch registers, then hands off to the host's own
-gen_binary_op/gen_unary_op (ScalarsLoweringMixin) as this pass's own
-instruction-selection rule -- that arithmetic isn't reimplemented
-here. Real register allocation now exists (register_allocator.py) and
-hooks in at _gen_read_temp_into/_gen_write_temp_from: _temp_mem's own
-permanent-frame-slot policy remains exactly this, used as the
-fallback for whichever Temps the allocator didn't promote -- except
-that an anonymous Temp's own slot, discovered here for the first time,
-can't be resolved to a real offset immediately the way every other
-slot in this compiler is: host._resolve_frame_layout doesn't run until
-lower_function, well after lower_ir (this method's own caller) is
-done. _temp_mem returns a FrameSlot placeholder for one of these
-instead (see its own docstring), and lower_function is what resolves
-every one of them, in one pass, after lower_ir returns.
-
-InstructionSelector is a standalone class, not a CodeGenerator mixin:
-every dependency it needs is an explicit constructor argument rather
-than an implicit assumption about whatever else happens to be mixed
-into a shared self. Constructed fresh per function's own lowering (see
-lower_function's own comment), not once for the whole compilation:
-`ir_fn` is a genuine field, set once at construction, needed by
-_temp_mem's own call to host.ids.new_slot (see IRFunction's own
-docstring for why its slot registry lives there rather than on host).
-`host` is still held and read/written directly for one remaining
-piece of state -- _temp_slots/_temp_offsets -- because Temp ids are
-globally unique across the whole compilation, so leaving this on host
-is harmless. Every OTHER dependency (which leaf codegen methods get
-called, which read-only program-level data is needed) is listed here,
-in one place, rather than discovered by grepping for self. across the
-rest of the codebase.
+"""Instruction selection: IR -> assembly AST. Temps not assigned a register get a lazily allocated frame slot,
+emitted as a FrameSlot placeholder and resolved after lowering.
 """
 
 from codegen.assembly_ast import (
@@ -85,37 +50,14 @@ from semantic import Type
 
 
 class InstructionSelector:
-    """Constructed fresh per function's own lowering (see lower_
-    function's own comment) -- see this module's own docstring for
-    what `host`/`ir_fn` are used for."""
+    """Lowers one function's IR."""
 
     def __init__(self, host, ir_fn):
         self.host = host
         self.ir_fn = ir_fn
 
     def _temp_mem(self, temp: Temp) -> Operand:
-        """Returns temp's own frame location, assigning it a fresh
-        logical slot the first time it's referenced (memoized in
-        host._temp_slots) rather than at temp-creation time. This is
-        the fallback for a Temp that register_allocator.py didn't (or
-        couldn't -- see its own module docstring) promote to a
-        physical register -- see _gen_read_temp_into/_gen_write_temp_
-        from, the two places that actually decide which applies.
-
-        A named-local Temp (host._temp_offsets already has one,
-        assigned eagerly by _temp_at_offset when the Temp itself was
-        created) carries its own logical SLOT there, not a resolved
-        offset -- host._resolve_frame_layout doesn't run until lower_
-        function, well after every named-local Temp in this function
-        is already created. So this returns a FrameSlot placeholder
-        here too, exactly like the anonymous case right below.
-
-        An anonymous Temp reaching here for the first time needs a
-        fresh logical slot handed out on the spot (host.ids.new_slot,
-        same as every other slot in this compiler) -- its own slot
-        genuinely isn't known until THIS moment, mid-lowering. Either
-        way, _patch_frame_slots is what resolves the FrameSlot this
-        returns, once host._resolve_frame_layout's one call has run."""
+        """Frame slot for `temp`, allocated on first use."""
         if temp.id in self.host.ir_program.ids._temp_offsets:
             return FrameSlot(slot=self.host.ir_program.ids._temp_offsets[temp.id])
         if temp.id not in self.host.ir_program.ids._temp_slots:
@@ -124,13 +66,7 @@ class InstructionSelector:
         return FrameSlot(slot=self.host.ir_program.ids._temp_slots[temp.id])
 
     def _gen_load_value(self, value: IRValue, dst: Register) -> list[Instruction]:
-        """Loads an IRValue (a Temp's current value, or a compile-time
-        IRConst) into `dst`, a 32-bit-named register -- widened to
-        `dst`'s own 64-bit view internally wherever the value's type
-        needs it, matching every other scalar read/write site in this
-        compiler. IRConst is never str-typed (a string literal needs a
-        label address, not an immediate value), so only the Temp path
-        needs str's own special case -- see _gen_read_temp_into."""
+        """Load an IRValue into `dst` (32-bit name; widened by type)."""
         if isinstance(value, IRConst):
             if value.type == Type.INT64:
                 return [MovQ(src=Imm(value.value), dst=as_qword_register(dst))]
@@ -138,18 +74,7 @@ class InstructionSelector:
         return self._gen_read_temp_into(value, dst)
 
     def _gen_read_temp_into(self, temp: Temp, dst: Register) -> list[Instruction]:
-        """Reads a Temp's current value into `dst`.
-
-        If register_allocator.py assigned it a register (see
-        host._register_assignment, set once per function by
-        gen_function), the value is already sitting there, not in
-        memory -- this is just a register-to-register move (or, if it
-        already happens to BE `dst`, no instruction at all). Otherwise,
-        falls back to reading its memory slot via host._gen_read_
-        scalar_into (ScalarsLoweringMixin), which already handles str/
-        int64/pointer's own wide (8-byte) storage correctly on its own
-        (is_wide_type, ir/utils.py) -- no separate str case needed
-        here anymore."""
+        """Read a Temp from its register or slot into `dst`."""
         reg_name = self.host._register_assignment.get(temp.id)
         if reg_name is not None:
             src = Register(reg_name)
@@ -162,10 +87,7 @@ class InstructionSelector:
         return self.host._gen_read_scalar_into(self._temp_mem(temp), temp.type, dst)
 
     def _gen_write_temp_from(self, src: Register, temp: Temp) -> list[Instruction]:
-        """The write-side counterpart to _gen_read_temp_into -- same
-        register-assignment check, same reliance on host._gen_write_
-        scalar_from's own wide-type handling for the memory-spill
-        fallback."""
+        """Write `src` to a Temp's register or slot."""
         reg_name = self.host._register_assignment.get(temp.id)
         if reg_name is not None:
             dst = Register(reg_name)
@@ -178,8 +100,7 @@ class InstructionSelector:
         return self.host._gen_write_scalar_from(src, temp.type, self._temp_mem(temp))
 
     def lower_ir(self, instructions: list) -> list[Instruction]:
-        """Translates one self-contained IR fragment into real
-        Instructions -- every op ir.py defines now has a rule here."""
+        """Lower an IR fragment."""
         out: list[Instruction] = []
         for instr in instructions:
             if isinstance(instr, IRMove):
@@ -196,10 +117,7 @@ class InstructionSelector:
                 out.extend(self.host.gen_unary_op(instr.op, Register('eax'), operand_type=instr.operand.type))
                 out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
             elif isinstance(instr, IRCast):
-                # dst.type says which way to (re)narrow; src.type is
-                # also needed now, so a source already int64 (a no-op
-                # cast) isn't destructively re-truncated -- see gen_
-                # cast_narrowing_into's own docstring.
+                # src.type avoids truncating an already-int64 source.
                 out.extend(self._gen_load_value(instr.src, Register('eax')))
                 out.extend(self.host.gen_cast_narrowing_into(instr.dst.type, Register('eax'), instr.src.type))
                 out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
@@ -208,42 +126,12 @@ class InstructionSelector:
             elif isinstance(instr, IRJump):
                 out.append(Jmp(instr.label))
             elif isinstance(instr, IRBranch):
-                # No peephole yet for when true_label happens to be
-                # whatever immediately follows -- always emits both
-                # the conditional and the unconditional jump. Fixing
-                # that (once it's worth it) is a lowering-only change;
-                # nothing that builds IRBranch needs to know or care.
+                # No fallthrough peephole yet: always emits both jumps.
                 out.extend(self._gen_load_value(instr.cond, Register('eax')))
                 out.append(Cmp(src=Imm(0), dst=Register('eax')))
                 out.append(Je(instr.false_label))
                 out.append(Jmp(instr.true_label))
             elif isinstance(instr, IRCall):
-                # Every argument -- scalar, an address for array/
-                # struct, or a slice's own {ptr, len, cap} triple --
-                # already arrives here as one or more ordinary,
-                # independent Temps (see _ir_call_arguments's own
-                # docstring for how each shape gets there); this loop
-                # places each one directly into its own argument
-                # register, in any order: no push/pop dance needed,
-                # since nothing a Temp could ever be assigned to
-                # (memory, or the allocator's own pool) overlaps an
-                # argument register, so placing one can never clobber
-                # another's source.
-                #
-                # Index 6 onward has no register left to go in -- the
-                # SysV ABI reserves only 6 (rdi/rsi/rdx/rcx/r8/r9) --
-                # so instead it's staged through %eax/%rax (a register
-                # no Temp is ever permanently homed in either, for the
-                # identical reason the 6 argument registers aren't)
-                # and written straight into ir_fn.outgoing_stack_args_
-                # slot -- reserved by lower_function, sized to the
-                # worst call this function makes, before lower_ir ever
-                # reached this instruction (see its own comment) --
-                # at that argument's own position within it. Writing
-                # each one there, in any order, is exactly as safe as
-                # the register case above for the same reason: this
-                # region is never a Temp's own home, so nothing placed
-                # here can ever clobber a still-unread argument source.
                 for i, arg_value in enumerate(instr.args):
                     if i < 6:
                         out.extend(self._gen_load_value(arg_value, Register(ARG_REGISTERS_32[i])))
@@ -257,25 +145,6 @@ class InstructionSelector:
                 if instr.dst is not None:
                     out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
             elif isinstance(instr, IRReadArgument):
-                # A plain register-to-register copy -- see IRReadArgument's
-                # own docstring for why this never narrows or widens:
-                # the value already arrived correctly represented for
-                # dst's own type, the same invariant every OTHER
-                # Temp-to-Temp copy in this compiler already relies on.
-                #
-                # Index 6 onward was never in a register at all -- the
-                # caller wrote it into ITS OWN outgoing-stack-arguments
-                # region (see IRCall's own lowering above), which,
-                # once this function's prologue has run (push %rbp;
-                # mov %rsp, %rbp), sits at a FIXED, positive offset
-                # from THIS function's own %rbp: 16 to skip the pushed
-                # return address and saved %rbp, then 8 bytes per
-                # overflow slot. This needs no FrameSlot/_resolve_
-                # frame_layout machinery at all, unlike every other
-                # frame reference in this compiler -- it's not part of
-                # this function's own local layout, so its offset is
-                # already fully known, immediately, with nothing to
-                # wait for.
                 wide = is_wide_type(instr.dst.type)
                 if instr.index < 6:
                     src = Register((ARG_REGISTERS_64 if wide else ARG_REGISTERS_32)[instr.index])
@@ -284,24 +153,10 @@ class InstructionSelector:
                 out.append(MovQ(src=src, dst=Register('rax')) if wide else Mov(src=src, dst=Register('eax')))
                 out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
             elif isinstance(instr, IRReturn):
-                # The one terminator that leaves the function entirely
-                # rather than jumping to a label. Load the value if
-                # there is one, then the ordinary epilogue either way.
-                # Never used for an array/slice/struct return -- those
-                # write through the hidden output pointer instead (see
-                # gen_statement_ir's own Return case), a mechanism
-                # this doesn't touch.
                 if instr.value is not None:
                     out.extend(self._gen_load_value(instr.value, Register('eax')))
                 out.extend(self.host._gen_epilogue())
             elif isinstance(instr, IRLoad):
-                # `address` is always INT64-typed, so this already
-                # widens to %rax internally -- reading through it
-                # right back into %eax (its own 32-bit alias) is safe
-                # even though that clobbers the address: the read
-                # happens before the overwrite, in the same
-                # instruction, and nothing here needs the address
-                # again afterward.
                 out.extend(self._gen_load_value(instr.address, Register('eax')))
                 if instr.dst.type == Type.STR:
                     out.append(MovQ(src=Memory('rax', 0), dst=Register('rax')))
@@ -309,19 +164,7 @@ class InstructionSelector:
                     out.extend(self.host._gen_read_scalar_into(Memory('rax', 0), instr.dst.type, Register('eax')))
                 out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
             elif isinstance(instr, IRStore):
-                # The address and the value need to be alive
-                # SIMULTANEOUSLY for the final write, unlike IRLoad --
-                # loaded into %r9 and %eax respectively so neither
-                # step can clobber the other. %r9, not one of
-                # register_allocator.py's own pool registers
-                # (%r10d/%r11d/%r15d), deliberately: those CAN be a
-                # Temp's actual home, and this runs with no visibility
-                # into whether one is live across this exact point --
-                # %r9 never persistently holds a value outside a
-                # call's own narrow argument-placement window, so
-                # nothing else could be relying on it surviving here.
-                # instr.value_type -- not instr.value.type -- decides
-                # the write's own width, per IRStore's own docstring.
+                # address in %r9, value in %eax: both live at the store
                 out.extend(self._gen_load_value(instr.address, Register('r9d')))
                 out.extend(self._gen_load_value(instr.value, Register('eax')))
                 if instr.value_type == Type.STR:
@@ -329,79 +172,29 @@ class InstructionSelector:
                 else:
                     out.extend(self.host._gen_write_scalar_from(Register('eax'), instr.value_type, Memory('r9', 0)))
             elif isinstance(instr, IRLocalAddress):
-                # LeaQFrame -- x86-64's own frame-relative address
-                # computation -- is the ONLY architecture-specific
-                # detail here; everything else about how this Temp is
-                # captured (register or spill slot) is the identical,
-                # already-architecture-agnostic _gen_write_temp_from
-                # every other op already uses. A hypothetical ARM64
-                # lowering changes exactly this one line. instr.slot is
-                # a purely logical identifier (see IRLocalAddress's own
-                # docstring) -- not yet resolved to a physical offset
-                # at all: self.host._resolve_frame_layout's own one
-                # call doesn't run until lower_function, well after
-                # this line executes, so LeaQFrameSlot (not an
-                # immediately-resolved LeaQFrame) is what stands in
-                # here, exactly like FrameSlot does for an ordinary
-                # Memory operand -- see its own docstring for why
-                # LeaQFrame's own `offset` field needs a DIFFERENT
-                # placeholder shape than FrameSlot's.
                 out.append(LeaQFrameSlot(slot=instr.slot, dst=Register('rax')))
                 out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
             elif isinstance(instr, IRStaticDataAddress):
-                # Same shape as IRLocalAddress, one line swapped: LeaQ
-                # against a label instead of a frame offset.
                 out.append(LeaQ(label=instr.label, dst=Register('rax')))
                 out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
             elif isinstance(instr, IRCopy):
-                # dst_address/src_address both need to be alive
-                # simultaneously, so both get their own fixed,
-                # never-a-Temp's-actual-home register -- %r9/%r8,
-                # extending IRStore's own reasoning for %r9 to a
-                # second register here. Pinning both is also what
-                # lets gen_array_copy's own dynamic "pick a scratch
-                # register that isn't either base" logic collapse to
-                # always just %rax: %r9/%r8 can never be an allocated
-                # Temp's home, so %rax can never collide with either
-                # base the way it could when gen_array_copy is handed
-                # two arbitrary, possibly-overlapping Memory operands.
+                # %r9/%r8: both addresses live at once
                 out.extend(self._gen_load_value(instr.dst_address, Register('r9d')))
                 out.extend(self._gen_load_value(instr.src_address, Register('r8d')))
                 out.extend(self.host.gen_array_copy(Memory('r9', 0), Memory('r8', 0), instr.value_type))
             elif isinstance(instr, IRBoundsCheck):
-                # An unsigned comparison (Cmp is always unsigned; the
-                # signed/unsigned distinction lives entirely in which
-                # jump follows it -- Jae here, Jge/Jg/etc for an
-                # ordinary signed BinaryOp comparison), and a shared,
-                # per-function/per-message fail label -- see
-                # IRBoundsCheck's own docstring for why this couldn't
-                # be an ordinary BinaryOp instead. The message itself
-                # ("array index out of bounds") is hardcoded here,
-                # not carried on the op, since indexing is the only
-                # caller. Slicing's own, different message AND
-                # comparison (`ja`, not `jae` -- see IRSliceBoundsCheck
-                # just below) is the real reason for not generalizing
-                # this op instead.
+                # Cmp is unsigned; signedness lives in the jump.
                 out.extend(self._gen_load_value(instr.length, Register('ecx')))
                 out.extend(self._gen_load_value(instr.index, Register('eax')))
                 out.append(Cmp(src=Register('ecx'), dst=Register('eax')))
                 out.append(Jae(self.host._get_bounds_check_fail_label("array index out of bounds")))
             elif isinstance(instr, IRSliceBoundsCheck):
-                # Same shape as IRBoundsCheck's own lowering just
-                # above, with the two differences its own docstring
-                # names: `ja` (strictly above), not `jae`, and its own
-                # message.
                 out.extend(self._gen_load_value(instr.bound, Register('ecx')))
                 out.extend(self._gen_load_value(instr.value, Register('eax')))
                 out.append(Cmp(src=Register('ecx'), dst=Register('eax')))
                 out.append(Ja(self.host._get_bounds_check_fail_label("slice bounds out of range")))
             elif isinstance(instr, IRSliceGrow):
-                # Fixed registers (%rbx/%r12/%r13 for ptr/len/cap,
-                # callee-saved so they survive the malloc call inside
-                # _gen_slice_grow_into) -- this op's own contract
-                # already requires the caller (IRSliceGrow's own
-                # docstring) to have decided reallocation is needed,
-                # so no internal check happens here at all.
+                # Fixed callee-saved %rbx/%r12/%r13 survive the malloc inside grow.
                 out.extend(self._gen_load_value(instr.ptr, Register('ebx')))
                 out.extend(self._gen_load_value(instr.length, Register('r12d')))
                 out.extend(self._gen_load_value(instr.cap, Register('r13d')))
@@ -409,26 +202,7 @@ class InstructionSelector:
                     Register('rbx'), Register('r12d'), Register('r13'), Register('r13d'),
                     instr.element_width,
                 ))
-                # dst_ptr/dst_cap are written out of the SAME fixed
-                # registers (%ebx/%r13d) their own sources just used
-                # above -- harmless while the general allocator could
-                # never land a Temp on those specific registers, but a
-                # real, confirmed bug (see codegen/register_allocator.
-                # py's own ALLOCATABLE_REGISTERS comment for the full
-                # incident) once it can: writing dst_ptr first
-                # silently clobbers the not-yet-read new_cap value
-                # whenever dst_ptr itself gets assigned %r13d, since
-                # %ebx -> %r13d is exactly the move that overwrites
-                # it. The reverse (dst_cap assigned %ebx) never needs
-                # reordering -- a move only READS its source, so
-                # writing dst_ptr out of %ebx first can't destroy the
-                # value dst_cap's own write later puts there. Only a
-                # genuine swap (dst_ptr on %r13d AND dst_cap on %ebx,
-                # each sitting on the other's needed source) needs an
-                # actual temporary -- %r12 is always free for it here
-                # regardless of which case applies, since length is
-                # already dead the moment the call above returns (see
-                # _gen_slice_grow_into's own docstring).
+                # Order the writes out of %ebx/%r13d so neither clobbers the other's source; swap via %r12 (length is dead).
                 dst_ptr_reg = self.host._register_assignment.get(instr.dst_ptr.id)
                 dst_cap_reg = self.host._register_assignment.get(instr.dst_cap.id)
                 if dst_ptr_reg == 'r13d' and dst_cap_reg == 'ebx':

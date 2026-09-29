@@ -1,4 +1,4 @@
-"""Lexer"""
+"""Lexer: source -> tokens, with Python-style INDENT/DEDENT."""
 
 import argparse
 import re
@@ -7,37 +7,22 @@ from enum import auto, Enum
 
 
 class TokenType(Enum):
-    # Literals
     NUMBER = auto()
     IDENTIFIER = auto()
-    STRING = auto()  # a string *literal*, e.g. 'hello' -- distinct from
-                      # STR below (the 'str' *type keyword*). Reusing one
-                      # token type for both would make it impossible for
-                      # the parser to tell "the word str" apart from "an
-                      # actual string value" by type alone.
-    BYTE = auto()  # a BYTE *literal*, e.g. "a" -- double-quoted,
-                    # distinct from STRING's own single-quoted syntax,
-                    # so the two can never be visually confused for one
-                    # another the way, say, an optional trailing suffix
-                    # would risk. See parser.py's own ByteLiteral for
-                    # what this actually becomes.
+    STRING = auto()  # string literal; STR is the type keyword
+    BYTE = auto()  # byte literal, double-quoted
 
-    # Punctuation
     OPEN_PAREN = auto()
     CLOSE_PAREN = auto()
     OPEN_BRACKET = auto()
     CLOSE_BRACKET = auto()
-    OPEN_BRACE = auto()  # dict literal only -- `dict[K]V{...}` (see
-                          # parser.py's own DictLiteral) -- this
-                          # language's blocks are indentation-based, so
-                          # braces have never been needed before now.
+    OPEN_BRACE = auto()
     CLOSE_BRACE = auto()
     COLON = auto()
     SEMICOLON = auto()
     COMMA = auto()
     DOT = auto()
 
-    # Operators
     ASSIGN = auto()
     PLUS = auto()
     MINUS = auto()
@@ -57,7 +42,6 @@ class TokenType(Enum):
     LESS_THAN_OR_EQUAL = auto()
     GREATER_THAN_OR_EQUAL = auto()
 
-    # Compound assignment
     PLUS_ASSIGN = auto()
     MINUS_ASSIGN = auto()
     STAR_ASSIGN = auto()
@@ -69,7 +53,6 @@ class TokenType(Enum):
     SHIFT_LEFT_ASSIGN = auto()
     SHIFT_RIGHT_ASSIGN = auto()
 
-    # Keywords
     DEF = auto()
     INT = auto()
     INT8 = auto()
@@ -103,7 +86,6 @@ class TokenType(Enum):
     INTRINSIC = auto()
     DICT = auto()
 
-    # Special
     NEWLINE = auto()
     INDENT = auto()
     DEDENT = auto()
@@ -131,47 +113,24 @@ class Token:
 
 
 class Lexer:
-    """Tokenizes Hornet source, including synthesizing INDENT/DEDENT
-    tokens for block structure (see tokenize()'s docstring).
-    """
-
     def __init__(self, source: str):
         self.source = source
         self.tokens = []
         self.line = 1
         self.line_start = 0
 
-        # Indentation tracking -- see tokenize() for how these are used.
-        # indent_stack always starts at [0] (top-level code is
-        # unindented); at_line_start tracks whether the next real token
-        # we see will be the first one on its logical line, which is
-        # the only time indentation actually gets measured.
         self.indent_stack = [0]
         self.at_line_start = True
 
-        # Depth of currently-open '(' / '[' / '{' -- while > 0, a
-        # newline is a mere line continuation (no NEWLINE token, no
-        # indentation measurement), letting a multi-line call,
-        # array/dict literal, or grouped expression span several
-        # source lines. See tokenize()'s own NEWLINE case.
         self.bracket_depth = 0
 
-        # Define keywords mapping
         self.keywords = {
             'def': TokenType.DEF,
             'int': TokenType.INT,
             'int8': TokenType.INT8,
             'uint8': TokenType.UINT8,
             'int64': TokenType.INT64,
-            # 'byte' is deliberately mapped to the SAME TokenType as
-            # 'uint8' -- not a new TokenType.BYTE -- since the two are
-            # meant to be completely interchangeable everywhere, all
-            # the way down: a built-in alias for uint8 (see semantic.
-            # py's own _TYPE_NAMES), not a third, distinct type. The
-            # parser and everything downstream of it never needs to
-            # know which spelling actually appeared in the source, the
-            # same way it never needs to know that about a user-
-            # written type alias either.
+            # alias for uint8, not a distinct token
             'byte': TokenType.UINT8,
             'str': TokenType.STR,
             'return': TokenType.RETURN,
@@ -202,129 +161,64 @@ class Lexer:
             'dict': TokenType.DICT,
         }
 
-        # Compile master regex pattern
         self.rules = [
-            # Multi character.
-            ('NUMBER',      r'\d+(\.\d+)?'),     # Integer or decimal
-            ('IDENTIFIER',  r'[a-zA-Z_]\w*'),    # Variable names/keywords
-            ('STRING',      r"'([^'\\]|\\.)*'"), # String literals
-            ('BYTE',        r'"([^"\\]|\\.)*"'), # Byte literals (double-quoted -- see parser.py's own ByteLiteral)
+            ('NUMBER',      r'\d+(\.\d+)?'),
+            ('IDENTIFIER',  r'[a-zA-Z_]\w*'),
+            ('STRING',      r"'([^'\\]|\\.)*'"),
+            ('BYTE',        r'"([^"\\]|\\.)*"'),
 
-            # Triple character -- must come before the double- and
-            # single-character '<'/'>' rules below (SHIFT_LEFT,
-            # SHIFT_RIGHT, LESS_THAN, GREATER_THAN, LESS_THAN_OR_EQUAL,
-            # GREATER_THAN_OR_EQUAL), or those would each greedily
-            # consume a prefix of '<<=' / '>>=' one or two characters at
-            # a time and never let the full three-character token match.
+            # Longer operators must precede their prefixes (greedy alternation).
             ('SHIFT_LEFT_ASSIGN',  r'<<='),
             ('SHIFT_RIGHT_ASSIGN', r'>>='),
 
-            # Double character
-            ('EQUAL',                 r'=='),    # Equal
-            ('NOT_EQUAL',             r'!='),    # Not equal
-            ('GREATER_THAN_OR_EQUAL', r'>='),    # Greater than or equal
+            ('EQUAL',                 r'=='),
+            ('NOT_EQUAL',             r'!='),
+            ('GREATER_THAN_OR_EQUAL', r'>='),
             ('LESS_THAN_OR_EQUAL',    r'<='),
-            ('SHIFT_LEFT',            r'<<'),    # Bitwise shift left -- must come before
-            ('SHIFT_RIGHT',           r'>>'),    # LESS_THAN/GREATER_THAN below, or those
-                                                  # single-char rules would consume one '<'/'>'
-                                                  # at a time and never let this match.
-            ('PLUS_ASSIGN',      r'\+='),        # Compound assignment -- each of these must
-            ('MINUS_ASSIGN',     r'\-='),        # come before its corresponding single-character
-            ('STAR_ASSIGN',      r'\*='),        # operator rule below, for the same greedy-
-            ('SLASH_ASSIGN',     r'/='),         # single-char-match-first reason as SHIFT_LEFT/
-            ('PERCENT_ASSIGN',   r'%='),         # SHIFT_RIGHT above.
+            ('SHIFT_LEFT',            r'<<'),
+            ('SHIFT_RIGHT',           r'>>'),
+            ('PLUS_ASSIGN',      r'\+='),
+            ('MINUS_ASSIGN',     r'\-='),
+            ('STAR_ASSIGN',      r'\*='),
+            ('SLASH_ASSIGN',     r'/='),
+            ('PERCENT_ASSIGN',   r'%='),
             ('AMPERSAND_ASSIGN', r'&='),
             ('PIPE_ASSIGN',      r'\|='),
             ('CARET_ASSIGN',     r'\^='),
 
-            # Single character
-            ('NEWLINE',       r'\n'),              # Line breaks
-            ('OPEN_PAREN',    r'\('),              # Open paren
-            ('CLOSE_PAREN',   r'\)'),              # Close paren
-            ('OPEN_BRACKET',  r'\['),              # Array type/literal/index open
-            ('CLOSE_BRACKET', r'\]'),              # Array type/literal/index close
-            ('OPEN_BRACE',    r'\{'),              # Dict literal open
-            ('CLOSE_BRACE',   r'\}'),              # Dict literal close
+            ('NEWLINE',       r'\n'),
+            ('OPEN_PAREN',    r'\('),
+            ('CLOSE_PAREN',   r'\)'),
+            ('OPEN_BRACKET',  r'\['),
+            ('CLOSE_BRACKET', r'\]'),
+            ('OPEN_BRACE',    r'\{'),
+            ('CLOSE_BRACE',   r'\}'),
             ('GREATER_THAN',  r'>'),
             ('LESS_THAN',     r'<'),
-            ('COLON',         r':'),               # Colon
-            ('SEMICOLON',     r';'),               # For-loop clause separator
+            ('COLON',         r':'),
+            ('SEMICOLON',     r';'),
             ('COMMA',         r','),
-            ('ASSIGN',        r'='),               # Assignment operator
-            ('PLUS',          r'\+'),              # Add
-            ('MINUS',         r'\-'),              # Subtract
-            ('STAR',          r'\*'),              # Multiply
-            ('SLASH',         r'/'),               # Divide
-            ('PERCENT',       r'%'),               # Modulo
-            ('TILDE',         r'\~'),              # Tilde
-            ('AMPERSAND',     r'&'),               # Bitwise AND
-            ('PIPE',          r'\|'),               # Bitwise OR
-            ('CARET',         r'\^'),              # Bitwise XOR
+            ('ASSIGN',        r'='),
+            ('PLUS',          r'\+'),
+            ('MINUS',         r'\-'),
+            ('STAR',          r'\*'),
+            ('SLASH',         r'/'),
+            ('PERCENT',       r'%'),
+            ('TILDE',         r'\~'),
+            ('AMPERSAND',     r'&'),
+            ('PIPE',          r'\|'),
+            ('CARET',         r'\^'),
             ('DOT',           r'\.'),
 
-            ('COMMENT',       r'#[^\n]*'),         # Single-line comment -- from '#' to
-                                                    # end of line, NOT including the
-                                                    # newline itself, so the newline
-                                                    # still gets tokenized normally right
-                                                    # after and statement-termination
-                                                    # logic doesn't need to know comments
-                                                    # exist at all. Placed here, next to
-                                                    # SKIP, since both are discarded
-                                                    # rather than producing a real token
-                                                    # -- see tokenize()'s own handling of
-                                                    # both, and _handle_indentation's
-                                                    # exclusion of both from what counts
-                                                    # as a line's first real content.
-            ('SKIP',          r'[ \t\r]+'),        # Spaces and tabs
-            ('MISMATCH',      r'.'),               # Any other character (error)
+            ('COMMENT',       r'#[^\n]*'),  # Stops before '\n' so NEWLINE is still emitted.
+            ('SKIP',          r'[ \t\r]+'),
+            ('MISMATCH',      r'.'),
         ]
 
-        # Combine rules into a single regex string
         self.regex = re.compile('|'.join(f'(?P<{name}>{pattern})' for name, pattern in self.rules))
 
     def tokenize(self):
-        """Tokenizes the source, including block structure.
-
-        Previously this language had no INDENT/DEDENT tokens at all --
-        the SKIP rule below just swallowed all whitespace, including
-        leading indentation, uniformly. That was fine as long as every
-        block was flat (a function body with no nested if/while), since
-        the parser could get away with "a block ends at the next 'def'
-        or EOF". It cannot work for nested blocks: once an `if` can
-        appear inside a function body, "the next def or EOF" no longer
-        tells you where the if's own body ends versus where an `elif`/
-        `else` begins, or where control returns to the enclosing block.
-
-        The fix is the classic Python-style approach: track an
-        indentation stack, and synthesize INDENT/DEDENT tokens whenever
-        a new logical line's leading whitespace goes deeper or
-        shallower than what's currently open. The parser then treats a
-        block as `INDENT statement+ DEDENT` -- a signal that
-        generalizes to any nesting depth, unlike scanning for `def`.
-
-        The key trick for finding where a logical line's real content
-        starts: rather than specifically inspecting the SKIP match at
-        the front of each line, this waits for the first match that
-        ISN'T itself SKIP or NEWLINE while `at_line_start` is true, and
-        computes that token's column directly. That sidesteps having to
-        special-case blank lines (lines that are only whitespace, or
-        entirely empty) -- a blank line never produces such a match, so
-        `at_line_start` just stays true across it, and the next genuinely
-        content-bearing line is what actually gets measured. Comparing
-        tabs and spaces isn't handled specially; each whitespace
-        character just counts as one column of indentation, which is a
-        simplification worth knowing about if you ever mix the two.
-
-        NOTE: a STRING literal that spans a genuine embedded newline
-        (an actual newline character typed between the quotes, not the
-        two-character `\\n` escape) is matched as a single token here,
-        since the STRING rule is tried -- and consumes as far as it
-        matches -- before NEWLINE gets a chance to. That means such a
-        newline never increments self.line, so line numbers reported in
-        errors after a multi-line string literal can drift. This is a
-        known, narrow edge case, not something worth the extra
-        bookkeeping to fix right now.
-        """
+        """Tokenize, emitting INDENT/DEDENT from the indent stack. Blank lines are skipped; tabs count as one column. Known issue: a raw newline inside a string literal doesn't advance self.line."""
         for match in self.regex.finditer(self.source):
             kind = match.lastgroup
             value = match.group(kind)
@@ -337,7 +231,6 @@ class Lexer:
             if kind == 'NUMBER':
                 self.tokens.append(Token(TokenType.NUMBER, value, self.line, column))
             elif kind == 'IDENTIFIER':
-                # Check if the identifier is actually a reserved keyword
                 token_type = self.keywords.get(value, TokenType.IDENTIFIER)
                 self.tokens.append(Token(token_type, value, self.line, column))
             elif kind == 'STRING':
@@ -352,20 +245,7 @@ class Lexer:
                 if self.bracket_depth == 0:
                     self.tokens.append(Token(TokenType.NEWLINE, value, self.line - 1, column))
                     self.at_line_start = True
-                # Inside an open '(', '[', or '{' (bracket_depth > 0),
-                # this newline is suppressed entirely -- no NEWLINE
-                # token, and at_line_start stays false, so the next
-                # token's own column never triggers _handle_
-                # indentation. This is the standard "logical line
-                # continues across a physical one while some bracket
-                # is still open" approach every indentation-sensitive
-                # language needs (Python's own tokenizer does the
-                # identical thing) -- without it, a multi-line dict
-                # literal's own entries would each look like a
-                # fresh, differently-indented logical line to the
-                # parser, which expects INDENT/DEDENT to mean actual
-                # block structure, not "this expression happens to
-                # span several source lines."
+                # Inside brackets a newline is a continuation: no NEWLINE, no indent check.
             elif kind == 'OPEN_PAREN':
                 self.tokens.append(Token(TokenType.OPEN_PAREN, value, self.line, column))
                 self.bracket_depth += 1
@@ -456,28 +336,20 @@ class Lexer:
             else:
                 raise RuntimeError(f'Unhandled character "{value}" at line {self.line}, column {column}')
 
-        # If the source didn't end with a newline, synthesize one before
-        # closing out indentation -- keeps the final logical line's
-        # shape consistent with every other line, whose NEWLINE arrives
-        # before any DEDENTs that follow it.
+        # Synthesize a final NEWLINE before closing DEDENTs.
         if self.tokens and self.tokens[-1].type != TokenType.NEWLINE:
             col = len(self.source) - self.line_start + 1
             self.tokens.append(Token(TokenType.NEWLINE, '', self.line, col))
 
-        # Unwind any indentation still open at EOF (e.g. a file that
-        # ends inside an if-block, with no trailing dedent to close it).
         while len(self.indent_stack) > 1:
             self.indent_stack.pop()
             self.tokens.append(Token(TokenType.DEDENT, '', self.line, 1))
 
-        # Append End-Of-File token
         self.tokens.append(Token(TokenType.EOF, "", self.line, len(self.source) - self.line_start + 1))
         return self.tokens
 
     def _handle_indentation(self, width: int) -> None:
-        """Compares `width` (the new logical line's indentation, in
-        characters) against the current indentation stack, emitting
-        INDENT/DEDENT tokens to reconcile the difference."""
+        """Emit INDENT/DEDENT to reach indentation `width`."""
         top = self.indent_stack[-1]
         if width > top:
             self.indent_stack.append(width)

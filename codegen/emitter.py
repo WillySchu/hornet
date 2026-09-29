@@ -1,24 +1,11 @@
-"""Emitter, which takes an AsmProgram and emits its assembly code."""
+"""AsmProgram -> AT&T assembly text."""
 
 from codegen.assembly_ast import AsmProgram, AsmFunction, CallInstr
 from codegen.utils import escape_for_asciz
 
 
 class Emitter:
-    """Renders an AsmProgram as textual x64 AT&T-syntax assembly.
-
-    `platform` controls the portability wrinkles that matter at this
-    stage of the compiler:
-      - macOS (Mach-O) requires a leading underscore on external symbols
-        (e.g. `_main`, and now also library calls like `_malloc`); Linux
-        (ELF) does not. This applies uniformly to this program's own
-        function labels (emit_function) and to Call instruction targets
-        (also emit_function, since that's where every instruction gets
-        rendered) -- both go through the same symbol() method.
-      - Linux toolchains generally expect a `.note.GNU-stack` section so
-        the linker doesn't warn about an executable stack; macOS doesn't
-        use this.
-    """
+    """`platform` controls symbol prefixes and section names."""
 
     def __init__(self, platform: str = 'macos'):
         if platform not in ('macos', 'linux'):
@@ -32,26 +19,15 @@ class Emitter:
         lines: list[str] = []
         for fn in program.functions:
             lines.extend(self.emit_function(fn))
-            lines.append("")  # blank line between functions
+            lines.append("")
         if program.string_literals or program.type_descriptors:
-            # Plain `.data` rather than a stricter read-only section
-            # (like ELF's `.rodata` or Mach-O's `__TEXT,__cstring`) --
-            # `.data` assembles correctly, unchanged, on both this
-            # Linux sandbox and macOS's assembler, and nothing in this
-            # language ever writes back into a string literal's bytes.
+            # writable .data: portable across ELF and Mach-O
             lines.append(".data")
             for label, content in program.string_literals:
                 lines.append(f"{label}:")
                 lines.append(f'    .asciz "{escape_for_asciz(content)}"')
             for label, fields in program.type_descriptors:
-                # Each field is either a plain int (a kind tag, a
-                # count, a byte offset -- emitted as a literal .quad)
-                # or a label name string (a pointer to another type
-                # descriptor or a string literal -- emitted as .quad
-                # <label>, an ordinary relocation that resolves
-                # correctly regardless of whether that label appears
-                # earlier or LATER in this block -- what makes a self-
-                # referential struct's own descriptor work at all).
+                # int fields emit as .quad literals; strings as label addresses
                 lines.append(f"{label}:")
                 for f in fields:
                     lines.append(f"    .quad {f}")
@@ -65,11 +41,6 @@ class Emitter:
         lines = [f"    .globl {sym}", f"{sym}:"]
         for instr in fn.instructions:
             if isinstance(instr, CallInstr):
-                # Call.emit() renders its target unprefixed -- platform
-                # symbol naming is this Emitter's job alone, same as for
-                # this program's own function labels above, so this is
-                # the one instruction type emit_function special-cases
-                # rather than just calling instr.emit() uniformly.
                 lines.append(f"    call    {self.symbol(instr.target)}")
             else:
                 lines.append(f"    {instr.emit()}")

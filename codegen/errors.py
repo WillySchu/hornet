@@ -1,6 +1,5 @@
-"""Errors for the codegen package."""
+"""Codegen errors."""
 
 
 class CodegenError(Exception):
-    """Raised when the code generator encounters an IR object it doesn't know
-    how to translate."""
+    """IR the backend can't lower."""

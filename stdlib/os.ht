@@ -1,15 +1,6 @@
 from 'c' import from_cstring, to_cstring, panic, from_raw_parts
 
-# The ONE place a raw pointer from argv is ever touched: runtime.c's
-# own hornet_argv_get does the actual C-side `argv[index]` indexing,
-# since this language deliberately has no pointer arithmetic or
-# pointer indexing of its own (a considered choice, not a gap -- see
-# this feature's own design discussion). get_args below is what
-# every program actually calls: it converts the raw {argc, argv} pair
-# main receives straight from the OS into an ordinary []str, exactly
-# once, so nothing past this one function ever sees a raw pointer at
-# all -- every ordinary slice operation (indexing, len, a for loop)
-# already applies to its own result from there on.
+# argv -> []str. hornet_argv_get does the C-side indexing.
 extern *byte hornet_argv_get(*byte argv, int index)
 
 def []str get_args(int argc, *byte argv):
@@ -18,39 +9,13 @@ def []str get_args(int argc, *byte argv):
         args = append(args, from_cstring(hornet_argv_get(argv, i)))
     return args
 
-# File I/O -- read-only for now (writing is a separate, later feature
-# with its own flags/modes design questions, deliberately not decided
-# here). open/read/close need no C-side helper the way argv's own
-# indexing did: a path or buffer pointer is only ever passed straight
-# through to C, opaquely, never indexed into from Hornet itself.
+# File I/O (read-only).
 extern int open(*byte path, int flags)
 extern int read(int fd, *byte buf, int count)
 extern int close(int fd)
 
 def str read_all_from_fd(int fd):
-    # Reads fd until EOF, looping on read() -- one fixed-size chunk
-    # at a time -- since a single read() call is never guaranteed to
-    # return everything available at once, only "up to" the requested
-    # count. Shared by read_file (an ordinary, just-opened fd) and
-    # read_stdin (fd 0, already open) alike -- neither has to know
-    # or care whether the other end is a regular file, a pipe, or a
-    # terminal, since read()'s own {>0 more data, 0 EOF, <0 error}
-    # contract is identical either way.
-    #
-    # A genuine read() error (<0, distinct from the ordinary 0-means-
-    # EOF end of data) panics, for the identical reason a failed
-    # open() does in read_file below -- there's no Result/Option-style
-    # type yet to report this some other way, so a real I/O failure is
-    # treated as a hard, unexpected error here, consistent with how a
-    # missing dict key already panics elsewhere in this language.
-    #
-    # Building the result via repeated `result + ...` concatenation is
-    # a deliberate, known simplicity trade-off, not a hidden one: each
-    # concatenation likely re-copies everything accumulated so far, so
-    # this is quadratic in the file's own total size for a very large
-    # one. Completely fine for anything text-tool-sized (KB to low MB);
-    # worth revisiting with a real growable buffer if that ever
-    # changes.
+    # Read fd to EOF; panics on read error. Quadratic concatenation.
     str result = ''
     *byte chunk = calloc(65536, 1)
     int n = read(fd, chunk, 65536)

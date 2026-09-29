@@ -1,19 +1,4 @@
-"""Builds a runnable executable from a Hornet source file: compiles
-the source through the ordinary lex -> parse -> analyze -> codegen
-pipeline (compile_to_asm), compiles runtime/runtime.c (fresh, every
-time -- see runtime.c's own module docstring for why this is
-deliberately not yet a precompiled, cached artifact), and links both
-together with the platform's own C compiler.
-
-This is the one piece of the toolchain that didn't exist at all
-before runtime.c did: previously, "run a Hornet program" meant
-compile_to_asm's own assembly text, assembled and linked directly (no
-second object file ever entered the picture, since hornet_stringify
-used to be emitted as literal assembly text inline in that same .s
-file). Bringing in a real C runtime means there are now genuinely two
-separate compilation units that need to be produced and linked
-together, not one.
-"""
+"""Build an executable: compile .ht to assembly, compile runtime.c, link."""
 
 import argparse
 import os
@@ -27,27 +12,15 @@ from compile import compile_to_asm
 REPO_ROOT = Path(__file__).resolve().parent
 RUNTIME_C_PATH = REPO_ROOT / "runtime" / "runtime.c"
 
-CC = "gcc"  # matches the compiler used throughout this project's own test suite
+CC = "gcc"
 
-# Same convention tests/test_compiler.py's own HOST_IS_MACOS/ASM_PLATFORM
-# already use. Without -arch x86_64, gcc's own default target on an
-# Apple Silicon Mac is arm64 -- its own assembler then has no idea
-# what to do with this compiler's x86-64 AT&T-syntax output at all
-# (every register becomes an "unknown token", every `call`/`leave`
-# an "unrecognized instruction mnemonic", since none of that syntax
-# means anything as arm64). This was a real, reported bug: build.py
-# never added this flag at all, unlike every other gcc-invoking
-# harness in this repo, which already did.
+# Without -arch x86_64, gcc on Apple Silicon targets arm64 and rejects our x86-64 output.
 HOST_IS_MACOS = sys.platform == "darwin"
 DEFAULT_PLATFORM = "macos" if HOST_IS_MACOS else "linux"
 
 
 class BuildError(Exception):
-    """Raised when any step of the build (codegen, compiling
-    runtime.c, or the final link) fails -- carries the underlying
-    subprocess's own captured stderr, not just a bare non-zero exit
-    code, so a failure here is actionable without re-running the
-    failing command by hand to see what it actually said."""
+    """Build step failed; carries the subprocess's stderr."""
 
 
 def _run(args: list[str], step_name: str) -> None:
@@ -63,35 +36,12 @@ def _run(args: list[str], step_name: str) -> None:
 
 
 def build_executable(source_path: str, output_path: str, platform: str = DEFAULT_PLATFORM) -> None:
-    """Compiles `source_path` (a .ht file) and links it, together with
-    a freshly-compiled runtime.c, into a single executable at
-    `output_path`.
-
-    `platform` defaults to whatever this function is actually running
-    on (DEFAULT_PLATFORM), not a hardcoded choice -- it affects both
-    compile_to_asm's own symbol-naming convention (a leading
-    underscore on every external symbol, on macOS) and, via _run
-    above, the -arch flag gcc itself needs to match. Passing a
-    DIFFERENT platform than the host is still allowed (e.g. inspecting
-    macOS-shaped assembly output while developing on Linux), it just
-    won't produce a binary this host can actually run.
-
-    Raises BuildError (wrapping the underlying failure's own stderr)
-    if lexing/parsing/semantic analysis fails (propagated directly,
-    not wrapped, since those already raise their own clear,
-    Hornet-specific exceptions), or if compiling runtime.c or the
-    final link step fails.
-    """
+    """Compile `source_path` and link it with runtime.c into `output_path`."""
     asm = compile_to_asm(source_path, platform=platform)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         asm_path = os.path.join(tmpdir, "program.s")
-        # Latin-1, not the default UTF-8 -- see compile.py's own,
-        # identical comment for why: a str literal's own raw bytes
-        # can legitimately be any 0-255 value now (\xNN escapes), and
-        # Latin-1 is the one encoding where every code point 0-255
-        # maps to exactly one byte, keeping the emitted .data byte
-        # count matching len()'s own compile-time value exactly.
+        # Latin-1: see compile.py.
         with open(asm_path, "w", encoding="latin-1") as f:
             f.write(asm)
 

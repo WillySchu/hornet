@@ -1,6 +1,5 @@
-"""Errors for the IR package."""
+"""IR errors."""
 
 
 class IRError(Exception):
-    """Raised when the IR generator encounters an AST node it doesn't know how
-    to translate."""
+    """AST shape the IR builder can't translate."""

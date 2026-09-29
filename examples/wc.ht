@@ -1,10 +1,7 @@
 from 'os' import get_args, read_file, read_stdin
 from 'fmt' import int_to_str
 
-# A deliberately simple wc: always prints lines, words, and bytes (no
-# -l/-w/-c flag support yet, and no column-aligned output the way the
-# real coreutils wc has) -- with any number of file arguments summed
-# into a trailing "total" line, or stdin if none are given.
+# Simplified wc: lines, words, bytes per file plus a total; stdin if no files.
 
 def bool is_whitespace(byte b):
     return b == " " or b == "\t" or b == "\n"
@@ -17,9 +14,7 @@ def int count_lines(str s):
     return count
 
 def int count_words(str s):
-    # A word is a maximal run of non-whitespace bytes -- count() only
-    # bumps on the FIRST byte of each run (in_word false -> true),
-    # not on every byte inside one.
+    # Count words at the first byte of each non-whitespace run.
     int count = 0
     bool in_word = false
     for int i = 0; i < len(s); i += 1:

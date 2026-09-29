@@ -1,4 +1,4 @@
-"""Definitions for assembly AST operands."""
+"""Assembly AST: operands, instructions, and program containers (AT&T syntax)."""
 
 from dataclasses import dataclass, field
 
@@ -18,7 +18,7 @@ class Imm(Operand):
 
 @dataclass
 class Register(Operand):
-    name: str  # e.g. 'eax'
+    name: str
 
     def emit(self) -> str:
         return f"%{self.name}"
@@ -26,13 +26,9 @@ class Register(Operand):
 
 @dataclass
 class Memory(Operand):
-    """A memory operand: `offset(%base)`, e.g. `-4(%rbp)`. This is how
-    every local variable is stored, with `base` almost always 'rbp'.
-    It's also reused, with a DIFFERENT base, for reading/writing
-    through a computed address held in some other register (e.g.
-    Memory('rbx', 0) for the address an array index computed)."""
-    base: str    # e.g. 'rbp', or another register holding a computed address
-    offset: int  # bytes from `base`; locals live at negative offsets
+    """`offset(%base)`."""
+    base: str
+    offset: int
 
     def emit(self) -> str:
         return f"{self.offset}(%{self.base})"
@@ -40,39 +36,9 @@ class Memory(Operand):
 
 @dataclass
 class FrameSlot(Operand):
-    """A placeholder %rbp-relative frame slot, not yet resolved to a
-    concrete byte offset -- what codegen.py's own _temp_mem builds for
-    any Temp register_allocator.py didn't promote to a register,
-    whether it's a named-local one (its own logical slot already
-    assigned by _bind_local/_bind_param, back when the Temp itself was
-    created) or an anonymous one discovered here for the first time,
-    lazily, during lowering (its own logical slot handed out fresh, by
-    codegen.py's own _new_slot). Every slot this compiler reserves --
-    a named local, a parameter, a compiler scratch slot, or one of
-    these -- is resolved to a real, physical offset the identical way
-    now: once, by _resolve_frame_layout, after EVERY slot a function
-    will ever need, including whatever this discovers mid-lowering, is
-    known. Nothing anywhere in this compiler ever reads a slot's own
-    offset before that single call has run.
-
-    _patch_frame_slots is what walks the ENTIRE final instruction
-    list, once _resolve_frame_layout has run, replacing every one of
-    these with an ordinary, concrete Memory operand -- see LeaQFrame's
-    own placeholder, LeaQFrameSlot, for the identical idea applied to
-    an instruction whose own field can't hold an Operand at all.
-
-    emit() deliberately has no implementation: reaching Emitter.py
-    with one of these still unresolved is a bug in that patch pass,
-    not something to paper over with a plausible-looking fallback."""
+    """Unresolved frame slot; replaced with Memory after frame layout. Never emitted."""
     slot: int
-    extra_offset: int = 0  # bytes added on top of the slot's own resolved
-    # base offset -- lets several independent values share one reserved
-    # region rather than needing a slot apiece: an overflow argument at
-    # position k within the outgoing-stack-arguments region a call
-    # needing more than 6 argument slots reserves (see _resolve_frame_
-    # layout's own docstring) is FrameSlot(that region's slot, 8*k). 0
-    # for every other use of FrameSlot, which addresses its slot's own
-    # base directly.
+    extra_offset: int = 0  # offset within the slot
 
     def emit(self) -> str:
         raise NotImplementedError(
@@ -83,14 +49,7 @@ class FrameSlot(Operand):
 
 
 class Instruction:
-    """Base class for assembly instructions.
-
-    Subclasses set `mnemonic` and implement `operands()`; `emit()` is
-    generic and handles column alignment (via `mnemonic.ljust(8)`) so
-    every instruction lines up the same way regardless of how long its
-    mnemonic is -- compare `movl` (4 chars) and `movzbl` (6 chars) in the
-    examples below, both of which align their first operand to column 8.
-    """
+    """Instruction base: subclasses set `mnemonic` and `operands()`."""
 
     mnemonic: str = ""
 
@@ -116,7 +75,7 @@ class Mov(Instruction):
 
 @dataclass
 class Neg(Instruction):
-    """Two's-complement arithmetic negation, in place: dst = -dst."""
+    """dst = -dst."""
     operand: Operand
     mnemonic = "negl"
 
@@ -126,12 +85,7 @@ class Neg(Instruction):
 
 @dataclass
 class NegQ(Instruction):
-    """64-bit two's-complement arithmetic negation (`negq`), in place
-    -- the NegQ counterpart to Neg (`negl`, 32-bit), needed for int64's
-    own unary negate: -int64Value has to negate the FULL 64-bit value,
-    not just its own low 32 bits, the same reason every other int64
-    arithmetic operator needs its own dedicated 64-bit instruction
-    rather than reusing the 32-bit one."""
+    """64-bit Neg."""
     operand: Operand
     mnemonic = "negq"
 
@@ -141,7 +95,7 @@ class NegQ(Instruction):
 
 @dataclass
 class Not(Instruction):
-    """Bitwise complement, in place: dst = ~dst."""
+    """dst = ~dst."""
     operand: Operand
     mnemonic = "notl"
 
@@ -151,9 +105,7 @@ class Not(Instruction):
 
 @dataclass
 class NotQ(Instruction):
-    """64-bit bitwise complement (`notq`), in place -- the NotQ
-    counterpart to Not (`notl`, 32-bit), needed for int64's own unary
-    complement for the identical reason NegQ is needed for negate."""
+    """64-bit Not."""
     operand: Operand
     mnemonic = "notq"
 
@@ -163,8 +115,7 @@ class NotQ(Instruction):
 
 @dataclass
 class Cmp(Instruction):
-    """Compares src and dst by computing dst - src and setting flags
-    (notably ZF) accordingly -- doesn't modify either operand."""
+    """Set flags from dst - src."""
     src: Operand
     dst: Operand
     mnemonic = "cmpl"
@@ -175,15 +126,7 @@ class Cmp(Instruction):
 
 @dataclass
 class CmpQ(Instruction):
-    """64-bit compare (`cmpq`) -- the CmpQ counterpart to Cmp (`cmpl`,
-    32-bit), for the one case that needs it: checking a slice
-    descriptor's own 64-bit `ptr` field against 0 (see
-    _ir_slice_none_comparison). Every OTHER comparison in this
-    language compares 32-bit int/bool values, for which Cmp's cmpl is
-    exactly right -- but a pointer is a full 64-bit value, and
-    comparing only its low 32 bits against zero could, in principle
-    (however unlikely for any real address in practice), miss a real,
-    non-null pointer whose low 32 bits happen to be zero."""
+    """64-bit Cmp."""
     src: Operand
     dst: Operand
     mnemonic = "cmpq"
@@ -194,14 +137,7 @@ class CmpQ(Instruction):
 
 @dataclass
 class SetCC(Instruction):
-    """Sets an 8-bit operand to 1 if the given condition matches the
-    flags from the last Cmp, else 0. `cc` is the x86 condition-code
-    suffix -- 'e' (equal), 'ne' (not equal), 'l'/'g' (signed less/greater
-    than), 'le'/'ge' (signed less/greater-or-equal) -- and the mnemonic
-    is built from it (`sete`, `setne`, `setl`, ...). This is the single
-    instruction behind every comparison operator (== != < > <= >=) and
-    also behind logical NOT, which is just "was the operand equal to
-    0?" (cc='e')."""
+    """Set an 8-bit operand to condition `cc` (0/1)."""
     cc: str
     operand: Operand
 
@@ -215,16 +151,7 @@ class SetCC(Instruction):
 
 @dataclass
 class MovZX(Instruction):
-    """Zero-extends an 8-bit src into a 32-bit dst. Needed after SetE,
-    since `sete` only ever writes the low byte (e.g. %al) and leaves the
-    rest of the containing 32-bit register (e.g. %eax) untouched -- so
-    without this, %eax could still hold garbage in its upper 24 bits.
-    Also reused directly for reading a uint8-typed value out of memory
-    into a 32-bit register for arithmetic -- src can be a plain Memory
-    operand here just as well as a register; the mnemonic itself
-    (movzbl) already tells the assembler to read exactly one byte from
-    wherever src points, with no size suffix needed on the operand
-    itself the way there would be in Intel syntax."""
+    """Zero-extend 8 -> 32 bits."""
     src: Operand
     dst: Operand
     mnemonic = "movzbl"
@@ -235,15 +162,7 @@ class MovZX(Instruction):
 
 @dataclass
 class MovSX(Instruction):
-    """Sign-extends an 8-bit src into a 32-bit dst (`movsbl`) -- the
-    int8 counterpart to MovZX's own uint8 one. Needed the first time
-    this compiler ever reads a SIGNED sub-word value: zero-extension
-    (MovZX) is correct for uint8 (there's no sign bit to propagate),
-    but wrong for int8 -- a negative int8 value zero-extended would
-    silently become a large POSITIVE 32-bit one instead (e.g. int8(-1)
-    == 0xFF would zero-extend to 0x000000FF == 255, not -1), corrupting
-    every arithmetic operation and comparison performed on it. Like
-    MovZX, src can be a plain Memory operand directly."""
+    """Sign-extend 8 -> 32 bits."""
     src: Operand
     dst: Operand
     mnemonic = "movsbl"
@@ -254,22 +173,7 @@ class MovSX(Instruction):
 
 @dataclass
 class MovSXD(Instruction):
-    """Sign-extends a 32-bit src into a 64-bit dst (`movslq`) -- needed
-    for WIDENING a cast into int64 (`int64(someInt8OrIntValue)`): the
-    source has already been correctly computed as an ordinary,
-    genuinely-32-bit-valid value by the time this runs (int/int8/uint8
-    are all read into a real, correct 32-bit register value one way or
-    another -- see _gen_read_scalar_into), so sign-extending it up to
-    64 bits is always correct regardless of which of the three it
-    originally was: a non-negative 32-bit value (however it got that
-    way, including uint8's own zero-extended read) has its own sign
-    bit already clear, so sign- and zero-extension would produce an
-    identical result for it anyway. Like MovSX/MovZX, src can be a
-    plain register OR Memory operand; this compiler always uses it
-    register-to-register (dst's own 32-bit view sign-extended into its
-    own 64-bit view), the same "re-widen dst's own value in place"
-    shape gen_cast_narrowing_into's own int8/uint8 branches already
-    use one register-width down."""
+    """Sign-extend 32 -> 64 bits."""
     src: Operand
     dst: Operand
     mnemonic = "movslq"
@@ -291,10 +195,7 @@ class Add(Instruction):
 
 @dataclass
 class AddQ(Instruction):
-    """64-bit dst += src (`addq`). Used only for the length arithmetic
-    in _ir_string_concat (`len(left) + len(right) + 1`) -- string
-    lengths come back from `strlen` as a full 64-bit size_t, so this
-    needs to be the 64-bit add, not Add's 32-bit `addl`."""
+    """64-bit Add."""
     src: Operand
     dst: Operand
     mnemonic = "addq"
@@ -316,7 +217,7 @@ class Sub(Instruction):
 
 @dataclass
 class IMul(Instruction):
-    """dst *= src (signed, two-operand form)."""
+    """dst *= src (signed)."""
     src: Operand
     dst: Operand
     mnemonic = "imull"
@@ -327,12 +228,7 @@ class IMul(Instruction):
 
 @dataclass
 class IMulQ(Instruction):
-    """64-bit dst *= src (`imulq`, signed, two-operand form) -- the
-    IMulQ counterpart to IMul (`imull`, 32-bit), needed for int64
-    multiplication: two 64-bit operands can produce a result that
-    genuinely needs all 64 bits, unlike int8/uint8's own multiply,
-    which can stay entirely within ordinary 32-bit arithmetic before
-    truncating."""
+    """64-bit IMul."""
     src: Operand
     dst: Operand
     mnemonic = "imulq"
@@ -343,36 +239,19 @@ class IMulQ(Instruction):
 
 @dataclass
 class Cdq(Instruction):
-    """Sign-extends %eax across the %edx:%eax pair. Required immediately
-    before IDiv, which always divides that 64-bit pair (not just %eax)
-    by its operand -- without this, %edx could hold garbage and corrupt
-    the division."""
+    """Sign-extend %eax into %edx:%eax (before IDiv)."""
     mnemonic = "cdq"
 
 
 @dataclass
 class Cqto(Instruction):
-    """Sign-extends %rax across the %rdx:%rax pair (`cqto`) -- the
-    64-bit counterpart to Cdq (`cdq`, sign-extending %eax across %edx:
-    %eax), required immediately before IDivQ for the identical reason:
-    IDivQ always divides the full 128-bit %rdx:%rax pair, not just
-    %rax, by its own operand."""
+    """Sign-extend %rax into %rdx:%rax (before IDivQ)."""
     mnemonic = "cqto"
 
 
 @dataclass
 class IDiv(Instruction):
-    """Divides the 64-bit %edx:%eax pair by `operand` (signed). Quotient
-    ends up in %eax, remainder in %edx. `operand` must be a register or
-    memory location -- x86 doesn't support an immediate divisor for
-    idiv, which is why ir_lowering.py's own IRBinOp case always routes
-    the right-hand side through the %ecx scratch register rather than
-    leaving it as an Imm.
-
-    This is also what MODULO reuses -- see gen_binary_op's MODULO case
-    -- since idiv computes the quotient *and* remainder in one
-    instruction; modulo is exactly this same Cdq+IDiv sequence, just
-    reading %edx afterward instead of %eax."""
+    """Signed %edx:%eax / operand: quotient %eax, remainder %edx. Operand must be a register or memory."""
     operand: Operand
     mnemonic = "idivl"
 
@@ -382,12 +261,7 @@ class IDiv(Instruction):
 
 @dataclass
 class IDivQ(Instruction):
-    """Divides the 128-bit %rdx:%rax pair by `operand` (signed) --
-    the IDivQ counterpart to IDiv (`idivl`, 32-bit). Quotient in %rax,
-    remainder in %rdx, otherwise identical in every respect to IDiv
-    one register-width up -- including doubling as int64's own MODULO
-    implementation the same way IDiv does for int/int8/uint8 (see
-    gen_binary_op's own MODULO case)."""
+    """64-bit IDiv."""
     operand: Operand
     mnemonic = "idivq"
 
@@ -397,25 +271,7 @@ class IDivQ(Instruction):
 
 @dataclass
 class Div(Instruction):
-    """Divides the 64-bit %edx:%eax pair by `operand` (UNSIGNED, unlike
-    IDiv). Quotient in %eax, remainder in %edx, same as IDiv -- the
-    only difference is the interpretation of the bits, so %edx must be
-    explicitly zeroed first (`movl $0, %edx`), never sign-extended via
-    Cdq, which would inject a sign bit into a value this instruction is
-    about to treat as having none.
-
-    Built for converting an int's own MAGNITUDE to decimal digits
-    without ever risking a signed-overflow trap: negating INT_MIN in
-    ordinary 32-bit two's complement doesn't actually change its bit
-    pattern at all (there's no positive counterpart to negate to), but
-    that SAME bit pattern, read as unsigned rather than signed,
-    correctly represents INT_MIN's own magnitude (2147483648) -- a
-    value that doesn't fit in a signed 32-bit int at all, but fits an
-    unsigned one perfectly. Currently unused: the int-to-string
-    conversion this was built for now lives in runtime.c, in C,
-    which sidesteps this problem differently (via a wider intermediate
-    type) -- kept here as it's still a correct, self-contained
-    primitive."""
+    """Unsigned %edx:%eax / operand."""
     operand: Operand
     mnemonic = "divl"
 
@@ -425,17 +281,7 @@ class Div(Instruction):
 
 @dataclass
 class DivQ(Instruction):
-    """Divides the 128-bit %rdx:%rax pair by `operand` (UNSIGNED) --
-    the DivQ counterpart to Div (`divl`, 32-bit), needed for int64's
-    own decimal-conversion digit-extraction loop, for the IDENTICAL
-    INT64_MIN edge-case reason Div's own docstring explains one
-    register-width down: negating INT64_MIN leaves its bit pattern
-    unchanged, but that same pattern, read as unsigned via DivQ rather
-    than signed via IDivQ, correctly represents its own magnitude
-    (9223372036854775808), a value that doesn't fit in a signed int64
-    at all but fits an unsigned 64-bit divide perfectly. %rdx must be
-    explicitly zeroed first, never sign-extended via Cqto, for the
-    same reason Div's own docstring gives."""
+    """64-bit Div."""
     operand: Operand
     mnemonic = "divq"
 
@@ -445,7 +291,7 @@ class DivQ(Instruction):
 
 @dataclass
 class And(Instruction):
-    """dst &= src (bitwise AND)."""
+    """dst &= src."""
     src: Operand
     dst: Operand
     mnemonic = "andl"
@@ -456,8 +302,7 @@ class And(Instruction):
 
 @dataclass
 class AndQ(Instruction):
-    """64-bit dst &= src (`andq`) -- the AndQ counterpart to And
-    (`andl`, 32-bit), needed for int64's own bitwise AND."""
+    """64-bit And."""
     src: Operand
     dst: Operand
     mnemonic = "andq"
@@ -468,7 +313,7 @@ class AndQ(Instruction):
 
 @dataclass
 class Or(Instruction):
-    """dst |= src (bitwise OR)."""
+    """dst |= src."""
     src: Operand
     dst: Operand
     mnemonic = "orl"
@@ -479,8 +324,7 @@ class Or(Instruction):
 
 @dataclass
 class OrQ(Instruction):
-    """64-bit dst |= src (`orq`) -- the OrQ counterpart to Or (`orl`,
-    32-bit), needed for int64's own bitwise OR."""
+    """64-bit Or."""
     src: Operand
     dst: Operand
     mnemonic = "orq"
@@ -491,7 +335,7 @@ class OrQ(Instruction):
 
 @dataclass
 class Xor(Instruction):
-    """dst ^= src (bitwise XOR)."""
+    """dst ^= src."""
     src: Operand
     dst: Operand
     mnemonic = "xorl"
@@ -502,8 +346,7 @@ class Xor(Instruction):
 
 @dataclass
 class XorQ(Instruction):
-    """64-bit dst ^= src (`xorq`) -- the XorQ counterpart to Xor
-    (`xorl`, 32-bit), needed for int64's own bitwise XOR."""
+    """64-bit Xor."""
     src: Operand
     dst: Operand
     mnemonic = "xorq"
@@ -514,15 +357,7 @@ class XorQ(Instruction):
 
 @dataclass
 class ShiftLeft(Instruction):
-    """dst <<= %cl. x86 only allows an immediate or specifically %cl as
-    a shift instruction's count operand -- never an arbitrary register
-    -- so, unlike And/Or/Xor above, this doesn't take a general `src`
-    field at all; %cl is hardcoded, since architecturally nothing else
-    could ever go there. This lines up for free with how every other
-    binary operator already works: ir_lowering.py's own IRBinOp case
-    always evaluates the right-hand operand into %ecx before calling
-    gen_binary_op, so the shift count is already sitting in the one
-    register x86 requires by the time this instruction is emitted."""
+    """dst <<= %cl."""
     dst: Operand
     mnemonic = "shll"
 
@@ -532,13 +367,7 @@ class ShiftLeft(Instruction):
 
 @dataclass
 class ShiftLeftQ(Instruction):
-    """64-bit dst <<= %cl (`shlq`) -- the ShiftLeftQ counterpart to
-    ShiftLeft (`shll`, 32-bit), needed for int64's own left shift. %cl
-    is still hardcoded, and still already correctly populated by the
-    time this runs, for the identical reason ShiftLeft's own docstring
-    explains -- the shift COUNT itself is never wider than a byte
-    regardless of the value being shifted, so this needs no 64-bit
-    change to the count operand at all, only to `dst`'s own width."""
+    """64-bit ShiftLeft."""
     dst: Operand
     mnemonic = "shlq"
 
@@ -548,10 +377,7 @@ class ShiftLeftQ(Instruction):
 
 @dataclass
 class ShiftRightArithmetic(Instruction):
-    """dst >>= %cl, sign-extending (arithmetic) shift -- matches this
-    language's `int` being signed, so `-8 >> 1 == -4`, not some large
-    positive value from a zero-filling logical shift. See ShiftLeft's
-    docstring for why %cl is hardcoded rather than a general `src`."""
+    """dst >>= %cl, arithmetic."""
     dst: Operand
     mnemonic = "sarl"
 
@@ -561,10 +387,7 @@ class ShiftRightArithmetic(Instruction):
 
 @dataclass
 class ShiftRightArithmeticQ(Instruction):
-    """64-bit dst >>= %cl, sign-extending (`sarq`) -- the
-    ShiftRightArithmeticQ counterpart to ShiftRightArithmetic (`sarl`,
-    32-bit), needed for int64's own right shift, matching int64 being
-    signed the same way int already is."""
+    """64-bit ShiftRightArithmetic."""
     dst: Operand
     mnemonic = "sarq"
 
@@ -574,11 +397,7 @@ class ShiftRightArithmeticQ(Instruction):
 
 @dataclass
 class Push(Instruction):
-    """Pushes a 64-bit register onto the stack. x86-64 doesn't support a
-    32-bit push in long mode, so the caller is responsible for passing
-    an already-64-bit register (e.g. Register('rax'), not
-    Register('eax')) -- see as_qword_register for converting a 32-bit
-    general-purpose register to its 64-bit alias when spilling one."""
+    """Push a 64-bit register."""
     operand: Register
     mnemonic = "pushq"
 
@@ -588,7 +407,7 @@ class Push(Instruction):
 
 @dataclass
 class Pop(Instruction):
-    """The pop counterpart to Push -- see its docstring."""
+    """Pop a 64-bit register."""
     operand: Register
     mnemonic = "popq"
 
@@ -598,14 +417,7 @@ class Pop(Instruction):
 
 @dataclass
 class LeaQ(Instruction):
-    """Loads the *address* of `label` into `dst`, RIP-relative (the
-    `(%rip)` addressing mode). This is the standard, PIE-friendly way to
-    get a static data address on x86-64 -- an absolute `movq
-    $label, %reg` would work on some setups but isn't safe to rely on
-    once position-independent executables are in the picture (the
-    default for `gcc`-produced binaries on both Linux and macOS), so
-    this is what every string literal's address gets loaded with (see
-    gen_expr_ir's own StringLiteral case)."""
+    """RIP-relative address of `label`."""
     label: str
     dst: Register
     mnemonic = "leaq"
@@ -616,12 +428,7 @@ class LeaQ(Instruction):
 
 @dataclass
 class LeaQFrame(Instruction):
-    """Loads the *address* of a %rbp-relative stack location into
-    `dst` -- `leaq offset(%rbp), dst`. Distinct from LeaQ (which is
-    RIP-relative, for static data like string literals): this is
-    relative to the CURRENT function's own frame, and is how an
-    array-typed local's address is obtained, unlike a scalar local,
-    which is always read/written directly by offset."""
+    """`leaq offset(%rbp), dst`."""
     offset: int
     dst: Register
     mnemonic = "leaq"
@@ -632,30 +439,7 @@ class LeaQFrame(Instruction):
 
 @dataclass
 class LeaQFrameSlot(Instruction):
-    """A placeholder for LeaQFrame, not yet resolved to a concrete
-    byte offset -- what ir_lowering.py's own IRLocalAddress case
-    builds now, in place of an immediately-resolved LeaQFrame, since
-    a slot's own final offset (see codegen.py's own _resolve_frame_
-    layout) isn't decided until AFTER every slot this function ever
-    needs -- named locals, parameters, scratch slots, AND whatever
-    _temp_mem discovers lazily during lowering itself -- is known,
-    which is later than when this instruction is built.
-
-    Distinct from FrameSlot (an Operand, substituted directly into a
-    Mov/MovQ's own src/dst field) for a structural reason, not a
-    stylistic one: LeaQFrame's own `offset` is a plain int baked into
-    the `leaq` instruction's own encoding, not a separate Operand at
-    all, so there's no field a FrameSlot could be substituted into
-    without lying about its own declared type. This placeholder
-    instead stands in for the WHOLE instruction -- _patch_frame_slots
-    replaces it outright with an equivalent, concrete LeaQFrame, once
-    self._slot_offsets covers this slot, rather than patching a field
-    within it the way a FrameSlot does.
-
-    emit() deliberately has no implementation, for the identical
-    reason FrameSlot's own doesn't: reaching Emitter.py with one of
-    these still unresolved is a bug in that patch pass, not something
-    to paper over with a plausible-looking fallback."""
+    """Unresolved LeaQFrame; patched after frame layout."""
     slot: int
     dst: Register
 
@@ -669,29 +453,7 @@ class LeaQFrameSlot(Instruction):
 
 @dataclass
 class CallInstr(Instruction):
-    """Calls a function (either a libc routine like `strlen`, or another
-    Hornet-compiled function) by symbol name, e.g. `call strlen` or
-    `call add`. Named CallInstr rather than plain Call specifically to
-    avoid colliding with parser.Call -- the source-level AST node for a
-    function-call *expression* -- which this file also imports; the two
-    are easy to conflate by name but are completely different things
-    (one is assembly, the other is source syntax), and Python will
-    silently let a module-level class definition shadow an import of
-    the same name with no error, which is exactly what happened here
-    during development before this rename.
-
-    `target` is always the *unprefixed* C symbol name (`malloc`, not
-    `_malloc`) -- Emitter is what knows whether the target platform
-    needs a leading underscore (see its emit_function), the same way it
-    already decides that for this program's own function labels. Emit()
-    here (unprefixed) is only ever used if a CallInstr is inspected/
-    rendered outside of Emitter; the real rendering path always goes
-    through Emitter's own handling instead.
-
-    Requires %rsp to be 16-byte aligned at the point this executes, per
-    the SysV ABI -- see codegen.py's LIBRARY CALLS section for how that
-    invariant is maintained without explicit runtime alignment checks.
-    """
+    """Call a symbol; the Emitter applies platform naming."""
     target: str
     mnemonic = "call"
 
@@ -701,10 +463,7 @@ class CallInstr(Instruction):
 
 @dataclass
 class MovQ(Instruction):
-    """64-bit mov (`movq`). Used for frame-pointer setup (`movq %rsp,
-    %rbp`) and for anything genuinely 64-bit, including string
-    pointers. int/bool still exclusively use the 32-bit Mov
-    (`movl`)."""
+    """64-bit mov."""
     src: Operand
     dst: Operand
     mnemonic = "movq"
@@ -715,17 +474,7 @@ class MovQ(Instruction):
 
 @dataclass
 class MovB(Instruction):
-    """8-bit mov (`movb`). Used for int8/uint8's own truncating scalar
-    store, and for the trailing 1-to-3-byte remainder of gen_array_
-    copy's own chunked copy, as opposed to a 4-byte int/bool or an
-    8-byte pointer/qword. Both operands must already be 8-bit
-    themselves (an 8-bit register alias, e.g. Register('al') via
-    as_byte_register, an Imm, or a byte-addressed Memory location) --
-    unlike Mov/MovQ, there's no separate 8-bit General-purpose register
-    name at all (%al IS %eax's own low byte, not a distinct register),
-    so passing a 32-bit Register here would silently assemble as
-    something else entirely rather than raising a clear error; callers
-    are responsible for using as_byte_register first."""
+    """8-bit mov."""
     src: Operand
     dst: Operand
     mnemonic = "movb"
@@ -736,8 +485,7 @@ class MovB(Instruction):
 
 @dataclass
 class SubQ(Instruction):
-    """64-bit subtract (`subq`). Used exactly once per function, in the
-    prologue, to reserve stack space for locals: `subq $N, %rsp`."""
+    """64-bit subtract."""
     src: Operand
     dst: Operand
     mnemonic = "subq"
@@ -748,17 +496,13 @@ class SubQ(Instruction):
 
 @dataclass
 class Leave(Instruction):
-    """Tears down the current stack frame: equivalent to
-    `movq %rbp, %rsp; popq %rbp`. The standard epilogue counterpart to
-    the prologue's `pushq %rbp; movq %rsp, %rbp`."""
+    """`leave`: movq %rbp, %rsp; popq %rbp."""
     mnemonic = "leave"
 
 
 @dataclass
 class Label(Instruction):
-    """A jump target. Not really an "instruction" (it assembles to
-    nothing -- it just names the address of whatever comes next), but it
-    fits the same emit()-based rendering as everything else."""
+    """Jump target."""
     name: str
 
     def emit(self) -> str:
@@ -767,7 +511,7 @@ class Label(Instruction):
 
 @dataclass
 class Jmp(Instruction):
-    """Unconditional jump to `target` (a Label's name)."""
+    """Unconditional jump."""
     target: str
     mnemonic = "jmp"
 
@@ -777,7 +521,7 @@ class Jmp(Instruction):
 
 @dataclass
 class Je(Instruction):
-    """Jump to `target` if the last Cmp found its operands equal (ZF set)."""
+    """Jump if equal."""
     target: str
     mnemonic = "je"
 
@@ -787,7 +531,7 @@ class Je(Instruction):
 
 @dataclass
 class Jne(Instruction):
-    """Jump to `target` if the last Cmp found its operands unequal (ZF clear)."""
+    """Jump if not equal."""
     target: str
     mnemonic = "jne"
 
@@ -797,14 +541,7 @@ class Jne(Instruction):
 
 @dataclass
 class Jae(Instruction):
-    """Jump to `target` if the last Cmp found dst >= src, using an
-    UNSIGNED interpretation of the compared values -- unlike Je/Jne,
-    which only look at the zero flag (equal or not, meaningless
-    whether signed or unsigned). This is what makes array bounds
-    checking a single comparison: `cmpl $size, %index; jae fail_label`
-    correctly catches BOTH index >= size and index < 0 at once, since
-    a negative int, reinterpreted unsigned, becomes a huge positive
-    number -- see _ir_index_address."""
+    """Jump if dst >= src (unsigned)."""
     target: str
     mnemonic = "jae"
 
@@ -814,18 +551,7 @@ class Jae(Instruction):
 
 @dataclass
 class Ja(Instruction):
-    """Jump to `target` if the last Cmp found dst > src (STRICTLY
-    greater), using an UNSIGNED interpretation -- the strict-
-    inequality counterpart to Jae, needed for slice bounds checking
-    specifically (see _ir_slice_into): `low == length` and
-    `high == length` are both VALID slice bounds (`arr[5:5]` on a
-    5-element array is a valid, empty-slice-producing expression),
-    unlike ordinary indexing, where an index equal to the array's own
-    size is already out of bounds -- so the boundary condition itself
-    genuinely differs here, not just the label it jumps to. Still
-    catches a negative value via the same unsigned-reinterpretation
-    trick Jae relies on: a negative int, reinterpreted unsigned,
-    becomes huge, and so is "above" any non-negative length."""
+    """Jump if dst > src (unsigned)."""
     target: str
     mnemonic = "ja"
 
@@ -835,14 +561,7 @@ class Ja(Instruction):
 
 @dataclass
 class Jle(Instruction):
-    """Jump to `target` if the last Cmp found dst <= src, using a
-    SIGNED interpretation -- unlike Jae/Ja, which are unsigned
-    (array/slice lengths and indices, where a negative value needs to
-    be caught by reinterpreting it as huge). Built for a buffer's own
-    bulk-append growth check (comparing `needed` against `cap`, both
-    ordinary, already-validated non-negative ints where a signed
-    comparison is the natural, and here equivalent, choice). Currently
-    unused: that buffer-growth logic now lives in runtime.c, in C."""
+    """Jump if dst <= src (signed)."""
     target: str
     mnemonic = "jle"
 
@@ -852,9 +571,7 @@ class Jle(Instruction):
 
 @dataclass
 class Jg(Instruction):
-    """Jump to `target` if the last Cmp found dst > src, using a
-    SIGNED interpretation -- the strict-inequality counterpart to
-    Jle, for the identical reason and the identical use site."""
+    """Jump if dst > src (signed)."""
     target: str
     mnemonic = "jg"
 
@@ -876,25 +593,7 @@ class AsmFunction:
 @dataclass
 class AsmProgram:
     functions: list[AsmFunction] = field(default_factory=list)
-    # (label, content) pairs for every string literal anywhere in the
-    # program, collected across all functions during generation (see
-    # ir/dispatch.py's own gen_expr_ir, its StringLiteral case). These
-    # aren't tied to any one function's frame -- they're static,
-    # immutable data -- so they live at the AsmProgram level and get
-    # emitted once, in a shared `.data` block, by Emitter (see its
-    # emit()).
+    # (label, content)
     string_literals: list[tuple] = field(default_factory=list)
-    # (label, fields) pairs for every runtime type descriptor built for
-    # print (see ir/strings.py's own _get_or_build_type_descriptor) --
-    # the first place this compiler has ever needed any runtime type
-    # information at all, since every other type-driven decision
-    # anywhere else happens entirely at compile time. Each
-    # `fields` entry is a flat list of ints (emitted as a literal
-    # `.quad N`) and label-name strings (emitted as `.quad label`, a
-    # perfectly ordinary assembler/linker relocation -- the same
-    # mechanism behind a vtable or jump table in any real compiled
-    # language, nothing new at the ASSEMBLY level, just new on this
-    # compiler's own emission side). Structured identically to string_
-    # literals for the identical reason: static, immutable, not tied to
-    # any one function's own frame.
+    # (label, fields)
     type_descriptors: list[tuple] = field(default_factory=list)

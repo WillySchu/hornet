@@ -1,13 +1,4 @@
-"""Builds the whole program's own IR: validates program's two
-registries, builds one IRFunction per function via IRFunctionBuilder,
-and returns a self-contained IRProgram (struct_registry/type_alias_
-registry/ids included).
-
-A plain function, not a class -- no per-build state to hold across
-multiple methods, unlike IRFunctionBuilder.
-
-Separate from CodeGenerator.generate() so optimize() can run between
-them (see compile_to_asm)."""
+"""Build and verify an IRProgram from an analyzed Program."""
 
 from ir.errors import IRError
 from ir.id_allocator import IdAllocator
@@ -18,10 +9,7 @@ from parser import Program
 
 
 def build_ir_program(program: Program) -> IRProgram:
-    """Raises IRError (rather than a bare AttributeError) if `program`
-    hasn't been through semantic.analyze() yet -- struct_registry/
-    type_alias_registry/sum_type_registry/function_registry are
-    stamped on there, not declared on the dataclass itself."""
+    """IRError if `program` hasn't been through semantic.analyze()."""
     if not hasattr(program, 'struct_registry'):
         raise IRError(
             "Program has no struct registry -- semantic.analyze() "
@@ -51,5 +39,5 @@ def build_ir_program(program: Program) -> IRProgram:
         ids=IdAllocator(),
     )
     ir_program.functions = [IRFunctionBuilder(ir_program).gen_function_ir(fn) for fn in program.functions]
-    verify_program(ir_program)  # catch a builder bug here, not at the assembler
+    verify_program(ir_program)
     return ir_program

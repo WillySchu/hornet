@@ -1,24 +1,4 @@
-"""Runs every benchmark under benchmarks/programs/, reporting
-generated-code size, register-allocation statistics, and wall-clock
-timing -- checked in so future changes to codegen/register_allocator.py
-have something concrete to compare against, rather than "how is this
-actually affecting generated code" staying opaque the way it has been
-until now.
-
-Deliberately NOT a pytest file: these programs are designed to take
-tens to hundreds of milliseconds each (see each program's own comment
-for why), and running them repeatedly for timing is inherently slower
-and noisier than the rest of the test suite. tests/test_benchmarks.py
-is the fast, deterministic sibling of this file -- it just confirms
-each program still compiles and produces its known-correct result,
-with no timing involved, so these programs can't silently bit-rot
-between the (much less frequent) times someone actually runs this
-script.
-
-Usage:
-    python3 benchmarks/run_benchmarks.py                  # run and print a report
-    python3 benchmarks/run_benchmarks.py --save-baseline   # also overwrite baseline.json
-"""
+"""Benchmarks: generated-code size, register-allocation stats, and runtime for benchmarks/programs/."""
 
 import argparse
 import json
@@ -48,9 +28,6 @@ BASELINE_PATH = Path(__file__).parent / 'baseline.json'
 TIMING_RUNS = 7
 EXECUTION_TIMEOUT = 30
 
-# Same platform-detection this compiler's own test suite uses (see
-# tests/test_compiler.py's ASM_PLATFORM) -- the generated assembly has
-# to match whatever gcc on *this* machine will actually assemble/link.
 HOST_IS_MACOS = sys.platform == 'darwin'
 ASM_PLATFORM = 'macos' if HOST_IS_MACOS else 'linux'
 
@@ -58,13 +35,7 @@ STAT_KEYS = ('total_temps', 'unsafe_span_excluded', 'eligible', 'allocated', 'sp
 
 
 def _instrumented_generate(program):
-    """Runs CodeGenerator.generate, capturing the (ir, assignment)
-    pair from every allocate_registers call made along the way -- one
-    per function -- without touching any production code at all: this
-    wraps the module-level reference gen_function actually calls,
-    exactly like the ad hoc verification scripts used earlier in this
-    project's own development did, just kept around properly this
-    time instead of being thrown away."""
+    """CodeGenerator.generate, capturing (ir, assignment) per function."""
     captured = []
     original = ra_module.allocate_registers
 
@@ -84,10 +55,7 @@ def _instrumented_generate(program):
 
 
 def _allocation_stats(ir: list, assignment: dict) -> dict:
-    """Re-derives the same breakdown eligible_intervals itself
-    computes, plus WHY each excluded Temp was excluded -- something
-    the production code has no reason to track, since it only needs
-    the final yes/no, not the reason."""
+    """eligible_intervals' breakdown plus exclusion reasons."""
     blocks = ra_module.build_cfg(ir)
     live_in, live_out = ra_module.compute_liveness(blocks)
     intervals = ra_module.compute_live_intervals(blocks, live_in, live_out)
@@ -109,13 +77,7 @@ def _sum_stats(per_function: list) -> dict:
 
 
 def _instruction_count(asm_text: str) -> int:
-    """A simple, deterministic proxy for generated-code size: counts
-    real instruction lines, skipping labels, directives, and blank/
-    comment lines. Not a substitute for the timing measurement below
-    (two versions with the same count can still run at different
-    speeds -- a register-to-register move and a memory access are
-    both "one instruction"), but a useful, noise-free signal on its
-    own for whether a change added or removed real work."""
+    """Instruction line count (excludes labels, directives, comments)."""
     count = 0
     for line in asm_text.splitlines():
         stripped = line.strip()
@@ -126,13 +88,7 @@ def _instruction_count(asm_text: str) -> int:
 
 
 def _time_binary(bin_path: Path) -> float:
-    """Runs the compiled binary TIMING_RUNS times and returns the
-    minimum wall-clock time. The minimum, not the mean or median, is
-    the least noisy signal for "how fast can this actually run":
-    scheduling noise and other processes on the machine can only ever
-    make a run slower, never artificially faster, so the fastest
-    observed run is the closest available estimate of the program's
-    own true cost."""
+    """Minimum wall-clock time over TIMING_RUNS runs."""
     times = []
     for _ in range(TIMING_RUNS):
         start = time.perf_counter()
@@ -159,11 +115,6 @@ def run_one(ht_path: Path) -> dict:
         runtime_o_path = Path(tmpdir) / 'runtime.o'
         asm_path.write_text(asm_text)
 
-        # Compiled fresh, unconditionally, matching build.py's own
-        # build_executable -- no current benchmark program calls
-        # print(), but leaving this benchmark harness's own linking
-        # silently dependent on that staying true would be fragile,
-        # not a deliberate scope boundary.
         runtime_cc_cmd = ['gcc']
         if HOST_IS_MACOS:
             runtime_cc_cmd += ['-arch', 'x86_64']

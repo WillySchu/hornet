@@ -1,16 +1,4 @@
-"""Register allocation over the IR (see ir.py) -- v1, linear scan.
-
-Only one kind of Temp is excluded from allocation, for correctness,
-not performance: any Temp that needs to SURVIVE THROUGH an IRCall it
-doesn't own (see eligible_intervals' own docstring for why being
-defined BY one is a different, safe case), because neither the
-caller-saved registers (which a call definitely clobbers) nor the
-callee-saved ones (already used internally, for unrelated purposes,
-by string/append codegen) can be trusted to carry a value across an
-opaque block untouched. Everything else here -- basic blocks,
-liveness, linear scan itself -- is standard and unsurprising; the
-interesting decisions are this one exclusion and the register pool
-choice (see ALLOCATABLE_REGISTERS below), not the algorithm."""
+"""Linear-scan register allocation over the IR. Temps live across an IRCall or IRSliceGrow are not allocated."""
 
 from dataclasses import dataclass, field
 from typing import Optional
@@ -37,82 +25,23 @@ from ir.ir import (
     Temp,
 )
 
-# %r10d, %r11d, %r15d, %ebx, %r12d, %r13d, %r14d (the ordinary 32-bit-
-# named form, matching every other register this codebase passes
-# around by default -- widened via as_qword_register when a Temp's
-# type needs it). None of the seven has a SysV argument role (unlike
-# %rdi/%rsi/%rdx/%rcx/%r8/%r9), an implicit instruction-level role
-# (unlike %rcx's shift-count, %rdx's div/mul high half), or this
-# compiler's own universal scratch convention (%rax).
-#
-# The first three (%r10d/%r11d/%r15d) are caller-saved and otherwise
-# completely unclaimed. The other four are callee-saved, and every
-# function's prologue/epilogue already saves and restores all four
-# UNCONDITIONALLY (CALLEE_SAVED_SCRATCH_REGISTERS, calling_convention.
-# py) -- so admitting them here adds no new save/restore cost, only
-# spends a cost already being paid. %r14d is entirely unused elsewhere
-# in codegen; %ebx/%r12d/%r13d are used, but only as fixed scratch
-# inside IRSliceGrow's own lowering (ir_lowering.py, for ptr/length/
-# cap around the malloc/realloc call append needs).
-#
-# %ebx/%r12d/%r13d were EXCLUDED for a while: including them produced
-# real, reproducible, ASLR-dependent segfaults on append-heavy
-# programs (e.g. benchmarks/programs/copy_heavy.ht) -- eligible_
-# intervals already treats IRSliceGrow as an unsafe position exactly
-# like IRCall, which correctly keeps any Temp ALIVE ACROSS it off
-# these registers, but that check has nothing to say about IRSliceGrow
-# DEFINING two Temps at once (dst_ptr and dst_cap) through those same
-# fixed registers. If the general allocator assigns dst_ptr itself to
-# %r13d, writing it out (from %ebx) before dst_cap is read back out of
-# %r13d clobbers the not-yet-consumed new_cap value with the new
-# pointer instead -- confirmed to be the actual mechanism (root-
-# caused with gdb against a real core dump, not just inferred) and
-# fixed at the lowering level: see ir_lowering.py's own IRSliceGrow
-# case, which now reorders (or, for the one case that's a genuine
-# swap rather than a simple ordering fix, uses %r12 as a temporary --
-# always free there, since length is already dead by that point) to
-# never read a destination register after something has already
-# overwritten it. Re-verified clean afterward against the same stress
-# test that originally found this (many repeated runs of the same
-# binary, with and without ASLR, across every benchmark program).
+# Allocatable pool: no SysV argument role, no implicit instruction role, not %rax scratch.
+# r10/r11/r15 are caller-saved; rbx/r12-r14 are callee-saved and always saved in the prologue.
+# rbx/r12/r13 are also IRSliceGrow's fixed scratch; see its lowering for write ordering.
 ALLOCATABLE_REGISTERS = ['r10d', 'r11d', 'r15d', 'ebx', 'r12d', 'r13d', 'r14d']
 
 
 @dataclass
 class BasicBlock:
-    """One maximal straight-line run of IR instructions: starts at a
-    label or at whatever immediately follows a terminator
-    (IRJump/IRBranch/IRReturn), and runs up to (and including) its own
-    terminator, if it has one. `start` is this block's own first
-    instruction's index in the whole-function ir list this was built
-    from -- the same numbering live_intervals uses, so a block's own
-    instructions are always range(start, start + len(instructions))."""
+    """Maximal straight-line run of IR."""
     label: Optional[str]
     start: int
     instructions: list
-    successors: list = field(default_factory=list)  # indices into the owning block list
+    successors: list = field(default_factory=list)  # indices into the block list
 
 
 def build_cfg(ir: list) -> list[BasicBlock]:
-    """Splits a flat, whole-function ir list (see gen_function) into
-    basic blocks and computes each one's successor edges.
-
-    A block boundary ("leader") is: the first instruction, every
-    IRLabel, and whatever immediately follows a terminator -- the
-    last case matters even when a label doesn't happen to follow one
-    (e.g. an early `return` inside an if, with ordinary code after the
-    if): that code is unreachable from the return itself, but it's
-    still a real block, reachable via the other branch, and needs its
-    own leader so it isn't silently fused into the block before it.
-
-    Successors: IRJump goes to one block (its target label's own);
-    IRBranch goes to two (true_label's and false_label's); IRReturn
-    goes to none (it leaves the function); anything else falls through
-    to the next block in program order, if there is one -- there
-    might not be, for a void function's trailing statement, which
-    relies on gen_function's own epilogue appended outside this list
-    entirely.
-    """
+    """Split IR into basic blocks with successor edges."""
     if not ir:
         return []
 
@@ -149,7 +78,7 @@ def build_cfg(ir: list) -> list[BasicBlock]:
 
 
 def _reads(instr) -> set:
-    """The Temps `instr` reads as input."""
+    """Temps `instr` reads."""
     if isinstance(instr, IRMove):
         return {instr.src} if isinstance(instr.src, Temp) else set()
     if isinstance(instr, IRCast):
@@ -180,7 +109,7 @@ def _reads(instr) -> set:
 
 
 def _writes(instr) -> set:
-    """The Temps `instr` defines."""
+    """Temps `instr` writes."""
     if isinstance(instr, (IRMove, IRBinOp, IRUnOp, IRLoad, IRLocalAddress, IRStaticDataAddress, IRCast, IRReadArgument)):
         return {instr.dst}
     if isinstance(instr, IRCall):
@@ -191,10 +120,7 @@ def _writes(instr) -> set:
 
 
 def _block_use_def(block: BasicBlock) -> tuple[set, set]:
-    """A block's own use/def sets: `use` is whatever it reads before
-    ever writing to it itself (i.e. must already be live coming in);
-    `def` is whatever it writes at all, regardless of order relative
-    to any of its own reads."""
+    """(use, def): read-before-written and written."""
     use, defined = set(), set()
     for instr in block.instructions:
         for t in _reads(instr):
@@ -205,13 +131,7 @@ def _block_use_def(block: BasicBlock) -> tuple[set, set]:
 
 
 def compute_liveness(blocks: list[BasicBlock]) -> tuple[list, list]:
-    """The standard backward liveness dataflow, iterated to a fixed
-    point: live_out[B] is the union of live_in over B's successors;
-    live_in[B] is whatever B uses itself, plus whatever live_out[B]
-    needs that B doesn't itself overwrite. Iterating to convergence
-    (rather than a single pass) is what makes this correct in the
-    presence of a loop's back-edge -- a single forward or backward
-    pass would get a loop-carried Temp's own range wrong."""
+    """Backward liveness to a fixed point."""
     use_def = [_block_use_def(b) for b in blocks]
     live_in = [set() for _ in blocks]
     live_out = [set() for _ in blocks]
@@ -232,22 +152,14 @@ def compute_liveness(blocks: list[BasicBlock]) -> tuple[list, list]:
 
 @dataclass
 class LiveInterval:
-    """One Temp's live range, approximated (as linear scan always
-    does) as a single [start, end] span rather than the possibly-
-    disjoint set of points it's actually live at -- sound (never
-    under-estimates how long a Temp needs protecting), just not
-    maximally precise."""
+    """One Temp's live range as a single [start, end] span."""
     temp: Temp
     start: int
     end: int
 
 
 def compute_live_intervals(blocks: list[BasicBlock], live_in: list, live_out: list) -> dict:
-    """Builds one LiveInterval per Temp referenced anywhere, keyed by
-    temp.id, from per-block live-in/live-out plus each block's own
-    internal reads/writes -- the latter is what gives a Temp that's
-    purely local to one block (never live-in or live-out of it at
-    all) a tight interval, rather than the whole block's own span."""
+    """One interval per Temp from liveness and per-block reads/writes."""
     bounds: dict = {}  # temp.id -> [Temp, start, end]
 
     def extend(temp: Temp, index: int) -> None:
@@ -275,48 +187,7 @@ def compute_live_intervals(blocks: list[BasicBlock], live_in: list, live_out: li
 
 
 def eligible_intervals(ir: list, intervals: dict, temp_home_slots: Optional[dict] = None) -> dict:
-    """Filters out every interval that can't be safely register-
-    allocated -- see this module's own docstring for why any Temp
-    SURVIVING THROUGH an IRCall it doesn't own is excluded
-    unconditionally, not just usually.
-
-    Two boundary cases are deliberately safe, not excluded, even
-    though they touch an unsafe position -- see _is_hazard for the
-    precise reasoning behind each:
-
-      pos == interval.start: this Temp's own def, via IRCall's dst --
-      that same op can't put it at risk, only one running strictly
-      after its definition can.
-
-      pos == interval.end, when ir[pos] is an IRCall and this Temp is
-      one of ITS OWN args: the read that places it into an argument
-      register happens before that same call's own clobbering, not
-      across it -- symmetric to the start case, just on the other
-      side of the unsafe op.
-
-    Anything strictly between start and end is always a hazard,
-    regardless of which op it is.
-
-    IRLocalAddress/IRStaticDataAddress are deliberately absent from
-    the unsafe set below: each writes only its own dst, from a fixed,
-    compile-time-known frame offset or label, with no other register
-    touched at all -- exactly as safe as an ordinary IRBinOp/IRMove.
-
-    A second, independent exclusion, when temp_home_slots is given:
-    any Temp whose OWN home slot (temp_home_slots[tid], see
-    IdAllocator.temp_at_offset) is one that some IRLocalAddress
-    instruction in THIS SAME ir computes the address of -- meaning
-    something holds a raw pointer into that slot and could read or
-    write through it at any point (see UnaryOp.ADDRESS_OF's own IR
-    case, ir/dispatch.py's _ir_address_of), so this Temp's value can
-    never safely live purely in a register: every read or write
-    through that address needs to see the exact same, up to date
-    value an ordinary read of the Temp itself would. temp_home_slots
-    is None for any caller that doesn't need this (existing tests
-    exercising the call-survival exclusion above in isolation), in
-    which case this second check is simply skipped -- not "no Temps
-    excluded by it", genuinely absent, matching this function's prior
-    behavior exactly."""
+    """Drop intervals live across an unsafe position (IRCall, IRSliceGrow)."""
     unsafe_positions = [i for i, instr in enumerate(ir) if isinstance(instr, (IRCall, IRSliceGrow))]
     addressed_slots = {instr.slot for instr in ir if isinstance(instr, IRLocalAddress)} if temp_home_slots is not None else None
     result = {}
@@ -330,20 +201,7 @@ def eligible_intervals(ir: list, intervals: dict, temp_home_slots: Optional[dict
 
 
 def _is_hazard(interval: LiveInterval, pos: int, ir: list) -> bool:
-    """Whether unsafe position `pos` genuinely threatens `interval`'s
-    own Temp -- see eligible_intervals' own docstring for the two safe
-    boundary cases this rules out (pos == start; pos == end when
-    ir[pos] is an IRCall reading this exact Temp as one of its own
-    args). Anything strictly between start and end is always a
-    hazard, regardless of what `ir[pos]` actually is: it's impossible
-    for interval.end to land exactly ON an unrelated IRCall's own
-    position purely from block-boundary liveness extension, since any
-    genuine downstream need would already have pulled `end` out
-    further than that -- so this only ever needs to special-case the
-    Temp's own true last position, never an earlier one it merely
-    passes through. `unsafe_positions` spans the WHOLE function, not
-    just this one interval's own span, so pos > end (entirely after
-    this Temp is already dead) needs its own explicit case too."""
+    """Whether unsafe position `pos` threatens `interval`."""
     if pos <= interval.start or pos > interval.end:
         return False
     if pos < interval.end:
@@ -353,24 +211,9 @@ def _is_hazard(interval: LiveInterval, pos: int, ir: list) -> bool:
 
 
 def linear_scan(intervals: dict, available_registers: list[str] = ALLOCATABLE_REGISTERS) -> dict:
-    """Poletto & Sarkar's linear-scan allocator: walk intervals in
-    start order, expiring any active interval that's already ended
-    (freeing its register) before deciding the new one's own fate.
-    Spilling (when no register is free) always targets whichever
-    interval -- among the active ones and the new one itself -- ends
-    FURTHEST in the future: that's the one most likely to still be
-    blocking a free register by the time anything else needs one, so
-    spilling it first minimizes the total number of spills over the
-    whole function.
-
-    Returns temp.id -> register name for however many intervals fit;
-    anything spilled is simply absent from the result, needing no
-    special marking -- it just falls back to its existing, always-
-    correct memory-slot behavor, exactly as every Temp already
-    behaves today.
-    """
+    """Poletto & Sarkar linear scan; spill the interval ending last."""
     sorted_intervals = sorted(intervals.values(), key=lambda iv: iv.start)
-    active: list[tuple[LiveInterval, str]] = []  # kept sorted by end point
+    active: list[tuple[LiveInterval, str]] = []  # sorted by end
     free_registers = list(available_registers)
     assignment: dict = {}
 
@@ -395,25 +238,12 @@ def linear_scan(intervals: dict, available_registers: list[str] = ALLOCATABLE_RE
             assignment[interval.temp.id] = reg
             active[-1] = (interval, reg)
             active.sort(key=lambda pair: pair[0].end)
-        # else: no free register, and every active interval ends no
-        # later than this one -- the new interval itself is the one
-        # that gets spilled; nothing to do, it's just absent from
-        # `assignment`.
 
     return assignment
 
 
 def allocate_registers(ir: list, temp_home_slots: Optional[dict] = None) -> dict:
-    """The whole pipeline, run over one function's own accumulated IR:
-    build the CFG, compute liveness, derive live intervals, filter to
-    what's actually eligible, and run linear scan over the result.
-    Returns temp.id -> register name, exactly like linear_scan itself.
-
-    temp_home_slots, passed straight through to eligible_intervals
-    (see its own docstring), is the codegen.py call site's way of
-    saying "these Temps must never be register-allocated if their own
-    home slot has its address taken" -- optional, and skipped when
-    omitted, since not every caller (tests included) needs it."""
+    """temp.id -> register for one function's IR."""
     blocks = build_cfg(ir)
     live_in, live_out = compute_liveness(blocks)
     intervals = compute_live_intervals(blocks, live_in, live_out)

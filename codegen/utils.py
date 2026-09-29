@@ -1,20 +1,11 @@
-"""Small, stateless, machine-level helpers shared across every
-lowering mixin: register-width aliasing (a 32-bit name to its 8-bit
-or 64-bit alias), the SysV ABI's own condition-code and argument-
-register tables. See ir/utils.py's own module docstring for this
-file's semantic-level counterpart -- type-width/leaf-type computation
-and the resolved-type accessor -- split out from here since neither
-reasons about a concrete x86-64 register at all."""
+"""Machine-level helpers: register aliases, condition codes, argument registers, string escaping."""
 
 from codegen.assembly_ast import Operand, Register
 from codegen.errors import CodegenError
 from parser import BinaryOp
 
 
-# BinaryOp -> the x86 condition-code suffix that implements it, given
-# that Cmp(src=right, dst=left) computes (left - right) and sets flags
-# accordingly. All six comparisons share one codegen path (see
-# gen_binary_op) that just plugs the relevant cc into SetCC.
+# BinaryOp -> setcc suffix for Cmp(src=right, dst=left).
 COMPARISON_CONDITION_CODES = {
     BinaryOp.EQUAL: 'e',
     BinaryOp.NOT_EQUAL: 'ne',
@@ -25,27 +16,12 @@ COMPARISON_CONDITION_CODES = {
 }
 
 
-# SysV ABI integer/pointer argument registers, in order, 64-bit and
-# 32-bit forms. Only the first 6 arguments of a call are supported --
-# beyond that the ABI moves to stack-passed arguments, which this
-# compiler doesn't implement. The 32-bit names don't follow one
-# consistent pattern: rdi/rsi/rdx/rcx are "legacy" registers with
-# their own historical e-prefixed names, while r8/r9 are x86-64-only
-# and use a d-suffix instead -- hence two explicit parallel lists
-# rather than a derived mapping.
+# SysV integer argument registers; later arguments go on the stack.
 ARG_REGISTERS_64 = ['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
 ARG_REGISTERS_32 = ['edi', 'esi', 'edx', 'ecx', 'r8d', 'r9d']
 
 
-# 32-bit register name -> its 8-bit low-byte alias (e.g. %eax -> %al).
-# `sete` (and friends) can only target an 8-bit operand, so codegen
-# needs to get from "the register I'm working in" to "its byte alias".
-# Covers all 16 general-purpose registers, not just the ones already
-# in active use: a scalar write can be asked to truncate-and-store
-# from whatever register a call site's value happens to be sitting in
-# (%eax most of the time, but also a protected register like %r8d),
-# so this needs to be complete up front rather than extended
-# reactively call site by call site.
+# 32-bit -> 8-bit register name.
 _BYTE_REGISTER_ALIASES = {
     'eax': 'al', 'ebx': 'bl', 'ecx': 'cl', 'edx': 'dl',
     'esi': 'sil', 'edi': 'dil', 'ebp': 'bpl', 'esp': 'spl',
@@ -60,12 +36,7 @@ def as_byte_register(reg: Operand) -> Register:
     return Register(_BYTE_REGISTER_ALIASES[reg.name])
 
 
-# 32-bit register name -> its 64-bit alias (e.g. %eax -> %rax). Needed
-# because Push/Pop can't operate on a 32-bit operand size in long mode,
-# and because int64 needs a full-width read/write from whatever
-# register a call site's computed value happens to be sitting in --
-# covers all 16 general-purpose registers up front for the same reason
-# _BYTE_REGISTER_ALIASES above does.
+# 32-bit -> 64-bit register name.
 _QWORD_REGISTER_ALIASES = {
     'eax': 'rax', 'ebx': 'rbx', 'ecx': 'rcx', 'edx': 'rdx',
     'esi': 'rsi', 'edi': 'rdi', 'ebp': 'rbp', 'esp': 'rsp',
@@ -81,25 +52,7 @@ def as_qword_register(reg: Operand) -> Register:
 
 
 def escape_for_asciz(s: str) -> str:
-    """Escapes `s` (an already-unescaped Hornet string value) for
-    embedding in a GAS `.asciz "..."` directive. Backslash is escaped
-    *first*, or the escapes added for the other characters would
-    themselves get re-escaped; double-quote needs escaping since
-    that's the directive's own delimiter; the rest are the common
-    control characters getting their standard short escape so the
-    emitted assembly stays readable text.
-
-    A null byte gets GAS's own octal escape (\\000), not left raw: an
-    UNescaped one inside the quoted text would end the directive's own
-    string early right there mid-line, as GAS parses it, however many
-    Hornet-level bytes were still meant to follow -- garbling the rest
-    of that line into invalid assembly rather than merely truncating
-    the DATA (which would at least assemble). This matters now in a
-    way it never used to: a str value's own bytes are no longer null-
-    terminated (see ir/strings.py's own module docstring), so an
-    embedded '\\0' is ordinary, fully-supported content a Hornet
-    program can legitimately put in a string literal (`'a\\0b'`), not
-    a hypothetical edge case."""
+    """Escape `s` for `.asciz`."""
     s = s.replace('\\', '\\\\')
     s = s.replace('"', '\\"')
     s = s.replace('\n', '\\n')
