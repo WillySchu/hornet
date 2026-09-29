@@ -23,6 +23,7 @@ from ir.program_builder import build_ir_program
 from optimize.optimizer import optimize
 import codegen.codegen as codegen_module
 import codegen.register_allocator as ra_module
+import ir.cfg as cfg
 
 PROGRAMS_DIR = Path(__file__).parent / 'programs'
 BASELINE_PATH = Path(__file__).parent / 'baseline.json'
@@ -57,8 +58,8 @@ def _instrumented_generate(program):
 
 def _allocation_stats(ir: list, temp_home_slots: dict, assignment: dict) -> dict:
     """Allocation breakdown, using the same eligibility rules as allocate_registers."""
-    blocks = ra_module.build_cfg(ir)
-    live_in, live_out = ra_module.compute_liveness(blocks)
+    blocks = cfg.build_blocks(ir)
+    live_in, live_out = cfg.liveness(blocks)
     intervals = ra_module.compute_live_intervals(blocks, live_in, live_out)
     call_safe = ra_module.eligible_intervals(ir, intervals)
     eligible = ra_module.eligible_intervals(ir, intervals, temp_home_slots)

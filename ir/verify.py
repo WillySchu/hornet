@@ -6,80 +6,12 @@ Not checked: operand type consistency, call target existence.
 
 from diagnostics import InternalCompilerError
 
-from ir.ir import (
-    IRBinOp,
-    IRBoundsCheck,
-    IRBranch,
-    IRCall,
-    IRCast,
-    IRCopy,
-    IRFunction,
-    IRJump,
-    IRLabel,
-    IRLoad,
-    IRLocalAddress,
-    IRMove,
-    IRProgram,
-    IRReadArgument,
-    IRReturn,
-    IRSliceBoundsCheck,
-    IRSliceGrow,
-    IRStaticDataAddress,
-    IRStore,
-    IRUnOp,
-    Temp,
-)
-
-_TERMINATORS = (IRJump, IRBranch, IRReturn)
+from ir.cfg import TERMINATORS, reads, writes
+from ir.ir import IRBranch, IRFunction, IRJump, IRLabel, IRLocalAddress, IRProgram
 
 
 class IRVerificationError(InternalCompilerError):
     """IR invariant violated; a compiler bug."""
-
-
-def _op_defs(op) -> list:
-    """Temp ids written by `op`."""
-    if isinstance(op, (
-            IRMove, IRBinOp, IRUnOp, IRCast, IRReadArgument, IRLoad, IRLocalAddress, IRStaticDataAddress)):
-        return [op.dst.id]
-    if isinstance(op, IRCall):
-        return [op.dst.id] if op.dst is not None else []
-    if isinstance(op, IRSliceGrow):
-        return [op.dst_ptr.id, op.dst_cap.id]
-    return []
-
-
-def _op_uses(op) -> list:
-    """Temp ids read by `op`."""
-    if isinstance(op, IRMove):
-        values = [op.src]
-    elif isinstance(op, IRBinOp):
-        values = [op.left, op.right]
-    elif isinstance(op, IRUnOp):
-        values = [op.operand]
-    elif isinstance(op, IRCast):
-        values = [op.src]
-    elif isinstance(op, IRCall):
-        values = list(op.args)
-    elif isinstance(op, IRReturn):
-        values = [op.value] if op.value is not None else []
-    elif isinstance(op, IRLoad):
-        values = [op.address]
-    elif isinstance(op, IRStore):
-        values = [op.address, op.value]
-    elif isinstance(op, IRCopy):
-        values = [op.dst_address, op.src_address]
-    elif isinstance(op, IRBoundsCheck):
-        values = [op.index, op.length]
-    elif isinstance(op, IRSliceBoundsCheck):
-        values = [op.value, op.bound]
-    elif isinstance(op, IRSliceGrow):
-        values = [op.ptr, op.length, op.cap]
-    elif isinstance(op, IRBranch):
-        values = [op.cond]
-    else:
-        values = []
-    return [v.id for v in values if isinstance(v, Temp)]
 
 
 def verify_function(ir_fn: IRFunction) -> None:
@@ -96,7 +28,7 @@ def verify_function(ir_fn: IRFunction) -> None:
 
     body_len = len(ir_fn.body)
     for i, op in enumerate(ir_fn.body):
-        if isinstance(op, _TERMINATORS):
+        if isinstance(op, TERMINATORS):
             continue
         is_last = i == body_len - 1
         next_op = None if is_last else ir_fn.body[i + 1]
@@ -122,9 +54,9 @@ def verify_function(ir_fn: IRFunction) -> None:
 
     defined_ids = set()
     for op in ir_fn.body:
-        defined_ids.update(_op_defs(op))
+        defined_ids.update(t.id for t in writes(op))
     for op in ir_fn.body:
-        for temp_id in _op_uses(op):
+        for temp_id in sorted(t.id for t in reads(op)):
             if temp_id not in defined_ids:
                 raise IRVerificationError(
                     f"{ir_fn.name}: Temp {temp_id} used by {op!r} but never defined anywhere in this function"
