@@ -30,10 +30,10 @@ _TYPEDESC_SLICE = 4
 _TYPEDESC_STRUCT = 5
 _TYPEDESC_INT8 = 6
 _TYPEDESC_UINT8 = 7
-_TYPEDESC_INT64 = 8
 _TYPEDESC_SUM = 9
 _TYPEDESC_POINTER = 10
 _TYPEDESC_DICT = 11
+_TYPEDESC_INT32 = 12
 
 
 class StringsMixin:
@@ -50,8 +50,8 @@ class StringsMixin:
             self.ir_program.type_descriptors.append((label, [_TYPEDESC_INT8]))
         elif t == Type.UINT8:
             self.ir_program.type_descriptors.append((label, [_TYPEDESC_UINT8]))
-        elif t == Type.INT64:
-            self.ir_program.type_descriptors.append((label, [_TYPEDESC_INT64]))
+        elif t == Type.INT32:
+            self.ir_program.type_descriptors.append((label, [_TYPEDESC_INT32]))
         elif t.kind == TypeKind.BOOL:
             self.ir_program.type_descriptors.append((label, [_TYPEDESC_BOOL]))
         elif t.kind == TypeKind.STR:
@@ -345,7 +345,7 @@ class StringsMixin:
         right_ir, right_ptr, right_len = self._ir_str_value(expr.right)
 
         lengths_equal = self.ir_program.ids.new_temp(Type.BOOL)
-        cmp_result = self.ir_program.ids.new_temp(Type.INT)
+        cmp_result = self.ir_program.ids.new_temp(Type.INT32)  # C int
         t_result = self.ir_program.ids.new_temp(Type.BOOL)
 
         lengths_equal_label = self.ir_program.ids.new_label("str_cmp_lengths_equal")
@@ -359,7 +359,7 @@ class StringsMixin:
             IRBranch(cond=lengths_equal, true_label=lengths_equal_label, false_label=lengths_differ_label),
             IRLabel(lengths_equal_label),
             IRCall(dst=cmp_result, name='memcmp', args=[left_ptr, right_ptr, left_len]),
-            IRBinOp(dst=t_result, op=expr.op, left=cmp_result, right=IRConst(0, Type.INT)),
+            IRBinOp(dst=t_result, op=expr.op, left=cmp_result, right=IRConst(0, Type.INT32)),
             IRJump(end_label),
             IRLabel(lengths_differ_label),
             IRMove(dst=t_result, src=IRConst(mismatch_result, Type.BOOL)),

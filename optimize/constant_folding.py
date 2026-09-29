@@ -14,12 +14,12 @@ def _wrap(value: int, t: Type) -> int:
         return value - 0x100 if value >= 0x80 else value
     if t == Type.UINT8:
         return value & 0xFF
-    if t == Type.INT64:
-        value &= 0xFFFFFFFFFFFFFFFF
-        return value - 0x10000000000000000 if value >= 0x8000000000000000 else value
+    if t == Type.INT32:
+        value &= 0xFFFFFFFF
+        return value - 0x100000000 if value >= 0x80000000 else value
     # INT
-    value &= 0xFFFFFFFF
-    return value - 0x100000000 if value >= 0x80000000 else value
+    value &= 0xFFFFFFFFFFFFFFFF
+    return value - 0x10000000000000000 if value >= 0x8000000000000000 else value
 
 
 def _truncated_div(a: int, b: int) -> int:
@@ -46,10 +46,10 @@ def fold_binary_op(op: BinaryOp, left: int, right: int, result_type: Type) -> "i
     if op == BinaryOp.MODULO:
         return _wrap(_truncated_mod(left, right), result_type) if right != 0 else None
     if op == BinaryOp.SHIFT_LEFT:
-        mask = 63 if result_type == Type.INT64 else 31
+        mask = 63 if result_type == Type.INT else 31
         return _wrap(left << (right & mask), result_type)
     if op == BinaryOp.SHIFT_RIGHT:
-        mask = 63 if result_type == Type.INT64 else 31
+        mask = 63 if result_type == Type.INT else 31
         return _wrap(left >> (right & mask), result_type)
     if op == BinaryOp.LESS_THAN:
         return int(left < right)
@@ -87,10 +87,8 @@ def fold_cast(target_type: Type, src: int, source_type: Type) -> int:
         return _wrap(src, Type.INT8)
     if target_type == Type.UINT8:
         return _wrap(src, Type.UINT8)
-    if target_type == Type.INT64:
-        if source_type == Type.INT64:
-            return src
-        return _wrap(_wrap(src, Type.INT), Type.INT64)
+    if target_type == Type.INT32:
+        return _wrap(src, Type.INT32)
     return _wrap(src, Type.INT)
 
 

@@ -46,7 +46,7 @@ static char *stringify_to_cstr(void *value_addr, const uint64_t *type_desc, int 
 }
 
 static void test_int(void) {
-    int32_t v;
+    int64_t v;
     uint64_t desc[] = {HORNET_TYPEDESC_INT};
 
     v = 42;
@@ -64,9 +64,9 @@ static void test_int(void) {
     CHECK_STR(s, "0");
     free(s);
 
-    v = INT32_MIN;
+    v = INT64_MIN;
     s = stringify_to_cstr(&v, desc, 0);
-    CHECK_STR(s, "-2147483648");
+    CHECK_STR(s, "-9223372036854775808");
     free(s);
 }
 
@@ -95,18 +95,18 @@ static void test_int8_uint8(void) {
     free(s);
 }
 
-static void test_int64(void) {
-    int64_t v;
-    uint64_t desc[] = {HORNET_TYPEDESC_INT64};
+static void test_int32(void) {
+    int32_t v;
+    uint64_t desc[] = {HORNET_TYPEDESC_INT32};
 
-    v = INT64_MAX;
+    v = INT32_MAX;
     char *s = stringify_to_cstr(&v, desc, 0);
-    CHECK_STR(s, "9223372036854775807");
+    CHECK_STR(s, "2147483647");
     free(s);
 
-    v = INT64_MIN;
+    v = INT32_MIN;
     s = stringify_to_cstr(&v, desc, 0);
-    CHECK_STR(s, "-9223372036854775808");
+    CHECK_STR(s, "-2147483648");
     free(s);
 }
 
@@ -126,18 +126,12 @@ static void test_bool(void) {
 }
 
 static void test_str(void) {
-    // A str value is a 16-byte {ptr, len} descriptor now (see ir/
-    // strings.py's own module docstring): ptr (8 bytes), len (an
-    // ordinary int32_t, in its own 8-byte slot -- same layout a
-    // SLICE's own len/cap fields already use just above, minus cap).
-    // No null terminator anywhere in this scheme -- len alone decides
-    // how many bytes get read, exactly like it already does for a
-    // slice's own backing storage.
+    // str: 16-byte {ptr, int64 len}; no NUL terminator.
     uint64_t desc[] = {HORNET_TYPEDESC_STR};
 
     struct {
         const char *ptr;
-        int32_t len;
+        int64_t len;
     } str_value = {"hello", 5};
 
     char *s = stringify_to_cstr(&str_value, desc, 0);
@@ -150,7 +144,7 @@ static void test_str(void) {
 
     struct {
         const char *ptr;
-        int32_t len;
+        int64_t len;
     } empty_value = {"", 0};
     s = stringify_to_cstr(&empty_value, desc, 0);
     CHECK_STR(s, "");
@@ -161,7 +155,7 @@ static void test_str(void) {
     // must print all 11 bytes, not stop at the 5th.
     struct {
         const char *ptr;
-        int32_t len;
+        int64_t len;
     } embedded_null_value = {"hello\0world", 11};
     s = stringify_to_cstr(&embedded_null_value, desc, 0);
     if (memcmp(s, "hello\0world", 11) != 0 || strlen(s) != 5) {
@@ -174,14 +168,14 @@ static void test_str(void) {
 static void test_array(void) {
     // [3]int -- descriptor: [tag, name, elem_desc, count, elem_width]
     uint64_t elem_desc[] = {HORNET_TYPEDESC_INT};
-    uint64_t arr_desc[] = {HORNET_TYPEDESC_ARRAY, (uint64_t)"[3]int", (uint64_t)elem_desc, 3, 4};
-    int32_t values[3] = {1, 2, 3};
+    uint64_t arr_desc[] = {HORNET_TYPEDESC_ARRAY, (uint64_t)"[3]int", (uint64_t)elem_desc, 3, 8};
+    int64_t values[3] = {1, 2, 3};
     char *s = stringify_to_cstr(values, arr_desc, 0);
     CHECK_STR(s, "[3]int[1, 2, 3]");
     free(s);
 
     // Zero-length array
-    uint64_t empty_arr_desc[] = {HORNET_TYPEDESC_ARRAY, (uint64_t)"[0]int", (uint64_t)elem_desc, 0, 4};
+    uint64_t empty_arr_desc[] = {HORNET_TYPEDESC_ARRAY, (uint64_t)"[0]int", (uint64_t)elem_desc, 0, 8};
     s = stringify_to_cstr(values, empty_arr_desc, 0);
     CHECK_STR(s, "[0]int[]");
     free(s);
@@ -189,16 +183,15 @@ static void test_array(void) {
 
 static void test_slice(void) {
     // []int -- descriptor: [tag, name, elem_desc, elem_width]. Value
-    // is a runtime {ptr, len, cap} triple: ptr (8 bytes), len (4
-    // bytes), cap (4 bytes).
+    // is {ptr, int64 len, int64 cap}.
     uint64_t elem_desc[] = {HORNET_TYPEDESC_INT};
-    uint64_t slice_desc[] = {HORNET_TYPEDESC_SLICE, (uint64_t)"[]int", (uint64_t)elem_desc, 4};
+    uint64_t slice_desc[] = {HORNET_TYPEDESC_SLICE, (uint64_t)"[]int", (uint64_t)elem_desc, 8};
 
-    int32_t backing[2] = {10, 20};
+    int64_t backing[2] = {10, 20};
     struct {
         void *ptr;
-        int32_t len;
-        int32_t cap;
+        int64_t len;
+        int64_t cap;
     } slice_value = {backing, 2, 2};
     char *s = stringify_to_cstr(&slice_value, slice_desc, 0);
     CHECK_STR(s, "[]int[10, 20]");
@@ -207,8 +200,8 @@ static void test_slice(void) {
     // nil/empty slice
     struct {
         void *ptr;
-        int32_t len;
-        int32_t cap;
+        int64_t len;
+        int64_t cap;
     } nil_slice = {NULL, 0, 0};
     s = stringify_to_cstr(&nil_slice, slice_desc, 0);
     CHECK_STR(s, "[]int[]");
@@ -222,11 +215,11 @@ static void test_struct(void) {
     uint64_t point_desc[] = {
         HORNET_TYPEDESC_STRUCT, (uint64_t)"Point", 2,
         (uint64_t)"x", (uint64_t)int_desc, 0,
-        (uint64_t)"y", (uint64_t)int_desc, 4,
+        (uint64_t)"y", (uint64_t)int_desc, 8,
     };
     struct {
-        int32_t x;
-        int32_t y;
+        int64_t x;
+        int64_t y;
     } point = {1, 2};
     char *s = stringify_to_cstr(&point, point_desc, 0);
     CHECK_STR(s, "Point(x: 1, y: 2)");
@@ -238,11 +231,11 @@ static void test_nested_array_of_structs(void) {
     uint64_t point_desc[] = {
         HORNET_TYPEDESC_STRUCT, (uint64_t)"Point", 2,
         (uint64_t)"x", (uint64_t)int_desc, 0,
-        (uint64_t)"y", (uint64_t)int_desc, 4,
+        (uint64_t)"y", (uint64_t)int_desc, 8,
     };
-    uint64_t arr_desc[] = {HORNET_TYPEDESC_ARRAY, (uint64_t)"[2]Point", (uint64_t)point_desc, 2, 8};
+    uint64_t arr_desc[] = {HORNET_TYPEDESC_ARRAY, (uint64_t)"[2]Point", (uint64_t)point_desc, 2, 16};
     struct {
-        int32_t x, y;
+        int64_t x, y;
     } points[2] = {{1, 2}, {3, 4}};
     char *s = stringify_to_cstr(points, arr_desc, 0);
     CHECK_STR(s, "[2]Point[Point(x: 1, y: 2), Point(x: 3, y: 4)]");
@@ -251,16 +244,16 @@ static void test_nested_array_of_structs(void) {
 
 static void test_struct_with_slice_field(void) {
     uint64_t int_desc[] = {HORNET_TYPEDESC_INT};
-    uint64_t slice_desc[] = {HORNET_TYPEDESC_SLICE, (uint64_t)"[]int", (uint64_t)int_desc, 4};
+    uint64_t slice_desc[] = {HORNET_TYPEDESC_SLICE, (uint64_t)"[]int", (uint64_t)int_desc, 8};
     uint64_t box_desc[] = {
         HORNET_TYPEDESC_STRUCT, (uint64_t)"Box", 1,
         (uint64_t)"values", (uint64_t)slice_desc, 0,
     };
-    int32_t backing[3] = {7, 8, 9};
+    int64_t backing[3] = {7, 8, 9};
     struct {
         void *ptr;
-        int32_t len;
-        int32_t cap;
+        int64_t len;
+        int64_t cap;
     } slice_value = {backing, 3, 3};
     struct {
         __typeof__(slice_value) values;
@@ -275,14 +268,14 @@ static void test_nested_struct_field(void) {
     uint64_t point_desc[] = {
         HORNET_TYPEDESC_STRUCT, (uint64_t)"Point", 2,
         (uint64_t)"x", (uint64_t)int_desc, 0,
-        (uint64_t)"y", (uint64_t)int_desc, 4,
+        (uint64_t)"y", (uint64_t)int_desc, 8,
     };
     uint64_t wrapper_desc[] = {
         HORNET_TYPEDESC_STRUCT, (uint64_t)"Wrapper", 1,
         (uint64_t)"p", (uint64_t)point_desc, 0,
     };
     struct {
-        int32_t x, y;
+        int64_t x, y;
     } wrapper = {5, 6};
     char *s = stringify_to_cstr(&wrapper, wrapper_desc, 0);
     CHECK_STR(s, "Wrapper(p: Point(x: 5, y: 6))");
@@ -297,8 +290,8 @@ static void test_buffer_growth_stress(void) {
     // bug in the realloc/memcpy path.
     enum { N = 5000 };
     uint64_t elem_desc[] = {HORNET_TYPEDESC_INT};
-    uint64_t arr_desc[] = {HORNET_TYPEDESC_ARRAY, (uint64_t)"[5000]int", (uint64_t)elem_desc, N, 4};
-    static int32_t values[N];
+    uint64_t arr_desc[] = {HORNET_TYPEDESC_ARRAY, (uint64_t)"[5000]int", (uint64_t)elem_desc, N, 8};
+    static int64_t values[N];
     for (int i = 0; i < N; i++) {
         values[i] = i;
     }
@@ -328,7 +321,7 @@ static void test_hornet_print_end_to_end(void) {
     dup2(pipefd[1], 1);
     close(pipefd[1]);
 
-    int32_t v = 123;
+    int64_t v = 123;
     uint64_t desc[] = {HORNET_TYPEDESC_INT};
     hornet_print(&v, (const unsigned char *)desc);
 
@@ -367,7 +360,7 @@ static void test_self_referential_struct(void) {
     children_slice_desc[0] = HORNET_TYPEDESC_SLICE;
     children_slice_desc[1] = (uint64_t)"[]Node";
     children_slice_desc[2] = (uint64_t)node_desc;
-    children_slice_desc[3] = 20;  // a Node value's own byte width (4-byte int value + 16-byte slice descriptor)
+    children_slice_desc[3] = 32;  // Node width: 8-byte int + 24-byte slice
 
     node_desc[0] = HORNET_TYPEDESC_STRUCT;
     node_desc[1] = (uint64_t)"Node";
@@ -383,7 +376,7 @@ static void test_self_referential_struct(void) {
     memcpy(node_desc_full, node_desc, sizeof(node_desc));
     node_desc_full[6] = (uint64_t)"children";
     node_desc_full[7] = (uint64_t)children_slice_desc;
-    node_desc_full[8] = 4;  // "children" field's own byte offset (after the int value)
+    node_desc_full[8] = 8;  // "children" offset, after the int
     children_slice_desc[2] = (uint64_t)node_desc_full;  // complete the cycle
 
     // __attribute__((packed)): Hornet's own struct layout is tightly
@@ -395,10 +388,10 @@ static void test_self_referential_struct(void) {
     // a bug in runtime.c -- a bug in this test not reproducing
     // Hornet's own layout faithfully).
     struct __attribute__((packed)) node_value {
-        int32_t value;
+        int64_t value;
         void *children_ptr;
-        int32_t children_len;
-        int32_t children_cap;
+        int64_t children_len;
+        int64_t children_cap;
     };
 
     // A small, finite tree: root(1, [leaf(2, []), leaf(3, [])])
@@ -418,7 +411,7 @@ static void test_self_referential_struct(void) {
 int main(void) {
     test_int();
     test_int8_uint8();
-    test_int64();
+    test_int32();
     test_bool();
     test_str();
     test_array();

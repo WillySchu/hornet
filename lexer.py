@@ -60,6 +60,7 @@ class TokenType(Enum):
     INT8 = auto()
     UINT8 = auto()
     INT64 = auto()
+    INT32 = auto()
     STR = auto()
     RETURN = auto()
     AND = auto()
@@ -138,6 +139,7 @@ class Lexer:
             'int8': TokenType.INT8,
             'uint8': TokenType.UINT8,
             'int64': TokenType.INT64,
+            'int32': TokenType.INT32,
             # alias for uint8, not a distinct token
             'byte': TokenType.UINT8,
             'str': TokenType.STR,

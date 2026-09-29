@@ -117,7 +117,11 @@ def test_fold_binary_op_shift_count_masked_to_32_bits():
     """x86's own sal/sar mask the shift count to 5 bits for anything
     but int64 -- a shift by 35 on a 32-bit value is a shift by 35 & 31
     == 3, not 35 itself."""
-    assert fold_binary_op(BinaryOp.SHIFT_LEFT, 1, 3, Type.INT) == fold_binary_op(BinaryOp.SHIFT_LEFT, 1, 35, Type.INT)
+    assert fold_binary_op(BinaryOp.SHIFT_LEFT, 1, 3, Type.INT32) == fold_binary_op(BinaryOp.SHIFT_LEFT, 1, 35, Type.INT32)
+
+
+def test_fold_binary_op_int_shift_count_masked_to_64_bits():
+    assert fold_binary_op(BinaryOp.SHIFT_LEFT, 1, 3, Type.INT) == fold_binary_op(BinaryOp.SHIFT_LEFT, 1, 67, Type.INT)
 
 
 def test_fold_binary_op_shift_count_masked_to_64_bits_for_int64():
@@ -151,8 +155,12 @@ def test_fold_binary_op_int64_does_not_spuriously_truncate_to_32_bits():
     assert big + 1 == fold_binary_op(BinaryOp.ADD, big, 1, Type.INT64)
 
 
-def test_fold_binary_op_int_wraps_at_32_bits():
-    assert -(2 ** 31) == fold_binary_op(BinaryOp.ADD, 2 ** 31 - 1, 1, Type.INT)
+def test_fold_binary_op_int32_wraps_at_32_bits():
+    assert -(2 ** 31) == fold_binary_op(BinaryOp.ADD, 2 ** 31 - 1, 1, Type.INT32)
+
+
+def test_fold_binary_op_int_wraps_at_64_bits():
+    assert -(2 ** 63) == fold_binary_op(BinaryOp.ADD, 2 ** 63 - 1, 1, Type.INT)
 
 
 # -- fold_unary_op -------------------------------------------------------------
@@ -203,11 +211,9 @@ def test_fold_cast_narrow_to_int64_widens():
     assert -5 == fold_cast(Type.INT64, -5, Type.INT)
 
 
-def test_fold_cast_int64_to_int_truncates_to_32_bits_first():
-    """Narrowing an int64 source down to int needs the identical
-    32-bit truncation int64_to_int8/uint8 also goes through."""
-    big = 5_000_000_000  # doesn't fit in a 32-bit int at all
-    assert fold_cast(Type.INT, big, Type.INT64) == fold_cast(Type.INT, big % (2 ** 32), Type.INT64)
+def test_fold_cast_int_to_int32_truncates():
+    big = 5_000_000_000
+    assert fold_cast(Type.INT32, big, Type.INT) == big % (2 ** 32)
 
 
 def test_fold_cast_int64_to_int64_is_a_true_no_op():

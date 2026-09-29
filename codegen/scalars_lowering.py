@@ -122,11 +122,11 @@ class ScalarsLoweringMixin:
     def gen_unary_op(self, op: UnaryOp, dst: Operand, operand_type: Type = Type.INT) -> list[Instruction]:
         """Emit unary `op` in place on dst."""
         if op == UnaryOp.NEGATE:
-            if operand_type == Type.INT64:
+            if operand_type == Type.INT:
                 return [NegQ(as_qword_register(dst))]
             return [Neg(dst)]
         if op == UnaryOp.COMPLEMENT:
-            if operand_type == Type.INT64:
+            if operand_type == Type.INT:
                 return [NotQ(as_qword_register(dst))]
             return [Not(dst)]
         if op == UnaryOp.NOT:
@@ -145,10 +145,12 @@ class ScalarsLoweringMixin:
             return [MovSX(src=as_byte_register(dst), dst=dst)]
         if target_type == Type.UINT8:
             return [MovZX(src=as_byte_register(dst), dst=dst)]
-        if target_type == Type.INT64:
-            if source_type == Type.INT64:
+        if target_type == Type.INT:
+            if source_type == Type.INT:
                 return []
             return [MovSXD(src=dst, dst=as_qword_register(dst))]
+        if target_type == Type.INT32:
+            return [Mov(src=dst, dst=dst)]  # truncate: clear the upper half
         return []
 
     def _gen_read_scalar_into(self, mem: Memory, t: Type, dst: Register) -> list[Instruction]:

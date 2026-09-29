@@ -1,4 +1,4 @@
-Hornet Lang
+ntHornet Lang
 -----------
 
 ```
@@ -17,6 +17,8 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
+- Per function dict scratch slot is allocated but never used?
+- Update TextMate and Vim grammers.
 - Module errors have a line but no column.
 - Lexer line number shifts with string literal containing a raw newline.
 - Reject not supported yet errors in semantic analysis rather than IR building.
@@ -69,8 +71,6 @@ Updates:
 - Variadic FFI calls?
 - Make `append` variadic.
 - Spread operator.
-- int32
-- Change int to an alias.
 - float
 - Multithreading
 - `gen_array_copy` currently copies each leaf one by one, so for small leaf types (int8, etc.) this is calling many `movb` rather than a few `movq`.

@@ -8033,7 +8033,7 @@ class TestScalarAndStrVariants:
         """int8/uint8/int64/bool alongside int/str -- not just the two
         kinds the rest of this class focuses on."""
         assert_program_exit_code(
-            "type Anything is int | int8 | uint8 | int64 | bool | str\n"
+            "type Anything is int | int8 | uint8 | int32 | bool | str\n"
             "\n"
             "def int main():\n"
             "    return 0\n",
@@ -13333,36 +13333,24 @@ class TestInt64TypeSystem:
         case needs no range check regardless."""
         self._check("def int64 main():\n    int64 x = 9000000000\n    return 0\n")
 
-    def test_int64_from_int_variable_still_requires_a_cast(self):
-        """The direct proof of this step's own central design
-        decision: literal convenience does NOT extend to an arbitrary
-        int-typed expression, even though widening a variable would be
-        perfectly safe -- matching int8/uint8's own identical
-        restriction rather than carving out a special exception for
-        the safe direction."""
-        self._check(
+    def test_int64_is_int(self):
+        """`int64` is another spelling of `int`: no cast needed."""
+        assert_program_stdout(
             "def int main():\n"
             "    int y = 5\n"
             "    int64 x = y\n"
+            "    int64 c = x + y\n"
+            "    print(c)\n"
             "    return 0\n",
-            expect_error="Cannot initialize",
+            "10\n",
         )
 
-    def test_int64_arithmetic_stays_int64(self):
+    def test_int32_and_int_mixing_is_rejected(self):
         self._check(
             "def int main():\n"
-            "    int64 a = 5\n"
-            "    int64 b = 3\n"
-            "    int64 c = a + b\n"
-            "    return 0\n"
-        )
-
-    def test_int64_and_int_mixing_is_rejected(self):
-        self._check(
-            "def int main():\n"
-            "    int64 a = 5\n"
+            "    int32 a = 5\n"
             "    int b = 3\n"
-            "    int64 c = a + b\n"
+            "    int c = a + b\n"
             "    return 0\n",
             expect_error="requires two operands of the same integer type",
         )
@@ -14083,7 +14071,7 @@ class TestInt64Print:
             "    [3]int64 arr = [-5000000000, 0, 5000000000]\n"
             "    print(arr)\n"
             "    return 0\n",
-            "[3]int64[-5000000000, 0, 5000000000]\n",
+            "[3]int[-5000000000, 0, 5000000000]\n",
         )
 
     def test_print_struct_with_int64_field(self):
@@ -14111,7 +14099,7 @@ class TestInt64Print:
             "    []int64 s = []int64[1, -2, 5000000000]\n"
             "    print(s)\n"
             "    return 0\n",
-            "[]int64[1, -2, 5000000000]\n",
+            "[]int[1, -2, 5000000000]\n",
         )
 
     def test_print_array_of_structs_with_int64_field(self):
@@ -14503,7 +14491,7 @@ class TestHeapAllocatedArrays:
         must NOT be heap-allocated -- checked by inspecting the
         generated assembly for the complete absence of a malloc call,
         not just by trusting a plausible-looking exit code."""
-        n = 4096  # 4096 * 4 = 16384, exactly the threshold
+        n = 2048  # 2048 * 8 = 16384, exactly the threshold
         source = (
             f"def int main():\n"
             f"    [{n}]int arr\n"
@@ -14520,7 +14508,7 @@ class TestHeapAllocatedArrays:
         threshold must be heap-allocated -- checked by confirming a
         malloc call is present, sized to the array's own exact
         footprint, not merely "big enough"."""
-        n = 4097  # 4097 * 4 = 16388, one int over the threshold
+        n = 2049  # 2049 * 8 = 16392, one int over the threshold
         source = (
             f"def int main():\n"
             f"    [{n}]int arr\n"
@@ -14531,7 +14519,7 @@ class TestHeapAllocatedArrays:
         analyze(ast)
         asm = generate_asm(ast, platform=ASM_PLATFORM)
         assert "malloc" in asm
-        assert "$16388" in asm
+        assert "$16392" in asm
 
     def test_heap_allocated_local_basic_read_write(self):
         assert_exit_code(
@@ -14846,7 +14834,7 @@ class TestArrayEscapeAnalysis:
         analyze(ast)
         asm = generate_asm(ast, platform=ASM_PLATFORM)
         assert "malloc" in asm
-        assert "$20" in asm  # 5 ints * 4 bytes
+        assert "$40" in asm  # 5 ints * 8 bytes
 
     def test_local_array_sliced_but_not_returned_stays_on_the_stack(self):
         """THE test proving this is genuinely more precise than
@@ -17956,13 +17944,13 @@ class TestSemanticErrors:
     def test_negate_requires_int_not_bool(self):
         assert_semantic_error(
             "    return -true",
-            match="requires an int, int8, uint8, or int64 operand",
+            match="requires an int, int8, uint8, or int32 operand",
         )
 
     def test_complement_requires_int_not_bool(self):
         assert_semantic_error(
             "    return ~true",
-            match="requires an int, int8, uint8, or int64 operand",
+            match="requires an int, int8, uint8, or int32 operand",
         )
 
     def test_arithmetic_requires_int_operands(self):
@@ -19979,13 +19967,13 @@ class TestStructLiterals:
         macOS, not by this sandbox, which only has Linux available."""
         source = (
             "type Big struct:\n"
-            "    [2100]int a\n"
-            "    [2100]int b\n"
+            "    [1050]int a\n"
+            "    [1050]int b\n"
             "    int tag\n"
             "\n"
             "def int main():\n"
-            "    [2100]int fa\n"
-            "    [2100]int fb\n"
+            "    [1050]int fa\n"
+            "    [1050]int fb\n"
             "    Big big = Big(fa, fb, 99)\n"
             "    return big.tag\n"
         )

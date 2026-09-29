@@ -3,6 +3,7 @@ emitted as a FrameSlot placeholder and resolved after lowering.
 """
 
 from codegen.assembly_ast import (
+    CmpQ,
     CallInstr,
     Cmp,
     FrameSlot,
@@ -99,6 +100,13 @@ class InstructionSelector:
             return [MovQ(src=src, dst=dst)] if wide else [Mov(src=src, dst=dst)]
         return self.host._gen_write_scalar_from(src, temp.type, self._temp_mem(temp))
 
+    @staticmethod
+    def _cmp(src: IRValue, dst: IRValue):
+        """Compare %eax (dst) against %ecx (src), 64-bit if either operand is wide."""
+        if is_wide_type(src.type) or is_wide_type(dst.type):
+            return CmpQ(src=Register('rcx'), dst=Register('rax'))
+        return Cmp(src=Register('ecx'), dst=Register('eax'))
+
     def lower_ir(self, instructions: list) -> list[Instruction]:
         """Lower an IR fragment."""
         out: list[Instruction] = []
@@ -186,12 +194,12 @@ class InstructionSelector:
                 # Cmp is unsigned; signedness lives in the jump.
                 out.extend(self._gen_load_value(instr.length, Register('ecx')))
                 out.extend(self._gen_load_value(instr.index, Register('eax')))
-                out.append(Cmp(src=Register('ecx'), dst=Register('eax')))
+                out.append(self._cmp(instr.length, instr.index))
                 out.append(Jae(self.host._get_bounds_check_fail_label("array index out of bounds")))
             elif isinstance(instr, IRSliceBoundsCheck):
                 out.extend(self._gen_load_value(instr.bound, Register('ecx')))
                 out.extend(self._gen_load_value(instr.value, Register('eax')))
-                out.append(Cmp(src=Register('ecx'), dst=Register('eax')))
+                out.append(self._cmp(instr.bound, instr.value))
                 out.append(Ja(self.host._get_bounds_check_fail_label("slice bounds out of range")))
             elif isinstance(instr, IRSliceGrow):
                 # Fixed callee-saved %rbx/%r12/%r13 survive the malloc inside grow.
@@ -199,9 +207,7 @@ class InstructionSelector:
                 out.extend(self._gen_load_value(instr.length, Register('r12d')))
                 out.extend(self._gen_load_value(instr.cap, Register('r13d')))
                 out.extend(self.host._gen_slice_grow_into(
-                    Register('rbx'), Register('r12d'), Register('r13'), Register('r13d'),
-                    instr.element_width,
-                ))
+                    Register('rbx'), Register('r12'), Register('r13'), instr.element_width))
                 # Order the writes out of %ebx/%r13d so neither clobbers the other's source; swap via %r12 (length is dead).
                 dst_ptr_reg = self.host._register_assignment.get(instr.dst_ptr.id)
                 dst_cap_reg = self.host._register_assignment.get(instr.dst_cap.id)

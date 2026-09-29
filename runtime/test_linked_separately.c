@@ -17,7 +17,7 @@ extern void hornet_print(void *value_addr, const unsigned char *type_desc);
 #define TYPEDESC_INT 0
 
 int main(void) {
-    int32_t value = 42;
+    int64_t value = 42;
     unsigned char desc[8];
     uint64_t tag = TYPEDESC_INT;
     memcpy(desc, &tag, sizeof(tag));

@@ -71,6 +71,7 @@ _TYPE_NAMES = {
     # alias, not a distinct kind
     'byte': Type.UINT8,
     'int64': Type.INT64,
+    'int32': Type.INT32,
     'bool': Type.BOOL,
     'str': Type.STR,
 }
@@ -106,7 +107,7 @@ def type_from_name(
         if key_type not in _VALID_DICT_KEY_TYPES:
             raise SemanticError(
                 f"'{key_type}' can't be a dict's own key type -- only "
-                f"int, int8, uint8, int64, bool, and str are supported "
+                f"int, int8, uint8, int32, bool, and str are supported "
                 f"as dict keys right now",
                 node,
             )
@@ -212,13 +213,14 @@ _ORDERING_OPS = {BinaryOp.LESS_THAN, BinaryOp.GREATER_THAN,
 _EQUALITY_OPS = {BinaryOp.EQUAL, BinaryOp.NOT_EQUAL}
 _LOGICAL_OPS = {BinaryOp.AND, BinaryOp.OR}
 
-_INTEGER_TYPES = {Type.INT, Type.INT8, Type.UINT8, Type.INT64}
+_INTEGER_TYPES = {Type.INT, Type.INT8, Type.UINT8, Type.INT64, Type.INT32}
 _VALID_DICT_KEY_TYPES = _INTEGER_TYPES | {Type.BOOL, Type.STR}
 
 # Literal ranges for narrow integer types.
 _NARROW_INT_RANGES = {
     Type.INT8: (-128, 127),
     Type.UINT8: (0, 255),
+    Type.INT32: (-2**31, 2**31 - 1),
 }
 
 
@@ -1528,6 +1530,8 @@ class SemanticAnalyzer:
                 f"no floating-point type; only int and bool exist",
                 expr,
             )
+        if expr.value > 2**63 - 1:
+            raise SemanticError(f"Integer literal {int(expr.value)} is out of range for int (64-bit)", expr)
         return Type.INT
 
     def check_variable(self, expr: Variable) -> Type:
@@ -1569,12 +1573,16 @@ class SemanticAnalyzer:
         return expr if isinstance(expr, Variable) else None
 
     def check_unary(self, expr: Unary) -> Type:
+        if (expr.op == UnaryOp.NEGATE and isinstance(expr.operand, Constant)
+                and expr.operand.value == 2**63):
+            expr.operand.resolved_type = Type.INT  # -2**63 is int's minimum
+            return Type.INT
         operand_type = self._check_expr_allowing_struct_literal(expr.operand)
         if expr.op in (UnaryOp.NEGATE, UnaryOp.COMPLEMENT):
             if operand_type not in _INTEGER_TYPES:
                 raise SemanticError(
                     f"'{expr.op.symbol()}' requires an int, int8, "
-                    f"uint8, or int64 operand, got {operand_type}",
+                    f"uint8, or int32 operand, got {operand_type}",
                     expr,
                 )
             return operand_type
@@ -1631,7 +1639,7 @@ class SemanticAnalyzer:
         if target_type not in _INTEGER_TYPES or source_type not in _INTEGER_TYPES:
             raise SemanticError(
                 f"Cannot cast {source_type} to {target_type} -- casting "
-                f"is only supported between int, int8, uint8, and int64 "
+                f"is only supported between int, int8, uint8, and int32 "
                 f"right now",
                 expr,
             )
@@ -1661,7 +1669,7 @@ class SemanticAnalyzer:
                 return Type.STR
             raise SemanticError(
                 f"'+' requires two operands of the same integer type "
-                f"(int, int8, uint8, or int64) or two str operands, "
+                f"(int, int8, uint8, or int32) or two str operands, "
                 f"got {left_type} and {right_type}",
                 expr,
             )
@@ -1789,7 +1797,7 @@ class SemanticAnalyzer:
         if left_type not in _INTEGER_TYPES or left_type != right_type:
             raise SemanticError(
                 f"'{op.symbol()}' requires two operands of the same "
-                f"integer type (int, int8, uint8, or int64), got "
+                f"integer type (int, int8, uint8, or int32), got "
                 f"{left_type} and {right_type}",
                 node,
             )

@@ -1,4 +1,4 @@
-"""Dicts: 24-byte {buckets_ptr, count, capacity} descriptor over a calloc'd open-addressed table.
+"""Dicts: 32-byte {buckets_ptr, count, tombstones, capacity} descriptor over a calloc'd open-addressed table.
 Bucket = state byte (0 empty, 1 occupied, 2 tombstone) + key + value, unpadded. Capacity is a power of two.
 Hashing, probing, and growth live in runtime.c.
 """
@@ -144,10 +144,9 @@ class DictsMixin:
             IRStore(address=dst_address, value=buckets_addr, value_type=Type.INT64),
             IRBinOp(dst=count_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(8, Type.INT64)),
             IRStore(address=count_addr, value=count_value, value_type=Type.INT),
-            # tombstone count at offset 12
-            IRBinOp(dst=tombstones_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(12, Type.INT64)),
+            IRBinOp(dst=tombstones_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(16, Type.INT64)),
             IRStore(address=tombstones_addr, value=IRConst(0, Type.INT), value_type=Type.INT),
-            IRBinOp(dst=capacity_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(16, Type.INT64)),
+            IRBinOp(dst=capacity_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(24, Type.INT64)),
             IRStore(address=capacity_addr, value=IRConst(capacity, Type.INT64), value_type=Type.INT64),
         ])
         return ir
@@ -366,7 +365,7 @@ class DictsMixin:
         capacity_addr = self.ir_program.ids.new_temp(Type.INT64)
         setup_ir = dict_ir + [
             IRLoad(dst=buckets_ptr, address=descriptor_addr),
-            IRBinOp(dst=capacity_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(16, Type.INT64)),
+            IRBinOp(dst=capacity_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(24, Type.INT64)),
             IRLoad(dst=capacity, address=capacity_addr),
         ]
 

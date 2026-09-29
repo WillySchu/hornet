@@ -79,6 +79,13 @@ static void hornet_stringify(
     void *value_addr, const unsigned char *type_desc, int quote_strings, struct hornet_buf *buf) {
     switch ((int)read_desc_word(type_desc, 0)) {
         case HORNET_TYPEDESC_INT: {
+            int64_t value = read_i64(value_addr);
+            char digits[32];
+            int n = snprintf(digits, sizeof(digits), "%lld", (long long)value);
+            hornet_buf_append_bytes(buf, digits, n);
+            break;
+        }
+        case HORNET_TYPEDESC_INT32: {
             int32_t value = read_i32(value_addr);
             char digits[16];
             int n = snprintf(digits, sizeof(digits), "%d", value);
@@ -99,13 +106,6 @@ static void hornet_stringify(
             hornet_buf_append_bytes(buf, digits, n);
             break;
         }
-        case HORNET_TYPEDESC_INT64: {
-            int64_t value = read_i64(value_addr);
-            char digits[32];
-            int n = snprintf(digits, sizeof(digits), "%lld", (long long)value);
-            hornet_buf_append_bytes(buf, digits, n);
-            break;
-        }
         case HORNET_TYPEDESC_BOOL: {
             int32_t value = read_i32(value_addr);
             if (value != 0) {
@@ -118,7 +118,7 @@ static void hornet_stringify(
         case HORNET_TYPEDESC_STR: {
             // {ptr, len} descriptor.
             const char *s = (const char *)read_ptr(value_addr);
-            int64_t len = (int64_t)read_i32((char *)value_addr + 8);
+            int64_t len = read_i64((char *)value_addr + 8);
             if (quote_strings) {
                 hornet_buf_append_byte(buf, '\'');
                 hornet_buf_append_bytes(buf, s, len);
@@ -153,12 +153,12 @@ static void hornet_stringify(
             const unsigned char *elem_desc = (const unsigned char *)read_desc_word(type_desc, 2);
             int64_t elem_width = (int64_t)read_desc_word(type_desc, 3);
 
-            // {ptr: 8, len: 4, cap: 4}
+            // {ptr, len, cap}, 8 bytes each
             void *base_ptr = read_ptr(value_addr);
-            int32_t length = read_i32((char *)value_addr + 8);
+            int64_t length = read_i64((char *)value_addr + 8);
             hornet_buf_append_cstr(buf, name);
             hornet_buf_append_byte(buf, '[');
-            for (int32_t i = 0; i < length; i++) {
+            for (int64_t i = 0; i < length; i++) {
                 if (i != 0) {
                     hornet_buf_append_bytes(buf, ", ", 2);
                 }
@@ -178,7 +178,7 @@ static void hornet_stringify(
             int64_t bucket_stride = 1 + key_width + value_width;
 
             void *buckets = read_ptr(value_addr);
-            int64_t capacity = read_i64((char *)value_addr + 16);
+            int64_t capacity = read_i64((char *)value_addr + 24);
 
             hornet_buf_append_cstr(buf, name);
             hornet_buf_append_byte(buf, '{');
@@ -266,7 +266,7 @@ void hornet_panic(const char *msg) {
 }
 
 // malloc new_cap * element_width bytes and copy `len` elements.
-void *hornet_slice_grow(const void *old_ptr, int32_t len, int32_t new_cap, int32_t element_width) {
+void *hornet_slice_grow(const void *old_ptr, int64_t len, int64_t new_cap, int64_t element_width) {
     void *new_ptr = malloc((size_t)new_cap * (size_t)element_width);
     memcpy(new_ptr, old_ptr, (size_t)len * (size_t)element_width);
     return new_ptr;
@@ -284,7 +284,7 @@ int64_t hornet_hash_bytes(const void *ptr, int64_t len) {
 }
 
 // Insert into a presized scalar-keyed table (literals); returns 1 if new, 0 if overwritten.
-int hornet_dict_insert_scalar_key(
+int64_t hornet_dict_insert_scalar_key(
     void *buckets, int64_t capacity, int64_t bucket_stride,
     const void *key_ptr, int64_t key_width,
     const void *value_ptr, int64_t value_width
@@ -317,7 +317,7 @@ int hornet_dict_insert_scalar_key(
 }
 
 // Str-keyed insert; the bucket stores the key's {ptr, len}.
-int hornet_dict_insert_str_key(
+int64_t hornet_dict_insert_str_key(
     void *buckets, int64_t capacity, int64_t bucket_stride,
     const void *key_ptr, int64_t key_len,
     const void *value_ptr, int64_t value_width
@@ -333,7 +333,7 @@ int hornet_dict_insert_str_key(
             unsigned char *target_bucket = (unsigned char *)buckets + target * bucket_stride;
             target_bucket[0] = HORNET_DICT_BUCKET_OCCUPIED;
             *(void **)(target_bucket + 1) = (void *)key_ptr;
-            *(int32_t *)(target_bucket + 1 + sizeof(void *)) = (int32_t)key_len;
+            *(int64_t *)(target_bucket + 1 + sizeof(void *)) = key_len;
             memcpy(target_bucket + 1 + key_region_width, value_ptr, (size_t)value_width);
             return (tombstone_index >= 0) ? 2 : 1;
         }
@@ -345,7 +345,7 @@ int hornet_dict_insert_str_key(
             continue;
         }
         void *stored_ptr = *(void **)(bucket + 1);
-        int32_t stored_len = *(int32_t *)(bucket + 1 + sizeof(void *));
+        int64_t stored_len = read_i64(bucket + 1 + sizeof(void *));
         if (stored_len == key_len && memcmp(stored_ptr, key_ptr, (size_t)key_len) == 0) {
             memcpy(bucket + 1 + key_region_width, value_ptr, (size_t)value_width);
             return 0;
@@ -354,35 +354,34 @@ int hornet_dict_insert_str_key(
     }
 }
 
-// Descriptor fields: buckets @0, count @8, tombstones @12, capacity @16.
+// Descriptor fields (8 bytes each): buckets @0, count @8, tombstones @16, capacity @24.
 static void *dict_buckets(void *descriptor) { return read_ptr(descriptor); }
-static int64_t dict_capacity(void *descriptor) { return read_i64((char *)descriptor + 16); }
+static int64_t dict_capacity(void *descriptor) { return read_i64((char *)descriptor + 24); }
 
 static void dict_set_buckets(void *descriptor, void *buckets) {
     *(void **)descriptor = buckets;
 }
 static void dict_set_capacity(void *descriptor, int64_t capacity) {
-    *(int64_t *)((char *)descriptor + 16) = capacity;
+    *(int64_t *)((char *)descriptor + 24) = capacity;
 }
 static void dict_bump_count(void *descriptor) {
-    int32_t *count = (int32_t *)((char *)descriptor + 8);
+    int64_t *count = (int64_t *)((char *)descriptor + 8);
     *count += 1;
 }
 
-// tombstones occupies the padding between count and capacity.
-static int32_t dict_tombstones(void *descriptor) { return read_i32((char *)descriptor + 12); }
-static void dict_set_tombstones(void *descriptor, int32_t tombstones) {
-    *(int32_t *)((char *)descriptor + 12) = tombstones;
+static int64_t dict_tombstones(void *descriptor) { return read_i64((char *)descriptor + 16); }
+static void dict_set_tombstones(void *descriptor, int64_t tombstones) {
+    *(int64_t *)((char *)descriptor + 16) = tombstones;
 }
-static void dict_bump_tombstones(void *descriptor, int32_t delta) {
+static void dict_bump_tombstones(void *descriptor, int64_t delta) {
     dict_set_tombstones(descriptor, dict_tombstones(descriptor) + delta);
 }
 
 // Double capacity once (count + tombstones + 1) exceeds 75%; rehash live buckets only.
 static void dict_grow_scalar_key_if_needed(void *descriptor, int64_t key_width, int64_t value_width) {
     int64_t capacity = dict_capacity(descriptor);
-    int32_t count = read_i32((char *)descriptor + 8);
-    int32_t tombstones = dict_tombstones(descriptor);
+    int64_t count = read_i64((char *)descriptor + 8);
+    int64_t tombstones = dict_tombstones(descriptor);
     if ((count + tombstones + 1) * 4 <= capacity * 3) {
         return;
     }
@@ -408,8 +407,8 @@ static void dict_grow_scalar_key_if_needed(void *descriptor, int64_t key_width, 
 static void dict_grow_str_key_if_needed(void *descriptor, int64_t value_width) {
     const int64_t key_region_width = 16;  // type_byte_width(str)
     int64_t capacity = dict_capacity(descriptor);
-    int32_t count = read_i32((char *)descriptor + 8);
-    int32_t tombstones = dict_tombstones(descriptor);
+    int64_t count = read_i64((char *)descriptor + 8);
+    int64_t tombstones = dict_tombstones(descriptor);
     if ((count + tombstones + 1) * 4 <= capacity * 3) {
         return;
     }
@@ -424,7 +423,7 @@ static void dict_grow_str_key_if_needed(void *descriptor, int64_t value_width) {
             continue;
         }
         void *stored_ptr = *(void **)(bucket + 1);
-        int32_t stored_len = *(int32_t *)(bucket + 1 + sizeof(void *));
+        int64_t stored_len = read_i64(bucket + 1 + sizeof(void *));
         hornet_dict_insert_str_key(
             new_buckets, new_capacity, bucket_stride,
             stored_ptr, stored_len, bucket + 1 + key_region_width, value_width);
@@ -509,7 +508,7 @@ void *hornet_dict_lookup_str_key(void *descriptor, int64_t value_width, const vo
         }
         if (bucket[0] == HORNET_DICT_BUCKET_OCCUPIED) {
             void *stored_ptr = *(void **)(bucket + 1);
-            int32_t stored_len = *(int32_t *)(bucket + 1 + sizeof(void *));
+            int64_t stored_len = read_i64(bucket + 1 + sizeof(void *));
             if (stored_len == key_len && memcmp(stored_ptr, key_ptr, (size_t)key_len) == 0) {
                 return bucket + 1 + key_region_width;
             }
@@ -519,7 +518,7 @@ void *hornet_dict_lookup_str_key(void *descriptor, int64_t value_width, const vo
 }
 
 // `k in d`.
-int hornet_dict_contains_scalar_key(void *descriptor, int64_t key_width, int64_t value_width, const void *key_ptr) {
+int64_t hornet_dict_contains_scalar_key(void *descriptor, int64_t key_width, int64_t value_width, const void *key_ptr) {
     void *buckets = dict_buckets(descriptor);
     int64_t capacity = dict_capacity(descriptor);
     if (capacity == 0) {
@@ -540,7 +539,7 @@ int hornet_dict_contains_scalar_key(void *descriptor, int64_t key_width, int64_t
     }
 }
 
-int hornet_dict_contains_str_key(void *descriptor, int64_t value_width, const void *key_ptr, int64_t key_len) {
+int64_t hornet_dict_contains_str_key(void *descriptor, int64_t value_width, const void *key_ptr, int64_t key_len) {
     const int64_t key_region_width = 16;
     void *buckets = dict_buckets(descriptor);
     int64_t capacity = dict_capacity(descriptor);
@@ -557,7 +556,7 @@ int hornet_dict_contains_str_key(void *descriptor, int64_t value_width, const vo
         }
         if (bucket[0] == HORNET_DICT_BUCKET_OCCUPIED) {
             void *stored_ptr = *(void **)(bucket + 1);
-            int32_t stored_len = *(int32_t *)(bucket + 1 + sizeof(void *));
+            int64_t stored_len = read_i64(bucket + 1 + sizeof(void *));
             if (stored_len == key_len && memcmp(stored_ptr, key_ptr, (size_t)key_len) == 0) {
                 return 1;
             }
@@ -583,7 +582,7 @@ void hornet_dict_delete_scalar_key(void *descriptor, int64_t key_width, int64_t 
         }
         if (bucket[0] == HORNET_DICT_BUCKET_OCCUPIED && memcmp(bucket + 1, key_ptr, (size_t)key_width) == 0) {
             bucket[0] = HORNET_DICT_BUCKET_TOMBSTONE;
-            int32_t *count = (int32_t *)((char *)descriptor + 8);
+            int64_t *count = (int64_t *)((char *)descriptor + 8);
             *count -= 1;
             dict_bump_tombstones(descriptor, 1);
             return;
@@ -609,10 +608,10 @@ void hornet_dict_delete_str_key(void *descriptor, int64_t value_width, const voi
         }
         if (bucket[0] == HORNET_DICT_BUCKET_OCCUPIED) {
             void *stored_ptr = *(void **)(bucket + 1);
-            int32_t stored_len = *(int32_t *)(bucket + 1 + sizeof(void *));
+            int64_t stored_len = read_i64(bucket + 1 + sizeof(void *));
             if (stored_len == key_len && memcmp(stored_ptr, key_ptr, (size_t)key_len) == 0) {
                 bucket[0] = HORNET_DICT_BUCKET_TOMBSTONE;
-                int32_t *count = (int32_t *)((char *)descriptor + 8);
+                int64_t *count = (int64_t *)((char *)descriptor + 8);
                 *count -= 1;
                 dict_bump_tombstones(descriptor, 1);
                 return;

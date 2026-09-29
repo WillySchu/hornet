@@ -9,7 +9,7 @@ class TypeKind(Enum):
     INT = auto()
     INT8 = auto()
     UINT8 = auto()
-    INT64 = auto()
+    INT32 = auto()
     BOOL = auto()
     STR = auto()
     ARRAY = auto()
@@ -54,7 +54,8 @@ class Type:
 Type.INT = Type(TypeKind.INT)
 Type.INT8 = Type(TypeKind.INT8)
 Type.UINT8 = Type(TypeKind.UINT8)
-Type.INT64 = Type(TypeKind.INT64)
+Type.INT64 = Type.INT  # `int64` is another spelling of `int`
+Type.INT32 = Type(TypeKind.INT32)
 Type.BOOL = Type(TypeKind.BOOL)
 Type.STR = Type(TypeKind.STR)
 # VOID (no declared return) and NONE (`none`) have no source spelling.
@@ -84,7 +85,7 @@ def type_byte_width(t: Type, structs: dict[str, StructInfo], sum_types: dict) ->
     """Storage size of `t` in bytes."""
     if t == Type.INT8 or t == Type.UINT8:
         return 1
-    if t == Type.INT64:
+    if t == Type.INT:
         return 8
     if t.kind == TypeKind.ARRAY:
         return t.size * type_byte_width(t.element_type, structs, sum_types)
@@ -103,13 +104,13 @@ def type_byte_width(t: Type, structs: dict[str, StructInfo], sum_types: dict) ->
     if t.kind == TypeKind.POINTER:
         return 8  # pointer
     if t.kind == TypeKind.DICT:
-        return 24  # {buckets_ptr, count, capacity}
-    return 4  # INT, BOOL
+        return 32  # {buckets_ptr, count, tombstones, capacity}
+    return 4  # INT32, BOOL
 
 
 def is_wide_type(t: Type) -> bool:
-    """Whether `t` needs 8-byte moves (int64, pointer)."""
-    return t in (Type.INT64,) or t.kind == TypeKind.POINTER
+    """Whether `t` needs 8-byte moves (int, pointer)."""
+    return t == Type.INT or t.kind == TypeKind.POINTER
 
 
 def leaf_type(t: Type) -> Type:

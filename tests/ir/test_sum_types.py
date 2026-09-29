@@ -44,7 +44,7 @@ def _discriminant_writes(body):
     itself and (coincidentally, for these small test structs) a
     scalar field's own value have this exact shape, so callers filter
     by expected VALUE, not just presence, to tell them apart."""
-    return [instr for instr in body if isinstance(instr, IRStore) and isinstance(instr.value, IRConst) and instr.value.type == Type.INT]
+    return [instr for instr in body if isinstance(instr, IRStore) and isinstance(instr.value, IRConst) and instr.value.type == Type.INT32]
 
 
 # Circle first, Square second, throughout -- so Circle's own
@@ -307,7 +307,7 @@ def test_widening_argument_too_large_for_a_stack_slot_mallocs_instead():
     skips reservation (no "argument_temp" slot at all, unlike the
     small-Shape case above), and _ir_materialize_sum_type_value's own
     malloc branch sizes the allocation for THE SUM TYPE (tag + Big's
-    own [5000]int -- 4 + 20000 = 20004), not Circle's own tiny size."""
+    own [5000]int -- 4 + 40000 = 40004), not Circle's own tiny size."""
     ir_program = _build(
         "type Circle struct:\n"
         "    int radius\n"
@@ -330,7 +330,7 @@ def test_widening_argument_too_large_for_a_stack_slot_mallocs_instead():
         if hasattr(instr, 'name') and getattr(instr, 'name', None) == 'malloc'
     ]
     assert len(mallocs) == 1
-    assert mallocs[0].args[0].value == 20004
+    assert mallocs[0].args[0].value == 40004
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +367,7 @@ def test_is_check_compares_tag_against_the_right_discriminant():
     # IRBinOp that defines it, rather than assume position.
     compares = [instr for instr in fn.body if isinstance(instr, IRBinOp) and instr.dst == branches[0].cond]
     assert len(compares) == 1
-    assert compares[0].right == IRConst(1, Type.INT)
+    assert compares[0].right == IRConst(1, Type.INT32)
 
 
 def test_narrowed_field_access_offsets_by_the_tag_width():
@@ -419,11 +419,10 @@ def test_narrowed_field_access_at_a_nonzero_field_offset():
         "    return 0\n"
     )
     fn = _fn(ir_program, 'main')
-    # Two chained ADDs feeding the final load: +4 (tag width), then
-    # +4 again (height's own offset within Square, after width's own
-    # 4 bytes) -- not collapsed into one, and not just one alone.
+    # Chained ADDs: +4 (tag width), then +8 (height's offset after width).
     add_fours = [instr for instr in fn.body if isinstance(instr, IRBinOp) and instr.right == IRConst(4, Type.INT64)]
-    chained = [a for a in add_fours if any(a.left == b.dst for b in add_fours)]
+    add_eights = [instr for instr in fn.body if isinstance(instr, IRBinOp) and instr.right == IRConst(8, Type.INT64)]
+    chained = [a for a in add_eights if any(a.left == b.dst for b in add_fours)]
     assert len(chained) >= 1
 
 

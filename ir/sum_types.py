@@ -18,7 +18,7 @@ class SumTypesMixin:
         variants = self.ir_program.sum_type_registry[sum_type.sum_type_name].variants
         discriminant = variants.index(source_type)
 
-        tag_ir = [IRStore(address=dst_address, value=IRConst(discriminant, Type.INT), value_type=Type.INT)]
+        tag_ir = [IRStore(address=dst_address, value=IRConst(discriminant, Type.INT32), value_type=Type.INT32)]
 
         payload_addr = self.ir_program.ids.new_temp(Type.INT64)
         payload_addr_ir = [IRBinOp(
@@ -61,7 +61,7 @@ class SumTypesMixin:
                 f"reachable, sum-typed variable"
             )
         addr_ir, addr_value = result
-        tag_temp = self.ir_program.ids.new_temp(Type.INT)
+        tag_temp = self.ir_program.ids.new_temp(Type.INT32)
         load_ir = [IRLoad(dst=tag_temp, address=addr_value)]
 
         variants = self.ir_program.sum_type_registry[sum_type.sum_type_name].variants
@@ -69,5 +69,5 @@ class SumTypesMixin:
         discriminant = variants.index(narrowed_type)
 
         result_temp = self.ir_program.ids.new_temp(Type.BOOL)
-        compare_ir = [IRBinOp(dst=result_temp, op=BinaryOp.EQUAL, left=tag_temp, right=IRConst(discriminant, Type.INT))]
+        compare_ir = [IRBinOp(dst=result_temp, op=BinaryOp.EQUAL, left=tag_temp, right=IRConst(discriminant, Type.INT32))]
         return addr_ir + load_ir + compare_ir, result_temp

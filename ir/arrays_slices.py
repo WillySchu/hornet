@@ -346,6 +346,13 @@ class ArraysSlicesMixin:
         if value_type == Type.STR:
             zero_ir, ptr_value, len_value = self._ir_zero_str_value()
             return zero_ir + self._ir_write_str_descriptor_into_address(dst_address, ptr_value, len_value)
+        if value_type.kind == TypeKind.DICT:
+            ir = [IRStore(address=dst_address, value=IRConst(0, Type.INT64), value_type=Type.INT64)]
+            for offset in (8, 16, 24):
+                addr = self.ir_program.ids.new_temp(Type.INT64)
+                ir.append(IRBinOp(dst=addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(offset, Type.INT64)))
+                ir.append(IRStore(address=addr, value=IRConst(0, Type.INT64), value_type=Type.INT64))
+            return ir
         return [IRStore(address=dst_address, value=IRConst(0, value_type), value_type=value_type)]
 
     def _ir_zero_array_loop(self, dst_address, element_type: Type, count: int) -> list:
@@ -436,14 +443,14 @@ class ArraysSlicesMixin:
             right_read_ir, right_ptr, right_len = self._ir_read_str_descriptor_from_address(right_addr)
             lengths_equal = self.ir_program.ids.new_temp(Type.BOOL)
             lengths_equal_label = self.ir_program.ids.new_label("eq_str_lengths_equal")
-            cmp_result = self.ir_program.ids.new_temp(Type.INT)
+            cmp_result = self.ir_program.ids.new_temp(Type.INT32)  # C int
             mismatch_cond = self.ir_program.ids.new_temp(Type.BOOL)
             return left_read_ir + right_read_ir + [
                 IRBinOp(dst=lengths_equal, op=BinaryOp.EQUAL, left=left_len, right=right_len),
                 IRBranch(cond=lengths_equal, true_label=lengths_equal_label, false_label=mismatch_label),
                 IRLabel(lengths_equal_label),
                 IRCall(dst=cmp_result, name='memcmp', args=[left_ptr, right_ptr, left_len]),
-                IRBinOp(dst=mismatch_cond, op=BinaryOp.NOT_EQUAL, left=cmp_result, right=IRConst(0, Type.INT)),
+                IRBinOp(dst=mismatch_cond, op=BinaryOp.NOT_EQUAL, left=cmp_result, right=IRConst(0, Type.INT32)),
                 IRBranch(cond=mismatch_cond, true_label=mismatch_label, false_label=continue_label),
                 IRLabel(continue_label),
             ]

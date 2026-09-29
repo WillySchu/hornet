@@ -323,17 +323,17 @@ class StatementsMixin:
                 dst_ir, dst_address = self._ir_dict_address(self._var_ref(stmt))
                 ir.extend(dst_ir)
                 zero64 = IRConst(0, Type.INT64)
-                zero32 = IRConst(0, Type.INT)
+                zero_int = IRConst(0, Type.INT)
                 count_addr = self.ir_program.ids.new_temp(Type.INT64)
                 tombstones_addr = self.ir_program.ids.new_temp(Type.INT64)
                 capacity_addr = self.ir_program.ids.new_temp(Type.INT64)
                 ir.extend([
                     IRStore(address=dst_address, value=zero64, value_type=Type.INT64),
                     IRBinOp(dst=count_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(8, Type.INT64)),
-                    IRStore(address=count_addr, value=zero32, value_type=Type.INT),
-                    IRBinOp(dst=tombstones_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(12, Type.INT64)),
-                    IRStore(address=tombstones_addr, value=zero32, value_type=Type.INT),
-                    IRBinOp(dst=capacity_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(16, Type.INT64)),
+                    IRStore(address=count_addr, value=zero_int, value_type=Type.INT),
+                    IRBinOp(dst=tombstones_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(16, Type.INT64)),
+                    IRStore(address=tombstones_addr, value=zero_int, value_type=Type.INT),
+                    IRBinOp(dst=capacity_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(24, Type.INT64)),
                     IRStore(address=capacity_addr, value=zero64, value_type=Type.INT64),
                 ])
                 return ir

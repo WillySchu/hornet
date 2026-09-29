@@ -61,13 +61,13 @@ def test_is_heap_allocated_none():
 
 
 def test_is_heap_allocated_array_int_stack():
-    size = 4096  # int = 4, 4 * 4096 = 16384
+    size = 2048  # int = 8, 8 * 2048 = 16384
     t = semantic.Type(kind=semantic.TypeKind.ARRAY, element_type=semantic.Type(kind=semantic.TypeKind.INT), size=size)
     assert not ea.is_heap_allocated(t, {}, {})
 
 
 def test_is_heap_allocated_array_int_heap():
-    size = 4097  # int = 4, 4 * 4096 = 16388
+    size = 2049  # int = 8, 8 * 2049 = 16392
     t = semantic.Type(kind=semantic.TypeKind.ARRAY, element_type=semantic.Type(kind=semantic.TypeKind.INT), size=size)
     assert ea.is_heap_allocated(t, {}, {})
 

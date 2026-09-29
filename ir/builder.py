@@ -7,7 +7,7 @@ from ir.errors import IRError
 from ir.utils import COMPOSITE_KINDS, is_composite_addressable, type_of
 from typesys import type_byte_width
 from ir.ir import (
-    IRBranch, IRCall, IRConst, IRCopy, IRFunction, IRJump, IRLocalAddress, IRReadArgument, IRReturn, IRStore, Temp,
+    IRBranch, IRCall, IRCast, IRConst, IRCopy, IRFunction, IRJump, IRLocalAddress, IRReadArgument, IRReturn, IRStore, Temp,
 )
 from ir.arrays_slices import ArraysSlicesMixin
 from ir.dicts import DictsMixin
@@ -82,7 +82,7 @@ class IRFunctionBuilder(
         # Per-function scratch slots for print/dict arguments.
         self._unnamed_slice_temp_slot = self.ir_program.ids.new_slot(24, "unnamed_slice_temp", ir_fn)
 
-        self._unnamed_dict_temp_slot = self.ir_program.ids.new_slot(24, "unnamed_dict_temp", ir_fn)
+        self._unnamed_dict_temp_slot = self.ir_program.ids.new_slot(32, "unnamed_dict_temp", ir_fn)
 
         self._dict_key_scratch_slot = self.ir_program.ids.new_slot(8, "dict_key_scratch", ir_fn)
 
@@ -142,7 +142,13 @@ class IRFunctionBuilder(
             else:
                 self._bind_param(p, ir_fn)
                 incoming = self.ir_program.ids.new_temp(p_type)
-                ir.append(IRReadArgument(dst=incoming, index=reg_index))
+                if fn.name == 'main' and reg_index == 0 and p_type == Type.INT:
+                    # C passes argc as a 32-bit int; sign-extend it.
+                    argc = self.ir_program.ids.new_temp(Type.INT32)
+                    ir.append(IRReadArgument(dst=argc, index=reg_index))
+                    ir.append(IRCast(dst=incoming, src=argc))
+                else:
+                    ir.append(IRReadArgument(dst=incoming, index=reg_index))
                 ir.extend(self._ir_finish_scalar_var_decl(p.name, id(p), p_type, incoming))
                 reg_index += 1
                 captured.append(None)

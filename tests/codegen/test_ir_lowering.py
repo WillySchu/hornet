@@ -59,7 +59,7 @@ def test_slice_grow_dst_cap_before_dst_ptr_when_dst_ptr_lands_on_r13d():
     instr = IRSliceGrow(dst_ptr=dst_ptr, dst_cap=dst_cap, ptr=ptr, length=length, cap=cap, element_width=4)
     out = selector.lower_ir([instr])
 
-    cap_write = _write_index(out, 'r13d', 'r12d')  # dst_cap <- still-valid new_cap
+    cap_write = _write_index(out, 'r13', 'r12')  # dst_cap <- still-valid new_cap
     ptr_write = _write_index(out, 'rbx', 'r13')     # dst_ptr <- new ptr (widened, since INT64)
     assert cap_write != -1 and ptr_write != -1
     assert cap_write < ptr_write
@@ -82,7 +82,7 @@ def test_slice_grow_original_order_is_fine_when_dst_cap_lands_on_ebx():
     out = selector.lower_ir([instr])
 
     ptr_write = _write_index(out, 'rbx', 'r14')     # dst_ptr <- new ptr, reads %ebx (non-destructively)
-    cap_write = _write_index(out, 'r13d', 'ebx')    # dst_cap <- new_cap, written into %ebx afterward
+    cap_write = _write_index(out, 'r13', 'rbx')    # dst_cap <- new_cap, written into %ebx afterward
     assert ptr_write != -1 and cap_write != -1
     assert ptr_write < cap_write
 
@@ -104,7 +104,7 @@ def test_slice_grow_true_swap_uses_r12_as_a_temporary():
     out = selector.lower_ir([instr])
 
     stash = _write_index(out, 'rbx', 'r12')          # new ptr stashed out of %ebx first
-    cap_write = _write_index(out, 'r13d', 'ebx')     # dst_cap <- new_cap (still valid; %ebx not yet touched again)
+    cap_write = _write_index(out, 'r13', 'rbx')     # dst_cap <- new_cap (still valid; %ebx not yet touched again)
     ptr_write = _write_index(out, 'r12', 'r13')      # dst_ptr <- the stashed ptr (already widened), not %ebx (already overwritten)
     assert stash != -1 and cap_write != -1 and ptr_write != -1
     assert stash < cap_write < ptr_write
