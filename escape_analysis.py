@@ -18,6 +18,7 @@ from parser import (
     Field,
     FieldAssign,
     For,
+    ForIn,
     Function,
     If,
     Index,
@@ -32,7 +33,7 @@ from parser import (
     While,
 )
 from semantic import type_from_name, Type, TypeKind, StructInfo
-from ir.utils import type_byte_width, type_of
+from ir.utils import type_byte_width, type_of, for_in_binding_types
 
 
 # Fixed, hardcoded threshold for size-based stack safety. Any array-typed local
@@ -112,6 +113,19 @@ class EscapeAnalyzer:
 
         for p, p_type in zip(fn.params, param_types):
             self.declare(p.name, id(p), p_type)
+
+        self._next_for_in_binding_id = -(10 ** 9)  # a large, negative
+        # starting point for ForIn's own synthetic decl ids -- disjoint
+        # from both id() (always positive in CPython) and slot_node_
+        # id's own, much smaller negative range (-1, -2, ... one per
+        # aggregate slot actually seen), so this can never collide with
+        # either. Needed because there's no real AST node id() to key a
+        # ForIn binding by (see ForIn's own docstring in parser.py for
+        # why) -- unlike slot_node_id's own synthetic ids, which always
+        # represent a slice/pointer-shaped aggregate slot specifically,
+        # a ForIn binding can be ANY type, so it goes through declare
+        # normally (below) rather than slot_node_id's own unconditional
+        # "this is slice-shaped" bookkeeping.
 
         self._AGGREGATE_ELEMENTS_SLOT = '[]'  # the one shared slot for a WHOLE
         # aggregate declaration -- an array-/slice-of-slices (used by
@@ -196,6 +210,15 @@ class EscapeAnalyzer:
             self.direct_backing.setdefault(node_id, set())
             self.slice_deps.setdefault(node_id, set())
         return self.aggregate_slot_ids[key]
+
+    def _fresh_for_in_binding_id(self) -> int:
+        """A fresh, unique synthetic decl id for one ForIn binding --
+        see __init__'s own comment on self._next_for_in_binding_id for
+        why this needs its own, disjoint counter rather than reusing
+        slot_node_id's own."""
+        node_id = self._next_for_in_binding_id
+        self._next_for_in_binding_id -= 1
+        return node_id
 
     def indexed_slot_of(self, base_expr: Node) -> Optional[int]:
         """Recognizes `base_expr` as something that, indexed ONE more
@@ -581,6 +604,37 @@ class EscapeAnalyzer:
             elif isinstance(stmt, While):
                 self.scan_expr_for_escaping_calls(stmt.condition)
                 self.scopes.append({})
+                self.walk_statements(stmt.body)
+                self.scopes.pop()
+            elif isinstance(stmt, ForIn):
+                # ONE scope spans the binding(s) and body, matching
+                # analyze_for_in's own reasoning in semantic.py.
+                # binding(s) each get a FRESH synthetic decl id (see
+                # _fresh_for_in_binding_id's own docstring for why --
+                # no real VarDecl node exists to key by id(), unlike
+                # For's own init variable just below), then the
+                # identical "does this variable's own value derive
+                # from a slice/pointer-shaped source" tracking the
+                # VarDecl case above gives an ordinary declaration's
+                # own init expression -- here, every binding's own
+                # value derives from stmt.iterable as a whole (a safe
+                # over-approximation: treating an ELEMENT as if it
+                # derives from the WHOLE collection can only cause an
+                # unnecessary heap promotion, never a missed one, the
+                # one direction that's actually safe to get wrong).
+                self.scopes.append({})
+                iterable_type = type_of(stmt.iterable)
+                for name, binding_type in zip(stmt.binding_names, for_in_binding_types(stmt, iterable_type)):
+                    decl_id = self._fresh_for_in_binding_id()
+                    self.declare(name, decl_id, binding_type)
+                    target_node = self.whole_value_node_of(name)
+                    if target_node is not None:
+                        backing_id, derived_from_id = self.contribution(stmt.iterable)
+                        if backing_id is not None:
+                            self.direct_backing[target_node].add(backing_id)
+                        if derived_from_id is not None:
+                            self.slice_deps[target_node].add(derived_from_id)
+                self.scan_expr_for_escaping_calls(stmt.iterable)
                 self.walk_statements(stmt.body)
                 self.scopes.pop()
             elif isinstance(stmt, For):

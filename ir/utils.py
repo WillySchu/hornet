@@ -5,7 +5,7 @@ Deliberately free of anything machine-level (a register, an
 assembly_ast operand, an x86 condition code) -- see codegen/utils.py
 for that half."""
 
-from parser import Node, Field, Index, Unary, UnaryOp, Variable
+from parser import Node, Field, ForIn, Index, Unary, UnaryOp, Variable
 from semantic import Type, TypeKind, StructInfo
 
 from ir.errors import IRError
@@ -178,3 +178,25 @@ def type_of(expr: Node) -> Type:
             f"must run before codegen (see compile_to_asm)"
         )
     return expr.resolved_type
+
+
+def for_in_binding_types(stmt: ForIn, iterable_type: Type) -> list:
+    """The shared "what type does each of stmt's own binding_names
+    resolve to" logic analyze_for_in (semantic.py) already applies --
+    re-derived here from iterable_type directly (already resolved by
+    the time IR-building runs, via stmt.iterable's own resolved_type,
+    see type_of above) rather than re-running semantic analysis. A
+    plain, stateless function, not a method on any one mixin: both
+    ir/builder.py's own _collect_locals/loop-building code AND escape_
+    analysis.py's own walk_statements (a wholly separate class, never
+    mixed into IRFunctionBuilder) need the identical answer.
+
+    ARRAY/SLICE with one binding: the element type. With two: (int,
+    element type) -- index, then element. DICT with one binding: the
+    key type. With two: (key type, value type)."""
+    num_bindings = len(stmt.binding_names)
+    if iterable_type.kind == TypeKind.DICT:
+        return [iterable_type.key_type, iterable_type.element_type][:num_bindings]
+    if num_bindings == 2:
+        return [Type.INT, iterable_type.element_type]
+    return [iterable_type.element_type]

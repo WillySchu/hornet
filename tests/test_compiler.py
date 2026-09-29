@@ -696,7 +696,7 @@ from ir.errors import IRError
 from build import RUNTIME_C_PATH
 from desugar import desugar_methods
 from lexer import lex
-from parser import Break, Constant, Node, Parser, ParseError
+from parser import Break, Call, Constant, Continue, For, ForIn, Node, Parser, ParseError
 from semantic import SemanticError, analyze as _semantic_analyze
 
 
@@ -22953,3 +22953,556 @@ class TestASTPrettyPrinting:
         assert node.pretty() == (
             "_FakeFutureNode(label='widget', payload=_FakeFutureNode(label='inner', payload=None))"
         )
+
+
+# ---------------------------------------------------------------------------
+# for x in y / for x, y in z -- Stage 0: grammar and disambiguation only.
+# Parser-level only (ForIn is not yet wired into semantic.py or ir/, so an
+# end-to-end compiled-program test isn't possible yet) -- see ForIn's own
+# docstring in parser.py for the full design and its own deliberately-open
+# questions (mutation safety, per-iteration vs. shared binding, iterable
+# shape) that later stages settle, not this one.
+# ---------------------------------------------------------------------------
+
+class TestForInParsing:
+    def test_single_binding_parses_into_forin(self):
+        ast = _parse(
+            "def int main():\n"
+            "    for x in arr:\n"
+            "        print(x)\n"
+            "    return 0\n"
+        )
+        stmt = ast.functions[0].body[0]
+        assert isinstance(stmt, ForIn)
+        assert stmt.binding_names == ['x']
+
+    def test_two_binding_parses_into_forin(self):
+        ast = _parse(
+            "def int main():\n"
+            "    for i, x in arr:\n"
+            "        print(x)\n"
+            "    return 0\n"
+        )
+        stmt = ast.functions[0].body[0]
+        assert isinstance(stmt, ForIn)
+        assert stmt.binding_names == ['i', 'x']
+
+    def test_three_clause_for_still_parses_into_for(self):
+        """The pre-existing C-style form is untouched: parse_for's own
+        new dispatch falls through to it unchanged for anything that
+        isn't the iteration shape."""
+        ast = _parse(
+            "def int main():\n"
+            "    for int i = 0; i < 10; i += 1:\n"
+            "        print(i)\n"
+            "    return 0\n"
+        )
+        stmt = ast.functions[0].body[0]
+        assert isinstance(stmt, For)
+
+    def test_struct_typed_three_clause_init_still_disambiguates_correctly(self):
+        """The one case where the two forms' own first two tokens
+        could plausibly be confused: a struct-typed three-clause init
+        (`for Point p = ...`) is TWO consecutive IDENTIFIERs, the one
+        shape the iteration form's own first binding (a single
+        IDENTIFIER followed by ',' or 'in', never a second IDENTIFIER)
+        can never itself produce -- confirms that disambiguation
+        actually holds, not just for the scalar-type-keyword case."""
+        ast = _parse(
+            "def int main():\n"
+            "    for Point p = Point(1, 2); i < 10; i += 1:\n"
+            "        print(p.x)\n"
+            "    return 0\n"
+        )
+        stmt = ast.functions[0].body[0]
+        assert isinstance(stmt, For)
+
+    def test_forin_iterable_parses_as_an_ordinary_expression(self):
+        """The 'must be a bare addressable base' restriction is a
+        semantic-level concern (analyze_for_in, not yet built) -- the
+        parser itself accepts any expression here, exactly like
+        parse_for_init_clause/analyze_for already split syntax from
+        meaning for the three-clause form's own init clause."""
+        ast = _parse(
+            "def int main():\n"
+            "    for x in make_arr():\n"
+            "        print(x)\n"
+            "    return 0\n"
+        )
+        stmt = ast.functions[0].body[0]
+        assert isinstance(stmt, ForIn)
+        assert isinstance(stmt.iterable, Call)
+
+    def test_forin_body_supports_break_and_continue(self):
+        """parse_block is reused unchanged for this form's own body,
+        so break/continue need no new parser support at all -- this
+        confirms that rather than assuming it."""
+        ast = _parse(
+            "def int main():\n"
+            "    for x in arr:\n"
+            "        if x == 5:\n"
+            "            break\n"
+            "        continue\n"
+            "    return 0\n"
+        )
+        stmt = ast.functions[0].body[0]
+        assert isinstance(stmt, ForIn)
+        assert isinstance(stmt.body[0].then_body[0], Break)
+        assert isinstance(stmt.body[1], Continue)
+
+    def test_forin_missing_in_is_rejected(self):
+        """No 'in' at all falls through to the three-clause path's own
+        existing error (a bare identifier is not a valid VarDecl
+        either) -- not a crash, and not a silently-wrong parse."""
+        with pytest.raises(ParseError):
+            _parse(
+                "def int main():\n"
+                "    for x:\n"
+                "        print(x)\n"
+                "    return 0\n"
+            )
+
+
+# ---------------------------------------------------------------------------
+# for x in y / for x, y in z -- Stage 1: semantic analysis only. IR-building
+# doesn't exist yet (Stage 2/3), so every test here calls analyze() directly
+# and stops -- no compiled-program test is possible until then. See
+# analyze_for_in's own docstring in semantic.py for the full design.
+# ---------------------------------------------------------------------------
+
+class TestForInSemantics:
+    def test_array_single_binding_analyzes_correctly(self):
+        ast = _parse(
+            "def int main():\n"
+            "    [3]int arr = [1, 2, 3]\n"
+            "    for x in arr:\n"
+            "        print(x)\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_array_two_binding_analyzes_correctly(self):
+        ast = _parse(
+            "def int main():\n"
+            "    [3]int arr = [1, 2, 3]\n"
+            "    for i, x in arr:\n"
+            "        print(i)\n"
+            "        print(x)\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_slice_single_binding_analyzes_correctly(self):
+        ast = _parse(
+            "def int main():\n"
+            "    []int s = [1, 2, 3]\n"
+            "    for x in s:\n"
+            "        print(x)\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_dict_single_binding_analyzes_correctly(self):
+        """One binding over a dict binds the KEY type only."""
+        ast = _parse(
+            "def int main():\n"
+            "    dict[str]int d = dict[str]int{'a': 1}\n"
+            "    for k in d:\n"
+            "        print(k)\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_dict_two_binding_analyzes_correctly(self):
+        ast = _parse(
+            "def int main():\n"
+            "    dict[str]int d = dict[str]int{'a': 1}\n"
+            "    for k, v in d:\n"
+            "        print(k)\n"
+            "        print(v)\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_non_addressable_iterable_is_rejected(self):
+        """The deliberate, tracked seam ForIn's own docstring names --
+        a function call directly as the iterable isn't accepted yet."""
+        ast = _parse(
+            "def []int make():\n"
+            "    []int s = [1, 2, 3]\n"
+            "    return s\n"
+            "\n"
+            "def int main():\n"
+            "    for x in make():\n"
+            "        print(x)\n"
+            "    return 0\n"
+        )
+        with pytest.raises(
+            SemanticError,
+            match="'for ... in' requires a plain variable, field, or index expression",
+        ):
+            analyze(ast)
+
+    def test_non_collection_iterable_type_is_rejected(self):
+        ast = _parse(
+            "def int main():\n"
+            "    int y = 5\n"
+            "    for x in y:\n"
+            "        print(x)\n"
+            "    return 0\n"
+        )
+        with pytest.raises(
+            SemanticError,
+            match="'for ... in' requires an array, slice, or dict as its own iterable",
+        ):
+            analyze(ast)
+
+    def test_element_binding_type_is_actually_enforced(self):
+        """Confirms the bound variable's own type is genuinely used for
+        real type-checking inside the body, not accepted unconditionally
+        -- a str-typed binding assigned into an int-typed local fails
+        exactly like any other type mismatch would."""
+        ast = _parse(
+            "def int main():\n"
+            "    [3]str names = ['a', 'b', 'c']\n"
+            "    for x in names:\n"
+            "        int y = x\n"
+            "    return 0\n"
+        )
+        with pytest.raises(SemanticError, match="Cannot initialize 'y'"):
+            analyze(ast)
+
+    def test_index_binding_is_typed_int(self):
+        ast = _parse(
+            "def int main():\n"
+            "    [3]str names = ['a', 'b', 'c']\n"
+            "    for i, x in names:\n"
+            "        str y = i\n"
+            "    return 0\n"
+        )
+        with pytest.raises(SemanticError, match="Cannot initialize 'y'"):
+            analyze(ast)
+
+    def test_dict_key_and_value_bindings_are_distinctly_typed(self):
+        ast = _parse(
+            "def int main():\n"
+            "    dict[str]int ages = dict[str]int{'a': 1}\n"
+            "    for k, v in ages:\n"
+            "        int x = v\n"
+            "        str y = k\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise: v is int, k is str -- both correct
+
+        ast_wrong = _parse(
+            "def int main():\n"
+            "    dict[str]int ages = dict[str]int{'a': 1}\n"
+            "    for k, v in ages:\n"
+            "        int x = k\n"
+            "    return 0\n"
+        )
+        with pytest.raises(SemanticError, match="Cannot initialize 'x'"):
+            analyze(ast_wrong)
+
+    def test_binding_name_is_scoped_to_the_loop(self):
+        assert_semantic_error(
+            "    [3]int arr = [1, 2, 3]\n"
+            "    for x in arr:\n"
+            "        print(x)\n"
+            "    print(x)\n"
+            "    return 0\n",
+            return_type="int",
+            match="Reference to undeclared variable 'x'",
+        )
+
+    def test_break_and_continue_work_inside_the_body(self):
+        ast = _parse(
+            "def int main():\n"
+            "    [3]int arr = [1, 2, 3]\n"
+            "    for x in arr:\n"
+            "        if x == 2:\n"
+            "            break\n"
+            "        continue\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_address_of_a_for_in_binding_is_rejected(self):
+        """Was a real, constructed memory-corruption bug before this
+        restriction existed: a for-in binding's own stack slot is
+        shared across every iteration and escape_analysis.py doesn't
+        yet track its own address escaping, so heap-promoting it
+        correctly isn't safe yet -- rejecting `&x` outright avoids
+        silently miscompiling it (returning it from the enclosing
+        function read back garbage, confirmed directly, not assumed)
+        until that tracking is extended to cover it properly."""
+        assert_semantic_error(
+            "    [3]int arr = [1, 2, 3]\n"
+            "    for x in arr:\n"
+            "        *int p = &x\n"
+            "    return 0\n",
+            match="'&' cannot take the address of 'x', a 'for ... in' loop binding",
+        )
+
+    def test_address_of_a_shadowed_name_inside_the_body_is_still_allowed(self):
+        """The rejection is scope-aware, not a blanket ban on the
+        NAME: an ordinary, nested VarDecl that shadows the binding
+        name (inside its own, separately-pushed scope -- an `if`
+        here) is a genuinely different declaration, with its own,
+        ordinary stack slot -- taking ITS address is completely
+        safe and must not be rejected."""
+        ast = _parse(
+            "def int main():\n"
+            "    [3]int arr = [1, 2, 3]\n"
+            "    for x in arr:\n"
+            "        if x > 0:\n"
+            "            int x = 5\n"
+            "            *int p = &x\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# for x in y / for x, y in z -- Stage 2: array/slice IR-building. dict (Stage
+# 3) isn't implemented yet -- see gen_statement_ir's own ForIn case, which
+# raises a clear IRError for a dict-typed iterable rather than crashing.
+# ---------------------------------------------------------------------------
+
+class TestForInArraySlice:
+    def test_array_single_binding(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    [5]int arr = [10, 20, 30, 40, 50]\n"
+            "    for x in arr:\n"
+            "        print(x)\n"
+            "    return 0\n",
+            "10\n20\n30\n40\n50\n",
+        )
+
+    def test_array_two_binding(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    [3]int arr = [10, 20, 30]\n"
+            "    for i, x in arr:\n"
+            "        print(i)\n"
+            "        print(x)\n"
+            "    return 0\n",
+            "0\n10\n1\n20\n2\n30\n",
+        )
+
+    def test_slice_single_binding(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    []int s = [10, 20, 30]\n"
+            "    for x in s:\n"
+            "        print(x)\n"
+            "    return 0\n",
+            "10\n20\n30\n",
+        )
+
+    def test_slice_two_binding(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    []int s = [10, 20, 30]\n"
+            "    for i, x in s:\n"
+            "        print(i)\n"
+            "        print(x)\n"
+            "    return 0\n",
+            "0\n10\n1\n20\n2\n30\n",
+        )
+
+    def test_empty_slice_iterates_zero_times(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    []int s = []\n"
+            "    for x in s:\n"
+            "        print(x)\n"
+            "    print('done')\n"
+            "    return 0\n",
+            "done\n",
+        )
+
+    def test_str_elements(self):
+        """Exercises IRCopy's own composite path for the element
+        binding (str is in COMPOSITE_KINDS, unlike int/bool), not
+        just the scalar IRLoad-then-_ir_finish_scalar_var_decl path
+        the int-element tests above already cover."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    [3]str names = ['alice', 'bob', 'carol']\n"
+            "    for name in names:\n"
+            "        print(name)\n"
+            "    return 0\n",
+            "alice\nbob\ncarol\n",
+        )
+
+    def test_struct_elements(self):
+        """Exercises the SAME IRCopy composite path, plus the
+        synthesized Variable(name=...) node's own dispatch through
+        _ir_struct_address specifically (str goes through _ir_str_
+        address instead) -- both share the code path, but this
+        confirms it for STRUCT specifically, field reads included."""
+        assert_program_stdout(
+            "type Point struct:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Point pts = [Point(1, 2), Point(3, 4)]\n"
+            "    for p in pts:\n"
+            "        print(p.x)\n"
+            "        print(p.y)\n"
+            "    return 0\n",
+            "1\n2\n3\n4\n",
+        )
+
+    def test_break_exits_the_loop_early(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    [5]int arr = [10, 20, 30, 40, 50]\n"
+            "    for x in arr:\n"
+            "        if x == 30:\n"
+            "            break\n"
+            "        print(x)\n"
+            "    return 0\n",
+            "10\n20\n",
+        )
+
+    def test_continue_skips_to_the_next_element(self):
+        """Confirms continue_label's own distinct existence actually
+        matters: continue must still advance i (the identical reason
+        For's own increment_label exists for its own increment
+        clause) before re-checking the loop condition, not skip the
+        advance and infinite-loop."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    [5]int arr = [10, 20, 30, 40, 50]\n"
+            "    for x in arr:\n"
+            "        if x % 20 == 0:\n"
+            "            continue\n"
+            "        print(x)\n"
+            "    return 0\n",
+            "10\n30\n50\n",
+        )
+
+    def test_safe_in_place_element_mutation_does_not_panic(self):
+        """The mutation-safety check is precise, not a blanket ban on
+        touching the collection during iteration: an ordinary in-
+        place element write never changes the slice's own base
+        address, so it must never falsely trigger the panic."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    []int s = [1, 2, 3]\n"
+            "    for x in s:\n"
+            "        s[0] = 999\n"
+            "    print(s[0])\n"
+            "    return 0\n",
+            "999\n",
+        )
+
+    def test_slice_reallocation_during_iteration_panics(self):
+        """The actual, positive confirmation of the mutation-safety
+        design discussed before implementation: an append that forces
+        reallocation invalidates this iterator's own cached base
+        address, and must panic (via hornet_panic, the same runtime
+        function bounds-check failures already use, hence the shared
+        assert_crashes_with_sigabrt helper) rather than silently
+        continuing to walk what's now stale, possibly-freed memory."""
+        assert_crashes_with_sigabrt(
+            "    []int s = [1]\n"
+            "    int i = 0\n"
+            "    while i < 100:\n"
+            "        s = append(s, i)\n"
+            "        i = i + 1\n"
+            "    for x in s:\n"
+            "        s = append(s, 999)\n"
+            "    print('should not reach here')\n"
+            "    return 0\n"
+        )
+
+    def test_array_needs_no_mutation_check_at_all(self):
+        """An array's own address can never change (fixed size, no
+        reallocation possible) -- confirms iterating one while doing
+        the closest available "mutation" (an in-place element write)
+        never panics, unlike the slice case above."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    [3]int arr = [1, 2, 3]\n"
+            "    for x in arr:\n"
+            "        arr[0] = 999\n"
+            "    print(arr[0])\n"
+            "    return 0\n",
+            "999\n",
+        )
+
+    def test_oversized_struct_element_is_heap_allocated_correctly(self):
+        """Exercises the size-based heap-promotion branch specifically
+        (_is_heap_allocated's own pure-size half, not the escape-
+        tracking one the address-of restriction above exists because
+        of): an element type large enough to cross _STACK_ARRAY_
+        LIMIT_BYTES needs its own fresh malloc'd box each binding
+        (_ir_malloc_and_store), with the destination address computed
+        from that box afterward -- confirms both items' own data
+        round-trip correctly, not just that this doesn't crash."""
+        assert_program_stdout(
+            "type Huge struct:\n"
+            "    [5000]int data\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Huge items\n"
+            "    items[0].data[0] = 111\n"
+            "    items[1].data[0] = 222\n"
+            "    for h in items:\n"
+            "        print(h.data[0])\n"
+            "    return 0\n",
+            "111\n222\n",
+        )
+
+    def test_slice_element_escaping_via_return_is_tracked_correctly(self):
+        """Exercises escape_analysis.py's own ForIn case specifically
+        for a binding whose own type contains a slice (an int element
+        wouldn't reach that code path at all -- see its own
+        docstring): the matching element is assigned into a variable
+        that then escapes via return, which must correctly heap-
+        promote the outer array being iterated (or whatever ITS own
+        contents are ultimately derived from) so the returned slice's
+        own backing data survives past this function -- not a crash
+        this time, a correctness check on the actual returned
+        content."""
+        assert_program_stdout(
+            "def []int find_matching(int target_len):\n"
+            "    [][]int lists = [[1, 2], [3, 4, 5], [6]]\n"
+            "    []int result = []\n"
+            "    for x in lists:\n"
+            "        if len(x) == target_len:\n"
+            "            result = x\n"
+            "    return result\n"
+            "\n"
+            "def int main():\n"
+            "    []int found = find_matching(3)\n"
+            "    print(len(found))\n"
+            "    print(found[0])\n"
+            "    print(found[1])\n"
+            "    print(found[2])\n"
+            "    return 0\n",
+            "3\n3\n4\n5\n",
+        )
+
+    def test_dict_iteration_is_not_implemented_yet(self):
+        """Stage 3, not this one -- semantic.py already accepts a
+        dict-typed iterable (Stage 1 covers all three collection
+        kinds), so this is purely an IR-building-stage gap, reported
+        with a clear, explicit IRError rather than an AttributeError
+        from assuming an element_type a DICT-typed iterable doesn't
+        have."""
+        ast = _parse(
+            "def int main():\n"
+            "    dict[str]int d = dict[str]int{'a': 1}\n"
+            "    for k in d:\n"
+            "        print(k)\n"
+            "    return 0\n"
+        )
+        analyze(ast)
+        with pytest.raises(IRError, match="'for ... in' over a dict is not implemented yet"):
+            generate_asm(ast, platform=ASM_PLATFORM)

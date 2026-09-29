@@ -18,6 +18,7 @@ from ir.ir import (
     IRBranch,
     IRCall,
     IRConst,
+    IRCopy,
     IRJump,
     IRLabel,
     IRLoad,
@@ -28,8 +29,8 @@ from ir.ir import (
     IRStaticDataAddress,
     IRStore, Temp,
 )
-from ir.utils import COMPOSITE_KINDS, SUM_TYPE_TAG_WIDTH, is_composite_addressable, type_of, type_byte_width
-from parser import Node, ArrayLiteral, Call, DictLiteral, Field, Index, Slice, Variable, NoneLiteral, Binary, BinaryOp, Unary, UnaryOp
+from ir.utils import COMPOSITE_KINDS, SUM_TYPE_TAG_WIDTH, is_composite_addressable, type_of, type_byte_width, for_in_binding_types
+from parser import Node, ArrayLiteral, Call, DictLiteral, Field, ForIn, Index, Slice, Variable, NoneLiteral, Binary, BinaryOp, Unary, UnaryOp
 from semantic import TypeKind, Type
 
 
@@ -855,6 +856,177 @@ class ArraysSlicesMixin:
             IRLabel(done_label),
         ])
         return ir, t
+
+    def _ir_for_in_array_slice(self, stmt: ForIn, ir_fn) -> list:
+        """Builds (without lowering) `for x in arr:` / `for i, x in
+        arr:` (equally for a SLICE) as real IR -- a bounded loop over
+        _ir_indexable_base's own uniform (address, length), binding
+        each element (and, for the two-binding form, the index too)
+        into stmt's own binding_names on every pass, rather than
+        comparing against one the way _ir_array_slice_contains does.
+
+        continue_label is DISTINCT from start_label, existing
+        specifically so `continue` still advances the loop before
+        re-checking the condition -- the identical reason For's own
+        increment_label exists (see gen_statement_ir's own For case);
+        here the "increment" is just i += 1, synthesized directly
+        rather than a separate AST node the way For's own increment
+        clause is.
+
+        Binding itself always uses IRCopy: element_type's own address
+        (base_addr + i * element_width) copied into the element
+        binding's own slot works identically whether element_type is
+        scalar or composite (IRCopy is purely byte-width-based, see
+        its own docstring in ir/ir.py) -- no scalar/composite split
+        needed here the way VarDecl's own initializer dispatch has.
+        The two-binding form's own index binding is the one exception:
+        i is already a plain value in a Temp, not an address to copy
+        FROM, so that one goes through an ordinary IRStore instead.
+
+        Mutation safety: ARRAY needs no check at all (nothing about
+        iterating it can change its own fixed address). SLICE re-
+        reads its own current base address every iteration and
+        compares it against the one cached at loop start -- an
+        append inside the body that reallocates would change it,
+        meaning this iterator's own cached elem_addr math is no
+        longer valid -- panicking via hornet_panic (the same runtime
+        function bounds-check failures already use) rather than
+        silently walking freed or orphaned memory. Ordinary insert-
+        without-growth, in-place overwrite, and (for dict, a
+        different method entirely, see Stage 3) delete are all still
+        safe and unchecked -- this only ever catches a base-address
+        change, the one operation that's actually memory-unsafe."""
+        iterable_type = type_of(stmt.iterable)
+        element_type = iterable_type.element_type
+        element_width = type_byte_width(element_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+        is_slice = iterable_type.kind == TypeKind.SLICE
+
+        base = self._ir_indexable_base(stmt.iterable)
+        if base is None:
+            raise IRError(
+                f"_ir_indexable_base returned None for an ARRAY/SLICE-typed "
+                f"'for ... in' iterable ({stmt.iterable!r}) -- expected to "
+                f"always succeed for a reachable indexable base")
+        base_ir, base_addr, length_value, _ = base
+
+        i = self.ir_program.ids.new_temp(Type.INT)
+        start_label = self.ir_program.ids.new_label("for_in_start")
+        body_label = self.ir_program.ids.new_label("for_in_body")
+        continue_label = self.ir_program.ids.new_label("for_in_continue")
+        end_label = self.ir_program.ids.new_label("for_in_end")
+
+        self._push_scope()
+        binding_types = for_in_binding_types(stmt, iterable_type)
+        slots = [self._bind_for_in_binding(stmt, idx, bt, ir_fn) for idx, bt in enumerate(binding_types)]
+
+        ir = base_ir + [
+            IRMove(dst=i, src=IRConst(0, Type.INT)),
+            IRJump(start_label),
+            IRLabel(start_label),
+        ]
+        cond = self.ir_program.ids.new_temp(Type.BOOL)
+        ir.append(IRBinOp(dst=cond, op=BinaryOp.LESS_THAN, left=i, right=length_value))
+        ir.append(IRBranch(cond=cond, true_label=body_label, false_label=end_label))
+        ir.append(IRLabel(body_label))
+
+        if is_slice:
+            recheck = self._ir_indexable_base(stmt.iterable)
+            if recheck is None:
+                raise IRError(
+                    f"_ir_indexable_base returned None on its own mutation-"
+                    f"safety recheck for a SLICE-typed 'for ... in' iterable "
+                    f"({stmt.iterable!r}) -- expected to always succeed, "
+                    f"having already succeeded once above")
+            recheck_ir, recheck_addr, _, _ = recheck
+            ir.extend(recheck_ir)
+            mutated = self.ir_program.ids.new_temp(Type.BOOL)
+            ir.append(IRBinOp(dst=mutated, op=BinaryOp.NOT_EQUAL, left=recheck_addr, right=base_addr))
+            mutated_label = self.ir_program.ids.new_label("for_in_mutated")
+            safe_label = self.ir_program.ids.new_label("for_in_safe")
+            ir.append(IRBranch(cond=mutated, true_label=mutated_label, false_label=safe_label))
+            ir.append(IRLabel(mutated_label))
+            msg_ptr = self.ir_program.ids.new_temp(Type.INT64)
+            msg_label = self.ir_program.ids.new_label("for_in_mutated_msg")
+            self.ir_program.string_literals.append(
+                (msg_label, "for ... in: slice was reallocated (e.g. by append) during iteration"))
+            ir.append(IRStaticDataAddress(dst=msg_ptr, label=msg_label))
+            ir.append(IRCall(dst=None, name='hornet_panic', args=[msg_ptr]))
+            ir.append(IRJump(safe_label))  # unreachable -- hornet_panic
+            # never returns -- but the verifier requires every block to
+            # end in an explicit terminator, the same "harmless, costs
+            # a few bytes" reasoning gen_statement_ir's own If case
+            # already applies to its own possibly-redundant jumps.
+            ir.append(IRLabel(safe_label))
+
+        offset_temp = self.ir_program.ids.new_temp(Type.INT)
+        ir.append(IRBinOp(dst=offset_temp, op=BinaryOp.MULTIPLY, left=i, right=IRConst(element_width, Type.INT)))
+        elem_addr = self.ir_program.ids.new_temp(Type.INT64)
+        ir.append(IRBinOp(dst=elem_addr, op=BinaryOp.ADD, left=base_addr, right=offset_temp))
+
+        if len(slots) == 2:
+            # The index binding is always INT -- always scalar --
+            # so _ir_finish_scalar_var_decl (the exact helper an
+            # ordinary scalar VarDecl's own first write already goes
+            # through) applies directly: name/decl_id/value are all
+            # it needs, no real VarDecl node required (see its own
+            # signature -- name is a plain str, decl_id a plain int,
+            # neither tied to any particular node shape).
+            ir.extend(self._ir_finish_scalar_var_decl(stmt.binding_names[0], (id(stmt), 0), Type.INT, i))
+            element_index = 1
+        else:
+            element_index = 0
+        element_decl_id = (id(stmt), element_index)
+        element_slot = slots[element_index]
+        if element_type.kind in COMPOSITE_KINDS:
+            # Mirrors gen_statement_ir's own composite VarDecl case
+            # exactly: malloc a fresh box first if this binding is
+            # heap-allocated (never for SLICE -- its own descriptor is
+            # always small and stack-resident, matching that case's
+            # identical exclusion), THEN compute the destination's own
+            # address (which, for a heap-allocated one, now correctly
+            # loads the fresh pointer this same malloc just wrote,
+            # exactly like _ir_array_address/_ir_struct_address/etc.
+            # already do for any OTHER heap-allocated local), then
+            # IRCopy the element's own bytes into it.
+            if element_type.kind != TypeKind.SLICE and self._is_heap_allocated(element_decl_id, element_type):
+                ir.extend(self._ir_malloc_and_store(element_type, element_slot))
+            address_of = {
+                TypeKind.ARRAY: self._ir_array_address,
+                TypeKind.STRUCT: self._ir_struct_address,
+                TypeKind.SLICE: self._ir_slice_address,
+                TypeKind.DICT: self._ir_dict_address,
+                TypeKind.SUM: self._ir_struct_address,  # generic address computation -- see its own docstring
+                TypeKind.STR: self._ir_str_address,
+            }[element_type.kind]
+            dst_ir, dst_addr = address_of(Variable(name=stmt.binding_names[element_index]))
+            ir.extend(dst_ir)
+            ir.append(IRCopy(dst_address=dst_addr, src_address=elem_addr, value_type=element_type))
+        else:
+            # An ordinary scalar element: IRLoad its own value out of
+            # elem_addr first (there's no expression to hand gen_
+            # expr_ir here, unlike an ordinary VarDecl's own
+            # initializer -- the element comes from the collection's
+            # own storage, not a source expression), then the
+            # identical _ir_finish_scalar_var_decl the index binding
+            # just above already used.
+            value = self.ir_program.ids.new_temp(element_type)
+            ir.append(IRLoad(dst=value, address=elem_addr))
+            ir.extend(self._ir_finish_scalar_var_decl(stmt.binding_names[element_index], element_decl_id, element_type, value))
+
+        self.loop_labels.append((continue_label, end_label))
+        for s in stmt.body:
+            ir.extend(self.gen_statement_ir(s, ir_fn))
+        self.loop_labels.pop()
+
+        ir.append(IRJump(continue_label))
+        ir.append(IRLabel(continue_label))
+        next_i = self.ir_program.ids.new_temp(Type.INT)
+        ir.append(IRBinOp(dst=next_i, op=BinaryOp.ADD, left=i, right=IRConst(1, Type.INT)))
+        ir.append(IRMove(dst=i, src=next_i))
+        ir.append(IRJump(start_label))
+        ir.append(IRLabel(end_label))
+        self._pop_scope()
+        return ir
 
     def _ir_write_composite_value_into(self, dst_address, value_expr: Node, value_type: Type):
         """The general-purpose dispatcher underlying nested literal

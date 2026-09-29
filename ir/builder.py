@@ -23,7 +23,7 @@ from typing import List, Optional
 
 from escape_analysis import analyze_array_escapes, is_heap_allocated
 from ir.errors import IRError
-from ir.utils import COMPOSITE_KINDS, is_composite_addressable, type_byte_width, type_of
+from ir.utils import COMPOSITE_KINDS, is_composite_addressable, type_byte_width, type_of, for_in_binding_types
 from ir.ir import (
     IRBranch, IRCall, IRConst, IRCopy, IRFunction, IRJump, IRLocalAddress, IRReadArgument, IRReturn, IRStore, Temp,
 )
@@ -45,6 +45,7 @@ from parser import (
     Field,
     FieldAssign,
     For,
+    ForIn,
     Function,
     If,
     Index,
@@ -397,6 +398,19 @@ class IRFunctionBuilder(
             id(stmt), var_type) else type_byte_width(var_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
         ir_fn.var_slots[id(stmt)] = self.ir_program.ids.new_slot(width, f"local:{stmt.name}", ir_fn)
 
+    def _allocate_for_in_binding_slot(self, stmt: ForIn, index: int, binding_type: Type, ir_fn: IRFunction) -> None:
+        """The ForIn counterpart to _allocate_local_slot -- there's no
+        real VarDecl node for a binding name to key a slot by (parse_
+        for_in never synthesizes one, see ForIn's own docstring), so
+        this keys by (id(stmt), index) instead: a stable, unique pair
+        for however many binding_names this ForIn actually has (1 or
+        2), reused identically by _bind_for_in_binding once real-IR
+        construction actually binds each name to a value."""
+        width = 8 if self._is_heap_allocated(
+            (id(stmt), index), binding_type) else type_byte_width(binding_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+        ir_fn.var_slots[(id(stmt), index)] = self.ir_program.ids.new_slot(
+            width, f"for_in:{stmt.binding_names[index]}", ir_fn)
+
     def _collect_locals(self, statements: List[Node], ir_fn: IRFunction) -> None:
         """Recursively walks `statements`, including into every If's
         then_body/else_body and every While's body, and gives each
@@ -429,6 +443,18 @@ class IRFunctionBuilder(
                 if stmt.else_body is not None:
                     self._collect_locals(stmt.else_body, ir_fn)
             elif isinstance(stmt, While):
+                self._collect_locals(stmt.body, ir_fn)
+            elif isinstance(stmt, ForIn):
+                # Each of stmt's own binding_names (1 or 2) needs a
+                # slot too, exactly like For's own init variable does
+                # just below -- but there's no VarDecl to wrap and
+                # reuse that branch through, since none exists for a
+                # bare binding name (see _allocate_for_in_binding_
+                # slot's own docstring for why this needs its own,
+                # parallel helper instead).
+                iterable_type = type_of(stmt.iterable)
+                for i, binding_type in enumerate(for_in_binding_types(stmt, iterable_type)):
+                    self._allocate_for_in_binding_slot(stmt, i, binding_type, ir_fn)
                 self._collect_locals(stmt.body, ir_fn)
             elif isinstance(stmt, For):
                 # stmt.init is always a VarDecl right now (see For's
@@ -513,6 +539,18 @@ class IRFunctionBuilder(
                     self._collect_argument_temps(stmt.else_body, ir_fn)
             elif isinstance(stmt, While):
                 self._collect_argument_temps_in_expr(stmt.condition, ir_fn)
+                self._collect_argument_temps(stmt.body, ir_fn)
+            elif isinstance(stmt, ForIn):
+                # stmt.iterable, for now, is always a bare Variable/
+                # Field/Index (semantic.py's own analyze_for_in
+                # enforces this -- see ForIn's own docstring), never a
+                # shape this method's own _collect_argument_temps_in_
+                # expr would find anything to reserve a slot for, but
+                # called anyway for the same reason every other
+                # expression position here is: correct and future-
+                # proof if that restriction is ever lifted, at zero
+                # cost today.
+                self._collect_argument_temps_in_expr(stmt.iterable, ir_fn)
                 self._collect_argument_temps(stmt.body, ir_fn)
             elif isinstance(stmt, For):
                 # init/increment each wrapped in a list, reusing this
@@ -693,6 +731,21 @@ class IRFunctionBuilder(
         var_type = type_from_name(stmt.var_type, self.ir_program.struct_registry, self.ir_program.type_alias_registry, sum_types=self.ir_program.sum_type_registry)
         temp_type = Type(TypeKind.POINTER, element_type=var_type) if self._is_heap_allocated(id(stmt), var_type) else var_type
         self.scopes[-1][stmt.name] = (slot, var_type, id(stmt), self.ir_program.ids.temp_at_offset(temp_type, slot))
+        return slot
+
+    def _bind_for_in_binding(self, stmt: ForIn, index: int, binding_type: Type, ir_fn: IRFunction) -> int:
+        """The ForIn counterpart to _bind_local: registers stmt's own
+        binding_names[index] in the current scope, pointing at the
+        slot _allocate_for_in_binding_slot already assigned this
+        (id(stmt), index) pair. Otherwise identical to _bind_local,
+        minus the type_from_name step -- binding_type is already
+        resolved (see _for_in_binding_types), not parsed from a
+        VarDecl's own var_type string, since no such node exists
+        here."""
+        slot = ir_fn.var_slots[(id(stmt), index)]
+        temp_type = Type(TypeKind.POINTER, element_type=binding_type) if self._is_heap_allocated((id(stmt), index), binding_type) else binding_type
+        name = stmt.binding_names[index]
+        self.scopes[-1][name] = (slot, binding_type, (id(stmt), index), self.ir_program.ids.temp_at_offset(temp_type, slot))
         return slot
 
     def _local_slot(self, name: str) -> int:

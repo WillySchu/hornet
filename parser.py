@@ -940,6 +940,41 @@ class For(Node):
 
 
 @dataclass
+class ForIn(Node):
+    """`for name in iterable: <body>` or `for name1, name2 in iterable:
+    <body>` -- Python/Go-style iteration, distinct from For's own
+    three-clause C-style form above (the two never collide: For's own
+    init clause always starts with a type-starting token or two
+    consecutive IDENTIFIERs, a shape this one's own single, bare
+    binding name -- followed by ',' or 'in', never a second IDENTIFIER
+    -- can never itself produce, so parse_for's own one-token-deeper
+    lookahead resolves which of the two this is with no backtracking).
+
+    binding_names holds ONE name (`for x in arr`, `for k in d`) or TWO
+    (`for i, x in arr` -- index and element; `for k, v in d` -- key and
+    value); never more. iterable is, for now, deliberately restricted
+    to a bare addressable base (Variable/Field/Index) -- semantic.py's
+    own analyze_for_in enforces this -- not yet a call result or a
+    literal directly; a real, tracked follow-up, not a permanent
+    ceiling, the same posture For's own init/increment narrowing
+    already takes.
+
+    Mutation safety while iterating (an insert that grows a dict's own
+    backing buckets, or an append that reallocates a slice's own
+    backing array, out from under an in-progress walk) and whether
+    each iteration gets its own fresh binding or shares one slot for
+    the whole loop (today: shares one, matching For's own init
+    variable -- a deliberately revisited-later choice, not a settled
+    one) are both real, still-open design questions -- this node's own
+    shape doesn't presuppose an answer to either; ir/statements.py's
+    own gen_statement_ir is where each gets decided, per collection
+    kind, once real-IR construction actually begins."""
+    binding_names: List[str]
+    iterable: Node
+    body: List[Node]
+
+
+@dataclass
 class Break(Node):
     """`break` -- exits the *innermost* enclosing loop immediately.
     Only valid inside a while body; semantic.py rejects one that isn't."""
@@ -1969,7 +2004,29 @@ class Parser:
         body = self.parse_block()
         return While(condition=condition, body=body, line=start_tok.line, col=start_tok.col)
 
-    def parse_for(self) -> For:
+    def parse_for(self) -> Node:
+        """Dispatches between the three-clause `for init; cond;
+        increment:` form (_parse_for_three_clause, building a For) and
+        the newer `for x in y:` / `for x, y in z:` iteration form
+        (parse_for_in, building a ForIn) -- see each node's own
+        docstring in parser.py. Two tokens of lookahead past 'for'
+        itself disambiguate with no backtracking: the iteration form's
+        own first binding is always a bare IDENTIFIER immediately
+        followed by ',' or 'in', a shape _parse_for_init_clause's own
+        type-starting-token/struct-name check (a scalar/array/slice/
+        dict type keyword, or two consecutive IDENTIFIERs) can never
+        itself produce -- those two conditions are exhaustive and
+        mutually exclusive by construction, so checking for the
+        iteration shape FIRST and falling through to the three-clause
+        path otherwise is safe: anything that isn't the iteration
+        shape is either a valid three-clause init or already an error
+        _parse_for_init_clause's own existing check reports correctly,
+        unchanged."""
+        if self.peek(1).type == TokenType.IDENTIFIER and self.peek(2).type in (TokenType.COMMA, TokenType.IN):
+            return self.parse_for_in()
+        return self._parse_for_three_clause()
+
+    def _parse_for_three_clause(self) -> For:
         """`for init; cond; increment: <body>`. The two semicolons are
         the only place this parser ever expects TokenType.SEMICOLON --
         everywhere else, a NEWLINE ends a statement -- but a for-
@@ -1986,6 +2043,29 @@ class Parser:
         self.expect(TokenType.NEWLINE, "Expected a newline after ':'")
         body = self.parse_block()
         return For(init=init, condition=condition, increment=increment, body=body, line=start_tok.line, col=start_tok.col)
+
+    def parse_for_in(self) -> ForIn:
+        """`for name in iterable: <body>` or `for name1, name2 in
+        iterable: <body>` -- see ForIn's own docstring for the full
+        design and its own deliberately-open questions. iterable is
+        parsed as an ordinary expression, then narrowed to a bare
+        addressable base by semantic.py's own analyze_for_in, not
+        here -- the identical division of labor parse_for_init_clause/
+        analyze_for already split between syntax and meaning, kept
+        consistent here rather than rejecting a shape at parse time
+        that's syntactically just an ordinary expression."""
+        start_tok = self.expect(TokenType.FOR, "Expected 'for'")
+        first_name_tok = self.expect(TokenType.IDENTIFIER, "Expected a loop variable name after 'for'")
+        binding_names = [first_name_tok.val]
+        if self.match(TokenType.COMMA):
+            second_name_tok = self.expect(TokenType.IDENTIFIER, "Expected a second loop variable name after ','")
+            binding_names.append(second_name_tok.val)
+        self.expect(TokenType.IN, "Expected 'in' after the for-loop's own binding name(s)")
+        iterable = self.parse_expression()
+        self.expect(TokenType.COLON, "Expected ':' to start the for body")
+        self.expect(TokenType.NEWLINE, "Expected a newline after ':'")
+        body = self.parse_block()
+        return ForIn(binding_names=binding_names, iterable=iterable, body=body, line=start_tok.line, col=start_tok.col)
 
     def _parse_for_init_clause(self) -> Node:
         """The for-loop's own init clause -- for now, always a fresh

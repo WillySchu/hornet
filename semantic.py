@@ -219,6 +219,7 @@ from parser import (
     Field,
     FieldAssign,
     For,
+    ForIn,
     Function,
     If,
     Index,
@@ -710,6 +711,15 @@ class SemanticAnalyzer:
 
     def __init__(self):
         self.scopes: List[Dict[str, Type]] = []
+        self._for_in_binding_scope_names: set = set()  # (scope_index,
+        # name) pairs currently naming a 'for ... in' binding rather
+        # than an ordinary declaration -- see check_unary's own
+        # ADDRESS_OF case for why this needs tracking at all (&x on a
+        # for-in binding isn't yet safely supported -- see analyze_
+        # for_in's own docstring) and _is_for_in_binding's own
+        # docstring for exactly how this stays correct under
+        # shadowing (a nested scope redeclaring the same name as an
+        # ordinary local).
         self.loop_depth = 0  # how many enclosing `while` loops we're currently inside
         self.functions: Dict[str, tuple] = {}  # name -> (List[Type] param types, Type return type)
         self.structs: Dict[str, StructInfo] = {}  # name -> resolved fields; see _reserve_struct_names/_resolve_struct_fields
@@ -1387,6 +1397,23 @@ class SemanticAnalyzer:
                 return scope[name]
         raise SemanticError(f"Reference to undeclared variable '{name}'", node)
 
+    def _is_for_in_binding(self, name: str) -> bool:
+        """True if `name`, resolved the identical way _lookup already
+        resolves it (innermost enclosing scope wins, so a nested
+        scope's own ordinary VarDecl correctly shadows an outer 'for
+        ... in' binding of the same name), currently names a 'for ...
+        in' binding rather than an ordinary declaration. Used only by
+        check_unary's own ADDRESS_OF case, to reject &x on one (see
+        analyze_for_in's own docstring for why this restriction exists
+        at all: escape_analysis.py doesn't yet track a for-in
+        binding's own address escaping, so heap-promoting it correctly
+        isn't safe yet -- rejecting outright here avoids silently
+        mis-compiling it instead)."""
+        for i, scope in reversed(list(enumerate(self.scopes))):
+            if name in scope:
+                return (i, name) in self._for_in_binding_scope_names
+        return False
+
     # -- statements ---------------------------------------------------
 
     def analyze_statement(self, stmt: Node, return_type: Type) -> None:
@@ -1408,6 +1435,8 @@ class SemanticAnalyzer:
             self.analyze_while(stmt, return_type)
         elif isinstance(stmt, For):
             self.analyze_for(stmt, return_type)
+        elif isinstance(stmt, ForIn):
+            self.analyze_for_in(stmt, return_type)
         elif isinstance(stmt, Break):
             self.analyze_break(stmt)
         elif isinstance(stmt, Continue):
@@ -2120,6 +2149,86 @@ class SemanticAnalyzer:
             self.analyze_statement(s, return_type)
         self.loop_depth -= 1
         self.analyze_statement(stmt.increment, return_type)
+        self._pop_scope()
+
+    def analyze_for_in(self, stmt: ForIn, return_type: Type) -> None:
+        """`for name in iterable:` or `for name1, name2 in iterable:`
+        -- see ForIn's own docstring in parser.py for the full design,
+        including its own still-open questions this method doesn't
+        yet need to settle (mutation safety, per-iteration vs. shared
+        binding -- both purely IR-building/codegen concerns, nothing
+        here).
+
+        iterable is, for now, restricted to a bare Variable/Field/
+        Index -- not yet a call result or a literal directly, the
+        identical "assign it to a variable first" posture the struct-
+        literal-position restriction already takes elsewhere in this
+        file, and a real, tracked follow-up rather than a permanent
+        ceiling (see ForIn's own docstring). Its own resolved type must
+        be ARRAY, SLICE, or DICT.
+
+        binding_names' own count decides what each name resolves to:
+        ARRAY/SLICE with one name binds the element type; with two,
+        (int, element type) -- index, then element. DICT with one name
+        binds the key type; with two, (key type, value type). No
+        separate "is this type copyable" check is needed: every type
+        that can legally be an array/slice element or a dict key/value
+        in the first place is already copyable by construction (VOID,
+        the one type that genuinely isn't, can never be one).
+
+        Each binding_name is recorded in self._for_in_binding_scope_
+        names (scope-index-keyed, correctly respecting shadowing --
+        see _is_for_in_binding's own docstring) for the body's own
+        duration, discarded again once popped: check_unary's own
+        ADDRESS_OF case consults this to reject `&x` on one outright.
+        Confirmed empirically, not just suspected: a binding's own
+        stack slot is shared across every iteration (see ForIn's own
+        docstring on this point) and escape_analysis.py doesn't yet
+        attribute an escaping address back to one at all (its own
+        synthetic decl ids for a for-in binding never appear in the
+        set analyze_array_escapes populates) -- storing `&x` somewhere
+        that outlives the loop silently read back corrupted memory in
+        a real, constructed test, not a hypothetical. Rejecting it
+        here avoids shipping that silently, until escape_analysis.py's
+        own tracking is extended to cover this properly -- a real,
+        tracked follow-up, not a permanent ceiling.
+
+        ONE shared scope wraps the binding(s) and the body, matching
+        analyze_for's own reasoning exactly: the binding(s) need to
+        stay visible in the body and nowhere past it, both already
+        true of one scope with no nested one needed. loop_depth wraps
+        the body only, matching every other loop here."""
+        if not isinstance(stmt.iterable, (Variable, Field, Index)):
+            raise SemanticError(
+                f"'for ... in' requires a plain variable, field, or index "
+                f"expression as its own iterable, not a {type(stmt.iterable).__name__} "
+                f"-- not yet a function call or a literal directly; assign it "
+                f"to a variable first",
+                stmt.iterable,
+            )
+        iterable_type = self.check_expr(stmt.iterable)
+        if iterable_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.DICT):
+            raise SemanticError(
+                f"'for ... in' requires an array, slice, or dict as its own "
+                f"iterable, got {iterable_type}",
+                stmt.iterable,
+            )
+        num_bindings = len(stmt.binding_names)
+        if iterable_type.kind == TypeKind.DICT:
+            binding_types = [iterable_type.key_type, iterable_type.element_type][:num_bindings]
+        else:
+            binding_types = [Type.INT, iterable_type.element_type] if num_bindings == 2 else [iterable_type.element_type]
+        self._push_scope()
+        scope_index = len(self.scopes) - 1
+        for name, binding_type in zip(stmt.binding_names, binding_types):
+            self._declare(name, binding_type, stmt)
+            self._for_in_binding_scope_names.add((scope_index, name))
+        self.loop_depth += 1
+        for s in stmt.body:
+            self.analyze_statement(s, return_type)
+        self.loop_depth -= 1
+        for name in stmt.binding_names:
+            self._for_in_binding_scope_names.discard((scope_index, name))
         self._pop_scope()
 
     def analyze_break(self, stmt: Break) -> None:
@@ -2960,10 +3069,8 @@ class SemanticAnalyzer:
             # here, deliberately not included yet either -- a
             # separate, later follow-up too.
             is_struct_literal = isinstance(expr.operand, Call) and expr.operand.name in self.structs
-            is_rooted_field_or_index = (
-                isinstance(expr.operand, (Field, Index))
-                and self._root_variable_of(expr.operand) is not None
-            )
+            root_variable = self._root_variable_of(expr.operand) if isinstance(expr.operand, (Field, Index)) else None
+            is_rooted_field_or_index = isinstance(expr.operand, (Field, Index)) and root_variable is not None
             if not (isinstance(expr.operand, Variable) or is_struct_literal or is_rooted_field_or_index):
                 raise SemanticError(
                     f"'&' can only take the address of a bare variable, "
@@ -2971,6 +3078,26 @@ class SemanticAnalyzer:
                     f"in a named variable for now, not "
                     f"{type(expr.operand).__name__} -- a function call's "
                     f"own field/element isn't yet supported",
+                    expr,
+                )
+            # A 'for ... in' binding specifically -- see analyze_for_
+            # in's own docstring for why this is rejected outright
+            # rather than silently miscompiled: its own stack slot is
+            # shared across every iteration and never heap-promoted
+            # when its address escapes (escape_analysis.py doesn't
+            # track it yet), confirmed to actually corrupt memory in
+            # a real test, not just a theoretical gap.
+            root_name = expr.operand.name if isinstance(expr.operand, Variable) else (
+                root_variable.name if root_variable is not None else None
+            )
+            if root_name is not None and self._is_for_in_binding(root_name):
+                raise SemanticError(
+                    f"'&' cannot take the address of '{root_name}', a "
+                    f"'for ... in' loop binding -- its own storage is "
+                    f"shared across every iteration and isn't yet safely "
+                    f"heap-promoted when its address escapes; copy it "
+                    f"into an ordinary variable first if you need its "
+                    f"address",
                     expr,
                 )
             return Type(TypeKind.POINTER, element_type=operand_type)
