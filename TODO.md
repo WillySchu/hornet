@@ -18,6 +18,7 @@ Documentation:
 
 Updates:
 - Struct literal restrictions in semantic analysis?
+- Pointer receivers for methods.
 - Dicts as sum types.
 - `in` checking for strings.
 - Sum type equality.
