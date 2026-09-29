@@ -21,6 +21,7 @@ Updates:
 - Struct literal restrictions in semantic analysis?
 - `for in` loops on non addressable base (literals, function returns, etc.).
 - Fix `return none` for pointer returning function.
+- Escape analysis for iterator variables in for ... in ...  loops (currently restricted).
 - Dicts as sum types.
 - `in` checking for strings.
 - Sum type equality.

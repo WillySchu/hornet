@@ -40,9 +40,9 @@ named source-level variable.
 """
 
 from ir.errors import IRError
-from ir.ir import IRBinOp, IRCall, IRConst, IRLoad, IRLocalAddress, IRStore
-from ir.utils import COMPOSITE_KINDS, type_byte_width, type_of
-from parser import BinaryOp, Call, DictLiteral, Field, Index, Node, Unary, UnaryOp, Variable
+from ir.ir import IRBinOp, IRBranch, IRCall, IRConst, IRJump, IRLabel, IRLoad, IRLocalAddress, IRMove, IRStaticDataAddress, IRStore
+from ir.utils import COMPOSITE_KINDS, type_byte_width, type_of, for_in_binding_types
+from parser import BinaryOp, Call, DictLiteral, Field, ForIn, Index, Node, Unary, UnaryOp, Variable
 from semantic import Type, TypeKind
 
 
@@ -549,3 +549,153 @@ class DictsMixin:
         t_result = self.ir_program.ids.new_temp(Type.BOOL)
         check = IRBinOp(dst=t_result, op=expr.op, left=ptr_value, right=IRConst(0, Type.INT64))
         return addr_ir + load_ir + [check], t_result
+
+    def _ir_for_in_dict(self, stmt: ForIn, ir_fn) -> list:
+        """Builds (without lowering) `for k in d:` / `for k, v in d:`
+        as real IR -- a bounded loop over EVERY bucket slot (0..
+        capacity, not 0..count: an occupied one can sit anywhere among
+        them), skipping empty/tombstone ones entirely (no binding, no
+        body run for those) -- mirrors runtime.c's own hornet_
+        stringify dict case structurally (the one other place that
+        already walks every bucket this same way, to print a dict's
+        own contents), rebuilt here in IR since the loop body has to
+        run as compiled Hornet statements, not a C callback.
+
+        bucket_stride/key/value offsets are exactly runtime.c's own
+        (see this file's own module docstring): a bucket is 1 (state)
+        + key_width + value_width bytes, key at buckets + i *
+        bucket_stride + 1, value right after it at that address +
+        key_width. A str-typed key needs no special handling AT ALL
+        here despite living inline in its own bucket, rather than
+        behind a separately-heap-allocated descriptor the way an
+        ordinary str variable's OWN storage usually is: hornet_dict_
+        insert_str_key already writes {ptr, len} there in exactly str's
+        own ordinary descriptor layout (key_region_width == 16 ==
+        type_byte_width(str) exactly), so _ir_bind_for_in_value's own
+        STR case (an ordinary composite IRCopy) already handles it
+        correctly, unchanged, the address it's given already being a
+        real, valid str descriptor's own address, byte for byte.
+
+        continue_label serves BOTH an empty/tombstone bucket's own
+        "skip this one, no binding, no body" jump AND an explicit
+        `continue` from inside the body -- both need the identical
+        "advance i, re-check the loop condition" behavior, so sharing
+        one target is correct, not incidental.
+
+        Mutation safety: buckets_ptr (offset 0 of the 24-byte
+        descriptor) is cached at loop start and re-read every
+        iteration, panicking via hornet_panic (the same runtime
+        function bounds-check failures, and _ir_for_in_array_slice's
+        own identical SLICE check, already use) if it's changed --
+        exactly the one operation that's actually memory-unsafe here:
+        an insert that crosses the growth threshold reallocates the
+        WHOLE buckets array, orphaning this iterator's own cached
+        base address and bucket_stride math. Ordinary insert-without-
+        growth, in-place value overwrite, and delete (tombstoning) are
+        all still safe and unchecked -- none of them touch buckets_
+        ptr at all."""
+        dict_type = type_of(stmt.iterable)
+        key_type = dict_type.key_type
+        value_type = dict_type.element_type
+        key_width = type_byte_width(key_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+        value_width = type_byte_width(value_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+        bucket_stride = 1 + key_width + value_width
+
+        result = self._ir_dict_address(stmt.iterable)
+        if result is None:
+            raise IRError(
+                f"_ir_dict_address returned None for a DICT-typed 'for ... "
+                f"in' iterable ({stmt.iterable!r}) -- expected to always "
+                f"succeed for a reachable indexable base")
+        dict_ir, descriptor_addr = result
+
+        buckets_ptr = self.ir_program.ids.new_temp(Type.INT64)
+        capacity = self.ir_program.ids.new_temp(Type.INT64)
+        capacity_addr = self.ir_program.ids.new_temp(Type.INT64)
+        setup_ir = dict_ir + [
+            IRLoad(dst=buckets_ptr, address=descriptor_addr),
+            IRBinOp(dst=capacity_addr, op=BinaryOp.ADD, left=descriptor_addr, right=IRConst(16, Type.INT64)),
+            IRLoad(dst=capacity, address=capacity_addr),
+        ]
+
+        i = self.ir_program.ids.new_temp(Type.INT64)
+        start_label = self.ir_program.ids.new_label("for_in_start")
+        body_label = self.ir_program.ids.new_label("for_in_body")
+        entry_label = self.ir_program.ids.new_label("for_in_entry")
+        continue_label = self.ir_program.ids.new_label("for_in_continue")
+        end_label = self.ir_program.ids.new_label("for_in_end")
+
+        self._push_scope()
+        binding_types = for_in_binding_types(stmt, dict_type)
+        for idx, binding_type in enumerate(binding_types):
+            self._bind_for_in_binding(stmt, idx, binding_type, ir_fn)
+
+        ir = setup_ir + [
+            IRMove(dst=i, src=IRConst(0, Type.INT64)),
+            IRJump(start_label),
+            IRLabel(start_label),
+        ]
+        cond = self.ir_program.ids.new_temp(Type.BOOL)
+        ir.append(IRBinOp(dst=cond, op=BinaryOp.LESS_THAN, left=i, right=capacity))
+        ir.append(IRBranch(cond=cond, true_label=body_label, false_label=end_label))
+        ir.append(IRLabel(body_label))
+
+        # Mutation-safety recheck FIRST, before buckets_ptr is used for
+        # anything -- computing bucket_addr from a stale buckets_ptr is
+        # already the unsafe operation, regardless of what this
+        # particular iteration's own bucket state byte turns out to be.
+        recheck_ptr = self.ir_program.ids.new_temp(Type.INT64)
+        ir.append(IRLoad(dst=recheck_ptr, address=descriptor_addr))
+        mutated = self.ir_program.ids.new_temp(Type.BOOL)
+        ir.append(IRBinOp(dst=mutated, op=BinaryOp.NOT_EQUAL, left=recheck_ptr, right=buckets_ptr))
+        mutated_label = self.ir_program.ids.new_label("for_in_mutated")
+        safe_label = self.ir_program.ids.new_label("for_in_safe")
+        ir.append(IRBranch(cond=mutated, true_label=mutated_label, false_label=safe_label))
+        ir.append(IRLabel(mutated_label))
+        msg_ptr = self.ir_program.ids.new_temp(Type.INT64)
+        msg_label = self.ir_program.ids.new_label("for_in_mutated_msg")
+        self.ir_program.string_literals.append(
+            (msg_label, "for ... in: dict's own buckets were reallocated (e.g. by an "
+                        "insert that triggered growth) during iteration"))
+        ir.append(IRStaticDataAddress(dst=msg_ptr, label=msg_label))
+        ir.append(IRCall(dst=None, name='hornet_panic', args=[msg_ptr]))
+        ir.append(IRJump(safe_label))  # unreachable -- hornet_panic never
+        # returns -- but the verifier requires every block to end in an
+        # explicit terminator, the same reasoning _ir_for_in_array_
+        # slice's own identical SLICE-case jump already has.
+        ir.append(IRLabel(safe_label))
+
+        offset_temp = self.ir_program.ids.new_temp(Type.INT64)
+        ir.append(IRBinOp(dst=offset_temp, op=BinaryOp.MULTIPLY, left=i, right=IRConst(bucket_stride, Type.INT64)))
+        bucket_addr = self.ir_program.ids.new_temp(Type.INT64)
+        ir.append(IRBinOp(dst=bucket_addr, op=BinaryOp.ADD, left=buckets_ptr, right=offset_temp))
+
+        state = self.ir_program.ids.new_temp(Type.UINT8)
+        ir.append(IRLoad(dst=state, address=bucket_addr))
+        is_occupied = self.ir_program.ids.new_temp(Type.BOOL)
+        ir.append(IRBinOp(dst=is_occupied, op=BinaryOp.EQUAL, left=state, right=IRConst(1, Type.UINT8)))  # HORNET_DICT_BUCKET_OCCUPIED == 1
+        ir.append(IRBranch(cond=is_occupied, true_label=entry_label, false_label=continue_label))
+        ir.append(IRLabel(entry_label))
+
+        key_addr = self.ir_program.ids.new_temp(Type.INT64)
+        ir.append(IRBinOp(dst=key_addr, op=BinaryOp.ADD, left=bucket_addr, right=IRConst(1, Type.INT64)))
+        ir.extend(self._ir_bind_for_in_value(stmt, 0, key_type, key_addr, ir_fn))
+        if len(binding_types) == 2:
+            value_addr = self.ir_program.ids.new_temp(Type.INT64)
+            ir.append(IRBinOp(dst=value_addr, op=BinaryOp.ADD, left=key_addr, right=IRConst(key_width, Type.INT64)))
+            ir.extend(self._ir_bind_for_in_value(stmt, 1, value_type, value_addr, ir_fn))
+
+        self.loop_labels.append((continue_label, end_label))
+        for s in stmt.body:
+            ir.extend(self.gen_statement_ir(s, ir_fn))
+        self.loop_labels.pop()
+
+        ir.append(IRJump(continue_label))
+        ir.append(IRLabel(continue_label))
+        next_i = self.ir_program.ids.new_temp(Type.INT64)
+        ir.append(IRBinOp(dst=next_i, op=BinaryOp.ADD, left=i, right=IRConst(1, Type.INT64)))
+        ir.append(IRMove(dst=i, src=next_i))
+        ir.append(IRJump(start_label))
+        ir.append(IRLabel(end_label))
+        self._pop_scope()
+        return ir

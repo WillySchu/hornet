@@ -23489,20 +23489,215 @@ class TestForInArraySlice:
             "3\n3\n4\n5\n",
         )
 
-    def test_dict_iteration_is_not_implemented_yet(self):
-        """Stage 3, not this one -- semantic.py already accepts a
-        dict-typed iterable (Stage 1 covers all three collection
-        kinds), so this is purely an IR-building-stage gap, reported
-        with a clear, explicit IRError rather than an AttributeError
-        from assuming an element_type a DICT-typed iterable doesn't
-        have."""
-        ast = _parse(
+    def test_dict_iteration_now_works(self):
+        """Was Stage 3's own placeholder ("not implemented yet") --
+        replaced now that Stage 3 has actually landed. See
+        TestForInDict below for the full dict-iteration test suite;
+        this one just confirms the single-key form specifically works
+        end to end, closing out what this test used to pin as a known
+        gap."""
+        assert_program_stdout(
             "def int main():\n"
             "    dict[str]int d = dict[str]int{'a': 1}\n"
             "    for k in d:\n"
             "        print(k)\n"
+            "    return 0\n",
+            "a\n",
+        )
+
+# ---------------------------------------------------------------------------
+# for k in d / for k, v in d -- Stage 3: dict IR-building. The last of the
+# three collection kinds -- see _ir_for_in_dict's own docstring (ir/dicts.py)
+# for the full bucket-walk design and its own mutation-safety check.
+# ---------------------------------------------------------------------------
+
+class TestForInDict:
+    def test_single_key_binding(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]int ages = dict[str]int{'alice': 25}\n"
+            "    for k in ages:\n"
+            "        print(k)\n"
+            "    return 0\n",
+            "alice\n",
+        )
+
+    def test_key_value_binding_str_keyed(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]int ages = dict[str]int{'alice': 25, 'bob': 30, 'carol': 35}\n"
+            "    int total = 0\n"
+            "    for k, v in ages:\n"
+            "        total = total + v\n"
+            "    print(total)\n"
+            "    return 0\n",
+            "90\n",
+        )
+
+    def test_key_value_binding_int_keyed(self):
+        """A scalar-keyed dict specifically -- exercises hornet_dict_
+        insert_scalar_key's own bucket layout (the key region holds the
+        raw key bytes directly, not a {ptr, len} pair the way a str
+        key's own region does), confirming the walk's own key_width
+        computation is correct for this shape too, not just str."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[int]str codes = dict[int]str{1: 'one', 2: 'two', 3: 'three'}\n"
+            "    int total = 0\n"
+            "    for k, v in codes:\n"
+            "        total = total + k\n"
+            "    print(total)\n"
+            "    return 0\n",
+            "6\n",
+        )
+
+    def test_tombstones_are_correctly_skipped(self):
+        """The identical tombstone-correctness property test_in_skips_
+        past_tombstones_rather_than_stopping_at_them already proves for
+        'in', proved here for iteration specifically: every even key
+        deleted (guaranteeing real tombstones scattered through the
+        bucket array), every surviving odd key must still be visited
+        exactly once despite however many tombstones sit between its
+        own bucket and wherever the walk currently is, and no deleted
+        even key may be visited at all."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[int]int nums = dict[int]int{0: 0}\n"
+            "    int i = 1\n"
+            "    while i < 20:\n"
+            "        nums[i] = i * 10\n"
+            "        i = i + 1\n"
+            "    i = 0\n"
+            "    while i < 20:\n"
+            "        if i % 2 == 0:\n"
+            "            del(nums, i)\n"
+            "        i = i + 1\n"
+            "    int found_odd = 0\n"
+            "    int found_even = 0\n"
+            "    for k, v in nums:\n"
+            "        if k % 2 == 1:\n"
+            "            found_odd = found_odd + 1\n"
+            "        else:\n"
+            "            found_even = found_even + 1\n"
+            "    print(found_odd)\n"
+            "    print(found_even)\n"
+            "    return 0\n",
+            "10\n0\n",
+        )
+
+    def test_struct_valued_dict(self):
+        """Exercises _ir_bind_for_in_value's own composite IRCopy path
+        for the VALUE binding specifically (the key is str, str, in
+        both other dict tests above -- also composite, but this
+        confirms a genuinely different composite kind works too, field
+        reads included)."""
+        assert_program_stdout(
+            "type Point struct:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    dict[str]Point pts = dict[str]Point{'origin': Point(0, 0), 'a': Point(3, 4)}\n"
+            "    int sumx = 0\n"
+            "    for k, p in pts:\n"
+            "        sumx = sumx + p.x\n"
+            "    print(sumx)\n"
+            "    return 0\n",
+            "3\n",
+        )
+
+    def test_nil_dict_iterates_zero_times(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]int d\n"
+            "    int count = 0\n"
+            "    for k in d:\n"
+            "        count = count + 1\n"
+            "    print(count)\n"
+            "    return 0\n",
+            "0\n",
+        )
+
+    def test_break_exits_the_loop_early(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[int]int d = dict[int]int{1: 10, 2: 20, 3: 30}\n"
+            "    int count = 0\n"
+            "    for k in d:\n"
+            "        count = count + 1\n"
+            "        if count == 2:\n"
+            "            break\n"
+            "    print(count)\n"
+            "    return 0\n",
+            "2\n",
+        )
+
+    def test_continue_skips_to_the_next_bucket(self):
+        """continue_label is shared with the empty/tombstone-bucket
+        skip -- confirms an EXPLICIT continue from inside the body
+        gets the identical 'advance i, re-check the loop condition'
+        treatment, not just the implicit skip case."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]int d = dict[str]int{'a': 1, 'b': 2, 'c': 3}\n"
+            "    int seen = 0\n"
+            "    for k, v in d:\n"
+            "        if v == 2:\n"
+            "            continue\n"
+            "        seen = seen + 1\n"
+            "    print(seen)\n"
+            "    return 0\n",
+            "2\n",
+        )
+
+    def test_safe_in_place_value_overwrite_does_not_panic(self):
+        """The mutation-safety check is precise, not a blanket ban:
+        an ordinary value overwrite for an EXISTING key never touches
+        buckets_ptr, so it must never falsely trigger the panic."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]int d = dict[str]int{'a': 1, 'b': 2, 'c': 3}\n"
+            "    for k in d:\n"
+            "        d[k] = 999\n"
+            "    print(d['a'])\n"
+            "    print(d['b'])\n"
+            "    print(d['c'])\n"
+            "    return 0\n",
+            "999\n999\n999\n",
+        )
+
+    def test_safe_delete_during_iteration_does_not_panic(self):
+        """Tombstoning is in-place too -- never touches buckets_ptr --
+        so deleting the current key mid-iteration must also be safe
+        and unchecked, unlike a growth-triggering insert."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    dict[str]int d = dict[str]int{'x': 1, 'y': 2}\n"
+            "    for k in d:\n"
+            "        if k == 'x':\n"
+            "            del(d, 'x')\n"
+            "    print('x' in d)\n"
+            "    print('y' in d)\n"
+            "    return 0\n",
+            "false\ntrue\n",
+        )
+
+    def test_growth_triggering_insert_during_iteration_panics(self):
+        """The actual, positive confirmation of the mutation-safety
+        design: an insert that crosses the growth threshold
+        reallocates the WHOLE buckets array, invalidating this
+        iterator's own cached buckets_ptr -- must panic (via hornet_
+        panic, the same runtime function bounds-check failures and
+        the slice case already use) rather than silently continuing to
+        walk what's now stale, possibly-freed memory."""
+        assert_crashes_with_sigabrt(
+            "    dict[int]int d = dict[int]int{1: 1}\n"
+            "    int i = 0\n"
+            "    while i < 100:\n"
+            "        d[i] = i\n"
+            "        i = i + 1\n"
+            "    for k in d:\n"
+            "        d[9999 + k] = k\n"
+            "    print('should not reach here')\n"
             "    return 0\n"
         )
-        analyze(ast)
-        with pytest.raises(IRError, match="'for ... in' over a dict is not implemented yet"):
-            generate_asm(ast, platform=ASM_PLATFORM)

@@ -857,6 +857,55 @@ class ArraysSlicesMixin:
         ])
         return ir, t
 
+    def _ir_bind_for_in_value(self, stmt: ForIn, binding_index: int, binding_type: Type, source_addr, ir_fn) -> list:
+        """Binds a value already sitting at source_addr into stmt's
+        own binding_names[binding_index] -- shared by every for-in
+        binding that comes from an ALREADY-ADDRESSABLE source (an
+        array/slice element, a dict's own key or value region within
+        a bucket), as opposed to the index binding, which is already
+        a plain value in a Temp with nothing to load at all (see _ir_
+        for_in_array_slice's own separate, direct _ir_finish_scalar_
+        var_decl call for that one).
+
+        Mirrors gen_statement_ir's own scalar-vs-composite VarDecl
+        split exactly, just fed source_addr instead of an initializer
+        expression to evaluate: an ordinary scalar IRLoads its own
+        value out of source_addr first, then _ir_finish_scalar_var_
+        decl (the exact helper an ordinary scalar VarDecl's own first
+        write already goes through -- no real VarDecl node needed, see
+        its own signature). A composite (including STR, so a str-
+        typed dict key -- stored inline in its own bucket as a {ptr,
+        len} pair, byte-for-byte identical to str's own ordinary
+        descriptor layout, see runtime.c's own hornet_dict_insert_
+        str_key -- needs no special handling beyond this, either)
+        mallocs a fresh box first if heap-allocated (never for SLICE,
+        matching every other composite VarDecl case's identical
+        exclusion), then IRCopies source_addr's own bytes into the
+        destination's own address."""
+        if binding_type.kind in COMPOSITE_KINDS:
+            decl_id = (id(stmt), binding_index)
+            slot = ir_fn.var_slots[decl_id]
+            if binding_type.kind != TypeKind.SLICE and self._is_heap_allocated(decl_id, binding_type):
+                ir = self._ir_malloc_and_store(binding_type, slot)
+            else:
+                ir = []
+            address_of = {
+                TypeKind.ARRAY: self._ir_array_address,
+                TypeKind.STRUCT: self._ir_struct_address,
+                TypeKind.SLICE: self._ir_slice_address,
+                TypeKind.DICT: self._ir_dict_address,
+                TypeKind.SUM: self._ir_struct_address,  # generic address computation -- see its own docstring
+                TypeKind.STR: self._ir_str_address,
+            }[binding_type.kind]
+            dst_ir, dst_addr = address_of(Variable(name=stmt.binding_names[binding_index]))
+            ir.extend(dst_ir)
+            ir.append(IRCopy(dst_address=dst_addr, src_address=source_addr, value_type=binding_type))
+            return ir
+        value = self.ir_program.ids.new_temp(binding_type)
+        ir = [IRLoad(dst=value, address=source_addr)]
+        ir.extend(self._ir_finish_scalar_var_decl(stmt.binding_names[binding_index], (id(stmt), binding_index), binding_type, value))
+        return ir
+
     def _ir_for_in_array_slice(self, stmt: ForIn, ir_fn) -> list:
         """Builds (without lowering) `for x in arr:` / `for i, x in
         arr:` (equally for a SLICE) as real IR -- a bounded loop over
@@ -873,15 +922,15 @@ class ArraysSlicesMixin:
         rather than a separate AST node the way For's own increment
         clause is.
 
-        Binding itself always uses IRCopy: element_type's own address
-        (base_addr + i * element_width) copied into the element
-        binding's own slot works identically whether element_type is
-        scalar or composite (IRCopy is purely byte-width-based, see
-        its own docstring in ir/ir.py) -- no scalar/composite split
-        needed here the way VarDecl's own initializer dispatch has.
-        The two-binding form's own index binding is the one exception:
-        i is already a plain value in a Temp, not an address to copy
-        FROM, so that one goes through an ordinary IRStore instead.
+        Binding itself delegates to _ir_bind_for_in_value (shared with
+        _ir_for_in_dict's own key/value bindings) for the element,
+        fed the element's own computed address (base_addr + i *
+        element_width) to copy or load from -- works identically
+        whether element_type is scalar or composite, that method's
+        own concern, not this one's. The two-binding form's own index
+        binding is the one exception handled directly here: i is
+        already a plain value in a Temp, not an address to read FROM,
+        so it goes through _ir_finish_scalar_var_decl on its own.
 
         Mutation safety: ARRAY needs no check at all (nothing about
         iterating it can change its own fixed address). SLICE re-
@@ -975,43 +1024,7 @@ class ArraysSlicesMixin:
             element_index = 1
         else:
             element_index = 0
-        element_decl_id = (id(stmt), element_index)
-        element_slot = slots[element_index]
-        if element_type.kind in COMPOSITE_KINDS:
-            # Mirrors gen_statement_ir's own composite VarDecl case
-            # exactly: malloc a fresh box first if this binding is
-            # heap-allocated (never for SLICE -- its own descriptor is
-            # always small and stack-resident, matching that case's
-            # identical exclusion), THEN compute the destination's own
-            # address (which, for a heap-allocated one, now correctly
-            # loads the fresh pointer this same malloc just wrote,
-            # exactly like _ir_array_address/_ir_struct_address/etc.
-            # already do for any OTHER heap-allocated local), then
-            # IRCopy the element's own bytes into it.
-            if element_type.kind != TypeKind.SLICE and self._is_heap_allocated(element_decl_id, element_type):
-                ir.extend(self._ir_malloc_and_store(element_type, element_slot))
-            address_of = {
-                TypeKind.ARRAY: self._ir_array_address,
-                TypeKind.STRUCT: self._ir_struct_address,
-                TypeKind.SLICE: self._ir_slice_address,
-                TypeKind.DICT: self._ir_dict_address,
-                TypeKind.SUM: self._ir_struct_address,  # generic address computation -- see its own docstring
-                TypeKind.STR: self._ir_str_address,
-            }[element_type.kind]
-            dst_ir, dst_addr = address_of(Variable(name=stmt.binding_names[element_index]))
-            ir.extend(dst_ir)
-            ir.append(IRCopy(dst_address=dst_addr, src_address=elem_addr, value_type=element_type))
-        else:
-            # An ordinary scalar element: IRLoad its own value out of
-            # elem_addr first (there's no expression to hand gen_
-            # expr_ir here, unlike an ordinary VarDecl's own
-            # initializer -- the element comes from the collection's
-            # own storage, not a source expression), then the
-            # identical _ir_finish_scalar_var_decl the index binding
-            # just above already used.
-            value = self.ir_program.ids.new_temp(element_type)
-            ir.append(IRLoad(dst=value, address=elem_addr))
-            ir.extend(self._ir_finish_scalar_var_decl(stmt.binding_names[element_index], element_decl_id, element_type, value))
+        ir.extend(self._ir_bind_for_in_value(stmt, element_index, element_type, elem_addr, ir_fn))
 
         self.loop_labels.append((continue_label, end_label))
         for s in stmt.body:

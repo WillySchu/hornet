@@ -369,19 +369,12 @@ class StatementsMixin:
             self._pop_scope()
             return ir
         elif isinstance(stmt, ForIn):
-            # Stage 2 (array/slice) only, for now -- see this project's
-            # own scoping discussion for why array/slice comes first
-            # and dict (Stage 3) follows separately. type_of(stmt.
-            # iterable) is already resolved (semantic.py's own analyze_
-            # for_in already restricted it to ARRAY/SLICE/DICT), so
-            # dict reaching here means Stage 3 hasn't landed yet --
-            # raising a clear, explicit IRError rather than an
-            # AttributeError from _ir_for_in_array_slice assuming an
-            # element_type that a DICT-typed iterable doesn't have.
+            # Dispatches on the iterable's own resolved type -- already
+            # restricted to ARRAY/SLICE/DICT by semantic.py's own
+            # analyze_for_in, so this is exhaustive: no third, fallback
+            # case needed.
             if type_of(stmt.iterable).kind == TypeKind.DICT:
-                raise IRError(
-                    "'for ... in' over a dict is not implemented yet "
-                    "(only array and slice iteration exist so far)")
+                return self._ir_for_in_dict(stmt, ir_fn)
             return self._ir_for_in_array_slice(stmt, ir_fn)
         elif isinstance(stmt, VarDecl):
             # A scalar VarDecl, WITH or without an initializer: bind
