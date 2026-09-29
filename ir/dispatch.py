@@ -280,12 +280,17 @@ class DispatchMixin:
         if expr.op == BinaryOp.OR:
             return self._ir_short_circuit(expr, short_circuit_value=1, label_prefix="or")
         if expr.op == BinaryOp.IN:
-            # `key in d` -- dict-only for now (see check_binary's own
-            # docstring in semantic.py), so expr.right is always dict-
-            # typed here; type_of(expr.right) rather than expr.left's
-            # own type is what _ir_dict_contains needs to know the
-            # dict's own key/value widths.
-            return self._ir_dict_contains(expr.left, expr.right, type_of(expr.right))
+            # `key in d` (hash lookup) vs `value in arr`/`value in s`
+            # (linear scan) -- see check_binary's own docstring in
+            # semantic.py for the full membership design, and _ir_
+            # array_slice_contains' own docstring (ir/arrays_slices.py)
+            # for why array and slice share one implementation rather
+            # than each getting their own. type_of(expr.right) rather
+            # than expr.left's own type is what both callees need to
+            # know the collection's own key/value or element widths.
+            if type_of(expr.right).kind == TypeKind.DICT:
+                return self._ir_dict_contains(expr.left, expr.right, type_of(expr.right))
+            return self._ir_array_slice_contains(expr.left, expr.right, type_of(expr.right).element_type)
         if type_of(expr.left) == Type.STR:
             # ADD (concatenation) is deliberately NOT dispatched here:
             # its own result IS a str, a composite, multi-value type

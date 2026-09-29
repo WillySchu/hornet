@@ -778,6 +778,84 @@ class ArraysSlicesMixin:
             IRLabel(continue_label),
         ]
 
+    def _ir_array_slice_contains(self, needle_expr: Node, collection_expr: Node, element_type: Type) -> tuple[list, object]:
+        """Builds (without lowering) `needle_expr in collection_expr`
+        for an ARRAY- or SLICE-typed collection -- returns (ir,
+        value), a plain bool Temp. A linear scan, unlike dict's own
+        O(1) hash lookup (_ir_dict_contains): "is this exact value an
+        element" has no better mechanism for either ARRAY or SLICE, so
+        both share this one implementation rather than each getting
+        their own -- _ir_indexable_base already gives a uniform
+        (address, length) pair for either (an array's own length a
+        compile-time IRConst, a slice's own read off its descriptor at
+        runtime), needing no branching here on which of the two this
+        actually is.
+
+        needle_expr's own address comes from _ir_materialize_value_
+        into_scratch (built for dict-literal construction, but already
+        generic over any value, scalar or composite) -- always fresh,
+        never reusing an existing address even when needle_expr
+        already has one, the same "simpler than special-casing, costs
+        nothing extra" reasoning that method's own docstring gives.
+
+        Each element's own comparison reuses _ir_composite_equal
+        exactly as array equality's own loop does (ir/arrays_slices.
+        py's own module-level element-loop shape), but INVERTED: a
+        mismatch there means "keep scanning" here (jumps to next_
+        label, not an outright failure), and falling through (no
+        mismatch -- a match) jumps straight to a TRUE result instead
+        of continuing. The loop exhausting with no match falls through
+        to a FALSE result."""
+        needle_ir, needle_addr = self._ir_materialize_value_into_scratch(
+            needle_expr, element_type, self.ir_fn, "in_needle")
+        base = self._ir_indexable_base(collection_expr)
+        if base is None:
+            raise IRError(
+                f"_ir_indexable_base returned None for an ARRAY/SLICE-typed "
+                f"'in' right operand ({collection_expr!r}) -- expected to "
+                f"always succeed for a reachable indexable base")
+        base_ir, base_addr, length_value, _ = base
+        element_width = type_byte_width(element_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+
+        i = self.ir_program.ids.new_temp(Type.INT)
+        start_label = self.ir_program.ids.new_label("in_start")
+        body_label = self.ir_program.ids.new_label("in_body")
+        next_label = self.ir_program.ids.new_label("in_next")
+        found_label = self.ir_program.ids.new_label("in_found")
+        not_found_label = self.ir_program.ids.new_label("in_not_found")
+        done_label = self.ir_program.ids.new_label("in_done")
+        cond = self.ir_program.ids.new_temp(Type.BOOL)
+        ir = needle_ir + base_ir + [
+            IRMove(dst=i, src=IRConst(0, Type.INT)),
+            IRJump(start_label),
+            IRLabel(start_label),
+            IRBinOp(dst=cond, op=BinaryOp.LESS_THAN, left=i, right=length_value),
+            IRBranch(cond=cond, true_label=body_label, false_label=not_found_label),
+            IRLabel(body_label),
+        ]
+        offset_temp = self.ir_program.ids.new_temp(Type.INT)
+        ir.append(IRBinOp(dst=offset_temp, op=BinaryOp.MULTIPLY, left=i, right=IRConst(element_width, Type.INT)))
+        elem_addr = self.ir_program.ids.new_temp(Type.INT64)
+        ir.append(IRBinOp(dst=elem_addr, op=BinaryOp.ADD, left=base_addr, right=offset_temp))
+        ir.extend(self._ir_composite_equal(needle_addr, elem_addr, element_type, next_label))
+        ir.append(IRJump(found_label))
+        ir.append(IRLabel(next_label))
+        next_i = self.ir_program.ids.new_temp(Type.INT)
+        ir.append(IRBinOp(dst=next_i, op=BinaryOp.ADD, left=i, right=IRConst(1, Type.INT)))
+        ir.append(IRMove(dst=i, src=next_i))
+        ir.append(IRJump(start_label))
+        t = self.ir_program.ids.new_temp(Type.BOOL)
+        ir.extend([
+            IRLabel(not_found_label),
+            IRMove(dst=t, src=IRConst(0, Type.BOOL)),
+            IRJump(done_label),
+            IRLabel(found_label),
+            IRMove(dst=t, src=IRConst(1, Type.BOOL)),
+            IRJump(done_label),
+            IRLabel(done_label),
+        ])
+        return ir, t
+
     def _ir_write_composite_value_into(self, dst_address, value_expr: Node, value_type: Type):
         """The general-purpose dispatcher underlying nested literal
         construction: writes value_expr's own value through dst_

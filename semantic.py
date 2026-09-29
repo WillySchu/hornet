@@ -3237,12 +3237,14 @@ class SemanticAnalyzer:
             return Type.BOOL
 
         if op == BinaryOp.IN:
-            # `key in d` -- dict membership only for now; array,
-            # slice, and str membership are real, wanted features but
-            # each needs its own, substantially different mechanism
-            # (str is substring search, not "is this exact value an
-            # element" -- sharing almost nothing with array/dict
-            # membership), so none of the three is built yet.
+            # `key in d` (hash lookup), or `value in arr`/`value in s`
+            # (linear scan, "is this exact value an element" -- see
+            # _ir_composite_equal's own docstring in ir/arrays_slices.
+            # py for the shared per-element comparison primitive array/
+            # struct equality already uses, reused here too) -- str
+            # membership is a substantially different mechanism again
+            # (substring search, not "is this exact value an element"
+            # at all) and still isn't built.
             #
             # left_type/right_type are already computed above,
             # unconditionally -- unlike _check_indexable_and_index's
@@ -3254,19 +3256,36 @@ class SemanticAnalyzer:
             # same as every other check_binary case comparing two
             # already-independently-typed operands -- `int8(5) in d`,
             # not bare `5 in d`, for an int8-keyed dict.
-            if right_type.kind != TypeKind.DICT:
-                raise SemanticError(
-                    f"'in' requires a dict as its right operand, got {right_type} "
-                    f"-- array, slice, and str membership aren't supported yet",
-                    expr.right,
-                )
-            if not self._types_compatible(left_type, right_type.key_type):
-                raise SemanticError(
-                    f"Dict declares key type {right_type.key_type}, but 'in's "
-                    f"own left operand is {left_type}",
-                    expr.left,
-                )
-            return Type.BOOL
+            if right_type.kind == TypeKind.DICT:
+                if not self._types_compatible(left_type, right_type.key_type):
+                    raise SemanticError(
+                        f"Dict declares key type {right_type.key_type}, but 'in's "
+                        f"own left operand is {left_type}",
+                        expr.left,
+                    )
+                return Type.BOOL
+            if right_type.kind in (TypeKind.ARRAY, TypeKind.SLICE):
+                element_type = right_type.element_type
+                if not self._is_comparable_type(element_type):
+                    raise SemanticError(
+                        f"'in' does not support an element type of "
+                        f"{element_type} -- membership isn't defined yet "
+                        f"when the elements are (or contain) a slice, "
+                        f"sum type, or dict",
+                        expr.right,
+                    )
+                if not self._types_compatible(left_type, element_type):
+                    raise SemanticError(
+                        f"{right_type} declares element type {element_type}, "
+                        f"but 'in's own left operand is {left_type}",
+                        expr.left,
+                    )
+                return Type.BOOL
+            raise SemanticError(
+                f"'in' requires a dict, array, or slice as its right operand, "
+                f"got {right_type} -- str membership isn't supported yet",
+                expr.right,
+            )
 
         if op in _LOGICAL_OPS:
             self._require_type(left_type, Type.BOOL, op, expr)

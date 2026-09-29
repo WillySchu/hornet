@@ -19,7 +19,6 @@ Documentation:
 Updates:
 - `for in` loop.
 - Dicts as sum types.
-- `in` checking for arrays/slices.
 - `in` checking for strings.
 - Sum type equality.
 - Sum type support for nested sum types?

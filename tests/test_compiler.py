@@ -9377,13 +9377,149 @@ class TestDicts:
             match="Dict declares key type str, but 'in's own left operand is int",
         )
 
-    def test_in_requires_a_dict_right_operand(self):
+    def test_in_requires_a_dict_array_or_slice_right_operand(self):
         assert_program_semantic_error(
             "def int main():\n"
             "    int y = 5\n"
             "    bool x = 'a' in y\n"
             "    return 0\n",
-            match="'in' requires a dict as its right operand",
+            match="'in' requires a dict, array, or slice as its right operand",
+        )
+
+    # -- in / not in: array and slice membership (linear scan) -----------------
+
+    def test_in_with_an_array(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    [5]int arr = [10, 20, 30, 40, 50]\n"
+            "    if 30 in arr:\n"
+            "        print('found')\n"
+            "    if 99 in arr:\n"
+            "        print('found (WRONG)')\n"
+            "    else:\n"
+            "        print('not found (correct)')\n"
+            "    return 0\n",
+            "found\nnot found (correct)\n",
+        )
+
+    def test_in_with_a_slice(self):
+        assert_program_stdout(
+            "def int main():\n"
+            "    []int s = [10, 20, 30, 40, 50]\n"
+            "    if 30 in s:\n"
+            "        print('found')\n"
+            "    if 99 in s:\n"
+            "        print('found (WRONG)')\n"
+            "    else:\n"
+            "        print('not found (correct)')\n"
+            "    []int empty = []\n"
+            "    if 1 in empty:\n"
+            "        print('found in empty (WRONG)')\n"
+            "    else:\n"
+            "        print('empty correctly has nothing')\n"
+            "    return 0\n",
+            "found\nnot found (correct)\nempty correctly has nothing\n",
+        )
+
+    def test_in_with_str_elements(self):
+        """Each element comparison recurses through _ir_composite_
+        equal exactly as array/struct equality's own element loop
+        does -- this exercises its own STR case (length-first, then
+        memcmp) specifically, not just the scalar one."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    [3]str names = ['alice', 'bob', 'carol']\n"
+            "    if 'bob' in names:\n"
+            "        print('found')\n"
+            "    if 'dave' in names:\n"
+            "        print('found (WRONG)')\n"
+            "    else:\n"
+            "        print('not found (correct)')\n"
+            "    return 0\n",
+            "found\nnot found (correct)\n",
+        )
+
+    def test_in_with_struct_elements(self):
+        """Exercises _ir_composite_equal's own STRUCT case (per-field
+        recursion) as the element comparison."""
+        assert_program_stdout(
+            "type Point struct:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int main():\n"
+            "    [2]Point pts = [Point(1, 2), Point(3, 4)]\n"
+            "    Point target = Point(3, 4)\n"
+            "    Point missing = Point(5, 6)\n"
+            "    if target in pts:\n"
+            "        print('found')\n"
+            "    if missing in pts:\n"
+            "        print('found (WRONG)')\n"
+            "    else:\n"
+            "        print('not found (correct)')\n"
+            "    return 0\n",
+            "found\nnot found (correct)\n",
+        )
+
+    def test_not_in_with_an_array(self):
+        """The identical parse-time Unary(NOT, Binary(IN, ...))
+        composition dict's own 'not in' already uses -- proved here
+        end-to-end for array/slice too, not just that it parses."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    [3]int nums = [10, 20, 30]\n"
+            "    if 30 not in nums:\n"
+            "        print('30 absent (WRONG)')\n"
+            "    else:\n"
+            "        print('30 present (correct)')\n"
+            "    if 99 not in nums:\n"
+            "        print('99 absent (correct)')\n"
+            "    return 0\n",
+            "30 present (correct)\n99 absent (correct)\n",
+        )
+
+    def test_in_evaluates_the_needle_exactly_once_for_side_effects(self):
+        """The needle's own address is materialized once, before the
+        loop even starts (_ir_materialize_value_into_scratch, called
+        a single time in _ir_array_slice_contains) -- a needle with
+        its own side effect must run it exactly once, never once per
+        element scanned."""
+        assert_program_stdout(
+            "def int get_target():\n"
+            "    print('computing target')\n"
+            "    return 30\n"
+            "\n"
+            "def int main():\n"
+            "    [3]int arr = [10, 20, 30]\n"
+            "    if get_target() in arr:\n"
+            "        print('found')\n"
+            "    return 0\n",
+            "computing target\nfound\n",
+        )
+
+    def test_in_with_an_uncomparable_element_type_is_rejected(self):
+        """Reuses _is_comparable_type, the identical check array/
+        struct equality's own element type already gets -- a slice
+        element (or one that contains one, at any depth) has no
+        well-defined comparison, so 'in' can't scan for it either."""
+        assert_program_semantic_error(
+            "def int main():\n"
+            "    [][]int nested = [[1, 2], [3, 4]]\n"
+            "    []int target = [1, 2]\n"
+            "    bool x = target in nested\n"
+            "    return 0\n",
+            match="'in' does not support an element type of \\[\\]int -- "
+                  "membership isn't defined yet when the elements are "
+                  "\\(or contain\\) a slice, sum type, or dict",
+        )
+
+    def test_in_element_type_mismatch_is_rejected(self):
+        assert_program_semantic_error(
+            "def int main():\n"
+            "    [3]str names = ['alice', 'bob', 'carol']\n"
+            "    bool x = 5 in names\n"
+            "    return 0\n",
+            match="\\[3\\]str declares element type str, but 'in's own left operand is int",
         )
 
     # -- nil (declared-but-uninitialized) dicts -------------------------------
