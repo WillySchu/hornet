@@ -196,7 +196,37 @@ class ScalarsMixin:
                 ir, ptr_value, len_value = result
                 arg_ir.extend(ir)
                 arg_values.extend([ptr_value, len_value])
-            elif arg_type.kind == TypeKind.SLICE or isinstance(arg, NoneLiteral):
+            elif arg_type.kind == TypeKind.SLICE or (isinstance(arg, NoneLiteral) and param_types is not None and param_types[i].kind == TypeKind.SLICE):
+                # A bare `none` argument is ambiguous on its own --
+                # type_of(NoneLiteral) is Type.NONE, neither SLICE nor
+                # POINTER -- so which shape it needs can only be read
+                # off the PARAMETER it's actually flowing into, via
+                # param_types[i], the same lookup is_widening just
+                # above already uses. A real, constructed bug before
+                # this gate existed: an unconditional `or isinstance(
+                # arg, NoneLiteral)` here routed a `none` argument
+                # through _ir_slice_arg regardless of the parameter's
+                # own declared type, always producing THREE IR values
+                # (a nil slice's own {ptr, len, cap} triple) even for a
+                # POINTER-typed parameter expecting exactly one. For
+                # the pointer parameter's OWN value this happened to
+                # look harmless -- ptr=0 is the correct null pointer
+                # too -- but the two EXTRA, spurious values (len=0,
+                # cap=0) still got passed into the call's own argument
+                # list, silently shifting every SUBSEQUENT parameter's
+                # own intended value one register late: confirmed
+                # directly, not assumed -- check(none, 42) with check's
+                # own second parameter reading back 0 instead of 42.
+                # param_types is None only for a builtin (print/len/
+                # append, none of which ever reach this method at all
+                # -- see gen_expr_ir's own Call dispatch and _ir_write_
+                # composite_value_into's own docstring) or an
+                # unresolved callee ("shouldn't happen for a real
+                # call" -- see this method's own docstring); either
+                # way, falling through to the ordinary scalar case
+                # below is always correct there too, matching how a
+                # pointer-typed parameter's own `none` argument is
+                # already handled once this condition is False.
                 result = self._ir_slice_arg(arg)
                 if result is None:
                     raise IRError(

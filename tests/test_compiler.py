@@ -17771,6 +17771,79 @@ class TestNone:
         )
         assert result.returncode == -signal.SIGABRT
 
+    def test_none_as_a_pointer_argument_does_not_corrupt_a_later_parameter(self):
+        """A real, constructed bug, found and fixed after this arc
+        first shipped: _ir_call_arguments' own SLICE-argument dispatch
+        was `arg_type.kind == TypeKind.SLICE or isinstance(arg,
+        NoneLiteral)` -- unconditional on the SECOND clause, so a bare
+        `none` passed to a POINTER-typed parameter also matched it,
+        routing through _ir_slice_arg and producing THREE IR values (a
+        nil slice's own {ptr, len, cap} triple) for a parameter
+        expecting exactly one. The pointer parameter's OWN value
+        happened to come out right regardless (ptr=0 is the correct
+        null pointer too), which is why test_none_as_a_pointer_
+        argument_reads_back_as_none just below -- an equivalent,
+        single-parameter case -- passed both before and after this
+        fix and doesn't by itself prove anything. What actually
+        exposed it: the two EXTRA, spurious values (len=0, cap=0)
+        still got passed into the call, silently shifting every
+        parameter declared after the pointer one register late. Here
+        `y` -- passed as 42 -- read back as 0 instead, corrupted by
+        the none argument declared just before it. The fix reads the
+        actual PARAMETER's own declared type (param_types[i], the
+        same lookup the sum-type widening check just above already
+        uses) to decide whether a bare `none` argument needs the
+        slice-triple shape at all, rather than assuming every `none`
+        argument must be one."""
+        assert_program_stdout(
+            "def int check(*int p, int y):\n"
+            "    if p == none:\n"
+            "        return y\n"
+            "    return -1\n"
+            "\n"
+            "def int main():\n"
+            "    print(check(none, 42))\n"
+            "    return 0\n",
+            "42\n",
+        )
+
+    def test_none_as_a_pointer_argument_reads_back_as_none(self):
+        """The direct, single-parameter confirmation that `none`
+        passed to a pointer-typed parameter is itself still correct
+        after the fix above -- gen_expr_ir's own NoneLiteral case
+        (ir/dispatch.py) produces the null-pointer value here, exactly
+        as it already does for a pointer-typed VarDecl/Assign
+        initializer or a pointer-returning function's own `return
+        none`."""
+        assert_program_stdout(
+            "def bool isNull(*int p):\n"
+            "    return p == none\n"
+            "\n"
+            "def int main():\n"
+            "    if isNull(none):\n"
+            "        print('yes null')\n"
+            "    return 0\n",
+            "yes null\n",
+        )
+
+    def test_none_as_mixed_slice_and_pointer_arguments_in_one_call(self):
+        """Confirms the fix reads EACH argument position's own
+        parameter type independently (param_types[i], not some single,
+        call-wide assumption) -- a slice-typed `none` and a pointer-
+        typed `none` in the SAME call each still get their own,
+        correctly-shaped treatment: three values for the slice, one
+        for the pointer."""
+        assert_program_stdout(
+            "def bool takesBoth([]int s, *int p):\n"
+            "    return s == none and p == none\n"
+            "\n"
+            "def int main():\n"
+            "    if takesBoth(none, none):\n"
+            "        print('both none')\n"
+            "    return 0\n",
+            "both none\n",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Semantic analysis: scope/declaration checking and the strict int/bool
