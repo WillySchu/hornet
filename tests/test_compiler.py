@@ -23256,9 +23256,12 @@ class TestForInSemantics:
         )
         analyze(ast)  # should not raise
 
-    def test_non_addressable_iterable_is_rejected(self):
-        """The deliberate, tracked seam ForIn's own docstring names --
-        a function call directly as the iterable isn't accepted yet."""
+    def test_bare_call_iterable_is_rejected(self):
+        """A function call result directly as the iterable is
+        rejected outright -- see analyze_for_in's own docstring for
+        why (unlike re-slicing an existing, named variable, a call's
+        own result might alias one of ITS OWN parameters, which this
+        intraprocedural analysis has no way to know)."""
         ast = _parse(
             "def []int make():\n"
             "    []int s = [1, 2, 3]\n"
@@ -23271,7 +23274,145 @@ class TestForInSemantics:
         )
         with pytest.raises(
             SemanticError,
-            match="'for ... in' requires a plain variable, field, or index expression",
+            match="'for ... in' does not support a function call result",
+        ):
+            analyze(ast)
+
+    def test_append_call_as_iterable_is_rejected(self):
+        """append(...) is a Call node too, so it's caught by the
+        identical rejection -- no separate carve-out needed, or
+        given, for a builtin specifically."""
+        ast = _parse(
+            "def int main():\n"
+            "    []int s = [1, 2, 3]\n"
+            "    for x in append(s, 4):\n"
+            "        print(x)\n"
+            "    return 0\n"
+        )
+        with pytest.raises(
+            SemanticError,
+            match="'for ... in' does not support a function call result",
+        ):
+            analyze(ast)
+
+    def test_field_rooted_in_call_iterable_is_rejected(self):
+        """A real, pre-existing bug, closed as a direct consequence of
+        this restriction, not just a new one: Field's own base was
+        never restricted before this check existed, so `for x in
+        makeBox().items:` used to compile cleanly and then panic at
+        RUNTIME with a false "reallocated" report (makeBox() evaluated
+        twice -- once for the loop's own base address, once for the
+        mutation-safety recheck -- landing two different, freshly-
+        materialized instances, whose descriptor addresses always
+        differ regardless of any actual mutation). Now a clean,
+        compile-time error instead."""
+        ast = _parse(
+            "type Box struct:\n"
+            "    []int items\n"
+            "\n"
+            "def Box makeBox():\n"
+            "    return Box([1, 2, 3])\n"
+            "\n"
+            "def int main():\n"
+            "    for x in makeBox().items:\n"
+            "        print(x)\n"
+            "    return 0\n"
+        )
+        with pytest.raises(
+            SemanticError,
+            match="'for ... in' does not support a function call result",
+        ):
+            analyze(ast)
+
+    def test_index_rooted_in_call_iterable_is_rejected(self):
+        """The identical shape one level down: Index's own base can
+        also be a Call (`makeRows()[i]`), and needs the identical
+        rejection root_variable_of already gives Field's own base."""
+        ast = _parse(
+            "def [2][]int makeRows():\n"
+            "    return [[1, 2], [3, 4]]\n"
+            "\n"
+            "def int main():\n"
+            "    for x in makeRows()[0]:\n"
+            "        print(x)\n"
+            "    return 0\n"
+        )
+        with pytest.raises(
+            SemanticError,
+            match="'for ... in' does not support a function call result",
+        ):
+            analyze(ast)
+
+    def test_slice_rooted_in_call_iterable_is_rejected(self):
+        """Re-slicing is allowed (see test_reslicing_a_variable_
+        iterable_analyzes_correctly below), but only when rooted in a
+        real, named variable -- re-slicing a call's own result
+        directly (`makeSlice()[a:b]`) has the identical aliasing
+        problem a bare call does, one level nested, and is rejected
+        the same way."""
+        ast = _parse(
+            "def []int makeSlice():\n"
+            "    return [1, 2, 3, 4, 5]\n"
+            "\n"
+            "def int main():\n"
+            "    for x in makeSlice()[1:3]:\n"
+            "        print(x)\n"
+            "    return 0\n"
+        )
+        with pytest.raises(
+            SemanticError,
+            match="'for ... in' does not support a function call result",
+        ):
+            analyze(ast)
+
+    def test_array_literal_iterable_analyzes_correctly(self):
+        ast = _parse(
+            "def int main():\n"
+            "    for x in [1, 2, 3]:\n"
+            "        print(x)\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_dict_literal_iterable_analyzes_correctly(self):
+        ast = _parse(
+            "def int main():\n"
+            "    for k, v in dict[str]int{'a': 1, 'b': 2}:\n"
+            "        print(k)\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_reslicing_a_variable_iterable_analyzes_correctly(self):
+        """`arr[a:b]` as the iterable directly -- allowed because
+        root_variable_of finds the real, named `arr` underneath,
+        unlike the rejected, call-rooted cases just above."""
+        ast = _parse(
+            "def int main():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    for x in arr[1:3]:\n"
+            "        print(x)\n"
+            "    return 0\n"
+        )
+        analyze(ast)  # should not raise
+
+    def test_non_addressable_iterable_is_rejected(self):
+        """The general, catch-all shape rejection -- an iterable that
+        isn't a Variable/Field/Index/Slice/ArrayLiteral/DictLiteral
+        (or a Call, given its own dedicated, more specific rejection
+        message just above) at all, a bare arithmetic expression
+        here."""
+        ast = _parse(
+            "def int main():\n"
+            "    int n = 3\n"
+            "    for x in n + 1:\n"
+            "        print(x)\n"
+            "    return 0\n"
+        )
+        with pytest.raises(
+            SemanticError,
+            match="'for ... in' requires a variable, field, index, "
+                  "slice, or array/dict literal",
         ):
             analyze(ast)
 
@@ -23691,6 +23832,103 @@ class TestForInArraySlice:
             "    return 0\n"
         )
 
+    def test_array_literal_iterable_iterates_correctly(self):
+        """A bare bracketed literal as the iterable directly -- no
+        VarDecl needed first. Resolves to ARRAY, absent a declared
+        type to widen against (the identical default resolution an
+        untyped ArrayLiteral gets everywhere else)."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    for x in [10, 20, 30]:\n"
+            "        print(x)\n"
+            "    return 0\n",
+            "10\n20\n30\n",
+        )
+
+    def test_reslicing_an_array_iterates_correctly(self):
+        """`arr[a:b]` as the iterable directly, single-binding form."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    [5]int arr = [10, 20, 30, 40, 50]\n"
+            "    for x in arr[1:4]:\n"
+            "        print(x)\n"
+            "    return 0\n",
+            "20\n30\n40\n",
+        )
+
+    def test_reslicing_a_slice_two_binding_iterates_correctly(self):
+        """`s[a:b]` as the iterable directly, two-binding form -- the
+        index binding is re-indexed from 0 within the RE-SLICE, not
+        the original slice's own indices."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    []int s = [1, 2, 3, 4, 5]\n"
+            "    for i, x in s[2:5]:\n"
+            "        print(i)\n"
+            "        print(x)\n"
+            "    return 0\n",
+            "0\n3\n1\n4\n2\n5\n",
+        )
+
+    def test_reslicing_root_reallocation_panics(self):
+        """The new mutation-safety case this arc's own work was
+        specifically about: re-slicing an existing, named SLICE
+        variable (`s[0:len(s)]`), then reallocating THAT root variable
+        during the loop -- must still panic, via a separately-cached
+        read of the root's own ptr (not stmt.iterable's own base_addr,
+        which is already offset from the root and would never match
+        it even without any mutation at all). Re-slices the WHOLE
+        slice (not a short sub-range) specifically to guarantee enough
+        iterations for at least one append to actually exhaust the
+        spare capacity already left over from the while loop's own
+        prior growth and force a real reallocation -- a short re-slice
+        risks a false negative here (confirmed directly: an earlier,
+        2-element re-slice never actually reallocated at all, since
+        the prior growth's own spare capacity absorbed both appends)."""
+        assert_crashes_with_sigabrt(
+            "    []int s = [1, 2, 3, 4, 5]\n"
+            "    int j = 0\n"
+            "    while j < 100:\n"
+            "        s = append(s, j)\n"
+            "        j = j + 1\n"
+            "    for x in s[0:len(s)]:\n"
+            "        s = append(s, 999)\n"
+            "    print('should not reach here')\n"
+            "    return 0\n"
+        )
+
+    def test_reslicing_safe_in_place_mutation_does_not_panic(self):
+        """The companion case to the test just above: re-slicing, then
+        an in-place element overwrite (no reallocation at all) through
+        the ORIGINAL slice, not the re-slice -- must not panic."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    []int s = [1, 2, 3, 4, 5]\n"
+            "    for i, x in s[1:4]:\n"
+            "        s[i + 1] = x * 100\n"
+            "    for x in s:\n"
+            "        print(x)\n"
+            "    return 0\n",
+            "1\n200\n300\n400\n5\n",
+        )
+
+    def test_reslicing_an_array_root_needs_no_mutation_check(self):
+        """Re-slicing a fixed-size ARRAY (not a slice) -- the root
+        itself can never be reallocated at all (matching the plain
+        ARRAY case's own "no check needed" rule, just applied to the
+        root here rather than stmt.iterable directly, since stmt.
+        iterable -- the re-slice's own result -- is always SLICE-typed
+        regardless of what its own root is). Confirms this doesn't
+        panic and doesn't need one to behave correctly."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    for x in arr[1:4]:\n"
+            "        print(x)\n"
+            "    return 0\n",
+            "2\n3\n4\n",
+        )
+
     def test_array_needs_no_mutation_check_at_all(self):
         """An array's own address can never change (fixed size, no
         reallocation possible) -- confirms iterating one while doing
@@ -23970,4 +24208,19 @@ class TestForInDict:
             "        d[9999 + k] = k\n"
             "    print('should not reach here')\n"
             "    return 0\n"
+        )
+
+    def test_dict_literal_iterable_iterates_correctly(self):
+        """A bare dict literal as the iterable directly -- no VarDecl
+        needed first. Needs no mutation-safety recheck at all (see
+        _ir_for_in_dict's own docstring): its own backing buckets are
+        freshly allocated and referenced by nothing else in the
+        program, ever."""
+        assert_program_stdout(
+            "def int main():\n"
+            "    for k, v in dict[str]int{'a': 1, 'b': 2}:\n"
+            "        print(k)\n"
+            "        print(v)\n"
+            "    return 0\n",
+            "a\n1\nb\n2\n",
         )

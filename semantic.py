@@ -2134,13 +2134,45 @@ class SemanticAnalyzer:
         is likewise handled entirely in ir/arrays_slices.py's own
         _ir_for_in_array_slice and ir/dicts.py's own _ir_for_in_dict).
 
-        iterable is, for now, restricted to a bare Variable/Field/
-        Index -- not yet a call result or a literal directly, the
-        identical "assign it to a variable first" posture the struct-
-        literal-position restriction already takes elsewhere in this
-        file, and a real, tracked follow-up rather than a permanent
-        ceiling (see ForIn's own docstring). Its own resolved type must
-        be ARRAY, SLICE, or DICT.
+        iterable may be a bare Variable, a Field/Index/Slice chain,
+        or an array/dict literal directly -- but a function call
+        result is rejected, whether stmt.iterable IS one directly
+        (`for x in someFn():`) or a Field/Index/Slice chain bottoms
+        out at one anywhere inside it (`for x in someFn().field:`,
+        `for x in someFn()[a:b]:`), via _root_variable_of finding no
+        real, named root for one of those three wrapper shapes.
+
+        The reason is specific to mutation safety, not a general
+        "assign it to a variable first" posture: re-slicing an
+        existing, NAMED variable (`arr[a:b]`) still has a real
+        variable for the IR-building mutation-safety recheck to
+        watch (via _root_variable_of again, this time in ir/arrays_
+        slices.py's own _ir_for_in_array_slice), and an array/dict
+        literal's own backing storage is freshly allocated and
+        referenced by nothing else, ever, so no recheck is even
+        needed there. A function call's own result might alias one
+        of ITS OWN parameters (`def []int identitySlice([]int s):
+        return s`) -- whether it does depends on that function's own
+        body, information this intraprocedural analysis doesn't have
+        and would need real interprocedural analysis to get soundly;
+        see the design discussion this restriction came out of for
+        the fuller reasoning, including why a narrower, best-effort
+        recheck (e.g. watching every slice-typed argument passed to
+        the call) was considered and rejected as neither sound nor
+        free of new false positives.
+
+        This closes a real, pre-existing bug as a direct consequence
+        of applying the SAME reasoning consistently, not just a new
+        restriction: `for x in someFn().field:` already compiled
+        before this check existed (Field's own base was never
+        restricted), and already produced a false "reallocated" panic
+        at runtime, confirmed directly -- someFn() evaluated TWICE
+        (once for the loop's own base address, once for the mutation-
+        safety recheck) lands two independently-materialized
+        instances, whose descriptor addresses always differ from each
+        other regardless of any actual mutation ever happening.
+
+        Its own resolved type must be ARRAY, SLICE, or DICT.
 
         binding_names' own count decides what each name resolves to:
         ARRAY/SLICE with one name binds the element type; with two,
@@ -2168,12 +2200,20 @@ class SemanticAnalyzer:
         stay visible in the body and nowhere past it, both already
         true of one scope with no nested one needed. loop_depth wraps
         the body only, matching every other loop here."""
-        if not isinstance(stmt.iterable, (Variable, Field, Index)):
+        if not isinstance(stmt.iterable, (Variable, Field, Index, Slice, ArrayLiteral, DictLiteral, Call)):
             raise SemanticError(
-                f"'for ... in' requires a plain variable, field, or index "
-                f"expression as its own iterable, not a {type(stmt.iterable).__name__} "
-                f"-- not yet a function call or a literal directly; assign it "
-                f"to a variable first",
+                f"'for ... in' requires a variable, field, index, "
+                f"slice, or array/dict literal as its own iterable, "
+                f"not a {type(stmt.iterable).__name__}",
+                stmt.iterable,
+            )
+        if isinstance(stmt.iterable, Call) or (
+                isinstance(stmt.iterable, (Field, Index, Slice))
+                and self._root_variable_of(stmt.iterable) is None):
+            raise SemanticError(
+                f"'for ... in' does not support a function call result "
+                f"as its own iterable, or anywhere in its own "
+                f"iterable's chain -- assign it to a variable first",
                 stmt.iterable,
             )
         iterable_type = self.check_expr(stmt.iterable)
@@ -2962,23 +3002,32 @@ class SemanticAnalyzer:
         return Type.BOOL
 
     def _root_variable_of(self, expr: Node) -> Optional[Variable]:
-        """Unwraps a chain of Field/Index nodes down to whatever bare
-        Variable, if any, ultimately sits underneath -- `s.field`,
-        `arr[i]`, `outer.inner[0].field`, arbitrary depth alike. The
-        semantic-level counterpart to escape_analysis.py's own
-        root_variable_name (that one also unwraps Slice, which never
-        reaches here: check_unary's own ADDRESS_OF case is the only
-        caller, and `&s[a:b]` -- taking the address of a SLICE
-        production itself, not indexing one -- isn't a shape semantic.
-        py's own Slice-node handling ever produces as a bare `&`
-        operand in the first place).
+        """Unwraps a chain of Field/Index/Slice nodes down to whatever
+        bare Variable, if any, ultimately sits underneath -- `s.field`,
+        `arr[i]`, `arr[a:b]`, `outer.inner[0].field[a:b]`, arbitrary
+        depth and mix alike. The semantic-level counterpart to escape_
+        analysis.py's own root_variable_name -- same three node kinds,
+        same "bottoms out at a bare Variable, or doesn't" answer.
+
+        Two callers now: check_unary's own ADDRESS_OF case (`&s[a:b]`
+        never actually reaches the Slice-unwrapping branch there --
+        taking the address of a SLICE PRODUCTION itself, rather than
+        indexing one, isn't a shape semantic.py's own Slice-node
+        handling ever produces as a bare `&` operand in the first
+        place, so widening this to unwrap Slice changed nothing for
+        that caller) and analyze_for_in (where `for x in arr[a:b]:` --
+        re-slicing as the iterable itself -- very much does need it,
+        to find the real, named variable a mutation-safety recheck
+        can watch).
 
         Returns None when the chain bottoms out in anything else -- a
-        Call (`someFn().field`), most notably: there's no stable
-        declaration for escape analysis to attribute the resulting
-        address to the way there is for a named variable, so `&`'s own
-        ADDRESS_OF case rejects that shape using this same check."""
-        while isinstance(expr, (Field, Index)):
+        Call (`someFn().field`, `someFn()[a:b]`), most notably:
+        there's no stable declaration to attribute the resulting
+        address to the way there is for a named variable. check_
+        unary's own ADDRESS_OF case rejects that shape using this same
+        check; analyze_for_in rejects it for a different, its own
+        reason (see its own docstring)."""
+        while isinstance(expr, (Field, Index, Slice)):
             expr = expr.base if isinstance(expr, Field) else expr.array
         return expr if isinstance(expr, Variable) else None
 

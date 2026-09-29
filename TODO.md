@@ -18,7 +18,6 @@ Documentation:
 
 Updates:
 - Struct literal restrictions in semantic analysis?
-- `for in` loops on non addressable base (literals, function returns, etc.).
 - Dicts as sum types.
 - `in` checking for strings.
 - Sum type equality.
@@ -58,6 +57,7 @@ Updates:
 - Import \*?
 - Borrow checker for modifying dicts / slices in for ... in ... loops?
 - Flow sensitive escape analysis.
+- `for in` loops on function calls.
 - Deduplicate emitted type descriptors when we call print()
 - Variadic functions.
 - Variadic FFI calls?

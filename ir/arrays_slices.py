@@ -32,6 +32,7 @@ from ir.ir import (
 from ir.utils import COMPOSITE_KINDS, SUM_TYPE_TAG_WIDTH, is_composite_addressable, type_of, type_byte_width, for_in_binding_types
 from parser import Node, ArrayLiteral, Call, DictLiteral, Field, ForIn, Index, Slice, Variable, NoneLiteral, Binary, BinaryOp, Unary, UnaryOp
 from semantic import TypeKind, Type
+from escape_analysis import root_variable_name
 
 
 class ArraysSlicesMixin:
@@ -961,7 +962,33 @@ class ArraysSlicesMixin:
         i, unrelated to this loop's own counter) would silently
         compare two DIFFERENT slices' own ptr values and panic with a
         false "reallocated" report -- confirmed as a real, constructed
-        bug, not a hypothetical one, before this fix existed."""
+        bug, not a hypothetical one, before this fix existed.
+
+        Three further shapes, all newer than the above: an ArrayLiteral
+        iterable needs no recheck at all, for a different, stronger
+        reason than ARRAY's own "fixed address" one -- its own backing
+        storage is freshly allocated and referenced by nothing else in
+        the program, ever, so nothing could mutate it out from under
+        this loop even in principle, whether or not IT happens to be
+        SLICE-typed (`for x in []int[1, 2, 3]:`, an explicit type_expr,
+        can produce one). A Slice iterable (re-slicing, `for x in
+        arr[a:b]:`) is the interesting new case: the re-slice's own
+        {ptr, len, cap} triple is freshly produced by _ir_slice_into,
+        never written into any addressable, persistent location at
+        all -- there is no stable descriptor of arr[a:b] ITSELF to
+        re-read from. What CAN be watched is the ROOT variable the
+        slice was taken FROM (root_variable_name, imported from escape_
+        analysis.py -- semantic.py's own analyze_for_in already
+        guarantees one exists for any Slice-shaped iterable that
+        reaches here, via its own, semantic-level _root_variable_of
+        check), if that root is itself SLICE-typed (an ARRAY root's own
+        address can't change either, matching ARRAY's own rule, just
+        applied to the root here instead of stmt.iterable directly). A
+        function call anywhere in stmt.iterable's own chain is
+        rejected outright by semantic.py before this method ever runs
+        -- see analyze_for_in's own docstring for why a sound recheck
+        isn't possible for one at all (interprocedural aliasing this
+        analysis doesn't have)."""
         iterable_type = type_of(stmt.iterable)
         element_type = iterable_type.element_type
         element_width = type_byte_width(element_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
@@ -976,7 +1003,44 @@ class ArraysSlicesMixin:
         base_ir, base_addr, length_value, _ = base
         ir = base_ir
 
-        if is_slice:
+        # descriptor_expr is None when no recheck is needed at all
+        # (ARRAY -- unchanged; ArrayLiteral; a Slice rooted in an
+        # ARRAY-typed variable). Otherwise it's the expression whose
+        # own descriptor address gets cached and re-read from every
+        # iteration: stmt.iterable itself for the direct, already-
+        # addressable shapes (Variable/Field/Index, exactly as
+        # before), or a synthesized Variable naming the ROOT for a
+        # Slice (re-slicing) iterable.
+        #
+        # recheck_base is the value the reloaded ptr gets compared
+        # AGAINST. For the direct shapes this is simply base_addr
+        # (already stmt.iterable's own ptr, computed just above by
+        # _ir_indexable_base). For a re-slice it must NOT be base_addr
+        # -- base_addr there is already offset from the root's own
+        # ptr by the slice's own start index (arr[2:5]'s own base_addr
+        # is root's ptr + 2*element_width), so it would never equal
+        # the root's own reloaded ptr even with zero mutation ever
+        # happening. A SEPARATE read of the root's own ptr, taken once
+        # here at loop start, is what recheck_base needs to be
+        # instead.
+        descriptor_expr = None
+        recheck_base = base_addr
+        if is_slice and not isinstance(stmt.iterable, ArrayLiteral):
+            if isinstance(stmt.iterable, Slice):
+                root_name = root_variable_name(stmt.iterable)
+                if root_name is None:
+                    raise IRError(
+                        f"root_variable_name returned None for a Slice-"
+                        f"shaped 'for ... in' iterable ({stmt.iterable!r}) "
+                        f"-- expected to always succeed, semantic.py's own "
+                        f"analyze_for_in already having confirmed a real "
+                        f"root variable exists before this method ever runs")
+                if self._local_type(root_name).kind == TypeKind.SLICE:
+                    descriptor_expr = Variable(name=root_name)
+            else:
+                descriptor_expr = stmt.iterable
+
+        if descriptor_expr is not None:
             # Computed ONCE here, separately from _ir_indexable_base's
             # own (already complete, already correct) ptr/len/cap
             # unpacking just above -- that method has no reason to
@@ -989,15 +1053,20 @@ class ArraysSlicesMixin:
             # _ir_indexable_base run here, at loop start, before the
             # body could ever mutate anything an Index/Field chain's
             # own address depends on.
-            descriptor_result = self._ir_slice_address(stmt.iterable)
+            descriptor_result = self._ir_slice_address(descriptor_expr)
             if descriptor_result is None:
                 raise IRError(
                     f"_ir_slice_address returned None for a SLICE-typed "
-                    f"'for ... in' iterable ({stmt.iterable!r}) -- expected "
-                    f"to always succeed, having already succeeded once "
-                    f"above via _ir_indexable_base")
+                    f"'for ... in' iterable's own recheck target "
+                    f"({descriptor_expr!r}) -- expected to always succeed, "
+                    f"having already succeeded once above via "
+                    f"_ir_indexable_base or resolved to a plain Variable")
             descriptor_ir, descriptor_addr = descriptor_result
             ir = ir + descriptor_ir
+            if descriptor_expr is not stmt.iterable:
+                root_ptr = self.ir_program.ids.new_temp(Type.INT64)
+                ir.append(IRLoad(dst=root_ptr, address=descriptor_addr))
+                recheck_base = root_ptr
 
         i = self.ir_program.ids.new_temp(Type.INT)
         start_label = self.ir_program.ids.new_label("for_in_start")
@@ -1019,11 +1088,11 @@ class ArraysSlicesMixin:
         ir.append(IRBranch(cond=cond, true_label=body_label, false_label=end_label))
         ir.append(IRLabel(body_label))
 
-        if is_slice:
+        if descriptor_expr is not None:
             recheck_ptr = self.ir_program.ids.new_temp(Type.INT64)
             ir.append(IRLoad(dst=recheck_ptr, address=descriptor_addr))
             mutated = self.ir_program.ids.new_temp(Type.BOOL)
-            ir.append(IRBinOp(dst=mutated, op=BinaryOp.NOT_EQUAL, left=recheck_ptr, right=base_addr))
+            ir.append(IRBinOp(dst=mutated, op=BinaryOp.NOT_EQUAL, left=recheck_ptr, right=recheck_base))
             mutated_label = self.ir_program.ids.new_label("for_in_mutated")
             safe_label = self.ir_program.ids.new_label("for_in_safe")
             ir.append(IRBranch(cond=mutated, true_label=mutated_label, false_label=safe_label))

@@ -88,6 +88,17 @@ class DictsMixin:
                 ir.append(IRLoad(dst=loaded, address=addr_temp))
                 return ir, loaded
             return ir, addr_temp
+        if isinstance(expr, DictLiteral):
+            # A bare dict-literal 'for ... in' iterable (`for k, v in
+            # dict[str]int{...}:`) -- the one new shape this method
+            # needs beyond what it already had, since semantic.py's
+            # own analyze_for_in only allows Variable/Field/Index/
+            # Slice/ArrayLiteral/DictLiteral to reach here at all (a
+            # Call is rejected outright, so no case for one is needed
+            # here either). _ir_materialize_dict_literal never
+            # returns None (see its own docstring), so there's nothing
+            # to propagate.
+            return self._ir_materialize_dict_literal(expr)
         if isinstance(expr, Index):
             return self._ir_index_address(expr)
         if isinstance(expr, Field):
@@ -593,13 +604,24 @@ class DictsMixin:
         base address and bucket_stride math. Ordinary insert-without-
         growth, in-place value overwrite, and delete (tombstoning) are
         all still safe and unchecked -- none of them touch buckets_
-        ptr at all."""
+        ptr at all.
+
+        A bare DictLiteral iterable (`for k, v in dict[str]int{...}:`)
+        needs no recheck at all, unconditionally skipped -- exactly
+        _ir_for_in_array_slice's own ArrayLiteral reasoning: its own
+        backing storage (descriptor_addr here, this literal's own
+        materialized, hidden slot) is freshly allocated and referenced
+        by nothing else in the program, ever, so buckets_ptr could
+        never actually change out from under this loop -- the check
+        would always trivially pass, never a correctness bug, just
+        needless generated IR left in for nothing."""
         dict_type = type_of(stmt.iterable)
         key_type = dict_type.key_type
         value_type = dict_type.element_type
         key_width = type_byte_width(key_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
         value_width = type_byte_width(value_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
         bucket_stride = 1 + key_width + value_width
+        needs_recheck = not isinstance(stmt.iterable, DictLiteral)
 
         result = self._ir_dict_address(stmt.iterable)
         if result is None:
@@ -644,26 +666,27 @@ class DictsMixin:
         # anything -- computing bucket_addr from a stale buckets_ptr is
         # already the unsafe operation, regardless of what this
         # particular iteration's own bucket state byte turns out to be.
-        recheck_ptr = self.ir_program.ids.new_temp(Type.INT64)
-        ir.append(IRLoad(dst=recheck_ptr, address=descriptor_addr))
-        mutated = self.ir_program.ids.new_temp(Type.BOOL)
-        ir.append(IRBinOp(dst=mutated, op=BinaryOp.NOT_EQUAL, left=recheck_ptr, right=buckets_ptr))
-        mutated_label = self.ir_program.ids.new_label("for_in_mutated")
-        safe_label = self.ir_program.ids.new_label("for_in_safe")
-        ir.append(IRBranch(cond=mutated, true_label=mutated_label, false_label=safe_label))
-        ir.append(IRLabel(mutated_label))
-        msg_ptr = self.ir_program.ids.new_temp(Type.INT64)
-        msg_label = self.ir_program.ids.new_label("for_in_mutated_msg")
-        self.ir_program.string_literals.append(
-            (msg_label, "for ... in: dict's own buckets were reallocated (e.g. by an "
-                        "insert that triggered growth) during iteration"))
-        ir.append(IRStaticDataAddress(dst=msg_ptr, label=msg_label))
-        ir.append(IRCall(dst=None, name='hornet_panic', args=[msg_ptr]))
-        ir.append(IRJump(safe_label))  # unreachable -- hornet_panic never
-        # returns -- but the verifier requires every block to end in an
-        # explicit terminator, the same reasoning _ir_for_in_array_
-        # slice's own identical SLICE-case jump already has.
-        ir.append(IRLabel(safe_label))
+        if needs_recheck:
+            recheck_ptr = self.ir_program.ids.new_temp(Type.INT64)
+            ir.append(IRLoad(dst=recheck_ptr, address=descriptor_addr))
+            mutated = self.ir_program.ids.new_temp(Type.BOOL)
+            ir.append(IRBinOp(dst=mutated, op=BinaryOp.NOT_EQUAL, left=recheck_ptr, right=buckets_ptr))
+            mutated_label = self.ir_program.ids.new_label("for_in_mutated")
+            safe_label = self.ir_program.ids.new_label("for_in_safe")
+            ir.append(IRBranch(cond=mutated, true_label=mutated_label, false_label=safe_label))
+            ir.append(IRLabel(mutated_label))
+            msg_ptr = self.ir_program.ids.new_temp(Type.INT64)
+            msg_label = self.ir_program.ids.new_label("for_in_mutated_msg")
+            self.ir_program.string_literals.append(
+                (msg_label, "for ... in: dict's own buckets were reallocated (e.g. by an "
+                            "insert that triggered growth) during iteration"))
+            ir.append(IRStaticDataAddress(dst=msg_ptr, label=msg_label))
+            ir.append(IRCall(dst=None, name='hornet_panic', args=[msg_ptr]))
+            ir.append(IRJump(safe_label))  # unreachable -- hornet_panic never
+            # returns -- but the verifier requires every block to end in an
+            # explicit terminator, the same reasoning _ir_for_in_array_
+            # slice's own identical SLICE-case jump already has.
+            ir.append(IRLabel(safe_label))
 
         offset_temp = self.ir_program.ids.new_temp(Type.INT64)
         ir.append(IRBinOp(dst=offset_temp, op=BinaryOp.MULTIPLY, left=i, right=IRConst(bucket_stride, Type.INT64)))
