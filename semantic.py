@@ -3036,11 +3036,30 @@ class SemanticAnalyzer:
 
     def _is_comparable_type(self, t: Type) -> bool:
         """Whether '==' is defined for a value of type `t` -- true for
-        int/bool/str; recursively true for an ARRAY whose element type
-        is itself comparable (this method IS the recursion, unwrapping
-        one ARRAY level per call); recursively true for a STRUCT whose
-        fields are all comparable; always false for a SLICE (slice
-        equality beyond `s == none` isn't defined).
+        int/bool/str/pointer; recursively true for an ARRAY whose
+        element type is itself comparable (this method IS the
+        recursion, unwrapping one ARRAY level per call); recursively
+        true for a STRUCT whose fields are all comparable; always
+        false for a SLICE (slice equality beyond `s == none` isn't
+        defined), a SUM type (rejected as a direct operand too --
+        check_binary's own top-level rejection list -- but reachable
+        HERE via an ARRAY that merely CONTAINS one, which that top-
+        level check never sees -- never via a STRUCT field, since a
+        sum type isn't allowed as one at all yet, see type_from_name's
+        own docstring: an unhandled SUM reaching _ir_composite_equal's
+        own final, scalar-only fallback there doesn't fail loudly, it
+        silently does a fixed-width load-and-compare against a value
+        several times wider, comparing some arbitrary, truncated slice
+        of the tag-plus-payload bytes -- confirmed to actually
+        misreport equal for two Shapes holding the same variant with
+        different field values), or a DICT for the identical reason,
+        reachable via either an ARRAY or a STRUCT field (its own
+        descriptor's first field is a raw, unstable heap pointer to
+        its backing buckets array, not any kind of logical value --
+        comparing it, even as part of that same silent fallback, is
+        comparing implementation detail that happens to differ across
+        separately-constructed dicts, never a real notion of
+        equality).
 
         Used by check_binary's ARRAY-vs-ARRAY and STRUCT-vs-STRUCT
         branches alike -- an array's own comparability already depends
@@ -3056,7 +3075,7 @@ class SemanticAnalyzer:
         if t.kind == TypeKind.STRUCT:
             struct_info = self.structs[t.struct_name]
             return all(self._is_comparable_type(field_type) for field_type in struct_info.fields.values())
-        if t.kind == TypeKind.SLICE:
+        if t.kind in (TypeKind.SLICE, TypeKind.SUM, TypeKind.DICT):
             return False
         return True  # INT, BOOL, STR, POINTER
 
@@ -3131,16 +3150,18 @@ class SemanticAnalyzer:
                         f"'{op.symbol()}' does not support {left_type} "
                         f"operands -- array equality isn't defined yet "
                         f"when the elements are (or contain) a slice, "
-                        f"which has no '==' defined for it yet",
+                        f"sum type, or dict, none of which has '==' "
+                        f"defined for it yet outside comparing to none",
                         expr,
                     )
                 return Type.BOOL
 
             # STRUCT vs STRUCT: valid when both sides are the exact
             # same struct type AND every field, at any nesting depth,
-            # is itself comparable. A slice-typed field anywhere has
-            # no well-defined field-by-field comparison, same reason
-            # an array of slices doesn't just above.
+            # is itself comparable. A slice-, sum-, or dict-typed
+            # field anywhere has no well-defined field-by-field
+            # comparison, same reason an array of them doesn't just
+            # above.
             if left_type.kind == TypeKind.STRUCT and right_type.kind == TypeKind.STRUCT:
                 if left_type != right_type:
                     raise SemanticError(
@@ -3155,7 +3176,8 @@ class SemanticAnalyzer:
                         f"operands -- struct equality isn't defined yet "
                         f"when a field (directly, or nested inside "
                         f"another struct or an array field) is a slice, "
-                        f"which has no '==' defined for it yet",
+                        f"sum type, or dict, none of which has '==' "
+                        f"defined for it yet outside comparing to none",
                         expr,
                     )
                 return Type.BOOL

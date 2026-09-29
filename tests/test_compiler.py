@@ -18324,6 +18324,71 @@ class TestSemanticErrors:
             return_type="bool",
         )
 
+    def test_array_of_sum_types_equality_comparison_is_rejected(self):
+        """Was a silent, latent bug before _is_comparable_type learned
+        to reject SUM (mirroring its own SLICE rejection): array
+        equality's own scalar fallback treated a sum-typed element as
+        if it were an ordinary, register-width value, comparing only
+        some arbitrary, truncated slice of its actual tag-plus-payload
+        bytes -- confirmed to actually misreport two Shapes holding
+        the same variant with different field values as equal, rather
+        than failing loudly or comparing correctly. (No struct-with-
+        a-sum-typed-field counterpart test exists alongside this one:
+        a sum type is deliberately not allowed as a struct field's own
+        type at all yet -- see type_from_name's own docstring -- so
+        that shape isn't a constructible program in the first place.)
+        """
+        ast = _parse(
+            "type Circle struct:\n"
+            "    int radius\n"
+            "\n"
+            "type Square struct:\n"
+            "    int64 side\n"
+            "\n"
+            "type Shape is Circle | Square\n"
+            "\n"
+            "def bool main():\n"
+            "    [2]Shape a = [Circle(1), Circle(2)]\n"
+            "    [2]Shape b = [Circle(1), Circle(2)]\n"
+            "    return a == b\n"
+        )
+        with pytest.raises(
+            SemanticError,
+            match="array equality isn't defined yet when the elements "
+                  "are \\(or contain\\) a slice, sum type, or dict",
+        ):
+            analyze(ast)
+
+    def test_array_of_dicts_equality_comparison_is_rejected(self):
+        """The identical bug _is_comparable_type's own SUM fix
+        addresses, for the identical underlying reason: a dict's own
+        descriptor begins with a raw, unstable heap pointer to its
+        backing buckets array, not any kind of logical value, so the
+        same scalar fallback comparing it is comparing implementation
+        detail that differs across separately-constructed dicts,
+        never a real notion of equality."""
+        assert_semantic_error(
+            "    [2]dict[str]int a\n"
+            "    [2]dict[str]int b\n"
+            "    return a == b",
+            match="array equality isn't defined yet when the elements "
+                  "are \\(or contain\\) a slice, sum type, or dict",
+            return_type="bool",
+        )
+
+    def test_struct_with_a_dict_typed_field_equality_comparison_is_rejected(self):
+        ast = _parse(
+            "type Wrapper struct:\n"
+            "    dict[str]int d\n"
+            "\n"
+            "def bool main():\n"
+            "    Wrapper a\n"
+            "    Wrapper b\n"
+            "    return a == b\n"
+        )
+        with pytest.raises(SemanticError, match="struct equality isn't defined yet when a field"):
+            analyze(ast)
+
     def test_array_as_function_param_and_return_type_checks_correctly(self):
         """The positive control: semantic.py fully accepts arrays as
         parameter and return types -- type_from_name and Type's
