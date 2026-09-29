@@ -19,7 +19,6 @@ Documentation:
 Updates:
 - Struct literal restrictions in semantic analysis?
 - `for in` loops on non addressable base (literals, function returns, etc.).
-- Fix `return none` for pointer returning function.
 - Dicts as sum types.
 - `in` checking for strings.
 - Sum type equality.
@@ -43,7 +42,8 @@ Updates:
 - Consider enabling struct literal syntax for aliases.
 - `function` type.
 - User defined types built off other types.
-- Change slice's zero type to an empty slice rather than `none`.
+- Change slice's zero type to an empty slice rather than `none`?
+- Change dict's zero type to an empty slice rather than `none`?
 - Disallow untyped array literals from anything except assignment to a typed variable / parameter / return.
 - `assert`
 - `cap` builtin?
@@ -66,7 +66,6 @@ Updates:
 - int32
 - Change int to an alias.
 - float
-- Imports.
 - Multithreading
 - `gen_array_copy` currently copies each leaf one by one, so for small leaf types (int8, etc.) this is calling many `movb` rather than a few `movq`.
 - Consider aligning struct storage rather than packing.

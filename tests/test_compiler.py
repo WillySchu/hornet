@@ -17571,6 +17571,65 @@ class TestNone:
             1,
         )
 
+    def test_return_bare_none_from_pointer_returning_function(self):
+        """A real, constructed bug, found and fixed after this arc
+        first shipped: gen_statement_ir's own Return case treated ANY
+        bare `none` return value as needing the composite, hidden-
+        return-pointer path -- correct for the SLICE case just above,
+        but a pointer-returning function has no hidden return pointer
+        at all (it's returned directly in a register, like any other
+        scalar), so _ir_hidden_return_ptr's own lookup had no slot to
+        find and crashed the verifier outright: "IRLocalAddress
+        references unknown slot None". The fix gates the composite-
+        return check's own NoneLiteral clause on the return type
+        actually being SLICE, matching every other site in ir/
+        statements.py that intercepts a bare `none` (VarDecl/Assign/
+        IndexAssign/FieldAssign all already did this correctly) --
+        letting a pointer-returning `return none` fall through to the
+        ordinary scalar return path instead, where gen_expr_ir's own
+        NoneLiteral case (ir/dispatch.py) already produces the
+        correct null-pointer value, exactly as it already does for a
+        pointer-typed VarDecl/Assign initializer."""
+        assert_program_stdout(
+            "def *int maybeGet(bool flag):\n"
+            "    if flag:\n"
+            "        int x = 5\n"
+            "        return &x\n"
+            "    return none\n"
+            "\n"
+            "def int main():\n"
+            "    *int p = maybeGet(false)\n"
+            "    if p == none:\n"
+            "        print('got none')\n"
+            "    return 0\n",
+            "got none\n",
+        )
+
+    def test_return_address_still_works_from_the_same_pointer_returning_function(self):
+        """The companion case to the test just above, in the SAME
+        function -- confirms the fix's own new TypeKind.SLICE gate
+        doesn't accidentally disturb the OTHER branch's already-
+        working `return &x`, which must still route through the
+        ordinary scalar return path exactly as before (a pointer
+        return was never routed through the hidden-pointer path in
+        the first place; only a bare `none` was ever mis-routed)."""
+        assert_program_stdout(
+            "def *int maybeGet(bool flag):\n"
+            "    if flag:\n"
+            "        int x = 5\n"
+            "        return &x\n"
+            "    return none\n"
+            "\n"
+            "def int main():\n"
+            "    *int p = maybeGet(true)\n"
+            "    if p == none:\n"
+            "        print('got none')\n"
+            "    else:\n"
+            "        print(*p)\n"
+            "    return 0\n",
+            "5\n",
+        )
+
     def test_none_valued_slice_equals_none(self):
         assert_exit_code(
             "    []int s = none\n"

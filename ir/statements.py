@@ -101,7 +101,7 @@ class StatementsMixin:
         ExprStmt whose own base is out of scope for _ir_slice_into)
         raises IRError explicitly."""
         if isinstance(stmt, Return):
-            is_composite_return = isinstance(stmt.value, NoneLiteral) or (
+            is_composite_return = (isinstance(stmt.value, NoneLiteral) and ir_fn.return_type.kind == TypeKind.SLICE) or (
                 stmt.value is not None and (
                     type_of(stmt.value).kind in COMPOSITE_KINDS
                     or ir_fn.return_type.kind == TypeKind.SUM
@@ -114,6 +114,27 @@ class StatementsMixin:
             # never be `none` -- semantic.py rejects that outright).
             # _ir_nil_slice's own all-zero triple, written through the
             # hidden pointer as an ordinary slice descriptor.
+            #
+            # A POINTER-typed return's own `none` deliberately does
+            # NOT reach this branch -- is_composite_return's own
+            # NoneLiteral clause is gated on ir_fn.return_type.kind ==
+            # TypeKind.SLICE specifically, matching every other site
+            # in this file that intercepts a bare `none` ahead of gen_
+            # expr_ir (VarDecl/Assign/IndexAssign/FieldAssign, all
+            # gated on TypeKind.SLICE too). A pointer has no hidden
+            # return pointer at all -- it's returned directly in a
+            # register, like any other scalar -- so _ir_hidden_return_
+            # ptr's own lookup has no slot to find for one, and did,
+            # in fact, resolve to slot=None before this gate existed,
+            # confirmed as a real IRVerificationError ("IRLocalAddress
+            # references unknown slot None"), not a hypothetical.
+            # Falling through to the ordinary is_composite_return=
+            # False branch above instead routes a pointer-returning
+            # `return none` through the plain _ir_return(stmt.value)
+            # path -- gen_expr_ir's own NoneLiteral case (ir/dispatch.
+            # py) already produces the correct IRConst(0, Type.INT64)
+            # null-pointer value there, exactly as it already does for
+            # a pointer-typed VarDecl/Assign initializer.
             if isinstance(stmt.value, NoneLiteral):
                 hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr(ir_fn)
                 nil_ir, ptr_value, len_value, cap_value = self._ir_nil_slice()
