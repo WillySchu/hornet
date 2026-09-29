@@ -1,0 +1,34 @@
+# Twelve values live across the whole loop body.
+def int main():
+    int a = 1
+    int b = 2
+    int c = 3
+    int d = 4
+    int e = 5
+    int f = 6
+    int g = 7
+    int h = 8
+    int j = 9
+    int k = 10
+    int l = 11
+    int m = 12
+    int i = 0
+    while i < 24000000:
+        a = (a + b * 3) & 65535
+        b = (b ^ c) + 1
+        c = (c + d - i) & 65535
+        d = (d * 5 + e) & 65535
+        e = e ^ (f + i)
+        f = (f + g + h) & 65535
+        g = (g * 3 - j) & 65535
+        h = (h + k) ^ l
+        j = (j + l + m) & 65535
+        k = (k ^ a) + 7
+        l = (l + b + c) & 65535
+        m = (m + d * e) & 65535
+        b = b & 65535
+        e = e & 65535
+        h = h & 65535
+        k = k & 65535
+        i = i + 1
+    return (a + b + c + d + e + f + g + h + j + k + l + m) % 256

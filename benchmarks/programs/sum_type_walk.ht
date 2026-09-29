@@ -1,0 +1,43 @@
+# AST-interpreter style: recursive match dispatch over sum-typed nodes.
+type Num struct:
+    int v
+type Add struct:
+    int l
+    int r
+type Mul struct:
+    int l
+    int r
+type Node is Num | Add | Mul
+
+def int eval([]Node nodes, int i):
+    match nodes[i] as n:
+        is Num:
+            return n.v
+        is Add:
+            return (eval(nodes, n.l) + eval(nodes, n.r)) & 1048575
+        is Mul:
+            return (eval(nodes, n.l) * eval(nodes, n.r)) & 1048575
+
+def int main():
+    []Node nodes = none
+    []int level = none
+    for int i = 0; i < 4096; i += 1:
+        nodes = append(nodes, Num(i % 10 + 1))
+        level = append(level, i)
+    int depth = 0
+    while len(level) > 1:
+        []int next = none
+        for int j = 0; j + 1 < len(level); j += 2:
+            if (j / 2 + depth) % 3 == 0:
+                nodes = append(nodes, Mul(level[j], level[j + 1]))
+            else:
+                nodes = append(nodes, Add(level[j], level[j + 1]))
+            next = append(next, len(nodes) - 1)
+        level = next
+        depth += 1
+    int root = level[0]
+    int total = 0
+    for int r = 0; r < 2500; r += 1:
+        nodes[r * 97 % 4096] = Num(r + 3)
+        total = (total + eval(nodes, root)) & 1048575
+    return (total ^ (total >> 8) ^ (total >> 16)) % 256

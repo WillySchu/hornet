@@ -15,7 +15,9 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_compiler import GCC_SKIP, _compile_to_binary, _run_binary
+from build import build_executable
+from compile import compile_to_asm
+from tests.test_compiler import ASM_PLATFORM, GCC_SKIP, _run_binary
 
 PROGRAMS_DIR = Path(__file__).parent.parent / 'benchmarks' / 'programs'
 
@@ -33,6 +35,13 @@ EXPECTED_EXIT_CODES = {
     'string_heavy': 1,  # r1 == r2 -- two independently-built copies of the same repeated string
     'copy_heavy': 173,  # whole-array/whole-struct/whole-slice copy, slice production, indexing through a slice-typed struct field/array element, chained slice production, repeated scalar append, repeated STRUCT-element append, indexing directly into append's own result with no variable in between (verified in isolation, separately from the rest of this benchmark's own Go-style aliasing, which a naive Python re-simulation doesn't replicate faithfully), a no-initializer slice, slice-vs-none comparison, and a bare bracketed-list literal resolved to SLICE by context, in a hot loop
     'calling_convention_heavy': 135,  # array-typed, slice-typed, and array-typed-struct-field function arguments (the last exercising the Field-argument fix), plus composite-returning function calls including forwarding one level deep, a bare local Variable return, an all-scalar positional struct-literal return, a nested struct-literal return, a composite-returning call used directly as an addressable base (indexed, field-accessed, and sliced -- the last exercising the always-heap-allocate-for-slice-production path), and a bare ArrayLiteral, a composite-returning Call, and a struct-literal each passed directly as a function-call argument, in a hot loop
+    # Added with item 6; each verified against a Python reference implementation.
+    'register_pressure': 142,  # twelve values live across a loop body
+    'calls_in_loop': 111,  # locals live across calls to a leaf function
+    'branchy': 114,  # if/elif chains, short-circuit and/or, Collatz loops
+    'tokenize': 136,  # lexer-style byte scan over a 270 KB str, 60 times
+    'dict_heavy': 192,  # int- and str-keyed insert/delete/lookup/iterate
+    'sum_type_walk': 7,  # recursive match dispatch over a sum-typed tree
 }
 
 # How many times each benchmark's COMPILED BINARY is run before this
@@ -55,8 +64,10 @@ RERUNS = 10
 @GCC_SKIP
 @pytest.mark.parametrize('name', sorted(EXPECTED_EXIT_CODES))
 def test_benchmark_still_compiles_and_runs_correctly(name, tmp_path):
-    source = (PROGRAMS_DIR / f'{name}.ht').read_text()
-    bin_path, asm = _compile_to_binary(source, tmp_path)
+    path = str(PROGRAMS_DIR / f'{name}.ht')
+    bin_path = tmp_path / 'program'
+    build_executable(path, str(bin_path), platform=ASM_PLATFORM)  # full driver, so imports work
+    asm = compile_to_asm(path, platform=ASM_PLATFORM)
     expected = EXPECTED_EXIT_CODES[name]
     for run in range(1, RERUNS + 1):
         result = _run_binary(bin_path, asm)
@@ -96,3 +107,20 @@ def test_benchmark_runner_end_to_end(tmp_path):
         assert r['instruction_count'] > 0, name
         assert a['allocated'] + a['spilled'] == a['eligible'], name
         assert a['eligible'] + a['unsafe_span_excluded'] + a['address_taken_excluded'] == a['total_temps'], name
+
+
+@GCC_SKIP
+@pytest.mark.skipif(__import__('shutil').which('valgrind') is None, reason='valgrind not installed')
+def test_benchmark_runner_counts_executed_instructions(tmp_path):
+    import json
+    import subprocess
+    import sys
+    out = tmp_path / 'results.json'
+    runner = PROGRAMS_DIR.parent / 'run_benchmarks.py'
+    result = subprocess.run(
+        [sys.executable, str(runner), '--runs', '0', '--icount', '--json', str(out),
+         '--compare', str(tmp_path / 'none.json'), 'recursive_fibonacci'],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(out.read_text())['recursive_fibonacci']['executed_instructions'] > 0

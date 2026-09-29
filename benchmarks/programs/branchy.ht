@@ -1,0 +1,31 @@
+# if/elif chains, short-circuit and/or, and data-dependent loops.
+def int classify(int x):
+    if x % 15 == 0:
+        return 3
+    elif x % 5 == 0:
+        return 2
+    elif x % 3 == 0:
+        return 1
+    return 0
+
+def int main():
+    int total = 0
+    int count = 0
+    for int n = 1; n < 250000; n += 1:
+        int v = n
+        int steps = 0
+        while v != 1:
+            if v % 2 == 0:
+                v = v / 2
+            else:
+                v = 3 * v + 1
+            steps += 1
+        total = (total + steps) & 1048575
+        int kind = classify(n)
+        if (steps > 100 and n % 2 == 0) or kind == 3:
+            count += 1
+        elif kind == 1 or (kind == 2 and steps < 50):
+            count += 2
+        elif not (steps > 20):
+            count += 3
+    return (total + count) % 256

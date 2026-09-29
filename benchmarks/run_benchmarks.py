@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -100,8 +101,20 @@ def _time_binary(bin_path: Path, runs: int) -> float:
     return min(times)
 
 
-def run_one(ht_path: Path, runs: int = TIMING_RUNS) -> dict:
-    """Compile, link, and time one benchmark."""
+def _executed_instructions(bin_path: Path) -> int:
+    """Instructions executed, counted by valgrind's cachegrind (deterministic)."""
+    result = subprocess.run(
+        ['valgrind', '--tool=cachegrind', '--cache-sim=no', '--cachegrind-out-file=/dev/null', str(bin_path)],
+        capture_output=True, text=True,
+    )
+    match = re.search(r'I\s+refs:\s+([\d,]+)', result.stderr)
+    if match is None:
+        raise RuntimeError(f"couldn't read cachegrind output:\n{result.stderr}")
+    return int(match.group(1).replace(',', ''))
+
+
+def run_one(ht_path: Path, runs: int = TIMING_RUNS, icount: bool = False) -> dict:
+    """Compile, link, and time one benchmark; optionally count executed instructions."""
     with tempfile.TemporaryDirectory() as tmpdir:
         entry, modules = discover_modules(str(ht_path))
         program = merge_programs(entry, modules)
@@ -134,11 +147,13 @@ def run_one(ht_path: Path, runs: int = TIMING_RUNS) -> dict:
 
         per_function_stats = [_allocation_stats(*c) for c in captured]
         elapsed = _time_binary(bin_path, runs)
+        executed = _executed_instructions(bin_path) if icount else None
 
     return {
         'name': ht_path.stem,
         'instruction_count': _instruction_count(asm_text),
         'runtime_seconds': elapsed,
+        'executed_instructions': executed,
         'allocation': _sum_stats(per_function_stats),
     }
 
@@ -146,7 +161,7 @@ def run_one(ht_path: Path, runs: int = TIMING_RUNS) -> dict:
 def format_report(results: dict) -> str:
     header = (
         f"{'benchmark':<22} {'instrs':>8} {'time(ms)':>10} "
-        f"{'temps':>7} {'elig':>6} {'alloc':>6} {'spill':>6} {'unsafe':>7} {'addr':>5}"
+        f"{'temps':>7} {'elig':>6} {'alloc':>6} {'spill':>6} {'unsafe':>7} {'addr':>5} {'exec(M)':>9}"
     )
     lines = [header, '-' * len(header)]
     for name, r in sorted(results.items()):
@@ -154,14 +169,20 @@ def format_report(results: dict) -> str:
         lines.append(
             f"{name:<22} {r['instruction_count']:>8} {r['runtime_seconds'] * 1000:>10.1f} "
             f"{a['total_temps']:>7} {a['eligible']:>6} {a['allocated']:>6} {a['spilled']:>6} "
-            f"{a['unsafe_span_excluded']:>7} {a['address_taken_excluded']:>5}"
+            f"{a['unsafe_span_excluded']:>7} {a['address_taken_excluded']:>5} "
+            f"{_fmt_exec(r.get('executed_instructions')):>9}"
         )
     lines.append('')
     lines.append(
         "temps: Temps created. elig: eligible for a register. alloc/spill: eligible Temps "
-        "that got a register / a frame slot. unsafe: live across a call. addr: address taken."
+        "that got a register / a frame slot. unsafe: live across a call. addr: address taken. "
+        "exec(M): millions of instructions executed (--icount; needs valgrind)."
     )
     return '\n'.join(lines)
+
+
+def _fmt_exec(n) -> str:
+    return '-' if n is None else f"{n / 1e6:.1f}"
 
 
 def format_diff(results: dict, baseline: dict, label: str) -> str:
@@ -172,15 +193,18 @@ def format_diff(results: dict, baseline: dict, label: str) -> str:
             continue
         b = baseline[name]
         instr_delta = r['instruction_count'] - b['instruction_count']
-        time_delta_pct = (
-            (r['runtime_seconds'] - b['runtime_seconds']) / b['runtime_seconds'] * 100
-            if b['runtime_seconds'] else 0.0
-        )
+        timed = r['runtime_seconds'] and b['runtime_seconds']
+        time_delta = f"{(r['runtime_seconds'] - b['runtime_seconds']) / b['runtime_seconds'] * 100:+.1f}%" if timed else 'n/a'
+
         alloc_delta = r['allocation']['allocated'] - b['allocation']['allocated']
-        lines.append(
-            f"{name}: instructions {instr_delta:+d}, time {time_delta_pct:+.1f}%, "
+        line = (
+            f"{name}: instructions {instr_delta:+d}, time {time_delta}, "
             f"allocated temps {alloc_delta:+d}"
         )
+        if r.get('executed_instructions') and b.get('executed_instructions'):
+            exec_pct = (r['executed_instructions'] - b['executed_instructions']) / b['executed_instructions'] * 100
+            line += f", executed {exec_pct:+.2f}%"
+        lines.append(line)
     return '\n'.join(lines)
 
 
@@ -192,12 +216,16 @@ def main():
     )
     arg_parser.add_argument('--runs', type=int, default=TIMING_RUNS, help=f'Timing runs per program (default {TIMING_RUNS}; 0 skips timing)')
     arg_parser.add_argument('--json', type=Path, help='Also write results to this file')
+    arg_parser.add_argument('--icount', action='store_true', help='Count executed instructions with valgrind (slow, deterministic)')
     arg_parser.add_argument('--compare', type=Path, help='Diff against this results file instead of baseline.json')
     arg_parser.add_argument('programs', nargs='*', help='Benchmark names to run (default: all)')
     args = arg_parser.parse_args()
 
     if shutil.which('gcc') is None:
         print("gcc not found on PATH -- these benchmarks compile and execute real binaries.", file=sys.stderr)
+        sys.exit(1)
+    if args.icount and shutil.which('valgrind') is None:
+        print("--icount needs valgrind on PATH.", file=sys.stderr)
         sys.exit(1)
 
     paths = sorted(PROGRAMS_DIR.glob('*.ht'))
@@ -206,7 +234,7 @@ def main():
     results = {}
     for ht_path in paths:
         print(f"Running {ht_path.stem}...", file=sys.stderr)
-        results[ht_path.stem] = run_one(ht_path, args.runs)
+        results[ht_path.stem] = run_one(ht_path, args.runs, args.icount)
 
     print()
     print(format_report(results))
