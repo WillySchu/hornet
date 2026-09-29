@@ -3,6 +3,7 @@ emitted as a FrameSlot placeholder and resolved after lowering.
 """
 
 from codegen.assembly_ast import (
+    JCC,
     CmpQ,
     CallInstr,
     Cmp,
@@ -46,7 +47,9 @@ from ir.ir import (
     Temp,
 )
 from typesys import is_wide_type, type_byte_width
-from codegen.utils import as_qword_register, ARG_REGISTERS_32, ARG_REGISTERS_64
+from ir.cfg import uses
+from codegen.peephole import INVERSE_CC
+from codegen.utils import as_qword_register, ARG_REGISTERS_32, ARG_REGISTERS_64, COMPARISON_CONDITION_CODES
 from typesys import Type
 
 
@@ -100,18 +103,44 @@ class InstructionSelector:
             return [MovQ(src=src, dst=dst)] if wide else [Mov(src=src, dst=dst)]
         return self.host._gen_write_scalar_from(src, temp.type, self._temp_mem(temp))
 
+    def _fused_compare_branch(self, instructions: list, i: int, use_sites: dict):
+        """`cmp; jNCC false; jmp true` for a comparison read only by the IRBranch right after it, else None."""
+        instr = instructions[i]
+        if not (isinstance(instr, IRBinOp) and instr.op in COMPARISON_CONDITION_CODES and i + 1 < len(instructions)):
+            return None
+        branch = instructions[i + 1]
+        if not (isinstance(branch, IRBranch) and branch.cond == instr.dst and use_sites.get(instr.dst.id) == [i + 1]):
+            return None
+        out = self._gen_load_value(instr.left, Register('eax'))
+        out.extend(self._gen_load_value(instr.right, Register('ecx')))
+        out.append(self._cmp(instr.right, instr.left, wide=is_wide_type(instr.left.type)))
+        out.append(JCC(INVERSE_CC[COMPARISON_CONDITION_CODES[instr.op]], branch.false_label))
+        out.append(Jmp(branch.true_label))
+        return out
+
     @staticmethod
-    def _cmp(src: IRValue, dst: IRValue):
-        """Compare %eax (dst) against %ecx (src), 64-bit if either operand is wide."""
-        if is_wide_type(src.type) or is_wide_type(dst.type):
+    def _cmp(src: IRValue, dst: IRValue, wide: bool = None):
+        """Compare %eax (dst) against %ecx (src), 64-bit if `wide` (default: either operand is wide)."""
+        if wide is None:
+            wide = is_wide_type(src.type) or is_wide_type(dst.type)
+        if wide:
             return CmpQ(src=Register('rcx'), dst=Register('rax'))
         return Cmp(src=Register('ecx'), dst=Register('eax'))
 
     def lower_ir(self, instructions: list) -> list[Instruction]:
         """Lower an IR fragment."""
         out: list[Instruction] = []
-        for instr in instructions:
-            if isinstance(instr, IRMove):
+        use_sites = uses(instructions)
+        skip_next = False
+        for i, instr in enumerate(instructions):
+            if skip_next:
+                skip_next = False
+                continue
+            fused = self._fused_compare_branch(instructions, i, use_sites)
+            if fused is not None:
+                out.extend(fused)
+                skip_next = True
+            elif isinstance(instr, IRMove):
                 out.extend(self._gen_load_value(instr.src, Register('eax')))
                 out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
             elif isinstance(instr, IRBinOp):
@@ -134,7 +163,6 @@ class InstructionSelector:
             elif isinstance(instr, IRJump):
                 out.append(Jmp(instr.label))
             elif isinstance(instr, IRBranch):
-                # No fallthrough peephole yet: always emits both jumps.
                 out.extend(self._gen_load_value(instr.cond, Register('eax')))
                 out.append(Cmp(src=Imm(0), dst=Register('eax')))
                 out.append(Je(instr.false_label))

@@ -24,6 +24,7 @@ from codegen.assembly_ast import (
 )
 from codegen.calling_convention import CALLEE_SAVED_SCRATCH_REGISTERS
 from codegen.emitter import Emitter
+from codegen.peephole import optimize_asm
 from ir.ir import IRCall, IRFunction, IRProgram
 from codegen.ir_lowering import InstructionSelector
 from codegen.register_allocator import allocate_registers
@@ -111,6 +112,7 @@ class CodeGenerator(
         self._patch_frame_slots(instructions)
         self._register_assignment = {}
         instructions.extend(self._gen_bounds_check_panic_block())
+        instructions = optimize_asm(instructions)
 
         # Identical for every function.
         prologue: List[Instruction] = [

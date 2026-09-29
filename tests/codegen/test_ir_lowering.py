@@ -1,8 +1,4 @@
-"""Tests for ir_lowering.py's InstructionSelector -- currently just
-the IRSliceGrow write-back ordering bug documented in codegen/
-register_allocator.py's own ALLOCATABLE_REGISTERS comment. Everything
-else here is otherwise only exercised indirectly, through the full
-compile-and-run integration tests in tests/test_compiler.py."""
+"""Tests for ir_lowering.py's InstructionSelector: IRSliceGrow write-back ordering and compare/branch fusion."""
 
 from codegen.codegen import CodeGenerator
 from codegen.assembly_ast import Mov, MovQ, Register
@@ -108,3 +104,38 @@ def test_slice_grow_true_swap_uses_r12_as_a_temporary():
     ptr_write = _write_index(out, 'r12', 'r13')      # dst_ptr <- the stashed ptr (already widened), not %ebx (already overwritten)
     assert stash != -1 and cap_write != -1 and ptr_write != -1
     assert stash < cap_write < ptr_write
+
+
+# -- compare/branch fusion ----------------------------------------------------
+
+def _cmp_branch_ir(extra_use: bool = False, gap: bool = False) -> list:
+    from ir.ir import IRBinOp, IRBranch, IRMove
+    from ops import BinaryOp
+    a, b, c, d = Temp(10, Type.INT), Temp(11, Type.INT), Temp(12, Type.BOOL), Temp(13, Type.BOOL)
+    ir = [IRBinOp(dst=c, op=BinaryOp.LESS_THAN, left=a, right=b)]
+    if gap:
+        ir.append(IRMove(dst=d, src=c))
+    ir.append(IRBranch(cond=c, true_label='.T', false_label='.F'))
+    if extra_use and not gap:
+        ir.append(IRMove(dst=d, src=c))
+    return ir
+
+
+def test_comparison_feeding_only_the_next_branch_is_fused():
+    from codegen.assembly_ast import CmpQ, JCC, Jmp, SetCC
+    out = _selector_with({10: 'r10d', 11: 'r11d', 12: 'r12d'}).lower_ir(_cmp_branch_ir())
+    assert not any(isinstance(i, SetCC) for i in out)
+    assert any(isinstance(i, CmpQ) for i in out)
+    assert out[-2:] == [JCC('ge', '.F'), Jmp('.T')]
+
+
+def test_comparison_with_another_use_is_not_fused():
+    from codegen.assembly_ast import SetCC
+    out = _selector_with({10: 'r10d', 11: 'r11d', 12: 'r12d', 13: 'ebx'}).lower_ir(_cmp_branch_ir(extra_use=True))
+    assert any(isinstance(i, SetCC) for i in out)
+
+
+def test_comparison_not_directly_before_branch_is_not_fused():
+    from codegen.assembly_ast import SetCC
+    out = _selector_with({10: 'r10d', 11: 'r11d', 12: 'r12d', 13: 'ebx'}).lower_ir(_cmp_branch_ir(gap=True))
+    assert any(isinstance(i, SetCC) for i in out)

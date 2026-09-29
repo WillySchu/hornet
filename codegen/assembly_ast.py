@@ -520,6 +520,20 @@ class Jmp(Instruction):
 
 
 @dataclass
+class JCC(Instruction):
+    """Jump if condition `cc` (a setcc suffix, e.g. 'l', 'ne') holds."""
+    cc: str
+    target: str
+
+    @property
+    def mnemonic(self) -> str:
+        return f"j{self.cc}"
+
+    def operands(self) -> list[str]:
+        return [self.target]
+
+
+@dataclass
 class Je(Instruction):
     """Jump if equal."""
     target: str
