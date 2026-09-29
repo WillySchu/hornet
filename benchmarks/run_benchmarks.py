@@ -12,9 +12,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from lexer import lex
-from parser import Parser
 from desugar import desugar_methods
+from merge import merge_programs
+from modules import discover_modules
 from semantic import analyze
 from codegen.emitter import Emitter
 from build import RUNTIME_C_PATH
@@ -31,17 +31,17 @@ EXECUTION_TIMEOUT = 30
 HOST_IS_MACOS = sys.platform == 'darwin'
 ASM_PLATFORM = 'macos' if HOST_IS_MACOS else 'linux'
 
-STAT_KEYS = ('total_temps', 'unsafe_span_excluded', 'eligible', 'allocated', 'spilled')
+STAT_KEYS = ('total_temps', 'unsafe_span_excluded', 'address_taken_excluded', 'eligible', 'allocated', 'spilled')
 
 
 def _instrumented_generate(program):
-    """CodeGenerator.generate, capturing (ir, assignment) per function."""
+    """CodeGenerator.generate, capturing (ir, temp_home_slots, assignment) per function."""
     captured = []
     original = ra_module.allocate_registers
 
-    def wrapper(ir):
-        assignment = original(ir)
-        captured.append((list(ir), dict(assignment)))
+    def wrapper(ir, temp_home_slots=None):
+        assignment = original(ir, temp_home_slots)
+        captured.append((list(ir), dict(temp_home_slots or {}), dict(assignment)))
         return assignment
 
     codegen_module.allocate_registers = wrapper
@@ -54,16 +54,17 @@ def _instrumented_generate(program):
     return asm_program, captured
 
 
-def _allocation_stats(ir: list, assignment: dict) -> dict:
-    """eligible_intervals' breakdown plus exclusion reasons."""
+def _allocation_stats(ir: list, temp_home_slots: dict, assignment: dict) -> dict:
+    """Allocation breakdown, using the same eligibility rules as allocate_registers."""
     blocks = ra_module.build_cfg(ir)
     live_in, live_out = ra_module.compute_liveness(blocks)
     intervals = ra_module.compute_live_intervals(blocks, live_in, live_out)
-    eligible = ra_module.eligible_intervals(ir, intervals)
-    unsafe_span = len(intervals) - len(eligible)
+    call_safe = ra_module.eligible_intervals(ir, intervals)
+    eligible = ra_module.eligible_intervals(ir, intervals, temp_home_slots)
     return {
         'total_temps': len(intervals),
-        'unsafe_span_excluded': unsafe_span,
+        'unsafe_span_excluded': len(intervals) - len(call_safe),
+        'address_taken_excluded': len(call_safe) - len(eligible),
         'eligible': len(eligible),
         'allocated': len(assignment),
         'spilled': len(eligible) - len(assignment),
@@ -87,23 +88,23 @@ def _instruction_count(asm_text: str) -> int:
     return count
 
 
-def _time_binary(bin_path: Path) -> float:
-    """Minimum wall-clock time over TIMING_RUNS runs."""
-    times = []
-    for _ in range(TIMING_RUNS):
+def _time_binary(bin_path: Path, runs: int) -> float:
+    """Minimum wall-clock time over `runs` runs; 0.0 if runs is 0."""
+    times = [0.0]
+    if runs:
+        times = []
+    for _ in range(runs):
         start = time.perf_counter()
         subprocess.run([str(bin_path)], capture_output=True, timeout=EXECUTION_TIMEOUT)
         times.append(time.perf_counter() - start)
     return min(times)
 
 
-def run_one(ht_path: Path) -> dict:
-    source = ht_path.read_text()
+def run_one(ht_path: Path, runs: int = TIMING_RUNS) -> dict:
+    """Compile, link, and time one benchmark."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        src_path = Path(tmpdir) / 'program.ht'
-        src_path.write_text(source)
-        tokens = lex(str(src_path))
-        program = Parser(tokens).parse_program()
+        entry, modules = discover_modules(str(ht_path))
+        program = merge_programs(entry, modules)
         desugar_methods(program)
         analyze(program)
 
@@ -131,10 +132,8 @@ def run_one(ht_path: Path) -> dict:
         if result.returncode != 0:
             raise RuntimeError(f"gcc failed to assemble/link {ht_path.name}:\n{result.stderr}")
 
-        per_function_stats = [
-            _allocation_stats(ir, assignment) for ir, assignment in captured
-        ]
-        elapsed = _time_binary(bin_path)
+        per_function_stats = [_allocation_stats(*c) for c in captured]
+        elapsed = _time_binary(bin_path, runs)
 
     return {
         'name': ht_path.stem,
@@ -147,7 +146,7 @@ def run_one(ht_path: Path) -> dict:
 def format_report(results: dict) -> str:
     header = (
         f"{'benchmark':<22} {'instrs':>8} {'time(ms)':>10} "
-        f"{'temps':>7} {'elig':>6} {'alloc':>6} {'spill':>6} {'unsafe':>7}"
+        f"{'temps':>7} {'elig':>6} {'alloc':>6} {'spill':>6} {'unsafe':>7} {'addr':>5}"
     )
     lines = [header, '-' * len(header)]
     for name, r in sorted(results.items()):
@@ -155,21 +154,18 @@ def format_report(results: dict) -> str:
         lines.append(
             f"{name:<22} {r['instruction_count']:>8} {r['runtime_seconds'] * 1000:>10.1f} "
             f"{a['total_temps']:>7} {a['eligible']:>6} {a['allocated']:>6} {a['spilled']:>6} "
-            f"{a['unsafe_span_excluded']:>7}"
+            f"{a['unsafe_span_excluded']:>7} {a['address_taken_excluded']:>5}"
         )
     lines.append('')
     lines.append(
-        "temps: total Temps created. elig: eligible for allocation (see "
-        "register_allocator.py's own docstring for the one exclusion). "
-        "alloc/spill: of those eligible, how many got a register vs. fell "
-        "back to a memory slot. unsafe: excluded because their live range "
-        "spans an IRCall."
+        "temps: Temps created. elig: eligible for a register. alloc/spill: eligible Temps "
+        "that got a register / a frame slot. unsafe: live across a call. addr: address taken."
     )
     return '\n'.join(lines)
 
 
-def format_diff(results: dict, baseline: dict) -> str:
-    lines = ['', '=== vs baseline (benchmarks/baseline.json) ===']
+def format_diff(results: dict, baseline: dict, label: str) -> str:
+    lines = ['', f'=== vs {label} ===']
     for name, r in sorted(results.items()):
         if name not in baseline:
             lines.append(f"{name}: NEW (no baseline entry)")
@@ -194,26 +190,35 @@ def main():
         '--save-baseline', action='store_true',
         help="Overwrite baseline.json with this run's own results, instead of diffing against it.",
     )
+    arg_parser.add_argument('--runs', type=int, default=TIMING_RUNS, help=f'Timing runs per program (default {TIMING_RUNS}; 0 skips timing)')
+    arg_parser.add_argument('--json', type=Path, help='Also write results to this file')
+    arg_parser.add_argument('--compare', type=Path, help='Diff against this results file instead of baseline.json')
+    arg_parser.add_argument('programs', nargs='*', help='Benchmark names to run (default: all)')
     args = arg_parser.parse_args()
 
     if shutil.which('gcc') is None:
         print("gcc not found on PATH -- these benchmarks compile and execute real binaries.", file=sys.stderr)
         sys.exit(1)
 
+    paths = sorted(PROGRAMS_DIR.glob('*.ht'))
+    if args.programs:
+        paths = [p for p in paths if p.stem in args.programs]
     results = {}
-    for ht_path in sorted(PROGRAMS_DIR.glob('*.ht')):
+    for ht_path in paths:
         print(f"Running {ht_path.stem}...", file=sys.stderr)
-        results[ht_path.stem] = run_one(ht_path)
+        results[ht_path.stem] = run_one(ht_path, args.runs)
 
     print()
     print(format_report(results))
 
+    if args.json:
+        args.json.write_text(json.dumps(results, indent=2, sort_keys=True) + '\n')
+    compare_path = args.compare or BASELINE_PATH
     if args.save_baseline:
         BASELINE_PATH.write_text(json.dumps(results, indent=2, sort_keys=True) + '\n')
         print(f"\nSaved baseline to {BASELINE_PATH}")
-    elif BASELINE_PATH.exists():
-        baseline = json.loads(BASELINE_PATH.read_text())
-        print(format_diff(results, baseline))
+    elif compare_path.exists():
+        print(format_diff(results, json.loads(compare_path.read_text()), str(compare_path)))
     else:
         print("\nNo baseline.json yet -- run with --save-baseline to create one.")
 

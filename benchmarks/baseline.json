@@ -1,98 +1,106 @@
 {
   "arithmetic_heavy": {
     "allocation": {
-      "allocated": 25,
+      "address_taken_excluded": 0,
+      "allocated": 31,
       "eligible": 32,
-      "spilled": 7,
+      "spilled": 1,
       "total_temps": 32,
       "unsafe_span_excluded": 0
     },
-    "instruction_count": 137,
+    "instruction_count": 138,
     "name": "arithmetic_heavy",
-    "runtime_seconds": 0.1322249009999723
+    "runtime_seconds": 0.15752204199088737
   },
   "array_heavy": {
     "allocation": {
-      "allocated": 78,
-      "eligible": 86,
-      "spilled": 8,
-      "total_temps": 92,
+      "address_taken_excluded": 0,
+      "allocated": 98,
+      "eligible": 98,
+      "spilled": 0,
+      "total_temps": 104,
       "unsafe_span_excluded": 6
     },
-    "instruction_count": 500,
+    "instruction_count": 538,
     "name": "array_heavy",
-    "runtime_seconds": 0.2671290279999994
+    "runtime_seconds": 0.24407191696809605
   },
   "calling_convention_heavy": {
     "allocation": {
-      "allocated": 255,
-      "eligible": 278,
-      "spilled": 23,
-      "total_temps": 297,
+      "address_taken_excluded": 0,
+      "allocated": 283,
+      "eligible": 283,
+      "spilled": 0,
+      "total_temps": 302,
       "unsafe_span_excluded": 19
     },
-    "instruction_count": 1355,
+    "instruction_count": 1367,
     "name": "calling_convention_heavy",
-    "runtime_seconds": 0.29247674499998766
+    "runtime_seconds": 0.2925150829833001
   },
   "copy_heavy": {
     "allocation": {
-      "allocated": 290,
+      "address_taken_excluded": 0,
+      "allocated": 328,
       "eligible": 328,
-      "spilled": 38,
+      "spilled": 0,
       "total_temps": 355,
       "unsafe_span_excluded": 27
     },
-    "instruction_count": 1701,
+    "instruction_count": 1709,
     "name": "copy_heavy",
-    "runtime_seconds": 0.28995314300004793
+    "runtime_seconds": 0.3666228340007365
   },
   "loop_accumulator": {
     "allocation": {
-      "allocated": 9,
+      "address_taken_excluded": 0,
+      "allocated": 11,
       "eligible": 11,
-      "spilled": 2,
+      "spilled": 0,
       "total_temps": 11,
       "unsafe_span_excluded": 0
     },
     "instruction_count": 70,
     "name": "loop_accumulator",
-    "runtime_seconds": 0.26711919799998896
+    "runtime_seconds": 0.29696741700172424
   },
   "recursive_fibonacci": {
     "allocation": {
-      "allocated": 7,
-      "eligible": 7,
+      "address_taken_excluded": 0,
+      "allocated": 8,
+      "eligible": 8,
       "spilled": 0,
-      "total_temps": 9,
+      "total_temps": 10,
       "unsafe_span_excluded": 2
     },
-    "instruction_count": 76,
+    "instruction_count": 78,
     "name": "recursive_fibonacci",
-    "runtime_seconds": 0.04529158799999777
+    "runtime_seconds": 0.04849829099839553
   },
   "string_heavy": {
     "allocation": {
-      "allocated": 13,
-      "eligible": 13,
+      "address_taken_excluded": 0,
+      "allocated": 45,
+      "eligible": 45,
       "spilled": 0,
-      "total_temps": 20,
-      "unsafe_span_excluded": 7
+      "total_temps": 55,
+      "unsafe_span_excluded": 10
     },
-    "instruction_count": 120,
+    "instruction_count": 282,
     "name": "string_heavy",
-    "runtime_seconds": 0.020877720999976646
+    "runtime_seconds": 0.03148750000400469
   },
   "struct_heavy": {
     "allocation": {
-      "allocated": 73,
-      "eligible": 78,
-      "spilled": 5,
-      "total_temps": 86,
+      "address_taken_excluded": 0,
+      "allocated": 79,
+      "eligible": 79,
+      "spilled": 0,
+      "total_temps": 87,
       "unsafe_span_excluded": 8
     },
-    "instruction_count": 425,
+    "instruction_count": 431,
     "name": "struct_heavy",
-    "runtime_seconds": 0.07087734100002763
+    "runtime_seconds": 0.07657858298625797
   }
 }

@@ -74,3 +74,25 @@ def test_every_benchmark_program_has_an_expected_exit_code():
     otherwise just never get checked here at all."""
     on_disk = {p.stem for p in PROGRAMS_DIR.glob('*.ht')}
     assert on_disk == set(EXPECTED_EXIT_CODES)
+
+
+@GCC_SKIP
+def test_benchmark_runner_end_to_end(tmp_path):
+    """run_benchmarks.py itself runs, without timing, and its stats add up."""
+    import json
+    import subprocess
+    import sys
+    out = tmp_path / 'results.json'
+    runner = PROGRAMS_DIR.parent / 'run_benchmarks.py'
+    result = subprocess.run(
+        [sys.executable, str(runner), '--runs', '0', '--json', str(out), '--compare', str(tmp_path / 'none.json')],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    results = json.loads(out.read_text())
+    assert set(results) == set(EXPECTED_EXIT_CODES)
+    for name, r in results.items():
+        a = r['allocation']
+        assert r['instruction_count'] > 0, name
+        assert a['allocated'] + a['spilled'] == a['eligible'], name
+        assert a['eligible'] + a['unsafe_span_excluded'] + a['address_taken_excluded'] == a['total_temps'], name
