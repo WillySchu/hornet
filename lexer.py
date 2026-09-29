@@ -2,8 +2,10 @@
 
 import argparse
 import re
-
 from enum import auto, Enum
+from typing import Optional
+
+from diagnostics import CompileError, InternalCompilerError
 
 
 class TokenType(Enum):
@@ -93,17 +95,22 @@ class TokenType(Enum):
     EOF = auto()
 
 
+class LexError(CompileError):
+    """Invalid character or indentation."""
+
+
 class Token:
-    def __init__(self, t: TokenType, val: str, line: int, col: int):
+    def __init__(self, t: TokenType, val: str, line: int, col: int, file: Optional[str] = None):
         self.type = t
         self.val = val
         self.line = line
         self.col = col
+        self.file = file
 
     def __eq__(self, other) -> bool:
         if not isinstance(other, Token):
             return False
-        return other.__dict__ == self.__dict__
+        return (self.type, self.val, self.line, self.col) == (other.type, other.val, other.line, other.col)
 
     def __str__(self) -> str:
         return f'Token(type={self.type}, val={self.val})'
@@ -113,8 +120,9 @@ class Token:
 
 
 class Lexer:
-    def __init__(self, source: str):
+    def __init__(self, source: str, file: Optional[str] = None):
         self.source = source
+        self.file = file
         self.tokens = []
         self.line = 1
         self.line_start = 0
@@ -331,10 +339,9 @@ class Lexer:
             elif kind == 'SKIP':
                 continue
             elif kind == 'MISMATCH':
-                raise SyntaxError(
-                    f"Unexpected character '{value}' at line {self.line}, column {column}")
+                raise LexError(f"Unexpected character '{value}'", self.file, self.line, column)
             else:
-                raise RuntimeError(f'Unhandled character "{value}" at line {self.line}, column {column}')
+                raise InternalCompilerError(f'Unhandled token kind {kind!r} at line {self.line}, column {column}')
 
         # Synthesize a final NEWLINE before closing DEDENTs.
         if self.tokens and self.tokens[-1].type != TokenType.NEWLINE:
@@ -346,6 +353,8 @@ class Lexer:
             self.tokens.append(Token(TokenType.DEDENT, '', self.line, 1))
 
         self.tokens.append(Token(TokenType.EOF, "", self.line, len(self.source) - self.line_start + 1))
+        for tok in self.tokens:
+            tok.file = self.file
         return self.tokens
 
     def _handle_indentation(self, width: int) -> None:
@@ -359,10 +368,8 @@ class Lexer:
                 self.indent_stack.pop()
                 self.tokens.append(Token(TokenType.DEDENT, '', self.line, 1))
             if width != self.indent_stack[-1]:
-                raise SyntaxError(
-                    f"Unindent does not match any outer indentation "
-                    f"level at line {self.line}"
-                )
+                msg = "Unindent does not match any outer indentation level"
+                raise LexError(msg, self.file, self.line, 0, legacy=f"{msg} at line {self.line}")
 
 
 def main():
@@ -372,10 +379,46 @@ def main():
     print(lex(args.file))
 
 
+_TOKEN_NAMES = {
+    TokenType.IDENTIFIER: 'identifier', TokenType.NUMBER: 'number',
+    TokenType.STRING: 'string literal', TokenType.BYTE: 'byte literal',
+    TokenType.NEWLINE: 'end of line', TokenType.INDENT: 'indentation',
+    TokenType.DEDENT: 'end of block', TokenType.EOF: 'end of input',
+}
+
+
+def _build_spellings() -> dict:
+    lx = Lexer('')
+    out = {t: f"'{word}'" for word, t in lx.keywords.items() if word != 'byte'}
+    for name, pattern in lx.rules:
+        t = getattr(TokenType, name, None)
+        if t is not None and t not in out and t not in _TOKEN_NAMES:
+            out[t] = "'" + re.sub(r'\\(.)', r'\1', pattern) + "'"
+    out.update(_TOKEN_NAMES)
+    return out
+
+
+_SPELLINGS: dict = {}
+
+
+def describe_token_type(t: TokenType) -> str:
+    """Human-readable name of a token type, e.g. "':'" or "end of input"."""
+    if not _SPELLINGS:
+        _SPELLINGS.update(_build_spellings())
+    return _SPELLINGS.get(t, t.name.lower())
+
+
+def describe_token(tok: Token) -> str:
+    """Human-readable token, e.g. "identifier 'x'" or "':'"."""
+    if tok.type in (TokenType.IDENTIFIER, TokenType.NUMBER, TokenType.STRING, TokenType.BYTE):
+        return f"{_TOKEN_NAMES[tok.type]} {tok.val!r}" if tok.type != TokenType.STRING else f"string literal {tok.val}"
+    return describe_token_type(tok.type)
+
+
 def lex(filename: str) -> list:
     with open(filename, 'r') as f:
         lines = f.readlines()
-    lexer = Lexer(''.join(lines))
+    lexer = Lexer(''.join(lines), filename)
     tokens = lexer.tokenize()
     return tokens
 

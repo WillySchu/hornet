@@ -1,8 +1,10 @@
 """Merges discovered modules into the entry Program: mangles module declarations to `module$name` and resolves qualified references and visibility, so later passes see one flat Program. Runs before desugar/analyze."""
 
+import re
 from dataclasses import dataclass, fields
 from typing import Dict, List, Optional, Set, Tuple
 
+from diagnostics import CompileError
 from modules import DiscoveredModule
 from parser import (
     ArrayTypeExpr,
@@ -17,8 +19,12 @@ from parser import (
 )
 
 
-class MergeError(Exception):
+class MergeError(CompileError):
     """Unresolvable or private qualified reference."""
+
+    def __init__(self, message: str, file: Optional[str] = None, line: int = 0, col: int = 0):
+        clean = re.sub(rf' at line {line}\b', '', message) if line else message
+        super().__init__(clean, file, line, col, legacy=message)
 
 
 # Node fields holding type expressions.
@@ -57,7 +63,8 @@ def _check_visible(module: DiscoveredModule, name: str, referencing_module: Opti
         raise MergeError(
             f"'{module.canonical_name}.{name}' at line {at_line} is not visible outside "
             f"the module that defines it -- names starting with '_' are private to their "
-            f"own module"
+            f"own module",
+            line=at_line,
         )
 
 
@@ -77,7 +84,8 @@ def _resolve_in_module(canonical_name: str, name: str, ctx: _MergeContext,
     if name not in ctx.all_own_names[canonical_name]:
         raise MergeError(
             f"'{name}' at line {at_line} is not declared in module "
-            f"{target.canonical_name!r} ({target.file_path})"
+            f"{target.canonical_name!r} ({target.file_path})",
+            line=at_line,
         )
     _check_visible(target, name, referencing_module, at_line)
     return _mangle(canonical_name, name)
@@ -114,7 +122,8 @@ def _rewrite_type_expr(type_expr, own_names: Set[str], canonical_module: Optiona
         if resolved is None:
             raise MergeError(
                 f"'{type_expr.module}' at line {type_expr.line} doesn't name an imported "
-                f"module"
+                f"module",
+                line=type_expr.line,
             )
         return resolved
     if isinstance(type_expr, (ArrayTypeExpr, SliceTypeExpr, PointerTypeExpr)):
@@ -195,7 +204,8 @@ def _validate_named_imports(
                 raise MergeError(
                     f"'{local_alias}' at line {from_decl.line} collides with this file's "
                     f"own declaration of that name -- rename the import with 'as', or "
-                    f"rename the declaration"
+                    f"rename the declaration",
+                    line=from_decl.line,
                 )
             canonical_name, _ = named_imports[local_alias]
             _resolve_in_module(canonical_name, original_name, ctx, referencing_module, from_decl.line)
@@ -243,19 +253,31 @@ def _validate_intrinsics(program: Program) -> None:
                 f"'{ic.original_name}' at line {ic.line} isn't a recognized intrinsic -- "
                 f"the compiler only implements a fixed set of these "
                 f"({', '.join(sorted(_RECOGNIZED_INTRINSICS))}), not a general "
-                f"extensibility mechanism"
+                f"extensibility mechanism",
+                line=ic.line,
             )
         if not _signatures_match(ic, expected):
             expected_return, expected_params = expected
             params_str = ', '.join(str(p) for p in expected_params)
             raise MergeError(
                 f"'{ic.original_name}' at line {ic.line} doesn't match its own required "
-                f"signature -- expected ({params_str}) -> {expected_return}"
+                f"signature -- expected ({params_str}) -> {expected_return}",
+                line=ic.line,
             )
 
 
 def merge_programs(entry_program: Program, modules: Dict[str, DiscoveredModule]) -> Program:
     """Merge modules into entry_program in place and return it."""
+    current = [entry_program.file]
+    try:
+        return _merge(entry_program, modules, current)
+    except MergeError as e:
+        if e.file is None:
+            e.file = current[0]
+        raise
+
+
+def _merge(entry_program: Program, modules: Dict[str, DiscoveredModule], current: list) -> Program:
     entry_aliases = getattr(entry_program, 'import_aliases', {})
     entry_named = getattr(entry_program, 'named_imports', {})
     ctx = _MergeContext(
@@ -280,6 +302,7 @@ def merge_programs(entry_program: Program, modules: Dict[str, DiscoveredModule])
     for canonical_name, module in modules.items():
         own_names = ctx.all_own_names[canonical_name]
         program = module.program
+        current[0] = program.file
         _validate_intrinsics(program)
         _validate_named_imports(program, own_names, module.named_imports, ctx, canonical_name)
         program.functions = _rewrite_node(

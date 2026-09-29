@@ -12,6 +12,7 @@ stashed on Program.
 import argparse
 from typing import Dict, List, Optional, Set, Tuple
 
+from diagnostics import CompileError
 from lexer import lex
 from typesys import StructInfo, SumTypeInfo, Type, TypeKind
 from desugar import mangle_method_name
@@ -172,12 +173,30 @@ _BUILTIN_FUNCTION_NAMES = {'print', 'len', 'append', 'del'}
 
 # Errors
 
-class SemanticError(Exception):
-    """First semantic error found; `node` gives the position."""
+class SemanticError(CompileError):
+    """Semantic error; `node` gives the position."""
     def __init__(self, message: str, node: Optional[Node] = None):
-        if node is not None and (node.line or node.col):
-            message = f"{message} at line {node.line}, column {node.col}"
-        super().__init__(message)
+        if node is None:
+            super().__init__(message)
+        else:
+            super().__init__(message, node.file, node.line, node.col)
+
+
+class SemanticErrors(SemanticError):
+    """Several functions failed. Behaves like the first error; `errors` holds all."""
+    def __init__(self, errors: List[SemanticError]):
+        first = errors[0]
+        Exception.__init__(self, str(first))
+        self.message, self.file, self.line, self.col = first.message, first.file, first.line, first.col
+        self._errors = errors
+
+    @property
+    def errors(self) -> List[CompileError]:
+        return self._errors
+
+
+# Function bodies checked before giving up.
+MAX_ERRORS = 20
 
 
 # Analyzer
@@ -298,9 +317,21 @@ class SemanticAnalyzer:
         program.intrinsic_original_names = self.intrinsic_original_names
         program.function_registry = self.functions
 
-        # 5. Check bodies.
+        # 5. Check bodies, collecting at most one error per function.
+        errors: List[SemanticError] = []
         for fn in program.functions:
-            self.analyze_function(fn)
+            try:
+                self.analyze_function(fn)
+            except SemanticError as e:
+                if e.file is None:
+                    e.file = fn.file
+                errors.append(e)
+                if len(errors) >= MAX_ERRORS:
+                    break
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise SemanticErrors(errors)
 
     def _resolve_sum_types(self, sum_type_defs: List[SumTypeDef], structs: Dict[str, StructInfo]) -> Dict[str, SumTypeInfo]:
         """Resolve sum type variants and check name collisions."""
@@ -788,14 +819,14 @@ class SemanticAnalyzer:
                 f"write it as a plain '=' instead",
                 stmt,
             )
-        synthetic = Binary(op=compound_op, left=target_expr_for_check, right=value_expr, line=stmt.line, col=stmt.col)
+        synthetic = Binary(op=compound_op, left=target_expr_for_check, right=value_expr, line=stmt.line, col=stmt.col, file=stmt.file)
         self.check_binary(synthetic)
 
     def analyze_index_assign(self, stmt: IndexAssign) -> None:
         """`array[index] = value`."""
         element_type = self._check_indexable_and_index(stmt.array, stmt.index)
         if stmt.compound_op is not None:
-            target_expr = Index(array=stmt.array, index=stmt.index, line=stmt.line, col=stmt.col)
+            target_expr = Index(array=stmt.array, index=stmt.index, line=stmt.line, col=stmt.col, file=stmt.file)
             value_expr = stmt.value
             self._check_compound_assign(stmt.compound_op, element_type, target_expr, value_expr, stmt)
             return
@@ -811,7 +842,7 @@ class SemanticAnalyzer:
         """`base.name = value`."""
         field_type = self._check_struct_and_field(stmt.base, stmt.name)
         if stmt.compound_op is not None:
-            target_expr = Field(base=stmt.base, name=stmt.name, line=stmt.line, col=stmt.col)
+            target_expr = Field(base=stmt.base, name=stmt.name, line=stmt.line, col=stmt.col, file=stmt.file)
             self._check_compound_assign(stmt.compound_op, field_type, target_expr, stmt.value, stmt)
             return
         value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, field_type)
@@ -833,7 +864,7 @@ class SemanticAnalyzer:
             )
         pointee_type = pointer_type.element_type
         if stmt.compound_op is not None:
-            target_expr = Unary(op=UnaryOp.DEREFERENCE, operand=stmt.pointer, line=stmt.line, col=stmt.col)
+            target_expr = Unary(op=UnaryOp.DEREFERENCE, operand=stmt.pointer, line=stmt.line, col=stmt.col, file=stmt.file)
             self._check_compound_assign(stmt.compound_op, pointee_type, target_expr, stmt.value, stmt)
             return
         value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, pointee_type)
@@ -934,6 +965,7 @@ class SemanticAnalyzer:
                     init=stmt.condition.subject,
                     line=stmt.condition.line,
                     col=stmt.condition.col,
+                    file=stmt.condition.file,
                 )
                 stmt.condition.binding_decl.resolved_type = subject_type
             self._declare(stmt.condition.variable_name, subject_type, stmt.condition, id(stmt.condition.binding_decl))

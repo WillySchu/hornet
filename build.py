@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 from compile import compile_to_asm
+from diagnostics import run_cli
 
 REPO_ROOT = Path(__file__).resolve().parent
 RUNTIME_C_PATH = REPO_ROOT / "runtime" / "runtime.c"
@@ -62,14 +63,17 @@ def main() -> None:
         "-o", "--output", type=str, required=True,
         help="Path to write the resulting executable to.",
     )
+    arg_parser.add_argument("--traceback", action="store_true", help="Show Python tracebacks for all errors")
     args = arg_parser.parse_args()
 
-    try:
-        build_executable(args.file, args.output, platform=args.platform)
-    except BuildError as e:
-        print(str(e), file=sys.stderr)
-        sys.exit(1)
+    def action():
+        try:
+            build_executable(args.file, args.output, platform=args.platform)
+        except BuildError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
 
+    run_cli(action, args.traceback)
 
 if __name__ == "__main__":
     main()

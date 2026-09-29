@@ -477,7 +477,7 @@ def test_parse_function_no_close_paren():
     with pytest.raises(
         parser.ParseError,
         match=re.escape(
-            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name, '[size]type', or '[]type'), got TokenType.EOF ('') at line 1, column 1"
+            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name, '[size]type', or '[]type'), got end of input at line 1, column 1"
         )):
         p.parse_function()
 
@@ -655,7 +655,7 @@ def test_parse_params_two_params_no_second():
     with pytest.raises(
         parser.ParseError,
         match=re.escape(
-            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name, '[size]type', or '[]type'), got TokenType.CLOSE_PAREN (')') at line 1, column 7"
+            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name, '[size]type', or '[]type'), got ')' at line 1, column 7"
         )):
         p.parse_params()
 
@@ -711,7 +711,7 @@ def test_parse_param_empty():
     with pytest.raises(
         parser.ParseError,
         match=re.escape(
-            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name, '[size]type', or '[]type'), got TokenType.EOF ('') at line 1, column 1"
+            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name, '[size]type', or '[]type'), got end of input at line 1, column 1"
         )):
         p.parse_param()
 
@@ -747,7 +747,7 @@ def test_parse_type_empty():
     with pytest.raises(
         parser.ParseError,
         match=re.escape(
-            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name, '[size]type', or '[]type'), got TokenType.EOF ('') at line 1, column 1"
+            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name, '[size]type', or '[]type'), got end of input at line 1, column 1"
         )):
         p.parse_type()
 
@@ -830,7 +830,7 @@ def test_parse_type_array_missing_type():
     with pytest.raises(
         parser.ParseError,
         match=re.escape(
-            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name, '[size]type', or '[]type'), got TokenType.EOF ('') at line 1, column 4"
+            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name, '[size]type', or '[]type'), got end of input at line 1, column 4"
         )):
         p.parse_type()
 
@@ -967,7 +967,7 @@ def test_parse_statement_empty():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got TokenType.EOF (\'\') at line 1, column 11')):
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 11')):
         p.parse_statement()
 
 
@@ -1072,7 +1072,7 @@ def test_parse_statement_array_no_type():
     with pytest.raises(
         parser.ParseError,
         match=re.escape(
-            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name, '[size]type', or '[]type'), got TokenType.EOF ('') at line 1, column 4"
+            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name, '[size]type', or '[]type'), got end of input at line 1, column 4"
         )):
         p.parse_statement()
 
@@ -1112,7 +1112,7 @@ def test_parse_statement_return_no_value():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got TokenType.EOF (\'\') at line 1, column 7')):
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 7')):
         p.parse_statement()
 
 
@@ -1134,7 +1134,7 @@ def test_parse_statement_if_no_expression():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got TokenType.EOF (\'\') at line 1, column 3')):
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 3')):
         p.parse_statement()
 
 
@@ -1233,7 +1233,7 @@ def test_parse_statement_while_no_condition():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got TokenType.EOF (\'\') at line 1, column 6')):
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 6')):
         p.parse_statement()
 
 
@@ -1357,7 +1357,7 @@ def test_parse_statement_assign_no_value():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got TokenType.EOF (\'\') at line 1, column 3')):
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 3')):
         p.parse_statement()
 
 
@@ -1395,7 +1395,7 @@ def test_parse_while_no_condition():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got TokenType.EOF (\'\') at line 1, column 6')):
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 6')):
         p.parse_while()
 
 
@@ -1538,7 +1538,7 @@ def test_parse_if_empty():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got TokenType.EOF (\'\') at line 1, column 3')):
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 3')):
         p.parse_if()
 
 
@@ -1790,7 +1790,7 @@ def test_parse_if_elif_no_condition():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got TokenType.EOF (\'\') at line 2, column 9')):
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got end of input at line 2, column 9')):
         p.parse_if()
 
 
@@ -2025,7 +2025,7 @@ def test_parse_var_decl_none_empty():
     with pytest.raises(
         parser.ParseError,
         match=re.escape(
-            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name, '[size]type', or '[]type'), got TokenType.EOF ('') at line 1, column 1"
+            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name, '[size]type', or '[]type'), got end of input at line 1, column 1"
         )):
         p.parse_var_decl()
 
@@ -2066,7 +2066,7 @@ def test_parse_var_decl_none_no_value():
 
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape("Expected an expression, got TokenType.EOF (\'\') at line 1, column 7")):
+    with pytest.raises(parser.ParseError, match=re.escape("Expected an expression, got end of input at line 1, column 7")):
         p.parse_var_decl()
 
 
@@ -2138,7 +2138,7 @@ def test_parse_assign_empty():
 
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape("Expected TokenType.IDENTIFIER, got TokenType.EOF (\'\') at line 1, column 1")):
+    with pytest.raises(parser.ParseError, match=re.escape("Expected identifier, got end of input at line 1, column 1")):
         p.parse_assign()
 
 
@@ -2150,7 +2150,7 @@ def test_parse_assign_no_assign():
 
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape("Expected an expression, got TokenType.EOF (\'\') at line 1, column 2")):
+    with pytest.raises(parser.ParseError, match=re.escape("Expected an expression, got end of input at line 1, column 2")):
         p.parse_assign()
 
 
@@ -2163,7 +2163,7 @@ def test_parse_assign_no_value():
 
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape("Expected an expression, got TokenType.EOF (\'\') at line 1, column 3")):
+    with pytest.raises(parser.ParseError, match=re.escape("Expected an expression, got end of input at line 1, column 3")):
         p.parse_assign()
 
 

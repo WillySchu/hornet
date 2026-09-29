@@ -1,15 +1,21 @@
 """Module discovery: resolve and parse every file the entry file transitively imports. One module per file."""
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
+from diagnostics import CompileError
 from lexer import lex
 from parser import Parser, Program
 
 
-class ModuleError(Exception):
+class ModuleError(CompileError):
     """Import resolution failure."""
+
+    def __init__(self, message: str, file: Optional[str] = None, line: int = 0, col: int = 0):
+        clean = re.sub(rf' at line {line}\b', '', message) if line else message
+        super().__init__(clean, file, line, col, legacy=message)
 
 
 @dataclass
@@ -61,7 +67,9 @@ def discover_modules(entry_path: str) -> Tuple[Program, Dict[str, DiscoveredModu
                 raise ModuleError(
                     f"Import {path!r} at line {at_line} doesn't resolve to a real "
                     f"file (looked for {_candidate_path(importer_dir, path)}, or in "
-                    f"the standard library)"
+                    f"the standard library)",
+                    line=at_line,
+                    file=program.file,
                 )
             if resolved in by_path:
                 return by_path[resolved]
@@ -71,7 +79,8 @@ def discover_modules(entry_path: str) -> Tuple[Program, Dict[str, DiscoveredModu
                     f"Two different files both resolve to module name "
                     f"{canonical_name!r} -- module names must be globally "
                     f"unique across every imported file; rename one of them "
-                    f"(the second is {resolved})"
+                    f"(the second is {resolved})",
+                    file=program.file,
                 )
             by_path[resolved] = canonical_name  # Reserved before recursing so cycles terminate.
             sub_program = Parser(lex(str(resolved))).parse_program()
@@ -87,7 +96,9 @@ def discover_modules(entry_path: str) -> Tuple[Program, Dict[str, DiscoveredModu
             if decl.qualifier in aliases and aliases[decl.qualifier] != canonical_name:
                 raise ModuleError(
                     f"Two imports at line {decl.line} both use the name "
-                    f"{decl.qualifier!r} -- give one an explicit 'as' alias"
+                    f"{decl.qualifier!r} -- give one an explicit 'as' alias",
+                    line=decl.line,
+                    file=program.file,
                 )
             aliases[decl.qualifier] = canonical_name
 
@@ -98,12 +109,16 @@ def discover_modules(entry_path: str) -> Tuple[Program, Dict[str, DiscoveredModu
                     raise ModuleError(
                         f"'{local_alias}' at line {from_decl.line} collides with an "
                         f"'import ... as {local_alias}' elsewhere in this file -- "
-                        f"give one of them a different name"
+                        f"give one of them a different name",
+                        line=from_decl.line,
+                        file=program.file,
                     )
                 if local_alias in named and named[local_alias] != (canonical_name, original_name):
                     raise ModuleError(
                         f"'{local_alias}' at line {from_decl.line} is imported more than "
-                        f"once under that name -- give one an explicit 'as' alias"
+                        f"once under that name -- give one an explicit 'as' alias",
+                        line=from_decl.line,
+                        file=program.file,
                     )
                 named[local_alias] = (canonical_name, original_name)
 

@@ -4,6 +4,8 @@ slots exist; every read Temp is written somewhere in the function.
 Not checked: operand type consistency, call target existence.
 """
 
+from diagnostics import InternalCompilerError
+
 from ir.ir import (
     IRBinOp,
     IRBoundsCheck,
@@ -31,7 +33,7 @@ from ir.ir import (
 _TERMINATORS = (IRJump, IRBranch, IRReturn)
 
 
-class IRVerificationError(Exception):
+class IRVerificationError(InternalCompilerError):
     """IR invariant violated; a compiler bug."""
 
 

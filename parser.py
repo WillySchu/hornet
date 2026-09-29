@@ -6,15 +6,16 @@ from dataclasses import dataclass, field, fields
 from enum import auto, Enum
 from typing import Any, List, Optional, Tuple, Union
 
-from lexer import Token, TokenType, lex
+from lexer import Token, TokenType, describe_token, describe_token_type, lex
 from ops import BinaryOp, UnaryOp
+from diagnostics import CompileError
 
 
 # AST nodes
 
 _PRETTY_MAX_WIDTH = 88
-# Set by semantic analysis; omitted from pretty().
-_SEMANTIC_FIELDS = {'resolved_type', 'line', 'col', 'decl_id', 'narrowed_type', 'resolved_return_type', 'binding_types'}
+# Positions and semantic annotations; omitted from pretty().
+_HIDDEN_FIELDS = {'resolved_type', 'line', 'col', 'file', 'decl_id', 'narrowed_type', 'resolved_return_type', 'binding_types'}
 _PRETTY_INDENT = "    "
 
 
@@ -50,7 +51,7 @@ def _pretty_list(items: list, indent: int) -> str:
 def _pretty_node(node: 'Node', indent: int) -> str:
     """Render `ClassName(field=value, ...)` via dataclasses.fields."""
     class_name = type(node).__name__
-    field_names = [f.name for f in fields(node) if f.name not in _SEMANTIC_FIELDS]
+    field_names = [f.name for f in fields(node) if f.name not in _HIDDEN_FIELDS]
     if not field_names:
         return f"{class_name}()"
 
@@ -69,6 +70,7 @@ class Node:
     """AST base. pretty() renders any node generically."""
     line: int = field(default=0, kw_only=True, compare=False, repr=False)
     col: int = field(default=0, kw_only=True, compare=False, repr=False)
+    file: Optional[str] = field(default=None, kw_only=True, compare=False, repr=False)
 
     def pretty(self) -> str:
         return _pretty_node(self, indent=0)
@@ -440,7 +442,20 @@ class Program(Node):
 
 # Parser
 
-class ParseError(Exception):
+def stamp_file(node, file: str) -> None:
+    """Set `file` on `node` and every descendant that lacks one."""
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if isinstance(n, Node):
+            if n.file is None:
+                n.file = file
+            stack.extend(getattr(n, f.name) for f in fields(n))
+        elif isinstance(n, (list, tuple)):
+            stack.extend(n)
+
+
+class ParseError(CompileError):
     """Malformed input."""
 
 
@@ -565,6 +580,9 @@ class Parser:
         self.tokens = tokens
         self.pos = 0
 
+    def _error(self, message: str, tok: Token) -> 'ParseError':
+        return ParseError(message, tok.file, tok.line, tok.col)
+
 
     def peek(self, offset: int = 0) -> Token:
         idx = min(self.pos + offset, len(self.tokens) - 1)
@@ -595,8 +613,8 @@ class Parser:
         if self.check(type_):
             return self.advance()
         tok = self.current()
-        msg = message or f"Expected {type_}, got {tok.type} ('{tok.val}')"
-        raise ParseError(f"{msg} at line {tok.line}, column {tok.col}")
+        msg = message or f"Expected {describe_token_type(type_)}, got {describe_token(tok)}"
+        raise self._error(msg, tok)
 
     def skip_newlines(self):
         while self.match(TokenType.NEWLINE):
@@ -617,10 +635,10 @@ class Parser:
         while not self.at_end():
             if self.check(TokenType.STRUCT):
                 tok = self.current()
-                raise ParseError(
-                    f"Bare 'struct Name:' is no longer supported -- write "
-                    f"'type Name struct:' instead "
-                    f"at line {tok.line}, column {tok.col}"
+                raise self._error(
+                    f"Bare 'struct Name:' is no longer supported -- write 'type Name "
+                    f"struct:' instead",
+                    tok,
                 )
             elif self.check(TokenType.TYPE):
                 declaration = self.parse_type_declaration()
@@ -641,12 +659,15 @@ class Parser:
             else:
                 functions.append(self.parse_function())
             self.skip_newlines()
-        return Program(
+        program = Program(
             functions=functions, structs=structs, type_aliases=type_aliases, sum_types=sum_types,
             extern_functions=extern_functions, imports=imports, from_imports=from_imports,
             intrinsics=intrinsics,
             line=start_tok.line, col=start_tok.col,
         )
+        if start_tok.file:
+            stamp_file(program, start_tok.file)
+        return program
 
     def parse_intrinsic(self) -> IntrinsicDecl:
         """`intrinsic T name(params)`."""
@@ -672,11 +693,11 @@ class Parser:
         else:
             qualifier = _default_import_qualifier(path)
             if not re.fullmatch(r'[a-zA-Z_]\w*', qualifier):
-                raise ParseError(
+                raise self._error(
                     f"Import path {path!r} doesn't produce a valid module name "
-                    f"({qualifier!r}) on its own -- rename the file, or give this "
-                    f"import an explicit qualifier with 'as' "
-                    f"at line {start_tok.line}, column {start_tok.col}"
+                    f"({qualifier!r}) on its own -- rename the file, or give this import an "
+                    f"explicit qualifier with 'as'",
+                    start_tok,
                 )
         return ImportDecl(path=path, qualifier=qualifier, line=start_tok.line, col=start_tok.col)
 
@@ -722,10 +743,10 @@ class Parser:
             variant = self._parse_qualifiable_type_name("a variant name after '|'")
             variants.append(variant)
         if len(variants) < 2:
-            raise ParseError(
+            raise self._error(
                 f"Expected at least one '|' and a second variant in sum type "
-                f"'{name_tok.val}' -- a sum type needs at least two variants "
-                f"at line {first_line_tok.line}, column {first_line_tok.col}"
+                f"'{name_tok.val}' -- a sum type needs at least two variants",
+                first_line_tok,
             )
         self.expect(TokenType.NEWLINE, "Expected a newline after a sum type declaration")
         return SumTypeDef(name=name_tok.val, variants=variants, line=start_tok.line, col=start_tok.col)
@@ -754,9 +775,7 @@ class Parser:
             self.skip_newlines()
         self.expect(TokenType.DEDENT, "Expected a dedent to end the struct body")
         if not fields:
-            raise ParseError(
-                f"Expected at least one field in struct '{name_tok.val}'"
-            )
+            raise self._error(f"Expected at least one field in struct '{name_tok.val}'", self.current())
         return StructDef(name=name_tok.val, fields=fields, methods=methods, line=start_tok.line, col=start_tok.col)
 
     def _check_starts_with_return_type(self) -> bool:
@@ -856,16 +875,10 @@ class Parser:
                 "Expected an array size (a positive integer literal), or ']' for a slice type",
             )
             if '.' in size_tok.val:
-                raise ParseError(
-                    f"Array size must be a whole number, got '{size_tok.val}' "
-                    f"at line {size_tok.line}, column {size_tok.col}"
-                )
+                raise self._error(f"Array size must be a whole number, got '{size_tok.val}'", size_tok)
             size = int(size_tok.val)
             if size <= 0:
-                raise ParseError(
-                    f"Array size must be positive, got {size} "
-                    f"at line {size_tok.line}, column {size_tok.col}"
-                )
+                raise self._error(f"Array size must be positive, got {size}", size_tok)
             self.expect(TokenType.CLOSE_BRACKET, "Expected ']' after array size")
             element_type = self.parse_type()
             return ArrayTypeExpr(size=size, element_type=element_type, line=open_tok.line, col=open_tok.col)
@@ -881,11 +894,10 @@ class Parser:
                     module=name_tok.val, name=qualified_name_tok.val, line=name_tok.line, col=name_tok.col)
             return name_tok.val
         tok = self.current()
-        raise ParseError(
-            f"Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', "
-            f"'str', a struct name, '[size]type', or '[]type'), got "
-            f"{tok.type} ('{tok.val}') at line {tok.line}, column "
-            f"{tok.col}"
+        raise self._error(
+            f"Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a "
+            f"struct name, '[size]type', or '[]type'), got {describe_token(tok)}",
+            tok,
         )
 
     def parse_block(self) -> List[Node]:
@@ -899,7 +911,7 @@ class Parser:
             self.skip_newlines()
         self.expect(TokenType.DEDENT, "Expected the end of an indented block")
         if not statements:
-            raise ParseError("Expected at least one statement in this block")
+            raise self._error("Expected at least one statement in this block", self.current())
         return statements
 
     def parse_statement(self) -> Node:
@@ -1010,9 +1022,10 @@ class Parser:
         if self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.IDENTIFIER:
             parsed_type = self.parse_type()
             return self.parse_var_decl(var_type=parsed_type, start_tok=start_tok)
-        raise ParseError(
+        raise self._error(
             f"Expected a variable declaration (e.g. `int i = 0`) as the for-loop's "
-            f"own init clause at line {start_tok.line}, column {start_tok.col}"
+            f"own init clause",
+            start_tok,
         )
 
     def _parse_for_increment_clause(self) -> Node:
@@ -1020,9 +1033,10 @@ class Parser:
         start_tok = self.current()
         if self.check(TokenType.IDENTIFIER) and self.peek(1).type in _ASSIGNMENT_TOKENS:
             return self.parse_assign()
-        raise ParseError(
-            f"Expected an assignment (e.g. `i += 1`) as the for-loop's own "
-            f"increment clause at line {start_tok.line}, column {start_tok.col}"
+        raise self._error(
+            f"Expected an assignment (e.g. `i += 1`) as the for-loop's own increment "
+            f"clause",
+            start_tok,
         )
 
     def parse_break(self) -> Break:
@@ -1143,10 +1157,7 @@ class Parser:
         self.expect(TokenType.DEDENT, "Expected the match body to end")
 
         if not arms:
-            raise ParseError(
-                f"Expected at least one 'is' arm in this match "
-                f"at line {start_tok.line}, column {start_tok.col}"
-            )
+            raise self._error(f"Expected at least one 'is' arm in this match", start_tok)
 
         chained_body = else_body
         for i, (arm_tok, type_name, arm_body) in reversed(list(enumerate(arms))):
@@ -1222,10 +1233,7 @@ class Parser:
                 self.advance()
                 value = self.parse_expression()
                 return DerefAssign(pointer=expr.operand, value=value, compound_op=compound_op, line=expr.line, col=expr.col)
-            raise ParseError(
-                f"Left-hand side of '{op_tok.val}' is not assignable "
-                f"at line {op_tok.line}, column {op_tok.col}"
-            )
+            raise self._error(f"Left-hand side of '{op_tok.val}' is not assignable", op_tok)
         return ExprStmt(expr=expr, line=expr.line, col=expr.col)
 
     def parse_expression(self) -> Node:
@@ -1296,11 +1304,10 @@ class Parser:
                 self.advance()
                 value = self.parse_expression()
                 if args:
-                    raise ParseError(
-                        f"Cannot mix positional and named arguments in "
-                        f"a call -- '{field_name}=...' follows a "
-                        f"positional argument at line {start_tok.line}, "
-                        f"column {start_tok.col}"
+                    raise self._error(
+                        f"Cannot mix positional and named arguments in a call -- "
+                        f"'{field_name}=...' follows a positional argument",
+                        start_tok,
                     )
                 if kwargs is None:
                     kwargs = []
@@ -1308,11 +1315,10 @@ class Parser:
             else:
                 value = self.parse_expression()
                 if kwargs is not None:
-                    raise ParseError(
-                        f"Cannot mix positional and named arguments in "
-                        f"a call -- a positional argument follows a "
-                        f"named one at line {start_tok.line}, column "
-                        f"{start_tok.col}"
+                    raise self._error(
+                        f"Cannot mix positional and named arguments in a call -- a positional "
+                        f"argument follows a named one",
+                        start_tok,
                     )
                 args.append(value)
             if not self.match(TokenType.COMMA):
@@ -1355,9 +1361,10 @@ class Parser:
             tok = self.advance()
             resolved = _unescape_quoted_literal(tok.val)
             if len(resolved) != 1 or ord(resolved) > 255:
-                raise ParseError(
+                raise self._error(
                     f"A byte literal must resolve to exactly one byte (0-255), got "
-                    f"{resolved!r} at line {tok.line}, column {tok.col}"
+                    f"{resolved!r}",
+                    tok,
                 )
             return ByteLiteral(value=ord(resolved), line=tok.line, col=tok.col)
         if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.BOOL, TokenType.STR) and self.peek(1).type == TokenType.OPEN_PAREN:
@@ -1380,10 +1387,7 @@ class Parser:
             self.expect(TokenType.CLOSE_PAREN, "Expected ')' to close grouped expression")
             return expr
         tok = self.current()
-        raise ParseError(
-            f"Expected an expression, got {tok.type} ('{tok.val}') "
-            f"at line {tok.line}, column {tok.col}"
-        )
+        raise self._error(f"Expected an expression, got {describe_token(tok)}", tok)
 
     def _looks_like_typed_literal(self) -> bool:
         """Whether '[' starts a typed literal rather than an untyped one."""
@@ -1459,11 +1463,10 @@ class Parser:
                     self.advance()
                     value = self.parse_expression()
                     if args:
-                        raise ParseError(
-                            f"Cannot mix positional and named arguments in "
-                            f"a call -- '{field_name}=...' follows a "
-                            f"positional argument at line {start_tok.line}, "
-                            f"column {start_tok.col}"
+                        raise self._error(
+                            f"Cannot mix positional and named arguments in a call -- "
+                            f"'{field_name}=...' follows a positional argument",
+                            start_tok,
                         )
                     if kwargs is None:
                         kwargs = []
@@ -1471,11 +1474,10 @@ class Parser:
                 else:
                     value = self.parse_expression()
                     if kwargs is not None:
-                        raise ParseError(
-                            f"Cannot mix positional and named arguments in "
-                            f"a call -- a positional argument follows a "
-                            f"named one at line {start_tok.line}, column "
-                            f"{start_tok.col}"
+                        raise self._error(
+                            f"Cannot mix positional and named arguments in a call -- a positional "
+                            f"argument follows a named one",
+                            start_tok,
                         )
                     args.append(value)
                 if not self.match(TokenType.COMMA):

@@ -1,5 +1,7 @@
 """IR errors."""
 
+from diagnostics import InternalCompilerError
 
-class IRError(Exception):
+
+class IRError(InternalCompilerError):
     """AST shape the IR builder can't translate."""

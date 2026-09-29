@@ -17,6 +17,9 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
+- Module errors have a line but no column.
+- Lexer line number shifts with string literal containing a raw newline.
+- Reject not supported yet errors in semantic analysis rather than IR building.
 - hornet\_panic currently writes to stdout, not stderr.
 - Add symbol table to replace IR builder's use if id() as declaration keys.
 - Pointer receivers for methods.

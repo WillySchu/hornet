@@ -5,6 +5,7 @@ import sys
 
 from codegen.codegen import lower_to_asm
 from desugar import desugar_methods
+from diagnostics import run_cli
 from ir.program_builder import build_ir_program
 from merge import merge_programs
 from modules import discover_modules
@@ -21,10 +22,11 @@ def main():
     parser.add_argument('file', type=str, help='Source file to compile.')
     parser.add_argument('--platform', choices=['macos', 'linux'], default=DEFAULT_PLATFORM, help=f'Target platform. Default: {DEFAULT_PLATFORM} (this host)')
     parser.add_argument('-o', '--output', type=str, default=None, help='Write assembly to this file instead of stdout')
+    parser.add_argument('--traceback', action='store_true', help='Show Python tracebacks for all errors')
 
     args = parser.parse_args()
 
-    asm = compile_to_asm(args.file, args.platform)
+    asm = run_cli(lambda: compile_to_asm(args.file, args.platform), args.traceback)
     # Latin-1: str literals are raw bytes 0-255; UTF-8 would re-encode >= 128.
     if args.output:
         with open(args.output, 'w', encoding='latin-1') as f:
