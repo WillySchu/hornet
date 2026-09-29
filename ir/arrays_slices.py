@@ -933,10 +933,14 @@ class ArraysSlicesMixin:
         so it goes through _ir_finish_scalar_var_decl on its own.
 
         Mutation safety: ARRAY needs no check at all (nothing about
-        iterating it can change its own fixed address). SLICE re-
-        reads its own current base address every iteration and
-        compares it against the one cached at loop start -- an
-        append inside the body that reallocates would change it,
+        iterating it can change its own fixed address). SLICE caches
+        its own DESCRIPTOR's address once at loop start (_ir_slice_
+        address, called separately from _ir_indexable_base -- see the
+        comment at its own call site below for why this can't just
+        reuse _ir_indexable_base's own internal computation) and re-
+        LOADS its ptr field from that same, fixed address every
+        iteration, comparing against the value cached at loop start --
+        an append inside the body that reallocates would change it,
         meaning this iterator's own cached elem_addr math is no
         longer valid -- panicking via hornet_panic (the same runtime
         function bounds-check failures already use) rather than
@@ -944,7 +948,20 @@ class ArraysSlicesMixin:
         without-growth, in-place overwrite, and (for dict, a
         different method entirely, see Stage 3) delete are all still
         safe and unchecked -- this only ever catches a base-address
-        change, the one operation that's actually memory-unsafe."""
+        change, the one operation that's actually memory-unsafe.
+
+        Re-LOADING from a cached descriptor address, rather than re-
+        CALLING _ir_indexable_base(stmt.iterable) a second time, is
+        the whole point, not an optimization: stmt.iterable can be an
+        Index/Field chain (`for x in rows[i]:`) whose own descriptor
+        address depends on evaluating some OTHER expression (i here)
+        -- re-evaluating that expression on every recheck would re-
+        resolve it against i's CURRENT value, not the one loop start
+        actually captured, so a body that reassigns i (`rows[i]`'s own
+        i, unrelated to this loop's own counter) would silently
+        compare two DIFFERENT slices' own ptr values and panic with a
+        false "reallocated" report -- confirmed as a real, constructed
+        bug, not a hypothetical one, before this fix existed."""
         iterable_type = type_of(stmt.iterable)
         element_type = iterable_type.element_type
         element_width = type_byte_width(element_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
@@ -957,6 +974,30 @@ class ArraysSlicesMixin:
                 f"'for ... in' iterable ({stmt.iterable!r}) -- expected to "
                 f"always succeed for a reachable indexable base")
         base_ir, base_addr, length_value, _ = base
+        ir = base_ir
+
+        if is_slice:
+            # Computed ONCE here, separately from _ir_indexable_base's
+            # own (already complete, already correct) ptr/len/cap
+            # unpacking just above -- that method has no reason to
+            # expose the descriptor's own address alongside the
+            # values it already reads out of it, and widening its own
+            # return shape for this one, narrow caller would touch
+            # every other already-working call site (indexing, 'in',
+            # ...) for no benefit to them. A second address
+            # computation is harmless -- both this and the one inside
+            # _ir_indexable_base run here, at loop start, before the
+            # body could ever mutate anything an Index/Field chain's
+            # own address depends on.
+            descriptor_result = self._ir_slice_address(stmt.iterable)
+            if descriptor_result is None:
+                raise IRError(
+                    f"_ir_slice_address returned None for a SLICE-typed "
+                    f"'for ... in' iterable ({stmt.iterable!r}) -- expected "
+                    f"to always succeed, having already succeeded once "
+                    f"above via _ir_indexable_base")
+            descriptor_ir, descriptor_addr = descriptor_result
+            ir = ir + descriptor_ir
 
         i = self.ir_program.ids.new_temp(Type.INT)
         start_label = self.ir_program.ids.new_label("for_in_start")
@@ -968,7 +1009,7 @@ class ArraysSlicesMixin:
         binding_types = for_in_binding_types(stmt, iterable_type)
         slots = [self._bind_for_in_binding(stmt, idx, bt, ir_fn) for idx, bt in enumerate(binding_types)]
 
-        ir = base_ir + [
+        ir = ir + [
             IRMove(dst=i, src=IRConst(0, Type.INT)),
             IRJump(start_label),
             IRLabel(start_label),
@@ -979,17 +1020,10 @@ class ArraysSlicesMixin:
         ir.append(IRLabel(body_label))
 
         if is_slice:
-            recheck = self._ir_indexable_base(stmt.iterable)
-            if recheck is None:
-                raise IRError(
-                    f"_ir_indexable_base returned None on its own mutation-"
-                    f"safety recheck for a SLICE-typed 'for ... in' iterable "
-                    f"({stmt.iterable!r}) -- expected to always succeed, "
-                    f"having already succeeded once above")
-            recheck_ir, recheck_addr, _, _ = recheck
-            ir.extend(recheck_ir)
+            recheck_ptr = self.ir_program.ids.new_temp(Type.INT64)
+            ir.append(IRLoad(dst=recheck_ptr, address=descriptor_addr))
             mutated = self.ir_program.ids.new_temp(Type.BOOL)
-            ir.append(IRBinOp(dst=mutated, op=BinaryOp.NOT_EQUAL, left=recheck_addr, right=base_addr))
+            ir.append(IRBinOp(dst=mutated, op=BinaryOp.NOT_EQUAL, left=recheck_ptr, right=base_addr))
             mutated_label = self.ir_program.ids.new_label("for_in_mutated")
             safe_label = self.ir_program.ids.new_label("for_in_safe")
             ir.append(IRBranch(cond=mutated, true_label=mutated_label, false_label=safe_label))

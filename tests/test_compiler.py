@@ -23421,6 +23421,55 @@ class TestForInArraySlice:
             "    return 0\n"
         )
 
+    def test_index_based_iterable_with_mutated_index_does_not_false_panic(self):
+        """A real, constructed bug found and fixed after this stage
+        first shipped: `for x in rows[i]:`, i reassigned inside the
+        body. The mutation-safety recheck used to re-CALL _ir_
+        indexable_base(stmt.iterable) a second time every iteration --
+        which re-resolves rows[i] against i's CURRENT value, not the
+        one loop start actually captured, so reassigning i made the
+        recheck compare two DIFFERENT slices' own ptr values (rows[0]
+        vs. rows[1]) and falsely report "reallocated". The fix caches
+        the iterable's own DESCRIPTOR address once, up front (_ir_
+        slice_address, computed before the body could ever mutate
+        whatever the Index/Field chain's own address depends on), and
+        re-LOADS its ptr field from that same, fixed address on every
+        recheck -- confirms the loop correctly keeps iterating the
+        SAME slice (rows[0]) determined at loop start, unaffected by
+        i changing partway through, and exits cleanly rather than
+        panicking."""
+        assert_program_stdout(
+            "type Rows = [2][]int\n"
+            "\n"
+            "def int main():\n"
+            "    Rows rows = [[1, 2], [10, 20]]\n"
+            "    int i = 0\n"
+            "    for x in rows[i]:\n"
+            "        print(x)\n"
+            "        i = 1\n"
+            "    return 0\n",
+            "1\n2\n",
+        )
+
+    def test_index_based_iterable_still_detects_genuine_reallocation(self):
+        """The fix above must not accidentally disable real detection:
+        an append that actually reallocates the SAME slice (rows[0],
+        the one genuinely being iterated) still needs to panic, not
+        just avoid false positives when an unrelated index variable
+        changes."""
+        assert_crashes_with_sigabrt(
+            "    [2][]int rows = [[1], [10, 20]]\n"
+            "    int i = 0\n"
+            "    int j = 0\n"
+            "    while j < 100:\n"
+            "        rows[0] = append(rows[0], j)\n"
+            "        j = j + 1\n"
+            "    for x in rows[i]:\n"
+            "        rows[0] = append(rows[0], 999)\n"
+            "    print('should not reach here')\n"
+            "    return 0\n"
+        )
+
     def test_array_needs_no_mutation_check_at_all(self):
         """An array's own address can never change (fixed size, no
         reallocation possible) -- confirms iterating one while doing
