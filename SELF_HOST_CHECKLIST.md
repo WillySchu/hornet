@@ -6,5 +6,4 @@
 6. assert
 7. Finish the most useful pointer operations
 8. Generics
-9. for ... in ... loops
-10. Function values
+9. Function values

@@ -17,7 +17,6 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
-- `for in` loop.
 - Struct literal restrictions in semantic analysis?
 - `for in` loops on non addressable base (literals, function returns, etc.).
 - Fix `return none` for pointer returning function.
