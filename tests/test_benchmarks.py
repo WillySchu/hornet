@@ -106,7 +106,8 @@ def test_benchmark_runner_end_to_end(tmp_path):
         a = r['allocation']
         assert r['instruction_count'] > 0, name
         assert a['allocated'] + a['spilled'] == a['eligible'], name
-        assert a['eligible'] + a['unsafe_span_excluded'] + a['address_taken_excluded'] == a['total_temps'], name
+        assert a['eligible'] + a['address_taken_excluded'] == a['total_temps'], name
+        assert a['live_across_call'] <= a['eligible'], name
 
 
 @GCC_SKIP

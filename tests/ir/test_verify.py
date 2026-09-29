@@ -1,6 +1,6 @@
 """Tests for ir/verify.py -- one test per check listed in its own
 module docstring, plus a few edge cases the docstring calls out
-explicitly (def-after-use, IRSliceGrow's two dsts)."""
+explicitly (def-after-use)."""
 
 import pytest
 
@@ -16,7 +16,6 @@ from ir.ir import (
     IRProgram,
     IRReadArgument,
     IRReturn,
-    IRSliceGrow,
     Temp,
 )
 from ir.verify import IRVerificationError, verify_function, verify_program
@@ -177,16 +176,6 @@ def test_read_argument_counts_as_definition():
     body = [
         IRReadArgument(dst=t(0), index=0),
         IRReturn(value=t(0)),
-    ]
-    verify_function(fn(body=body))  # no raise
-
-
-def test_slice_grow_defines_both_dst_temps():
-    body = [
-        IRSliceGrow(dst_ptr=t(0), dst_cap=t(1), ptr=t(2), length=t(2), cap=t(2), element_width=4),
-        IRReadArgument(dst=t(2), index=0),  # define t(2), used above -- order doesn't matter (see above)
-        IRBinOp(dst=t(3), op=BinaryOp.ADD, left=t(0), right=t(1)),
-        IRReturn(value=t(3)),
     ]
     verify_function(fn(body=body))  # no raise
 

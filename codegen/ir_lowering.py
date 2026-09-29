@@ -71,7 +71,6 @@ from ir.ir import (
     IRReadArgument,
     IRReturn,
     IRSliceBoundsCheck,
-    IRSliceGrow,
     IRStaticDataAddress,
     IRStore,
     IRUnOp,
@@ -510,26 +509,6 @@ class InstructionSelector:
                 out.extend(self._gen_load_value(instr.value, Register('eax')))
                 out.append(self._cmp(instr.bound, instr.value))
                 out.append(Ja(self.host._get_bounds_check_fail_label("slice bounds out of range")))
-            elif isinstance(instr, IRSliceGrow):
-                # Fixed callee-saved %rbx/%r12/%r13 survive the malloc inside grow.
-                out.extend(self._gen_load_value(instr.ptr, Register('ebx')))
-                out.extend(self._gen_load_value(instr.length, Register('r12d')))
-                out.extend(self._gen_load_value(instr.cap, Register('r13d')))
-                out.extend(self.host._gen_slice_grow_into(
-                    Register('rbx'), Register('r12'), Register('r13'), instr.element_width))
-                # Order the writes out of %ebx/%r13d so neither clobbers the other's source; swap via %r12 (length is dead).
-                dst_ptr_reg = self.host._register_assignment.get(instr.dst_ptr.id)
-                dst_cap_reg = self.host._register_assignment.get(instr.dst_cap.id)
-                if dst_ptr_reg == 'r13d' and dst_cap_reg == 'ebx':
-                    out.append(MovQ(src=Register('rbx'), dst=Register('r12')))
-                    out.extend(self._gen_write_temp_from(Register('r13d'), instr.dst_cap))
-                    out.extend(self._gen_write_temp_from(Register('r12d'), instr.dst_ptr))
-                elif dst_ptr_reg == 'r13d':
-                    out.extend(self._gen_write_temp_from(Register('r13d'), instr.dst_cap))
-                    out.extend(self._gen_write_temp_from(Register('ebx'), instr.dst_ptr))
-                else:
-                    out.extend(self._gen_write_temp_from(Register('ebx'), instr.dst_ptr))
-                    out.extend(self._gen_write_temp_from(Register('r13d'), instr.dst_cap))
             else:
                 raise NotImplementedError(f"lower_ir has no rule for: {instr!r}")
         return out

@@ -136,19 +136,6 @@ class IRSliceBoundsCheck:
 
 
 @dataclass
-class IRSliceGrow:
-    """Grow a slice's backing to new_cap via hornet_slice_grow; writes dst_ptr/dst_cap.
-    The caller has already checked len == cap. Clobbers caller-saved registers like IRCall.
-    """
-    dst_ptr: Temp
-    dst_cap: Temp
-    ptr: IRValue
-    length: IRValue
-    cap: IRValue
-    element_width: int
-
-
-@dataclass
 class IRLabel:
     """Jump target."""
     name: str
@@ -183,7 +170,6 @@ IRInstr = Union[
     IRReadArgument,
     IRReturn,
     IRSliceBoundsCheck,
-    IRSliceGrow,
     IRStaticDataAddress,
     IRStore,
     IRUnOp,

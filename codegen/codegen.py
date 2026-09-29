@@ -1,4 +1,8 @@
-"""x86-64 backend driver: per-function register allocation, instruction selection, frame layout, prologue/epilogue."""
+"""x86-64 backend driver: per-function register allocation, instruction selection, frame layout, prologue/epilogue.
+
+Frame: saved rbp, then the callee-saved registers this function uses, then slots, then
+outgoing stack arguments at %rsp. Saved registers plus slots are a multiple of 16 bytes.
+"""
 
 
 import dataclasses
@@ -22,13 +26,14 @@ from codegen.assembly_ast import (
     Ret,
     SubQ,
 )
-from codegen.calling_convention import CALLEE_SAVED_SCRATCH_REGISTERS
+from codegen.calling_convention import CALLEE_SAVED_REGISTERS
 from codegen.emitter import Emitter
 from codegen.peephole import optimize_asm
 from ir.ir import IRCall, IRFunction, IRProgram
 from codegen.ir_lowering import InstructionSelector
 from codegen.register_allocator import allocate_registers
 from codegen.scalars_lowering import ScalarsLoweringMixin
+from codegen.utils import as_qword_register
 
 
 # IR -> assembly AST
@@ -39,7 +44,8 @@ class CodeGenerator(
     """Lowers an IRProgram to an AsmProgram."""
 
     def __init__(self):
-        self._next_offset = 0
+        self._frame_bytes = 0
+        self._saved_registers: List[str] = []
         self._slot_offsets: Dict[int, int] = {}  # slot id -> %rbp offset; set by _resolve_frame_layout
         self._register_assignment: Dict[int, str] = {}
         # fail labels reset per function; message labels cached per program
@@ -48,24 +54,22 @@ class CodeGenerator(
         self.ir_program: Optional[IRProgram] = None
 
     def _resolve_frame_layout(self, ir_fn: IRFunction) -> None:
-        """Assign %rbp offsets to every logical slot, in creation order. Runs once per function after lower_ir, when all slots are known."""
-        next_offset = 0
+        """Assign %rbp offsets to every logical slot, in creation order, below the saved registers.
+        Outgoing stack arguments go at the bottom (%rsp). Runs once per function after lower_ir."""
+        saved_bytes = 8 * len(self._saved_registers)
+        next_offset = -saved_bytes
         for slot_id, width in ir_fn.slot_widths.items():
             if slot_id == ir_fn.outgoing_stack_args_slot:
                 continue
             next_offset -= width
             self._slot_offsets[slot_id] = next_offset
-
+        used = -next_offset
         if ir_fn.outgoing_stack_args_slot is not None:
-            width = ir_fn.slot_widths[ir_fn.outgoing_stack_args_slot]
-            raw_before = -next_offset
-            pad = (16 - (raw_before + width) % 16) % 16
-            next_offset -= pad
-            next_offset -= width
-            pushed_bytes = 8 * len(CALLEE_SAVED_SCRATCH_REGISTERS)
-            self._slot_offsets[ir_fn.outgoing_stack_args_slot] = next_offset - pushed_bytes
-
-        self._next_offset = next_offset
+            used += ir_fn.slot_widths[ir_fn.outgoing_stack_args_slot]
+        # %rsp must be 16-byte aligned at calls: saved registers plus frame is a multiple of 16.
+        self._frame_bytes = (used + 15) // 16 * 16 - saved_bytes
+        if ir_fn.outgoing_stack_args_slot is not None:
+            self._slot_offsets[ir_fn.outgoing_stack_args_slot] = -(saved_bytes + self._frame_bytes)
 
     def _patch_frame_slots(self, instructions: List[Instruction]) -> None:
         """Replace logical slot placeholders with resolved frame offsets."""
@@ -106,6 +110,8 @@ class CodeGenerator(
             )
 
         self._register_assignment = allocate_registers(ir, self.ir_program.ids._temp_offsets)
+        used = {as_qword_register(Register(r)).name for r in self._register_assignment.values()}
+        self._saved_registers = [r for r in CALLEE_SAVED_REGISTERS if r in used]
         instructions = []
         instructions.extend(InstructionSelector(self, ir_fn).lower_ir(ir))
         self._resolve_frame_layout(ir_fn)
@@ -114,30 +120,23 @@ class CodeGenerator(
         instructions.extend(self._gen_bounds_check_panic_block())
         instructions = optimize_asm(instructions)
 
-        # Identical for every function.
         prologue: List[Instruction] = [
             Push(Register('rbp')),
             MovQ(src=Register('rsp'), dst=Register('rbp')),
         ]
-        # Callee-saved scratch registers are saved unconditionally.
-        for reg in CALLEE_SAVED_SCRATCH_REGISTERS:
+        for reg in self._saved_registers:
             prologue.append(Push(Register(reg)))
-
-        frame_size = self._frame_size()
-        if frame_size:
-            prologue.append(SubQ(src=Imm(frame_size), dst=Register('rsp')))
+        if self._frame_bytes:
+            prologue.append(SubQ(src=Imm(self._frame_bytes), dst=Register('rsp')))
 
         return AsmFunction(name=ir_fn.name, instructions=prologue + instructions)
 
-    def _frame_size(self) -> int:
-        # Frame rounded up to 16 bytes for call alignment.
-        raw = -self._next_offset
-        return ((raw + 15) // 16) * 16 if raw > 0 else 0
-
     def _gen_epilogue(self) -> List[Instruction]:
-        """Restore callee-saved scratch registers, then leave/ret."""
+        """Restore saved callee-saved registers (from just below %rbp), then leave/ret."""
         instructions = []
-        for reg in reversed(CALLEE_SAVED_SCRATCH_REGISTERS):
+        if self._saved_registers:
+            instructions.append(LeaQFrame(offset=-8 * len(self._saved_registers), dst=Register('rsp')))
+        for reg in reversed(self._saved_registers):
             instructions.append(Pop(Register(reg)))
         instructions.append(Leave())
         instructions.append(Ret())

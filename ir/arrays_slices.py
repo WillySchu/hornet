@@ -16,7 +16,6 @@ from ir.ir import (
     IRLocalAddress,
     IRMove,
     IRSliceBoundsCheck,
-    IRSliceGrow,
     IRStaticDataAddress,
     IRStore, Temp,
 )
@@ -833,14 +832,34 @@ class ArraysSlicesMixin:
             IRJump(end_label),
         ]
 
-        # len == cap: grow, then write.
-        grow_ptr = self.ir_program.ids.new_temp(Type.INT64)
-        grow_cap = self.ir_program.ids.new_temp(Type.INT)
-        grow = IRSliceGrow(
-            dst_ptr=grow_ptr, dst_cap=grow_cap,
-            ptr=ptr, length=length, cap=cap,
-            element_width=element_width,
-        )
+        # len == cap: new_cap = cap == 0 ? 1 : cap < 256 ? cap * 2 : cap + cap / 4, then grow and write.
+        ids = self.ir_program.ids
+        grow_ptr = ids.new_temp(Type.INT64)
+        grow_cap = ids.new_temp(Type.INT)
+        is_zero, is_small, quarter = ids.new_temp(Type.BOOL), ids.new_temp(Type.BOOL), ids.new_temp(Type.INT)
+        zero_label, nonzero_label = ids.new_label("append_cap_zero"), ids.new_label("append_cap_nonzero")
+        small_label, large_label = ids.new_label("append_cap_small"), ids.new_label("append_cap_large")
+        grow_label = ids.new_label("append_grow")
+        grow = [
+            IRBinOp(dst=is_zero, op=BinaryOp.EQUAL, left=cap, right=IRConst(0, Type.INT)),
+            IRBranch(cond=is_zero, true_label=zero_label, false_label=nonzero_label),
+            IRLabel(zero_label),
+            IRMove(dst=grow_cap, src=IRConst(1, Type.INT)),
+            IRJump(grow_label),
+            IRLabel(nonzero_label),
+            IRBinOp(dst=is_small, op=BinaryOp.LESS_THAN, left=cap, right=IRConst(256, Type.INT)),
+            IRBranch(cond=is_small, true_label=small_label, false_label=large_label),
+            IRLabel(small_label),
+            IRBinOp(dst=grow_cap, op=BinaryOp.ADD, left=cap, right=cap),
+            IRJump(grow_label),
+            IRLabel(large_label),
+            IRBinOp(dst=quarter, op=BinaryOp.SHIFT_RIGHT, left=cap, right=IRConst(2, Type.INT)),
+            IRBinOp(dst=grow_cap, op=BinaryOp.ADD, left=cap, right=quarter),
+            IRJump(grow_label),
+            IRLabel(grow_label),
+            IRCall(dst=grow_ptr, name='hornet_slice_grow',
+                   args=[ptr, length, grow_cap, IRConst(element_width, Type.INT)]),
+        ]
         realloc_offset_temp = self.ir_program.ids.new_temp(Type.INT)
         realloc_target_addr = self.ir_program.ids.new_temp(Type.INT64)
         realloc_new_len = self.ir_program.ids.new_temp(Type.INT)
@@ -849,7 +868,7 @@ class ArraysSlicesMixin:
             return None
         realloc_ir = [
             IRLabel(realloc_label),
-            grow,
+        ] + grow + [
             IRBinOp(dst=realloc_offset_temp, op=BinaryOp.MULTIPLY, left=length, right=IRConst(element_width, Type.INT)),
             IRBinOp(dst=realloc_target_addr, op=BinaryOp.ADD, left=grow_ptr, right=realloc_offset_temp),
         ] + realloc_write_ir + [

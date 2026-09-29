@@ -19,10 +19,12 @@ from ir.ir import (
 from ir.cfg import build_blocks, liveness
 from codegen.register_allocator import (
     compute_live_intervals,
+    call_crossing,
     eligible_intervals,
     linear_scan,
     LiveInterval,
     ALLOCATABLE_REGISTERS,
+    CALLEE_SAVED_POOL,
     allocate_registers,
 )
 from parser import BinaryOp
@@ -101,17 +103,17 @@ def _interval(temp, start, end):
     return LiveInterval(temp=temp, start=start, end=end)
 
 
-def test_eligible_intervals_excludes_span_across_ircall():
+def test_call_crossing_includes_span_across_ircall():
     ir = [
         IRMove(dst=t(0), src=IRConst(1, Type.INT)),
         IRCall(dst=t(1), name='foo', args=[]),
         IRBinOp(dst=t(2), op=BinaryOp.ADD, left=t(0), right=t(1)),
     ]
     intervals = {0: _interval(t(0), 0, 2)}
-    assert eligible_intervals(ir, intervals) == {}
+    assert 0 in call_crossing(ir, intervals)
 
 
-def test_eligible_intervals_includes_temp_surviving_across_an_ircopy():
+def test_call_crossing_excludes_temp_surviving_across_an_ircopy():
     """Unlike IRCall, IRCopy is deliberately NOT in unsafe_
     positions at all: its own lowering is pinned to %r9/%r8 (the
     address registers) plus whatever gen_array_copy's own scratch pick
@@ -125,10 +127,10 @@ def test_eligible_intervals_includes_temp_surviving_across_an_ircopy():
         IRBinOp(dst=t(3), op=BinaryOp.ADD, left=t(0), right=IRConst(1, Type.INT)),
     ]
     intervals = {0: _interval(t(0), 0, 2)}
-    assert 0 in eligible_intervals(ir, intervals)
+    assert 0 not in call_crossing(ir, intervals)
 
 
-def test_eligible_intervals_includes_temp_surviving_across_an_irboundscheck():
+def test_call_crossing_excludes_temp_surviving_across_an_irboundscheck():
     """Same reasoning as IRCopy just above: IRBoundsCheck's own
     lowering only ever touches %eax/%ecx (never the pool), so a Temp
     allocated to the pool safely survives across it too."""
@@ -138,10 +140,10 @@ def test_eligible_intervals_includes_temp_surviving_across_an_irboundscheck():
         IRBinOp(dst=t(3), op=BinaryOp.ADD, left=t(0), right=IRConst(1, Type.INT)),
     ]
     intervals = {0: _interval(t(0), 0, 2)}
-    assert 0 in eligible_intervals(ir, intervals)
+    assert 0 not in call_crossing(ir, intervals)
 
 
-def test_eligible_intervals_includes_argument_temp_consumed_by_the_call_it_ends_at():
+def test_call_crossing_excludes_argument_temp_consumed_by_the_call_it_ends_at():
     """The symmetric end-side counterpart to the def-side fix above:
     a Temp used as one of an IRCall's OWN args, with nothing needed
     after, is safe -- the read that places it into an argument
@@ -154,10 +156,10 @@ def test_eligible_intervals_includes_argument_temp_consumed_by_the_call_it_ends_
         IRCall(dst=t(1), name='foo', args=[t(0)]),    # 1: t(0) consumed here, its own last use
     ]
     intervals = {0: _interval(t(0), 0, 1)}
-    assert 0 in eligible_intervals(ir, intervals)
+    assert 0 not in call_crossing(ir, intervals)
 
 
-def test_eligible_intervals_still_excludes_temp_surviving_through_an_unrelated_call_before_being_used_as_an_argument():
+def test_call_crossing_includes_temp_surviving_through_an_unrelated_call_before_being_used_as_an_argument():
     """The fix above must not overcorrect: a Temp that needs to
     survive through an EARLIER, unrelated call before finally being
     consumed as a LATER call's own argument is still genuinely unsafe
@@ -169,10 +171,10 @@ def test_eligible_intervals_still_excludes_temp_surviving_through_an_unrelated_c
         IRCall(dst=t(2), name='bar', args=[t(0)]),     # 2: t(0)'s own last use, as bar's argument
     ]
     intervals = {0: _interval(t(0), 0, 2)}
-    assert eligible_intervals(ir, intervals) == {}
+    assert 0 in call_crossing(ir, intervals)
 
 
-def test_eligible_intervals_still_excludes_argument_temp_also_needed_after_the_call():
+def test_call_crossing_includes_argument_temp_also_needed_after_the_call():
     """If a Temp used as an IRCall's own argument is ALSO needed
     again afterward, its interval extends past that call, and the
     call becomes a genuine survive-through hazard again -- the end-
@@ -184,10 +186,10 @@ def test_eligible_intervals_still_excludes_argument_temp_also_needed_after_the_c
         IRBinOp(dst=t(2), op=BinaryOp.ADD, left=t(0), right=IRConst(1, Type.INT)),  # 2: ...but needed again after
     ]
     intervals = {0: _interval(t(0), 0, 2)}
-    assert eligible_intervals(ir, intervals) == {}
+    assert 0 in call_crossing(ir, intervals)
 
 
-def test_eligible_intervals_unaffected_by_an_unrelated_ircall_entirely_after_its_own_lifetime():
+def test_call_crossing_unaffected_by_an_unrelated_ircall_entirely_after_its_own_lifetime():
     """A real bug the end-side fix shipped with initially: an unsafe
     position AFTER a Temp's own interval has already ended (it's
     already dead by then) must never count against it -- this Temp's
@@ -202,23 +204,22 @@ def test_eligible_intervals_unaffected_by_an_unrelated_ircall_entirely_after_its
         IRCall(dst=t(2), name='foo', args=[]),          # 2: unrelated, and AFTER t(0) is already dead
     ]
     intervals = {0: _interval(t(0), 0, 1)}
-    assert 0 in eligible_intervals(ir, intervals)
+    assert 0 not in call_crossing(ir, intervals)
 
 
-def test_eligible_intervals_includes_pure_temp_arithmetic():
+def test_call_crossing_excludes_pure_temp_arithmetic():
     ir = [
         IRMove(dst=t(0), src=IRConst(1, Type.INT)),
         IRMove(dst=t(1), src=IRConst(2, Type.INT)),
         IRBinOp(dst=t(2), op=BinaryOp.ADD, left=t(0), right=t(1)),
     ]
     intervals = {0: _interval(t(0), 0, 2), 1: _interval(t(1), 1, 2)}
-    result = eligible_intervals(ir, intervals)
-    assert set(result.keys()) == {0, 1}
+    assert call_crossing(ir, intervals) == set()
 
 
-def test_eligible_intervals_includes_temp_defined_by_its_own_ircall():
+def test_call_crossing_excludes_temp_defined_by_its_own_ircall():
     """A Temp's OWN defining IRCall isn't a hazard to itself -- only
-    surviving THROUGH one it doesn't own is (see eligible_intervals'
+    surviving THROUGH one it doesn't own is (see call_crossing's
     own docstring). This is exactly the address-Temp pattern
     _ir_index_assign/_ir_load rely on: capture an address, consume it
     immediately with the very next instruction. Regression test for a
@@ -228,7 +229,7 @@ def test_eligible_intervals_includes_temp_defined_by_its_own_ircall():
         IRBinOp(dst=t(1), op=BinaryOp.ADD, left=t(0), right=IRConst(1, Type.INT)),  # 1: used right after
     ]
     intervals = {0: _interval(t(0), 0, 1)}
-    assert 0 in eligible_intervals(ir, intervals)
+    assert 0 not in call_crossing(ir, intervals)
 
 
 # -- linear_scan ---------------------------------------------------------------
@@ -304,8 +305,50 @@ def test_linear_scan_never_assigns_the_same_register_to_two_live_intervals():
 # fixed rather than just avoided. Pins the exact set, not just the
 # count, so an accidental reorder or duplicate is caught too.
 
-def test_allocatable_registers_is_the_widened_seven_register_pool():
-    assert ALLOCATABLE_REGISTERS == ['r10d', 'r11d', 'r15d', 'ebx', 'r12d', 'r13d', 'r14d']
+def test_allocatable_registers_are_caller_saved_first():
+    assert ALLOCATABLE_REGISTERS == ['r10d', 'r11d', 'ebx', 'r12d', 'r13d', 'r14d', 'r15d']
+
+
+def test_crossing_intervals_get_only_callee_saved_registers():
+    intervals = {i: LiveInterval(temp=t(i), start=i, end=10) for i in range(4)}
+    result = linear_scan(intervals, crossing=frozenset({0, 2}))
+    assert result[0] in CALLEE_SAVED_POOL and result[2] in CALLEE_SAVED_POOL
+    assert result[1] == 'r10d' and result[3] == 'r11d'
+
+
+def test_crossing_interval_evicts_a_non_crossing_one_holding_a_callee_saved_register():
+    intervals = {i: LiveInterval(temp=t(i), start=i, end=20 - i) for i in range(7)}
+    intervals[7] = LiveInterval(temp=t(7), start=7, end=8)
+    result = linear_scan(intervals, crossing=frozenset({7}))
+    assert result[7] in CALLEE_SAVED_POOL
+    assert len(result) == 7 and len(set(result.values())) == 7
+
+
+def test_crossing_intervals_beyond_callee_saved_pool_spill():
+    intervals = {i: LiveInterval(temp=t(i), start=i, end=10) for i in range(6)}
+    result = linear_scan(intervals, crossing=frozenset(range(6)))
+    assert len(result) == 5
+    assert set(result.values()) == set(CALLEE_SAVED_POOL)
+
+
+def test_eligible_intervals_excludes_named_temp_whose_slot_address_is_taken():
+    from ir.ir import IRLocalAddress
+    ir = [IRLocalAddress(dst=t(1), slot=7), IRReturn(value=t(0))]
+    intervals = {0: LiveInterval(temp=t(0), start=0, end=1), 1: LiveInterval(temp=t(1), start=0, end=0)}
+    assert set(eligible_intervals(ir, intervals, {0: 7})) == {1}
+    assert set(eligible_intervals(ir, intervals)) == {0, 1}
+
+
+def test_allocate_registers_keeps_call_crossing_temp_in_callee_saved_register():
+    from ir.ir import IRCall
+    ir = [
+        IRMove(dst=t(0), src=IRConst(1, Type.INT)),
+        IRCall(dst=t(1), name='f', args=[]),
+        IRBinOp(dst=t(2), op=BinaryOp.ADD, left=t(0), right=t(1)),
+        IRReturn(value=t(2)),
+    ]
+    result = allocate_registers(ir)
+    assert result[0] in CALLEE_SAVED_POOL
 
 
 def test_allocate_registers_no_longer_spills_four_simultaneously_live_temps():

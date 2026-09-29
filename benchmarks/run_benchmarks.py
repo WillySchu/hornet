@@ -33,7 +33,7 @@ EXECUTION_TIMEOUT = 30
 HOST_IS_MACOS = sys.platform == 'darwin'
 ASM_PLATFORM = 'macos' if HOST_IS_MACOS else 'linux'
 
-STAT_KEYS = ('total_temps', 'unsafe_span_excluded', 'address_taken_excluded', 'eligible', 'allocated', 'spilled')
+STAT_KEYS = ('total_temps', 'address_taken_excluded', 'eligible', 'allocated', 'spilled', 'live_across_call')
 
 
 def _instrumented_generate(program):
@@ -61,15 +61,14 @@ def _allocation_stats(ir: list, temp_home_slots: dict, assignment: dict) -> dict
     blocks = cfg.build_blocks(ir)
     live_in, live_out = cfg.liveness(blocks)
     intervals = ra_module.compute_live_intervals(blocks, live_in, live_out)
-    call_safe = ra_module.eligible_intervals(ir, intervals)
     eligible = ra_module.eligible_intervals(ir, intervals, temp_home_slots)
     return {
         'total_temps': len(intervals),
-        'unsafe_span_excluded': len(intervals) - len(call_safe),
-        'address_taken_excluded': len(call_safe) - len(eligible),
+        'address_taken_excluded': len(intervals) - len(eligible),
         'eligible': len(eligible),
         'allocated': len(assignment),
         'spilled': len(eligible) - len(assignment),
+        'live_across_call': len(ra_module.call_crossing(ir, eligible)),
     }
 
 
@@ -162,7 +161,7 @@ def run_one(ht_path: Path, runs: int = TIMING_RUNS, icount: bool = False) -> dic
 def format_report(results: dict) -> str:
     header = (
         f"{'benchmark':<22} {'instrs':>8} {'time(ms)':>10} "
-        f"{'temps':>7} {'elig':>6} {'alloc':>6} {'spill':>6} {'unsafe':>7} {'addr':>5} {'exec(M)':>9}"
+        f"{'temps':>7} {'elig':>6} {'alloc':>6} {'spill':>6} {'x-call':>7} {'addr':>5} {'exec(M)':>9}"
     )
     lines = [header, '-' * len(header)]
     for name, r in sorted(results.items()):
@@ -170,13 +169,13 @@ def format_report(results: dict) -> str:
         lines.append(
             f"{name:<22} {r['instruction_count']:>8} {r['runtime_seconds'] * 1000:>10.1f} "
             f"{a['total_temps']:>7} {a['eligible']:>6} {a['allocated']:>6} {a['spilled']:>6} "
-            f"{a['unsafe_span_excluded']:>7} {a['address_taken_excluded']:>5} "
+            f"{a['live_across_call']:>7} {a['address_taken_excluded']:>5} "
             f"{_fmt_exec(r.get('executed_instructions')):>9}"
         )
     lines.append('')
     lines.append(
         "temps: Temps created. elig: eligible for a register. alloc/spill: eligible Temps "
-        "that got a register / a frame slot. unsafe: live across a call. addr: address taken. "
+        "that got a register / a frame slot. x-call: eligible Temps live across a call. addr: address taken. "
         "exec(M): millions of instructions executed (--icount; needs valgrind)."
     )
     return '\n'.join(lines)

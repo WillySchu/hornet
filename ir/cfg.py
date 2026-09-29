@@ -22,7 +22,6 @@ from ir.ir import (
     IRReadArgument,
     IRReturn,
     IRSliceBoundsCheck,
-    IRSliceGrow,
     IRStaticDataAddress,
     IRStore,
     IRUnOp,
@@ -58,8 +57,6 @@ def reads(instr) -> set:
         return {v for v in (instr.index, instr.length) if isinstance(v, Temp)}
     if isinstance(instr, IRSliceBoundsCheck):
         return {v for v in (instr.value, instr.bound) if isinstance(v, Temp)}
-    if isinstance(instr, IRSliceGrow):
-        return {v for v in (instr.ptr, instr.length, instr.cap) if isinstance(v, Temp)}
     return set()
 
 
@@ -69,8 +66,6 @@ def writes(instr) -> set:
         return {instr.dst}
     if isinstance(instr, IRCall):
         return {instr.dst} if instr.dst is not None else set()
-    if isinstance(instr, IRSliceGrow):
-        return {instr.dst_ptr, instr.dst_cap}
     return set()
 
 

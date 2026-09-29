@@ -19,7 +19,7 @@ import desugar
 import parser
 import semantic
 from lexer import lex
-from ir.ir import IRBinOp, IRBranch, IRConst, IRCopy, IRLoad, IRSliceGrow, IRStore
+from ir.ir import IRBinOp, IRBranch, IRCall, IRConst, IRCopy, IRLoad, IRStore
 from ir.program_builder import build_ir_program
 from semantic import Type, TypeKind
 
@@ -209,7 +209,7 @@ def test_already_sum_typed_argument_needs_no_widening_but_still_a_real_address()
 
 
 def test_append_into_sum_typed_slice_uses_shapes_own_element_width():
-    """append(shapes, Circle(5)) into a []Shape -- IRSliceGrow's own
+    """append(shapes, Circle(5)) into a []Shape -- hornet_slice_grow's
     element_width must be Shape's width (12), not Circle's (4): the
     one position checked, not fixed, since it turned out to already
     work correctly (the target element type comes from the slice's
@@ -223,9 +223,9 @@ def test_append_into_sum_typed_slice_uses_shapes_own_element_width():
         "    return 0\n"
     )
     fn = _fn(ir_program, 'main')
-    grows = [instr for instr in fn.body if isinstance(instr, IRSliceGrow)]
+    grows = [instr for instr in fn.body if isinstance(instr, IRCall) and instr.name == 'hornet_slice_grow']
     assert len(grows) == 1
-    assert grows[0].element_width == 12
+    assert grows[0].args[3].value == 12
 
 
 def test_array_literal_of_shapes_widens_each_element():
