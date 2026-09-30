@@ -238,6 +238,31 @@ class IMulQ(Instruction):
 
 
 @dataclass
+class IMulWide(Instruction):
+    """Signed %rdx:%rax = %rax * operand (one-operand imulq)."""
+    operand: Operand
+    mnemonic = "imulq"
+
+    def operands(self) -> list[str]:
+        return [self.operand.emit()]
+
+
+@dataclass
+class ShiftImmQ(Instruction):
+    """64-bit shift of dst by an immediate count; kind is 'sar', 'shr', or 'shl'."""
+    kind: str
+    count: int
+    dst: Operand
+
+    @property
+    def mnemonic(self) -> str:
+        return f"{self.kind}q"
+
+    def operands(self) -> list[str]:
+        return [f"${self.count}", self.dst.emit()]
+
+
+@dataclass
 class Cdq(Instruction):
     """Sign-extend %eax into %edx:%eax (before IDiv)."""
     mnemonic = "cdq"

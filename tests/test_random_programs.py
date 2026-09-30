@@ -109,8 +109,15 @@ class Gen:
                 return text, (lambda s: _wrap(lf(s) << (rf(s) & mask), bits))
             return text, (lambda s: lf(s) >> (rf(s) & mask))
         if op in ('/', '%'):
-            text = f"({lt} {op} (({rt} & {c255}) | {c1}))"
             fn = _div if op == '/' else _mod
+            if r.random() < 0.4:  # literal divisor: multiply-high lowering
+                k = r.choice([2, 3, 7, 10, 16, 255, 1000003, -5, -8, 2 ** 40 + 3] if bits == 64
+                             else [2, 3, 7, 10, 16, 255, 1000003, -5, -8, 65537])
+                kt = f"({k})" if k < 0 else str(k)
+                if bits == 32:
+                    kt = f"int32({kt})"
+                return f"({lt} {op} {kt})", (lambda s, k=k: _wrap(fn(lf(s), k), bits))
+            text = f"({lt} {op} (({rt} & {c255}) | {c1}))"
             return text, (lambda s: _wrap(fn(lf(s), (rf(s) & 255) | 1), bits))
         py = {'+': lambda a, b: a + b, '-': lambda a, b: a - b, '*': lambda a, b: a * b,
               '&': lambda a, b: a & b, '|': lambda a, b: a | b, '^': lambda a, b: a ^ b}[op]

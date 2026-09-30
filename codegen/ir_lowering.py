@@ -21,6 +21,9 @@ from codegen.assembly_ast import (
     IDivQ,
     IMul,
     IMulQ,
+    IMulWide,
+    MovSXD,
+    ShiftImmQ,
     MovZX,
     Neg,
     NegQ,
@@ -80,6 +83,7 @@ from ir.ir import (
 from typesys import is_wide_type, type_byte_width
 from ir.cfg import uses
 from codegen.peephole import INVERSE_CC
+from codegen.divide_by_constant import is_power_of_two, magic
 from codegen.utils import as_qword_register, ARG_REGISTERS_32, ARG_REGISTERS_64, COMPARISON_CONDITION_CODES
 from typesys import Type
 from ops import BinaryOp, UnaryOp
@@ -236,7 +240,44 @@ class InstructionSelector:
         out.append(cls(src=src, dst=acc))
         return out + self._mov(acc, d, width)
 
+    def _divmod_by_constant(self, op, d: Operand, a: Operand, divisor: int, width: int) -> list:
+        """Division or modulo by a constant (not 0, 1, -1) with multiply-high, shifts, and adds.
+        int32 operands are sign-extended and divided as 64-bit; the low half is the result."""
+        rax, rcx, rdx = Register('rax'), Register('rcx'), Register('rdx')
+        if width == 8:
+            out = self._mov(a, rcx, 8)
+        else:
+            out = self._mov(a, Register('ecx'), 4) + [MovSXD(src=Register('ecx'), dst=rcx)]
+        ad = abs(divisor)
+        if is_power_of_two(ad):
+            k = ad.bit_length() - 1
+            out += [MovQ(src=rcx, dst=rdx), ShiftImmQ('sar', 63, rdx), ShiftImmQ('shr', 64 - k, rdx),
+                    AddQ(src=rcx, dst=rdx), ShiftImmQ('sar', k, rdx)]
+        else:
+            m, shift = magic(ad)
+            out += [MovQ(src=Imm(m), dst=rax), IMulWide(rcx)]
+            if m < 0:
+                out.append(AddQ(src=rcx, dst=rdx))
+            if shift:
+                out.append(ShiftImmQ('sar', shift, rdx))
+            out += [MovQ(src=rdx, dst=rax), ShiftImmQ('shr', 63, rax), AddQ(src=rax, dst=rdx)]
+        if divisor < 0:
+            out.append(NegQ(rdx))
+        result = rdx
+        if op == BinaryOp.MODULO:
+            if self._fits_imm(divisor, 8):
+                out.append(IMulQ(src=Imm(divisor), dst=rdx))
+            else:
+                out += [MovQ(src=Imm(divisor), dst=rax), IMulQ(src=rax, dst=rdx)]
+            out.append(SubQ(src=rdx, dst=rcx))
+            result = rcx
+        if width == 4:
+            result = Register({'rdx': 'edx', 'rcx': 'ecx'}[result.name])
+        return out + self._mov(result, d, width)
+
     def _direct_divmod(self, op, d: Operand, a: Operand, b: Operand, width: int) -> list:
+        if isinstance(b, Imm) and b.value not in (0, 1, -1):
+            return self._divmod_by_constant(op, d, a, b.value, width)
         acc = self._scratch('eax', width)
         out = self._mov(a, acc, width)
         divisor = b

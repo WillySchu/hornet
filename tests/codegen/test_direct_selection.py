@@ -10,8 +10,8 @@ import random
 import pytest
 
 from codegen.assembly_ast import (
-    Add, AddQ, And, AndQ, Cdq, Cmp, CmpQ, Cqto, FrameSlot, IDiv, IDivQ, IMul, IMulQ, Imm, Mov, MovQ,
-    MovZX, Neg, NegQ, Not, NotQ, Or, OrQ, Register, SetCC, ShiftLeft, ShiftLeftQ, ShiftRightArithmetic,
+    Add, AddQ, And, AndQ, Cdq, Cmp, CmpQ, Cqto, FrameSlot, IDiv, IDivQ, IMul, IMulQ, IMulWide, Imm, Mov, MovQ,
+    MovSXD, MovZX, ShiftImmQ, Neg, NegQ, Not, NotQ, Or, OrQ, Register, SetCC, ShiftLeft, ShiftLeftQ, ShiftRightArithmetic,
     ShiftRightArithmeticQ, Sub, SubQ, Xor, XorQ,
 )
 from codegen.codegen import CodeGenerator
@@ -125,6 +125,15 @@ class Sim:
                 self.write(ins.operand, int(ok), 1)
             elif t is MovZX:
                 self.write(ins.dst, self.read(ins.src, 1), 4)
+            elif t is MovSXD:
+                self.write(ins.dst, _signed(self.read(ins.src, 4), 32), 8)
+            elif t is IMulWide:
+                prod = _signed(self.regs.get('rax', 0), 64) * _signed(self.read(ins.operand, 8), 64)
+                self.regs['rax'], self.regs['rdx'] = prod & M64, (prod >> 64) & M64
+            elif t is ShiftImmQ:
+                v = self.read(ins.dst, 8)
+                v = {'sar': _signed(v, 64) >> ins.count, 'shr': v >> ins.count, 'shl': v << ins.count}[ins.kind]
+                self.write(ins.dst, v, 8)
             else:
                 raise AssertionError(f"simulator has no rule for {ins!r}")
 
@@ -233,3 +242,46 @@ def test_direct_selection_matches_model(seed):
     for tid in values:
         if tid != instr.dst.id:
             assert sim.read(home(tid, width), width) == before[tid], f"clobbered temp {tid}: {out}"
+
+
+DIVISORS = [2, 3, 5, 7, 10, 15, 16, 255, 256, 1000003, 7919, 2 ** 31 - 1, 2 ** 31, 2 ** 40 + 3, 2 ** 62, 2 ** 63 - 1]
+DIVISORS += [-x for x in DIVISORS] + [-(2 ** 63)]
+
+
+@pytest.mark.parametrize('divisor', DIVISORS)
+@pytest.mark.parametrize('bits', [64, 32])
+def test_division_by_constant_matches_idiv(divisor, bits):
+    if bits == 32 and not -2 ** 31 <= divisor < 2 ** 31:
+        pytest.skip('not an int32 constant')
+    t = Type.INT if bits == 64 else Type.INT32
+    width = bits // 8
+    r = random.Random(divisor * 7 + bits)
+    lo, hi = -2 ** (bits - 1), 2 ** (bits - 1) - 1
+    values = [lo, hi, 0, 1, -1, 2, -2]
+    values += [_signed(divisor * k + e, bits) for k in (1, 2, 3, -1, -7) for e in (-1, 0, 1)]
+    values += [r.randint(lo, hi) for _ in range(40)]
+    for op in (BinaryOp.DIVIDE, BinaryOp.MODULO):
+        for n in values:
+            expected = _model(op, n, divisor, bits)
+            for layout in range(4):
+                src, dst = Temp(1, t), Temp(2 if layout % 2 else 1, t)
+                assignment = {}
+                if layout < 2:
+                    assignment[1] = 'r12d'
+                    if dst.id == 2:
+                        assignment[2] = 'r13d'
+                host = CodeGenerator()
+                host.ir_program = IRProgram(ids=IdAllocator())
+                host._register_assignment = assignment
+                sel = InstructionSelector(host, IRFunction(name='f'))
+                out = sel.lower_ir([IRBinOp(dst=dst, op=op, left=src, right=IRConst(divisor, t))])
+                assert not any(isinstance(i, (IDiv, IDivQ)) for i in out)
+                sim = Sim()
+                sim.write(sel._loc(src, width), n, width)
+                sim.write(Register('rbx'), 12345, 8)
+                sim.run(out)
+                got = _signed(sim.read(sel._loc(dst, width), width), bits)
+                assert got == expected, (op, n, divisor, bits, layout, out)
+                if dst.id != src.id:
+                    assert _signed(sim.read(sel._loc(src, width), width), bits) == _signed(n, bits)
+                assert sim.regs['rbx'] == 12345
