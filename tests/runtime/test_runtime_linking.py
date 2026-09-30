@@ -91,7 +91,8 @@ def test_hornet_runtime_entry_points_are_the_only_external_symbols():
             "hornet_dict_insert_scalar_key", "hornet_dict_insert_str_key",
             "hornet_dict_lookup_scalar_key", "hornet_dict_lookup_str_key",
             "hornet_dict_set_scalar_key", "hornet_dict_set_str_key",
-            "hornet_hash_bytes", "hornet_panic", "hornet_print", "hornet_slice_grow",
+            "hornet_exit", "hornet_hash_bytes", "hornet_open_write", "hornet_panic", "hornet_print",
+            "hornet_slice_grow", "hornet_write_fd",
         ]
         expected_names = [f"_{n}" for n in names] if HOST_IS_MACOS else names
         assert sorted(external_symbols) == sorted(expected_names)

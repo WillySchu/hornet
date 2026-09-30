@@ -1,4 +1,6 @@
 // Hornet runtime: print, panic, slice growth, and dict hash tables.
+#include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -247,6 +249,33 @@ static void hornet_stringify(
 }
 
 // print(x) entry point.
+// Write all `len` bytes to `fd`, retrying partial writes; -1 on error.
+int64_t hornet_write_fd(int64_t fd, const char *ptr, int64_t len) {
+    int64_t done = 0;
+    while (done < len) {
+        ssize_t n = write((int)fd, ptr + done, (size_t)(len - done));
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        done += n;
+    }
+    return done;
+}
+
+// open(2) for writing, creating or truncating (open is variadic, so it's called from C).
+int64_t hornet_open_write(const char *path) {
+    return open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+}
+
+// Flush stdio, then exit.
+void hornet_exit(int64_t code) {
+    fflush(NULL);
+    exit((int)code);
+}
+
 void hornet_print(void *value_addr, const unsigned char *type_desc) {
     struct hornet_buf buf;
     buf.cap = 16;
@@ -254,7 +283,7 @@ void hornet_print(void *value_addr, const unsigned char *type_desc) {
     buf.len = 0;
     hornet_stringify(value_addr, type_desc, 0, &buf);
     hornet_buf_append_byte(&buf, '\n');
-    write(1, buf.ptr, (size_t)buf.len);
+    hornet_write_fd(1, buf.ptr, buf.len);
     free(buf.ptr);
 }
 
