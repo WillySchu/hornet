@@ -61,6 +61,8 @@ def shapes(k: str):
         out.append(('none', [], 'none', '[]int[]'))
     if k == 't':
         out.append(('slice', ["str t3 = 'abX'"], 't3[0:2]', canon))
+        out.append(('from_bytes', ["[]byte bsrc = bytes('ab')"], 'str(bsrc)', canon))
+        out.append(('bytes_round_trip', [], 'str(bytes(mk_t()))', canon))
     if k == 'u':
         out.append(('variant_var', ["C cv = C(1)"], 'cv', canon))
     return out

@@ -169,7 +169,8 @@ def contains_reachable_break(statements: List[Node]) -> bool:
 
 
 # Builtins; see check_call.
-_BUILTIN_FUNCTION_NAMES = {'print', 'len', 'append', 'del'}
+_BUILTIN_FUNCTION_NAMES = {'print', 'len', 'append', 'del', 'bytes'}
+_BYTE_SLICE = Type(TypeKind.SLICE, element_type=Type.UINT8)
 
 
 # Errors
@@ -1417,6 +1418,8 @@ class SemanticAnalyzer:
             return self.check_append_call(expr)
         if expr.name == 'del':
             return self.check_del_call(expr)
+        if expr.name == 'bytes':
+            return self.check_bytes_call(expr)
         if expr.name not in self.functions:
             raise SemanticError(f"Call to undeclared function '{expr.name}'", expr)
         param_types, return_type = self.functions[expr.name]
@@ -1499,6 +1502,17 @@ class SemanticAnalyzer:
                 value_arg,
             )
         return slice_type
+
+    def check_bytes_call(self, expr: Call) -> Type:
+        """`bytes(s)`: a new []byte copy of str s. Lowered to a runtime call."""
+        if len(expr.args) != 1 or expr.kwargs:
+            raise SemanticError(f"bytes() takes exactly one argument, got {len(expr.args)}", expr)
+        arg_type = self.check_expr(expr.args[0])
+        if arg_type != Type.STR:
+            raise SemanticError(f"bytes() takes a str, got {arg_type}", expr)
+        expr.name = 'hornet_bytes'
+        self.functions['hornet_bytes'] = ([Type.STR], _BYTE_SLICE)
+        return _BYTE_SLICE
 
     def check_del_call(self, expr: Call) -> Type:
         """`del(d, key)` mutates d in place."""
@@ -1631,6 +1645,11 @@ class SemanticAnalyzer:
     def check_cast(self, expr: Cast) -> Type:
         """`T(expr)` between integer types; literals range-checked against T."""
         target_type = type_from_name(expr.target_type, self.structs, self.type_aliases, expr, self.sum_types)
+        if target_type == Type.STR:
+            source_type = self.check_expr(expr.expr)
+            if source_type not in (Type.UINT8, _BYTE_SLICE):
+                raise SemanticError(f"str(...) takes a byte or []byte, got {source_type}", expr)
+            return Type.STR
         if target_type == Type.INT64 and self._as_folded_int_literal(expr.expr) is not None:
             self._annotate_literal_resolved_type(expr.expr, Type.INT64)
             source_type = Type.INT64

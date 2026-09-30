@@ -13006,14 +13006,14 @@ class TestCasting:
         with pytest.raises(SemanticError, match="Cannot cast"):
             analyze(ast)
 
-    def test_cast_to_str_is_rejected(self):
+    def test_cast_int_to_str_is_rejected(self):
         ast = _parse(
             "def int main():\n"
             "    int x = 5\n"
             "    str s = str(x)\n"
             "    return 0\n"
         )
-        with pytest.raises(SemanticError, match="Cannot cast"):
+        with pytest.raises(SemanticError, match="takes a byte or"):
             analyze(ast)
 
     def test_cast_from_bool_is_rejected(self):

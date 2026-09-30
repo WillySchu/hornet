@@ -3,10 +3,11 @@ Copies copy the descriptor only. Also print and its runtime type descriptors.
 """
 
 from ir.errors import IRError
-from ir.ir import IRBinOp, IRBoundsCheck, IRBranch, IRConst, IRCall, IRJump, IRLabel, IRSliceBoundsCheck, IRStaticDataAddress, IRLocalAddress, IRLoad, IRMove, IRStore
+from ir.ir import IRBinOp, IRBoundsCheck, IRCast, IRBranch, IRConst, IRCall, IRJump, IRLabel, IRSliceBoundsCheck, IRStaticDataAddress, IRLocalAddress, IRLoad, IRMove, IRStore
 from ir.utils import type_of
 from typesys import SUM_TYPE_TAG_WIDTH, type_byte_width
 from parser import (
+    Cast,
     Call,
     Binary,
     Field,
@@ -192,6 +193,8 @@ class StringsMixin:
             return self._ir_string_concat(expr)
         if isinstance(expr, Slice):
             return self._ir_str_slice_into(expr)
+        if isinstance(expr, Cast):
+            return self._ir_str_from(expr.expr)
         if isinstance(expr, Call) and self.ir_program.intrinsic_original_names.get(expr.name) == '_from_raw_parts':
             # from_raw_parts intrinsic: builds {ptr, len} inline.
             ptr_ir, ptr_value = self.gen_expr_ir(expr.args[0])
@@ -209,6 +212,33 @@ class StringsMixin:
             read_ir, ptr_value, len_value = self._ir_read_str_descriptor_from_address(addr_value)
             return addr_ir + read_ir, ptr_value, len_value
         return None
+
+    def _ir_str_from(self, source: Node) -> tuple:
+        """{ptr, len} of str(byte) (points into a shared 256-byte table) or str([]byte) (a copy)."""
+        ids = self.ir_program.ids
+        if type_of(source) == Type.UINT8:
+            label = getattr(self.ir_program, 'byte_table_label', None)
+            if label is None:
+                label = ids.new_label("byte_table")
+                self.ir_program.string_literals.append((label, ''.join(chr(i) for i in range(256))))
+                self.ir_program.byte_table_label = label
+            value_ir, value = self.gen_expr_ir(source)
+            base, offset, ptr = ids.new_temp(Type.INT64), ids.new_temp(Type.INT64), ids.new_temp(Type.INT64)
+            return value_ir + [
+                IRStaticDataAddress(dst=base, label=label),
+                IRCast(dst=offset, src=value),
+                IRBinOp(dst=ptr, op=BinaryOp.ADD, left=base, right=offset),
+            ], ptr, IRConst(1, Type.INT)
+        result = self._ir_slice_arg(source)
+        if result is None:
+            return None
+        slice_ir, src_ptr, length, _ = result
+        size, ptr = ids.new_temp(Type.INT), ids.new_temp(Type.INT64)
+        return slice_ir + [
+            IRBinOp(dst=size, op=BinaryOp.BITWISE_OR, left=length, right=IRConst(1, Type.INT)),  # never malloc(0)
+            IRCall(dst=ptr, name='malloc', args=[size]),
+            IRCall(dst=None, name='memcpy', args=[ptr, src_ptr, length]),
+        ], ptr, length
 
     def _ir_str_slice_into(self, expr: Slice):
         """{ptr, len} of s[low:high]."""

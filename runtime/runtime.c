@@ -249,6 +249,23 @@ static void hornet_stringify(
 }
 
 // print(x) entry point.
+// bytes(s): *out = a new []byte copy of the len bytes at ptr. Hornet's calling convention
+// passes the result slot first, then the str as (ptr, len).
+struct hornet_slice {
+    void *ptr;
+    int64_t len;
+    int64_t cap;
+};
+
+void hornet_bytes(struct hornet_slice *out, const char *ptr, int64_t len) {
+    out->ptr = malloc(len > 0 ? (size_t)len : 1);
+    if (len > 0) {
+        memcpy(out->ptr, ptr, (size_t)len);
+    }
+    out->len = len;
+    out->cap = len;
+}
+
 // Write all `len` bytes to `fd`, retrying partial writes; -1 on error.
 int64_t hornet_write_fd(int64_t fd, const char *ptr, int64_t len) {
     int64_t done = 0;

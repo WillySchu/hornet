@@ -17,6 +17,7 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
+- Make IRReadArgument architecturally independent.
 - Struct fields are resolved before sum types, so a sum type used as a field type is unknown at that point.
 - A slice literal whose element type is a dict ([]dict[int]int[...]) fails to parse with "Expected a variable name".
 - Weight spills by use count and loop depth.
@@ -36,7 +37,6 @@ Updates:
 - A package-style in-file declaration decoupling the module's name from its filename.
 - Struct field/method-level visibility.
 - Any import-path resolution strategy beyond "relative to the importing file" (a stdlib search path, a project manifest/root, etc.).
-- Mutable []byte ↔ str conversion.
 - FFI/extern string interop design.
 - is as a general, composable boolean expression — usable with and/or/not, assignable to bool, usable in while conditions or as a function argument. This is the biggest deferred item; it needs real control-flow-sensitive narrowing (what does if shape is Circle and x > 0: narrow? what survives an early return guard?), not just a special if-condition shape.
 - else-branch narrowing — even the "exactly two variants, so else means the other one" case.

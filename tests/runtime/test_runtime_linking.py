@@ -85,7 +85,7 @@ def test_hornet_runtime_entry_points_are_the_only_external_symbols():
         # the expected names need the identical leading underscore on
         # macOS, not just when Hornet-generated code refers to them.
         names = [
-            "hornet_argv_get",
+            "hornet_argv_get", "hornet_bytes",
             "hornet_dict_contains_scalar_key", "hornet_dict_contains_str_key",
             "hornet_dict_delete_scalar_key", "hornet_dict_delete_str_key",
             "hornet_dict_insert_scalar_key", "hornet_dict_insert_str_key",
