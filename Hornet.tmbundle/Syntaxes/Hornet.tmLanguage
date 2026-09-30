@@ -128,7 +128,7 @@
 							<key>name</key>
 							<string>constant.character.escape.hornet</string>
 							<key>match</key>
-							<string>\\.</string>
+							<string>\\x[0-9A-Fa-f]{2}|\\.</string>
 						</dict>
 					</array>
 				</dict>
@@ -167,7 +167,7 @@
 							<key>name</key>
 							<string>constant.character.escape.hornet</string>
 							<key>match</key>
-							<string>\\.</string>
+							<string>\\x[0-9A-Fa-f]{2}|\\.</string>
 						</dict>
 					</array>
 				</dict>
@@ -178,28 +178,60 @@
 			<key>patterns</key>
 			<array>
 				<dict>
-					<key>match</key>
-					<string>\bdef\b</string>
-					<key>captures</key>
+					<key>begin</key>
+					<string>\b(def)\b</string>
+					<key>beginCaptures</key>
 					<dict>
-						<key>0</key>
+						<key>1</key>
 						<dict>
 							<key>name</key>
 							<string>keyword.declaration.function.hornet</string>
 						</dict>
 					</dict>
-				</dict>
-				<dict>
-					<key>match</key>
-					<string>(?m)^\s*def\s+[^\n(]*?([A-Za-z_]\w*)\s*(?=\()</string>
-					<key>captures</key>
+					<key>end</key>
+					<string>\)</string>
+					<key>endCaptures</key>
 					<dict>
-						<key>1</key>
+						<key>0</key>
 						<dict>
+							<key>name</key>
+							<string>punctuation.definition.parameters.end.hornet</string>
+						</dict>
+					</dict>
+					<key>patterns</key>
+					<array>
+						<dict>
+							<key>match</key>
+							<string>[A-Za-z_]\w*(?=\s*\()</string>
 							<key>name</key>
 							<string>entity.name.function.hornet</string>
 						</dict>
-					</dict>
+						<dict>
+							<key>match</key>
+							<string>(?&lt;=\()\s*(\*)?([A-Za-z_]\w*)(?=\s*[,)])</string>
+							<key>captures</key>
+							<dict>
+								<key>1</key>
+								<dict>
+									<key>name</key>
+									<string>storage.type.pointer.hornet</string>
+								</dict>
+								<key>2</key>
+								<dict>
+									<key>name</key>
+									<string>variable.parameter.receiver.hornet</string>
+								</dict>
+							</dict>
+						</dict>
+						<dict>
+							<key>include</key>
+							<string>#types</string>
+						</dict>
+						<dict>
+							<key>include</key>
+							<string>#punctuation</string>
+						</dict>
+					</array>
 				</dict>
 			</array>
 		</dict>
@@ -208,9 +240,9 @@
 			<key>patterns</key>
 			<array>
 				<dict>
-					<key>match</key>
+					<key>begin</key>
 					<string>\b(extern|intrinsic)\b</string>
-					<key>captures</key>
+					<key>beginCaptures</key>
 					<dict>
 						<key>1</key>
 						<dict>
@@ -218,18 +250,33 @@
 							<string>keyword.declaration.foreign.hornet</string>
 						</dict>
 					</dict>
-				</dict>
-				<dict>
-					<key>match</key>
-					<string>(?m)^\s*(?:extern|intrinsic)\s+[^\n(]*?([A-Za-z_]\w*)\s*(?=\()</string>
-					<key>captures</key>
+					<key>end</key>
+					<string>\)</string>
+					<key>endCaptures</key>
 					<dict>
-						<key>1</key>
+						<key>0</key>
 						<dict>
+							<key>name</key>
+							<string>punctuation.definition.parameters.end.hornet</string>
+						</dict>
+					</dict>
+					<key>patterns</key>
+					<array>
+						<dict>
+							<key>match</key>
+							<string>[A-Za-z_]\w*(?=\s*\()</string>
 							<key>name</key>
 							<string>entity.name.function.foreign.hornet</string>
 						</dict>
-					</dict>
+						<dict>
+							<key>include</key>
+							<string>#types</string>
+						</dict>
+						<dict>
+							<key>include</key>
+							<string>#punctuation</string>
+						</dict>
+					</array>
 				</dict>
 			</array>
 		</dict>
@@ -239,7 +286,7 @@
 			<array>
 				<dict>
 					<key>match</key>
-					<string>\b(type|struct)\b</string>
+					<string>\b(type)\s+([A-Za-z_]\w*)</string>
 					<key>captures</key>
 					<dict>
 						<key>1</key>
@@ -247,19 +294,18 @@
 							<key>name</key>
 							<string>keyword.declaration.type.hornet</string>
 						</dict>
-					</dict>
-				</dict>
-				<dict>
-					<key>match</key>
-					<string>(?m)^\s*(?:type|struct)\s+([A-Za-z_]\w*)</string>
-					<key>captures</key>
-					<dict>
-						<key>1</key>
+						<key>2</key>
 						<dict>
 							<key>name</key>
 							<string>entity.name.type.hornet</string>
 						</dict>
 					</dict>
+				</dict>
+				<dict>
+					<key>match</key>
+					<string>\bstruct\b</string>
+					<key>name</key>
+					<string>keyword.declaration.type.hornet</string>
 				</dict>
 				<dict>
 					<key>name</key>
@@ -312,7 +358,7 @@
 					<key>name</key>
 					<string>support.function.builtin.hornet</string>
 					<key>match</key>
-					<string>\b(?:print|len|append)\b</string>
+					<string>\b(?:print|len|append|del|bytes)\b</string>
 				</dict>
 			</array>
 		</dict>
@@ -324,7 +370,7 @@
 					<key>name</key>
 					<string>keyword.control.hornet</string>
 					<key>match</key>
-					<string>\b(?:return|if|elif|else|while|break|continue|match)\b</string>
+					<string>\b(?:return|if|elif|else|for|in|while|break|continue|match)\b</string>
 				</dict>
 				<dict>
 					<key>name</key>
@@ -348,7 +394,7 @@
 					<key>name</key>
 					<string>storage.type.primitive.hornet</string>
 					<key>match</key>
-					<string>\b(?:int|int8|uint8|int64|bool|str|byte)\b</string>
+					<string>\b(?:int|int8|uint8|int32|int64|bool|str|byte)\b</string>
 				</dict>
 				<dict>
 					<key>name</key>

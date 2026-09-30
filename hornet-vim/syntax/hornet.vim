@@ -1,9 +1,7 @@
-"
 " Vim syntax file
 " Language: Hornet
-" Maintainer: generated from the Hornet compiler lexer/parser
 " Filenames: *.ht
-" Last Change: 2026-08-19
+" Last Change: 2026-09-29
 
 if exists("b:current_syntax")
   finish
@@ -11,84 +9,63 @@ endif
 
 syn case match
 
-" ---------------------------------------------------------------------------
 " Literals
-" ---------------------------------------------------------------------------
-
 syn match   hornetNumber  /\<\d\+\%(\.\d\+\)\?\>/
-syn match   hornetBoolean /\<\%(true\|false\)\>/
+syn keyword hornetBoolean true false
 syn keyword hornetConstant none
 
+syn match   hornetEscape /\\x\x\x\|\\./ contained
 syn region  hornetString start=/'/ skip=/\\./ end=/'/ contains=hornetEscape
-syn match   hornetEscape /\\./ contained
+" Byte literals: one byte in double quotes.
+syn region  hornetByte   start=/"/ skip=/\\./ end=/"/ contains=hornetEscape
 
-" ---------------------------------------------------------------------------
-" Types
-" ---------------------------------------------------------------------------
+" Types. byte is uint8 and int64 is int.
+syn keyword hornetType int int8 uint8 int32 int64 byte bool str dict
 
-syn keyword hornetType int int8 uint8 int64 bool str struct
-" Array/slice type syntax is structural; the type keywords above still
-" highlight the element type inside forms such as [5]int and []int.
-syn match   hornetTypeBrackets /[\[\]]/
-
-" ---------------------------------------------------------------------------
-" Keywords and control flow
-" ---------------------------------------------------------------------------
-
+" Declarations
 syn keyword hornetKeyword def return
-syn keyword hornetConditional if elif else
-syn keyword hornetRepeat while
+syn keyword hornetStructure type struct
+syn keyword hornetInclude import from as
+syn keyword hornetStorageClass extern intrinsic
+
+" Control flow
+syn keyword hornetConditional if elif else match is
+syn keyword hornetRepeat for while in
 syn keyword hornetStatement break continue
 
-" ---------------------------------------------------------------------------
- " Operators
-" ---------------------------------------------------------------------------
-
-" Compound assignments and plain assignment.
-syn match hornetAssignment /<<=\|>>=\|+=\|-=\|\*=\|\/=\|%=\|&=\||=\|\^=\|=/
-
-" Comparisons and shifts.
-syn match hornetOperator /==\|!=\|<=\|>=\|<<\|>>/
-
-" Single-character operators. Longer operators above win because they are
-" declared first.
-syn match hornetOperator /[+\-*\/%~&|^<>]/
+" Operators. When matches start at the same column the later one wins, so
+" the guards keep '=' out of '==' and '<<' out of '<<='.
+syn match   hornetOperator /[+\-*\/%~&|^<>]/
+syn match   hornetAssignment /<<=\|>>=\|+=\|-=\|\*=\|\/=\|%=\|&=\||=\|\^=\|[=!<>]\@<!==\@!/
+syn match   hornetOperator /==\|!=\|<=\|>=\|<<=\@!\|>>=\@!/
 syn keyword hornetLogicalOperator and or not
 
-" Builtins and identifiers
-" ---------------------------------------------------------------------------
+" Calls. Builtins have their own group.
+syn match   hornetFunction /\h\w*\ze\s*(/
+syn keyword hornetBuiltin print len append del bytes
 
-syn keyword hornetBuiltin print len append
+" Declared names (after the operator and call matches, so they win).
+syn match   hornetTypeName /\%(\<type\s\+\)\@<=\h\w*/
+syn match   hornetFunctionDef /\%(\<\%(def\|extern\|intrinsic\)\>[^(#]*\)\@<=\<\h\w*\ze\s*(/
+" Method receiver, including the '*' of a pointer receiver: def m(*self, ...).
+syn match   hornetReceiver /\%(\<def\>[^(#]*(\s*\)\@<=\*\?\h\w*\ze\s*[,)]/
 
-" A name immediately followed by "(" is a call. This deliberately also
-" catches user-defined functions; builtin names have their own stronger
-" keyword highlight above.
-syn match hornetFunction /\h\w*\ze\s*(/
+syn match   hornetDelimiter /[(),:;\[\]{}.]/
 
-" ---------------------------------------------------------------------------
-" Delimiters
-" ---------------------------------------------------------------------------
-
-syn match hornetDelimiter /[(),:;\[\]]/
-
-" ---------------------------------------------------------------------------
-" Comments
-" ---------------------------------------------------------------------------
-
-syn match hornetComment "#.*$"
-
-" ---------------------------------------------------------------------------
-" Highlight links
-" ---------------------------------------------------------------------------
+syn match   hornetComment "#.*$" contains=@Spell
 
 hi def link hornetNumber Number
 hi def link hornetBoolean Boolean
 hi def link hornetConstant Constant
 hi def link hornetString String
+hi def link hornetByte Character
 hi def link hornetEscape SpecialChar
 
 hi def link hornetType Type
-hi def link hornetTypeBrackets Delimiter
+hi def link hornetTypeName Typedef
+hi def link hornetStructure Structure
+hi def link hornetInclude Include
+hi def link hornetStorageClass StorageClass
 
 hi def link hornetKeyword Keyword
 hi def link hornetConditional Conditional
@@ -97,10 +74,12 @@ hi def link hornetStatement Statement
 
 hi def link hornetAssignment Operator
 hi def link hornetOperator Operator
-hi def link hornetLogicalOperator Boolean
+hi def link hornetLogicalOperator Operator
 
-hi def link hornetBuiltin Function
+hi def link hornetFunctionDef Function
 hi def link hornetFunction Function
+hi def link hornetBuiltin Function
+hi def link hornetReceiver Special
 hi def link hornetDelimiter Delimiter
 
 hi def link hornetComment Comment

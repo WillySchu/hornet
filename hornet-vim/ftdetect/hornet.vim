@@ -1,3 +1,2 @@
-augroup filetypedetect
-  autocmd BufRead,BufNewFile *.ht setfiletype hornet
-augroup END
+" Vim ships a *.ht rule for another language (haste); override it.
+autocmd BufRead,BufNewFile *.ht set filetype=hornet
