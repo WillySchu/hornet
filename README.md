@@ -76,6 +76,19 @@ pytest
 
 The tests cover the lexer, parser, semantic analysis, module discovery and merging, IR construction and verification, optimization, the native backend, escape analysis, runtime behavior, and end-to-end compiled programs, including seeded random programs checked against a Python model.
 
+### Formatting
+
+`tools/hfmt` is the Hornet source formatter, itself written in Hornet:
+
+```bash
+python3 build.py tools/hfmt/main.ht -o hfmt
+./hfmt file.ht other.ht        # format in place (files are written only if they change)
+./hfmt --check file.ht         # list files that would change; exit 1 if any
+./hfmt < file.ht               # format stdin to stdout
+```
+
+It normalizes whitespace only and keeps line breaks: 4-space indentation (plus 4 per open bracket on continuation lines), canonical spacing around operators, commas, and colons, two spaces before an inline comment and one after `#`, at most one blank line in a row, and exactly one blank line around multi-line top-level definitions (consecutive one-line declarations stay together). The repository's own `.ht` files are kept formatted by the test suite.
+
 ### Benchmarks
 
 ```bash
@@ -97,13 +110,13 @@ Hornet currently provides:
 * Fixed-size arrays
 * Slices
 * Nominal structs, methods, and pointer receivers
-* Type aliases
+* Type aliases and compile-time constants
 * Single-level pointers
 * Tagged sum types
 * `if`, `elif`, `else`, and `match`
 * `while` loops
 * C-style `for` loops
-* `for ... in ...` iteration over arrays, slices, and dictionaries
+* `for ... in ...` iteration over arrays, slices, dictionaries, and strings
 * `break` and `continue`
 * Dictionaries with hashing, deletion, membership, and iteration
 * Explicit integer casts
@@ -352,6 +365,20 @@ def int main():
 
 A name cannot be redeclared in the same scope.
 
+## Constants
+
+`const` declares a top-level constant of an integer type, `bool`, or `str`:
+
+```hornet
+const int TK_IDENT = 1
+const int TK_NUMBER = TK_IDENT + 1
+const int LIMIT = 1 << 16
+const str GREETING = 'hello ' + 'world'
+const bool DEBUG = LIMIT > 1000 and not false
+```
+
+The value is computed at compile time from literals, other constants (in any order), operators, string concatenation, and integer casts, with the same wraparound as at runtime. Constants are imported and qualified like other top-level names (`from 'lexer' import TK_IDENT`, `lexer.TK_IDENT`), and a leading `_` makes one private. They can't be assigned or have their address taken, and a local variable, parameter, or loop binding can't reuse the name of a constant visible in its file.
+
 ---
 
 # Functions
@@ -589,6 +616,14 @@ for i, value in values:
     print(value)
 ```
 
+A string yields its bytes, optionally with their indices:
+
+```hornet
+for i, b in 'hi':
+    print(i)
+    print(str(b))
+```
+
 A dictionary can provide either its keys or both keys and values:
 
 ```hornet
@@ -600,7 +635,7 @@ for key, value in counts:
     print(value)
 ```
 
-The iterable must be an array, slice, or dictionary given as a variable, field, index, slice expression, or array/dictionary literal. Iterating over a function-call result or a dereference is not yet supported.
+The iterable must be an array, slice, dictionary, or string given as a variable, field, index, slice expression, or array/dictionary/string literal. Iterating over a function-call result or a dereference is not yet supported.
 
 The implementation currently uses one loop binding storage location for the whole iteration. Taking the address of an iteration binding is therefore rejected.
 
@@ -1013,6 +1048,7 @@ desugar.py         AST desugaring
 modules.py         Module discovery
 merge.py           Module merging and name resolution
 escape_analysis.py Escape analysis
+folding.py         Compile-time integer arithmetic (constants and IR folding)
 typesys.py         Types and type layout
 ops.py             Operator enums
 diagnostics.py     Error types and error reporting
@@ -1025,6 +1061,7 @@ runtime/           Native Hornet runtime
 stdlib/            Hornet standard-library modules
 
 examples/          Example Hornet programs
+tools/hfmt/        Source formatter, written in Hornet
 tests/             Compiler, runtime, and end-to-end tests
 benchmarks/        Benchmark programs and tooling
 
@@ -1115,6 +1152,7 @@ Hornet is still experimental. Some notable limitations are:
 * `extern` declarations are visible to every module after merging, even without an import.
 * Printing a struct defined in another module shows its internal name, such as `errors$Error(...)`.
 * A slice literal whose element type is a dictionary (`[]dict[int]int[...]`) does not parse.
+* A constant can't be used as an array size (`[LIMIT]int`).
 
 ---
 
@@ -1124,7 +1162,7 @@ A longer-term goal is to rewrite the compiler itself in Hornet.
 
 The current language already has most of the structural features needed by a compiler implementation: structs, arrays, slices, dictionaries, pointers, sum types, pattern matching, modules, FFI, and native compilation.
 
-The standard library now covers file and stream I/O, process exit, string building and searching, integer formatting, and an error convention, so the next step is porting the compiler itself, starting with the lexer.
+The standard library now covers file and stream I/O, process exit, string building and searching, integer formatting, and an error convention. The formatter in `tools/hfmt` is the first substantial tool written in Hornet; it includes a Hornet lexer that is tested token-for-token against the compiler's own. The next step is porting the compiler itself, starting from that lexer.
 
 The repository contains `SELF_HOST_CHECKLIST.md` to track that work.
 
