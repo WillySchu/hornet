@@ -197,3 +197,14 @@ def test_verify_program_names_the_offending_function():
     broken = fn(name='broken', body=[])
     with pytest.raises(IRVerificationError, match="broken: empty body"):
         verify_program(IRProgram(functions=[good, broken]))
+
+
+def test_temp_that_does_not_fit_a_register_raises():
+    from ir.ir import IRLoad, IRReturn, Temp
+    from typesys import Type, TypeKind
+    fn = IRFunction(name='f')
+    addr, value = Temp(1, Type.INT64), Temp(2, Type(TypeKind.SLICE, element_type=Type.INT))
+    fn.params = [addr]
+    fn.body = [IRLoad(dst=value, address=addr), IRReturn(value=None)]
+    with pytest.raises(IRVerificationError, match="doesn't fit in a register"):
+        verify_function(fn)

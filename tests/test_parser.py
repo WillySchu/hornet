@@ -942,15 +942,11 @@ def test_parse_block_single_statement_ignore_newlines():
 
 
 def test_parse_block_many_statements():
-    tokens = [
-        lexer.Token(lexer.TokenType.INDENT, '', 1, 1),
-        lexer.Token(lexer.TokenType.NUMBER, '1', 1, 3),
-        lexer.Token(lexer.TokenType.NUMBER, '2', 1, 5),
-        lexer.Token(lexer.TokenType.NUMBER, '3', 1, 7),
-        lexer.Token(lexer.TokenType.NUMBER, '4', 1, 9),
-        lexer.Token(lexer.TokenType.DEDENT, '', 1, 10),
-        lexer.Token(lexer.TokenType.EOF, '', 1, 11),
-    ]
+    tokens = [lexer.Token(lexer.TokenType.INDENT, '', 1, 1)]
+    for line in range(1, 5):
+        tokens += [lexer.Token(lexer.TokenType.NUMBER, str(line), line, 3),
+                   lexer.Token(lexer.TokenType.NEWLINE, '', line, 4)]
+    tokens += [lexer.Token(lexer.TokenType.DEDENT, '', 5, 1), lexer.Token(lexer.TokenType.EOF, '', 5, 1)]
     p = parser.Parser(tokens)
 
     assert [
@@ -959,6 +955,18 @@ def test_parse_block_many_statements():
         parser.ExprStmt(expr=parser.Constant(value=3)),
         parser.ExprStmt(expr=parser.Constant(value=4)),
     ] == p.parse_block()
+
+
+def test_parse_block_rejects_two_statements_on_one_line():
+    tokens = [
+        lexer.Token(lexer.TokenType.INDENT, '', 1, 1),
+        lexer.Token(lexer.TokenType.NUMBER, '1', 1, 3),
+        lexer.Token(lexer.TokenType.NUMBER, '2', 1, 5),
+        lexer.Token(lexer.TokenType.DEDENT, '', 1, 6),
+        lexer.Token(lexer.TokenType.EOF, '', 1, 7),
+    ]
+    with pytest.raises(parser.ParseError, match="Expected the end of the line after this statement, got number '2'"):
+        parser.Parser(tokens).parse_block()
 
 
 def test_parse_statement_empty():

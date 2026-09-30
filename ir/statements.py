@@ -590,7 +590,7 @@ class StatementsMixin:
             return self._ir_continue()
         elif isinstance(stmt, ExprStmt) and isinstance(stmt.expr, ArrayLiteral):
             return self._ir_array_literal_side_effects_only(stmt.expr)
-        elif isinstance(stmt, ExprStmt) and isinstance(stmt.expr, Slice):
+        elif isinstance(stmt, ExprStmt) and isinstance(stmt.expr, Slice) and type_of(stmt.expr).kind == TypeKind.SLICE:
             production = self._ir_slice_into(stmt.expr)
             if production is not None:
                 slice_ir, _, _, _ = production
@@ -623,6 +623,8 @@ class StatementsMixin:
                 )
             ir, _ = result
             return ir
+        elif isinstance(stmt, ExprStmt) and type_of(stmt.expr).kind in COMPOSITE_KINDS:
+            return self._ir_discarded_composite(stmt.expr)
         elif isinstance(stmt, ExprStmt):
             ir, _ = self.gen_expr_ir(stmt.expr)
             return ir
@@ -632,6 +634,18 @@ class StatementsMixin:
         raise IRError(
             f"No real-IR case for statement of type {type(stmt).__name__}: {stmt!r}"
         )
+
+    def _ir_discarded_composite(self, expr):
+        """A composite value used as a statement: evaluate it (calls, bounds checks, lookups) into a
+        scratch slot and discard it."""
+        value_type = type_of(expr)
+        width = type_byte_width(value_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+        slot = self.ir_program.ids.new_slot(width, "discarded_value", self.ir_fn)
+        address = self.ir_program.ids.new_temp(Type.INT64)
+        write_ir = self._ir_write_composite_value_into(address, expr, value_type)
+        if write_ir is None:
+            raise IRError(f"No real-IR case for a {value_type} value used as a statement: {expr!r}")
+        return [IRLocalAddress(dst=address, slot=slot)] + write_ir
 
     def _ir_assign_composite_fallback(self, stmt):
         """Composite Assign/IndexAssign/FieldAssign shapes without a dedicated case: take the

@@ -12124,6 +12124,42 @@ class TestBareExpressionStatements:
             42,
         )
 
+    @pytest.mark.parametrize("setup,expr", [
+        ("", "'hello'"),
+        ("", "'a' + 'b'"),
+        ("    []str ss = ['x']\n", "ss[0]"),
+        ("    str t = 'abc'\n", "t[0:2]"),
+        ("    [][]int s2 = [][]int[[]int[1, 2]]\n", "s2[0]"),
+        ("    []P ps = [P(1)]\n", "ps[0]"),
+        ("    dict[int]str d = dict[int]str{1: 'v'}\n", "d[1]"),
+        ("", "str(byte(65))"),
+    ])
+    def test_bare_composite_value_statement(self, setup, expr):
+        assert_program_stdout(
+            "type P struct:\n    int x\n"
+            f"def int main():\n{setup}    {expr}\n    print(1)\n    return 0\n",
+            "1\n",
+        )
+
+    @pytest.mark.parametrize("setup,expr,message", [
+        ("    []str ss = ['x']\n    int i = 3\n", "ss[i]", "array index out of bounds"),
+        ("    str t = 'abc'\n    int e = 9\n", "t[0:e]", "slice bounds out of range"),
+        ("    dict[int]str d\n", "d[5]", "dict lookup: key not found"),
+    ])
+    def test_bare_composite_value_statement_keeps_its_checks(self, setup, expr, message):
+        result = compile_and_run(f"def int main():\n{setup}    {expr}\n    print(1)\n    return 0\n")
+        assert result.returncode == -signal.SIGABRT and message in result.stdout
+
+
+class TestStatementsEndTheirLine:
+    @pytest.mark.parametrize("line", ["print(1) 2 3", "int y = 1 2", "x = 2 x = 3", "return 0 1", "x 5"])
+    def test_trailing_tokens_are_rejected(self, line):
+        with pytest.raises(ParseError, match="Expected the end of the line after this statement"):
+            _parse(f"def int main():\n    int x = 1\n    {line}\n    return 0\n")
+
+    def test_block_statements_and_comments_still_end_lines(self):
+        _parse("def int main():\n    if true:\n        print(1)  # c\n    while false:\n        break\n    return 0\n")
+
 
 class TestSliceParametersAndReturns:
     pytestmark = GCC_SKIP

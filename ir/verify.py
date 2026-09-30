@@ -1,6 +1,6 @@
 """Structural IR invariants, checked after building and after optimization:
 non-empty body; unique labels; every block ends in one terminator; jump targets exist;
-slots exist; every read Temp is written somewhere in the function.
+slots exist; every Temp fits in a register; every read Temp is written somewhere in the function.
 Not checked: operand type consistency, call target existence.
 """
 
@@ -8,10 +8,16 @@ from diagnostics import InternalCompilerError
 
 from ir.cfg import TERMINATORS, reads, writes
 from ir.ir import IRBranch, IRFunction, IRJump, IRLabel, IRLocalAddress, IRProgram
+from typesys import TypeKind
 
 
 class IRVerificationError(InternalCompilerError):
     """IR invariant violated; a compiler bug."""
+
+
+# Temps hold one machine word: integers, bools, pointers, and str (a descriptor's address).
+_REGISTER_KINDS = {TypeKind.INT, TypeKind.INT32, TypeKind.INT8, TypeKind.UINT8, TypeKind.BOOL, TypeKind.POINTER,
+                   TypeKind.STR}
 
 
 def verify_function(ir_fn: IRFunction) -> None:
@@ -51,6 +57,14 @@ def verify_function(ir_fn: IRFunction) -> None:
         raise IRVerificationError(
             f"{ir_fn.name}: hidden_return_ptr_slot references unknown slot {ir_fn.hidden_return_ptr_slot}"
         )
+
+    for op in ir_fn.body:
+        for temp in (*reads(op), *writes(op)):
+            if temp.type.kind not in _REGISTER_KINDS:
+                raise IRVerificationError(
+                    f"{ir_fn.name}: Temp {temp.id} has type {temp.type}, which doesn't fit in a register "
+                    f"(composite values live in slots and are handled by address): {op!r}"
+                )
 
     defined_ids = {t.id for t in ir_fn.params}
     for op in ir_fn.body:

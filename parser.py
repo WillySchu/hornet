@@ -932,11 +932,22 @@ class Parser:
         statements = []
         while not self.check(TokenType.DEDENT) and not self.at_end():
             statements.append(self.parse_statement())
+            self._expect_statement_end()
             self.skip_newlines()
         self.expect(TokenType.DEDENT, "Expected the end of an indented block")
         if not statements:
             raise self._error("Expected at least one statement in this block", self.current())
         return statements
+
+    def _expect_statement_end(self) -> None:
+        """A statement ends its line: a block statement has consumed its block (DEDENT), a simple
+        one must be followed by a newline, the block's end, or the end of input."""
+        previous = self.tokens[self.pos - 1].type if self.pos else None
+        if previous in (TokenType.DEDENT, TokenType.NEWLINE) or self.at_end():
+            return
+        if not self.check(TokenType.NEWLINE, TokenType.DEDENT):
+            tok = self.current()
+            raise self._error(f"Expected the end of the line after this statement, got {describe_token(tok)}", tok)
 
     def parse_statement(self) -> Node:
         if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.INT32, TokenType.BOOL, TokenType.STR) and self.peek(1).type == TokenType.OPEN_PAREN:
