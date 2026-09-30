@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from build import c_compiler
-from target import default_target
+from tests.targets import each_runnable_target, run_binary
 
 RUNTIME_DIR = Path(__file__).resolve().parent.parent.parent / "runtime"
 RUNTIME_C = RUNTIME_DIR / "runtime.c"
@@ -26,12 +26,10 @@ TEST_CALLER_C = RUNTIME_DIR / "test_linked_separately.c"
 GCC_AVAILABLE = shutil.which("gcc") is not None
 pytestmark = pytest.mark.skipif(not GCC_AVAILABLE, reason="gcc not available")
 
-# Built for the default target, the same as compiled Hornet programs.
-TARGET = default_target()
-CC = c_compiler(TARGET)
 
-
-def test_runtime_and_caller_link_and_run_correctly():
+@each_runnable_target
+def test_runtime_and_caller_link_and_run_correctly(target):
+    CC = c_compiler(target)
     with tempfile.TemporaryDirectory() as tmpdir:
         runtime_o = f"{tmpdir}/runtime.o"
         caller_o = f"{tmpdir}/caller.o"
@@ -47,12 +45,13 @@ def test_runtime_and_caller_link_and_run_correctly():
         )
         subprocess.run([*CC, runtime_o, caller_o, "-o", binary], check=True, capture_output=True, text=True)
 
-        result = subprocess.run([binary], capture_output=True, text=True)
+        result = run_binary(target, [binary], capture_output=True, text=True)
         assert result.returncode == 0
         assert result.stdout == "42\n"
 
 
-def test_hornet_runtime_entry_points_are_the_only_external_symbols():
+@each_runnable_target
+def test_hornet_runtime_entry_points_are_the_only_external_symbols(target):
     """hornet_print/hornet_panic/hornet_slice_grow/hornet_hash_bytes/
     hornet_dict_insert_scalar_key/hornet_dict_insert_str_key/hornet_
     dict_set_scalar_key/hornet_dict_set_str_key/hornet_dict_lookup_
@@ -65,6 +64,7 @@ def test_hornet_runtime_entry_points_are_the_only_external_symbols():
     dict_* descriptor-field accessor/growth helper are internal
     implementation details (static linkage) that shouldn't leak into
     whatever links against this object file."""
+    CC = c_compiler(target)
     with tempfile.TemporaryDirectory() as tmpdir:
         runtime_o = f"{tmpdir}/runtime.o"
         subprocess.run(
@@ -90,5 +90,5 @@ def test_hornet_runtime_entry_points_are_the_only_external_symbols():
             "hornet_error_message", "hornet_exit", "hornet_hash_bytes", "hornet_open_write", "hornet_panic", "hornet_print",
             "hornet_slice_grow", "hornet_write_fd",
         ]
-        expected_names = [f"_{n}" for n in names] if TARGET.os == 'macos' else names
+        expected_names = [f"_{n}" for n in names] if target.os == 'macos' else names
         assert sorted(external_symbols) == sorted(expected_names)

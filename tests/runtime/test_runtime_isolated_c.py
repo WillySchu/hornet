@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from build import c_compiler
-from target import default_target
+from tests.targets import each_runnable_target, is_native, run_binary
 
 RUNTIME_DIR = Path(__file__).resolve().parent.parent.parent / "runtime"
 TEST_ISOLATED_C = RUNTIME_DIR / "test_runtime_isolated.c"
@@ -27,28 +27,26 @@ TEST_ISOLATED_C = RUNTIME_DIR / "test_runtime_isolated.c"
 GCC_AVAILABLE = shutil.which("gcc") is not None
 pytestmark = pytest.mark.skipif(not GCC_AVAILABLE, reason="gcc not available")
 
-# Built for the default target, the same as compiled Hornet programs.
-TARGET = default_target()
-CC = c_compiler(TARGET)
 
-
-def _compile_and_run(extra_flags: list[str]) -> subprocess.CompletedProcess:
+def _compile_and_run(target, extra_flags: list[str]) -> subprocess.CompletedProcess:
     with tempfile.TemporaryDirectory() as tmpdir:
         binary = f"{tmpdir}/test_runtime_isolated"
         subprocess.run(
-            [*CC, "-Wall", "-Wextra", "-std=c11", *extra_flags, str(TEST_ISOLATED_C), "-o", binary],
+            [*c_compiler(target), "-Wall", "-Wextra", "-std=c11", *extra_flags, str(TEST_ISOLATED_C), "-o", binary],
             check=True, capture_output=True, text=True,
         )
-        return subprocess.run([binary], capture_output=True, text=True)
+        return run_binary(target, [binary], capture_output=True, text=True)
 
 
-def test_isolated_c_tests_pass():
-    result = _compile_and_run([])
+@each_runnable_target
+def test_isolated_c_tests_pass(target):
+    result = _compile_and_run(target, [])
     assert result.returncode == 0, result.stdout + result.stderr
     assert "all tests passed" in result.stdout
 
 
-def test_isolated_c_tests_pass_under_sanitizers():
+@each_runnable_target
+def test_isolated_c_tests_pass_under_sanitizers(target):
     """The same suite, compiled with AddressSanitizer and
     UndefinedBehaviorSanitizer -- this is exactly the combination that
     caught a genuine misaligned-access bug in runtime.c during initial
@@ -56,6 +54,8 @@ def test_isolated_c_tests_pass_under_sanitizers():
     worth running as its own, separate check rather than folding into
     the plain run above and losing the distinction if one ever passes
     while the other doesn't."""
-    result = _compile_and_run(["-Wpedantic", "-fsanitize=address,undefined", "-g"])
+    if not is_native(target):
+        pytest.skip('sanitizers do not run under qemu-user')
+    result = _compile_and_run(target, ["-Wpedantic", "-fsanitize=address,undefined", "-g"])
     assert result.returncode == 0, result.stdout + result.stderr
     assert "all tests passed" in result.stdout

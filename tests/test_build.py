@@ -90,3 +90,26 @@ def test_unimplemented_architecture_is_a_clean_error(tmp_path):
     r = subprocess.run([sys.executable, str(REPO_ROOT / 'compile.py'), str(src), '--target', 'x86_64-macos'],
                        capture_output=True, text=True)
     assert r.returncode == 0 and '_main:' in r.stdout
+
+
+def test_cross_toolchain_and_run_prefix_selection(monkeypatch):
+    from target import Target
+    x86_linux, arm_linux = Target('x86_64', 'linux'), Target('aarch64', 'linux')
+    x86_mac, arm_mac = Target('x86_64', 'macos'), Target('aarch64', 'macos')
+    monkeypatch.setattr(build, 'host_target', lambda: x86_linux)
+    assert build.c_compiler(x86_linux) == ["gcc"]
+    assert build.c_compiler(arm_linux) == ["aarch64-linux-gnu-gcc"]
+    assert build.run_prefix(x86_linux) == []
+    assert build.run_prefix(arm_linux) == ["qemu-aarch64", "-L", "/usr/aarch64-linux-gnu"]
+    assert build.run_prefix(x86_mac) is None and not build.can_build(x86_mac)
+    monkeypatch.setattr(build, 'host_target', lambda: arm_mac)
+    assert build.run_prefix(x86_mac) == []  # Rosetta 2
+    assert build.run_prefix(arm_mac) == []
+    assert build.run_prefix(x86_linux) is None
+    monkeypatch.setattr(build, 'host_target', lambda: x86_mac)
+    assert build.run_prefix(arm_mac) is None
+
+
+def test_missing_toolchain_is_a_build_error():
+    with pytest.raises(build.BuildError, match="'no-such-cc' not found"):
+        build._run(["no-such-cc", "-c", "x.c"], "compiling runtime.c")
