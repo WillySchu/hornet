@@ -17,8 +17,9 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
+- Struct fields are resolved before sum types, so a sum type used as a field type is unknown at that point.
+- A slice literal whose element type is a dict ([]dict[int]int[...]) fails to parse with "Expected a variable name".
 - Weight spills by use count and loop depth.
-- int8/uint8 arithmetic isn't truncated in registers. uint8 c = 200; uint8 d = c + c; print(d > uint8(150)) prints true; d should be 144.
 - Per function dict scratch slot is allocated but never used?
 - Update TextMate and Vim grammers.
 - Module errors have a line but no column.

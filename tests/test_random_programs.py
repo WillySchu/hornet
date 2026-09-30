@@ -13,6 +13,7 @@ from tests.test_compiler import GCC_SKIP, assert_program_stdout
 
 N_INT = 18
 N_I32 = 4
+NARROW = {'b0': 'int8', 'b1': 'int8', 'u0': 'uint8', 'u1': 'uint8'}
 ARR = 4
 LOOP = 3
 
@@ -123,8 +124,48 @@ class Gen:
               '&': lambda a, b: a & b, '|': lambda a, b: a | b, '^': lambda a, b: a ^ b}[op]
         return f"({lt} {op} {rt})", (lambda s: _wrap(py(lf(s), rf(s)), bits))
 
+    def nexpr(self, ty: str, depth: int = 0):
+        """int8/uint8 expression; the model wraps every result to 8 bits."""
+        r = self.r
+        signed = ty == 'int8'
+        w = (lambda v: _wrap(v, 8)) if signed else (lambda v: v & 255)
+        roll = r.random()
+        if depth >= 2 or roll < 0.35:
+            if r.random() < 0.6:
+                name = r.choice([n for n, t in NARROW.items() if t == ty])
+                return name, (lambda s, n=name: s[n])
+            v = w(r.randint(-300, 300))
+            return f"{ty}({v})" if v >= 0 else f"{ty}(({v}))", (lambda s, v=v: v)
+        if roll < 0.5:
+            t, f = self.expr(64, 2)
+            return f"{ty}({t})", (lambda s: w(f(s)))
+        if roll < 0.6:
+            t, f = self.nexpr(ty, depth + 1)
+            if signed:
+                return f"(-{t})", (lambda s: w(-f(s)))
+            return f"(~{t})", (lambda s: w(~f(s)))
+        (lt, lf), (rt, rf) = self.nexpr(ty, depth + 1), self.nexpr(ty, depth + 1)
+        op = r.choice(['+', '+', '-', '*', '*', '&', '|', '^', '/', '%', '<<', '>>'])
+        seven, one = f"{ty}(7)", f"{ty}(1)"
+        if op in ('/', '%'):
+            fn = _div if op == '/' else _mod
+            return f"({lt} {op} (({rt} & {seven}) | {one}))", (lambda s: w(fn(lf(s), (rf(s) & 7) | 1)))
+        if op in ('<<', '>>'):
+            if op == '<<':
+                return f"({lt} << ({rt} & {seven}))", (lambda s: w(lf(s) << (rf(s) & 7)))
+            return f"({lt} >> ({rt} & {seven}))", (lambda s: lf(s) >> (rf(s) & 7))
+        py = {'+': lambda a, b: a + b, '-': lambda a, b: a - b, '*': lambda a, b: a * b,
+              '&': lambda a, b: a & b, '|': lambda a, b: a | b, '^': lambda a, b: a ^ b}[op]
+        return f"({lt} {op} {rt})", (lambda s: w(py(lf(s), rf(s))))
+
     def cond(self):
         r = self.r
+        if r.random() < 0.25:
+            ty = r.choice(['int8', 'uint8'])
+            (a, fa), (b, fb) = self.nexpr(ty, 1), self.nexpr(ty, 1)
+            op = r.choice(['<', '>', '=='])
+            py = {'<': lambda x, y: x < y, '>': lambda x, y: x > y, '==': lambda x, y: x == y}[op]
+            return f"{a} {op} {b}", (lambda s: py(fa(s), fb(s)))
         bits = r.choice([64, 32])
         if r.random() < 0.5:
             (a, fa), (b, fb) = self.var(bits), self.var(bits)
@@ -149,7 +190,13 @@ class Gen:
             def run(s):
                 s['flag'] = cf(s)
             return [f"{indent}flag = {ct}"], run
-        bits = 64 if roll < 0.8 else 32
+        if roll < 0.32:
+            target = r.choice(list(NARROW))
+            t, f = self.nexpr(NARROW[target])
+            def run(s):
+                s[target] = f(s)
+            return [f"{indent}{target} = {t}"], run
+        bits = 64 if roll < 0.82 else 32
         target = f"v{r.randrange(N_INT)}" if bits == 64 else f"w{r.randrange(N_I32)}"
         t, f = self.expr(bits, prefer=target)
         def run(s):
@@ -184,6 +231,10 @@ class Gen:
             t, f = self.const(32)
             lines.append(f"    int32 w{i} = {t}")
             state[f"w{i}"] = f(state)
+        for name, ty in NARROW.items():
+            v = r.randint(-128, 127) if ty == 'int8' else r.randint(0, 255)
+            state[name] = v
+            lines.append(f"    {ty} {name} = {ty}({v})" if v >= 0 else f"    {ty} {name} = {ty}(({v}))")
         lines.append(f"    [{ARR}]int arr")
         lines.append("    bool flag = false")
         body = [self.statement('        ') for _ in range(r.randint(10, 18))]
@@ -202,6 +253,9 @@ class Gen:
         for i in range(N_I32):
             lines.append(f"    print(w{i})")
             out.append(str(state[f"w{i}"]))
+        for name in NARROW:
+            lines.append(f"    print(int({name}))")
+            out.append(str(state[name]))
         lines.append("    print(arr)")
         out.append(f"[{ARR}]int[" + ', '.join(str(x) for x in state['arr']) + "]")
         lines.append("    print(flag)")

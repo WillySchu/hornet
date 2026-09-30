@@ -1,8 +1,8 @@
 """Pointer IR: `&x` and `*p`."""
 
 from ir.errors import IRError
-from ir.ir import IRBinOp, IRConst, IRCopy, IRLoad, IRLocalAddress, IRStore, IRValue
-from ir.utils import COMPOSITE_KINDS, is_composite_addressable, type_of
+from ir.ir import IRBinOp, IRConst, IRLoad, IRLocalAddress, IRStore, IRValue
+from ir.utils import COMPOSITE_KINDS, type_of
 from typesys import SUM_TYPE_TAG_WIDTH
 from parser import Call, DerefAssign, Field, Index, Unary, Variable
 from ops import BinaryOp
@@ -83,23 +83,9 @@ class PointersMixin:
             value_ir, value = self.gen_expr_ir(stmt.value)
             return ptr_ir + value_ir + [IRStore(address=ptr_value, value=value, value_type=pointee_type)]
 
-        if pointee_type.kind == TypeKind.STRUCT and is_composite_addressable(stmt.value):
-            src_ir, src_address = self._ir_struct_address(stmt.value)
-            return ptr_ir + src_ir + [IRCopy(dst_address=ptr_value, src_address=src_address, value_type=pointee_type)]
-
-        if (
-                pointee_type.kind == TypeKind.STRUCT
-                and isinstance(stmt.value, Call)
-                and stmt.value.name in self.ir_program.struct_registry
-        ):
-            write_ir = self._ir_write_struct_literal_into(ptr_value, stmt.value, pointee_type)
-            if write_ir is not None:
-                return ptr_ir + write_ir
-
-        if pointee_type.kind == TypeKind.STR:
-            value_ir, ptr, length = self._ir_str_value(stmt.value)
-            return ptr_ir + value_ir + self._ir_write_str_descriptor_into_address(ptr_value, ptr, length)
-
+        write_ir = self._ir_write_composite_value_into(ptr_value, stmt.value, pointee_type)
+        if write_ir is not None:
+            return ptr_ir + write_ir
         raise IRError(
             f"No real-IR case for DerefAssign with pointee kind "
             f"{pointee_type.kind} and value {stmt.value!r}"

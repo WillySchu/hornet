@@ -71,13 +71,17 @@ class ArraysSlicesMixin:
         return None
 
     def _ir_slice_address(self, expr: Node):
-        """Address of a slice descriptor; slice variables are never heap-allocated."""
+        """Address of a slice descriptor (through the box if heap-allocated)."""
         if isinstance(expr, Variable):
             slot_type = self._local_type(expr)
             if slot_type.kind != TypeKind.SUM:
                 slot = self._local_slot(expr)
                 addr_temp = self.ir_program.ids.new_temp(Type.INT64)
-                return [IRLocalAddress(dst=addr_temp, slot=slot)], addr_temp
+                ir = [IRLocalAddress(dst=addr_temp, slot=slot)]
+                if self._is_heap_allocated(self._local_decl_id(expr), slot_type):
+                    boxed = self.ir_program.ids.new_temp(Type.INT64)
+                    return ir + [IRLoad(dst=boxed, address=addr_temp)], boxed
+                return ir, addr_temp
             slot = self._local_slot(expr)
             slot_addr = self.ir_program.ids.new_temp(Type.INT64)
             ir = [IRLocalAddress(dst=slot_addr, slot=slot)]
@@ -522,7 +526,7 @@ class ArraysSlicesMixin:
         if binding_type.kind in COMPOSITE_KINDS:
             decl_id = (id(stmt), binding_index)
             slot = ir_fn.var_slots[decl_id]
-            if binding_type.kind != TypeKind.SLICE and self._is_heap_allocated(decl_id, binding_type):
+            if self._is_heap_allocated(decl_id, binding_type):
                 ir = self._ir_malloc_and_store(binding_type, slot)
             else:
                 ir = []
@@ -664,9 +668,7 @@ class ArraysSlicesMixin:
         if is_composite_addressable(value_expr):
             return self._ir_copy_into_address(dst_address, value_expr, value_type)
         if isinstance(value_expr, NoneLiteral):
-            zero_ptr = IRConst(0, Type.INT64)
-            zero_int = IRConst(0, Type.INT)
-            return self._ir_write_slice_descriptor_into_address(dst_address, zero_ptr, zero_int, zero_int)
+            return self._ir_write_zero_value_into(dst_address, value_type)
         if value_type.kind == TypeKind.SLICE and isinstance(value_expr, Slice):
             production = self._ir_slice_into(value_expr)
             if production is None:

@@ -298,7 +298,7 @@ class StringsMixin:
                 self._ir_write_slice_descriptor_into_address(slice_addr, ptr_value, len_value, cap_value))
             value_addr = slice_addr
         elif arg_type.kind == TypeKind.DICT:
-            result = self._ir_dict_address(arg)
+            result = self._ir_materialize_composite_call(arg, arg_type) if isinstance(arg, Call) else self._ir_dict_address(arg)
             if result is None:
                 raise IRError(
                     f"_ir_dict_address returned None for print()'s own dict-typed "

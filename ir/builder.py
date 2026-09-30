@@ -162,8 +162,10 @@ class IRFunctionBuilder(
             if p_type.kind == TypeKind.SLICE:
                 ptr_value, len_value, cap_value = cap
                 slot = self._bind_param(p, ir_fn)
-                param_addr = self.ir_program.ids.new_temp(Type.INT64)
-                ir.append(IRLocalAddress(dst=param_addr, slot=slot))
+                if self._is_heap_allocated(id(p), p_type):
+                    ir.extend(self._ir_malloc_and_store(p_type, slot))
+                ir_dst, param_addr = self._ir_slice_address(Variable(name=p.name, decl_id=id(p)))
+                ir.extend(ir_dst)
                 ir.extend(self._ir_write_slice_descriptor_into_address(param_addr, ptr_value, len_value, cap_value))
             elif p_type.kind == TypeKind.STR:
                 ptr_value, len_value = cap

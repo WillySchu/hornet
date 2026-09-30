@@ -214,8 +214,7 @@ class StatementsMixin:
             ):
                 slot = self._bind_local(stmt, ir_fn)
                 ir = []
-                # Slice descriptors always live on the stack.
-                if var_type.kind != TypeKind.SLICE and self._is_heap_allocated(id(stmt), var_type):
+                if self._is_heap_allocated(id(stmt), var_type):
                     # New destination: allocate before writing.
                     ir.extend(self._ir_malloc_and_store(var_type, slot))
                 return ir + self._ir_copy_assign(self._var_ref(stmt), stmt.init, var_type)
@@ -233,7 +232,7 @@ class StatementsMixin:
             # `none` slice.
             if var_type.kind == TypeKind.SLICE and isinstance(stmt.init, NoneLiteral):
                 nil_ir, ptr_value, len_value, cap_value = self._ir_nil_slice()
-                self._bind_local(stmt, ir_fn)
+                nil_ir += self._ir_box_local(stmt, var_type, self._bind_local(stmt, ir_fn))
                 return nil_ir + self._ir_write_slice_descriptor(
                     self._var_ref(stmt), ptr_value, len_value, cap_value)
             # Slice production.
@@ -241,7 +240,7 @@ class StatementsMixin:
                 production = self._ir_slice_into(stmt.init)
                 if production is not None:
                     slice_ir, ptr_value, len_value, cap_value = production
-                    self._bind_local(stmt, ir_fn)
+                    slice_ir += self._ir_box_local(stmt, var_type, self._bind_local(stmt, ir_fn))
                     return slice_ir + self._ir_write_slice_descriptor(
                         self._var_ref(stmt), ptr_value, len_value, cap_value)
             # Slice literal.
@@ -249,7 +248,7 @@ class StatementsMixin:
                 production = self._ir_slice_literal(stmt.init)
                 if production is not None:
                     slice_ir, ptr_value, len_value, cap_value = production
-                    self._bind_local(stmt, ir_fn)
+                    slice_ir += self._ir_box_local(stmt, var_type, self._bind_local(stmt, ir_fn))
                     return slice_ir + self._ir_write_slice_descriptor(
                         self._var_ref(stmt), ptr_value, len_value, cap_value)
             # append.
@@ -257,7 +256,7 @@ class StatementsMixin:
                 production = self._ir_append_call(stmt.init)
                 if production is not None:
                     append_ir, ptr_value, len_value, cap_value = production
-                    self._bind_local(stmt, ir_fn)
+                    append_ir += self._ir_box_local(stmt, var_type, self._bind_local(stmt, ir_fn))
                     return append_ir + self._ir_write_slice_descriptor(
                         self._var_ref(stmt), ptr_value, len_value, cap_value)
             # Composite-returning call: write through the variable's address.
@@ -268,7 +267,7 @@ class StatementsMixin:
                          and stmt.init.name not in self.ir_program.struct_registry)):
                 slot = self._bind_local(stmt, ir_fn)
                 ir = []
-                if var_type.kind != TypeKind.SLICE and self._is_heap_allocated(id(stmt), var_type):
+                if self._is_heap_allocated(id(stmt), var_type):
                     ir.extend(self._ir_malloc_and_store(var_type, slot))
                 address_fn = {
                     TypeKind.ARRAY: self._ir_array_address,
@@ -310,10 +309,10 @@ class StatementsMixin:
                 return ir + self._ir_write_dict_literal_into(dst_address, stmt.init, var_type, ir_fn)
             # Nil slice.
             if var_type.kind == TypeKind.SLICE and stmt.init is None:
-                self._bind_local(stmt, ir_fn)
+                box_ir = self._ir_box_local(stmt, var_type, self._bind_local(stmt, ir_fn))
                 zero_ptr = IRConst(0, Type.INT64)
                 zero_int = IRConst(0, Type.INT)
-                return self._ir_write_slice_descriptor(self._var_ref(stmt), zero_ptr, zero_int, zero_int)
+                return box_ir + self._ir_write_slice_descriptor(self._var_ref(stmt), zero_ptr, zero_int, zero_int)
             # Nil dict.
             if var_type.kind == TypeKind.DICT and stmt.init is None:
                 slot = self._bind_local(stmt, ir_fn)
@@ -449,7 +448,7 @@ class StatementsMixin:
                 write_ir = self._ir_write_sum_type_value_into(dst_address, stmt.value, element_type)
                 if write_ir is not None:
                     return dst_ir + write_ir
-            if element_type.kind not in (TypeKind.SLICE, TypeKind.STRUCT, TypeKind.SUM, TypeKind.STR):
+            if element_type.kind not in COMPOSITE_KINDS:
                 return self._ir_index_assign(stmt, element_type)
             if (
                     element_type.kind in (TypeKind.STRUCT, TypeKind.SLICE, TypeKind.SUM, TypeKind.STR)
@@ -556,6 +555,7 @@ class StatementsMixin:
                     TypeKind.ARRAY: self._ir_array_address,
                     TypeKind.STRUCT: self._ir_struct_address,
                     TypeKind.SLICE: self._ir_slice_address,
+                    TypeKind.DICT: self._ir_dict_address,
                     TypeKind.STR: self._ir_str_address,
                 }[field_type.kind]
                 dst_ir, dst_address = address_fn(dst_expr)
@@ -626,9 +626,42 @@ class StatementsMixin:
         elif isinstance(stmt, ExprStmt):
             ir, _ = self.gen_expr_ir(stmt.expr)
             return ir
+        fallback = self._ir_assign_composite_fallback(stmt)
+        if fallback is not None:
+            return fallback
         raise IRError(
             f"No real-IR case for statement of type {type(stmt).__name__}: {stmt!r}"
         )
+
+    def _ir_assign_composite_fallback(self, stmt):
+        """Composite Assign/IndexAssign/FieldAssign shapes without a dedicated case: take the
+        destination's address and write with the general composite writer. None if unsupported."""
+        if isinstance(stmt, Assign):
+            dst_expr, value_type = self._var_ref(stmt), self._local_type(stmt)
+        elif isinstance(stmt, IndexAssign) and stmt.compound_op is None:
+            dst_expr, value_type = Index(array=stmt.array, index=stmt.index), type_of(stmt.array).element_type
+        elif isinstance(stmt, FieldAssign) and stmt.compound_op is None:
+            dst_expr = Field(base=stmt.base, name=stmt.name)
+            value_type = self._check_struct_and_field_type(stmt.base, stmt.name)
+        else:
+            return None
+        if value_type.kind not in COMPOSITE_KINDS:
+            return None
+        address_fn = {
+            TypeKind.ARRAY: self._ir_array_address, TypeKind.STRUCT: self._ir_struct_address,
+            TypeKind.SUM: self._ir_struct_address, TypeKind.SLICE: self._ir_slice_address,
+            TypeKind.DICT: self._ir_dict_address, TypeKind.STR: self._ir_str_address,
+        }[value_type.kind]
+        result = address_fn(dst_expr)
+        if result is None:
+            return None
+        dst_ir, dst_address = result
+        write_ir = self._ir_write_composite_value_into(dst_address, stmt.value, value_type)
+        return None if write_ir is None else dst_ir + write_ir
+
+    def _ir_box_local(self, stmt, var_type, slot) -> list:
+        """malloc storage for a heap-allocated local before its first write; [] otherwise."""
+        return self._ir_malloc_and_store(var_type, slot) if self._is_heap_allocated(id(stmt), var_type) else []
 
     def _ir_malloc_and_store(self, var_type, slot: int) -> list:
         """malloc a heap local's storage and store the pointer in its slot."""

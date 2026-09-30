@@ -22,6 +22,7 @@ from codegen.assembly_ast import (
     IMul,
     IMulQ,
     IMulWide,
+    MovSX,
     MovSXD,
     ShiftImmQ,
     MovZX,
@@ -84,7 +85,7 @@ from typesys import is_wide_type, type_byte_width
 from ir.cfg import uses
 from codegen.peephole import INVERSE_CC
 from codegen.divide_by_constant import is_power_of_two, magic
-from codegen.utils import as_qword_register, ARG_REGISTERS_32, ARG_REGISTERS_64, COMPARISON_CONDITION_CODES
+from codegen.utils import as_byte_register, as_qword_register, ARG_REGISTERS_32, ARG_REGISTERS_64, COMPARISON_CONDITION_CODES
 from typesys import Type
 from ops import BinaryOp, UnaryOp
 
@@ -131,6 +132,10 @@ class InstructionSelector:
         reg_name = self.host._register_assignment.get(temp.id)
         if reg_name is not None:
             dst = Register(reg_name)
+            if temp.type in (Type.INT8, Type.UINT8):
+                # Narrow values live in registers sign/zero-extended from their low byte.
+                extend = MovSX if temp.type == Type.INT8 else MovZX
+                return [extend(src=as_byte_register(src), dst=dst)]
             wide = is_wide_type(temp.type)
             if wide:
                 src, dst = as_qword_register(src), as_qword_register(dst)
