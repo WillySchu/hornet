@@ -241,6 +241,25 @@ def _constant_key_value(expr: Node):
     return None
 
 
+_MAIN_PARAMS = ([], [Type.INT, Type(TypeKind.POINTER, element_type=Type.UINT8)])
+
+
+# Types the C runtime can read as main's int exit status.
+_MAIN_RETURN_TYPES = (Type.INT, Type.INT32, Type.INT8, Type.UINT8, Type.BOOL)
+
+
+def _check_main_signature(fn, param_types: list, return_type: Type) -> None:
+    """`main` is called by the C runtime: it returns the exit status (normally `int`) and takes no
+    parameters or `(int argc, *byte argv)`."""
+    if return_type not in _MAIN_RETURN_TYPES:
+        raise SemanticError(
+            f"'main' must return int (the program's exit status), not "
+            f"{'nothing' if return_type == Type.VOID else return_type} -- declare it 'def int main()'", fn)
+    if param_types not in _MAIN_PARAMS:
+        raise SemanticError(
+            "'main' takes no parameters, or exactly '(int argc, *byte argv)'", fn.params[0] if fn.params else fn)
+
+
 class SemanticAnalyzer:
     """Type- and scope-checks a Program."""
 
@@ -337,6 +356,8 @@ class SemanticAnalyzer:
         for fn in program.functions:
             try:
                 self.analyze_function(fn)
+                if fn.name == 'main':
+                    _check_main_signature(fn, *self.functions['main'])
             except SemanticError as e:
                 if e.file is None:
                     e.file = fn.file

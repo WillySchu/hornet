@@ -5,7 +5,7 @@ import sys
 
 from desugar import desugar_methods
 from backend import lower_to_asm
-from diagnostics import run_cli
+from diagnostics import CompileError, run_cli
 from ir.program_builder import build_ir_program
 from merge import merge_programs
 from modules import discover_modules
@@ -43,12 +43,15 @@ def generate_asm(program, target=None) -> str:
     return lower_to_asm(optimize(build_ir_program(program)), as_target(target))
 
 
-def compile_to_asm(source: str, target=None) -> str:
-    """Discover, merge, desugar, analyze, and lower `source` to assembly."""
+def compile_to_asm(source: str, target=None, require_main: bool = False) -> str:
+    """Discover, merge, desugar, analyze, and lower `source` to assembly. An executable needs
+    `require_main`; without it the assembly may be code for another program to link."""
     entry_program, discovered_modules = discover_modules(source)
     ast = merge_programs(entry_program, discovered_modules)
     desugar_methods(ast)  # Must precede analyze().
     analyze(ast)
+    if require_main and not any(fn.name == 'main' for fn in ast.functions):
+        raise CompileError("no 'main' function: a program starts at 'def int main()'", source)
     return generate_asm(ast, target)
 
 

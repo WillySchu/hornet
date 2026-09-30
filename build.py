@@ -73,7 +73,7 @@ def build_executable(source_path: str, output_path: str, target=None) -> None:
     """Compile `source_path` for `target` (Target, `arch-os`, or None for the default) and link it
     with runtime.c into `output_path`."""
     target = as_target(target)
-    asm = compile_to_asm(source_path, target)
+    asm = compile_to_asm(source_path, target, require_main=True)
     cc = c_compiler(target)
 
     with tempfile.TemporaryDirectory() as tmpdir:

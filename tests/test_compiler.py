@@ -4456,7 +4456,7 @@ class TestSumTypes:
             "\n"
             "type Shape is Circle | Square\n"
             "\n"
-            "def int main([3]Shape shapes):\n"
+            "def int f([3]Shape shapes):\n"
             "    return 0\n"
         )
         analyze(ast)  # should not raise
@@ -12151,6 +12151,37 @@ class TestBareExpressionStatements:
         assert result.returncode == -signal.SIGABRT and message in result.stdout
 
 
+class TestMainSignature:
+    @pytest.mark.parametrize("signature", [
+        "def int main()", "def int main(int argc, *byte argv)", "def int32 main()", "def uint8 main()", "def bool main()",
+    ])
+    def test_accepted(self, signature):
+        value = {'int32': 'int32(0)', 'uint8': 'uint8(0)', 'bool': 'false'}.get(signature.split()[1], '0')
+        analyze(_parse(f"{signature}:\n    return {value}\n"))
+
+    @pytest.mark.parametrize("signature,body,match", [
+        ("def str main()", "return 'x'", "'main' must return int .* not str"),
+        ("def main()", "return", "'main' must return int .* not nothing"),
+        ("def *int main()", "return none", "'main' must return int"),
+        ("def int main(int x)", "return x", "'main' takes no parameters, or exactly '\\(int argc, \\*byte argv\\)'"),
+        ("def int main(int argc, []str argv)", "return 0", "'main' takes no parameters"),
+        ("def int main(int32 argc, *byte argv)", "return 0", "'main' takes no parameters"),
+    ])
+    def test_rejected(self, signature, body, match):
+        with pytest.raises(SemanticError, match=match):
+            analyze(_parse(f"{signature}:\n    {body}\n"))
+
+    def test_an_executable_needs_main_but_linkable_assembly_does_not(self, tmp_path):
+        from build import build_executable
+        from compile import compile_to_asm
+        from diagnostics import CompileError
+        src = tmp_path / 'lib.ht'
+        src.write_text("def int helper():\n    return 1\n")
+        assert 'helper' in compile_to_asm(str(src))
+        with pytest.raises(CompileError, match="no 'main' function"):
+            build_executable(str(src), str(tmp_path / 'lib'))
+
+
 class TestStatementsEndTheirLine:
     @pytest.mark.parametrize("line", ["print(1) 2 3", "int y = 1 2", "x = 2 x = 3", "return 0 1", "x 5"])
     def test_trailing_tokens_are_rejected(self, line):
@@ -13762,7 +13793,7 @@ class TestSemanticErrors:
 
     def test_concatenation_type_checks_as_valid_str(self):
         ast = _parse(
-            "def str main():\n"
+            "def str f():\n"
             "    str a = 'hello'\n"
             "    str b = ' world'\n"
             "    str c = a + b\n"
