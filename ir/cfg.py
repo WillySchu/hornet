@@ -4,7 +4,7 @@ Blocks are computed on demand; IRFunction.body stays a flat list.
 A block starts at a label or after a terminator and ends at the next one.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional
 
 from ir.ir import (
@@ -29,6 +29,32 @@ from ir.ir import (
 )
 
 TERMINATORS = (IRJump, IRBranch, IRReturn)
+
+# Fields each instruction reads ('args' is a list). Must agree with reads().
+READ_FIELDS = {
+    IRMove: ('src',), IRCast: ('src',), IRBinOp: ('left', 'right'), IRUnOp: ('operand',),
+    IRCall: ('args',), IRReturn: ('value',), IRBranch: ('cond',), IRLoad: ('address',),
+    IRStore: ('address', 'value'), IRCopy: ('dst_address', 'src_address'),
+    IRBoundsCheck: ('index', 'length'), IRSliceBoundsCheck: ('value', 'bound'),
+}
+
+# Instructions whose only effect is writing `dst`.
+PURE = (IRMove, IRBinOp, IRUnOp, IRCast, IRLocalAddress, IRStaticDataAddress, IRReadArgument)
+
+
+def replace_reads(instr, mapping: dict):
+    """`instr` with every read Temp whose id is in `mapping` replaced; the same object if none."""
+    names = READ_FIELDS.get(type(instr), ())
+    changes = {}
+    for name in names:
+        value = getattr(instr, name)
+        if name == 'args':
+            new = [mapping.get(a.id, a) if isinstance(a, Temp) else a for a in value]
+            if new != value:
+                changes[name] = new
+        elif isinstance(value, Temp) and value.id in mapping:
+            changes[name] = mapping[value.id]
+    return replace(instr, **changes) if changes else instr
 
 
 def reads(instr) -> set:

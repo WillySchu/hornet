@@ -1,14 +1,39 @@
-"""IR optimization entry point: per-function local passes, then re-verify."""
+"""IR optimization entry point: per-function passes repeated until nothing changes, then re-verify."""
 
-from ir.ir import IRProgram
+from ir.ir import IRFunction, IRLocalAddress, IRProgram
 from ir.verify import verify_program
+from optimize.branch_simplification import simplify_branches
 from optimize.constant_folding import fold_constants
+from optimize.copy_coalescing import coalesce_copies
+from optimize.copy_propagation import propagate_copies
+from optimize.dead_code import remove_dead_code
 from optimize.identity_reduction import reduce_identities
+
+MAX_ROUNDS = 10
+
+
+def pinned_temps(ir_fn: IRFunction, temp_home_slots: dict) -> set:
+    """Temps whose home slot has its address taken: they can change through memory."""
+    addressed = {instr.slot for instr in ir_fn.body if isinstance(instr, IRLocalAddress)}
+    return {tid for tid, slot in temp_home_slots.items() if slot in addressed}
+
+
+def optimize_function(ir_fn: IRFunction, temp_home_slots: dict) -> None:
+    pinned = pinned_temps(ir_fn, temp_home_slots)
+    for _ in range(MAX_ROUNDS):
+        before = list(ir_fn.body)
+        simplify_branches(ir_fn)
+        propagate_copies(ir_fn, pinned)
+        fold_constants(ir_fn)
+        reduce_identities(ir_fn)
+        coalesce_copies(ir_fn, pinned)
+        remove_dead_code(ir_fn, pinned)
+        if ir_fn.body == before:
+            break
 
 
 def optimize(ir_program: IRProgram) -> IRProgram:
     for ir_fn in ir_program.functions:
-        fold_constants(ir_fn)
-        reduce_identities(ir_fn)
+        optimize_function(ir_fn, ir_program.ids._temp_offsets)
     verify_program(ir_program)  # a pass may break an invariant
     return ir_program
