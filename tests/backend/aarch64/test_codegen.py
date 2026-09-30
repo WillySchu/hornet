@@ -95,10 +95,7 @@ def _asm_program(path: Path):
 
 @pytest.mark.parametrize('path', PROGRAMS, ids=lambda p: p.stem)
 def test_functions_save_every_callee_saved_register_they_write(path):
-    try:
-        program = _asm_program(path)
-    except Exception as e:  # composite features arrive in a later milestone
-        pytest.skip(f'not yet supported on aarch64: {e}')
+    program = _asm_program(path)
     for fn in program.functions:
         saved = set()
         for i in fn.instructions:

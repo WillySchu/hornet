@@ -11,13 +11,14 @@ from backend.aarch64.calling_convention import ARG_REGISTERS, MAX_REGISTER_ARGS,
 from backend.errors import CodegenError
 from ir.cfg import uses
 from ir.ir import (
-    IRBinOp, IRBoundsCheck, IRBranch, IRCall, IRCast, IRConst, IRJump, IRLabel, IRLoad, IRLocalAddress, IRMove, IRReturn,
+    IRBinOp, IRBoundsCheck, IRBranch, IRCall, IRCast, IRCopy, IRConst, IRJump, IRLabel, IRLoad, IRLocalAddress, IRMove, IRReturn,
     IRSliceBoundsCheck, IRStaticDataAddress, IRStore, IRUnOp, Temp,
 )
 from ops import BinaryOp, UnaryOp
 from typesys import Type, is_wide_type, type_byte_width
 
 SCRATCH_Q = Reg('x8')
+UNROLLED_COPY_LIMIT = 128
 
 CONDITIONS = {
     BinaryOp.EQUAL: 'eq', BinaryOp.NOT_EQUAL: 'ne', BinaryOp.LESS_THAN: 'lt',
@@ -249,6 +250,8 @@ class Selector:
             self.finish(instr.dst, d)
         elif isinstance(instr, IRCall):
             self._call(instr)
+        elif isinstance(instr, IRCopy):
+            self._copy(instr)
         elif isinstance(instr, IRBoundsCheck):
             self._compare(instr.index, instr.length)  # unsigned: a negative index is huge
             self.emit('b.hs', LabelRef(self.host.fail_label("array index out of bounds")))
@@ -315,6 +318,43 @@ class Selector:
         else:
             self.emit('mov', d.x, a.x)
         self.finish(dst, d)
+
+    def _copy(self, instr: IRCopy) -> None:
+        """Copy value_type's bytes: unrolled 16/8/4/2/1-byte moves when small, else an 8-byte loop."""
+        size = type_byte_width(instr.value_type, self.host.ir_program.struct_registry,
+                               self.host.ir_program.sum_type_registry)
+        src = self.value_in(instr.src_address, SCRATCH_A).x
+        dst = self.value_in(instr.dst_address, SCRATCH_Q).x
+        if size <= UNROLLED_COPY_LIMIT:
+            self._copy_tail(dst, src, 0, size)
+            return
+        # Cursors and a counter in scratch registers: the address registers themselves may be allocated.
+        if src != SCRATCH_A:
+            self.emit('mov', SCRATCH_A, src)
+        if dst != SCRATCH_Q:
+            self.emit('mov', SCRATCH_Q, dst)
+        counter, data = SCRATCH_B, SCRATCH_RESULT
+        self.mov_imm(counter, size // 8)
+        loop = self.host.ir_program.ids.new_label("copy_loop")
+        self.out.append(LabelDef(loop))
+        self.emit('ldr', data, Mem(SCRATCH_A, 8, 'post'))
+        self.emit('str', data, Mem(SCRATCH_Q, 8, 'post'))
+        self.emit('subs', counter, counter, Imm(1))
+        self.emit('b.ne', LabelRef(loop))
+        self._copy_tail(SCRATCH_Q, SCRATCH_A, 0, size % 8)
+
+    def _copy_tail(self, dst: Reg, src: Reg, offset: int, size: int) -> None:
+        a, b = SCRATCH_RESULT, SCRATCH_B
+        while size >= 16:
+            self.emit('ldp', a, b, Mem(src, offset))
+            self.emit('stp', a, b, Mem(dst, offset))
+            offset, size = offset + 16, size - 16
+        for width, load, store, reg in ((8, 'ldr', 'str', a), (4, 'ldr', 'str', a.w), (2, 'ldrh', 'strh', a.w),
+                                        (1, 'ldrb', 'strb', a.w)):
+            while size >= width:
+                self.emit(load, reg, Mem(src, offset))
+                self.emit(store, reg, Mem(dst, offset))
+                offset, size = offset + width, size - width
 
     def _call(self, instr: IRCall) -> None:
         for i, arg in enumerate(instr.args):

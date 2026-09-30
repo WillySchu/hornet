@@ -50,6 +50,16 @@ PROGRAMS = {
                             "    print(s + a + b + c + d + e + f + g + h + i + j + k)\n    return 0\n", 0, "132\n"),
     'large_frame': ("def int main():\n    [1500]int big\n    big[0] = 5\n    big[1499] = 7\n    int x = 9\n"
                     "    print(big[0] + big[1499] + x)\n    return 0\n", 0, "21\n"),
+    'copies': ("type Odd struct:\n    int8 a\n    int b\n    uint8 c\n    [5]int8 d\n"
+               "def [3]int8 bump3([3]int8 x):\n    x[2] = x[2] + int8(1)\n    return x\n"
+               "def [300]int fill(int n):\n    [300]int r\n    for int i = 0; i < 300; i += 1:\n        r[i] = i * n\n    return r\n"
+               "def int main():\n    [3]int8 small = [int8(1), int8(2), int8(3)]\n    [3]int8 other = bump3(small)\n"
+               "    print(small)\n    print(other)\n    [300]int big = fill(3)\n    [300]int copy = big\n    copy[299] = 0\n"
+               "    print(big[299] + big[150] + copy[299])\n    Odd o = Odd(int8(-1), 77, uint8(200), [int8(1), int8(2), int8(3), int8(4), int8(5)])\n"
+               "    Odd p = o\n    p.d[4] = int8(9)\n    print(o)\n    print(p)\n    [17]uint8 seventeen\n    seventeen[16] = uint8(42)\n"
+               "    [17]uint8 s2 = seventeen\n    print(int(s2[16]))\n    return 0\n", 0,
+               "[3]int8[1, 2, 3]\n[3]int8[1, 2, 4]\n1347\nOdd(a: -1, b: 77, c: 200, d: [5]int8[1, 2, 3, 4, 5])\n"
+               "Odd(a: -1, b: 77, c: 200, d: [5]int8[1, 2, 3, 4, 9])\n42\n"),
     'bounds_check': ("def int main():\n    [3]int a = [1, 2, 3]\n    int i = 5\n    print(a[i])\n    return 0\n", None, None),
 }
 
