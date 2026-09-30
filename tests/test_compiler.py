@@ -693,8 +693,9 @@ import pytest
 from compile import generate_asm
 from backend.errors import CodegenError
 from ir.errors import IRError
-from build import RUNTIME_C_PATH, c_compiler
+from build import RUNTIME_C_PATH, c_compiler, run_prefix
 from target import default_target
+from tests.targets import E2E_TARGETS, on_every_target
 from desugar import desugar_methods
 from lexer import lex
 from parser import Break, Call, Constant, Continue, For, ForIn, Node, Parser, ParseError
@@ -751,7 +752,7 @@ def _parse(source: str):
         return Parser(tokens).parse_program()
 
 
-def _compile_to_binary(source: str, tmp: Path) -> tuple[Path, str]:
+def _compile_to_binary(source: str, tmp: Path, target=ASM_TARGET) -> tuple[Path, str]:
     """Compiles `source` through the real lex -> parse -> analyze ->
     codegen pipeline and links it with gcc into a runnable binary
     inside `tmp` (a directory the CALLER owns and is responsible for
@@ -769,7 +770,7 @@ def _compile_to_binary(source: str, tmp: Path) -> tuple[Path, str]:
     bin_path = tmp / "program"
     runtime_o_path = tmp / "runtime.o"
 
-    asm = generate_asm(ast, target=ASM_TARGET)
+    asm = generate_asm(ast, target=target)
     # Latin-1, not write_text's own default UTF-8 -- see compile.py's
     # own, identical comment for why: a str literal's own raw bytes
     # can legitimately be any 0-255 value now (\xNN escapes), and
@@ -786,7 +787,7 @@ def _compile_to_binary(source: str, tmp: Path) -> tuple[Path, str]:
     # assembled inline here). Unconditional, regardless of whether
     # THIS particular program happens to call print, matching
     # build_executable's own reasoning exactly.
-    runtime_cc_cmd = c_compiler(ASM_TARGET) + ["-c", str(RUNTIME_C_PATH), "-o", str(runtime_o_path)]
+    runtime_cc_cmd = c_compiler(target) + ["-c", str(RUNTIME_C_PATH), "-o", str(runtime_o_path)]
     runtime_result = subprocess.run(runtime_cc_cmd, capture_output=True, text=True)
     if runtime_result.returncode != 0:
         pytest.fail(
@@ -796,7 +797,7 @@ def _compile_to_binary(source: str, tmp: Path) -> tuple[Path, str]:
             f"--- gcc stderr ---\n{runtime_result.stderr}\n"
         )
 
-    gcc_cmd = c_compiler(ASM_TARGET) + [str(asm_path), str(runtime_o_path), "-o", str(bin_path)]
+    gcc_cmd = c_compiler(target) + [str(asm_path), str(runtime_o_path), "-o", str(bin_path)]
 
     result = subprocess.run(gcc_cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -815,7 +816,7 @@ def _compile_to_binary(source: str, tmp: Path) -> tuple[Path, str]:
     return bin_path, asm
 
 
-def _run_binary(bin_path: Path, asm: str) -> subprocess.CompletedProcess:
+def _run_binary(bin_path: Path, asm: str, target=ASM_TARGET) -> subprocess.CompletedProcess:
     """Runs an already-compiled binary, subject to EXECUTION_TIMEOUT --
     the run-side counterpart to _compile_to_binary, split out so a
     caller that compiles once and runs many times (tests/test_
@@ -842,7 +843,7 @@ def _run_binary(bin_path: Path, asm: str) -> subprocess.CompletedProcess:
         # against it (e.g. '\xc8' in an expected string) are always
         # the same value, never re-encoded into something else.
         return subprocess.run(
-            [str(bin_path)], timeout=EXECUTION_TIMEOUT,
+            run_prefix(target) + [str(bin_path)], timeout=EXECUTION_TIMEOUT,
             capture_output=True, encoding='latin-1',
         )
     except subprocess.TimeoutExpired:
@@ -866,11 +867,27 @@ def _run_binary(bin_path: Path, asm: str) -> subprocess.CompletedProcess:
         raise
 
 
+def _ir_program(ast):
+    """The optimized IR for an analyzed AST."""
+    from ir.program_builder import build_ir_program
+    from optimize.optimizer import optimize
+    return optimize(build_ir_program(ast))
+
+
+def _heap_allocations(ast) -> list:
+    """Sizes passed to malloc anywhere in the program's IR (None where not constant), in order."""
+    from ir.ir import IRCall, IRConst
+    return [c.args[0].value if isinstance(c.args[0], IRConst) else None
+            for fn in _ir_program(ast).functions for c in fn.body
+            if isinstance(c, IRCall) and c.name == 'malloc']
+
+
 def compile_and_run(source: str) -> subprocess.CompletedProcess:
     """Runs `source` through the real lex -> parse -> analyze -> codegen
-    pipeline, assembles and links it with gcc (for ASM_TARGET, this
-    machine's default target -- see above),
-    and runs the resulting binary, subject to EXECUTION_TIMEOUT below.
+    pipeline, then builds and runs it for every target in E2E_TARGETS
+    (each runnable target with a backend), subject to EXECUTION_TIMEOUT.
+    Every target must produce the same exit status and output; the
+    first target's result is returned.
 
     Returns the CompletedProcess so callers can inspect `.returncode`:
     0-255 for a normal exit, or -N if the process was killed by signal N
@@ -883,9 +900,11 @@ def compile_and_run(source: str) -> subprocess.CompletedProcess:
     call this helper. A thin wrapper around _compile_to_binary/_run_
     binary now -- see those for why they're split out.
     """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        bin_path, asm = _compile_to_binary(source, Path(tmpdir))
-        return _run_binary(bin_path, asm)
+    def build_and_run(target):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bin_path, asm = _compile_to_binary(source, Path(tmpdir), target)
+            return _run_binary(bin_path, asm, target)
+    return on_every_target(build_and_run, source)
 
 
 
@@ -14488,8 +14507,8 @@ class TestHeapAllocatedArrays:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, target=ASM_TARGET)
-        assert "malloc" not in asm
+        mallocs = _heap_allocations(ast)
+        assert not mallocs
 
     def test_just_over_threshold_is_heap_allocated(self):
         """The other side of the same boundary: even one byte over the
@@ -14505,9 +14524,9 @@ class TestHeapAllocatedArrays:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, target=ASM_TARGET)
-        assert "malloc" in asm
-        assert "$16392" in asm
+        mallocs = _heap_allocations(ast)
+        assert mallocs
+        assert 16392 in mallocs
 
     def test_heap_allocated_local_basic_read_write(self):
         assert_exit_code(
@@ -14820,9 +14839,9 @@ class TestArrayEscapeAnalysis:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, target=ASM_TARGET)
-        assert "malloc" in asm
-        assert "$40" in asm  # 5 ints * 8 bytes
+        mallocs = _heap_allocations(ast)
+        assert mallocs
+        assert 40 in mallocs  # 5 ints * 8 bytes
 
     def test_local_array_sliced_but_not_returned_stays_on_the_stack(self):
         """THE test proving this is genuinely more precise than
@@ -14838,8 +14857,8 @@ class TestArrayEscapeAnalysis:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, target=ASM_TARGET)
-        assert "malloc" not in asm
+        mallocs = _heap_allocations(ast)
+        assert not mallocs
 
     def test_array_passed_by_value_not_sliced_stays_on_the_stack(self):
         """A small array passed to another function, never sliced at
@@ -14856,8 +14875,8 @@ class TestArrayEscapeAnalysis:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, target=ASM_TARGET)
-        assert "malloc" not in asm
+        mallocs = _heap_allocations(ast)
+        assert not mallocs
 
     def test_transitive_reslicing_chain_escapes_correctly(self):
         """arr backs s1, s1 backs s2, s2 is returned -- the analysis
@@ -14944,8 +14963,8 @@ class TestArrayEscapeAnalysis:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, target=ASM_TARGET)
-        assert "malloc" not in asm
+        mallocs = _heap_allocations(ast)
+        assert not mallocs
 
     def test_slice_passed_to_a_parameter_that_escapes_is_promoted(self):
         source = (
@@ -14959,8 +14978,8 @@ class TestArrayEscapeAnalysis:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, target=ASM_TARGET)
-        assert "malloc" in asm
+        mallocs = _heap_allocations(ast)
+        assert mallocs
 
     def test_array_of_slices_element_escapes_correctly(self):
         """The gap this class used to document as known and deferred:
@@ -15004,8 +15023,8 @@ class TestArrayEscapeAnalysis:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, target=ASM_TARGET)
-        assert "malloc" in asm
+        mallocs = _heap_allocations(ast)
+        assert mallocs
 
     def test_slice_of_slices_element_escapes_correctly(self):
         """The same gap, but the container itself is a SLICE-of-slices
@@ -15061,8 +15080,8 @@ class TestArrayEscapeAnalysis:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, target=ASM_TARGET)
-        assert "malloc" not in asm
+        mallocs = _heap_allocations(ast)
+        assert not mallocs
 
     def test_container_element_never_read_does_not_trigger_promotion(self):
         """THE precision test for this whole extension, mirroring
@@ -15082,8 +15101,8 @@ class TestArrayEscapeAnalysis:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, target=ASM_TARGET)
-        assert "malloc" not in asm
+        mallocs = _heap_allocations(ast)
+        assert not mallocs
 
     def test_slice_variable_backed_by_local_array_assigned_into_container_element(self):
         """Transitive: a plain slice VARIABLE (itself backed by a
@@ -15184,8 +15203,8 @@ class TestArrayEscapeAnalysis:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, target=ASM_TARGET)
-        assert "malloc" in asm
+        mallocs = _heap_allocations(ast)
+        assert mallocs
 
     def test_chained_reslicing_with_no_intermediate_variable_escapes_correctly(self):
         """The second, separately-rooted gap this class used to
@@ -15230,8 +15249,8 @@ class TestArrayEscapeAnalysis:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, target=ASM_TARGET)
-        assert "malloc" in asm
+        mallocs = _heap_allocations(ast)
+        assert mallocs
 
     def test_scalar_read_through_a_slice_element_does_not_escape(self):
         """THE precision test for the deeper-nesting fix, mirroring
@@ -15253,8 +15272,8 @@ class TestArrayEscapeAnalysis:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, target=ASM_TARGET)
-        assert "malloc" not in asm
+        mallocs = _heap_allocations(ast)
+        assert not mallocs
 
 
 class TestSlices:
@@ -19212,8 +19231,8 @@ class TestStructs:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, target=ASM_TARGET)
-        assert "malloc" in asm
+        mallocs = _heap_allocations(ast)
+        assert mallocs
 
     def test_forward_reference(self):
         """Struct A, declared first, references struct B, declared
@@ -19638,8 +19657,8 @@ class TestStructs:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, target=ASM_TARGET)
-        assert "malloc" not in asm
+        mallocs = _heap_allocations(ast)
+        assert not mallocs
 
     def test_reslicing_a_struct_slice_field_escapes_correctly(self):
         """`r.values[0:2]` -- re-slicing a struct's OWN slice field --
@@ -19970,8 +19989,7 @@ class TestStructLiterals:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, target=ASM_TARGET)
-        assert len(re.findall(r"call\s+_?malloc\b", asm)) == 1
+        assert len(_heap_allocations(ast)) == 1
 
     def test_small_struct_literal_does_not_use_malloc(self):
         """Negative control for the test just above: a struct literal
@@ -19990,8 +20008,8 @@ class TestStructLiterals:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, target=ASM_TARGET)
-        assert "malloc" not in asm
+        mallocs = _heap_allocations(ast)
+        assert not mallocs
 
     def test_value_semantics_mutating_a_copy_does_not_affect_the_original(self):
         assert_program_exit_code(
@@ -20685,31 +20703,12 @@ class TestArgumentMaterialization:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, target=ASM_TARGET)
-        assert len(re.findall(r"call\s+_?malloc\b", asm)) >= 1
-
-        main_frame_size = None
-        in_main = False
-        for line in asm.splitlines():
-            # `_?main:` -- Emitter prefixes every function label with a
-            # leading underscore on macOS (Mach-O convention -- see
-            # its own symbol() method), so the actual label text is
-            # `_main:` there, not `main:`. A plain "startswith('main:')"
-            # check would never match on macOS -- caught the same way
-            # the malloc check just above already had to be, by a
-            # person actually running this on macOS, not by the Linux-
-            # only sandbox this was originally written and tested in.
-            if re.match(r"^_?main:$", line.strip()):
-                in_main = True
-                continue
-            if in_main and "subq" in line and "%rsp" in line:
-                main_frame_size = int(line.split("$")[1].split(",")[0])
-                break
-        assert main_frame_size is not None
+        assert _heap_allocations(ast)
+        main = next(f for f in _ir_program(ast).functions if f.name == 'main')
+        main_frame_size = sum(main.slot_widths.values())
         assert main_frame_size < 1024, (
-            f"main's own frame is {main_frame_size} bytes -- expected a "
-            f"small, fixed baseline, not one that grew with the "
-            f"argument literal's own ~20000-byte size"
+            f"main's own frame slots total {main_frame_size} bytes -- expected a "
+            f"small frame, with the argument literal on the heap"
         )
 
     def test_large_struct_literal_argument_is_heap_allocated(self):
@@ -20743,8 +20742,7 @@ class TestArgumentMaterialization:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, target=ASM_TARGET)
-        assert len(re.findall(r"call\s+_?malloc\b", asm)) >= 1
+        assert _heap_allocations(ast)
 
     def test_small_literal_argument_does_not_use_malloc(self):
         """Negative control for both malloc tests above: a small
@@ -20761,8 +20759,8 @@ class TestArgumentMaterialization:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, target=ASM_TARGET)
-        assert "malloc" not in asm
+        mallocs = _heap_allocations(ast)
+        assert not mallocs
 
     def test_nested_struct_literal_as_argument(self):
         """A nested struct literal (`Outer(Inner(1), 2)`) as a direct
@@ -20969,8 +20967,8 @@ class TestCompositeCallAsAddressableBase:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, target=ASM_TARGET)
-        assert "malloc" not in asm
+        mallocs = _heap_allocations(ast)
+        assert not mallocs
 
     def test_large_array_returning_call_indexed_is_heap_allocated(self):
         """The other side of the same threshold: a call returning an
@@ -20991,8 +20989,8 @@ class TestCompositeCallAsAddressableBase:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, target=ASM_TARGET)
-        assert "malloc" in asm
+        mallocs = _heap_allocations(ast)
+        assert mallocs
 
     def test_slice_production_from_call_always_heap_allocates_regardless_of_size(self):
         """Direct proof of the always-escape rule: even a TINY array-
@@ -21011,8 +21009,8 @@ class TestCompositeCallAsAddressableBase:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, target=ASM_TARGET)
-        assert "malloc" in asm
+        mallocs = _heap_allocations(ast)
+        assert mallocs
 
 
 class TestNamedStructLiterals:
@@ -22220,8 +22218,7 @@ class TestArraysOfStructs:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, target=ASM_TARGET)
-        assert len(re.findall(r"call\s+_?malloc\b", asm)) >= 1
+        assert _heap_allocations(ast)
 
     def test_small_array_of_structs_literal_does_not_use_malloc(self):
         """Negative control: a small array-of-structs literal, well
@@ -22237,8 +22234,8 @@ class TestArraysOfStructs:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, target=ASM_TARGET)
-        assert "malloc" not in asm
+        mallocs = _heap_allocations(ast)
+        assert not mallocs
 
     def test_mismatched_struct_types_in_array_literal_is_rejected(self):
         assert_program_semantic_error(

@@ -17,7 +17,8 @@ import pytest
 
 from build import build_executable
 from compile import compile_to_asm
-from tests.test_compiler import ASM_TARGET, GCC_SKIP, _run_binary
+from tests.test_compiler import GCC_SKIP, _run_binary
+from tests.targets import each_e2e_target
 
 PROGRAMS_DIR = Path(__file__).parent.parent / 'benchmarks' / 'programs'
 
@@ -63,14 +64,15 @@ RERUNS = 10
 
 @GCC_SKIP
 @pytest.mark.parametrize('name', sorted(EXPECTED_EXIT_CODES))
-def test_benchmark_still_compiles_and_runs_correctly(name, tmp_path):
+@each_e2e_target
+def test_benchmark_still_compiles_and_runs_correctly(name, target, tmp_path):
     path = str(PROGRAMS_DIR / f'{name}.ht')
     bin_path = tmp_path / 'program'
-    build_executable(path, str(bin_path), target=ASM_TARGET)  # full driver, so imports work
-    asm = compile_to_asm(path, target=ASM_TARGET)
+    build_executable(path, str(bin_path), target=target)  # full driver, so imports work
+    asm = compile_to_asm(path, target=target)
     expected = EXPECTED_EXIT_CODES[name]
     for run in range(1, RERUNS + 1):
-        result = _run_binary(bin_path, asm)
+        result = _run_binary(bin_path, asm, target)
         assert result.returncode == expected, (
             f"{name}: run {run}/{RERUNS} of the SAME compiled binary "
             f"returned {result.returncode}, expected {expected} -- "

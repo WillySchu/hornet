@@ -1,11 +1,6 @@
-"""Tests for codegen/utils.py's own machine-level helpers -- register-
-width aliasing and GAS string escaping. See tests/codegen/test_ir_
-utils.py for the semantic-level half (type_byte_width/leaf_type/
-type_of) split out alongside ir/utils.py itself."""
+"""backend/common/text.py."""
 
 from backend.common.text import escape_for_asciz
-
-# TODO(will): Test as_qword_register
 
 
 def test_escape_for_asciz():

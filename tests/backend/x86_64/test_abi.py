@@ -21,7 +21,7 @@ from optimize.optimizer import optimize
 from semantic import analyze
 from tests.test_compiler import GCC_SKIP
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+ROOT = Path(__file__).resolve().parents[3]
 PROGRAMS = sorted((ROOT / 'benchmarks' / 'programs').glob('*.ht')) + sorted((ROOT / 'examples').glob('*.ht'))
 
 

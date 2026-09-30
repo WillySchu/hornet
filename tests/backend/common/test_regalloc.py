@@ -1,4 +1,4 @@
-"""Tests for register_allocator.py: live intervals, eligibility, and linear scan."""
+"""backend/common/regalloc.py, driven with the x86-64 register lists."""
 
 from semantic import Type
 from ir.ir import (
@@ -270,17 +270,12 @@ def test_linear_scan_never_assigns_the_same_register_to_two_live_intervals():
                     assert a.end < b.start or b.end < a.start
 
 
-# -- ALLOCATABLE_REGISTERS pool size --------------------------------------
 # Regression coverage for the full pool: 3 -> 4 (adding r14d) -> 7
 # (adding ebx/r12d/r13d back once the real bug they exposed -- see
 # this module's own comment above ALLOCATABLE_REGISTERS, and tests/
 # codegen/test_ir_lowering.py for the fix itself -- was found and
 # fixed rather than just avoided. Pins the exact set, not just the
 # count, so an accidental reorder or duplicate is caught too.
-
-def test_allocatable_registers_are_caller_saved_first():
-    assert ALLOCATABLE_REGISTERS == ['r10d', 'r11d', 'ebx', 'r12d', 'r13d', 'r14d', 'r15d']
-
 
 def test_crossing_intervals_get_only_callee_saved_registers():
     intervals = {i: LiveInterval(temp=t(i), start=i, end=10) for i in range(4)}

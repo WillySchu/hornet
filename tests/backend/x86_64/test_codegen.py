@@ -176,7 +176,7 @@ def test_lowering_does_not_modify_the_ir():
     from modules import discover_modules
     from optimize.optimizer import optimize
     from semantic import analyze
-    path = Path(__file__).resolve().parent.parent.parent / 'benchmarks' / 'programs' / 'register_pressure.ht'
+    path = Path(__file__).resolve().parents[3] / 'benchmarks' / 'programs' / 'register_pressure.ht'
     entry, modules = discover_modules(str(path))
     program = merge_programs(entry, modules)
     desugar_methods(program)

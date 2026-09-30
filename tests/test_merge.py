@@ -22,8 +22,8 @@ import pytest
 from desugar import desugar_methods
 from lexer import lex
 from merge import merge_programs, MergeError
-from build import c_compiler
-from target import default_target
+from build import build_executable
+from tests.targets import on_every_target, run_binary
 from modules import discover_modules
 from parser import Parser, ParseError
 from semantic import analyze, SemanticError
@@ -31,10 +31,7 @@ from semantic import analyze, SemanticError
 GCC_AVAILABLE = shutil.which("gcc") is not None
 pytestmark = pytest.mark.skipif(not GCC_AVAILABLE, reason="gcc not available")
 
-RUNTIME_C_PATH = Path(__file__).parent.parent / "runtime" / "runtime.c"
 
-# Compiled for, and run on, this machine's default target.
-ASM_TARGET = default_target()
 
 
 def _write(tmpdir: str, name: str, content: str) -> str:
@@ -56,25 +53,11 @@ def _compile_and_run(entry_path: str, tmpdir: str, args: list = None, stdin: str
     running it with input redirected from /dev/null) is piped into
     the binary's own stdin -- for a program that reads it (e.g.
     stdlib/os.ht's own read_stdin)."""
-    entry_program, modules = discover_modules(entry_path)
-    merged = merge_programs(entry_program, modules)
-    desugar_methods(merged)
-    analyze(merged)
-    from compile import generate_asm
-    asm = generate_asm(merged, target=ASM_TARGET)
-
-    asm_path = Path(tmpdir) / "program.s"
-    asm_path.write_text(asm, encoding="latin-1")
-    runtime_o = Path(tmpdir) / "runtime.o"
-    runtime_cc_cmd = c_compiler(ASM_TARGET)
-    runtime_cc_cmd += ["-c", str(RUNTIME_C_PATH), "-o", str(runtime_o)]
-    subprocess.run(runtime_cc_cmd, check=True, capture_output=True)
-    binary = Path(tmpdir) / "program"
-    gcc_cmd = c_compiler(ASM_TARGET)
-    gcc_cmd += [str(asm_path), str(runtime_o), "-o", str(binary)]
-    link = subprocess.run(gcc_cmd, capture_output=True, text=True)
-    assert link.returncode == 0, f"link failed:\n{link.stderr}\n--- asm ---\n{asm}"
-    return subprocess.run([str(binary), *(args or [])], input=stdin or "", capture_output=True, text=True)
+    def build_and_run(target):
+        binary = Path(tmpdir) / f"program-{target}"
+        build_executable(entry_path, str(binary), target=target)
+        return run_binary(target, [binary, *(args or [])], input=stdin or "", capture_output=True, text=True)
+    return on_every_target(build_and_run)
 
 
 def test_cross_module_function_call():

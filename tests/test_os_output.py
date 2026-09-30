@@ -5,16 +5,19 @@ import tempfile
 from pathlib import Path
 
 from build import build_executable
-from tests.test_compiler import ASM_TARGET, GCC_SKIP
+from tests.test_compiler import GCC_SKIP
+from tests.targets import on_every_target, run_binary
 
 
 def compile_and_run(source: str) -> subprocess.CompletedProcess:
-    """Full driver (so stdlib imports resolve), then run."""
-    with tempfile.TemporaryDirectory() as tmp:
-        src, exe = Path(tmp) / 'p.ht', Path(tmp) / 'p'
-        src.write_text(source)
-        build_executable(str(src), str(exe), target=ASM_TARGET)
-        return subprocess.run([str(exe)], capture_output=True, text=True, timeout=10)
+    """Full driver (so stdlib imports resolve), then build and run for every E2E target."""
+    def build_and_run(target):
+        with tempfile.TemporaryDirectory() as tmp:
+            src, exe = Path(tmp) / 'p.ht', Path(tmp) / 'p'
+            src.write_text(source)
+            build_executable(str(src), str(exe), target=target)
+            return run_binary(target, [exe], capture_output=True, text=True, timeout=10)
+    return on_every_target(build_and_run, source)
 
 
 def _run(body: str):

@@ -5,24 +5,26 @@ from pathlib import Path
 
 import pytest
 
-from build import build_executable
+from build import build_executable, run_prefix
 from lexer import Lexer, TokenType
-from tests.test_compiler import ASM_TARGET, GCC_SKIP
+from tests.test_compiler import GCC_SKIP
+from tests.targets import E2E_TARGETS
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCES = sorted(
     p for d in ('stdlib', 'examples', 'benchmarks/programs', 'tools/hfmt') for p in (ROOT / d).glob('*.ht'))
 
 
-@pytest.fixture(scope='session')
-def hfmt(tmp_path_factory):
-    exe = tmp_path_factory.mktemp('hfmt') / 'hfmt'
-    build_executable(str(ROOT / 'tools' / 'hfmt' / 'main.ht'), str(exe), target=ASM_TARGET)
-    return exe
+@pytest.fixture(scope='session', params=E2E_TARGETS, ids=str)
+def hfmt(request, tmp_path_factory):
+    """Command running hfmt built for each E2E target (under qemu for a foreign architecture)."""
+    exe = tmp_path_factory.mktemp(f'hfmt-{request.param}') / 'hfmt'
+    build_executable(str(ROOT / 'tools' / 'hfmt' / 'main.ht'), str(exe), target=request.param)
+    return run_prefix(request.param) + [str(exe)]
 
 
 def _run(hfmt, *args, stdin=None):
-    return subprocess.run([str(hfmt), *args], input=stdin, capture_output=True, text=True, timeout=20)
+    return subprocess.run([*hfmt, *args], input=stdin, capture_output=True, text=True, timeout=20)
 
 
 _KEYWORD_TYPES = set(Lexer('').keywords.values())

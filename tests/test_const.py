@@ -61,12 +61,13 @@ def test_constants_across_modules(tmp_path):
         "    print(private_plus(1))\n"
         "    return 0\n")
     from pathlib import Path
-    import subprocess
     from build import build_executable
-    from tests.test_compiler import ASM_TARGET
+    from tests.targets import on_every_target, run_binary
     exe = Path(tmp_path) / 'm'
-    build_executable(str(main), str(exe), target=ASM_TARGET)
-    assert subprocess.run([str(exe)], capture_output=True, text=True).stdout == "3\nhi kinds\n100\n"
+    def build_and_run(target):
+        build_executable(str(main), str(exe), target=target)
+        return run_binary(target, [exe], capture_output=True, text=True)
+    assert on_every_target(build_and_run).stdout == "3\nhi kinds\n100\n"
 
 
 def test_private_constant_is_not_importable(tmp_path):
