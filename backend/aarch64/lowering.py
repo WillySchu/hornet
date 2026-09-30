@@ -30,6 +30,28 @@ _ALU = {BinaryOp.ADD: 'add', BinaryOp.SUBTRACT: 'sub', BinaryOp.MULTIPLY: 'mul',
         BinaryOp.SHIFT_RIGHT: 'asr', BinaryOp.DIVIDE: 'sdiv'}
 
 
+def is_logical_immediate(value: int, bits: int) -> bool:
+    """Whether `value` is encodable as an immediate of and/orr/eor on a `bits`-wide register: a
+    rotated run of ones in an element of 2..bits bits, repeated across the register."""
+    mask = (1 << bits) - 1
+    v = value & mask
+    if v in (0, mask):
+        return False
+    size = 2
+    while size < bits:
+        element = v & ((1 << size) - 1)
+        if sum(element << i for i in range(0, bits, size)) == v:
+            break
+        size *= 2
+    element = v & ((1 << size) - 1)
+    element_mask = (1 << size) - 1
+    for r in range(size):
+        rotated = ((element >> r) | (element << (size - r))) & element_mask
+        if rotated and rotated & (rotated + 1) == 0:
+            return True
+    return False
+
+
 def reg_width(t: Type) -> int:
     """Register width: 8 bytes (x) for int, pointers, and str descriptor addresses; 4 (w) otherwise."""
     return 8 if is_wide_type(t) or t == Type.STR else 4
@@ -258,6 +280,9 @@ class Selector:
         if op in (BinaryOp.ADD, BinaryOp.SUBTRACT) and isinstance(right, IRConst) and -4095 <= right.value <= 4095:
             mnemonic = _ALU[op] if right.value >= 0 else ('sub' if op == BinaryOp.ADD else 'add')
             self.emit(mnemonic, d, a, Imm(abs(right.value)))
+        elif (op in (BinaryOp.BITWISE_AND, BinaryOp.BITWISE_OR, BinaryOp.BITWISE_XOR) and isinstance(right, IRConst)
+              and is_logical_immediate(right.value, bits)):
+            self.emit(_ALU[op], d, a, Imm(right.value & ((1 << bits) - 1)))
         elif op in (BinaryOp.SHIFT_LEFT, BinaryOp.SHIFT_RIGHT) and isinstance(right, IRConst):
             self.emit(_ALU[op], d, a, Imm(right.value & (bits - 1)))
         elif op == BinaryOp.MODULO:

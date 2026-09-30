@@ -1,5 +1,6 @@
 """AArch64 backend internals: emission per OS, immediates, frame legalization, callee-saved registers."""
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -172,3 +173,23 @@ def test_c_convention_caller_keeps_callee_saved_registers(tmp_path):
     exe = tmp_path / 'abi'
     subprocess.run(c_compiler(A64) + [str(tmp_path / 'harness.s'), str(tmp_path / 'work.s'), '-o', str(exe)], check=True)
     assert subprocess.run(run_prefix(A64) + [str(exe)]).returncode == _work_model()
+
+
+@pytest.mark.skipif(shutil.which('aarch64-linux-gnu-as') is None, reason='no aarch64 assembler')
+def test_logical_immediates_match_the_assembler(tmp_path):
+    import random
+    from backend.aarch64.lowering import is_logical_immediate
+    r = random.Random(5)
+    values = [1, 3, 255, 0xFF00, 0xAAAAAAAAAAAAAAAA, 0x0F0F0F0F0F0F0F0F, 0xFFFFFFFF, 0x8000000000000001, 0x1234, -2]
+    values += [r.getrandbits(64) for _ in range(20)] + [((1 << r.randint(1, 63)) - 1) << r.randint(0, 10) for _ in range(20)]
+    lines, expected = [], []
+    for bits, reg in [(64, 'x'), (32, 'w')]:
+        for v in values:
+            v &= (1 << bits) - 1
+            lines.append(f"and {reg}0, {reg}1, #{v}")
+            expected.append(is_logical_immediate(v, bits))
+    for line, want in zip(lines, expected):
+        (tmp_path / 't.s').write_text(line + '\n')
+        got = subprocess.run(['aarch64-linux-gnu-as', str(tmp_path / 't.s'), '-o', str(tmp_path / 't.o')],
+                             capture_output=True).returncode == 0
+        assert got == want, line

@@ -87,9 +87,7 @@ def test_fold_binary_op_modulo_truncating():
 
 
 def test_fold_binary_op_divide_by_zero_is_not_folded():
-    """Division by a constant zero is a genuine, intended runtime trap
-    (a hardware SIGFPE) -- folding it would silently replace a crash
-    with an arbitrary value instead."""
+    """Division by zero must reach its runtime panic, not become a value."""
     assert fold_binary_op(BinaryOp.DIVIDE, 5, 0, Type.INT) is None
 
 

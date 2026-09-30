@@ -33,7 +33,7 @@ def _truncated_mod(a: int, b: int) -> int:
 
 
 def fold_binary_op(op: BinaryOp, left: int, right: int, result_type: Type) -> "int | None":
-    """Folded value, or None (division by zero is left to trap at runtime)."""
+    """Folded value, or None (division by zero is left to panic at runtime)."""
     if op == BinaryOp.ADD:
         return _wrap(left + right, result_type)
     if op == BinaryOp.SUBTRACT:

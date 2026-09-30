@@ -427,6 +427,9 @@ class SemanticAnalyzer:
             elif left_type == Type.BOOL and expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
                 return (left == right) == (expr.op == BinaryOp.EQUAL)
             else:
+                if (expr.op in (BinaryOp.DIVIDE, BinaryOp.MODULO) and right == -1
+                        and left == {Type.INT: -(2 ** 63), Type.INT32: -(2 ** 31)}.get(left_type)):
+                    raise SemanticError("Integer overflow in division in a constant expression", expr)
                 value = fold_binary_op(expr.op, left, right, t if t != Type.BOOL else left_type)
                 if value is None:
                     raise SemanticError("Division by zero in a constant expression", expr)

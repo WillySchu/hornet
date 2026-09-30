@@ -93,9 +93,7 @@ def test_reduce_divide_right_one_returns_left():
 
 
 def test_reduce_divide_left_zero_is_not_reduced():
-    """0 / x is 0 for every x except x == 0, where the unreduced code
-    traps (a hardware SIGFPE) -- reducing this away would silently
-    replace that trap with an ordinary 0."""
+    """0 / x is 0 except when x == 0, which must panic."""
     x = _temp()
     assert reduce_binary_op(BinaryOp.DIVIDE, _const(0), x, Type.INT) is None
 

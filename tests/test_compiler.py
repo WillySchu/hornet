@@ -19,9 +19,9 @@ import pytest
 from compile import generate_asm
 from backend.errors import CodegenError
 from ir.errors import IRError
-from build import RUNTIME_C_PATH, c_compiler, run_prefix
+from build import RUNTIME_C_PATH, c_compiler
 from target import default_target
-from tests.targets import E2E_TARGETS, on_every_target
+from tests.targets import E2E_TARGETS, on_every_target, run_binary
 from desugar import desugar_methods
 from lexer import lex
 from parser import Break, Call, Constant, Continue, For, ForIn, Node, Parser, ParseError
@@ -98,8 +98,8 @@ def _compile_to_binary(source: str, tmp: Path, target=ASM_TARGET) -> tuple[Path,
 def _run_binary(bin_path: Path, asm: str, target=ASM_TARGET) -> subprocess.CompletedProcess:
     """Run a built binary (under qemu for a foreign architecture), subject to EXECUTION_TIMEOUT."""
     try:
-        return subprocess.run(
-            run_prefix(target) + [str(bin_path)], timeout=EXECUTION_TIMEOUT,
+        return run_binary(
+            target, [bin_path], timeout=EXECUTION_TIMEOUT,
             capture_output=True, encoding='latin-1',
         )
     except subprocess.TimeoutExpired:
@@ -133,13 +133,14 @@ def _heap_allocations(ast) -> list:
             if isinstance(c, IRCall) and c.name == 'malloc']
 
 
-def compile_and_run(source: str) -> subprocess.CompletedProcess:
-    """Build and run `source` for every E2E target; all must agree. Returns the first result."""
+def compile_and_run(source: str, agree: bool = True) -> subprocess.CompletedProcess:
+    """Build and run `source` for every E2E target; all must agree unless `agree` is False.
+    Returns the first result."""
     def build_and_run(target):
         with tempfile.TemporaryDirectory() as tmpdir:
             bin_path, asm = _compile_to_binary(source, Path(tmpdir), target)
             return _run_binary(bin_path, asm, target)
-    return on_every_target(build_and_run, source)
+    return on_every_target(build_and_run, source, agree)
 
 
 def assert_exit_code(body: str, expected: int, return_type: str = "int") -> None:
@@ -151,12 +152,12 @@ def assert_exit_code(body: str, expected: int, return_type: str = "int") -> None
     )
 
 
-def assert_crashes_with_sigfpe(body: str, return_type: str = "int") -> None:
-    """Like assert_exit_code, but the program must die of SIGFPE."""
+def assert_panics(body: str, message: str, return_type: str = "int") -> None:
+    """Like assert_exit_code, but the program must panic (SIGABRT) with `message`."""
     source = f"def {return_type} main():\n{body}\n"
     result = compile_and_run(source)
-    assert result.returncode == -signal.SIGFPE, (
-        f"body:\n{body}\nexpected SIGFPE crash, got exit {result.returncode}"
+    assert result.returncode == -signal.SIGABRT and message in result.stdout, (
+        f"body:\n{body}\nexpected a panic with {message!r}, got exit {result.returncode}: {result.stdout!r}"
     )
 
 
@@ -306,8 +307,23 @@ class TestBitwiseAndModuloOperators:
             2,
         )
 
-    def test_modulo_by_zero_crashes_with_sigfpe(self):
-        assert_crashes_with_sigfpe("    int a = 5\n    int b = 0\n    return a % b")
+    def test_modulo_by_zero_panics(self):
+        assert_panics("    int a = 5\n    int b = 0\n    return a % b", "integer division by zero")
+
+    @pytest.mark.parametrize("type_,minimum", [("int", "-9223372036854775807 - 1"), ("int32", "int32(-2147483647) - int32(1)")])
+    @pytest.mark.parametrize("op", ["/", "%"])
+    def test_minimum_divided_by_minus_one_panics(self, type_, minimum, op):
+        assert_panics(f"    {type_} a = {minimum}\n    {type_} b = {type_}(-1)\n    print(a {op} b)\n    return 0",
+                      "integer overflow in division")
+
+    @pytest.mark.parametrize("type_", ["int8", "uint8", "int32"])
+    def test_narrow_division_by_zero_panics(self, type_):
+        assert_panics(f"    {type_} a = {type_}(5)\n    {type_} b = {type_}(0)\n    print(a / b)\n    return 0",
+                      "integer division by zero")
+
+    def test_int8_minimum_divided_by_minus_one_wraps(self):
+        assert_stdout("    int8 a = int8(-128)\n    int8 b = int8(-1)\n    print(a / b)\n    print(a % b)\n    return 0",
+                      "-128\n0\n")
 
     def test_modulo_result_used_as_operand_of_plus(self):
         assert_exit_code(
@@ -402,7 +418,7 @@ class TestShortCircuitEvaluation:
         "false or ((1 / 0) == 1)",   # left doesn't decide -> right MUST run
     ])
     def test_short_circuit_control_evaluates_when_needed(self, expr):
-        assert_crashes_with_sigfpe(f"    return {expr}", return_type="bool")
+        assert_panics(f"    return {expr}", "integer division by zero", return_type="bool")
 
 
 # ---------------------------------------------------------------------------
@@ -499,9 +515,10 @@ class TestVariablesAndStatements:
         )
 
     def test_standalone_expression_statement_actually_executes(self):
-        assert_crashes_with_sigfpe(
+        assert_panics(
             "    1 / 0\n"
-            "    return 0"
+            "    return 0",
+            "integer division by zero",
         )
 
     def test_standalone_safe_expression_does_not_crash(self):
@@ -586,12 +603,13 @@ class TestCompoundAssignment:
             match="undeclared variable",
         )
 
-    def test_modulo_assign_by_zero_still_crashes_with_sigfpe(self):
-        assert_crashes_with_sigfpe(
+    def test_modulo_assign_by_zero_panics(self):
+        assert_panics(
             "    int a = 5\n"
             "    int zero = 0\n"
             "    a %= zero\n"
-            "    return a"
+            "    return a",
+            "integer division by zero",
         )
 
 
@@ -8281,7 +8299,8 @@ class TestPointersCodegen:
             "    int x = 5\n"
             "    *int p = &x\n"
             "    print(p)\n"
-            "    return 0\n"
+            "    return 0\n",
+            agree=False,
         )
         assert re.match(r"^0x[0-9a-f]+\n$", result.stdout), result.stdout
 
@@ -8302,7 +8321,8 @@ class TestPointersCodegen:
             "    Node c = Node(3, none)\n"
             "    Node b = Node(2, &c)\n"
             "    print(b)\n"
-            "    return 0\n"
+            "    return 0\n",
+            agree=False,
         )
         assert re.match(r"^Node\(value: 2, next: 0x[0-9a-f]+\)\n$", result.stdout), result.stdout
 
