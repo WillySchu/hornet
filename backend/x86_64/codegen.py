@@ -56,6 +56,19 @@ class CodeGenerator(
         self._bounds_check_message_labels = {}
         self.ir_program: Optional[IRProgram] = None
 
+    @staticmethod
+    def _referenced_slots(instructions: List[Instruction]) -> set:
+        used = set()
+        for instr in instructions:
+            if isinstance(instr, LeaQFrameSlot):
+                used.add(instr.slot)
+                continue
+            for f in dataclasses.fields(instr):
+                value = getattr(instr, f.name)
+                if isinstance(value, FrameSlot):
+                    used.add(value.slot)
+        return used
+
     def _patch_frame_slots(self, instructions: List[Instruction]) -> None:
         """Replace logical slot placeholders with resolved frame offsets."""
         for i, instr in enumerate(instructions):
@@ -102,7 +115,7 @@ class CodeGenerator(
         selector = InstructionSelector(self, ir_fn)
         instructions = selector.lower_params(ir_fn.params, ir)
         instructions.extend(selector.lower_ir(ir))
-        self.frame.layout(save_area=8 * len(self._saved_registers))
+        self.frame.layout(save_area=8 * len(self._saved_registers), used=self._referenced_slots(instructions))
         self._slot_offsets = self.frame.offsets
         self._patch_frame_slots(instructions)
         self._register_assignment = {}

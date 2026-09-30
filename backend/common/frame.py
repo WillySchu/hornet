@@ -31,13 +31,14 @@ class Frame:
             self.spills[temp.id] = self.new_slot(type_byte_width(temp.type, self._structs, self._sums))
         return self.spills[temp.id]
 
-    def layout(self, save_area: int, alignment: int = 16) -> None:
+    def layout(self, save_area: int, alignment: int = 16, used=None) -> None:
         """Offsets (negative, from the frame pointer) for every slot below `save_area` bytes of saved
         registers, with the outgoing-argument slot at the very bottom; save_area + size is a
-        multiple of `alignment`."""
+        multiple of `alignment`. With `used`, only those slots get space: optimization often
+        leaves slots nothing refers to."""
         next_offset = -save_area
         for key, width in self.slots.items():
-            if key == self.outgoing:
+            if key == self.outgoing or (used is not None and key not in used):
                 continue
             next_offset -= width
             self.offsets[key] = next_offset

@@ -5,7 +5,7 @@ uses, then slots, then outgoing stack arguments at sp. sp stays 16-byte aligned.
 """
 
 from backend.aarch64.assembly import (
-    AsmFunction, AsmProgram, Call, Imm, Instr, LabelDef, LabelRef, Mem, Reg, SymPage, SymPageOffset, FP, LR, SP,
+    AddrOf, AsmFunction, AsmProgram, Call, FrameSlot, Imm, Instr, LabelDef, LabelRef, Mem, Reg, SymPage, SymPageOffset, FP, LR, SP,
 )
 from backend.aarch64.calling_convention import ALLOCATABLE_REGISTERS, CALLEE_SAVED_POOL, MAX_REGISTER_ARGS
 from backend.aarch64.emitter import Emitter
@@ -46,6 +46,16 @@ class _Jumps:
 
 
 _JUMPS = _Jumps()
+
+
+def _referenced_slots(instrs: list) -> set:
+    used = set()
+    for i in instrs:
+        if isinstance(i, AddrOf):
+            used.add(i.slot.slot)
+        elif isinstance(i, Instr):
+            used.update(o.slot for o in i.operands if isinstance(o, FrameSlot))
+    return used
 
 
 def _peephole(instrs: list) -> list:
@@ -90,7 +100,7 @@ class CodeGenerator:
         self._fail_labels = {}
         instrs = selector.lower(body) + self._panic_blocks()
         save_area = 16 * ((len(self.saved) + 1) // 2)
-        self.frame.layout(save_area=save_area)
+        self.frame.layout(save_area=save_area, used=_referenced_slots(instrs))
         instrs = _peephole(legalize(instrs, self.frame))
         return AsmFunction(ir_fn.name, self._prologue(save_area + self.frame.size) + instrs)
 

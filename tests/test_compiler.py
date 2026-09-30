@@ -12151,6 +12151,19 @@ class TestBareExpressionStatements:
         assert result.returncode == -signal.SIGABRT and message in result.stdout
 
 
+class TestStackUse:
+    pytestmark = GCC_SKIP
+
+    def test_deep_recursion_fits_the_default_stack(self):
+        # 100,000 frames: each is only the saved frame pointer and return address once unused
+        # slots are dropped.
+        assert_program_stdout(
+            "def int depth(int n):\n    if n == 0:\n        return 0\n    return 1 + depth(n - 1)\n"
+            "def int main():\n    print(depth(100000))\n    return 0\n",
+            "100000\n",
+        )
+
+
 class TestMainSignature:
     @pytest.mark.parametrize("signature", [
         "def int main()", "def int main(int argc, *byte argv)", "def int32 main()", "def uint8 main()", "def bool main()",

@@ -34,3 +34,13 @@ def test_backend_slots_never_collide_with_ir_slots_and_spills_are_reused():
     assert a != b and a not in ('0',) and f.spill_slot(Temp(1, Type.INT)) == a
     f.reserve_outgoing(0)
     assert f.outgoing is None
+
+
+def test_layout_skips_slots_nothing_refers_to():
+    f = _frame(**{'1': 8, '2': 24, '3': 8})
+    f.layout(save_area=0, used={'3'})
+    assert f.offsets == {'3': -8}
+    assert f.size == 16
+    f = _frame(**{'1': 8})
+    f.layout(save_area=16, used=set())
+    assert f.offsets == {} and f.size == 0
