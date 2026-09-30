@@ -1,0 +1,91 @@
+# String building and searching.
+from 'c' import panic
+from 'fmt' import int_to_str
+
+# Growable byte buffer. Pass by pointer: write(&b, 'text').
+type Builder struct:
+    []byte buf
+
+def write(*Builder b, str s):
+    for int i = 0; i < len(s); i += 1:
+        b.buf = append(b.buf, s[i])
+
+def write_byte(*Builder b, byte x):
+    b.buf = append(b.buf, x)
+
+def write_int(*Builder b, int n):
+    write(b, int_to_str(n))
+
+def int length(*Builder b):
+    return len(b.buf)
+
+# A copy of the contents; the builder can keep growing.
+def str to_str(*Builder b):
+    return str(b.buf)
+
+def reset(*Builder b):
+    b.buf = none
+
+def bool starts_with(str s, str prefix):
+    return len(prefix) <= len(s) and s[0:len(prefix)] == prefix
+
+def bool ends_with(str s, str suffix):
+    return len(suffix) <= len(s) and s[len(s) - len(suffix):len(s)] == suffix
+
+# Index of the first occurrence of sub in s at or after `start`, or -1.
+def int index_from(str s, str sub, int start):
+    int last = len(s) - len(sub)
+    for int i = start; i <= last; i += 1:
+        if s[i:i + len(sub)] == sub:
+            return i
+    return -1
+
+def int index_of(str s, str sub):
+    return index_from(s, sub, 0)
+
+def int index_of_byte(str s, byte x):
+    for int i = 0; i < len(s); i += 1:
+        if s[i] == x:
+            return i
+    return -1
+
+# Pieces of s between occurrences of sep (non-empty); always at least one piece.
+def []str split(str s, str sep):
+    if len(sep) == 0:
+        panic('split: empty separator')
+    []str parts = none
+    int start = 0
+    int at = index_from(s, sep, 0)
+    while at >= 0:
+        parts = append(parts, s[start:at])
+        start = at + len(sep)
+        at = index_from(s, sep, start)
+    parts = append(parts, s[start:len(s)])
+    return parts
+
+def str join([]str parts, str sep):
+    Builder b = Builder(none)
+    for i, p in parts:
+        if i > 0:
+            write(&b, sep)
+        write(&b, p)
+    return to_str(&b)
+
+def bool _is_space(byte x):
+    return x == " " or x == "\t" or x == "\n" or x == "\r"
+
+# s without leading and trailing spaces, tabs, and line breaks.
+def str trim(str s):
+    int i = 0
+    int j = len(s)
+    while i < j and _is_space(s[i]):
+        i += 1
+    while j > i and _is_space(s[j - 1]):
+        j -= 1
+    return s[i:j]
+
+def str repeat(str s, int n):
+    Builder b = Builder(none)
+    for int i = 0; i < n; i += 1:
+        write(&b, s)
+    return to_str(&b)

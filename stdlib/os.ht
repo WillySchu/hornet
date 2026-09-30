@@ -1,4 +1,5 @@
-from 'c' import from_cstring, to_cstring, panic, from_raw_parts
+from 'c' import from_cstring, to_cstring, panic, from_raw_parts, calloc
+from 'strings' import Builder, write, to_str
 
 # argv -> []str. hornet_argv_get does the C-side indexing.
 extern *byte hornet_argv_get(*byte argv, int index)
@@ -20,16 +21,16 @@ intrinsic *byte _raw_ptr(str s)
 intrinsic int _raw_len(str s)
 
 def str read_all_from_fd(int32 fd):
-    # Read fd to EOF; panics on read error. Quadratic concatenation.
-    str result = ''
+    # Read fd to EOF; panics on read error.
+    Builder b = Builder(none)
     *byte chunk = calloc(65536, 1)
     int n = read(fd, chunk, 65536)
     while n != 0:
         if n < 0:
             panic('read error')
-        result = result + from_raw_parts(chunk, n)
+        write(&b, from_raw_parts(chunk, n))
         n = read(fd, chunk, 65536)
-    return result
+    return to_str(&b)
 
 def str read_file(str path):
     int32 fd = open(to_cstring(path), 0)

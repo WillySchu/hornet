@@ -1224,10 +1224,7 @@ def test_stdlib_fmt_module_int_to_str_result_is_an_ordinary_str():
         assert result.stdout == "3 lines\n"
 
 
-def test_stdlib_fmt_module_int_to_str_panics_on_a_negative_number():
-    """Non-negative only for now -- see int_to_str's own comment in
-    stdlib/fmt.ht for why (no current caller needs a negative sign,
-    and where it would even go is a genuinely separate question)."""
+def test_stdlib_fmt_module_int_to_str_formats_a_negative_number():
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
@@ -1237,7 +1234,7 @@ def test_stdlib_fmt_module_int_to_str_panics_on_a_negative_number():
             "    return 0\n",
         )
         result = _compile_and_run(entry, tmpdir)
-        assert result.returncode == -signal.SIGABRT
-        assert "negative numbers are not supported yet" in result.stdout
+        assert result.returncode == 0
+        assert result.stdout == "-5\n"
 
 

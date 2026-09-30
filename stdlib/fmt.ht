@@ -1,36 +1,47 @@
-from 'c' import panic
+# Integer formatting.
 
-# Single digit 0-9 as a str.
-def str _digit_to_str(int d):
-    if d == 0:
-        return '0'
-    if d == 1:
-        return '1'
-    if d == 2:
-        return '2'
-    if d == 3:
-        return '3'
-    if d == 4:
-        return '4'
-    if d == 5:
-        return '5'
-    if d == 6:
-        return '6'
-    if d == 7:
-        return '7'
-    if d == 8:
-        return '8'
-    return '9'
+def []byte _reverse([]byte b):
+    int i = 0
+    int j = len(b) - 1
+    while i < j:
+        byte t = b[i]
+        b[i] = b[j]
+        b[j] = t
+        i += 1
+        j -= 1
+    return b
 
-def str int_to_str(int n):
-    # Non-negative only.
-    if n < 0:
-        panic('int_to_str: negative numbers are not supported yet')
+# Digits of n in `base` (2..16), with '-' for negatives. Works for every int, including the minimum:
+# digits are taken from the negative side, where no value overflows.
+def str _format(int n, int base):
     if n == 0:
         return '0'
-    str result = ''
-    int remaining = n
-    while remaining > 0:
-        result = _digit_to_str(remaining % 10) + result
-        remaining = remaining / 10
-    return result
+    str digits = '0123456789abcdef'
+    []byte out = none
+    int m = n
+    while m != 0:
+        int d = m % base
+        if d < 0:
+            d = -d
+        out = append(out, digits[d])
+        m = m / base
+    if n < 0:
+        out = append(out, "-")
+    return str(_reverse(out))
+
+def str int_to_str(int n):
+    return _format(n, 10)
+
+# Lowercase hex without a prefix; negatives get '-'.
+def str int_to_hex(int n):
+    return _format(n, 16)
+
+# s padded on the left with `fill` to at least `width` bytes.
+def str pad_left(str s, int width, byte fill):
+    int missing = width - len(s)
+    if missing <= 0:
+        return s
+    []byte out = none
+    for int i = 0; i < missing; i += 1:
+        out = append(out, fill)
+    return str(out) + s
