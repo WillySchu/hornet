@@ -1,4 +1,4 @@
-ntHornet Lang
+Hornet Lang
 -----------
 
 ```
