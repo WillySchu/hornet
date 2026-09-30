@@ -13,9 +13,6 @@ Binary Ops:
 - Consider replacing ^ with ~
 - Exponentiation (either ** or ^)
 
-Documentation:
-- Clean up test\_compiler.py, the docstring of which is quite stale.
-
 Updates:
 - Printing a struct defined in another module shows its internal name: print(write\_file(bad, x)) prints errors$Error(message: …).
 - must\_str and must\_int need a dead return after an exhaustive match, because semantic analysis doesn't treat match as covering every path.
@@ -43,7 +40,6 @@ Updates:
 - else-branch narrowing — even the "exactly two variants, so else means the other one" case.
 - Narrowing inside a while condition. Excluded by construction in v1 (only if is recognized), but worth its own tracked item since loop bodies raise questions v1 never has to answer — what does narrowing across iterations even mean once reassignment is disallowed anyway.
 - Cleanup remaining IR/backend coupling.
-- `*p = v` where `p` is `*[]T`: semantic accepts, IR raises.
 - Pass structs to FFI calls.
 - Separate the runtime code from codegen.
 - `IRBranch` peephole optimization to skip redundant unconditional jumps.
@@ -87,7 +83,6 @@ Updates:
 - Free memory `malloc`ed by string concatenation.
 - Explore graph coloring algorithm for register allocation (Chaitin-Briggs).
 - Consider renaming CodeGenerator to something like X86Backend.
-- Target different architectures?
 - Link to non libc functions for FFI?
 - Call hornet code from C?
 - for-loop binding variables (both the existing three-clause form and the new for x in y form) currently share one stack slot for the entire loop, not a fresh one per iteration — so &x taken inside the body always points at whatever the final iteration left there, regardless of which iteration actually took the address. This matches Go's pre-1.22 behavior, which Go itself changed after years of this being a recurring bug source. Revisit: should each iteration get its own binding instead?
