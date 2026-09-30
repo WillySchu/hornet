@@ -118,7 +118,7 @@ GOLDEN = sorted((ROOT / 'tests' / 'formatter').glob('*.in.ht'))
 @pytest.mark.parametrize('case', GOLDEN, ids=lambda p: p.name[:-len('.in.ht')])
 def test_golden(hfmt, case):
     expected = case.with_name(case.name.replace('.in.ht', '.out.ht')).read_text()
-    r = _run(hfmt, str(case))
+    r = _run(hfmt, stdin=case.read_text())
     assert r.returncode == 0, r.stderr
     assert r.stdout == expected
     assert _run(hfmt, stdin=expected).stdout == expected  # formatting twice changes nothing
@@ -135,10 +135,136 @@ def test_inconsistent_dedent_is_an_error(hfmt):
 def test_formatting_repo_files_is_stable_and_keeps_meaning(hfmt, path, tmp_path):
     """Formatting twice changes nothing, and the formatted file compiles to identical assembly."""
     from compile import compile_to_asm
-    formatted = _run(hfmt, str(path))
+    formatted = _run(hfmt, stdin=path.read_text())
     assert formatted.returncode == 0, formatted.stderr
     assert _run(hfmt, stdin=formatted.stdout).stdout == formatted.stdout
     # Sibling modules are formatted too, so relative imports resolve to formatted code.
     for sibling in path.parent.glob('*.ht'):
-        (tmp_path / sibling.name).write_text(_run(hfmt, str(sibling)).stdout)
+        (tmp_path / sibling.name).write_text(_run(hfmt, stdin=sibling.read_text()).stdout)
     assert compile_to_asm(str(tmp_path / path.name), 'linux') == compile_to_asm(str(path), 'linux')
+
+
+# -- command line ---------------------------------------------------------------
+
+@GCC_SKIP
+def test_in_place_formats_changed_files_only_and_continues_past_errors(hfmt, tmp_path):
+    import os
+    messy, clean, broken = tmp_path / 'messy.ht', tmp_path / 'clean.ht', tmp_path / 'broken.ht'
+    messy.write_text("x=1\n")
+    clean.write_text("y = 2\n")
+    broken.write_text("z = 'oops\n")
+    os.utime(clean, (1_000_000, 1_000_000))
+    r = _run(hfmt, str(messy), str(broken), str(clean))
+    assert r.returncode == 1
+    assert r.stderr == f"{broken}:1:5: error: unterminated literal\n"
+    assert messy.read_text() == "x = 1\n"
+    assert clean.stat().st_mtime == 1_000_000  # unchanged files aren't rewritten
+    assert broken.read_text() == "z = 'oops\n"
+
+
+@GCC_SKIP
+def test_check_lists_files_that_would_change(hfmt, tmp_path):
+    messy, clean = tmp_path / 'messy.ht', tmp_path / 'clean.ht'
+    messy.write_text("x=1\n")
+    clean.write_text("y = 2\n")
+    r = _run(hfmt, '--check', str(messy), str(clean))
+    assert (r.returncode, r.stdout) == (1, f"{messy}\n")
+    assert messy.read_text() == "x=1\n"
+    assert _run(hfmt, '--check', str(clean)).returncode == 0
+    assert _run(hfmt, '--check', stdin="x=1\n").returncode == 1
+    assert _run(hfmt, '--check', stdin="x = 1\n").returncode == 0
+
+
+@GCC_SKIP
+def test_missing_file_is_reported(hfmt, tmp_path):
+    r = _run(hfmt, str(tmp_path / 'nope.ht'))
+    assert r.returncode == 1
+    assert 'could not open' in r.stderr and 'No such file or directory' in r.stderr
+
+
+# -- scrambled generated programs -------------------------------------------------
+
+_OPERATORS = {'<<=', '>>=', '==', '!=', '>=', '<=', '<<', '>>', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^='}
+
+
+def _must_separate(prev: str, cur: str) -> bool:
+    """Whether writing prev and cur with no space would lex differently."""
+    wordy = lambda c: c.isalnum() or c == '_'
+    if wordy(prev[-1]) and wordy(cur[0]):
+        return True
+    return any(op.startswith(prev[-1] + cur[0]) for op in _OPERATORS) or (prev[-1] == '.' and cur[0].isdigit())
+
+
+def scramble(source: str, seed: int) -> str:
+    """Same tokens, different whitespace: random indentation width, random spacing between tokens,
+    extra blank lines, and line breaks inside brackets."""
+    import random
+    r = random.Random(seed)
+    unit = r.choice(['  ', '   ', '\t', '        ', ' '])
+    lines, cur, widths, depth = [], [], [0], 0
+    toks = [t for t in Lexer(source).tokenize() if t.type not in (TokenType.INDENT, TokenType.DEDENT, TokenType.EOF)]
+    for t in toks:
+        if t.type == TokenType.NEWLINE:
+            if cur:
+                lines.append(cur)
+            cur = []
+            continue
+        cur.append(t)
+    out = []
+    for line in lines:
+        width = line[0].col - 1
+        while width < widths[-1]:
+            widths.pop()
+        if width > widths[-1]:
+            widths.append(width)
+        text = unit * (len(widths) - 1)
+        prev = None
+        for t in line:
+            if prev is not None:
+                if prev.val == ',' and depth > 0 and r.random() < 0.3:
+                    text += '\n' + ' ' * r.randint(0, 9)
+                else:
+                    text += ' ' * (r.choice([0, 1, 1, 2]) or (1 if _must_separate(prev.val, t.val) else 0))
+            text += t.val
+            depth += t.val in '([{' and t.type != TokenType.STRING
+            depth -= t.val in ')]}' and t.type != TokenType.STRING
+            prev = t
+        out.append(text + ' ' * r.choice([0, 0, 2]))
+        if r.random() < 0.2:
+            out.append(' ' * r.randint(0, 3))
+    return '\n'.join(out) + '\n'
+
+
+def _generated_programs():
+    from tests.shape_matrix import programs
+    from tests.test_random_programs import Gen
+    progs = [(f"random-{seed}", Gen(seed).program()[0]) for seed in range(0, 40, 2)]
+    progs += [(name, src) for i, (name, src, _) in enumerate(programs()) if i % 6 == 0]
+    return progs
+
+
+GENERATED = _generated_programs()
+
+
+@GCC_SKIP
+@pytest.mark.parametrize('name,source', GENERATED, ids=[g[0] for g in GENERATED])
+def test_formatting_scrambled_programs_keeps_meaning(hfmt, name, source, tmp_path):
+    from compile import compile_to_asm
+    from diagnostics import CompileError
+    original = tmp_path / 'original.ht'
+    original.write_text(source)
+    try:
+        expected = compile_to_asm(str(original), 'linux')
+    except CompileError:
+        pytest.skip('rejected by semantic analysis')
+    import zlib
+    scrambled = scramble(source, zlib.crc32(name.encode()))
+    assert scrambled != source
+    (tmp_path / 'scrambled.ht').write_text(scrambled)
+    assert compile_to_asm(str(tmp_path / 'scrambled.ht'), 'linux') == expected  # the scrambler itself is sound
+    r = _run(hfmt, stdin=scrambled)
+    assert r.returncode == 0, r.stderr + scrambled
+    assert _run(hfmt, stdin=r.stdout).stdout == r.stdout
+    formatted = tmp_path / 'formatted.ht'
+    formatted.write_text(r.stdout)
+    assert compile_to_asm(str(formatted), 'linux') == expected

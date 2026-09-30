@@ -1,49 +1,44 @@
 # hfmt: Hornet source formatter.
-from 'os' import get_args, read_file, read_stdin, write_stdout, write_stderr, exit
-from 'errors' import Error, StrResult
+#
+#   hfmt                   format stdin to stdout
+#   hfmt file ...          format files in place (written only if they change)
+#   hfmt --check file ...  list files that would change; exit 1 if any
+#   hfmt --tokens [file]   dump the token stream
+from 'os' import get_args, read_file, read_stdin, write_file, write_stdout, write_stderr, exit
+from 'errors' import Error, StrResult, IntResult
 from 'fmt' import int_to_str
 from 'strings' import Builder, starts_with
-from 'lexer' import lex, kind_name, LexResult, LexError, Tokens, TK_NEWLINE
+from 'lexer' import lex, kind_name, LexError, Tokens, TK_NEWLINE
 from 'layout' import layout, LayoutError
 
-def str _usage():
-    return 'usage: hfmt [file] | hfmt --tokens [file]\n'
+const str USAGE = 'usage: hfmt [--check] [file ...]\n       hfmt --tokens [file]\n'
 
-def _fail(str path, int line, int col, str message):
-    write_stderr(path + ':' + int_to_str(line) + ':' + int_to_str(col) + ': error: ' + message + '\n')
-    exit(1)
+type FormatError struct:
+    str message  # path:line:col: error: ...
 
-# Formatted source on stdout.
-def format_to_stdout(str path, str src):
+type FormatResult is str | FormatError
+
+def str _located(str path, int line, int col, str message):
+    return path + ':' + int_to_str(line) + ':' + int_to_str(col) + ': error: ' + message
+
+def FormatResult format_source(str path, str src):
     match lex(src) as r:
         is LexError:
-            _fail(path, r.line, r.col, r.message)
+            return FormatError(_located(path, r.line, r.col, r.message))
         is Tokens:
             match layout(r.items) as f:
                 is LayoutError:
-                    _fail(path, f.line, f.col, f.message)
+                    return FormatError(_located(path, f.line, f.col, f.message))
                 is str:
-                    write_stdout(f)
-
-def StrResult _read(str path):
-    if len(path) > 0:
-        return read_file(path)
-    return read_stdin()
-
-def str _source(str path):
-    match _read(path) as v:
-        is str:
-            return v
-        is Error:
-            write_stderr('hfmt: ' + v.message + '\n')
-            exit(1)
+                    return f
     return ''
 
 # One line per token: KIND line col text (NEWLINE shows its bracket depth instead).
-def dump_tokens(str path, str src):
+def str dump_tokens(str path, str src):
     match lex(src) as r:
         is LexError:
-            _fail(path, r.line, r.col, r.message)
+            write_stderr(_located(path, r.line, r.col, r.message) + '\n')
+            exit(1)
         is Tokens:
             Builder b = Builder(none)
             for t in r.items:
@@ -58,25 +53,91 @@ def dump_tokens(str path, str src):
                 else:
                     b.write(t.text)
                 b.write('\n')
-            write_stdout(b.to_str())
+            return b.to_str()
+    return ''
+
+def StrResult _read(str path):
+    if len(path) > 0:
+        return read_file(path)
+    return read_stdin()
+
+def str _source_or_exit(str path):
+    match _read(path) as v:
+        is str:
+            return v
+        is Error:
+            write_stderr('hfmt: ' + v.message + '\n')
+            exit(1)
+    return ''
+
+# Format (or check) one file; false on any error or, when checking, a needed change.
+def bool _process_file(str path, bool check):
+    match read_file(path) as src:
+        is Error:
+            write_stderr('hfmt: ' + src.message + '\n')
+            return false
+        is str:
+            match format_source(path, src) as f:
+                is FormatError:
+                    write_stderr(f.message + '\n')
+                    return false
+                is str:
+                    if f == src:
+                        return true
+                    if check:
+                        write_stdout(path + '\n')
+                        return false
+                    IntResult w = write_file(path, f)
+                    if w is Error:
+                        write_stderr('hfmt: ' + w.message + '\n')
+                        return false
+                    return true
+    return false
 
 def int main(int argc, *byte argv):
     []str args = get_args(argc, argv)
-    bool tokens = len(args) > 1 and args[1] == '--tokens'
-    int first = 1
+    bool tokens = false
+    bool check = false
+    []str files = none
+    for i, a in args:
+        if i == 0:
+            continue
+        if a == '--tokens' and i == 1:
+            tokens = true
+        elif a == '--check' and i == 1:
+            check = true
+        elif starts_with(a, '-'):
+            write_stderr(USAGE)
+            return 2
+        else:
+            files = append(files, a)
     if tokens:
-        first = 2
-    if len(args) > first + 1 or (len(args) > first and starts_with(args[first], '-')):
-        write_stderr(_usage())
-        return 2
-    str path = ''
-    if len(args) > first:
-        path = args[first]
-    str label = path
-    if len(label) == 0:
-        label = '<stdin>'
-    if tokens:
-        dump_tokens(label, _source(path))
-    else:
-        format_to_stdout(label, _source(path))
-    return 0
+        if len(files) > 1:
+            write_stderr(USAGE)
+            return 2
+        str path = ''
+        str label = '<stdin>'
+        if len(files) == 1:
+            path = files[0]
+            label = path
+        write_stdout(dump_tokens(label, _source_or_exit(path)))
+        return 0
+    if len(files) == 0:
+        str src = _source_or_exit('')
+        match format_source('<stdin>', src) as f:
+            is FormatError:
+                write_stderr(f.message + '\n')
+                return 1
+            is str:
+                if check:
+                    if f != src:
+                        write_stdout('<stdin>\n')
+                        return 1
+                    return 0
+                write_stdout(f)
+        return 0
+    int status = 0
+    for path in files:
+        if not _process_file(path, check):
+            status = 1
+    return status
