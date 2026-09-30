@@ -10,13 +10,16 @@ stashed on Program.
 """
 
 import argparse
+from dataclasses import fields
 from typing import Dict, List, Optional, Set, Tuple
 
 from diagnostics import CompileError
 from lexer import lex
 from typesys import StructInfo, SumTypeInfo, Type, TypeKind
 from desugar import mangle_method_name
+from folding import fold_binary_op, fold_cast, fold_unary_op
 from parser import (
+    ConstDecl,
     ArrayLiteral,
     ArrayTypeExpr,
     Assign,
@@ -271,6 +274,9 @@ class SemanticAnalyzer:
         # 3.6. Methods, after struct resolution.
         self.methods = self._collect_methods(program)
 
+        # 3.7. Constants: types now resolve; values are evaluated on demand in step 4.7.
+        self._collect_consts(program)
+
         # 4. All signatures before any body, so order doesn't matter.
         self.functions = {}
         self.intrinsic_original_names = {}  # mangled name -> original_name
@@ -321,6 +327,11 @@ class SemanticAnalyzer:
         program.intrinsic_original_names = self.intrinsic_original_names
         program.function_registry = self.functions
 
+        # 4.7. Constant values, in dependency order.
+        for name in self.const_decls:
+            self._const_value(name)
+        self._check_const_name_collisions(program)
+
         # 5. Check bodies, collecting at most one error per function.
         errors: List[SemanticError] = []
         for fn in program.functions:
@@ -337,6 +348,124 @@ class SemanticAnalyzer:
         if errors:
             raise SemanticErrors(errors)
 
+        # 6. Later passes see literals, never constant references.
+        for fn in program.functions:
+            self._substitute_consts(fn)
+
+    # -- constants
+
+    def _collect_consts(self, program: Program) -> None:
+        self.const_decls: Dict[str, ConstDecl] = {}
+        self.consts: Dict[str, Tuple[Type, object]] = {}  # name -> (type, value)
+        self._const_in_progress: set = set()
+        for cd in program.consts:
+            if cd.name in self.const_decls:
+                raise SemanticError(f"Constant '{cd.name}' is already declared", cd)
+            self.const_decls[cd.name] = cd
+
+    def _check_const_name_collisions(self, program: Program) -> None:
+        for name, cd in self.const_decls.items():
+            for kind, table in (('function', self.functions), ('struct', self.structs),
+                                ('type alias', self.type_aliases), ('sum type', self.sum_types)):
+                if name in table:
+                    raise SemanticError(f"Constant '{name}' collides with a {kind} of the same name", cd)
+            if name in _BUILTIN_FUNCTION_NAMES:
+                raise SemanticError(f"'{name}' is a builtin and can't be used as a constant name", cd)
+
+    def _const_value(self, name: str) -> Tuple[Type, object]:
+        """(type, value) of constant `name`, evaluating it (and what it depends on) the first time."""
+        if name in self.consts:
+            return self.consts[name]
+        cd = self.const_decls[name]
+        if name in self._const_in_progress:
+            raise SemanticError(f"Constant '{name}' is defined in terms of itself", cd)
+        self._const_in_progress.add(name)
+        const_type = type_from_name(cd.const_type, self.structs, self.type_aliases, cd, self.sum_types)
+        if const_type not in _INTEGER_TYPES and const_type not in (Type.BOOL, Type.STR):
+            raise SemanticError(
+                f"Constant '{name}' has type {const_type} -- constants must be an integer type, bool, or str", cd)
+        saved_scopes, self.scopes = self.scopes, [{}]
+        try:
+            value_type = self._check_value_flowing_into(cd.value, const_type)
+            if not self._types_compatible(value_type, const_type):
+                raise SemanticError(
+                    f"Constant '{name}' is declared {const_type} but its value has type {value_type}", cd)
+            value = self._const_eval(cd.value)
+        finally:
+            self.scopes = saved_scopes
+        self._const_in_progress.discard(name)
+        self.consts[name] = (const_type, value)
+        return self.consts[name]
+
+    def _const_eval(self, expr: Node):
+        """Value of an already type-checked constant expression."""
+        t = getattr(expr, 'resolved_type', None)
+        if isinstance(expr, (Constant, ByteLiteral)) and isinstance(expr.value, int):
+            return expr.value
+        if isinstance(expr, (BoolLiteral, StringLiteral)):
+            return expr.value
+        if isinstance(expr, Variable) and expr.name in self.const_decls:
+            return self._const_value(expr.name)[1]
+        if isinstance(expr, Unary) and expr.op in (UnaryOp.NEGATE, UnaryOp.COMPLEMENT):
+            if isinstance(expr.operand, Constant) and expr.operand.value == 2 ** 63:
+                return -2 ** 63
+            return fold_unary_op(expr.op, self._const_eval(expr.operand), t)
+        if isinstance(expr, Unary) and expr.op == UnaryOp.NOT:
+            return not self._const_eval(expr.operand)
+        if isinstance(expr, Binary):
+            left_type = expr.left.resolved_type
+            if expr.op in (BinaryOp.AND, BinaryOp.OR):
+                left = self._const_eval(expr.left)
+                right = self._const_eval(expr.right)
+                return (left and right) if expr.op == BinaryOp.AND else (left or right)
+            left, right = self._const_eval(expr.left), self._const_eval(expr.right)
+            if left_type == Type.STR:
+                if expr.op == BinaryOp.ADD:
+                    return left + right
+                if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
+                    return (left == right) == (expr.op == BinaryOp.EQUAL)
+            elif left_type == Type.BOOL and expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
+                return (left == right) == (expr.op == BinaryOp.EQUAL)
+            else:
+                value = fold_binary_op(expr.op, left, right, t if t != Type.BOOL else left_type)
+                if value is None:
+                    raise SemanticError("Division by zero in a constant expression", expr)
+                return bool(value) if t == Type.BOOL else value
+        if isinstance(expr, Cast) and t in _INTEGER_TYPES:
+            return fold_cast(t, self._const_eval(expr.expr), expr.expr.resolved_type)
+        raise SemanticError(
+            "A constant's value must be built from literals, other constants, operators, and integer casts", expr)
+
+    def _const_literal(self, name: str, node: Node) -> Node:
+        const_type, value = self.consts[name]
+        where = dict(line=node.line, col=node.col, file=node.file)
+        if const_type == Type.BOOL:
+            return BoolLiteral(value=value, resolved_type=const_type, **where)
+        if const_type == Type.STR:
+            return StringLiteral(value=value, resolved_type=const_type, **where)
+        return Constant(value=value, resolved_type=const_type, **where)
+
+    def _substitute_consts(self, node) -> None:
+        """Replace every constant reference under `node` with its literal, in place."""
+        for f in fields(node):
+            if f.name in ('resolved_type', 'decl_id', 'narrowed_type', 'binding_types', 'resolved_return_type'):
+                continue
+            value = getattr(node, f.name)
+            if isinstance(value, Variable) and value.name in self.consts:
+                setattr(node, f.name, self._const_literal(value.name, value))
+            elif isinstance(value, Node):
+                self._substitute_consts(value)
+            elif isinstance(value, list):
+                for i, item in enumerate(value):
+                    if isinstance(item, Variable) and item.name in self.consts:
+                        value[i] = self._const_literal(item.name, item)
+                    elif isinstance(item, Node):
+                        self._substitute_consts(item)
+                    elif isinstance(item, tuple):
+                        value[i] = tuple(
+                            self._const_literal(x.name, x) if isinstance(x, Variable) and x.name in self.consts
+                            else (self._substitute_consts(x) or x) if isinstance(x, Node) else x
+                            for x in item)
     def _resolve_sum_types(self, sum_type_defs: List[SumTypeDef], structs: Dict[str, StructInfo]) -> Dict[str, SumTypeInfo]:
         """Resolve sum type variants and check name collisions."""
         registry: Dict[str, SumTypeInfo] = {}
@@ -675,10 +804,12 @@ class SemanticAnalyzer:
         self.scopes[-1][name] = (type_, decl_id)
 
     def _resolve(self, name: str, node: Optional[Node] = None) -> Tuple[Type, object]:
-        """(type, decl id) of `name`, innermost-first."""
+        """(type, decl id) of `name`, innermost-first; constants (decl id None) after locals."""
         for scope in reversed(self.scopes):
             if name in scope:
                 return scope[name]
+        if name in getattr(self, 'const_decls', {}):
+            return self._const_value(name)[0], None
         raise SemanticError(f"Reference to undeclared variable '{name}'", node)
 
     def _lookup(self, name: str, node: Optional[Node] = None) -> Type:
@@ -806,6 +937,8 @@ class SemanticAnalyzer:
                 f"variable instead",
                 stmt,
             )
+        if stmt.name in self.const_decls and not any(stmt.name in scope for scope in self.scopes):
+            raise SemanticError(f"Cannot assign to constant '{stmt.name}'", stmt)
         declared_type, stmt.decl_id = self._resolve(stmt.name, stmt)
         value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, declared_type)
         if not self._types_compatible(value_type, declared_type):
@@ -1630,6 +1763,8 @@ class SemanticAnalyzer:
                 )
             return Type.BOOL
         if expr.op == UnaryOp.ADDRESS_OF:
+            if isinstance(expr.operand, Variable) and expr.operand.decl_id is None and expr.operand.name in self.const_decls:
+                raise SemanticError(f"Cannot take the address of constant '{expr.operand.name}'", expr)
             # Only variables, struct literals, and chains rooted in a variable.
             is_struct_literal = isinstance(expr.operand, Call) and expr.operand.name in self.structs
             root_variable = self._root_variable_of(expr.operand) if isinstance(expr.operand, (Field, Index)) else None

@@ -8,8 +8,13 @@ from diagnostics import CompileError
 from modules import DiscoveredModule
 from parser import (
     ArrayTypeExpr,
+    Assign,
     Call,
     Field,
+    ForIn,
+    MethodDef,
+    Param,
+    VarDecl,
     Node,
     PointerTypeExpr,
     Program,
@@ -28,7 +33,7 @@ class MergeError(CompileError):
 
 
 # Node fields holding type expressions.
-_TYPE_FIELD_NAMES = frozenset({'var_type', 'return_type', 'field_type', 'target_type', 'type', 'type_name'})
+_TYPE_FIELD_NAMES = frozenset({'var_type', 'return_type', 'field_type', 'target_type', 'type', 'type_name', 'const_type'})
 
 
 def _mangle(canonical_module: str, name: str) -> str:
@@ -49,6 +54,8 @@ def _own_top_level_names(program: Program) -> Set[str]:
         names.add(st.name)
     for ic in program.intrinsics:
         names.add(ic.name)
+    for cd in program.consts:
+        names.add(cd.name)
     return names
 
 
@@ -73,6 +80,28 @@ class _MergeContext:
     modules: Dict[str, DiscoveredModule]
     all_own_names: Dict[str, Set[str]]
     all_extern_names: Dict[str, Set[str]]
+    all_const_names: Dict[str, Set[str]]
+    # Constants visible by bare name in the file being rewritten: local name -> merged name.
+    const_map: Dict[str, str]
+
+
+def _const_map(program: Program, canonical_module: Optional[str], named_imports: Dict[str, Tuple[str, str]],
+               ctx: _MergeContext) -> Dict[str, str]:
+    """Bare constant names visible in a file. Locals may not reuse them, so renaming every use is safe."""
+    out = {cd.name: (cd.name if canonical_module is None else _mangle(canonical_module, cd.name))
+           for cd in program.consts}
+    for local_name, (canonical_name, original_name) in named_imports.items():
+        if original_name in ctx.all_const_names[canonical_name]:
+            out[local_name] = _mangle(canonical_name, original_name)
+    return out
+
+
+def _check_binding(name: str, node: Node, ctx: _MergeContext) -> None:
+    if name in ctx.const_map:
+        raise MergeError(
+            f"'{name}' at line {node.line} is a constant here and can't also be a variable name",
+            line=node.line, col=node.col,
+        )
 
 
 def _resolve_in_module(canonical_name: str, name: str, ctx: _MergeContext,
@@ -162,6 +191,17 @@ def _rewrite_node(node, own_names: Set[str], canonical_module: Optional[str], im
         resolved = _resolve_qualified(node.base.name, node.name, import_aliases, ctx, canonical_module, node.line)
         if resolved is not None:
             return Variable(name=resolved, line=node.line, col=node.col)
+    if isinstance(node, Variable) and node.name in ctx.const_map:
+        node.name = ctx.const_map[node.name]
+    if isinstance(node, Assign) and node.name in ctx.const_map:
+        node.name = ctx.const_map[node.name]  # semantic analysis rejects assigning to a constant
+    if isinstance(node, (VarDecl, Param)):
+        _check_binding(node.name, node, ctx)
+    if isinstance(node, ForIn):
+        for name in node.binding_names:
+            _check_binding(name, node, ctx)
+    if isinstance(node, MethodDef):
+        _check_binding(node.receiver_name, node, ctx)
     if isinstance(node, Call) and node.receiver is None:
         if node.name in own_names:
             node.name = _mangle(canonical_module, node.name)
@@ -284,12 +324,16 @@ def _merge(entry_program: Program, modules: Dict[str, DiscoveredModule], current
         modules=modules,
         all_own_names={name: _own_top_level_names(module.program) for name, module in modules.items()},
         all_extern_names={name: _own_extern_names(module.program) for name, module in modules.items()},
+        all_const_names={name: {cd.name for cd in module.program.consts} for name, module in modules.items()},
+        const_map={},
     )
 
     _validate_intrinsics(entry_program)
     _validate_named_imports(entry_program, _own_top_level_names(entry_program), entry_named, ctx, None)
     entry_program.imports = []
     entry_program.from_imports = []
+    ctx.const_map = _const_map(entry_program, None, entry_named, ctx)
+    entry_program.consts = _rewrite_node(entry_program.consts, set(), None, entry_aliases, entry_named, ctx)
     entry_program.functions = _rewrite_node(entry_program.functions, set(), None, entry_aliases, entry_named, ctx)
     entry_program.structs = _rewrite_node(entry_program.structs, set(), None, entry_aliases, entry_named, ctx)
     entry_program.type_aliases = _rewrite_node(
@@ -305,6 +349,9 @@ def _merge(entry_program: Program, modules: Dict[str, DiscoveredModule], current
         current[0] = program.file
         _validate_intrinsics(program)
         _validate_named_imports(program, own_names, module.named_imports, ctx, canonical_name)
+        ctx.const_map = _const_map(program, canonical_name, module.named_imports, ctx)
+        program.consts = _rewrite_node(
+            program.consts, own_names, canonical_name, module.import_aliases, module.named_imports, ctx)
         program.functions = _rewrite_node(
             program.functions, own_names, canonical_name, module.import_aliases, module.named_imports, ctx)
         program.structs = _rewrite_node(
@@ -332,6 +379,9 @@ def _merge(entry_program: Program, modules: Dict[str, DiscoveredModule], current
             entry_program.sum_types.append(st)
         for ext in program.extern_functions:
             entry_program.extern_functions.append(ext)
+        for cd in program.consts:
+            cd.name = _mangle(canonical_name, cd.name)
+            entry_program.consts.append(cd)
         for ic in program.intrinsics:
             # Only name is mangled; original_name identifies the intrinsic.
             ic.name = _mangle(canonical_name, ic.name)

@@ -399,6 +399,14 @@ class IntrinsicDecl(Node):
 
 
 @dataclass
+class ConstDecl(Node):
+    """Top-level `const T NAME = expr`; expr must be a compile-time constant."""
+    name: str
+    const_type: Union[str, ArrayTypeExpr, SliceTypeExpr]
+    value: Node
+
+
+@dataclass
 class TypeAlias(Node):
     """`type Name = T`: an interchangeable alias."""
     name: str
@@ -436,6 +444,7 @@ class Program(Node):
     imports: List[ImportDecl] = field(default_factory=list)
     from_imports: List[FromImportDecl] = field(default_factory=list)
     intrinsics: List[IntrinsicDecl] = field(default_factory=list)
+    consts: List[ConstDecl] = field(default_factory=list)
 
     def __repr__(self) -> str:
         return self.pretty()
@@ -632,6 +641,7 @@ class Parser:
         imports = []
         from_imports = []
         intrinsics = []
+        consts = []
         self.skip_newlines()
         while not self.at_end():
             if self.check(TokenType.STRUCT):
@@ -653,6 +663,8 @@ class Parser:
                 extern_functions.append(self.parse_extern_function())
             elif self.check(TokenType.INTRINSIC):
                 intrinsics.append(self.parse_intrinsic())
+            elif self.check(TokenType.CONST):
+                consts.append(self.parse_const())
             elif self.check(TokenType.IMPORT):
                 imports.append(self.parse_import())
             elif self.check(TokenType.FROM):
@@ -663,7 +675,7 @@ class Parser:
         program = Program(
             functions=functions, structs=structs, type_aliases=type_aliases, sum_types=sum_types,
             extern_functions=extern_functions, imports=imports, from_imports=from_imports,
-            intrinsics=intrinsics,
+            intrinsics=intrinsics, consts=consts,
             line=start_tok.line, col=start_tok.col,
         )
         if start_tok.file:
@@ -847,6 +859,16 @@ class Parser:
         while self.match(TokenType.COMMA):
             params.append(self.parse_param())
         return params
+
+    def parse_const(self) -> ConstDecl:
+        """`const T NAME = expr`."""
+        start_tok = self.expect(TokenType.CONST, "Expected 'const'")
+        const_type = self.parse_type()
+        name_tok = self.expect(TokenType.IDENTIFIER, "Expected a constant name")
+        self.expect(TokenType.ASSIGN, "Expected '=' after a constant's name")
+        value = self.parse_expression()
+        self.expect(TokenType.NEWLINE, "Expected a newline after a constant declaration")
+        return ConstDecl(name=name_tok.val, const_type=const_type, value=value, line=start_tok.line, col=start_tok.col)
 
     def parse_param(self) -> Param:
         start_tok = self.current()
