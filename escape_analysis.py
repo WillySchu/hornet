@@ -6,9 +6,17 @@ literal, heap literal, or EXT = memory not owned by this frame) has
 H[t]: the locations whose addresses may be stored inside t. An
 expression's value is the set of locations it may point into.
 
-Escaping: returned values, call arguments, anything stored into EXT,
-and, transitively, anything stored inside an escaping location.
-Escaping locations may in turn hold EXT (callee writes)."""
+Escaping: returned values, anything stored into EXT, and, transitively,
+anything stored inside an escaping location. Escaping locations may in
+turn hold EXT (callee writes).
+
+Parameter i's value points into PARAM(i): memory the caller owns, whose
+contents are external and into which stores escape (like EXT). The
+function's summary says whether each PARAM(i) escapes. At a call with a
+summary, only arguments whose parameter escapes do; for the others, the
+callee may still leak or overwrite what their memory holds, so their
+contents escape and their memory may come to hold EXT. Calls without a
+summary (externs, intrinsics) escape every argument."""
 
 from typing import Optional, Union
 
@@ -65,14 +73,23 @@ DeclId = Union[int, tuple]
 EXT = 'EXT'
 
 
+def _param(i: int) -> tuple:
+    return ('param', i)
+
+
+def _is_external(t) -> bool:
+    return t == EXT or (isinstance(t, tuple) and t[0] == 'param')
+
+
 def _heap(node: Node) -> tuple:
     return ('heap', id(node))
 
 
 class EscapeAnalyzer:
-    def __init__(self, fn: Function, structs: dict[str, StructInfo]):
+    def __init__(self, fn: Function, structs: dict[str, StructInfo], summaries: Optional[dict] = None):
         self.fn = fn
         self.structs = structs
+        self.summaries = summaries or {}
         self.H: dict = {EXT: {EXT}}
         self.esc: set = {EXT}
         self.changed = False
@@ -80,14 +97,19 @@ class EscapeAnalyzer:
     def analyze(self) -> set[DeclId]:
         while True:
             self.changed = False
-            for p in self.fn.params:
-                self._add(id(p), {EXT})
+            for i, p in enumerate(self.fn.params):
+                self._add(_param(i), {EXT})
+                self._add(id(p), {_param(i)})
             self.walk_statements(self.fn.body)
             self._close_escapes()
             if not self.changed:
                 break
         return {t for t in self.esc
                 if t != EXT and not (isinstance(t, tuple) and isinstance(t[0], str))}
+
+    def param_escapes(self) -> list[bool]:
+        """After analyze(): whether each parameter's pointed-into memory escapes."""
+        return [_param(i) in self.esc for i in range(len(self.fn.params))]
 
     # -- lattice helpers
 
@@ -104,7 +126,7 @@ class EscapeAnalyzer:
 
     def _store(self, targets: set, vals: set) -> None:
         for t in targets:
-            if t == EXT:
+            if _is_external(t):
                 self._escape(vals)
             else:
                 self._add(t, vals)
@@ -232,9 +254,20 @@ class EscapeAnalyzer:
             elems = set().union(*arg_vals[1:])
             self._store(old | {t}, elems)
             return old | {t}
-        for v in arg_vals:
-            self._escape(v)
-        return {EXT}
+        summary = self.summaries.get(expr.name)
+        if summary is None or expr.kwargs or len(summary) != len(arg_vals):
+            for v in arg_vals:
+                self._escape(v)
+            return {EXT}
+        result = {EXT}
+        for escapes, v in zip(summary, arg_vals):
+            if escapes:
+                self._escape(v)
+                result |= v
+            else:
+                self._escape(self._contents(v))
+                self._store(v, {EXT})
+        return result
 
     # -- statements
 
@@ -290,6 +323,23 @@ class EscapeAnalyzer:
             self.vals(stmt)
 
 
-def analyze_array_escapes(fn: Function, structs: dict[str, StructInfo]) -> set[DeclId]:
-    """DeclIds in `fn` whose storage must be heap-allocated. Requires semantic analysis."""
-    return EscapeAnalyzer(fn, structs).analyze()
+def compute_escape_summaries(functions: list[Function], structs: dict[str, StructInfo]) -> dict:
+    """Function name -> per-parameter escape flags, iterated to a fixed point (handles recursion)."""
+    summaries = {fn.name: [False] * len(fn.params) for fn in functions}
+    changed = True
+    while changed:
+        changed = False
+        for fn in functions:
+            analyzer = EscapeAnalyzer(fn, structs, summaries)
+            analyzer.analyze()
+            flags = analyzer.param_escapes()
+            if flags != summaries[fn.name]:
+                summaries[fn.name] = flags
+                changed = True
+    return summaries
+
+
+def analyze_array_escapes(fn: Function, structs: dict[str, StructInfo], summaries: Optional[dict] = None) -> set[DeclId]:
+    """DeclIds in `fn` whose storage must be heap-allocated. Requires semantic analysis.
+    Without `summaries`, every call escapes its arguments."""
+    return EscapeAnalyzer(fn, structs, summaries).analyze()

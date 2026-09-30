@@ -2,29 +2,29 @@
 from 'c' import panic
 from 'fmt' import int_to_str
 
-# Growable byte buffer. Pass by pointer: write(&b, 'text').
+# Growable byte buffer: Builder b = Builder(none); b.write('text'); b.to_str().
 type Builder struct:
     []byte buf
 
-def write(*Builder b, str s):
-    for int i = 0; i < len(s); i += 1:
-        b.buf = append(b.buf, s[i])
+    def write(*b, str s):
+        for int i = 0; i < len(s); i += 1:
+            b.buf = append(b.buf, s[i])
 
-def write_byte(*Builder b, byte x):
-    b.buf = append(b.buf, x)
+    def write_byte(*b, byte x):
+        b.buf = append(b.buf, x)
 
-def write_int(*Builder b, int n):
-    write(b, int_to_str(n))
+    def write_int(*b, int n):
+        b.write(int_to_str(n))
 
-def int length(*Builder b):
-    return len(b.buf)
+    def int length(b):
+        return len(b.buf)
 
-# A copy of the contents; the builder can keep growing.
-def str to_str(*Builder b):
-    return str(b.buf)
+    # A copy of the contents; the builder can keep growing.
+    def str to_str(b):
+        return str(b.buf)
 
-def reset(*Builder b):
-    b.buf = none
+    def reset(*b):
+        b.buf = none
 
 def bool starts_with(str s, str prefix):
     return len(prefix) <= len(s) and s[0:len(prefix)] == prefix
@@ -67,9 +67,9 @@ def str join([]str parts, str sep):
     Builder b = Builder(none)
     for i, p in parts:
         if i > 0:
-            write(&b, sep)
-        write(&b, p)
-    return to_str(&b)
+            b.write(sep)
+        b.write(p)
+    return b.to_str()
 
 def bool _is_space(byte x):
     return x == " " or x == "\t" or x == "\n" or x == "\r"
@@ -87,5 +87,5 @@ def str trim(str s):
 def str repeat(str s, int n):
     Builder b = Builder(none)
     for int i = 0; i < n; i += 1:
-        write(&b, s)
-    return to_str(&b)
+        b.write(s)
+    return b.to_str()

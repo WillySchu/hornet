@@ -6,8 +6,7 @@ from tests.test_compiler import GCC_SKIP
 from tests.test_os_output import compile_and_run
 
 _IMPORTS = (
-    "from 'strings' import Builder, write, write_byte, write_int, to_str, length, reset, split, join, trim, "
-    "repeat, starts_with, ends_with, index_of, index_of_byte\n"
+    "from 'strings' import Builder, split, join, trim, repeat, starts_with, ends_with, index_of, index_of_byte\n"
     "from 'fmt' import int_to_str, int_to_hex, pad_left\n"
 )
 
@@ -42,18 +41,18 @@ def test_pad_left():
 def test_builder():
     out = _run(
         "Builder b = Builder(none)\n"
-        "write(&b, 'n=')\n"
-        "write_int(&b, -42)\n"
-        "write_byte(&b, \"!\")\n"
-        "print(to_str(&b))\n"
-        "write(&b, '?')\n"
-        "print(to_str(&b))\n"
-        "print(length(&b))\n"
-        "reset(&b)\n"
-        "print(length(&b))\n"
+        "b.write('n=')\n"
+        "b.write_int(-42)\n"
+        "b.write_byte(\"!\")\n"
+        "print(b.to_str())\n"
+        "b.write('?')\n"
+        "print(b.to_str())\n"
+        "print(b.length())\n"
+        "b.reset()\n"
+        "print(b.length())\n"
         "for int i = 0; i < 100000; i += 1:\n"
-        "    write(&b, 'abcdefghij')\n"
-        "str s = to_str(&b)\n"
+        "    b.write('abcdefghij')\n"
+        "str s = b.to_str()\n"
         "print(len(s))\n"
         "print(s[999990:1000000])\n"
         "return 0")

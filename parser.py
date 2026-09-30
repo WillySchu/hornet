@@ -284,12 +284,13 @@ class StructField(Node):
 
 @dataclass
 class MethodDef(Node):
-    """Struct method; first param is the untyped receiver."""
+    """Struct method; first param is the untyped receiver (`*name` for a pointer receiver)."""
     receiver_name: str
     name: str
     return_type: Optional[Union[str, ArrayTypeExpr, SliceTypeExpr]]
     params: List['Param'] = field(default_factory=list)
     body: List[Node] = field(default_factory=list)
+    receiver_is_pointer: bool = False
 
 
 @dataclass
@@ -817,11 +818,12 @@ class Parser:
         )
 
     def parse_method_def(self) -> MethodDef:
-        """`def [T] name(receiver, ...):`."""
+        """`def [T] name(receiver, ...):` or `def [T] name(*receiver, ...):`."""
         start_tok = self.expect(TokenType.DEF, "Expected 'def' to start a method definition")
         return_type = self.parse_type() if self._check_starts_with_return_type() else None
         name_tok = self.expect(TokenType.IDENTIFIER, "Expected a method name")
         self.expect(TokenType.OPEN_PAREN, "Expected '(' after method name")
+        receiver_is_pointer = self.match(TokenType.STAR)
         receiver_tok = self.expect(TokenType.IDENTIFIER, "Expected a receiver name as a method's first parameter")
         params: List[Param] = []
         while self.match(TokenType.COMMA):
@@ -833,7 +835,7 @@ class Parser:
         body = self.parse_block()
         return MethodDef(
             receiver_name=receiver_tok.val, name=name_tok.val, return_type=return_type, params=params, body=body,
-            line=start_tok.line, col=start_tok.col,
+            receiver_is_pointer=receiver_is_pointer, line=start_tok.line, col=start_tok.col,
         )
 
     def parse_params(self) -> List[Param]:

@@ -14943,13 +14943,8 @@ class TestArrayEscapeAnalysis:
             9,
         )
 
-    def test_slice_passed_to_another_function_conservatively_escapes(self):
-        """A slice handed to a user-defined function call is treated as
-        escaping unconditionally -- this analysis never looks at what
-        the callee actually does with it (a real interprocedural
-        version would need a per-function escape summary computed in
-        dependency order, a substantially larger undertaking left for
-        its own follow-up)."""
+    def test_slice_passed_to_a_non_escaping_parameter_stays_on_the_stack(self):
+        """The callee's escape summary says its parameter doesn't escape."""
         source = (
             "def int sumFirstTwo([]int s):\n"
             "    return s[0] + s[1]\n"
@@ -14958,6 +14953,21 @@ class TestArrayEscapeAnalysis:
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
             "    []int s = arr[0:3]\n"
             "    return sumFirstTwo(s)\n"
+        )
+        ast = _parse(source)
+        analyze(ast)
+        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        assert "malloc" not in asm
+
+    def test_slice_passed_to_a_parameter_that_escapes_is_promoted(self):
+        source = (
+            "def []int keep([]int s):\n"
+            "    return s\n"
+            "\n"
+            "def int main():\n"
+            "    [5]int arr = [1, 2, 3, 4, 5]\n"
+            "    []int s = keep(arr[0:3])\n"
+            "    return s[0]\n"
         )
         ast = _parse(source)
         analyze(ast)
@@ -15047,16 +15057,9 @@ class TestArrayEscapeAnalysis:
             3,
         )
 
-    def test_container_element_passed_to_another_function_conservatively_escapes(self):
-        """A container element, materialized into a named variable and
-        handed to a user-defined function call, gets the same
-        conservative treatment a bare slice variable already does --
-        escaping unconditionally, without looking at what the callee
-        does with it. (A bare Index expression can't be passed
-        directly as a slice-typed call argument at all -- a separate,
-        pre-existing restriction unrelated to this analysis -- so this
-        goes through an intermediate variable, exactly the shape
-        contribution() itself needs to resolve correctly here.)"""
+    def test_container_element_passed_to_a_non_escaping_parameter_stays_on_the_stack(self):
+        """A container element copied into a variable and passed to a callee whose
+        parameter doesn't escape."""
         source = (
             "def int sumFirstTwo([]int s):\n"
             "    return s[0] + s[1]\n"
@@ -15071,7 +15074,7 @@ class TestArrayEscapeAnalysis:
         ast = _parse(source)
         analyze(ast)
         asm = generate_asm(ast, platform=ASM_PLATFORM)
-        assert "malloc" in asm
+        assert "malloc" not in asm
 
     def test_container_element_never_read_does_not_trigger_promotion(self):
         """THE precision test for this whole extension, mirroring

@@ -71,7 +71,7 @@ class IRFunctionBuilder(
         param_types = [p.resolved_type for p in fn.params]
 
         # Declarations needing heap storage (size or escape).
-        self._escaping_decl_ids = analyze_array_escapes(fn, self.ir_program.struct_registry)
+        self._escaping_decl_ids = analyze_array_escapes(fn, self.ir_program.struct_registry, self.ir_program.escape_summaries)
 
         # Composite returns take a hidden result pointer as argument 0.
         arg_shift = 0

@@ -247,6 +247,7 @@ class SemanticAnalyzer:
         self.functions: Dict[str, tuple] = {}  # name -> (param types, return type)
         self.structs: Dict[str, StructInfo] = {}
         self.methods: Dict[Tuple[str, str], Tuple[List[Type], Type, str]] = {}  # (struct, method) -> (param types, return type, mangled name)
+        self.pointer_receivers: set = set()  # (struct, method) with a `*receiver`
         self.type_aliases: Dict[str, Type] = {}
         self.sum_types: Dict[str, SumTypeInfo] = {}
         self._narrowed_names: set = set()  # currently narrowed variable names
@@ -413,6 +414,8 @@ class SemanticAnalyzer:
                 param_types = [type_from_name(p.type, self.structs, self.type_aliases, p, self.sum_types) for p in md.params]
                 return_type = Type.VOID if md.return_type is None else type_from_name(md.return_type, self.structs, self.type_aliases, md, self.sum_types)
                 methods[(sd.name, md.name)] = (param_types, return_type, mangle_method_name(sd.name, md.name))
+                if md.receiver_is_pointer:
+                    self.pointer_receivers.add((sd.name, md.name))
         return methods
 
     def _collect_type_aliases(self, alias_defs: List[TypeAlias], structs: Dict[str, StructInfo]) -> Dict[str, Type]:
@@ -1345,7 +1348,8 @@ class SemanticAnalyzer:
                 expr,
             )
         receiver_type = self._check_expr_allowing_struct_literal(expr.receiver)
-        if receiver_type.kind == TypeKind.POINTER and receiver_type.element_type.kind == TypeKind.STRUCT:
+        receiver_is_pointer = receiver_type.kind == TypeKind.POINTER and receiver_type.element_type.kind == TypeKind.STRUCT
+        if receiver_is_pointer:
             # auto-deref
             receiver_type = receiver_type.element_type
         if receiver_type.kind != TypeKind.STRUCT:
@@ -1362,6 +1366,22 @@ class SemanticAnalyzer:
                 expr,
             )
         param_types, return_type, mangled_name = self.methods[key]
+        if key in self.pointer_receivers and not receiver_is_pointer:
+            # Pointer receiver: pass the receiver's address.
+            if not isinstance(expr.receiver, (Variable, Field, Index)) and not (
+                    isinstance(expr.receiver, Unary) and expr.receiver.op == UnaryOp.DEREFERENCE):
+                raise SemanticError(
+                    f"Method '{expr.name}' on '{receiver_type.struct_name}' has a pointer receiver, so it "
+                    f"needs an addressable receiver (a variable, field, index, or dereference), not a temporary",
+                    expr.receiver,
+                )
+            if isinstance(expr.receiver, Unary):
+                expr.receiver = expr.receiver.operand  # &(*p) is p
+            else:
+                address = Unary(op=UnaryOp.ADDRESS_OF, operand=expr.receiver,
+                                line=expr.receiver.line, col=expr.receiver.col, file=expr.receiver.file)
+                self.check_expr(address)
+                expr.receiver = address
         if len(expr.args) != len(param_types):
             raise SemanticError(
                 f"Method '{expr.name}' on '{receiver_type.struct_name}' "

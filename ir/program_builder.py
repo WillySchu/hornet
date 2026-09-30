@@ -1,5 +1,6 @@
 """Build and verify an IRProgram from an analyzed Program."""
 
+from escape_analysis import compute_escape_summaries
 from ir.errors import IRError
 from ir.id_allocator import IdAllocator
 from ir.ir import IRProgram
@@ -38,6 +39,7 @@ def build_ir_program(program: Program) -> IRProgram:
         intrinsic_original_names=getattr(program, 'intrinsic_original_names', {}),
         ids=IdAllocator(),
     )
+    ir_program.escape_summaries = compute_escape_summaries(program.functions, program.struct_registry)
     ir_program.functions = [IRFunctionBuilder(ir_program).gen_function_ir(fn) for fn in program.functions]
     verify_program(ir_program)
     return ir_program
