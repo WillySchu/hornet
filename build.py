@@ -1,6 +1,7 @@
 """Build an executable: compile .ht to assembly, compile runtime.c, link."""
 
 import argparse
+import hashlib
 import os
 import shutil
 import subprocess
@@ -69,6 +70,30 @@ def _run(args: list[str], step_name: str) -> None:
         )
 
 
+def cache_dir() -> Path:
+    """Where compiled artifacts are kept between runs: $HORNET_CACHE_DIR, else the user cache."""
+    if os.environ.get("HORNET_CACHE_DIR"):
+        return Path(os.environ["HORNET_CACHE_DIR"])
+    return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "hornet"
+
+
+def runtime_object(target: Target) -> Path:
+    """runtime.c compiled for `target`, built once and reused: the file name carries a hash of the
+    runtime's sources and the compile command, so any change builds a new one. Written atomically,
+    so concurrent builds can share it."""
+    command = c_compiler(target) + ["-c"]
+    digest = hashlib.sha256(" ".join(command).encode())
+    for path in [RUNTIME_C_PATH, *sorted(RUNTIME_C_PATH.parent.glob("*.h"))]:
+        digest.update(path.read_bytes())
+    obj = cache_dir() / f"runtime-{target}-{digest.hexdigest()[:16]}.o"
+    if not obj.exists():
+        obj.parent.mkdir(parents=True, exist_ok=True)
+        partial = obj.with_name(f"{obj.stem}.{os.getpid()}.partial.o")
+        _run(command + [str(RUNTIME_C_PATH), "-o", str(partial)], "compiling runtime.c")
+        os.replace(partial, obj)
+    return obj
+
+
 def build_executable(source_path: str, output_path: str, target=None) -> None:
     """Compile `source_path` for `target` (Target, `arch-os`, or None for the default) and link it
     with runtime.c into `output_path`."""
@@ -82,10 +107,7 @@ def build_executable(source_path: str, output_path: str, target=None) -> None:
         with open(asm_path, "w", encoding="latin-1") as f:
             f.write(asm)
 
-        runtime_o_path = os.path.join(tmpdir, "runtime.o")
-        _run(cc + ["-c", str(RUNTIME_C_PATH), "-o", runtime_o_path], "compiling runtime.c")
-
-        _run(cc + [asm_path, runtime_o_path, "-o", output_path], "linking")
+        _run(cc + [asm_path, str(runtime_object(target)), "-o", output_path], "linking")
 
 
 def main() -> None:

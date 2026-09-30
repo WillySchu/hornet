@@ -6,7 +6,7 @@ import subprocess
 import pytest
 
 from build import can_run, run_prefix
-from target import IMPLEMENTED_ARCHES, TARGET_NAMES, Target
+from target import IMPLEMENTED_ARCHES, TARGET_NAMES, Target, default_target
 
 RUNNABLE_TARGETS = [t for t in map(Target.parse, TARGET_NAMES) if can_run(t)]
 
@@ -30,12 +30,24 @@ def run_binary(target: Target, argv: list, **kwargs) -> subprocess.CompletedProc
     return result
 
 
-# Runnable targets that have a complete backend: every end-to-end program is built and run for each.
-# HORNET_E2E_TARGETS (comma-separated arch-os names) overrides this, e.g. to run the whole suite
-# against a backend that is still in progress.
-E2E_TARGETS = ([Target.parse(n) for n in os.environ['HORNET_E2E_TARGETS'].split(',')]
-               if os.environ.get('HORNET_E2E_TARGETS')
-               else [t for t in RUNNABLE_TARGETS if t.arch in IMPLEMENTED_ARCHES])
+# The test tier (see conftest.py): 'quick', 'standard', or 'full'.
+TIER = os.environ.get('HORNET_TEST_TIER', 'full')
+
+
+def _e2e_targets() -> list:
+    if os.environ.get('HORNET_E2E_TARGETS'):
+        return [Target.parse(n) for n in os.environ['HORNET_E2E_TARGETS'].split(',')]
+    targets = [t for t in RUNNABLE_TARGETS if t.arch in IMPLEMENTED_ARCHES]
+    if TIER == 'full':
+        return targets
+    native = default_target()
+    return [native] if native in targets else targets[:1]
+
+
+# Targets every end-to-end program is built and run for: this machine's own target, or with
+# --full every runnable target with a complete backend. HORNET_E2E_TARGETS (comma-separated
+# arch-os names) overrides this, e.g. to test a backend that is still in progress.
+E2E_TARGETS = _e2e_targets()
 
 # Parametrize a test over E2E_TARGETS as `target`.
 each_e2e_target = pytest.mark.parametrize('target', E2E_TARGETS, ids=str)

@@ -125,3 +125,21 @@ def test_default_target_is_the_host_now_that_both_architectures_have_backends(mo
     for host in (Target('aarch64', 'macos'), Target('x86_64', 'linux'), Target('aarch64', 'linux')):
         monkeypatch.setattr(target, 'host_target', lambda host=host: host)
         assert target.default_target() == host
+
+
+def test_runtime_object_is_built_once_and_rebuilt_when_the_runtime_changes(monkeypatch, tmp_path):
+    from target import default_target
+    monkeypatch.setenv("HORNET_CACHE_DIR", str(tmp_path / "cache"))
+    calls = []
+    real_run = build._run
+    monkeypatch.setattr(build, "_run", lambda args, step: (calls.append(step), real_run(args, step)))
+    first = build.runtime_object(default_target())
+    assert build.runtime_object(default_target()) == first and calls == ["compiling runtime.c"]
+    assert first.parent == tmp_path / "cache" and first.exists()
+    import shutil
+    shutil.copytree(build.RUNTIME_C_PATH.parent, tmp_path / "runtime", ignore=shutil.ignore_patterns("__pycache__"))
+    changed = tmp_path / "runtime" / "runtime.c"
+    changed.write_text(changed.read_text() + "\n/* changed */\n")
+    monkeypatch.setattr(build, "RUNTIME_C_PATH", changed)
+    second = build.runtime_object(default_target())
+    assert second != first and len(calls) == 2

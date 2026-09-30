@@ -18,7 +18,7 @@ import pytest
 from build import build_executable
 from compile import compile_to_asm
 from tests.test_compiler import GCC_SKIP, _run_binary
-from tests.targets import each_e2e_target
+from tests.targets import TIER, each_e2e_target
 
 PROGRAMS_DIR = Path(__file__).parent.parent / 'benchmarks' / 'programs'
 
@@ -59,7 +59,7 @@ EXPECTED_EXIT_CODES = {
 # COMPILED code does with whatever addresses it's handed at runtime.
 # So: compile once (that part IS deterministic, and gcc is by far the
 # expensive step), then actually run the result this many times.
-RERUNS = 10
+RERUNS = 10 if TIER == 'full' else 1
 
 
 @GCC_SKIP

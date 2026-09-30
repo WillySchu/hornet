@@ -18,7 +18,7 @@ from desugar import desugar_methods
 from merge import merge_programs
 from modules import discover_modules
 from semantic import analyze
-from build import RUNTIME_C_PATH, c_compiler, run_prefix
+from build import c_compiler, run_prefix, runtime_object
 from target import TARGET_NAMES, Target, default_target
 from ir.program_builder import build_ir_program
 from optimize.optimizer import optimize
@@ -97,17 +97,9 @@ def run_one(ht_path: Path, runs: int = TIMING_RUNS, icount: bool = False, target
 
         asm_path = Path(tmpdir) / 'program.s'
         bin_path = Path(tmpdir) / 'program'
-        runtime_o_path = Path(tmpdir) / 'runtime.o'
         asm_path.write_text(asm_text)
 
-        runtime_cc_cmd = c_compiler(target)
-        runtime_cc_cmd += ['-c', str(RUNTIME_C_PATH), '-o', str(runtime_o_path)]
-        runtime_result = subprocess.run(runtime_cc_cmd, capture_output=True, text=True)
-        if runtime_result.returncode != 0:
-            raise RuntimeError(f"gcc failed to compile runtime.c:\n{runtime_result.stderr}")
-
-        gcc_cmd = c_compiler(target)
-        gcc_cmd += [str(asm_path), str(runtime_o_path), '-o', str(bin_path)]
+        gcc_cmd = c_compiler(target) + [str(asm_path), str(runtime_object(target)), '-o', str(bin_path)]
         result = subprocess.run(gcc_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(f"gcc failed to assemble/link {ht_path.name}:\n{result.stderr}")
