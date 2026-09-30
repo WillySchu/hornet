@@ -1,682 +1,8 @@
-"""
-test_compiler.py
+"""End-to-end and semantic tests for the whole compiler pipeline.
 
-Consolidated pytest suite for the lexer -> parser -> semantic -> codegen
-pipeline.
-
-Every execution-based test here compiles a small program through the
-real pipeline, assembles and links it with gcc, actually *runs* the
-resulting binary, and checks its exit code (or, for the short-circuit
-"control" tests, that it crashes with a specific signal). This is
-deliberately not just inspecting the generated assembly text -- actually
-executing the binary is the strongest available check that codegen is
-correct, not merely plausible-looking. Semantic-error tests are
-different in kind: they assert that bad programs are *rejected* before
-codegen ever runs, so they don't need gcc at all and aren't skipped when
-it's unavailable (see GCC_SKIP below).
-
-Requires `gcc` (and `as`/`ld`, which it drives) on PATH for the
-execution-based classes. If it's not found, those are skipped with a
-clear reason rather than failing with a wall of "file not found" errors.
-
-Run with:
-    pytest test_compiler.py -v
-
-Organization:
-    TestUnaryOperators                           ( 7 tests)
-    TestBinaryArithmetic                         (18 tests)
-    TestBitwiseAndModuloOperators                (18 tests)
-    TestComparisons                              (12 tests)
-    TestPrecedenceAndLogicalOperators            ( 8 tests)
-    TestShortCircuitEvaluation                   ( 4 tests)
-    TestVariablesAndStatements                   (12 tests)
-    TestCompoundAssignment                       (16 tests)
-    TestIfStatements                             (18 tests)
-    TestWhileLoops                               (10 tests)
-    TestStrings                                  (13 tests)
-    TestStringMemory                             (12 tests)
-    TestFunctions                                (15 tests)
-    TestFunctionsWithNoDeclaredReturnType        (12 tests)
-    TestTypeAnnotation                           ( 4 tests)
-    TestPrint                                    (12 tests)
-    TestLen                                      (17 tests)
-    TestAllPathsReturn                           (18 tests)
-    TestArrays                                   (26 tests)
-    TestArrayEquality                            (16 tests)
-    TestStructEquality                           (24 tests)
-    TestMethods                                  (26 tests)
-    TestTypeAliases                              (37 tests)
-    TestSumTypes                                 (21 tests)
-    TestSumTypesCodegen                          ( 8 tests)
-    TestSumTypesPrint                            ( 8 tests)
-    TestNarrowing                                (13 tests)
-    TestNarrowingCodegen                         (12 tests)
-    TestExhaustiveMatching                       (10 tests)
-    TestExhaustiveMatchingCodegen                ( 2 tests)
-    TestPointers                                 (21 tests)
-    TestPointersCodegen                          (16 tests)
-    TestPointerEscapeAnalysis                    ( 5 tests)
-    TestExternFunctions                          (15 tests)
-    TestExternFunctionsCodegen                   ( 3 tests)
-    TestInt8Uint8TypeSystem                      (40 tests)
-    TestInt8Uint8Storage                         (50 tests)
-    TestInt8Uint8Print                           (12 tests)
-    TestByte                                     (12 tests)
-    TestCasting                                  ( 9 tests)
-    TestCastingCodegen                           (17 tests)
-    TestInt64TypeSystem                          (18 tests)
-    TestInt64Storage                             (40 tests)
-    TestInt64Print                               (12 tests)
-    TestInt64RegressionsFoundDuringPrintStep     ( 8 tests)
-    TestTypedArrayLiterals                       (13 tests)
-    TestBoundsChecking                           ( 4 tests)
-    TestHeapAllocatedArrays                      (12 tests)
-    TestArrayEscapeAnalysis                      (21 tests)
-    TestSlices                                   (10 tests)
-    TestSliceBoundsChecking                      ( 6 tests)
-    TestCapAwareSlicing                          ( 4 tests)
-    TestAppend                                   (29 tests)
-    TestBareExpressionStatements                 ( 2 tests)
-    TestSliceParametersAndReturns                (21 tests)
-    TestIndexingUnnamedSlices                    (11 tests)
-    TestPrintArraysAndSlices                     (24 tests)
-    TestSliceLiterals                            (16 tests)
-    TestNestedSlices                             ( 9 tests)
-    TestChainedSliceIndexing                     ( 2 tests)
-    TestArrayOfSlicesCopying                     ( 4 tests)
-    TestIndexAssignIntoArrayOfSlices             ( 5 tests)
-    TestNone                                     (20 tests)
-    TestSemanticErrors                           (82 tests)
-    TestComments                                 (11 tests)
-    TestStructs                                  (45 tests)
-    TestStructLiterals                           (38 tests)
-    TestArgumentMaterialization                  (15 tests)
-    TestCompositeCallAsAddressableBase           (10 tests)
-    TestNamedStructLiterals                      (21 tests)
-    TestNamedStructLiteralZeroFill               (12 tests)
-    TestStructLiteralArrayFieldAddressRegression ( 3 tests)
-    TestImplicitZeroValue                        (30 tests)
-    TestArraysOfStructs                          (16 tests)
-    TestPrintStructs                             (15 tests)
-    TestASTPrettyPrinting                        ( 9 tests)
-                                                 ----------
-                                                 1227 tests total
-
-A NOTE ON ARRAYS
------------------------------------------------------------------
-Fixed-size, stack-allocated, value-typed (see codegen.py's ARRAYS
-section for the full design). TestArrays' value-semantics tests are
-the ones that actually prove the headline design decision holds at the
-machine-code level, not just conceptually: `b = a; b[0] = 99` must
-leave `a[0]` completely untouched, for both 1D and 2D arrays, and for
-a sub-array extracted via `[3]int row = matrix[i]` too -- and, once
-arrays could cross a function boundary, for a parameter mutated inside
-a callee and a value returned from separate calls to the same function
-as well.
-
-TestBoundsChecking exists because every array access is runtime-
-checked -- one unsigned comparison catches both an over-large index
-and a negative one at once. test_panic_message_survives_piped_output
-is a genuine regression test, not a hypothetical one: during
-development, the "array index out of bounds" message was reliably
-printed to an interactive terminal but silently LOST whenever output
-was piped or redirected (the common case for a program run non-
-interactively), because abort() bypasses the normal exit() path that
-would otherwise flush libc's buffered stdio. Caught only by explicitly
-capturing and checking stdout, not by eyeballing an interactive run --
-worth remembering as a reason to prefer capture_output-based
-assertions over manual spot-checks for anything involving abort()/
-exit() specifically.
-
-Array function parameters and return values are fully supported, via
-a hidden-output-pointer convention for returns and copy-on-entry for
-parameters (see codegen.py's ARRAYS section). Getting there surfaced
-the same register-clobbering mistake in three separate call paths --
-test_array_return_direct_literal and test_array_return_via_sub_array_
-index are both genuine regression tests for segfaults found during
-development, not hypothetical edge cases: a destination address held
-in a general-purpose register (the hidden pointer, sitting in %rax)
-was silently overwritten by code that assumed it was free to use that
-same register as scratch, in three different places, each only found
-by testing a different shape of return value rather than trusting one
-passing test to mean the whole mechanism was sound. What's still a
-deliberate, explicit gap -- not silently missing -- is an ArrayLiteral
-or a call returning an array used DIRECTLY as a function-call argument
-(`foo([1,2,3])`); test_array_literal_as_direct_call_argument_not_
-supported confirms this fails with a clear error pointing at the
-workaround (assign it to a variable first) rather than a confusing
-crash.
-
-A NOTE ON TestTypedArrayLiterals
------------------------------------------------------------------
-The fully-typed array literal, `[3]int[1, 2, 3]` -- a genuine, self-
-describing primary expression, distinct from the plain `[1, 2, 3]`
-form even though that one already infers its own type just as validly
-from its elements alone (see check_array_literal in semantic.py): the
-untyped form stays restricted to a VarDecl's own initializer purely
-because codegen has nowhere else to write its value, not because of
-anything semantic.
-
-test_single_element_typed_literal and test_untyped_single_element_
-literal_still_works are the pair that actually prove the trickiest
-parsing ambiguity is resolved correctly: `[5]` (a single-element,
-untyped literal) and the OPENING of `[5]int[...]` share an identical
-first three tokens (OPEN_BRACKET NUMBER CLOSE_BRACKET) -- only a
-fourth token of lookahead (a type-starting token, or its absence)
-tells them apart, with no backtracking needed (see parse_primary's own
-_looks_like_typed_array_literal). A second, separate ambiguity showed
-up at the STATEMENT level specifically, not just the expression one:
-parse_statement used to route anything starting with OPEN_BRACKET
-unconditionally to parse_var_decl, since that was the only possibility
-before this feature existed -- `[3]int[1, 2, 3]` as a bare statement
-first failed with a confusing "expected a variable name" error before
-that dispatch was fixed to parse the type once and decide afterward
-based on what follows.
-
-test_bare_statement_with_side_effecting_element is the test that
-actually proves a bare literal statement genuinely evaluates its
-elements rather than silently dropping them: nothing ever reads the
-resulting array as a whole (there's no destination for a bare
-statement to write it into, and unlike a slice's fixed 16-byte
-descriptor, an array literal has no natural scratch-slot size to
-reserve one for), but each element still has to run for whatever side
-effect it might have, the same way any other bare expression statement
-already does. test_non_literal_array_element_in_bare_statement_not_
-supported is the explicit, deliberate boundary on that: an element
-that's itself some OTHER array-typed expression (a bare Variable, here)
-inside a bare-statement literal is rejected with a clear error rather
-than silently guessing whether it has a side effect worth preserving.
-
-test_typed_literal_as_call_argument_still_not_supported confirms the
-pre-existing "no direct array literal as a call argument" restriction
-(see TestArrays' own note on this) applies identically here -- it's
-about the expression being an ArrayLiteral at all, not about whether
-it happens to be typed.
-
-A NOTE ON TestHeapAllocatedArrays
------------------------------------------------------------------
-An array over 16KB (codegen.py's _STACK_ARRAY_LIMIT_BYTES, hardcoded --
-see is_heap_allocated) is heap-allocated instead of living inline on
-the stack, closing off the one concrete danger fixed-size arrays
-already had before any of this existed: nothing stopped a single huge
-array from silently blowing the stack. test_exactly_at_threshold_
-stays_on_stack and test_just_over_threshold_is_heap_allocated both
-inspect the generated assembly directly for the presence or complete
-absence of a malloc call, rather than only checking an exit code --
-proof the boundary itself is exactly right, not just that some array
-somewhere behaves plausibly.
-
-Heap-promoting an array turned out to touch nearly every piece of
-array codegen as a genuinely separate code path, not a transparent
-allocator swap -- test_heap_allocated_local_with_literal_initializer
-specifically exercises gen_var_decl's malloc-then-store-initializer
-path, which is fully distinct code from its malloc-then-copy path for
-a Variable/Index/Call initializer, and
-test_multiple_heap_allocated_parameters stress-tests gen_function's
-two-pass parameter handling: every incoming argument register gets
-stashed into its own slot before any parameter is processed, since a
-heap-allocated parameter's malloc call -- like any real call -- can
-clobber other, not-yet-processed parameters' own incoming values. An
-earlier, simpler attempt at protecting those registers (an ordinary
-push, popped immediately before each parameter was processed) turned
-out to misalign %rsp for roughly half of them; see codegen.py's own
-ARRAYS section for why. test_heap_allocated_array_as_return_type is
-the positive control proving array returns needed no changes at all --
-they already write through a caller-provided pointer regardless of
-size.
-
-A NOTE ON TestSlices AND TestSliceBoundsChecking
------------------------------------------------------------------
-A slice is a Go-style VIEW into an existing array or slice's own
-backing storage -- a fixed {pointer, length} descriptor (16 bytes),
-not a copy the way plain array assignment already is (see codegen.py's
-SLICES section for the full design). test_slice_write_mutates_
-underlying_array and test_overlapping_slices_alias_each_others_writes
-are the two tests that actually prove that holds at the machine-code
-level, not just conceptually -- writing through a slice has to be
-visible through the array it came from, and through any OTHER slice
-that overlaps it, or slices would just be a more awkward way to copy
-an array.
-
-test_slicing_a_slice is the hardest case exercised directly: the base
-being sliced is itself a slice, so its own length is a runtime value
-read out of its descriptor rather than a compile-time constant the
-way an array base's is -- this is what actually exercises
-gen_indexable_base_into's two different code paths, not just the
-array one.
-
-TestSliceBoundsChecking exists because slice bounds needed a genuinely
-different comparison from ordinary indexing's, not just a reused
-check with a different message: `low == length` and `high == length`
-are both VALID slice bounds (`arr[5:5]` is a valid, empty-slice-
-producing expression), unlike an ordinary index, where being equal to
-the array's own size is already invalid. test_low_equals_high_equals_
-length_is_valid is the positive control proving that boundary is
-exactly right (a strict `ja`, not `jae`) -- getting this wrong in
-either direction would either reject valid empty slices or silently
-accept a genuinely out-of-range one.
-
-test_slice_parameter and test_slice_return, in this class, cover the
-basic shape of crossing a function boundary at all -- they replaced
-what used to be test_slice_parameter_not_supported_yet and test_slice_
-return_not_supported_yet, back when neither was implemented. Both gaps
-were caught by deliberately compiling exactly that case and checking
-the generated assembly, before any test asserted anything about it:
-neither was rejected at first, and a slice's own 16-byte descriptor
-was silently truncated down to whatever fit in one 32-bit register
-instead. See TestSliceParametersAndReturns for the full calling-
-convention implementation and its own, much more thorough coverage
-(register-slot interleaving, the exact 6-vs-7-slot boundary, aliasing
-across a call, forwarding a returned slice for free, and more).
-
-A NOTE ON TestSliceParametersAndReturns
------------------------------------------------------------------
-A slice crosses a function boundary via three consecutive integer
-argument registers as a PARAMETER (its own ptr, len, then cap --
-matching exactly what a real C compiler does for an equivalent
-`struct{void*,long,long}` passed by value under the SysV ABI), and via
-the same hidden-output-pointer convention arrays already use as a
-RETURN VALUE -- not copied on entry the way an array parameter is (a
-slice parameter is just an alias crossing the boundary, exactly like
-any other slice variable). A slice return used to work differently:
-its whole descriptor fit in two registers (%rax:%rdx directly, the
-SysV ABI's own convention for a small, all-integer eightbyte struct
-return, needing no hidden pointer at all) before cap was added as a
-third field grew it past what any two- or three-register return shape
-this compiler has precedent for could hold.
-
-test_slice_interleaved_with_scalar_parameters and test_one_slice_and_
-three_scalars_are_exactly_six_slots are the tests that actually prove
-the trickiest part of this feature holds, not just that a slice CAN be
-a parameter: since a slice now costs 3 of the 6 available argument-
-register slots instead of 1, the mapping from argument/parameter INDEX
-to register INDEX stopped being 1:1 on both the caller side
-(_gen_call_arguments_into) and the callee side (gen_function's own
-parameter loop) -- both now track a running slot count instead, and
-these tests confirm a slice's own three slots land correctly among
-ordinary scalar ones regardless of position, not just when a slice
-happens to be the only or the last parameter.
-
-test_exactly_six_slots_from_two_slice_parameters and test_seven_
-slots_from_two_slices_and_a_scalar_is_rejected are the positive/
-negative pair proving the boundary itself is exactly right: 6 slots
-accepted, 7 cleanly rejected with a clear message -- not silently
-truncated or off by one in either direction, which an easy mis-count
-in the running-slot arithmetic could otherwise produce without any
-test noticing.
-
-test_writing_through_a_slice_parameter_mutates_callers_array is the
-test that actually proves a slice parameter is a genuine alias
-crossing the function boundary, not a copy -- the same aliasing
-guarantee slices already have within a single function, now verified
-to survive a call. test_forwarding_a_slice_returning_calls_result is
-the free case the hidden-pointer return convention makes possible:
-gen_slice_call_into just passes the SAME destination address one
-level deeper, so `return bar()` (bar also returning a slice) costs
-nothing beyond the call itself -- no intermediate copy, exactly like
-an array-returning function's own hidden-pointer forwarding already
-works (a slice's own return used to work differently here, coming
-back directly in %rax:%rdx instead -- see codegen.py's own SLICE
-PARAMETERS AND RETURNS section for why that stopped being possible
-once a slice's own descriptor grew a third field, cap).
-
-test_slice_parameter_with_heap_allocated_array_parameter confirms a
-slice parameter's own register-based passing and an array parameter's
-own copy-on-entry mechanism (heap-backed, in that test, since the
-array involved exceeds the stack-array threshold) coexist correctly
-in the same call, each going through its own, independent, unrelated
-code path. test_slice_argument_must_be_a_variable_or_none is the same
-deliberate restriction slice bases have everywhere else in this
-codebase (indexing, print, re-slicing) applied here too, for the same
-reason: a bare Slice expression has no pre-existing descriptor to
-read at a call site.
-
-A NOTE ON TestPrintArraysAndSlices
------------------------------------------------------------------
-`print` on an array or slice formats as `[elem, elem, ...]` -- no
-type-name prefix at all (an earlier version of this printed e.g.
-`[3]int[1, 2, 3]`; see codegen.py's PRINTING section for why that was
-dropped when struct printing was added: hornet_stringify, the single,
-recursive runtime function that now backs every type's own print
-output -- including structs, which never had a type-name prefix to
-begin with -- works entirely from a runtime kind tag, never a
-source-level type name string, so keeping arrays/slices consistent
-with structs meant losing their own prefix too). test_str_elements_
-are_quoted is the one deliberate asymmetry worth calling out: a str
-element inside a collection is quoted (`'alice'`) even though a bare
-str argument to print still prints unquoted -- two different, both
-intentional, conventions.
-
-Since an array's length is known at compile time but a slice's is
-only known at runtime, printing uses ONE uniform runtime loop for
-both rather than maintaining two separate code paths (unrolled vs.
-looped) -- test_printing_a_slice_of_a_slice exercises the harder,
-runtime-length path directly. test_empty_slice_prints_with_no_
-trailing_comma is the positive control for `arr[5:5]` (see
-TestSliceBoundsChecking's own boundary test) actually printing
-cleanly, not just type-checking. test_array_literal_as_direct_print_
-argument_not_supported and its Slice-expression counterpart are the
-same deliberate restriction gen_array_arg_address_into already
-imposes on array-typed call arguments, applied here for the same
-reason: neither has an address of its own to print through.
-
-
-A NOTE ON TestNone
------------------------
-`none` is Hornet's nil-style zero value, analogous to Go's own `nil`
--- only slices are nilable so far. Internally it's given one single,
-fixed type (Type.NONE, see semantic.py), checked for COMPATIBILITY
-(not equality) at the handful of sites a value flows into a slice-
-typed context, rather than a fully general untyped-constant mechanism
-the way Go's own nil actually works -- see NoneLiteral's own docstring
-in parser.py for why that's a deliberately narrower, but from-the-
-outside equivalent, mechanism for what's needed right now.
-
-test_real_empty_slice_is_not_equal_to_none and test_real_nonempty_
-slice_is_not_equal_to_none together are what actually prove the
-subtlest, easiest-to-get-wrong part of this feature: `s == none`
-checks specifically the slice descriptor's own `ptr` field, not its
-length, matching Go's own well-known nil-vs-empty-slice distinction --
-`arr[5:5]` is a real, zero-length slice with a non-null pointer, and
-is NOT `== none`, even though it's equally safe and equally
-zero-length as a genuinely nil slice for every other purpose. Checking
-length instead of (or in addition to) the pointer would have silently
-conflated two states this test deliberately keeps apart.
-
-test_indexing_a_none_valued_slice_aborts, test_printing_a_none_valued_
-slice, and test_reslicing_a_none_valued_slice_at_zero_zero together
-confirm the other half of the design: a none-valued slice's {0, 0}
-descriptor needed no new mechanism at all for indexing, printing, or
-re-slicing, since every one of those already handles an ordinary
-zero-length slice correctly (see TestSliceBoundsChecking's own
-`arr[5:5]` positive control) -- gen_none_into only had to produce that
-descriptor once, not teach any existing slice operation a new case.
-
-test_comparing_none_to_none_is_rejected exists for the same underlying
-reason test_comparing_two_void_call_results_is_rejected does in
-TestFunctionsWithNoDeclaredReturnType: `Type.NONE == Type.NONE` would
-otherwise trivially type-check by ordinary structural equality alone,
-so it needed its own explicit exclusion in check_binary, not just the
-slice-vs-none exception. test_slice_parameter_with_none_argument_hits_
-existing_restriction is the reminder that `none` doesn't need its own
-codegen-level rejection for slice parameters/returns -- those aren't
-supported in codegen at all yet (see TestSlices), so any program using
-them hits that existing, unrelated error regardless of what's passed.
-
-A NOTE ON TestFunctionsWithNoDeclaredReturnType
------------------------------------------------------------------
-`def NAME(params):` -- the type before the name omitted entirely,
-not a `void`/`none` keyword (there is no such keyword) -- means this
-function has no declared return type. Such a function may fall off
-the end of its body with no explicit return at all, or exit early via
-a bare `return`.
-
-test_falls_off_the_end_with_no_explicit_return_at_all is the test
-that actually proves the core mechanism holds, not just that the
-syntax parses: every OTHER function relies on always_returns
-guaranteeing an explicit return on some path, which is what lets
-gen_function skip ever emitting its own trailing epilogue (some
-gen_return-emitted one is always guaranteed to run first). A function
-with no declared return type deliberately skips that guarantee, so
-gen_function has to append a trailing epilogue unconditionally --
-without it, this exact test would fall through into whatever comes
-next in the generated assembly instead of returning to its caller, a
-real, silent crash, not a hypothetical one.
-test_while_loop_inside_a_void_function is the same proof for a
-different shape of fall-through: reachable after a loop completes,
-not just after a straight-line sequence of statements.
-test_mixed_early_return_and_fall_through_paths stresses that the
-trailing epilogue and gen_return's own, ordinary per-path epilogues
-are both genuinely reachable in the same function, not just one or
-the other.
-
-test_comparing_two_void_call_results_is_rejected exists because
-`Type.VOID == Type.VOID` is trivially true by structural equality
-alone, the same way any type equals itself -- every OTHER "void used
-as a value" case (a VarDecl initializer, an Assign, a binary operand,
-a function argument) is already rejected for free, just by never
-matching the real, user-declared type each of those checks compares
-against; equality between two void results specifically needed its
-own explicit rejection in check_binary, since two "nothing"s would
-otherwise match each other instead. test_non_void_function_still_
-requires_explicit_returns_on_every_path is the regression check
-proving the always_returns skip in analyze_function is specific to
-Type.VOID, not a blanket relaxation for every function.
-
-test_print_result_not_usable_as_a_value in TestPrint is the other
-half of this feature worth knowing about here: print's own docstring
-always said it returned a hardcoded, meaningless 0 specifically
-because there was no real void type to give it -- print became
-Type.VOID's first real user the moment one existed, and that test
-confirms the old workaround is gone, not still lingering alongside
-the new mechanism.
-
-A NOTE ON TestAllPathsReturn
------------------------------------------------------------------
-semantic.py now rejects any function where some execution path could
-fall off the end of its body without hitting a `return` -- see
-always_returns/contains_reachable_break there. This isn't just a
-correctness nicety: once functions could call each other (see
-codegen.py's FUNCTIONS section), a function falling through with no
-`ret` executed corrupts the *calling* function's own stack, not just
-the callee's exit code, since there's a real return address on the
-stack with nothing left to pop and jump to it.
-
-The genuinely subtle case, and the one the CRITICAL-labeled tests in
-TestAllPathsReturn specifically target, is `while true` with a `break`
-somewhere inside it. A bare `while true: ...; return x` is fine on its
-own -- the loop never falls through, it either returns from inside or
-runs forever -- but the instant a `break` exists anywhere in that
-loop's body, even buried inside a nested if/elif chain, the loop can
-fall through to whatever comes after it, so it stops counting as
-guaranteeing a return on its own. Getting this exactly right (finding a
-break nested arbitrarily deep in if/elif/else, while correctly *not*
-letting a break that belongs to a nested loop count toward the outer
-one) is most of what makes this check nontrivial rather than a simple
-"does every function end in a return statement" pattern match.
-
-A NOTE ON TestTypeAnnotation
------------------------------------------------------------------
-semantic.py's check_expr now annotates every expression node with its
-resolved type (expr.resolved_type), and codegen.py's _type_of reads
-that directly instead of re-deriving a type independently the way its
-old _infer_type method used to. That old method wasn't just a
-theoretical duplication risk -- it silently caused two real bugs, once
-each when `print` and the six int-only operators (% & | ^ << >>) were
-added, since each addition needed a matching update to semantic.py's
-real type-checking logic *and* a separate, easy-to-forget update to
-_infer_type's own parallel copy of that logic. TestTypeAnnotation
-exists specifically to regression-test those two exact bug shapes
-directly (a Call result and a modulo result each used straight as an
-operand of `+`, with no intermediate variable), plus the new
-CodegenError _type_of raises if codegen somehow runs before semantic
-analysis. See semantic.py's TYPES section and codegen.py's own comments
-on _type_of for the full reasoning.
-
-A NOTE ON COMPOUND ASSIGNMENT BEING PURE DESUGARING
------------------------------------------------------------------
-+= -= *= /= %= &= |= ^= <<= >>= are parsed directly into the same AST a
-hand-written `a = a + b` would already produce (see parser.py's
-parse_assign and its COMPOUND ASSIGNMENT docstring section) -- not a
-dedicated CompoundAssign node. That means semantic.py and codegen.py
-needed zero changes for any of these ten operators; most of
-TestCompoundAssignment is really confirming the desugaring round-trips
-correctly through already-tested machinery, not exercising new code
-paths. test_string_concat_via_plus_equals is the one genuinely new
-runtime path (reaching string concatenation through `+=` rather than an
-explicit `s = s + ...`), and the type-mismatch/undeclared-variable
-tests confirm the desugared form still gets full checking rather than
-some kind of bypass.
-
-test_compound_assignment_in_a_loop's docstring is worth reading even
-though the test itself only uses int: it connects to
-TestStringMemory's existing leak tests -- `result += 'x'` in a loop is
-now a much more natural, easy-to-write-by-accident way to reach the
-same "named variable buffers are never automatically freed" limitation
-that was already true and already documented before this feature
-existed. Compound assignment doesn't introduce a new leak; it just
-makes the existing one easier to hit.
-
-A NOTE ON THE BITWISE OPERATORS' PRECEDENCE
------------------------------------------------------------------
-% & | ^ << >> follow the classic C precedence ladder (see parser.py's
-_BINARY_OPS comment), adopted deliberately rather than invented fresh.
-That choice reproduces a well-known C surprise on purpose: `a & b == c`
-parses as `a & (b == c)`, not `(a & b) == c`, since == binds tighter
-than &. In C that silently compiles into something almost nobody
-intends. Here it can't -- `b == c` is bool, & requires int, so it's a
-compile-time type error instead of a silent footgun.
-test_bitwise_and_equality_precedence_is_a_type_error in
-TestSemanticErrors is the test that actually proves this, paired with
-test_bitwise_and_equality_with_explicit_parens_is_valid as the positive
-control showing the fix (adding the parens) works.
-
-Also worth knowing: modulo shares codegen with division (idivl computes
-both the quotient and the remainder in one instruction), so it inherits
-the exact same division-by-zero SIGFPE crash -- see
-test_modulo_by_zero_crashes_with_sigfpe. And
-test_modulo_result_used_as_operand_of_plus exists specifically because
-adding these operators surfaced a real bug in codegen.py's _infer_type:
-it needed these six new operators added to its int-producing branch, or
-an expression like `5 % 2 + 3` would have misidentified `5 % 2` as
-bool-typed and routed the outer `+` to string concatenation codegen
-instead of ordinary integer addition.
-
-A NOTE ON print AND WHY assert_stdout EXISTS
------------------------------------------------------------------
-`print` is the first genuinely observable I/O this language has -- every
-prior feature was only ever checkable through a program's exit code
-(the low byte of whatever `main` returns). print's entire purpose is a
-side effect (what it writes to stdout), so testing it via exit codes
-alone would be a real step down in rigor -- an exit-code check can't
-tell "printed the right text" apart from "printed nothing at all, but
-happened to exit 0 anyway". assert_stdout/assert_program_stdout check
-the compiled program's actual captured stdout content instead (see
-compile_and_run, which now passes capture_output=True for exactly this
-reason), and TestPrint uses them throughout rather than falling back to
-exit-code checks out of habit.
-
-Each of print's three argument types (int, bool, str) goes through a
-completely different instruction sequence in codegen.py's
-gen_print_call_into -- calling libc's printf, or puts, or a runtime
-branch into puts -- so TestPrint deliberately exercises all three
-individually rather than assuming "int works, so the others probably do
-too". print's return value (always a predictable int 0, never
-whatever puts/printf themselves returned) gets its own test via the
-ordinary exit-code path, since that's a case where the exit code is
-actually the relevant observable, not the printed text.
-
-A NOTE ON FUNCTION CALLS AND THE SECOND REGISTER-PRESERVATION FIX
------------------------------------------------------------------
-Function calls exposed a real bug in how `str` concatenation/comparison
-were implemented: they use %rbx/%r12/%r13/%r14 as scratch, on the
-reasoning (accurate at the time) that "nothing else uses them". That
-stopped being true the moment one Hornet function could call another --
-if function A is mid-concatenation (holding a value in %rbx) and calls
-function B, and B also does string work, B would silently clobber A's
-%rbx with no compiler warning and no crash, just a wrong answer. Every
-function's prologue/epilogue now unconditionally saves/restores these
-four registers (see codegen.py's FUNCTIONS section), regardless of
-whether that particular function happens to use them itself, which is
-what a callee-saved contract actually requires.
-
-TestFunctions' register-preservation and recursive-string-concatenation
-tests exist specifically to prove that fix, not just that calls work in
-general -- the former nests one string-using call inside another,
-the latter stress-tests the same fix under genuine recursion, where
-each level's saved registers live on a distinct stack frame rather than
-just one level of nesting. TestFunctions' mutual-recursion test proves
-the *other* half of what functions needed: semantic.py collects every
-function's signature in a first pass over the whole program before
-checking any function's body, so call order doesn't matter and forward
-references / recursion just work, rather than requiring functions to be
-defined before they're used.
-
-A NOTE ON str AND WHY THIS TOUCHED FAR MORE THAN THE TYPE CHECKER
------------------------------------------------------------------
-Every type added before `str` (bool) fit in the same 4 bytes as `int`,
-so codegen never had to think about width -- everything was always
-%eax, always `movl`. A string is an 8-byte pointer, and concatenation
-needs to call real C library functions (malloc/strlen/strcpy/strcat)
-via the actual SysV calling convention, which is the first time this
-compiler has ever called anything external at all. See codegen.py's
-STRINGS and LOCAL VARIABLES sections for the mechanism; the short
-version is every local now gets a uniform 8-byte stack slot regardless
-of type (simpler than variable-width packing, at the cost of a few
-wasted bytes on int/bool locals), and codegen re-derives just enough
-type information on its own (_infer_type) to know when a value is a
-pointer rather than duplicating semantic.py's full type checker.
-
-TestStrings' chained-concatenation and reused-result tests exist
-specifically to prove the malloc/strlen/strcpy/strcat sequence can run
-more than once within one expression, and that a concatenation's result
-survives being used as an operand in a *later* concatenation, without
-the scratch registers (%rbx/%r12/%r13/%r14) from one call clobbering
-values a still-in-progress outer expression depends on.
-
-A NOTE ON LOOPS AND WHY THE EXECUTION HELPER GAINED A TIMEOUT
------------------------------------------------------------------
-`while`/`break`/`continue` are the first feature in this language where
-a codegen bug can produce a compiled program that genuinely never
-terminates -- every previous feature, however buggy, still always ran
-to completion (or crashed) in bounded time. compile_and_run now passes
-`timeout=EXECUTION_TIMEOUT` to the actual process execution and fails
-with a clear "likely an infinite loop" message on expiry, rather than
-hanging the whole test run. TestWhileLoops' two nested-loop tests are
-the ones this matters most for: break/continue are resolved via
-codegen's loop_labels *stack* (see codegen.py's LOOPS section)
-specifically so they target the innermost enclosing loop once loops
-nest -- a bug there (e.g. accidentally using the outer loop's labels)
-would very plausibly manifest as an infinite loop rather than a wrong
-answer, which is exactly the failure mode the timeout exists to catch
-cleanly instead of silently hanging.
-
-A NOTE ON BLOCK SCOPING AND WHY CODEGEN'S ALLOCATOR CHANGED SHAPE
------------------------------------------------------------------
-`if`/`elif`/`else` introduced real nested scopes (see semantic.py's
-SCOPING section), which broke an assumption codegen's local-variable
-allocator used to rely on: that a variable name always maps to exactly
-one stack slot per function. Once sibling branches can each declare a
-variable with the same name (`if x: int a = 1` / `else: int a = 2`,
-now legitimately two different variables), stack slots have to be
-keyed by which specific declaration a name resolves to at a given
-point in the program, not by the name alone -- see codegen.py's LOCAL
-VARIABLES section for the actual mechanism. TestIfStatements' two
-same-name-in-both-branches tests exist specifically to prove that
-allocator change is correct, not just that if/else branch correctly.
-`while` bodies reuse the same node-identity-keyed allocation, though
-for a simpler reason -- see codegen.py's LOCAL VARIABLES section for
-why a loop body's own variables don't need anything extra beyond that.
-
-A NOTE ON THE TYPE SYSTEM AND WHY SEVERAL TESTS CHANGED SHAPE
------------------------------------------------------------------
-This language now has a strong static type system (see semantic.py):
-`int` and `bool` are distinct types with *no* implicit conversion
-between them in either direction. That's a real behavior change, not
-just an addition, and it broke several tests that predate it:
-  - `not 0`, `not 5`, `not -0` used to work (NOT applied to a raw int,
-    back when NOT was spelled `!` -- see the note below). Under strict
-    typing, `not` requires a genuine `bool` operand -- `not 0` is now a
-    type error, not "not true". These are now written with real bool
-    values (`not true`, `not (x == y)`, etc.) instead.
-  - Every test that did `return <comparison-or-logical-expr>` from a
-    `def int main()` now needs `def bool main()` instead, since
-    comparisons and `and`/`or` produce `bool`, and a strict return type
-    has to match exactly.
-  - `0 and (1 / 0)`-style short-circuit tests used raw int operands for
-    `and`/`or`, which now requires bool operands on both sides -- these
-    were rewritten with `true`/`false` and a comparison
-    (`(1 / 0) == 1`) standing in for "an int expression that crashes if
-    evaluated, but produces a bool so `and`/`or` will accept it".
-
-A NOTE ON '!' -> 'not' (RESOLVED)
------------------------------------
-Logical NOT used to be spelled `!` (the BANG token). The lexer has
-since dropped BANG entirely -- a bare `!` is now a genuine lexer error,
-not just unused -- and NOT is spelled with the `not` keyword instead
-(see parser.py's own note on this). `!=` (NOT_EQUAL) was never part of
-this rename and is completely unaffected; it's a separate two-character
-token that never depended on BANG existing.
+Execution tests compile a small program, build it for every E2E target (tests/targets.py), run it,
+and check its exit status or output; every target must agree. Semantic-error tests stop after
+analysis and need no toolchain.
 """
 import re
 import shutil
@@ -703,16 +29,9 @@ from semantic import SemanticError, analyze as _semantic_analyze
 
 
 def analyze(program):
-    """Test-only convenience wrapper: runs desugar_methods before
-    semantic analysis, matching compile_to_asm's own real pipeline
-    shape (see its own module docstring, desugar.py, for why desugaring
-    has to run first) -- so every one of this file's own ~90 existing
-    `analyze(ast)` call sites keeps working unchanged, rather than
-    needing desugar_methods threaded through individually at each one.
-    """
+    """Semantic analysis after desugaring, as compile_to_asm does."""
     desugar_methods(program)
     _semantic_analyze(program)
-
 
 
 GCC_AVAILABLE = shutil.which("gcc") is not None
@@ -720,20 +39,10 @@ GCC_SKIP = pytest.mark.skipif(
     not GCC_AVAILABLE,
     reason="gcc not found on PATH; these tests compile and execute real binaries",
 )
-# Applied per-class (not module-wide): TestSemanticErrors never reaches
-# codegen, let alone gcc, so it shouldn't be skipped just because gcc
-# happens to be missing.
 
-# Programs are compiled for, and run on, this machine's default target (x86-64 on macOS runs
-# under Rosetta 2 on Apple Silicon: `softwareupdate --install-rosetta`).
 HOST_IS_MACOS = sys.platform == "darwin"
 ASM_TARGET = default_target()
 
-# How long a compiled program gets to run before it's treated as hung.
-# Every test in this file finishes in well under a second normally; a
-# few seconds of headroom absorbs slow CI machines without making a
-# genuinely infinite loop (e.g. from a break/continue codegen bug) wait
-# long to fail.
 EXECUTION_TIMEOUT = 5
 
 
@@ -742,9 +51,7 @@ EXECUTION_TIMEOUT = 5
 # ---------------------------------------------------------------------------
 
 def _parse(source: str):
-    """lex + parse only, no semantic analysis -- used internally by both
-    compile_and_run (which analyzes explicitly, see below) and
-    assert_semantic_error (which asserts analysis itself fails)."""
+    """Lex and parse only."""
     with tempfile.TemporaryDirectory() as tmpdir:
         src_path = Path(tmpdir) / "program.lang"
         src_path.write_text(source)
@@ -753,40 +60,17 @@ def _parse(source: str):
 
 
 def _compile_to_binary(source: str, tmp: Path, target=ASM_TARGET) -> tuple[Path, str]:
-    """Compiles `source` through the real lex -> parse -> analyze ->
-    codegen pipeline and links it with gcc into a runnable binary
-    inside `tmp` (a directory the CALLER owns and is responsible for
-    cleaning up) -- extracted from compile_and_run so a caller that
-    wants to run the SAME binary more than once (see tests/test_
-    benchmarks.py, stress-testing for run-to-run non-determinism)
-    doesn't need to recompile for each run. Returns (bin_path, asm) --
-    asm only so a caller's own execution-side error reporting can
-    still show it, matching what compile_and_run already did on a
-    hang."""
+    """Compile `source` for `target` and link it with the runtime in `tmp`; returns (binary, assembly)."""
     ast = _parse(source)
-    analyze(ast)  # every program reaching codegen in this file is expected to be well-typed
+    analyze(ast)
 
     asm_path = tmp / "program.s"
     bin_path = tmp / "program"
     runtime_o_path = tmp / "runtime.o"
 
     asm = generate_asm(ast, target=target)
-    # Latin-1, not write_text's own default UTF-8 -- see compile.py's
-    # own, identical comment for why: a str literal's own raw bytes
-    # can legitimately be any 0-255 value now (\xNN escapes), and
-    # Latin-1 is the one encoding where every code point 0-255 maps to
-    # exactly one byte, keeping the emitted .data byte count matching
-    # len()'s own compile-time value exactly.
     asm_path.write_text(asm, encoding="latin-1")
 
-    # Compiled fresh, unconditionally, the same way build.py's own
-    # build_executable does -- print() now compiles to an ordinary
-    # `call hornet_print`, an external symbol this .s file no
-    # longer defines itself (unlike the old hand-built
-    # hornet_stringify, once appended to AsmProgram.functions and
-    # assembled inline here). Unconditional, regardless of whether
-    # THIS particular program happens to call print, matching
-    # build_executable's own reasoning exactly.
     runtime_cc_cmd = c_compiler(target) + ["-c", str(RUNTIME_C_PATH), "-o", str(runtime_o_path)]
     runtime_result = subprocess.run(runtime_cc_cmd, capture_output=True, text=True)
     if runtime_result.returncode != 0:
@@ -801,11 +85,6 @@ def _compile_to_binary(source: str, tmp: Path, target=ASM_TARGET) -> tuple[Path,
 
     result = subprocess.run(gcc_cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        # Don't just let CalledProcessError's bare "exit status 1"
-        # through -- that hides the one thing that actually explains
-        # a compile failure. Show the real diagnostic, the command,
-        # and the generated assembly so a failure here is
-        # self-diagnosing instead of needing a follow-up round trip.
         pytest.fail(
             "gcc failed to assemble/link the generated program.\n"
             f"command: {' '.join(gcc_cmd)}\n"
@@ -817,41 +96,13 @@ def _compile_to_binary(source: str, tmp: Path, target=ASM_TARGET) -> tuple[Path,
 
 
 def _run_binary(bin_path: Path, asm: str, target=ASM_TARGET) -> subprocess.CompletedProcess:
-    """Runs an already-compiled binary, subject to EXECUTION_TIMEOUT --
-    the run-side counterpart to _compile_to_binary, split out so a
-    caller that compiles once and runs many times (tests/test_
-    benchmarks.py) still gets the same timeout/OSError handling
-    compile_and_run always has, without recompiling per run."""
+    """Run a built binary (under qemu for a foreign architecture), subject to EXECUTION_TIMEOUT."""
     try:
-        # capture_output=True so callers can also inspect .stdout --
-        # needed now that print exists and genuinely produces
-        # observable output beyond just an exit code (see
-        # assert_program_stdout below). Every prior helper here only
-        # ever looked at .returncode, so capturing stdout/stderr as
-        # well doesn't change anything about their behavior.
-        #
-        # encoding='latin-1', not text=True's own default UTF-8: a
-        # program's own stdout can now legitimately contain any raw
-        # byte 0-255 (a str value built from a \xNN escape, or printed
-        # via a byte-typed value derived from one -- see ByteLiteral's
-        # own docstring in parser.py), which isn't necessarily valid
-        # UTF-8 at all. Latin-1 decodes every byte 0-255 into the
-        # identical code point, matching how compile.py/build.py/this
-        # same file's own compile_and_run already WRITE generated
-        # assembly (see compile.py's own comment on that) -- so a
-        # captured byte and the Python character a test asserts
-        # against it (e.g. '\xc8' in an expected string) are always
-        # the same value, never re-encoded into something else.
         return subprocess.run(
             run_prefix(target) + [str(bin_path)], timeout=EXECUTION_TIMEOUT,
             capture_output=True, encoding='latin-1',
         )
     except subprocess.TimeoutExpired:
-        # Now that while loops exist, a genuine codegen bug (e.g. a
-        # break/continue that jumps to the wrong label) could produce
-        # a real infinite loop -- without this, that would just hang
-        # the test suite forever instead of failing with a message
-        # that points at what's actually wrong.
         pytest.fail(
             f"Compiled program did not exit within {EXECUTION_TIMEOUT}s "
             "-- likely an infinite loop.\n"
@@ -883,23 +134,7 @@ def _heap_allocations(ast) -> list:
 
 
 def compile_and_run(source: str) -> subprocess.CompletedProcess:
-    """Runs `source` through the real lex -> parse -> analyze -> codegen
-    pipeline, then builds and runs it for every target in E2E_TARGETS
-    (each runnable target with a backend), subject to EXECUTION_TIMEOUT.
-    Every target must produce the same exit status and output; the
-    first target's result is returned.
-
-    Returns the CompletedProcess so callers can inspect `.returncode`:
-    0-255 for a normal exit, or -N if the process was killed by signal N
-    (that's how Python's subprocess reports signal termination when not
-    going through a shell -- see assert_crashes_with_sigfpe below).
-
-    Uses a plain tempfile.TemporaryDirectory rather than pytest's
-    tmp_path fixture so the many parametrized one-liner tests below
-    don't each need to declare and thread a fixture through just to
-    call this helper. A thin wrapper around _compile_to_binary/_run_
-    binary now -- see those for why they're split out.
-    """
+    """Build and run `source` for every E2E target; all must agree. Returns the first result."""
     def build_and_run(target):
         with tempfile.TemporaryDirectory() as tmpdir:
             bin_path, asm = _compile_to_binary(source, Path(tmpdir), target)
@@ -907,11 +142,8 @@ def compile_and_run(source: str) -> subprocess.CompletedProcess:
     return on_every_target(build_and_run, source)
 
 
-
 def assert_exit_code(body: str, expected: int, return_type: str = "int") -> None:
-    """Wraps `body` (the statements, one per line, each pre-indented) in
-    `def {return_type} main():` and asserts the compiled-and-executed
-    program exits with `expected`."""
+    """Wrap `body` in `def <return_type> main():` and check the exit status."""
     source = f"def {return_type} main():\n{body}\n"
     result = compile_and_run(source)
     assert result.returncode == expected, (
@@ -920,8 +152,7 @@ def assert_exit_code(body: str, expected: int, return_type: str = "int") -> None
 
 
 def assert_crashes_with_sigfpe(body: str, return_type: str = "int") -> None:
-    """Same as assert_exit_code, but asserts the program is killed by
-    SIGFPE (a real divide-by-zero trap) rather than exiting normally."""
+    """Like assert_exit_code, but the program must die of SIGFPE."""
     source = f"def {return_type} main():\n{body}\n"
     result = compile_and_run(source)
     assert result.returncode == -signal.SIGFPE, (
@@ -930,10 +161,7 @@ def assert_crashes_with_sigfpe(body: str, return_type: str = "int") -> None:
 
 
 def assert_crashes_with_sigabrt(body: str, return_type: str = "int") -> None:
-    """Same as assert_crashes_with_sigfpe, but for SIGABRT -- what an
-    out-of-bounds array access deliberately triggers (see codegen.py's
-    _gen_bounds_check_panic_block), rather than a hardware-trapped
-    SIGFPE."""
+    """Like assert_exit_code, but the program must die of SIGABRT (a runtime panic)."""
     source = f"def {return_type} main():\n{body}\n"
     result = compile_and_run(source)
     assert result.returncode == -signal.SIGABRT, (
@@ -942,9 +170,7 @@ def assert_crashes_with_sigabrt(body: str, return_type: str = "int") -> None:
 
 
 def assert_semantic_error(body: str, return_type: str = "int", match: str = None) -> None:
-    """Asserts that `body` (wrapped in `def {return_type} main():`) is
-    rejected by semantic analysis. Never reaches codegen or gcc, so
-    these run regardless of GCC_AVAILABLE."""
+    """Wrap `body` in `main` and check that semantic analysis rejects it."""
     source = f"def {return_type} main():\n{body}\n"
     ast = _parse(source)
     with pytest.raises(SemanticError, match=match):
@@ -952,10 +178,7 @@ def assert_semantic_error(body: str, return_type: str = "int", match: str = None
 
 
 def assert_program_exit_code(source: str, expected: int) -> None:
-    """Like assert_exit_code, but takes a complete, ready-to-run program
-    (possibly multiple functions) rather than wrapping a body in a
-    single `main` -- needed for function-call tests, which by their
-    nature involve more than one function definition."""
+    """Like assert_exit_code, for a complete program."""
     result = compile_and_run(source)
     assert result.returncode == expected, (
         f"program:\n{source}\nexpected exit {expected}, got {result.returncode}"
@@ -963,21 +186,14 @@ def assert_program_exit_code(source: str, expected: int) -> None:
 
 
 def assert_program_semantic_error(source: str, match: str = None) -> None:
-    """The assert_semantic_error counterpart to assert_program_exit_code
-    -- takes a complete program rather than wrapping a single-function
-    body."""
+    """Like assert_semantic_error, for a complete program."""
     ast = _parse(source)
     with pytest.raises(SemanticError, match=match):
         analyze(ast)
 
 
 def assert_program_codegen_error(source: str, match: str = None) -> None:
-    """Like assert_program_semantic_error, but for a program that's
-    well-typed (passes analyze() cleanly) and is only rejected one
-    stage later, during codegen itself -- currently just escape
-    analysis's own scalar-address-escapes rejection (see
-    TestPointerEscapeAnalysis), which needs the real IR-building
-    pipeline to run at all, not just semantic.py's own AST walk."""
+    """A well-typed program that the IR builder or backend rejects."""
     ast = _parse(source)
     analyze(ast)
     with pytest.raises(CodegenError, match=match):
@@ -985,13 +201,7 @@ def assert_program_codegen_error(source: str, match: str = None) -> None:
 
 
 def assert_stdout(body: str, expected_stdout: str, return_type: str = "int") -> None:
-    """Like assert_exit_code, but checks the program's actual printed
-    output instead of its exit code -- the only way to meaningfully
-    test `print`, whose entire observable effect (from a Hornet
-    program's point of view) is what it writes to stdout, not its exit
-    code. `body` still needs its own `return`, exactly like every other
-    body-based helper here -- this doesn't check the exit code, but
-    doesn't preclude a caller checking it too if they care."""
+    """Like assert_exit_code, but check what the program prints."""
     source = f"def {return_type} main():\n{body}\n"
     result = compile_and_run(source)
     assert result.stdout == expected_stdout, (
@@ -1000,9 +210,7 @@ def assert_stdout(body: str, expected_stdout: str, return_type: str = "int") -> 
 
 
 def assert_program_stdout(source: str, expected_stdout: str) -> None:
-    """The assert_stdout counterpart to assert_program_exit_code -- takes
-    a complete, ready-to-run program rather than wrapping a body in a
-    single `main`."""
+    """Like assert_stdout, for a complete program."""
     result = compile_and_run(source)
     assert result.stdout == expected_stdout, (
         f"program:\n{source}\nexpected stdout {expected_stdout!r}, got {result.stdout!r}"
@@ -1010,7 +218,7 @@ def assert_program_stdout(source: str, expected_stdout: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Unary operators: -, ~, not  (including chaining, e.g. ~-2)
+# Unary operators
 # ---------------------------------------------------------------------------
 
 class TestUnaryOperators:
@@ -1028,14 +236,14 @@ class TestUnaryOperators:
     @pytest.mark.parametrize("expr,expected", [
         ("not true", 0),
         ("not false", 1),
-        ("not not true", 1),   # chained NOT, still requires (and produces) bool at each step
+        ("not not true", 1),
     ])
     def test_bool_not(self, expr, expected):
         assert_exit_code(f"    return {expr}", expected, return_type="bool")
 
 
 # ---------------------------------------------------------------------------
-# Binary arithmetic: + - * / , precedence, associativity, grouping
+# Binary arithmetic
 # ---------------------------------------------------------------------------
 
 class TestBinaryArithmetic:
@@ -1066,18 +274,7 @@ class TestBinaryArithmetic:
 
 
 # ---------------------------------------------------------------------------
-# Modulo and the bitwise operators (% & | ^ << >>) -- the last of the
-# operators from the README's original TODO list. Precedence follows
-# the classic C ladder (see parser.py's _BINARY_OPS comment): % sits
-# with * /; << >> sit between +- and the relational operators; & ^ |
-# sit between == != and and/or, in that tightness order (& tightest,
-# | loosest).
-#
-# That specific placement reproduces a well-known C surprise on
-# purpose: `a & b == c` parses as `a & (b == c)`, not `(a & b) == c`,
-# since == binds tighter than &. TestSemanticErrors has the positive
-# proof that this language turns that into a real type error rather
-# than silently accepting the "wrong" grouping the way C does.
+# Modulo and the bitwise operators
 # ---------------------------------------------------------------------------
 
 class TestBitwiseAndModuloOperators:
@@ -1110,19 +307,9 @@ class TestBitwiseAndModuloOperators:
         )
 
     def test_modulo_by_zero_crashes_with_sigfpe(self):
-        """Modulo reuses idivl (see codegen.py's gen_binary_op MODULO
-        case -- it's the exact same Cdq+IDiv sequence as division, just
-        reading %edx instead of %eax afterward), so it inherits the
-        same division-by-zero hardware trap DIVIDE already has."""
         assert_crashes_with_sigfpe("    int a = 5\n    int b = 0\n    return a % b")
 
     def test_modulo_result_used_as_operand_of_plus(self):
-        """Specifically exercises _infer_type's handling of these new
-        operators (see codegen.py) -- if MODULO weren't included in its
-        int-producing branch, this expression's `5 % 2` would be
-        misidentified as bool-typed, and the outer `+` would be wrongly
-        routed to string concatenation codegen instead of ordinary
-        integer addition."""
         assert_exit_code(
             "    int x = 5 % 2 + 3\n"
             "    return x",
@@ -1151,13 +338,7 @@ class TestBitwiseAndModuloOperators:
 
 
 # ---------------------------------------------------------------------------
-# Comparisons: == != < > <= >=
-#
-# All of these produce `bool` now, so every one of these functions is
-# declared `def bool main()`, not `def int main()` -- the exit-code
-# mechanics work identically either way (the OS only ever sees the
-# 0/1 that ends up in %eax), but the *type* the language sees matters
-# to the analyzer.
+# Comparisons
 # ---------------------------------------------------------------------------
 
 class TestComparisons:
@@ -1204,17 +385,6 @@ class TestPrecedenceAndLogicalOperators:
 
 # ---------------------------------------------------------------------------
 # Short-circuit evaluation of 'and' / 'or'
-#
-# A correct boolean *result* alone doesn't prove short-circuiting
-# happened, since this language has no other observable side effects
-# yet. The definitive check is a division-by-zero trap on the side that
-# must NOT run: if it's genuinely skipped, the program returns cleanly;
-# if it's evaluated anyway, the program crashes with a real SIGFPE.
-#
-# 'and'/'or' require bool operands, so "an int expression that crashes
-# if evaluated" has to be wrapped as one: `(1 / 0) == 1` is bool-typed
-# (int == int), but still crashes at runtime the moment `1 / 0` actually
-# executes.
 # ---------------------------------------------------------------------------
 
 class TestShortCircuitEvaluation:
@@ -1232,17 +402,11 @@ class TestShortCircuitEvaluation:
         "false or ((1 / 0) == 1)",   # left doesn't decide -> right MUST run
     ])
     def test_short_circuit_control_evaluates_when_needed(self, expr):
-        """The control for the pair above: proves short-circuiting is
-        genuinely conditional, not just "always skip the right side" by
-        coincidence. When the left side does NOT already decide the
-        result, the right side must actually execute -- so this SHOULD
-        crash."""
         assert_crashes_with_sigfpe(f"    return {expr}", return_type="bool")
 
 
 # ---------------------------------------------------------------------------
-# Local variables: declaration, assignment, and standalone expression
-# statements
+# Local variables
 # ---------------------------------------------------------------------------
 
 class TestVariablesAndStatements:
@@ -1335,9 +499,6 @@ class TestVariablesAndStatements:
         )
 
     def test_standalone_expression_statement_actually_executes(self):
-        """Proof that expression statements aren't silently dropped:
-        a division by zero as a bare statement, with its result
-        discarded, must still crash the program."""
         assert_crashes_with_sigfpe(
             "    1 / 0\n"
             "    return 0"
@@ -1352,21 +513,7 @@ class TestVariablesAndStatements:
 
 
 # ---------------------------------------------------------------------------
-# Compound assignment (+= -= *= /= %= &= |= ^= <<= >>=).
-#
-# These are parsed as pure syntactic sugar -- parser.py's parse_assign
-# desugars `a += b` directly into the same AST a hand-written `a = a +
-# b` would produce (Assign wrapping a Binary), so semantic.py and
-# codegen.py needed zero changes to support any of these ten operators.
-# That means most of these tests are really testing the desugaring
-# itself and confirming nothing was lost by reusing existing machinery,
-# not exercising new codegen. test_string_concat_via_plus_equals is the
-# one genuinely new runtime path (compound assignment reaching the
-# string-concatenation/malloc machinery through the new syntax), and
-# test_compound_assignment_type_mismatch_is_rejected +
-# test_compound_assignment_to_undeclared_variable_is_rejected confirm
-# the desugared form still gets full type- and scope-checking, not a
-# bypass around it.
+# Compound assignment
 # ---------------------------------------------------------------------------
 
 class TestCompoundAssignment:
@@ -1388,9 +535,6 @@ class TestCompoundAssignment:
         assert_exit_code(body, expected)
 
     def test_chained_compound_assignments(self):
-        """Every operator applied in sequence to the same variable --
-        proof the desugared reads/writes compose correctly across
-        multiple statements, not just in isolation."""
         assert_exit_code(
             "    int x = 5\n"
             "    x += 3\n"   # 8
@@ -1408,10 +552,6 @@ class TestCompoundAssignment:
         )
 
     def test_string_concat_via_plus_equals(self):
-        """The one genuinely new runtime path here: compound assignment
-        reaching string concatenation's malloc/strlen/strcpy/strcat
-        codegen through the new `+=` syntax rather than an explicit
-        `s = s + ...`."""
         assert_exit_code(
             "    str s = 'hello'\n"
             "    s += ' world'\n"
@@ -1421,19 +561,6 @@ class TestCompoundAssignment:
         )
 
     def test_compound_assignment_in_a_loop(self):
-        """The natural, idiomatic use case for compound assignment --
-        an accumulator. Also the case worth knowing accumulates
-        garbage: each `total += i` here still only ever costs a few
-        bytes of stack, but the equivalent `result += 'x'` pattern for
-        str would leak one buffer per iteration, for the exact same
-        underlying reason `test_concatenation_with_fresh_intermediate_
-        inside_a_loop` in TestStringMemory already does -- `result` is
-        a named variable, not a fresh Binary(ADD, ...) result, so the
-        memory-freeing optimization correctly (if unfortunately) leaves
-        it alone every time. Compound assignment doesn't introduce a
-        new leak here; it just makes the existing one much easier to
-        write by accident.
-        """
         assert_exit_code(
             "    int total = 0\n"
             "    int i = 1\n"
@@ -1445,9 +572,6 @@ class TestCompoundAssignment:
         )
 
     def test_compound_assignment_type_mismatch_is_rejected(self):
-        """Confirms the desugared form still gets full type-checking --
-        `b += 1` desugars to `b = b + 1`, and `+` on bool and int is
-        exactly as invalid as it would be written out longhand."""
         assert_semantic_error(
             "    bool b = true\n"
             "    b += 1\n"
@@ -1463,9 +587,6 @@ class TestCompoundAssignment:
         )
 
     def test_modulo_assign_by_zero_still_crashes_with_sigfpe(self):
-        """%= reuses ordinary modulo codegen via desugaring, so it
-        inherits the same division-by-zero hardware trap DIVIDE and
-        MODULO already have."""
         assert_crashes_with_sigfpe(
             "    int a = 5\n"
             "    int zero = 0\n"
@@ -1475,16 +596,7 @@ class TestCompoundAssignment:
 
 
 # ---------------------------------------------------------------------------
-# if / elif / else: branching, elif chains, nesting, and block scoping.
-#
-# The scoping tests here matter more than they might look -- they're not
-# just "does the value come out right", they're proof that codegen's
-# stack-slot allocator correctly gives two *different* variables their
-# own storage even when they share a name across sibling branches (see
-# codegen.py's LOCAL VARIABLES section). Before that allocator was
-# rewritten, a program declaring `a` in both an if and its else would
-# have been rejected as a duplicate declaration at the codegen layer,
-# even though semantic.py correctly allows it.
+# if / elif / else
 # ---------------------------------------------------------------------------
 
 class TestIfStatements:
@@ -1571,11 +683,6 @@ class TestIfStatements:
         )
 
     def test_same_name_in_both_branches_then(self):
-        """The key scoping case: `a` in the then-branch and `a` in the
-        else-branch are independent variables that happen to share a
-        name -- semantic.py allows this (separate scopes), and codegen
-        must give them genuinely separate stack slots for this to come
-        out right."""
         assert_exit_code(
             "    if true:\n"
             "        int a = 1\n"
@@ -1644,10 +751,6 @@ class TestIfStatements:
         )
 
     def test_two_separate_if_blocks_each_declare_their_own_variable(self):
-        """Two *non-overlapping* if-blocks (not sibling branches of the
-        same if) each declaring a variable called `y` -- distinct from
-        the sibling-branch case above, but exercising the same
-        node-identity-keyed allocation."""
         assert_exit_code(
             "    int x = 1\n"
             "    if true:\n"
@@ -1662,15 +765,7 @@ class TestIfStatements:
 
 
 # ---------------------------------------------------------------------------
-# while / break / continue.
-#
-# The nested-loop tests here matter more than they might look, same as
-# the sibling-branch tests in TestIfStatements matter more than they
-# look -- they're not just "does break/continue work", they're proof
-# that codegen's loop_labels stack (see codegen.py's LOOPS section)
-# correctly resolves break/continue to the *innermost* enclosing loop
-# rather than some outer one, which a naive single-pair implementation
-# (rather than a stack) would get wrong the moment loops nest.
+# while / break / continue
 # ---------------------------------------------------------------------------
 
 class TestWhileLoops:
@@ -1706,10 +801,6 @@ class TestWhileLoops:
         )
 
     def test_continue_skips_specific_iterations(self):
-        """Sums 1..5 but skips adding when i is 2 or 4, via continue --
-        1 + 3 + 5 = 9. Proves continue skips only the rest of *that*
-        iteration's body (the `sum = sum + i` line), not the increment
-        that already happened above it, and not the loop entirely."""
         assert_exit_code(
             "    int i = 0\n"
             "    int sum = 0\n"
@@ -1723,10 +814,6 @@ class TestWhileLoops:
         )
 
     def test_nested_loops_break_only_exits_innermost(self):
-        """Inner loop always breaks on its second check (j==1), so it
-        contributes exactly one `count = count + 1` per outer iteration
-        -- if break incorrectly exited *both* loops, count would only
-        ever reach 1, not 3."""
         assert_exit_code(
             "    int count = 0\n"
             "    int i = 0\n"
@@ -1743,11 +830,6 @@ class TestWhileLoops:
         )
 
     def test_nested_loops_continue_only_affects_innermost(self):
-        """Inner loop runs 3 times per outer iteration, skipping one via
-        continue, so 2 increments per outer iteration -- 3 outer
-        iterations x 2 = 6. If continue incorrectly targeted the outer
-        loop's condition instead, this would come out very differently
-        (and likely loop far more than 3 outer times)."""
         assert_exit_code(
             "    int total = 0\n"
             "    int i = 0\n"
@@ -1843,18 +925,6 @@ class TestForLoops:
         )
 
     def test_continue_still_runs_the_increment(self):
-        """Regression test for a real bug: the increment clause was
-        originally reached only by falling through from the body's own
-        last instruction -- an implicit fallthrough this codebase's
-        own IR never allows (see ir.ir's own module docstring) -- so
-        the IR verifier itself caught the missing terminator before
-        this could ever miscompile silently. Behaviorally, the risk a
-        naive fix could still get wrong is continue reusing While's
-        own start_label directly, which would skip the increment
-        every time and infinite-loop here (i never advancing past 0,
-        `0 % 2 == 0` staying true forever) rather than just skip one
-        addition -- so this asserts the FULL sum, not just that the
-        program terminates."""
         assert_exit_code(
             "    int total = 0\n"
             "    for int i = 0; i < 10; i += 1:\n"
@@ -1888,13 +958,6 @@ class TestForLoops:
         )
 
     def test_struct_typed_counter(self):
-        """Exercises _parse_for_init_clause's own two-consecutive-
-        IDENTIFIERs struct-type detection, not just the scalar-keyword
-        path every other test here uses. The increment clause is a
-        plain reassignment (`p = Point(...)`), not a field-assignment
-        (`p.x += 1`) -- the latter is FieldAssign, one of the node
-        kinds _parse_for_increment_clause deliberately doesn't accept
-        yet (see its own docstring)."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -1909,11 +972,6 @@ class TestForLoops:
         )
 
     def test_increment_accepts_plain_assignment_too(self):
-        """`i = i + 1`, not `i += 1` -- parse_assign desugars the two
-        into the identical AST shape (see _parse_for_increment_clause's
-        own docstring for why accepting only one of them would be an
-        arbitrary distinction based on which operator token was used,
-        not on any real difference in behavior)."""
         assert_exit_code(
             "    int total = 0\n"
             "    for int i = 0; i < 5; i = i + 1:\n"
@@ -1940,10 +998,6 @@ class TestForLoops:
         )
 
     def test_init_clause_must_be_a_var_decl(self):
-        """`for i = 0; ...`, reassigning an already-existing i, rather
-        than `for int i = 0; ...` declaring a fresh one -- rejected for
-        now, per _parse_for_init_clause's own documented, deliberate
-        narrowness (a future broadening, not a permanent ceiling)."""
         with pytest.raises(ParseError, match="Expected a variable declaration"):
             _parse(
                 "def int main():\n"
@@ -1954,10 +1008,6 @@ class TestForLoops:
             )
 
     def test_increment_clause_must_be_an_assignment(self):
-        """`arr[i] = 5` as the increment clause -- an IndexAssign,
-        rejected for the identical, deliberate-narrowness reason a
-        FieldAssign is (see test_struct_typed_counter's own
-        docstring)."""
         with pytest.raises(ParseError, match="Expected an assignment"):
             _parse(
                 "def int main():\n"
@@ -1968,28 +1018,12 @@ class TestForLoops:
             )
 
     def test_break_and_continue_still_rejected_outside_any_loop(self):
-        """Not really a for-loop-specific test at all -- loop_depth is
-        a single, shared counter for every loop kind (see semantic.
-        py's own loop_depth field) -- but worth pinning explicitly now
-        that a second loop KIND exists, so a future refactor that
-        accidentally gave For its own separate counter would be
-        caught here rather than only inside an actual for body."""
         assert_semantic_error("    break\n    return 0", match="'break' outside of a loop")
         assert_semantic_error("    continue\n    return 0", match="'continue' outside of a loop")
 
 
 # ---------------------------------------------------------------------------
-# str: literals, equality/inequality, and concatenation.
-#
-# Every test here that touches equality or concatenation is a real,
-# end-to-end proof of the runtime mechanism, not just a type-checking
-# formality: concatenation genuinely calls malloc/strlen/strcpy/strcat
-# via the SysV ABI (see codegen.py's STRINGS section), and equality
-# genuinely calls strcmp -- there's no shortcut where the compiler
-# "knows" two literals are equal at compile time and folds the
-# comparison away. The chained-concatenation and reused-result tests in
-# particular are what prove multiple concatenations in sequence don't
-# corrupt each other's scratch registers.
+# str
 # ---------------------------------------------------------------------------
 
 class TestStrings:
@@ -2039,10 +1073,6 @@ class TestStrings:
         )
 
     def test_chained_concatenation_of_three_strings(self):
-        """Proves the malloc/strlen/strcpy/strcat sequence in
-        gen_string_concat_into can run more than once in a row within
-        one expression without the second call clobbering scratch state
-        the first call's result still depends on."""
         assert_exit_code(
             "    str a = 'a'\n"
             "    str b = 'b'\n"
@@ -2113,9 +1143,6 @@ class TestStrings:
         )
 
     def test_str_int_bool_locals_coexisting(self):
-        """Exercises the uniform 8-byte stack-slot allocation (see
-        codegen.py's LOCAL VARIABLES section) with all three types
-        present in the same frame at once."""
         assert_exit_code(
             "    int x = 5\n"
             "    str s = 'test'\n"
@@ -2128,20 +1155,7 @@ class TestStrings:
 
 
 # ---------------------------------------------------------------------------
-# String concatenation shapes: chains, reused operands, results stored in
-# variables and read back, and concatenation inside a loop. Originally
-# written to test a since-removed free-if-fresh-concat heuristic (see this
-# feature's own design discussion for why: it predated real escape
-# analysis, was already unsound the moment strings could alias a shared
-# buffer via slicing, and is fundamentally incompatible with a future
-# tracing GC regardless -- strings simply leak now, by design, until real
-# memory management exists). The test BODIES stay valuable regardless of
-# that history: each is still a genuine concatenation-correctness check
-# across a shape (a chain, a reused named operand, a stored intermediate
-# read back twice, ...) that a naive or subtly-wrong _ir_string_concat
-# could still get wrong, freeing or not -- only the class's own former
-# framing (and a few individual docstrings/names) needed correcting once
-# the feature they described no longer exists.
+# String concatenation shapes
 # ---------------------------------------------------------------------------
 
 class TestStringConcatenationShapes:
@@ -2183,11 +1197,6 @@ class TestStringConcatenationShapes:
         )
 
     def test_named_variable_reused_across_two_concats(self):
-        """A named variable used as an operand in one concatenation
-        must still be fully intact and usable in a *second*, later
-        concatenation -- a str value is never mutated by anything
-        that reads it, so this should hold trivially, but is worth
-        pinning down directly rather than assuming."""
         assert_exit_code(
             "    str a = 'shared'\n"
             "    str b = a + '_first'\n"
@@ -2232,12 +1241,6 @@ class TestStringConcatenationShapes:
         )
 
     def test_fresh_concat_compared_directly(self):
-        """A fresh concatenation result used immediately as an operand
-        of == also gets freed (in gen_string_compare_into, after
-        strcmp) -- this is the case that specifically exercises the
-        stash-before-free/restore-after-free dance needed there, since
-        `call free` clobbers %eax exactly where strcmp's own result
-        briefly lives."""
         assert_exit_code(
             "    str a = 'foo'\n"
             "    str b = 'bar'\n"
@@ -2267,11 +1270,6 @@ class TestStringConcatenationShapes:
         )
 
     def test_concat_result_stored_in_variable_reused_twice(self):
-        """`combined`'s own value originally came from a
-        concatenation, but once it's stored in a named variable,
-        later reads of it are ordinary Variable reads -- reused twice
-        here, as an operand in two further, independent
-        concatenations, to confirm that composes correctly."""
         assert_exit_code(
             "    str a = 'hello'\n"
             "    str b = 'world'\n"
@@ -2297,22 +1295,11 @@ class TestStringConcatenationShapes:
 
 
 class TestStringRepresentation:
-    """New capabilities and fixes specific to str's redesign around a
-    {ptr, len} descriptor rather than a null-terminated C string (see
-    ir/strings.py's own module docstring) -- as opposed to Test
-    Strings/TestStringConcatenationShapes just above, which mostly
-    test string BEHAVIOR that already worked before this redesign and
-    still needs to keep working identically after it."""
+    """str as a {ptr, len} descriptor."""
 
     pytestmark = GCC_SKIP
 
     def test_embedded_null_byte_prints_in_full(self):
-        """The bug this whole redesign exists to fix: a string
-        containing an embedded '\\0' used to be silently truncated by
-        every operation (print, comparison, concatenation), all of
-        which went through libc functions that treat '\\0' as an
-        end-of-string marker. len()'s own field read (not a scan)
-        means this now prints all 11 bytes, not 5."""
         assert_program_stdout(
             "def int main():\n"
             "    str s = 'hello\\0world'\n"
@@ -2330,10 +1317,6 @@ class TestStringRepresentation:
         )
 
     def test_embedded_null_byte_does_not_affect_equality(self):
-        """Two embedded-null strings, identical past the null but
-        different after it -- correctly NOT equal, which a strcmp-
-        based comparison (stopping at the first '\\0') would have
-        gotten wrong, reporting them equal."""
         assert_exit_code(
             "    str a = 'hi\\0one'\n"
             "    str b = 'hi\\0two'\n"
@@ -2358,14 +1341,6 @@ class TestStringRepresentation:
         )
 
     def test_comparison_with_different_lengths_and_a_shared_prefix(self):
-        """'ab' and 'abc' share a two-byte prefix -- the length-first
-        check in _ir_string_compare (ir/strings.py) has to reject this
-        BEFORE ever calling memcmp, both because the two are genuinely
-        unequal and because memcmp(left, right, left_len) once left is
-        the SHORTER of the two would read within bounds but still
-        never even look at the length mismatch -- this is the direct
-        test for that check actually running, not just the memcmp
-        that follows it."""
         assert_exit_code(
             "    str a = 'ab'\n"
             "    str b = 'abc'\n"
@@ -2375,9 +1350,6 @@ class TestStringRepresentation:
         )
 
     def test_comparison_where_the_longer_string_is_on_the_left(self):
-        """The mirror image of the test just above -- the length-first
-        check has to work regardless of which side is shorter, not
-        just when the LEFT operand happens to be."""
         assert_exit_code(
             "    str a = 'abc'\n"
             "    str b = 'ab'\n"
@@ -2387,15 +1359,6 @@ class TestStringRepresentation:
         )
 
     def test_pointer_to_str_parameter_mutates_the_callers_variable(self):
-        """&s (a str-typed local's own address) needs its own,
-        correct heap-promotion handling now that str is a 16-byte
-        descriptor rather than a single 8-byte scalar -- see _ir_str_
-        address's own docstring for the real bug this caught during
-        development: str, unlike slice, still needed the identical
-        heap-allocation check _ir_struct_address's own Variable case
-        already has, since `&s` was already legal before this arc
-        (str was scalar then, and check_unary's own ADDRESS_OF
-        restriction allows any bare variable regardless of type)."""
         assert_program_exit_code(
             "def setGreeting(*str p):\n"
             "    *p = 'hello'\n"
@@ -2410,12 +1373,6 @@ class TestStringRepresentation:
         )
 
     def test_pointer_to_str_local_outlives_the_function_that_declared_it(self):
-        """&s returned from the function that declared s -- s's own
-        address genuinely escapes past that function's own return,
-        the canonical scenario heap-promotion exists for: without the
-        fix above, s's own 16-byte descriptor would live on a stack
-        frame already torn down by the time the caller dereferences
-        the returned pointer, reading garbage rather than 'hello'."""
         assert_program_exit_code(
             "def *str makeGreeting():\n"
             "    str s = 'hello'\n"
@@ -2430,12 +1387,6 @@ class TestStringRepresentation:
         )
 
     def test_pointer_to_str_parameter_outlives_the_function(self):
-        """The parameter counterpart to the local-variable test just
-        above -- s here is a PARAMETER, not a local VarDecl, so &s
-        exercises _ir_param_setup's own escaping-str branch
-        specifically (malloc a fresh box, store the incoming {ptr,
-        len} pair through it) rather than VarDecl's identical-in-
-        spirit but separately-coded one."""
         assert_program_exit_code(
             "def *str identity(str s):\n"
             "    return &s\n"
@@ -2449,11 +1400,6 @@ class TestStringRepresentation:
         )
 
     def test_struct_field_equality_with_embedded_null(self):
-        """A struct field is compared via _ir_composite_equal's own
-        recursive str base case (rewritten around length-first-then-
-        memcmp alongside _ir_string_compare) -- this confirms that
-        path, not just the standalone operator, correctly handles an
-        embedded null rather than stopping early."""
         assert_program_exit_code(
             "type Holder struct:\n"
             "    str s\n"
@@ -2469,12 +1415,6 @@ class TestStringRepresentation:
         )
 
     def test_assign_an_existing_str_variable_from_an_ordinary_call(self):
-        """s = makeGreeting() -- Assign's own dedicated str case (just
-        after the existing-addressable-value copy case, in gen_
-        statement_ir) already handles every remaining str-typed
-        value shape, including an ordinary Call, via _ir_str_value --
-        this is the direct test for that Call sub-shape specifically,
-        not just StringLiteral/concatenation."""
         assert_program_exit_code(
             "def str makeGreeting():\n"
             "    return 'hello'\n"
@@ -2489,10 +1429,6 @@ class TestStringRepresentation:
         )
 
     def test_field_assign_a_str_field_from_an_ordinary_call(self):
-        """h.s = makeGreeting() -- unlike Assign's own case just
-        above, FieldAssign's dictionary-dispatched ordinary-Call case
-        (gen_statement_ir) runs BEFORE its own dedicated str case, so
-        this exercises that dictionary's own STR entry directly."""
         assert_program_exit_code(
             "type Holder struct:\n"
             "    str s\n"
@@ -2510,12 +1446,6 @@ class TestStringRepresentation:
         )
 
     def test_index_assign_a_str_element_from_an_ordinary_call(self):
-        """arr[0] = makeGreeting() -- IndexAssign's own ordinary-Call
-        case deliberately excludes STR from its own tuple check
-        (unlike FieldAssign's dictionary), falling through to str's
-        own dedicated case instead (see gen_statement_ir's own
-        comment there for why) -- this is the direct test that this
-        alternate structuring still gets a str-returning Call right."""
         assert_program_exit_code(
             "def str makeGreeting():\n"
             "    return 'hello'\n"
@@ -2531,15 +1461,7 @@ class TestStringRepresentation:
 
 
 class TestStringSlicing:
-    """`s[low:high]` for a str-typed s -- see check_slice's own
-    docstring in semantic.py, and _ir_str_slice_into's own in ir/
-    strings.py, for the full design: unlike array/slice slicing,
-    which always produces a SLICE regardless of the base's own kind,
-    slicing a str produces another str (Go's own convention -- a
-    substring IS a string); the bounds check is against len, not a
-    wider cap str has no concept of at all; and none of this needs
-    escape analysis's own involvement, since a str's own backing bytes
-    are never stack-allocated in the first place."""
+    """`s[low:high]` on a str."""
 
     pytestmark = GCC_SKIP
 
@@ -2568,9 +1490,6 @@ class TestStringSlicing:
         )
 
     def test_both_bounds_omitted(self):
-        """s[:] -- low defaults to 0, high defaults to len (not a
-        wider cap, since str has none): a full, unchanged copy of s's
-        own content."""
         assert_exit_code(
             "    str s = 'hello world'\n"
             "    return s[:] == 'hello world'",
@@ -2579,9 +1498,6 @@ class TestStringSlicing:
         )
 
     def test_empty_slice(self):
-        """low == high is a valid, empty result -- 0 <= bound is a
-        genuinely different comparison than < (see IRSliceBoundsCheck's
-        own docstring), not just a stricter one."""
         assert_exit_code(
             "    str s = 'hello'\n"
             "    return len(s[2:2])",
@@ -2589,13 +1505,6 @@ class TestStringSlicing:
         )
 
     def test_slice_result_type_is_str_not_slice(self):
-        """The one place array/slice's own precedent doesn't
-        mechanically generalize: slicing an ARRAY still produces a
-        SLICE, but slicing a str produces a str again, not some other
-        composite kind -- confirmed here by using the result directly
-        as a str (len(), concatenation), which would be a type error
-        if check_slice's own str case still fell through to Type
-        (SLICE, ...)."""
         assert_exit_code(
             "    str s = 'hello world'\n"
             "    str sub = s[0:5]\n"
@@ -2606,10 +1515,6 @@ class TestStringSlicing:
         )
 
     def test_slicing_a_string_literal_directly(self):
-        """'hello world'[6:11] -- the base itself is a StringLiteral,
-        not a Variable, exercising _ir_str_value's own StringLiteral
-        case as the base _ir_str_slice_into reads from, not just the
-        Variable/existing-value case."""
         assert_exit_code(
             "    return 'hello world'[6:11] == 'world'",
             1,
@@ -2624,10 +1529,6 @@ class TestStringSlicing:
         )
 
     def test_re_slicing_a_slice(self):
-        """A slice of a slice -- the base itself is already a Slice-
-        produced str, confirming _ir_str_value's own Slice case
-        composes with itself rather than only ever being reached with
-        a plain Variable/literal base."""
         assert_exit_code(
             "    str s = 'hello world'\n"
             "    str first = s[0:5]\n"
@@ -2638,10 +1539,6 @@ class TestStringSlicing:
         )
 
     def test_slicing_preserves_an_embedded_null_byte(self):
-        """Slicing is pure pointer-and-length arithmetic, with no
-        scanning of any kind -- an embedded '\\0' inside the sliced
-        range is ordinary content, carried through exactly like any
-        other byte, not a stopping point."""
         assert_program_stdout(
             "def int main():\n"
             "    str s = 'hello\\0world'\n"
@@ -2671,11 +1568,6 @@ class TestStringSlicing:
         )
 
     def test_struct_field_constructed_from_a_slice(self):
-        """A struct-literal field's own value is a Slice -- confirms
-        _ir_write_composite_value_into's own str case (which already
-        just delegates to _ir_str_value, unchanged since the previous
-        arc) picks up the new Slice case for free, with no additional
-        wiring needed specifically for this position."""
         assert_program_exit_code(
             "type Holder struct:\n"
             "    str s\n"
@@ -2697,10 +1589,6 @@ class TestStringSlicing:
         )
 
     def test_slice_bound_must_be_int(self):
-        """Shares check_slice's own low/high type checks with array/
-        slice slicing unchanged -- str's own base_type check runs
-        first, but low/high's own int-ness is validated identically
-        regardless of what's being sliced."""
         assert_semantic_error(
             "    str s = 'hello'\n"
             "    return len(s[true:3])",
@@ -2709,18 +1597,11 @@ class TestStringSlicing:
 
 
 class TestByteLiterals:
-    """`"a"` -- double-quoted, always uint8-typed (see ByteLiteral's
-    own docstring in parser.py, and check_expr's own case for it in
-    semantic.py). int8 deliberately out of scope -- see this feature's
-    own design discussion for why."""
+    """Double-quoted byte literals."""
 
     pytestmark = GCC_SKIP
 
     def test_basic_byte_literal_value(self):
-        """print(), not return: a byte's own exit code would be
-        truncated to the same 8-bit range regardless, so this
-        confirms the actual printed value, not just a code that could
-        coincidentally match after wraparound."""
         assert_program_stdout(
             "def int main():\n"
             "    byte b = \"a\"\n"
@@ -2730,11 +1611,6 @@ class TestByteLiterals:
         )
 
     def test_print_shows_the_number_not_the_character(self):
-        """The Go-style gotcha this feature inherits deliberately,
-        not accidentally -- print() already treated every uint8 value
-        this way before ByteLiteral existed at all (see runtime.c's
-        own HORNET_TYPEDESC_UINT8 case), so a byte literal's own
-        value prints identically to any other uint8's."""
         assert_program_stdout(
             "def int main():\n"
             "    print(\"A\")\n"
@@ -2743,10 +1619,6 @@ class TestByteLiterals:
         )
 
     def test_direct_comparison_against_a_byte_literal(self):
-        """The actual, motivating ergonomics fix: comparing a uint8
-        value against a known character used to require either a raw
-        ASCII code or an explicit uint8(...) cast -- this now works
-        directly, both sides already the same type."""
         assert_exit_code(
             "    byte b = \"a\"\n"
             "    return b == \"a\"",
@@ -2755,10 +1627,6 @@ class TestByteLiterals:
         )
 
     def test_byte_level_range_check_and_arithmetic(self):
-        """The concrete use case that motivated this feature: a
-        range check (a >= 'a' and a <= 'z', both comparisons against
-        byte literals) and case-conversion arithmetic (a - 'a' + 'A'),
-        neither needing any cast or raw ASCII code anywhere."""
         assert_program_stdout(
             "def int main():\n"
             "    byte a = \"a\"\n"
@@ -2822,15 +1690,6 @@ class TestByteLiterals:
             _parse(source)
 
     def test_hex_escape_in_a_string_literal_matches_len_to_actual_byte_count(self):
-        """The bug this feature's own encoding fix (compile.py/build.
-        py/the test harness all writing generated assembly as Latin-1,
-        not the default UTF-8) exists to prevent: a str literal
-        containing a high (>= 128) byte value via \\xNN, confirmed
-        both by its own len() and by round-tripping through print()
-        unchanged -- if the emitted .data byte count didn't match
-        len()'s own compile-time value, this would print something
-        other than the original 16 characters, or len() itself would
-        disagree with what actually got printed."""
         assert_program_stdout(
             "def int main():\n"
             "    str s = 'high byte: \\xc8 end'\n"
@@ -2841,14 +1700,6 @@ class TestByteLiterals:
         )
 
     def test_malformed_hex_escape_falls_back_leniently(self):
-        """\\x followed by fewer than two valid hex digits doesn't
-        raise -- it falls through to the same lenient "unknown
-        escape" handling _unescape_quoted_literal already gives any
-        other unrecognized escape (see its own docstring): the
-        backslash is dropped, 'x' kept literally. "\\xg1" resolves to
-        the THREE characters 'x', 'g', '1' -- correctly rejected here
-        not because the escape itself is malformed, but because three
-        characters is too many for a byte literal regardless."""
         source = (
             "def int main():\n"
             "    byte b = \"\\xg1\"\n"
@@ -2859,13 +1710,7 @@ class TestByteLiterals:
 
 
 class TestStringIndexing:
-    """`s[i]` for a str-typed s -- see check_index's own docstring in
-    semantic.py, and _ir_str_index_into's own in ir/strings.py, for
-    the full design: unlike array/slice indexing, whose result is the
-    base's own declared element_type, indexing a str always produces
-    a byte, since there's no separate element type a single one of
-    its own bytes could BE. Read-only -- str is immutable, so `s[i] =
-    ...` is rejected, unlike an array/slice element."""
+    """`s[i]` on a str."""
 
     pytestmark = GCC_SKIP
 
@@ -2888,9 +1733,6 @@ class TestStringIndexing:
         )
 
     def test_indexing_a_string_literal_directly(self):
-        """'hello'[1] -- the base itself is a StringLiteral, not a
-        Variable, exercising _ir_str_value's own StringLiteral case
-        as the base _ir_str_index_into reads from."""
         assert_program_stdout(
             "def int main():\n"
             "    print('hello'[1])\n"
@@ -2907,11 +1749,6 @@ class TestStringIndexing:
         )
 
     def test_indexing_composes_with_slicing(self):
-        """s[0:5][2] -- the base is itself a Slice-produced str,
-        confirming _ir_str_value's own Slice case (added for
-        TestStringSlicing) composes correctly with indexing too, not
-        just with itself (re-slicing) or with the operations that
-        motivated it originally."""
         assert_program_stdout(
             "def int main():\n"
             "    str s = 'hello world'\n"
@@ -2921,11 +1758,6 @@ class TestStringIndexing:
         )
 
     def test_index_out_of_bounds_is_rejected_at_runtime(self):
-        """Reuses IRBoundsCheck -- the ordinary indexing check, and
-        its own \"array index out of bounds\" message -- not
-        IRSliceBoundsCheck: this is indexing, not slicing, so it gets
-        indexing's own comparison and wording, confirmed directly
-        here rather than just assumed from the implementation."""
         assert_program_stdout(
             "def int main():\n"
             "    str s = 'hello'\n"
@@ -2951,9 +1783,6 @@ class TestStringIndexing:
         )
 
     def test_indexing_preserves_an_embedded_null_byte(self):
-        """Pure pointer arithmetic and a single IRLoad -- no scanning
-        of any kind -- so a '\\0' at the indexed position reads back
-        correctly, exactly like any other byte."""
         assert_program_stdout(
             "def int main():\n"
             "    str s = 'hi\\0there'\n"
@@ -2971,12 +1800,7 @@ class TestStringIndexing:
 
 
 # ---------------------------------------------------------------------------
-# Function calls: parameters, arguments, recursion, and the two distinct
-# register-preservation fixes that make string operations safe across
-# both nested expressions and nested calls (see codegen.py's STRINGS and
-# FUNCTIONS docstring sections). The mutual-recursion and register-
-# preservation tests here are the ones that actually prove something
-# subtle is correct, not just that a call compiles and runs.
+# Function calls
 # ---------------------------------------------------------------------------
 
 class TestFunctions:
@@ -3037,9 +1861,6 @@ class TestFunctions:
         )
 
     def test_mutual_recursion_with_forward_reference(self):
-        """is_even is defined *before* is_odd but calls it -- proves
-        semantic.py's two-pass signature collection (and codegen's own
-        function_return_types pre-scan) make call order not matter."""
         assert_program_exit_code(
             "def bool is_even(int n):\n"
             "    if n == 0:\n"
@@ -3080,9 +1901,6 @@ class TestFunctions:
         )
 
     def test_function_call_as_bare_statement(self):
-        """A call's result can be discarded entirely, via the ordinary
-        expr_stmt grammar rule -- no separate "call statement" concept
-        needed (see parser.py's Call docstring)."""
         assert_program_exit_code(
             "def int side_effect():\n"
             "    return 99\n"
@@ -3094,12 +1912,6 @@ class TestFunctions:
         )
 
     def test_register_preservation_across_nested_string_using_call(self):
-        """The critical test for codegen.py's FUNCTIONS section: `outer`
-        is mid-concatenation (holding a value that needs to survive)
-        when it calls `inner_concat`, which does its *own* string
-        concatenation internally. If the callee-saved-register fix in
-        every function's prologue/epilogue weren't there, this would
-        silently compute a wrong answer rather than fail loudly."""
         assert_program_exit_code(
             "def str inner_concat(str a, str b):\n"
             "    return a + b\n"
@@ -3115,11 +1927,6 @@ class TestFunctions:
         )
 
     def test_recursive_string_concatenation(self):
-        """A more aggressive version of the register-preservation test:
-        `repeat` calls *itself*, each level doing its own concatenation,
-        stress-testing that the callee-saved fix holds up under actual
-        recursion (each level's saved registers living on a genuinely
-        different stack frame), not just a single level of nesting."""
         assert_program_exit_code(
             "def str repeat(str s, int n):\n"
             "    if n == 0:\n"
@@ -3133,12 +1940,6 @@ class TestFunctions:
         )
 
     def test_call_mixing_scalar_and_array_arguments(self):
-        """Exercises passing a scalar and an array argument to the
-        SAME call together -- previously untested combination, and
-        exactly the shape that changed when array arguments started
-        being placed directly into their own argument register
-        (alongside a scalar's own value) instead of always going
-        through the old push-then-pop-in-reverse mechanism."""
         assert_program_exit_code(
             "def int sumWithBase([3]int arr, int base):\n"
             "    return arr[0] + arr[1] + arr[2] + base\n"
@@ -3151,11 +1952,6 @@ class TestFunctions:
         )
 
     def test_call_mixing_scalar_and_struct_arguments(self):
-        """Same idea one level over, with a struct argument instead of
-        an array -- both are passed as an address, but reached via a
-        different codegen path (gen_struct_address_into, not gen_
-        array_arg_address_into), so this is a genuinely distinct case
-        to cover, not a duplicate of the array one above."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -3171,13 +1967,6 @@ class TestFunctions:
         )
 
     def test_reassignment_combining_self_reference_and_function_call(self):
-        """`c = c + addOne(a)`: the new value depends on both c's own
-        pre-assignment value and a function call's result, in the same
-        expression. c's own Temp is read once for the left operand and
-        written once at the end for the assignment itself -- proof c's
-        old value is fully consumed before the call runs (which, if
-        anything protecting it were missing, could clobber it) and
-        before the assignment's own new value overwrites it."""
         assert_program_exit_code(
             "def int addOne(int x):\n"
             "    return x + 1\n"
@@ -3191,12 +1980,6 @@ class TestFunctions:
         )
 
     def test_more_than_six_parameters_now_works_via_the_stack(self):
-        """Was a clean codegen error before stack-passed arguments/
-        parameters existed -- now the 7th parameter (and 7th argument
-        at the call site) is simply read from/written to the caller's
-        own stack region instead of a register. Sums all 7 rather than
-        just returning one, so every slot -- register and stack alike
-        -- is actually exercised, not just present."""
         assert_program_exit_code(
             "def int seven(int a, int b, int c, int d, int e, int f, int g):\n"
             "    return a + b + c + d + e + f + g\n"
@@ -3207,12 +1990,6 @@ class TestFunctions:
         )
 
     def test_wide_typed_overflow_arguments(self):
-        """int64 (and, by the identical is_wide_type logic, str/pointer)
-        overflow arguments need the full 8-byte MovQ into their own
-        stack slot, not a narrowing 4-byte Mov -- exercised here with
-        two int64 parameters past the 6-slot boundary, values large
-        enough that truncation to 32 bits would silently corrupt them
-        into something else entirely."""
         assert_program_exit_code(
             "def int64 f(int a, int b, int c, int d, int e, int64 g, int64 h):\n"
             "    return g + h\n"
@@ -3224,13 +2001,6 @@ class TestFunctions:
         )
 
     def test_multiple_calls_needing_different_overflow_amounts_share_one_region(self):
-        """One call needs 2 overflow slots, another in the same
-        function needs 4 -- the outgoing-stack-arguments region this
-        function reserves is sized to the WORST of the two (see lower_
-        function's own comment), and correctly reused, not summed,
-        across both: each call writes its own overflow arguments
-        starting at the same %rsp-relative position regardless of how
-        many the other call needed."""
         assert_program_exit_code(
             "def int eight(int a, int b, int c, int d, int e, int f, int g, int h):\n"
             "    return a + b + c + d + e + f + g + h\n"
@@ -3247,37 +2017,7 @@ class TestFunctions:
 
 
 # ---------------------------------------------------------------------------
-# Functions with no declared return type: `def NAME(params):`, the type
-# before the name omitted entirely (Function.return_type=None) rather
-# than a `void`/`none` keyword -- there is no such keyword. Such a
-# function may fall off the end of its body without an explicit return
-# at all, or exit early via a bare `return` (Return.value=None) -- see
-# their own docstrings in parser.py. Internally, semantic.py gives this
-# a real (if purely internal, never user-writable) Type.VOID rather than
-# reusing Python's own None for it, specifically to keep it distinct
-# from resolved_type's OWN None, which already means "not yet type-
-# checked" everywhere else -- conflating the two would make a
-# legitimately void expression indistinguishable from one semantic
-# analysis simply hadn't reached yet.
-#
-# test_falls_off_the_end_with_no_explicit_return_at_all is the test
-# that actually proves the core mechanism holds, not just that the
-# feature parses: every OTHER function relies on always_returns
-# guaranteeing an explicit return on some path, which is what lets
-# gen_function skip ever emitting its own trailing epilogue (some
-# gen_return-emitted one is always guaranteed to run first). A function
-# with no declared return type deliberately skips that guarantee, so
-# gen_function has to append a trailing epilogue unconditionally --
-# without it, this exact test would fall through into whatever comes
-# next in the generated assembly (the bounds-check panic block, or the
-# next function's own prologue) instead of returning to its caller, a
-# real, silent crash, not a hypothetical one.
-#
-# print itself is Type.VOID now -- it was always documented as
-# returning a hardcoded, meaningless 0 specifically as a workaround for
-# there being no real void type at all; test_print_result_not_usable_
-# as_a_value in TestPrint is the test confirming that workaround is
-# gone.
+# Functions with no declared return type
 # ---------------------------------------------------------------------------
 
 class TestFunctionsWithNoDeclaredReturnType:
@@ -3320,12 +2060,6 @@ class TestFunctionsWithNoDeclaredReturnType:
         )
 
     def test_mixed_early_return_and_fall_through_paths(self):
-        """Several if-guarded early returns followed by a final fall-
-        through case, all in the same function -- stresses that the
-        trailing epilogue gen_function appends is genuinely reachable
-        (the fall-through case) alongside gen_return's own, ordinary
-        per-path epilogues (the early-return cases), not just one or
-        the other."""
         assert_program_stdout(
             "def classify(int x):\n"
             "    if x < 0:\n"
@@ -3374,10 +2108,6 @@ class TestFunctionsWithNoDeclaredReturnType:
         )
 
     def test_while_loop_inside_a_void_function(self):
-        """A different shape of "falls off the end" than the plain,
-        straight-line case above: the trailing epilogue has to be
-        reachable AFTER a loop completes, not just after a sequence of
-        ordinary statements."""
         assert_program_stdout(
             "def count_up(int n):\n"
             "    int i = 0\n"
@@ -3421,10 +2151,6 @@ class TestFunctionsWithNoDeclaredReturnType:
             analyze(ast)
 
     def test_non_void_function_still_requires_explicit_returns_on_every_path(self):
-        """The regression check: a function with a REAL declared
-        return type still goes through always_returns exactly as
-        before -- the skip in analyze_function is specific to
-        Type.VOID, not a blanket relaxation."""
         source = (
             "def int classify(int x):\n"
             "    if x < 0:\n"
@@ -3439,11 +2165,6 @@ class TestFunctionsWithNoDeclaredReturnType:
             analyze(ast)
 
     def test_comparing_two_void_call_results_is_rejected(self):
-        """`Type.VOID == Type.VOID` is trivially true by structural
-        equality alone -- the same way any type equals itself -- so
-        this needs its own explicit rejection in check_binary rather
-        than falling out for free the way every OTHER "void used as a
-        value" case already does (see check_binary's own comment)."""
         source = (
             "def log(int x):\n"
             "    print(x)\n"
@@ -3457,41 +2178,13 @@ class TestFunctionsWithNoDeclaredReturnType:
 
 
 # ---------------------------------------------------------------------------
-# Type annotation: semantic.py's check_expr annotates every expression
-# node with its resolved type (expr.resolved_type), which codegen.py's
-# _type_of reads directly instead of re-deriving a type independently.
-#
-# This replaced a previous codegen.py-internal method, _infer_type, that
-# duplicated -- in miniature, via its own per-operator/per-node-type
-# branches -- the same "what type does this produce" logic semantic.py's
-# check_binary/check_call already fully implement. That duplication
-# wasn't hypothetical risk: it silently caused two real bugs. Adding
-# `print` needed a Call case added to _infer_type separately from
-# semantic.py's own check_call; adding the six int-only operators (%  &
-# | ^ << >>) needed them added to _infer_type's int-producing branch
-# separately from semantic.py's _INT_ONLY_BINARY_OPS. Neither omission
-# caused an immediate, loud failure -- both were only caught by manual
-# testing during those turns, which is exactly the failure mode worth
-# structurally preventing rather than just fixing twice.
-#
-# These tests specifically target the annotation mechanism and the two
-# bug patterns above -- most of the ordinary coverage that this
-# mechanism also has to get right already exists throughout the rest of
-# this file (every test that computes a nontrivial expression exercises
-# it, whether or not that test was written with this in mind).
+# Type annotation
 # ---------------------------------------------------------------------------
 
 class TestTypeAnnotation:
     pytestmark = GCC_SKIP
 
     def test_call_result_directly_as_operand_of_plus(self):
-        """The exact shape of the first bug this refactor prevents:
-        codegen needs to know a Call expression's type to decide
-        whether the outer `+` means concatenation or arithmetic, with
-        the call's result never stored in an intermediate variable
-        first -- every existing function-call test always assigns a
-        call's result to a variable before using it further, so this
-        specific shape wasn't previously covered anywhere."""
         assert_program_exit_code(
             "def int five():\n"
             "    return 5\n"
@@ -3503,13 +2196,6 @@ class TestTypeAnnotation:
         )
 
     def test_modulo_result_directly_as_operand_of_plus(self):
-        """The exact shape of the second bug this refactor prevents.
-        Already covered by test_modulo_result_used_as_operand_of_plus
-        in TestBitwiseAndModuloOperators (added at the time that bug
-        was found); repeated here as a direct regression test scoped
-        to the annotation mechanism itself, so this file's own
-        organization doesn't obscure that the two bugs share one root
-        cause and one fix."""
         assert_exit_code(
             "    int x = 5 % 2 + 3\n"
             "    return x",
@@ -3517,17 +2203,6 @@ class TestTypeAnnotation:
         )
 
     def test_deeply_nested_mixed_expression_annotates_and_executes_correctly(self):
-        """A kitchen-sink expression touching every expression node
-        type and several operator categories at once -- a call, int
-        arithmetic, modulo, a comparison, a bitwise AND, equality,
-        unary not, and logical and -- nested three levels deep. Proof
-        the annotation mechanism correctly threads a resolved type
-        through arbitrary nesting, not just each category checked in
-        isolation. Also, not incidentally, another instance of the
-        bitwise/equality-precedence type error from
-        TestSemanticErrors' test_bitwise_and_equality_precedence_is_a_
-        type_error -- `(5 & 2) == 2` needs its explicit parens for
-        exactly the same reason `(1 & 2) == 2` does there."""
         assert_program_exit_code(
             "def int add(int a, int b):\n"
             "    return a + b\n"
@@ -3540,27 +2215,13 @@ class TestTypeAnnotation:
         )
 
     def test_codegen_without_semantic_analysis_raises_clear_error(self):
-        """codegen invoked on an AST that skipped semantic.analyze()
-        (so Program itself has no struct_registry, stamped on only by
-        analyze's own struct-collection pass -- see build_ir_program's
-        own defensive check, the first thing generate_asm/compile_to_
-        asm does via it) must fail with a clear, actionable
-        CodegenError --
-        matching _type_of's and _local_offset's own established
-        posture -- rather than a bare AttributeError or, worse,
-        silently wrong codegen."""
         ast = _parse("def int main():\n    return 1 + 2\n")
-        # Deliberately not calling analyze(ast) here.
         with pytest.raises(IRError, match="no struct registry"):
             generate_asm(ast, target=ASM_TARGET)
 
 
 # ---------------------------------------------------------------------------
-# print: the first builtin. Every test here checks actual stdout content
-# via assert_stdout/assert_program_stdout, not just an exit code -- exit
-# codes can't tell "printed the right thing" from "printed nothing at
-# all", which is exactly the distinction that matters for a function
-# whose entire purpose is its side effect.
+# print
 # ---------------------------------------------------------------------------
 
 class TestPrint:
@@ -3602,9 +2263,6 @@ class TestPrint:
         )
 
     def test_print_expression_results_not_just_literals(self):
-        """print's argument can be any expression, not just a bare
-        literal -- proves the argument is genuinely evaluated first,
-        not special-cased to only accept literal syntax."""
         assert_stdout(
             "    int a = 3\n"
             "    int b = 4\n"
@@ -3646,16 +2304,6 @@ class TestPrint:
         )
 
     def test_print_result_not_usable_as_a_value(self):
-        """print is Type.VOID (see semantic.py's check_print_call) --
-        this used to be a positive test for print "returning" a usable
-        int 0, back when there was no real void type to give it and
-        that was the documented workaround. Now that a function with no
-        declared return type exists, print became its first real user,
-        and using its result as a value is a genuine semantic error,
-        the same as calling any other void function that way -- caught
-        here by the same type-mismatch check '+' already had for any
-        other non-int/non-str operand, with no void-specific code
-        needed at this particular call site."""
         assert_semantic_error(
             "    int x = print(5) + 41\n"
             "    return x",
@@ -3676,17 +2324,6 @@ class TestPrint:
         )
 
     def test_print_repeated_calls_in_sequence_share_state_correctly(self):
-        """Not observable from stdout content alone, but this exercises
-        several things this design shares across print() calls without
-        letting them interfere with each other: hornet_stringify itself
-        (built once per program, not once per call site -- see
-        CodeGenerator.generate's own _print_used check), and the small
-        set of scratch slots each print() call reuses in turn (_print_
-        scalar_temp_offset, _print_buf_state_temp_offset -- see gen_
-        print_call_into's own docstring) -- if any of this were broken
-        (e.g. a stale buffer pointer left over from a previous call),
-        this would show up as garbled or missing output rather than a
-        clean failure."""
         assert_stdout(
             "    print(1)\n"
             "    print(22)\n"
@@ -3696,33 +2333,8 @@ class TestPrint:
         )
 
 
-
 # ---------------------------------------------------------------------------
-# `len`: Hornet's second builtin. Returns an array or slice's own length as
-# an ordinary, usable int -- unlike print (Type.VOID), `len(x)` works as a
-# real expression: a loop bound, an operand, anything.
-#
-# Deliberately reuses gen_indexable_base_into DIRECTLY rather than a
-# narrower restriction of its own, the way print's own argument is
-# restricted to a Variable or Index specifically (see TestPrint's own
-# note) -- so len accepts everything gen_indexable_base_into currently
-# does: a Variable, an Index, a Slice expression, a slice-returning Call,
-# or an ArrayLiteral. test_len_on_slice_returning_call_directly and
-# test_len_on_unnamed_slice_expression are the tests that actually prove
-# this -- neither shape would be accepted by print today.
-#
-# test_len_still_bounds_checks_out_of_range_argument and test_len_still_
-# aborts_on_out_of_range_array_index_even_though_length_is_compile_time
-# are the pair that prove the core design decision explicitly: len's
-# argument is FULLY evaluated regardless of whether the resulting length
-# ends up depending on it at all -- an array's own length is a compile-
-# time constant that never actually reads the argument's runtime value,
-# but an out-of-range index inside that same argument still aborts,
-# exactly like any other function argument's evaluation would. The
-# array-literal and slice-literal tests are the same principle from the
-# other direction: len(x) on a fresh literal still fully constructs it
-# (for a slice literal, a real, if wasted, heap allocation) even though
-# only its already-known length is ever used.
+# `len`
 # ---------------------------------------------------------------------------
 
 class TestLen:
@@ -3744,9 +2356,6 @@ class TestLen:
         )
 
     def test_len_on_unnamed_slice_expression(self):
-        """Not accepted by print (Variable-or-Index only) -- proves
-        len genuinely inherits gen_indexable_base_into's own, broader
-        set of accepted bases rather than a narrower restriction."""
         assert_exit_code(
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
             "    return len(arr[1:4])",
@@ -3754,8 +2363,6 @@ class TestLen:
         )
 
     def test_len_on_slice_returning_call_directly(self):
-        """Also not accepted by print -- same reasoning as the
-        unnamed-slice-expression case just above."""
         assert_program_exit_code(
             "def []int f([5]int arr):\n"
             "    return arr[1:4]\n"
@@ -3786,8 +2393,6 @@ class TestLen:
         )
 
     def test_len_usable_as_loop_bound(self):
-        """len returns a real, usable int -- unlike print, which is
-        Type.VOID and can only ever be a bare statement."""
         assert_exit_code(
             "    [4]int arr = [10, 20, 30, 40]\n"
             "    int total = 0\n"
@@ -3800,20 +2405,12 @@ class TestLen:
         )
 
     def test_len_still_bounds_checks_out_of_range_argument(self):
-        """The argument is fully evaluated regardless of whether the
-        result ends up depending on it -- an out-of-range slice bound
-        buried inside len's own argument still aborts."""
         assert_crashes_with_sigabrt(
             "    [3]int arr = [1, 2, 3]\n"
             "    return len(arr[0:10])"
         )
 
     def test_len_still_aborts_on_out_of_range_array_index_even_though_length_is_compile_time(self):
-        """The critical test proving this isn't just an accidental
-        side effect of reusing gen_indexable_base_into: an array's own
-        length is a compile-time constant that never actually reads
-        the argument's runtime value at all, yet an out-of-range index
-        buried inside that same argument still genuinely aborts."""
         assert_crashes_with_sigabrt(
             "    [2][3]int m = [[1, 2, 3], [4, 5, 6]]\n"
             "    return len(m[10])"
@@ -3846,11 +2443,6 @@ class TestLen:
         )
 
     def test_len_of_a_string_literal(self):
-        """str joined array/slice as a len()-supported type once it
-        became a {ptr, len} descriptor with a real length field (see
-        check_len_call's own docstring) -- this used to be the
-        rejection case (test_len_on_str_is_rejected_with_specific_
-        message), now it's an ordinary success."""
         assert_exit_code(
             "    return len('hello')",
             5,
@@ -3875,10 +2467,6 @@ class TestLen:
             analyze(_parse(source))
 
     def test_len_on_array_literal_argument_still_evaluates_elements(self):
-        """The literal-argument analog of the earlier bounds-check/
-        side-effect tests: len(x) on a fresh literal still fully
-        constructs it, even though only its already-known length is
-        ever used."""
         assert_program_stdout(
             "def int se():\n"
             "    print(55)\n"
@@ -3892,29 +2480,11 @@ class TestLen:
 
 
 # ---------------------------------------------------------------------------
-# All-paths-return checking (semantic.py's always_returns /
-# contains_reachable_break). Every function needs this regardless of
-# return type, since this language has no void -- but it became a real
-# safety issue, not just a correctness nicety, once functions could call
-# each other: control falling off the end of a function's generated
-# code with no `ret` executed corrupts the *calling* function's own
-# stack, not just the callee's exit code.
-#
-# The genuinely subtle case here is `while true` with a `break` inside
-# it -- a bare `while true: ...; return x` is fine on its own (the loop
-# never falls through: it either returns from inside or runs forever),
-# but the moment a `break` exists anywhere in that loop's body (even
-# buried inside a nested if/elif chain), the loop CAN fall through to
-# whatever comes after it, so it stops counting as guaranteeing a
-# return and something has to catch that path explicitly. The
-# CRITICAL-labeled tests are the ones that would actually catch a
-# mistake in this specific piece of the algorithm, not just prove the
-# ordinary if/else and trailing-return cases work.
+# All-paths-return checking
 # ---------------------------------------------------------------------------
 
 class TestAllPathsReturn:
 
-    # -- accepted (analyze() must NOT raise) -------------------------------
 
     def test_simple_trailing_return(self):
         ast = _parse("def int f():\n    return 1\n")
@@ -3931,8 +2501,6 @@ class TestAllPathsReturn:
         analyze(ast)  # should not raise
 
     def test_if_without_else_followed_by_trailing_return(self):
-        """An if with no else can never guarantee a return by itself --
-        it's the return statement *after* it that makes this valid."""
         ast = _parse(
             "def int f(int x):\n"
             "    if x > 0:\n"
@@ -3942,9 +2510,6 @@ class TestAllPathsReturn:
         analyze(ast)  # should not raise
 
     def test_if_elif_else_chain_all_branches_return(self):
-        """elif desugars into a nested If in else_body (see parser.py),
-        so this also proves always_returns recurses correctly through
-        an elif chain of arbitrary length, not just a single if/else."""
         ast = _parse(
             "def int f(int x):\n"
             "    if x > 0:\n"
@@ -3957,9 +2522,6 @@ class TestAllPathsReturn:
         analyze(ast)  # should not raise
 
     def test_if_elif_without_final_else_followed_by_trailing_return(self):
-        """The elif chain itself isn't exhaustive (no final else), but
-        the trailing return after it catches every path that falls
-        through the chain without returning."""
         ast = _parse(
             "def int f(int x):\n"
             "    if x > 0:\n"
@@ -3971,13 +2533,6 @@ class TestAllPathsReturn:
         analyze(ast)  # should not raise
 
     def test_while_true_with_no_break_needs_no_trailing_return(self):
-        """A genuine `while true` with nothing that can break out of it
-        never falls through to whatever comes after it -- it either
-        loops forever or returns from inside -- so this is valid even
-        though nothing follows the loop and the loop body itself has no
-        return in it. See codegen.py's own gaps around genuinely
-        infinite loops for the flip side of this: this is a legitimate,
-        if unusual, thing to write."""
         ast = _parse(
             "def int f():\n"
             "    while true:\n"
@@ -3986,10 +2541,6 @@ class TestAllPathsReturn:
         analyze(ast)  # should not raise
 
     def test_critical_while_true_with_break_and_trailing_return(self):
-        """The positive control for the critical case: once a `while
-        true` loop has a `break`, the loop alone can no longer
-        guarantee a return -- but an explicit return placed after the
-        loop correctly catches the break-exit path."""
         ast = _parse(
             "def int f(bool x):\n"
             "    while true:\n"
@@ -4001,14 +2552,6 @@ class TestAllPathsReturn:
         analyze(ast)  # should not raise
 
     def test_critical_nested_while_true_inner_break_does_not_satisfy_outer(self):
-        """A break inside a nested while loop belongs to that inner
-        loop, not the outer one (the exact same scoping break already
-        has for its own semantic validity -- see analyze_break/
-        loop_depth -- and at the codegen level -- see codegen.py's
-        loop_labels stack). So the outer while here is correctly still
-        recognized as unbreakable-except-by-return, purely because of
-        its own trailing `return 1`, with the inner loop's break having
-        no bearing on that."""
         ast = _parse(
             "def int f():\n"
             "    while true:\n"
@@ -4019,11 +2562,6 @@ class TestAllPathsReturn:
         analyze(ast)  # should not raise
 
     def test_finite_while_loop_followed_by_trailing_return(self):
-        """The most common real shape: an ordinary, condition-bounded
-        loop (not `while true`) can never itself guarantee a return --
-        its condition might be false immediately -- so it's the return
-        after the loop that makes this valid, exactly like an if
-        without an else."""
         ast = _parse(
             "def int f():\n"
             "    int i = 0\n"
@@ -4034,8 +2572,6 @@ class TestAllPathsReturn:
         analyze(ast)  # should not raise
 
     def test_str_returning_function_with_trailing_return(self):
-        """The check applies uniformly regardless of the function's
-        declared return type -- this isn't an int/bool-specific rule."""
         ast = _parse(
             "def str f():\n"
             "    str s = 'hello'\n"
@@ -4044,12 +2580,6 @@ class TestAllPathsReturn:
         analyze(ast)  # should not raise
 
     def test_critical_break_inside_elif_chain_inside_while_true_with_trailing_return(self):
-        """A break buried three levels deep inside an elif chain,
-        itself inside a while-true loop, must still be found by
-        contains_reachable_break (which has to recurse through If's
-        then_body/else_body, including the nested-If shape an elif
-        chain desugars into) -- and the trailing return after the loop
-        must still correctly catch the resulting break-exit path."""
         ast = _parse(
             "def int f(int x):\n"
             "    while true:\n"
@@ -4064,7 +2594,6 @@ class TestAllPathsReturn:
         )
         analyze(ast)  # should not raise
 
-    # -- rejected (analyze() must raise SemanticError) ---------------------
 
     def test_no_return_at_all(self):
         assert_semantic_error(
@@ -4073,9 +2602,6 @@ class TestAllPathsReturn:
         )
 
     def test_print_only_function_with_no_return(self):
-        """print's own presence has no bearing on this check -- it's
-        just an ordinary expression statement as far as always_returns
-        is concerned."""
         assert_semantic_error(
             "    print(5)",
             match="does not return a value on all code paths",
@@ -4100,11 +2626,6 @@ class TestAllPathsReturn:
         )
 
     def test_critical_while_true_with_break_and_no_trailing_return(self):
-        """The critical negative case: exactly the shape of program
-        that motivated this whole feature -- a `while true` loop that
-        looks like it always returns at a glance (it has a return
-        inside it), but can actually fall through to the end of the
-        function whenever `x` is true and the break fires."""
         assert_semantic_error(
             "    bool x = true\n"
             "    while true:\n"
@@ -4115,11 +2636,6 @@ class TestAllPathsReturn:
         )
 
     def test_finite_while_loop_with_nothing_after_it(self):
-        """A condition-bounded while loop's body might never execute
-        (the condition could be false from the start), so even a
-        return unconditionally reached *inside* the loop body doesn't
-        help if there's nothing after the loop to catch the
-        zero-iterations case."""
         assert_semantic_error(
             "    bool x = true\n"
             "    int i = 0\n"
@@ -4139,26 +2655,7 @@ class TestAllPathsReturn:
 
 
 # ---------------------------------------------------------------------------
-# Arrays: fixed-size, stack-allocated, value-typed (see codegen.py's
-# ARRAYS section for the full design). Scope note, repeated from there:
-# this covers LOCAL arrays completely -- declaration (literal- or
-# copy-initialized), reading/writing an element at any nesting depth,
-# and whole-array copy via plain assignment -- but array function
-# PARAMETERS and RETURN VALUES are a deliberately separate, not-yet-
-# built piece of work (a real calling-convention extension), covered
-# here only by the tests proving that gap fails with a clear,
-# actionable error rather than silently miscompiling.
-#
-# test_value_semantics_1d/2d and test_sub_array_extraction_is_independent
-# are the tests that actually prove the headline design decision --
-# arrays are values, not references -- holds at the machine-code level:
-# mutating a copy must never affect the original. The bounds-checking
-# tests are the other centerpiece: TestBoundsChecking proves the single
-# unsigned comparison genuinely catches both an over-large index and a
-# negative one, correctly leaves a valid boundary index alone, and --
-# found only by testing, not assumed -- that the panic message actually
-# reaches the user rather than being silently lost in an unflushed
-# stdio buffer when abort() bypasses the normal exit() path.
+# Arrays
 # ---------------------------------------------------------------------------
 
 class TestArrays:
@@ -4180,9 +2677,6 @@ class TestArrays:
         )
 
     def test_value_semantics_1d(self):
-        """The headline design property: assigning one array to
-        another copies its elements -- it does not alias them.
-        Mutating the copy must leave the original untouched."""
         assert_exit_code(
             "    [3]int a = [1, 2, 3]\n"
             "    [3]int b = [0, 0, 0]\n"
@@ -4220,9 +2714,6 @@ class TestArrays:
         )
 
     def test_sub_array_extraction_is_independent(self):
-        """`[3]int row = matrix[1]` extracts a whole row -- and per the
-        same value semantics, `row` is its own independent copy, not an
-        alias into `matrix`'s own storage."""
         assert_exit_code(
             "    [2][3]int matrix = [[1, 2, 3], [4, 5, 6]]\n"
             "    [3]int row = matrix[1]\n"
@@ -4292,11 +2783,6 @@ class TestArrays:
         )
 
     def test_array_parameter_value_semantics(self):
-        """The parameter-passing counterpart to test_value_semantics_1d:
-        mutating an array PARAMETER inside the callee must never affect
-        the caller's own array -- the callee receives a pointer to a
-        copy the caller made just for this call (see
-        gen_array_arg_address_into), not a reference to the original."""
         assert_program_exit_code(
             "def int mutate([3]int arr):\n"
             "    arr[0] = 999\n"
@@ -4322,16 +2808,6 @@ class TestArrays:
         )
 
     def test_array_return_direct_literal(self):
-        """Regression test for a real bug found during development:
-        `return [1,2,3]` writes each element straight through the
-        hidden return pointer without ever materializing an
-        intermediate local. When that pointer happens to be sitting in
-        %rax (the same register gen_expr_into always computes an
-        element's value into), evaluating the first element used to
-        silently destroy the pointer before anything was ever written
-        through it -- a segfault, not a wrong answer, since the write
-        landed at whatever address the corrupted "pointer" happened to
-        be. See gen_array_literal_into's own docstring for the fix."""
         assert_program_exit_code(
             "def [3]int make():\n"
             "    return [10, 20, 30]\n"
@@ -4343,13 +2819,6 @@ class TestArrays:
         )
 
     def test_array_return_via_sub_array_index(self):
-        """Another real bug found during development, the same class as
-        the literal-return one above but one layer deeper: `return
-        matrix[i]` computes the sub-array's SOURCE address (bounds-
-        checking and index arithmetic that freely use %rax/%rcx
-        internally) before ever touching the destination -- which,
-        again, could be sitting in %rax. See gen_array_value_into's
-        _gen_protecting_dst_across for the fix."""
         assert_program_exit_code(
             "def [3]int get_row([2][3]int matrix, int i):\n"
             "    return matrix[i]\n"
@@ -4362,10 +2831,6 @@ class TestArrays:
         )
 
     def test_nested_array_returning_call_forwarding(self):
-        """`return inner()`, where inner ALSO returns an array, forwards
-        the same hidden pointer one level deeper with no intermediate
-        copy ever materialized -- see gen_array_call_into's own
-        docstring."""
         assert_program_exit_code(
             "def [3]int inner():\n"
             "    return [7, 8, 9]\n"
@@ -4412,10 +2877,6 @@ class TestArrays:
         )
 
     def test_returned_array_independent_across_separate_calls(self):
-        """Value semantics across the return boundary: two separate
-        calls to the same array-returning function must produce two
-        completely independent results, even though the function
-        builds its result in the exact same local slot both times."""
         assert_program_exit_code(
             "def [3]int make_and_mutate():\n"
             "    [3]int local = [1, 2, 3]\n"
@@ -4431,9 +2892,6 @@ class TestArrays:
         )
 
     def test_array_argument_as_index_expression(self):
-        """An array-typed argument doesn't have to be a bare variable --
-        gen_array_arg_address_into also accepts an Index yielding a
-        sub-array, e.g. passing one row of a matrix straight through."""
         assert_program_exit_code(
             "def int sum3([3]int arr):\n"
             "    return arr[0] + arr[1] + arr[2]\n"
@@ -4459,10 +2917,6 @@ class TestArrays:
         )
 
     def test_five_real_params_on_array_returning_function(self):
-        """The boundary case: an array-returning function supports at
-        most 5 REAL parameters, one fewer than the usual 6, since the
-        hidden output pointer itself occupies the first argument
-        register."""
         assert_program_exit_code(
             "def [2]int make5(int a, int b, int c, int d, int e):\n"
             "    return [a + b, c + d + e]\n"
@@ -4474,9 +2928,6 @@ class TestArrays:
         )
 
     def test_seven_real_params_on_array_returning_function_works_via_the_stack(self):
-        """The hidden array-return pointer occupies slot 0, so 6 real
-        parameters here means 7 total slots -- previously rejected,
-        now the 7th (parameter 'f') is simply stack-passed."""
         assert_program_exit_code(
             "def [2]int make6(int a, int b, int c, int d, int e, int f):\n"
             "    return [a, f]\n"
@@ -4488,12 +2939,6 @@ class TestArrays:
         )
 
     def test_array_literal_as_direct_call_argument(self):
-        """Used to be a real, deliberate gap (an ArrayLiteral has no
-        address of its own to pass as an argument) -- now materialized
-        into its own dedicated stack slot first (see codegen.py's
-        _collect_argument_temps/_gen_materialize_argument_temp_into)
-        rather than requiring the caller to assign it to a named
-        variable first."""
         assert_program_exit_code(
             "def int sum3([3]int arr):\n"
             "    return arr[0] + arr[1] + arr[2]\n"
@@ -4505,64 +2950,11 @@ class TestArrays:
 
 
 # ---------------------------------------------------------------------------
-# The fully-typed array literal, `[3]int[1, 2, 3]` -- a genuine, self-
-# describing primary expression, unlike the plain `[1, 2, 3]` form (which
-# infers its own type from its elements just as validly, but is still
-# restricted to a VarDecl's own initializer, since codegen has nowhere
-# else to write its value -- see ArrayLiteral's own docstring in
-# parser.py). The typed form carries its own type, so it works as a
-# VarDecl initializer, redundantly restating a type the declaration
-# already gives, AND as a genuine standalone statement, AND (in principle)
-# anywhere else an expression is valid, subject to the same, pre-existing
-# restrictions untyped array values already have elsewhere (e.g. still
-# not usable as a direct call argument -- see
-# test_array_literal_as_direct_call_argument_not_supported just above,
-# which applies identically regardless of typed vs. untyped).
-#
-# test_single_element_typed_literal and test_untyped_single_element_
-# literal_still_works are the pair that actually prove the trickiest
-# parsing ambiguity is resolved correctly: `[5]` (a single-element,
-# untyped literal) and the OPENING of `[5]int[...]` share an identical
-# first three tokens (OPEN_BRACKET NUMBER CLOSE_BRACKET) -- only a
-# fourth token of lookahead (a type-starting token, or its absence)
-# tells them apart, with no backtracking needed.
-#
-# test_bare_statement_with_side_effecting_element is the test that
-# actually proves a bare literal statement genuinely evaluates its
-# elements rather than being silently dropped: nothing ever reads the
-# resulting array as a whole (there's no destination for a bare
-# statement to write it into), but each element still has to run for
-# whatever side effect it might have, the same way any other bare
-# expression statement already does.
+# Typed array literals
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Array equality: `arr1 == arr2` / `arr1 != arr2`, valid exactly when both
-# sides are the SAME array type (same length AND same element type -- Type's
-# own structural dataclass equality already checks both at once) AND the
-# array's own LEAF type (see leaf_type) is int, bool, or str -- never a
-# struct or slice, since neither has '==' defined for it at all yet (see
-# check_binary's own docstring for why that's a real, principled boundary,
-# not an arbitrary one: closing it later just means building struct/slice
-# equality first, and this already-general mechanism would cover arrays of
-# either for free).
-#
-# Two genuinely different codegen strategies, dispatched on leaf type:
-#   - int/bool: a flat, byte-for-byte comparison loop -- neither type is a
-#     pointer, so the WHOLE array, however deeply nested, is just one
-#     contiguous block of bytes (the same trick gen_array_copy already uses
-#     for copying, via leaf_type/type_byte_width, applied to comparison
-#     instead). test_nested_int_arrays_* is what actually exercises the
-#     "nested arrays are just one flat block" part of this, not merely a
-#     single-dimension array.
-#   - str: a per-element strcmp loop, since a str element is a POINTER --
-#     raw byte equality of the pointers would be wrong, since two equal
-#     strings can live at different addresses. test_str_arrays_equal_
-#     different_pointers is the test that actually proves this: both sides'
-#     corresponding elements are built via concatenation, so they're
-#     guaranteed to be different pointers with identical content -- a test
-#     using only string literals could pass even with a (wrong) raw-pointer
-#     comparison, purely by coincidence of literal deduplication.
+# Array equality
 # ---------------------------------------------------------------------------
 
 class TestArrayEquality:
@@ -4609,9 +3001,6 @@ class TestArrayEquality:
         )
 
     def test_nested_int_arrays_equal(self):
-        """Exercises the flat-byte loop's own core claim: a [2][3]int
-        is compared as one contiguous 24-byte block, not element by
-        element with per-row logic."""
         assert_exit_code(
             "    [2][3]int a = [[1, 2, 3], [4, 5, 6]]\n"
             "    [2][3]int b = [[1, 2, 3], [4, 5, 6]]\n"
@@ -4622,9 +3011,6 @@ class TestArrayEquality:
         )
 
     def test_nested_int_arrays_differ_in_last_element(self):
-        """A mismatch in the very LAST element of a nested array --
-        proves the flat-byte loop actually walks every byte rather
-        than stopping early or only checking the first row."""
         assert_exit_code(
             "    [2][3]int a = [[1, 2, 3], [4, 5, 6]]\n"
             "    [2][3]int b = [[1, 2, 3], [4, 5, 7]]\n"
@@ -4635,11 +3021,6 @@ class TestArrayEquality:
         )
 
     def test_str_arrays_equal_different_pointers(self):
-        """Both sides' elements are built via concatenation, so
-        they're guaranteed to be DIFFERENT pointers with identical
-        content -- proving this is a real strcmp-backed comparison,
-        not a raw (and wrong) pointer comparison that could only pass
-        by coincidence with plain string literals."""
         assert_exit_code(
             "    str prefix = 'hel'\n"
             "    [2]str a = ['hello', 'world']\n"
@@ -4671,9 +3052,6 @@ class TestArrayEquality:
         )
 
     def test_subarray_comparison_via_index(self):
-        """`m[0] == m[1]` -- each operand is itself an Index expression
-        yielding a sub-array, not a bare Variable; gen_array_address_
-        into already handles this via gen_index_address_into."""
         assert_exit_code(
             "    [2][3]int m = [[1, 2, 3], [1, 2, 3]]\n"
             "    if m[0] == m[1]:\n"
@@ -4697,8 +3075,6 @@ class TestArrayEquality:
         )
 
     def test_large_array_comparison(self):
-        """Correctness at a scale where a bug that only manifested
-        past the first few bytes or elements would actually show up."""
         assert_exit_code(
             "    [2000]int a\n"
             "    [2000]int b\n"
@@ -4714,14 +3090,6 @@ class TestArrayEquality:
         )
 
     def test_two_bare_array_literals_compared_directly(self):
-        """Regression test for a real bug: `[1, 2, 3] == [1, 2, 3]`
-        used to raise a hard CodegenError, tracing back to the OLD-
-        style gen_array_address_into itself -- which never handled an
-        ArrayLiteral operand at all. This was never supported, even
-        old-style, not something this arc's own real-IR equality work
-        narrowed -- confirmed by temporarily reverting the fix and
-        watching this exact program fail to compile before writing it
-        in here."""
         assert_program_exit_code(
             "def int main():\n"
             "    if [1, 2, 3] == [1, 2, 3]:\n"
@@ -4740,11 +3108,6 @@ class TestArrayEquality:
         )
 
     def test_two_array_returning_calls_compared_directly(self):
-        """`makeA() == makeB()`, with neither side ever assigned to a
-        variable first -- the same real bug as test_two_bare_array_
-        literals_compared_directly's own, just for an ordinary
-        composite-returning Call operand instead of a bracketed-list
-        literal."""
         assert_program_exit_code(
             "def [3]int makeA():\n"
             "    return [1, 2, 3]\n"
@@ -4760,11 +3123,6 @@ class TestArrayEquality:
         )
 
     def test_array_literal_compared_to_array_returning_call(self):
-        """Mixed operand shapes on either side of the same comparison
-        -- a bracketed-list literal on the left, an ordinary composite-
-        returning Call on the right -- exercising _ir_composite_
-        operand_address's own dispatch independently per side, not
-        just once for a uniform pair."""
         assert_program_exit_code(
             "def [3]int makeArr():\n"
             "    return [1, 2, 3]\n"
@@ -4778,38 +3136,7 @@ class TestArrayEquality:
 
 
 # ---------------------------------------------------------------------------
-# Struct equality: `s1 == s2` / `s1 != s2`, valid exactly when both sides are
-# the exact same struct type AND every one of that struct's own fields --
-# including through nested structs and array fields, at any depth -- is
-# itself comparable (see semantic.py's own _is_comparable_type, shared with
-# array equality's identical requirement). A struct with a slice-typed field
-# anywhere is rejected, since slice equality doesn't exist yet -- see
-# TestSemanticErrors.
-#
-# Unlike array equality, a struct's own fields can be a MIX of types, so
-# there's no single flat-byte-or-strcmp strategy that covers a whole struct:
-# codegen.py's _gen_struct_fields_equality_at_addresses flattens a struct's
-# fields (recursing through nested structs at COMPILE TIME, in Python, via
-# _flatten_struct_fields -- no runtime recursion needed to walk a struct's
-# own fixed shape) into one linear sequence of per-field comparisons, each
-# dispatched by that field's own type: a plain 4-byte compare for int/bool,
-# a strcmp call for str, or one of array equality's own three loop helpers
-# for an array field.
-#
-# test_array_of_structs_with_array_of_str_field and test_doubly_nested_*
-# are the tests that actually matter most here, not just thorough coverage:
-# they're what caught a real register-collision bug during development --
-# _gen_struct_fields_equality_at_addresses initially used %r8/%r9 as scratch
-# for computing an array field's own address, which collided with %r8/%r9
-# being used INTERNALLY by _gen_array_flat_byte_equality_loop for a
-# completely different purpose (the loop's own per-iteration word address),
-# corrupting the base address on the SECOND iteration of a flat-byte
-# comparison reached through a struct field. The simplest possible case
-# (test_array_field_equal, a struct with a plain [3]int field) already
-# failed outright once actually run, which is exactly why every method in
-# this file that hands addresses to another piece of code needs its OWN
-# register choices checked against what the callee uses internally, not
-# just reasoned about in the abstract.
+# Struct equality
 # ---------------------------------------------------------------------------
 
 class TestStructEquality:
@@ -4861,8 +3188,6 @@ class TestStructEquality:
         )
 
     def test_mismatch_in_first_field_is_detected(self):
-        """A mismatch in the very FIRST field -- proves comparison
-        doesn't just check the last field or skip early ones."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -4892,10 +3217,6 @@ class TestStructEquality:
         )
 
     def test_str_field_equal_different_pointers(self):
-        """Both sides' str fields are built so they're guaranteed to
-        be DIFFERENT pointers with identical content, proving this is
-        a real strcmp-backed comparison -- the same reasoning
-        TestArrayEquality's own identical test already established."""
         assert_program_exit_code(
             "type Person struct:\n"
             "    int age\n"
@@ -4944,10 +3265,6 @@ class TestStructEquality:
         )
 
     def test_nested_struct_field_mismatch(self):
-        """The mismatch is buried inside the NESTED struct's own
-        field, not a top-level one -- proves _flatten_struct_fields
-        actually descends into nested structs rather than treating
-        them as opaque/always-equal."""
         assert_program_exit_code(
             "type Inner struct:\n"
             "    int v\n"
@@ -4965,9 +3282,6 @@ class TestStructEquality:
         )
 
     def test_array_field_equal(self):
-        """The specific case that caught the %r8/%r9 register-
-        collision bug during development -- see this class's own
-        module-level comment."""
         assert_program_exit_code(
             "type Row struct:\n"
             "    [3]int values\n"
@@ -5011,10 +3325,6 @@ class TestStructEquality:
         )
 
     def test_array_of_comparable_structs(self):
-        """An array whose leaf is a comparable struct -- see semantic.
-        py's own _is_comparable_type, which now recurses into a
-        struct's own fields the same way it already recurses through
-        nested arrays."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -5045,13 +3355,6 @@ class TestStructEquality:
         )
 
     def test_array_of_structs_with_array_of_str_field(self):
-        """THE test that caught the register-collision bug most
-        directly: an array of structs, where the struct's own field is
-        ITSELF an array of str -- exercises _gen_array_struct_
-        equality_loop calling into _gen_struct_fields_equality_at_
-        addresses, which in turn calls _gen_array_str_equality_loop,
-        all sharing a small, fixed set of register names across three
-        levels."""
         assert_program_exit_code(
             "type Bag struct:\n"
             "    [2]str items\n"
@@ -5067,11 +3370,6 @@ class TestStructEquality:
         )
 
     def test_array_of_structs_with_array_of_str_field_mismatch_in_second_element(self):
-        """The mismatch is in the SECOND array-of-structs element,
-        not the first -- proves the outer loop's own index/base
-        registers correctly survive the first element's (potentially
-        register-clobbering) comparison and correctly advance to
-        compare the second."""
         assert_program_exit_code(
             "type Bag struct:\n"
             "    [2]str items\n"
@@ -5086,15 +3384,6 @@ class TestStructEquality:
         )
 
     def test_doubly_nested_struct_with_array_of_structs_with_str_field(self):
-        """A struct containing an ARRAY OF STRUCTS, where that inner
-        struct has its OWN str field -- one level deeper than the
-        test above, exercising the exact recursive chain gen_struct_
-        equality_into's own module comment describes: _gen_struct_
-        fields_equality_at_addresses (for Container) dispatches to
-        _gen_array_struct_equality_loop (for its [2]Item field), which
-        calls BACK into _gen_struct_fields_equality_at_addresses (for
-        each Item), which then does an ordinary strcmp for Item's own
-        str field."""
         assert_program_exit_code(
             "type Item struct:\n"
             "    str name\n"
@@ -5146,20 +3435,6 @@ class TestStructEquality:
         )
 
     def test_int8_struct_field_equality_equal(self):
-        """Regression test for a real bug: the scalar-field branch of
-        struct equality comparison used to always do a 4-byte compare
-        regardless of the field's own declared width, so an int8
-        field's own 1-byte storage got read 4 bytes wide anyway --
-        silently comparing whatever garbage happened to sit adjacent
-        on the stack past the field's own real extent, rather than
-        just the field itself. Two structs whose int8 fields are
-        genuinely, byte-for-byte equal used to compare UNEQUAL because
-        of this -- confirmed by temporarily reverting the fix and
-        seeing this exact test fail (exit 0, not 1) before writing it
-        in here. test_int8_array_equality_equal already covers the
-        identical bug class for an ARRAY of int8 (fixed earlier); this
-        is the STRUCT-FIELD case specifically, which stayed broken
-        until array/struct equality moved to real IR."""
         assert_program_exit_code(
             "type Small struct:\n"
             "    int8 a\n"
@@ -5179,14 +3454,6 @@ class TestStructEquality:
         )
 
     def test_int8_struct_field_equality_not_equal(self):
-        """The bug test_int8_struct_field_equality_equal documents
-        never masks a genuine difference -- it only ever introduces a
-        FALSE mismatch for truly equal values, never a false match for
-        genuinely different ones -- so this side of the comparison
-        already passed even before the fix. Kept as a companion test
-        anyway, to confirm the fix didn't accidentally break the
-        already-correct "genuinely different" case while correcting
-        the "genuinely equal" one."""
         assert_program_exit_code(
             "type Small struct:\n"
             "    int8 a\n"
@@ -5206,16 +3473,6 @@ class TestStructEquality:
         )
 
     def test_uint8_struct_field_equality_equal(self):
-        """The uint8 counterpart to test_int8_struct_field_equality_
-        equal -- same bug, same fix, a different narrow-width type
-        using the identical IRLoad-at-value_type's-own-width code
-        path. 200 is deliberately chosen to also exercise uint8's own
-        unsigned interpretation (0xC8 as a raw byte, which int8 would
-        instead read as -56) -- not that this comparison depends on
-        signedness at all (byte equality never does), but to keep this
-        test from accidentally only ever exercising values that would
-        also happen to work if the field were mistakenly treated as
-        int8."""
         assert_program_exit_code(
             "type Small struct:\n"
             "    uint8 a\n"
@@ -5235,9 +3492,6 @@ class TestStructEquality:
         )
 
     def test_uint8_struct_field_equality_not_equal(self):
-        """The uint8 companion to test_int8_struct_field_equality_
-        not_equal -- see its own docstring for why this side of the
-        comparison was never actually broken by the bug."""
         assert_program_exit_code(
             "type Small struct:\n"
             "    uint8 a\n"
@@ -5257,16 +3511,6 @@ class TestStructEquality:
         )
 
     def test_two_struct_returning_calls_compared_directly(self):
-        """Regression test for a real bug: `makeP1() == makeP2()`, with
-        neither side ever assigned to a variable first, used to raise
-        a hard CodegenError, tracing back to the OLD-style gen_struct_
-        address_into itself -- which never handled a Call operand at
-        all. This was never supported, even old-style -- confirmed by
-        temporarily reverting the fix and watching this exact program
-        fail to compile before writing it in here. A struct LITERAL
-        used directly as an equality operand (`Point(1,2) == Point(3,
-        4)`) needs no equivalent test: semantic.py already rejects
-        that outright, wherever it would appear, not just here."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -5287,31 +3531,7 @@ class TestStructEquality:
 
 
 # ---------------------------------------------------------------------------
-# Methods: `def [type] name(receiver, param2, ...):` declared inside a struct
-# body, called via `receiver.name(args)`. Entirely syntactic sugar, lowered
-# away before codegen.py ever runs: semantic.py's _collect_methods
-# synthesizes an ordinary, mangled-name Function (StructName.methodName --
-# '.' can never appear inside a single Hornet IDENTIFIER token, so this is
-# collision-free by construction, not by an explicit check) with the
-# receiver as an ordinary first Param, and appends it directly to
-# Program.functions. A method CALL parses into an ordinary Call node with a
-# new `receiver` field set (not a separate AST node type -- see Call's own
-# docstring in parser.py for why introducing one would have meant auditing
-# every isinstance(expr, Call) check across this codebase); check_call's own
-# _check_method_call resolves it and REWRITES the node in place -- receiver
-# prepended as the real first argument, name replaced with the mangled one
-# -- so codegen.py needed ZERO changes for this feature at all.
-#
-# test_receiver_via_struct_returning_call is worth calling out specifically:
-# once the receiver is rewritten into an ordinary first argument, it flows
-# through the exact same argument-materialization machinery (_collect_
-# argument_temps / _gen_materialize_argument_temp_into) already built for
-# struct-literal and struct-returning-call ARGUMENTS -- meaning a struct-
-# returning call works directly as a method receiver with no extra code.
-# test_struct_literal_as_receiver_works confirms the identical thing for a
-# struct LITERAL receiver, once semantic.py's own restriction (never
-# specific to methods at all) was lifted -- see check_call's own error
-# message for the full, current list of allowed positions.
+# Methods
 # ---------------------------------------------------------------------------
 
 class TestMethods:
@@ -5331,9 +3551,6 @@ class TestMethods:
         )
 
     def test_method_with_no_declared_return_type_as_a_bare_statement(self):
-        """A method can have no declared return type, exactly like an
-        ordinary function -- called as a bare statement (its own
-        result, if any, discarded) rather than used as a value."""
         assert_program_stdout(
             "type A struct:\n"
             "    int a\n"
@@ -5348,10 +3565,6 @@ class TestMethods:
         )
 
     def test_value_semantics_receiver_is_not_mutated(self):
-        """The receiver is copied on entry, exactly like an ordinary
-        struct-typed parameter -- there are no pointers yet, so a
-        method mutating its own receiver never affects the caller's
-        own value."""
         assert_program_exit_code(
             "type Counter struct:\n"
             "    int n\n"
@@ -5424,11 +3637,6 @@ class TestMethods:
         )
 
     def test_method_and_free_function_sharing_a_name(self):
-        """Methods live in their own registry, keyed by (struct,
-        method) and resolved by receiver type, not by a bare name
-        lookup -- so[O a method and a free function can share a name
-        with zero conflict, unlike struct and function names, which
-        DO share one namespace (see analyze()'s own collision check)."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -5463,9 +3671,6 @@ class TestMethods:
         )
 
     def test_method_name_matching_a_field_name(self):
-        """`w.x()` (call) and `w.x` (field read) are unambiguous
-        purely from whether '(' follows -- no restriction needed to
-        keep a method and a field of the same name apart."""
         assert_program_exit_code(
             "type Weird struct:\n"
             "    int x\n"
@@ -5557,8 +3762,6 @@ class TestMethods:
         )
 
     def test_chained_method_calls(self):
-        """`o.getInner().doubled()` -- the receiver of the SECOND
-        method call is itself the result of the first."""
         assert_program_exit_code(
             "type Inner struct:\n"
             "    int v\n"
@@ -5576,14 +3779,6 @@ class TestMethods:
         )
 
     def test_receiver_via_struct_returning_call(self):
-        """A struct-RETURNING call works directly as a method receiver
-        -- not restricted to a Variable/Field/Index the way it might
-        seem it should be -- because the receiver, once rewritten into
-        an ordinary first argument, is materialized by the exact same
-        machinery already built for struct-returning calls used as
-        ordinary function arguments. See test_struct_literal_as_
-        receiver_works just below for the identical confirmation with
-        a struct LITERAL receiver instead."""
         assert_program_exit_code(
             "type A struct:\n"
             "    int v\n"
@@ -5599,18 +3794,6 @@ class TestMethods:
         )
 
     def test_struct_literal_as_receiver_works(self):
-        """A real gap, found and closed after this arc first shipped:
-        a struct literal used directly as a method call's own receiver
-        (`A(1).foo()`) is now allowed -- the same kind of position a
-        field-access base already is (`A(1).v`), `.` meaning the same
-        thing whether what follows is a field or a method. Needed no
-        IR-building change of its own: method-call desugaring already
-        rewrites the receiver into an ordinary call's first argument
-        before IR-building ever runs, and ir/scalars.py's own _ir_
-        call_arguments already had the matching STRUCT-typed-argument
-        case for a struct-literal Call, built for an already-supported
-        position -- only semantic.py's own restriction needed
-        lifting."""
         assert_program_exit_code(
             "type A struct:\n"
             "    int v\n"
@@ -5682,10 +3865,6 @@ class TestMethods:
         )
 
     def test_struct_literal_as_method_argument(self):
-        """A struct literal works as a method's own argument, exactly
-        like it does for an ordinary function call -- _check_method_
-        call's own argument loop uses _check_expr_allowing_struct_
-        literal, the same helper every other allowed position uses."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -5702,10 +3881,6 @@ class TestMethods:
         )
 
     def test_receiver_plus_six_params_works_via_the_stack(self):
-        """The receiver occupies one of the same slots an ordinary
-        parameter would -- a method with 6 explicit parameters (7
-        slots total, including the receiver) previously hit the exact
-        same limit a 7-parameter free function would; now it doesn't."""
         assert_program_exit_code(
             "type A struct:\n"
             "    int v\n"
@@ -5733,65 +3908,7 @@ class TestMethods:
 
 
 # ---------------------------------------------------------------------------
-# Type aliases: `type Name = TargetType` -- an ALIAS, not a Go-style newtype
-# (`type Name TargetType`, with no '=' -- deliberately not what this is, and
-# not currently supported). Once resolved, an alias is completely
-# indistinguishable from its own target everywhere -- resolved_type on any
-# node just holds the real, underlying Type, with no trace the name was ever
-# an alias at all (test_print_alias_typed_variable is the test that actually
-# proves this most directly: printing an alias-typed variable prints the
-# underlying value, not the alias's own name anywhere).
-#
-# The whole feature is cheap specifically because type_from_name is the ONE
-# function every other type-name resolution in this codebase already calls
-# (a VarDecl's own type, a Param, a struct field, a function's own return
-# type, an array/slice's own element type, recursively) -- adding an
-# `aliases` registry there, threaded through exactly like the existing
-# `structs` registry already is, gives every one of those call sites alias
-# support for free, with no changes needed at any of them beyond passing the
-# new registry through. This did, however, turn out to be a genuinely wide
-# (if shallow) mechanical change: type_from_name is called from semantic.py,
-# codegen.py, AND escape_analysis.py (a third, easy-to-miss call
-# site found only by re-running the full suite after the first two files
-# were updated and seeing escape analysis's own tests still failing).
-#
-# An alias can now target int, bool, str, a struct name, an array or slice
-# type expression (at any nesting depth, with an element type that's itself
-# any of the above, including another alias), or another alias -- every
-# valid target parse_type() itself can produce. Struct names and array/
-# slice types needed two genuinely different kinds of care to add, not
-# equal effort for equal payoff:
-#
-# STRUCT NAMES needed an ORDERING fix, not new logic: a struct FIELD's own
-# type can already be an alias (needing aliases resolved before struct
-# fields are), while an alias can target a struct NAME (needing struct
-# names to already exist before aliases resolve). Solved by splitting what
-# used to be one _collect_structs pass into _reserve_struct_names (just
-# names) and _resolve_struct_fields (the rest), with alias resolution
-# running in between the two.
-#
-# ARRAY/SLICE TARGETS needed genuinely new recursive resolution logic,
-# since type_from_name itself couldn't be reused directly: it expects its
-# own `aliases` dict to already be fully resolved (a single, non-recursive
-# lookup), which isn't true yet while THIS pass is still building it. Split
-# into `resolve` (memoized, cycle-checked, keyed by ALIAS NAME) and
-# `resolve_target` (the actual "what type does this EXPRESSION denote"
-# recursion over bare names and Array/SliceTypeExpr wrapping, calling back
-# into `resolve` whenever it bottoms out at a bare name that's itself
-# another alias). test_array_alias_cycle_through_wrapping_is_rejected is
-# the test that actually proves the existing cycle guard extends correctly
-# to this new recursion with no changes needed: `type A = []B; type B =
-# []A;` is still caught, since resolve_target's own recursion into
-# resolve(target) for a bare alias name is what re-enters `resolve`,
-# regardless of how many array/slice layers sit in between.
-#
-# test_constructing_via_the_alias_name_is_not_supported documents a real,
-# narrower remaining gap: a struct-name alias is fully interchangeable with
-# the real struct name everywhere a type NAME is expected (a VarDecl, a
-# parameter, a field, ...), but NOT for construction -- `PointAlias(1)`
-# still fails, since struct-literal syntax is resolved by check_call's own
-# direct `expr.name in self.structs` membership check, which only ever
-# recognizes a struct's own real name, never an alias for it.
+# Type aliases
 # ---------------------------------------------------------------------------
 
 class TestTypeAliases:
@@ -5845,9 +3962,6 @@ class TestTypeAliases:
         )
 
     def test_forward_referenced_alias(self):
-        """`B` is declared before `A`, the alias it targets -- order
-        doesn't matter, mirroring how a struct field can already
-        reference a struct declared later in the file."""
         assert_program_exit_code(
             "type B = A\n"
             "type A = int\n"
@@ -5882,10 +3996,6 @@ class TestTypeAliases:
         )
 
     def test_alias_typed_vardecl_zero_init(self):
-        """An alias-typed VarDecl with no initializer still gets its
-        own (underlying) implicit zero value -- nothing about zero-
-        init needed to change at all, since resolved_type is already
-        the real, underlying Type by the time it's ever consulted."""
         assert_program_exit_code(
             "type MyInt = int\n"
             "\n"
@@ -5931,9 +4041,6 @@ class TestTypeAliases:
         )
 
     def test_print_alias_typed_variable(self):
-        """Proves an alias leaves no trace of its own name anywhere
-        past resolution: printing an alias-typed variable prints the
-        underlying int value, not 'MyInt' or anything alias-shaped."""
         assert_program_stdout(
             "type MyInt = int\n"
             "\n"
@@ -6018,11 +4125,6 @@ class TestTypeAliases:
         )
 
     def test_alias_to_a_slice_of_another_alias(self):
-        """The array/slice element type can itself be an alias, at
-        any nesting depth -- resolve_target's own bare-name case
-        recurses back into resolve for an alias that isn't resolved
-        yet, the same way a top-level alias-of-alias chain already
-        works."""
         assert_program_exit_code(
             "type MyInt = int\n"
             "type MyIntSlice = []MyInt\n"
@@ -6034,16 +4136,6 @@ class TestTypeAliases:
         )
 
     def test_array_alias_cycle_through_wrapping_is_rejected(self):
-        """`type A = []B; type B = []A;` -- genuinely meaningless, not
-        just a false positive: unlike a struct field (which can safely
-        self-reference through a slice, since the struct itself still
-        has a finite shape even with one recursive field), an alias
-        whose ENTIRE definition is just "a slice of X" has no other
-        structure to bottom out at -- if X never resolves to a real
-        type, the alias itself never means anything, the same failure
-        a direct `type A = A` already represents. Caught by the exact
-        same cycle guard, with no special-casing needed for the
-        wrapping in between."""
         assert_program_semantic_error(
             "type A = []B\n"
             "type B = []A\n"
@@ -6132,8 +4224,6 @@ class TestTypeAliases:
         )
 
     def test_print_array_alias_typed_variable(self):
-        """Same 'no trace of the alias name anywhere' proof as
-        test_print_alias_typed_variable, one type-kind over."""
         assert_program_stdout(
             "type IntArray = [3]int\n"
             "\n"
@@ -6145,12 +4235,6 @@ class TestTypeAliases:
         )
 
     def test_alias_to_a_struct_name(self):
-        """Once lifted (see this class's own module comment for the
-        ordering problem this needed solving), a struct-name target
-        resolves to Type(STRUCT, struct_name=...) -- structurally
-        identical to what type_from_name would produce for the
-        struct's own name used directly, so the alias is interchangeable
-        with it everywhere a type name is expected."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -6195,13 +4279,6 @@ class TestTypeAliases:
         )
 
     def test_constructing_via_the_alias_name_is_not_supported(self):
-        """A struct-name alias is interchangeable with the real struct
-        name everywhere a type NAME is expected, but not for
-        CONSTRUCTION: struct-literal syntax is resolved by check_call's
-        own direct `expr.name in self.structs` membership check, which
-        an alias name never satisfies (self.structs is keyed only by a
-        struct's own real name) -- a separate, narrower gap from
-        general type-name interchangeability, not yet closed."""
         assert_program_semantic_error(
             "type Point struct:\n"
             "    int x\n"
@@ -6227,9 +4304,6 @@ class TestTypeAliases:
         )
 
     def test_struct_declared_before_its_colliding_alias_is_still_rejected(self):
-        """Source order doesn't matter: struct NAMES are reserved in
-        their own, earlier pass regardless of where a struct is
-        textually written relative to the alias that collides with it."""
         assert_program_semantic_error(
             "type Point struct:\n"
             "    int x\n"
@@ -6261,17 +4335,11 @@ class TestTypeAliases:
 
 
 # ---------------------------------------------------------------------------
-# Sum types (`type Name is Variant | Variant (| Variant)*`) -- semantic
-# analysis only (Stage 2): declaration, name resolution, widening a
-# variant struct into its sum type, and every rejection this stage is
-# responsible for. No codegen exists for these yet, so every "accepted"
-# test here stops at analyze() -- there's nothing to compile-and-run
-# against, unlike TestStructs/TestTypeAliases's own happy-path tests.
+# Sum types
 # ---------------------------------------------------------------------------
 
 class TestSumTypes:
 
-    # -- accepted (analyze() must NOT raise) -------------------------------
 
     def test_widening_a_variant_into_a_sum_type_via_var_decl(self):
         ast = _parse(
@@ -6290,11 +4358,6 @@ class TestSumTypes:
         analyze(ast)  # should not raise
 
     def test_widening_a_variant_into_a_sum_type_via_assign(self):
-        """The same widening rule via an ordinary Assign, not just a
-        VarDecl's own initializer -- both go through the identical
-        _types_compatible check, but exercised separately since
-        _check_value_flowing_into_allowing_struct_literal is called
-        from two different call sites for these."""
         ast = _parse(
             "type Circle struct:\n"
             "    int radius\n"
@@ -6312,10 +4375,6 @@ class TestSumTypes:
         analyze(ast)  # should not raise
 
     def test_widening_an_already_typed_variable_not_just_a_bare_literal(self):
-        """`Shape s = c`, c already Circle-typed -- not just a bare
-        `Circle(5)` struct literal -- proving the widening rule lives
-        in _types_compatible itself, not in some struct-literal-
-        specific special case."""
         ast = _parse(
             "type Circle struct:\n"
             "    int radius\n"
@@ -6370,17 +4429,6 @@ class TestSumTypes:
         analyze(ast)  # should not raise
 
     def test_array_of_sum_type_as_a_local_variable(self):
-        """[3]Shape -- allowed as a parameter type, unlike as a struct
-        field (test_sum_type_as_a_struct_field_is_rejected below):
-        nothing embeds it inside another type's own fixed layout, so
-        there's no cycle risk to guard against here. A parameter,
-        deliberately, not a bare local with no initializer -- a sum
-        type (and so, transitively, an array of them) has no natural
-        zero value, so a no-initializer local of this type is its own,
-        separate rejection (test_array_of_sum_type_with_no_initializer_
-        is_rejected below); a parameter needs no initializer at all,
-        so it isolates the ARRAY-of-SUM-as-a-type-position question
-        from that one."""
         ast = _parse(
             "type Circle struct:\n"
             "    int radius\n"
@@ -6396,14 +4444,6 @@ class TestSumTypes:
         analyze(ast)  # should not raise
 
     def test_array_of_sum_type_with_no_initializer_is_rejected(self):
-        """The gap _contains_sum_type_at_any_array_depth exists to
-        close: a bare `[3]Shape shapes` (no initializer) looks, from
-        declared_type.kind alone, like an ordinary ARRAY -- not SUM --
-        so a check that only asked "is the declared type itself SUM"
-        would miss this entirely, letting it through to codegen with
-        no valid zero value to actually write. Found by testing all
-        the way through IR generation, not by review -- see this
-        method's own trace in the codebase history if curious."""
         assert_program_semantic_error(
             "type Circle struct:\n"
             "    int radius\n"
@@ -6438,7 +4478,6 @@ class TestSumTypes:
         )
         analyze(ast)  # should not raise
 
-    # -- rejected -----------------------------------------------------------
 
     def test_widening_an_unrelated_struct_is_rejected(self):
         assert_program_semantic_error(
@@ -6460,11 +4499,6 @@ class TestSumTypes:
         )
 
     def test_variant_naming_an_alias_that_resolves_to_a_scalar_is_accepted(self):
-        """type_from_name resolves aliases transparently, the same
-        choke point every other variant name goes through -- so an
-        alias for a valid scalar variant type works for free, with no
-        dedicated alias-specific handling needed in _resolve_sum_types
-        at all."""
         assert_program_exit_code(
             "type Circle struct:\n"
             "    int radius\n"
@@ -6540,10 +4574,6 @@ class TestSumTypes:
         )
 
     def test_array_of_sum_type_as_a_struct_field_is_also_rejected(self):
-        """Not just a bare Shape field -- an array of them is rejected
-        too, since _directly_embedded_struct_name-style array-
-        unwrapping means [3]Shape as a field is exactly as size-
-        infinite-prone as a bare Shape field would be."""
         assert_program_semantic_error(
             "type Circle struct:\n"
             "    int radius\n"
@@ -6664,26 +4694,7 @@ class TestSumTypes:
 
 
 # ---------------------------------------------------------------------------
-# Sum types, stage 4: actual codegen. No new IR instruction types were
-# introduced for widening (_ir_write_sum_type_value_into composes
-# ordinary IRStore/IRBinOp/IRCopy/IRCall -- see ir/sum_types.py's own
-# module docstring), so these are end-to-end compile-AND-RUN tests
-# confirming that composition survives optimization, register
-# allocation, and lowering intact -- not (only) new codegen rules.
-#
-# A second, distinct class of bug turned up only here, one level past
-# TestSumTypes' own IR-construction tests: every VarDecl/Assign/Return/
-# IndexAssign fix that intercepts a sum-typed target unconditionally
-# (checking only var_type.kind == SUM) crashes the moment the SOURCE
-# is ALREADY sum-typed too (`Shape t = s`, s already Shape) --
-# _ir_write_sum_type_value_into always tries to read source_struct_
-# type.struct_name to pick a discriminant, which is None for a sum
-# type, not a struct. Every widening check needed a second condition
-# (type_of(source).kind == TypeKind.STRUCT) restricting it to GENUINE
-# widening, falling through to the ordinary composite-copy path
-# otherwise -- found only by actually compiling and running a program
-# that assigns an already-Shape-typed value into another Shape slot,
-# not by any of the narrower IR-construction tests in TestSumTypes.
+# Sum types
 # ---------------------------------------------------------------------------
 
 class TestSumTypesCodegen:
@@ -6709,10 +4720,6 @@ class TestSumTypesCodegen:
         )
 
     def test_var_decl_from_already_sum_typed_variable_runs(self):
-        """The actual bug: `Shape t = s`, s already Shape-typed -- NOT
-        widening. Crashed unconditionally before the source-type
-        check was added (ValueError: None is not in list, from trying
-        to look up a struct name that doesn't exist on a sum type)."""
         assert_program_exit_code(
             self._SHAPE_DECLS +
             "def int main():\n"
@@ -6746,12 +4753,6 @@ class TestSumTypesCodegen:
         )
 
     def test_array_literal_of_already_sum_typed_elements_runs(self):
-        """[a, b] into a [2]Shape, a and b already Shape-typed -- the
-        actual bug: _ir_write_composite_value_into's own SUM check
-        originally fired unconditionally, crashing on an already-sum-
-        typed element the same way the VarDecl case above did, just
-        one level deeper (inside array-literal construction rather
-        than at a bare VarDecl)."""
         assert_program_exit_code(
             self._SHAPE_DECLS +
             "def int main():\n"
@@ -6786,14 +4787,6 @@ class TestSumTypesCodegen:
         )
 
     def test_everything_together_runs(self):
-        """Every position at once -- VarDecl (literal and from an
-        existing variable), Assign, an array literal of shapes,
-        IndexAssign, append into a sum-typed slice, and an already
-        sum-typed function argument -- compiled, assembled, linked
-        with the real runtime, and actually executed. The first real
-        confirmation that sum types work all the way through
-        optimization, register allocation, and lowering, not just
-        through IR construction."""
         assert_program_exit_code(
             self._SHAPE_DECLS +
             "def int takesShape(Shape s):\n"
@@ -6813,32 +4806,7 @@ class TestSumTypesCodegen:
 
 
 # ---------------------------------------------------------------------------
-# Sum types, print() support. A sum-typed value prints EXACTLY as its
-# active variant would on its own -- `Circle(radius: 5)`, never `Shape
-# (Circle(radius: 5))` -- matching how every language with real sum
-# types (Rust, the ML family, Swift, Kotlin/Scala) prints a variant's
-# own identity, never its enclosing type's. No new codegen dispatch was
-# needed for this: print() already works by walking a runtime TYPE
-# DESCRIPTOR (see _get_or_build_type_descriptor's own module docstring
-# in ir/strings.py) rather than compiling per-type formatting code, so
-# "print support" meant teaching that one generic mechanism (on both
-# the Python side that builds the descriptor and the C runtime side in
-# runtime/runtime.c that reads it) a new descriptor shape, not adding
-# per-call-site logic anywhere.
-#
-# The one real bug found here was NOT in the descriptor/stringify
-# mechanism itself -- that worked correctly the first time for a bare
-# local variable. It was in something print() merely exposed: a sum-
-# typed FUNCTION PARAMETER was completely broken before this, since
-# ir/builder.py's own parameter-prologue setup (_ir_param_setup) checks
-# `p_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT)` in two places to
-# decide a parameter is passed by address and needs a copy-in step --
-# neither included SUM, so a sum-typed parameter fell into the
-# scalar/str branch instead, reading the caller's POINTER as if it
-# were the parameter's own value with no copy at all. A small Shape
-# printed garbage; a larger one segfaulted. See test_sum_typed_
-# parameter_prints_correctly below for the test that caught it --
-# every other test in this class passed before that fix landed.
+# Sum types: print
 # ---------------------------------------------------------------------------
 
 class TestSumTypesPrint:
@@ -6855,11 +4823,6 @@ class TestSumTypesPrint:
     )
 
     def test_bare_struct_baseline(self):
-        """Not a sum type at all -- just confirms the expected struct-
-        print format this whole class compares against. print(x) needs
-        x assigned to a variable first -- check_print_call uses plain
-        check_expr, not the struct-literal-allowing variant, a pre-
-        existing restriction unrelated to sum types."""
         assert_program_stdout(
             self._SHAPE_DECLS +
             "def int main():\n"
@@ -6870,9 +4833,6 @@ class TestSumTypesPrint:
         )
 
     def test_sum_typed_value_prints_identically_to_the_bare_struct(self):
-        """The actual design decision this whole feature rests on:
-        Shape holding a Circle prints EXACTLY like a bare Circle --
-        no `Shape(...)` wrapper anywhere."""
         assert_program_stdout(
             self._SHAPE_DECLS +
             "def int main():\n"
@@ -6893,10 +4853,6 @@ class TestSumTypesPrint:
         )
 
     def test_three_variants_each_print_correctly(self):
-        """Discriminant indexing beyond 0/1 -- Triangle is index 2, and
-        its own variant descriptor (found via the tag reading
-        variant_desc_ptrs[2]) must be the right one, not Circle's or
-        Square's."""
         assert_program_stdout(
             "type Circle struct:\n"
             "    int radius\n"
@@ -6931,10 +4887,6 @@ class TestSumTypesPrint:
         )
 
     def test_variant_with_a_string_field_quotes_correctly(self):
-        """A struct field is always quoted regardless of nesting depth
-        (hornet_stringify's own STRUCT case hardcodes quote_strings=1
-        for every field, unconditionally) -- so this must match
-        exactly whether the Label is bare or wrapped in a Shape."""
         assert_program_stdout(
             "type Label struct:\n"
             "    str text\n"
@@ -6954,15 +4906,6 @@ class TestSumTypesPrint:
         )
 
     def test_sum_typed_parameter_prints_correctly(self):
-        """The actual bug: a sum-typed parameter's own prologue copy-
-        in was skipped entirely (see this class's own module-level
-        comment) -- passed by address, but the callee never copied the
-        pointed-to value into its own local slot at all, so it read
-        garbage (or segfaulted, for a wider Shape) wherever the
-        parameter was then used. This is a real end-to-end print, not
-        an IR-shape check -- a wrong copy-in silently produces
-        DIFFERENT wrong output on every run (whatever memory happens
-        to follow), which an exit-code-only test would never catch."""
         assert_program_stdout(
             self._SHAPE_DECLS +
             "def int printIt(Shape s):\n"
@@ -6977,12 +4920,6 @@ class TestSumTypesPrint:
         )
 
     def test_sum_typed_parameter_passed_through_another_function(self):
-        """One level further than the test above -- a sum-typed
-        parameter received by one function, then passed on (still
-        sum-typed, no re-widening) as an argument to a second, not
-        just printed directly -- stresses the parameter copy-in
-        alongside the already-sum-typed argument-passing path
-        together, not each in isolation."""
         assert_program_stdout(
             self._SHAPE_DECLS +
             "def int printIt(Shape s):\n"
@@ -7000,22 +4937,7 @@ class TestSumTypesPrint:
 
 
 # ---------------------------------------------------------------------------
-# Sum type narrowing, stage 2: semantic analysis only. `if NAME is
-# TypeName:` narrows NAME to TypeName for exactly the then_body (never
-# else_body -- no nameable "not Circle" type once a sum type has more
-# than two variants), by re-declaring it in the scope analyze_if
-# already pushes there, an ordinary shadow of the outer, sum-typed
-# binding (see _declare's own "fine to shadow" docstring). Reassigning
-# a narrowed name anywhere within its narrowed scope is rejected
-# outright -- not "for now" pending a future relaxation with an
-# obvious shape, a genuinely open question with no planned resolution.
-#
-# Stage 3's own actual codegen -- the runtime discriminant comparison
-# and narrowed field access's own base-address-plus-tag-width offset
-# -- is tested separately, in TestNarrowingCodegen below: these stay
-# semantic-analysis-only (analyze() either raises or doesn't), since
-# they were all true before Stage 3 ever existed and don't need
-# re-verifying at the codegen level too.
+# Sum type narrowing
 # ---------------------------------------------------------------------------
 
 class TestNarrowing:
@@ -7031,7 +4953,6 @@ class TestNarrowing:
         "\n"
     )
 
-    # -- accepted (analyze() must NOT raise) -------------------------------
 
     def test_narrowed_field_access(self):
         ast = _parse(
@@ -7070,9 +4991,6 @@ class TestNarrowing:
         analyze(ast)  # should not raise
 
     def test_reassigning_an_unrelated_variable_inside_narrowed_branch_is_fine(self):
-        """The reassignment rejection is keyed to the specific
-        narrowed NAME -- an ordinary local, unrelated to the
-        narrowing, is still freely reassignable in the same scope."""
         ast = _parse(
             self._SHAPE_DECLS +
             "def int main():\n"
@@ -7098,7 +5016,6 @@ class TestNarrowing:
         )
         analyze(ast)  # should not raise
 
-    # -- rejected -------------------------------------------------------
 
     def test_reassigning_the_narrowed_variable_is_rejected(self):
         assert_program_semantic_error(
@@ -7170,8 +5087,6 @@ class TestNarrowing:
         )
 
     def test_narrowing_does_not_leak_outside_the_if(self):
-        """s.radius after the if -- s is Shape again there, which has
-        no field called radius at all."""
         assert_program_semantic_error(
             self._SHAPE_DECLS +
             "def int main():\n"
@@ -7196,23 +5111,7 @@ class TestNarrowing:
 
 
 # ---------------------------------------------------------------------------
-# Sum type narrowing, stage 3: actual codegen. The IsCheck condition
-# itself is an ordinary tag-vs-discriminant comparison (no new IR
-# instruction kind -- the same IRBinOp/EQUAL shape `x == 5` already
-# uses); narrowed field access needed real, new work in _ir_struct_
-# address's own Variable case, adding SUM_TYPE_TAG_WIDTH to the
-# computed address whenever a reference's own resolved_type (Circle,
-# set by semantic.py's analyze_if) differs from its slot's unchanging
-# declared type (Shape) -- see that method's own docstring for the
-# full reasoning, including why a genuinely sum-typed reference (every
-# OTHER caller of that same Variable case, from before narrowing
-# existed) must NOT get that offset.
-#
-# Deliberately verified by actually compiling, linking, and RUNNING
-# each of these, not just inspecting the generated IR (see tests/ir/
-# test_sum_types.py for that level) -- a wrong offset here wouldn't
-# fail to compile, it would silently read the wrong bytes, which only
-# an actual runtime value can catch.
+# Sum type narrowing
 # ---------------------------------------------------------------------------
 
 class TestNarrowingCodegen:
@@ -7252,10 +5151,6 @@ class TestNarrowingCodegen:
         )
 
     def test_second_field_of_the_narrowed_variant_reads_correctly(self):
-        """s.height -- Square's SECOND field, a non-zero offset within
-        Square on top of the tag-width offset. Confirms the two
-        offsets compose (tag width, then field offset), not that only
-        one or the other happens to be right."""
         assert_program_exit_code(
             self._SHAPE_DECLS +
             "def int main():\n"
@@ -7299,12 +5194,6 @@ class TestNarrowingCodegen:
         )
 
     def test_narrowing_a_function_parameter(self):
-        """The identical mechanism, on a PARAMETER rather than a local
-        -- checked directly, not assumed to follow from the local-
-        variable case, since a parameter's own address comes through
-        the calling convention's copy-in prologue rather than an
-        ordinary VarDecl, and parameters have been the one recurring
-        blind spot throughout this entire feature."""
         assert_program_exit_code(
             self._SHAPE_DECLS +
             "def int describe(Shape s):\n"
@@ -7342,14 +5231,6 @@ class TestNarrowingCodegen:
             expected=12,
         )
 
-    # -- a narrowed variable used everywhere else a struct value can
-    # flow -- not just field access. Every one of these goes through
-    # the SAME _ir_struct_address mechanism field access does, but
-    # each has its own, separate calling code (print, VarDecl/Assign,
-    # argument-passing, Return, equality), and this whole feature has
-    # repeatedly shown that a shared mechanism doesn't guarantee every
-    # caller of it was actually exercised -- so each is checked
-    # directly rather than assumed to follow from the others.
 
     def test_printing_a_narrowed_variable_prints_as_its_own_variant(self):
         assert_program_stdout(
@@ -7418,28 +5299,7 @@ class TestNarrowingCodegen:
 
 
 # ---------------------------------------------------------------------------
-# Exhaustive matching (`match NAME: is Type: ... [else: ...]`). Introduces
-# no new AST node -- parse_match desugars entirely into an ordinary
-# nested-If chain, the identical shape an elif chain already has, one
-# IsCheck-conditioned If per arm (see If's own docstring in parser.py).
-# That means narrowing, IR generation, and codegen all already handle
-# a match's own desugared output with zero new code -- the only
-# genuinely new logic is semantic.py's own _check_match_exhaustiveness
-# (duplicate-arm and missing-variant checking) and always_returns' own
-# companion awareness (a proven-exhaustive match with no trailing else
-# still guarantees a return, the same way an if/else where both sides
-# return already does).
-#
-# The one thing that made this harder than "just walk else_body until
-# it runs out": an ordinary, hand-written `if NAME is Type:` can
-# legally be the SOLE statement inside a match's own explicit `else:`
-# block, and is indistinguishable BY SHAPE ALONE from one more
-# synthesized arm (identical IsCheck condition, identical single-
-# statement else_body). Walking a FIXED count (match_arm_count, set
-# once at desugaring time) rather than inferring the chain's own
-# length from shape is what makes this sound -- see test_ambiguous_
-# ordinary_if_inside_explicit_else_is_not_mistaken_for_another_arm
-# below for the case that would otherwise break.
+# Exhaustive matching
 # ---------------------------------------------------------------------------
 
 class TestExhaustiveMatching:
@@ -7455,7 +5315,6 @@ class TestExhaustiveMatching:
         "\n"
     )
 
-    # -- accepted (analyze() must NOT raise) -------------------------------
 
     def test_exhaustive_two_arm_match(self):
         ast = _parse(
@@ -7512,12 +5371,6 @@ class TestExhaustiveMatching:
         analyze(ast)  # should not raise
 
     def test_ambiguous_ordinary_if_inside_explicit_else_is_not_mistaken_for_another_arm(self):
-        """The case match_arm_count exists specifically to get right:
-        an ordinary `if s is Square:` as the sole statement inside the
-        match's own explicit else -- must NOT be treated as another
-        arm of the SAME match (which would, among other things, mean
-        exhaustiveness is deemed already satisfied by an arm that was
-        never actually declared as one)."""
         ast = _parse(
             self._SHAPE_DECLS +
             "def int main():\n"
@@ -7534,13 +5387,6 @@ class TestExhaustiveMatching:
         analyze(ast)  # should not raise
 
     def test_exhaustive_match_with_no_else_and_no_trailing_return_satisfies_all_paths_return(self):
-        """The always_returns companion piece: a function whose ENTIRE
-        body is an exhaustive match with no trailing else, and no
-        return statement after the match either, must still satisfy
-        "all paths return" -- exactly the case an ordinary if/elif
-        with no else could never satisfy, since a match's own
-        exhaustiveness has already been verified as a genuine
-        guarantee, not just an assumption."""
         ast = _parse(
             self._SHAPE_DECLS +
             "def int describe(Shape s):\n"
@@ -7552,7 +5398,6 @@ class TestExhaustiveMatching:
         )
         analyze(ast)  # should not raise
 
-    # -- rejected -------------------------------------------------------
 
     def test_missing_variant_is_rejected_and_named(self):
         assert_program_semantic_error(
@@ -7617,10 +5462,6 @@ class TestExhaustiveMatching:
         )
 
     def test_ordinary_if_elif_with_no_else_is_still_rejected(self):
-        """Regression check: an ORDINARY if/elif (is_match=False) with
-        no else must still be correctly rejected by always_returns --
-        confirms the new match-aware branch didn't accidentally make
-        this check MORE permissive for non-match code."""
         assert_program_semantic_error(
             "def int describe(int x):\n"
             "    if x > 0:\n"
@@ -7676,21 +5517,7 @@ class TestExhaustiveMatchingCodegen:
 
 
 class TestNarrowingNonBareVariable:
-    """`is`/`match` narrowing a subject that isn't already a bare
-    variable -- an array/slice element, a function call's own return
-    value -- via an explicit `as NAME` binding (see IsCheck's own
-    docstring in parser.py, and analyze_if's own has_binding comment,
-    for the full mechanism: NAME is declared, once, with subject's own
-    FULL type, in a scope wrapping the whole if/else, before the
-    condition itself is even checked; narrowing NAME within then_body
-    from that point on is the IDENTICAL, unchanged mechanism a bare-
-    variable subject already uses).
-
-    Struct fields are deliberately NOT covered here: a struct field
-    can't be sum-typed at all yet (a separate, prerequisite gap,
-    unrelated to narrowing itself -- see test_sum_typed_struct_field_
-    is_still_rejected below, which just confirms that boundary hasn't
-    shifted)."""
+    """`is`/`match` on a subject that is not a bare variable."""
 
     _SHAPE_DECLS = (
         "type Circle struct:\n"
@@ -7741,10 +5568,6 @@ class TestNarrowingNonBareVariable:
         )
 
     def test_bare_variable_subject_can_still_be_explicitly_renamed(self):
-        """`x is Circle as y` -- x keeps its own, original, un-
-        narrowed type outside the branch (it was never re-declared,
-        just read once to initialize y's own, separate binding), and
-        y is a genuine copy narrowed to Circle -- both readable."""
         assert_program_exit_code(
             self._SHAPE_DECLS +
             "def int main():\n"
@@ -7756,12 +5579,6 @@ class TestNarrowingNonBareVariable:
         )
 
     def test_binding_stays_in_scope_and_un_narrowed_in_else(self):
-        """The binding itself (not its narrowing) is declared in a
-        scope enclosing both then_body AND else_body -- else_body
-        still sees 'c', at Shape, and can run an ordinary, further
-        is-check on it (no 'as' needed there: by that point c is
-        already a bare variable with its own existing storage,
-        exactly like any other)."""
         assert_program_exit_code(
             self._SHAPE_DECLS +
             "def int main():\n"
@@ -7776,19 +5593,6 @@ class TestNarrowingNonBareVariable:
         )
 
     def test_array_element_subject_evaluated_exactly_once(self):
-        """The core correctness property this whole feature exists
-        for: reading shapes[nextIndex(p)] inside then_body must NOT
-        re-evaluate nextIndex(p) a second time -- a naive `if
-        shapes[i] is Circle: ... shapes[i].radius ...` (re-indexing
-        for every use) would call it twice. nextIndex returns its
-        counter's own pre-increment value, so the counter's own final
-        value directly reports how many times it was actually called.
-
-        c.radius * 10 (not * 100 -- the exit code this ultimately
-        becomes is truncated to 8 bits, so anything at or past 256
-        wraps silently rather than failing loudly; keeping every term
-        comfortably under that avoids the result meaning something
-        other than what it looks like)."""
         assert_program_exit_code(
             self._SHAPE_DECLS +
             "def int nextIndex(*int counter):\n"
@@ -7807,14 +5611,6 @@ class TestNarrowingNonBareVariable:
         )
 
     def test_call_subject_evaluated_exactly_once(self):
-        """The Call counterpart: makeShape(p) must be called exactly
-        once, not once (for the is-check) plus again for every field
-        read inside then_body. Circle's own radius is a fixed 9,
-        independent of current -- current only decides Circle vs
-        Square, so c.radius's own value isn't entangled with how many
-        times makeShape happened to be called, keeping the two things
-        this test checks (the field reads correctly; the call
-        happened once) independently legible in the one result."""
         assert_program_exit_code(
             self._SHAPE_DECLS +
             "def Shape makeShape(*int counter):\n"
@@ -7834,11 +5630,6 @@ class TestNarrowingNonBareVariable:
         )
 
     def test_match_with_call_subject_evaluated_exactly_once_even_across_arms(self):
-        """The property that actually motivated NOT setting subject
-        on every arm's own IsCheck (see parse_match's own docstring):
-        makeShape(p) must be called exactly once even though the
-        match only succeeds on its THIRD arm, after two failed checks
-        -- a naive per-arm re-check would call it three times."""
         assert_program_exit_code(
             "type Circle struct:\n"
             "    int radius\n"
@@ -7870,8 +5661,6 @@ class TestNarrowingNonBareVariable:
         )
 
     def test_match_bare_subject_still_works_unrenamed(self):
-        """match NAME: with no 'as' at all -- the pre-existing shape,
-        confirmed unaffected by parse_match's own restructuring."""
         assert_program_exit_code(
             self._SHAPE_DECLS +
             "def int main():\n"
@@ -7911,18 +5700,6 @@ class TestNarrowingNonBareVariable:
         )
 
     def test_non_sum_typed_subject_is_rejected(self):
-        """arr[0] is int-typed, not sum-typed -- rejected with a
-        message that names the actual expression bound to 'c' rather
-        than implying 'c' was some pre-existing, wrongly-typed
-        variable (see check_is_check's own docstring for why the two
-        cases need different wording). Checked against Circle, a
-        declared struct, rather than a scalar keyword like `int`:
-        `int` itself is a reserved type keyword, not a generic
-        IDENTIFIER token, so `is int` doesn't even parse -- irrelevant
-        to what this test means to check anyway, since check_is_check
-        rejects arr[0] itself for not being sum-typed before it ever
-        looks at whether the type name on the right is a declared
-        struct at all."""
         assert_program_semantic_error(
             self._SHAPE_DECLS +
             "def int main():\n"
@@ -7948,9 +5725,6 @@ class TestNarrowingNonBareVariable:
         )
 
     def test_sum_typed_struct_field_is_still_rejected(self):
-        """Confirms the deliberately out-of-scope boundary hasn't
-        shifted: a struct field still can't be sum-typed at all,
-        independent of narrowing -- see this class's own docstring."""
         assert_program_semantic_error(
             self._SHAPE_DECLS +
             "type Holder struct:\n"
@@ -7962,14 +5736,6 @@ class TestNarrowingNonBareVariable:
         )
 
     def test_two_independent_bindings_coexist(self):
-        """Two separate is-checks, each with its own subject and its
-        own binding name, nested -- confirms each gets its own,
-        distinct slot (see _allocate_local_slot's own docstring) and
-        neither's narrowing leaks into or clobbers the other's.
-
-        c.radius * 10, not * 100 -- see test_array_element_subject_
-        evaluated_exactly_once's own comment on why every term here
-        stays comfortably under the 256 an exit code truncates to."""
         assert_program_exit_code(
             self._SHAPE_DECLS +
             "def int main():\n"
@@ -7984,14 +5750,7 @@ class TestNarrowingNonBareVariable:
 
 
 # ---------------------------------------------------------------------------
-# Sum types, scalar/str variants: extends TestSumTypes/TestNarrowing/
-# TestExhaustiveMatching's own struct-only coverage to a variant that's a
-# scalar (int/int8/uint8/int64/bool) or str, mixed freely with struct
-# variants in the same sum type. Widening/narrowing/match/exhaustiveness
-# are all the SAME mechanism regardless of variant kind (see semantic.py's
-# own _types_compatible and ir/sum_types.py's own module docstring) --
-# these tests exist to prove that generalization actually holds, not to
-# re-litigate behavior TestSumTypes already covers for structs.
+# Sum types, scalar/str variants
 # ---------------------------------------------------------------------------
 
 class TestScalarAndStrVariants:
@@ -8004,7 +5763,6 @@ class TestScalarAndStrVariants:
         "\n"
     )
 
-    # -- accepted / rejected at the semantic level --------------------------
 
     def test_two_scalar_variants_parses_and_resolves(self):
         assert_program_exit_code(
@@ -8025,9 +5783,6 @@ class TestScalarAndStrVariants:
         )
 
     def test_duplicate_scalar_variant_by_different_spelling_is_rejected(self):
-        """`byte` and `uint8` are the identical Type -- rejected exactly
-        like `int | int`, not treated as two distinct variants just
-        because they're spelled differently."""
         assert_program_semantic_error(
             "type Number is byte | uint8\n"
             "\n"
@@ -8037,8 +5792,6 @@ class TestScalarAndStrVariants:
         )
 
     def test_every_scalar_kind_is_a_valid_variant(self):
-        """int8/uint8/int64/bool alongside int/str -- not just the two
-        kinds the rest of this class focuses on."""
         assert_program_exit_code(
             "type Anything is int | int8 | uint8 | int32 | bool | str\n"
             "\n"
@@ -8055,7 +5808,6 @@ class TestScalarAndStrVariants:
             expected=0,
         )
 
-    # -- widening -------------------------------------------------------
 
     def test_widening_an_int_literal_prints_correctly(self):
         assert_program_stdout(
@@ -8068,9 +5820,6 @@ class TestScalarAndStrVariants:
         )
 
     def test_widening_a_str_literal_prints_correctly(self):
-        """A str variant, printed as part of a sum-typed container,
-        quotes correctly -- the identical convention a struct's own
-        str field already follows (see TestSumTypesPrint)."""
         assert_program_stdout(
             self._MIXED_DECLS +
             "def int main():\n"
@@ -8102,12 +5851,6 @@ class TestScalarAndStrVariants:
         )
 
     def test_widening_a_scalar_function_argument(self):
-        """Regression test: the argument-marshaling loop's own
-        widening check used to fire only for a STRUCT-typed argument,
-        so a scalar argument passed to a sum-typed parameter never got
-        tagged at all -- it was passed as a raw scalar where the
-        callee expected a pointer to a tagged, sized box, corrupting
-        memory instead of raising a clean error."""
         assert_program_stdout(
             self._MIXED_DECLS +
             "def int describe(Mixed m):\n"
@@ -8121,16 +5864,6 @@ class TestScalarAndStrVariants:
         )
 
     def test_widening_a_scalar_return_value(self):
-        """Regression test: Return's own is_composite_return gate
-        decided whether to even consider the hidden-pointer widening
-        path at all based on the VALUE's own type, never the
-        function's declared return type -- so `return 99` from a
-        function declared to return a sum type took the ordinary
-        scalar-return path (returning 99 in a register) instead of
-        writing a tagged value through the hidden pointer the caller
-        expected, silently leaving the caller's own memory untouched
-        (read back as whatever was already there -- in practice, an
-        all-zero Circle)."""
         assert_program_stdout(
             self._MIXED_DECLS +
             "def Mixed makeInt():\n"
@@ -8156,7 +5889,6 @@ class TestScalarAndStrVariants:
             "'hi'\n",
         )
 
-    # -- narrowing --------------------------------------------------------
 
     def test_narrowing_to_int_reads_back_a_usable_value(self):
         assert_program_exit_code(
@@ -8216,8 +5948,6 @@ class TestScalarAndStrVariants:
         )
 
     def test_all_three_variant_kinds_narrowed_across_array_elements(self):
-        """Struct, int, and str variants side by side in one array,
-        each correctly narrowed and read back in turn."""
         assert_program_stdout(
             self._MIXED_DECLS +
             "def int main():\n"
@@ -8247,7 +5977,6 @@ class TestScalarAndStrVariants:
             expected=1,
         )
 
-    # -- match / exhaustiveness --------------------------------------------
 
     def test_match_with_a_branch_per_variant_kind(self):
         assert_program_stdout(
@@ -8299,18 +6028,7 @@ class TestScalarAndStrVariants:
         )
 
 # ---------------------------------------------------------------------------
-# Sum types, array/slice/pointer variants: extends TestScalarAndStrVariants'
-# own coverage to a variant that's an array, a slice, or a pointer. Widening
-# already needed no new code for any of these three (see the widening-
-# detection generalization done for scalar/str variants) -- these tests
-# exist mainly to prove the NARROWING side, which did need new work: _ir_
-# array_address/_ir_slice_address gained the identical sum-narrowing branch
-# _ir_struct_address already had, and _ir_indexable_base's own separate
-# slice-Variable leaf (used by print/arguments) had to be made to delegate
-# to it rather than duplicating the same logic a second time. _ir_address_
-# of (`&x`) also needed this branch, for `&n` on a narrowed scalar/pointer
-# binding -- a gap from the scalar/str arc, only surfaced by testing this
-# arc's own pointer variant.
+# Sum types, array/slice/pointer variants
 # ---------------------------------------------------------------------------
 
 class TestArraySliceAndPointerVariants:
@@ -8323,7 +6041,6 @@ class TestArraySliceAndPointerVariants:
         "\n"
     )
 
-    # -- accepted / rejected at the semantic level --------------------------
 
     def test_array_slice_and_pointer_each_parse_and_resolve_as_variants(self):
         assert_program_exit_code(
@@ -8352,8 +6069,6 @@ class TestArraySliceAndPointerVariants:
         )
 
     def test_arrays_of_different_size_are_distinct_variants(self):
-        """[3]int and [4]int are genuinely different Types -- not a
-        duplicate the way two spellings of the same type are."""
         assert_program_exit_code(
             "type X is [3]int | [4]int\n"
             "\n"
@@ -8390,11 +6105,6 @@ class TestArraySliceAndPointerVariants:
         )
 
     def test_array_of_a_sum_type_as_a_variant_is_rejected(self):
-        """A sum type can't be reached as a variant even through array
-        wrapping -- the identical restriction a struct field already
-        has, inherited for free since type_from_name's own recursive
-        element_type resolution passes the same sum_types=None
-        _resolve_sum_types itself passes at the top level."""
         assert_program_semantic_error(
             "type Circle struct:\n"
             "    int radius\n"
@@ -8412,10 +6122,6 @@ class TestArraySliceAndPointerVariants:
         )
 
     def test_a_sum_type_named_bare_as_a_variant_is_rejected(self):
-        """The same restriction as the array-wrapped case above, but
-        for a sum type named directly (not through any wrapping) --
-        _resolve_sum_types's own dedicated check for this shape,
-        rather than type_from_name's generic "Unknown type"."""
         assert_program_semantic_error(
             "type Circle struct:\n"
             "    int radius\n"
@@ -8432,7 +6138,6 @@ class TestArraySliceAndPointerVariants:
             match="is itself a sum type",
         )
 
-    # -- widening -------------------------------------------------------
 
     def test_widening_an_array_literal(self):
         assert_program_exit_code(
@@ -8549,7 +6254,6 @@ class TestArraySliceAndPointerVariants:
             "33\n55\n",
         )
 
-    # -- narrowing --------------------------------------------------------
 
     def test_false_branch_when_narrowing_to_array_but_actual_variant_differs(self):
         assert_program_exit_code(
@@ -8608,11 +6312,6 @@ class TestArraySliceAndPointerVariants:
         )
 
     def test_narrowing_to_slice_when_the_sum_type_is_heap_promoted(self):
-        """A sum type large enough to trigger heap promotion (its own
-        widest variant, [5000]int, well over the stack-array
-        threshold), narrowed to its OTHER, small slice variant --
-        exercises _ir_slice_address's own heap-allocated branch, not
-        just its stack-resident fast path."""
         assert_program_exit_code(
             "type Thing is [5000]int | []int\n"
             "\n"
@@ -8626,12 +6325,6 @@ class TestArraySliceAndPointerVariants:
         )
 
     def test_address_of_a_narrowed_scalar_binding(self):
-        """Regression test for a gap from the scalar/str arc, only
-        surfaced while testing this one: _ir_address_of's own bare-
-        Variable case had no sum-narrowing awareness at all, so `&n`
-        on a narrowed-to-int binding returned the address of the
-        WHOLE sum-typed slot (its own discriminant tag), not n's own
-        value past it."""
         assert_program_exit_code(
             "type Mixed is int | str\n"
             "\n"
@@ -8657,7 +6350,6 @@ class TestArraySliceAndPointerVariants:
             expected=20,
         )
 
-    # -- match / exhaustiveness --------------------------------------------
 
     def test_match_with_all_six_variant_kinds(self):
         assert_program_stdout(
@@ -8705,12 +6397,7 @@ class TestArraySliceAndPointerVariants:
         )
 
 # ---------------------------------------------------------------------------
-# Dict, stage 1: grammar, type system, and literal construction --
-# dict[K]V ages = dict[K]V{k1: v1, k2: v2, ...}. No indexing/lookup yet
-# (that's stage 2), so print() is the only way these tests can verify a
-# literal's own contents ended up correct. Key type is restricted to a
-# fixed, hashable/comparable set (int/int8/uint8/int64/bool/str); value
-# type is unrestricted, same as an array's own element type.
+# Dict
 # ---------------------------------------------------------------------------
 
 class TestDicts:
@@ -8753,7 +6440,6 @@ class TestDicts:
             expected=0,
         )
 
-    # -- rejected at the semantic level -------------------------------------
 
     def test_value_type_mismatch_is_rejected(self):
         assert_program_semantic_error(
@@ -8811,7 +6497,6 @@ class TestDicts:
             expected=0,
         )
 
-    # -- codegen: construction + print ---------------------------------------
 
     def test_str_keyed_dict_prints_correctly(self):
         assert_program_stdout(
@@ -8854,9 +6539,6 @@ class TestDicts:
         )
 
     def test_multiple_entries_all_present_regardless_of_print_order(self):
-        """A hash table has no guaranteed iteration order -- this
-        checks both entries are PRESENT (each 'key': value substring
-        appears somewhere), not their relative order."""
         result = compile_and_run(
             "def int main():\n"
             "    dict[str]int ages = dict[str]int{\n"
@@ -8870,16 +6552,6 @@ class TestDicts:
         assert "'bob': 17" in result.stdout
 
     def test_escaping_dict_variable_survives_past_its_own_function(self):
-        """Regression test for a real bug: _ir_dict_address's own
-        'ordinary' branch originally never checked heap-allocation
-        status at all, copied from _ir_slice_address's own fast path,
-        which gets away without one only because &s for a slice never
-        actually reaches that method (handled entirely within _ir_
-        address_of instead). A dict's own address, unlike a slice's,
-        CAN escape via `&d` and still reaches _ir_dict_address
-        afterward -- so skipping the check left an escaping dict's own
-        descriptor stack-allocated, printing as `dict[str]int{}`
-        (empty) instead of its real contents."""
         assert_program_stdout(
             "def *dict[str]int makeDictPtr():\n"
             "    dict[str]int d = dict[str]int{'x': 1}\n"
@@ -8892,7 +6564,6 @@ class TestDicts:
             "dict[str]int{'x': 1}\n",
         )
 
-    # -- stage 2: indexing (read/write), panic-on-miss, growth --------------
 
     def test_read_and_write_and_overwrite(self):
         assert_program_stdout(
@@ -8955,11 +6626,6 @@ class TestDicts:
         )
 
     def test_compound_assignment(self):
-        """Regression test for a real bug: the dict-specific
-        IndexAssign branch originally never checked stmt.compound_op
-        at all, unconditionally overwriting with the raw RHS -- `d[k]
-        += 10` on an existing entry of 1 produced 10 (the raw RHS),
-        not 11 (1 + 10)."""
         assert_program_stdout(
             "def int main():\n"
             "    dict[str]int counts = dict[str]int{'a': 1}\n"
@@ -8970,10 +6636,6 @@ class TestDicts:
         )
 
     def test_compound_assignment_with_a_scalar_key(self):
-        """test_compound_assignment's own str-keyed version only
-        exercises hornet_dict_set_str_key's own call site inside _ir_
-        dict_compound_assign -- this covers the scalar-keyed one
-        (hornet_dict_set_scalar_key) separately."""
         assert_program_stdout(
             "def int main():\n"
             "    dict[int]int counts = dict[int]int{1: 5}\n"
@@ -8984,10 +6646,6 @@ class TestDicts:
         )
 
     def test_compound_assignment_on_a_missing_key_panics(self):
-        """`d[k] += 1` needs an existing entry to add to -- the
-        identical panic-on-miss a bare read already has, since the
-        write side's own read-modify-write starts with exactly that
-        same read."""
         assert_crashes_with_sigabrt(
             "    dict[str]int counts = dict[str]int{'a': 1}\n"
             "    counts['nonexistent'] += 10\n"
@@ -8995,12 +6653,6 @@ class TestDicts:
         )
 
     def test_growth_and_rehash_across_many_insertions(self):
-        """100 sequential inserts, starting from a literal of just one
-        entry (capacity 8) -- forces several grow-and-rehash cycles
-        (8 -> 16 -> 32 -> 64 -> 128), then reads every single one back
-        out by key to confirm rehashing preserved all of them
-        correctly, not just the ones that happened to land in
-        buckets untouched by any particular resize."""
         assert_program_stdout(
             "def int main():\n"
             "    dict[int]int nums = dict[int]int{0: 0}\n"
@@ -9019,14 +6671,6 @@ class TestDicts:
         )
 
     def test_non_bare_variable_dict_base(self):
-        """`arr[0][key]` -- exercises _ir_dict_address's own Index
-        delegation, not just the bare-Variable leaf every other test
-        here reaches. Each dict is its own, separately-declared
-        variable, not a literal placed directly as an array element --
-        that specific combination (a DictLiteral as another
-        composite's own nested entry) is a known, separate, still-
-        deferred gap (_ir_write_composite_value_into doesn't yet know
-        how to handle one), unrelated to indexing itself."""
         assert_program_stdout(
             "def int main():\n"
             "    dict[str]int a = dict[str]int{'a': 1}\n"
@@ -9041,13 +6685,6 @@ class TestDicts:
         )
 
     def test_non_bare_field_dict_base(self):
-        """`b.contents[key]` -- exercises _ir_dict_address's own Field
-        delegation. The dict is again its own, separately-declared
-        variable passed into Box's own constructor, for the identical
-        reason test_non_bare_variable_dict_base's own dict elements
-        are -- a DictLiteral placed directly as a struct-literal's own
-        argument is the same still-deferred gap, not specific to
-        arrays."""
         assert_program_stdout(
             "type Box struct:\n"
             "    dict[str]int contents\n"
@@ -9062,7 +6699,6 @@ class TestDicts:
             "5\n99\n",
         )
 
-    # -- stage 3: del(d, key) -- panic-on-miss, tombstones ------------------
 
     def test_del_removes_only_the_given_key(self):
         assert_program_stdout(
@@ -9082,10 +6718,6 @@ class TestDicts:
         )
 
     def test_lookup_after_del_panics(self):
-        """A deleted key is gone for lookup purposes too, not just for
-        printing -- del's own tombstone must actually be treated as
-        absent by hornet_dict_lookup_scalar_key/hornet_dict_lookup_
-        str_key, not just skipped by hornet_stringify."""
         assert_crashes_with_sigabrt(
             "    dict[str]int ages = dict[str]int{'alice': 25}\n"
             "    del(ages, 'alice')\n"
@@ -9121,15 +6753,6 @@ class TestDicts:
         )
 
     def test_tombstone_does_not_break_lookup_for_a_key_that_probed_past_it(self):
-        """The core tombstone-correctness property: 100 int keys
-        inserted into an initially small-capacity dict (guaranteeing
-        real hash collisions along the way), every EVEN key then
-        deleted, every ODD key then read back by lookup -- summed to
-        confirm every single one survived. A naive delete (resetting
-        a bucket straight to EMPTY instead of a tombstone) would
-        silently break lookup for any odd key that happened to probe
-        PAST one of the deleted even keys' own buckets during its own
-        original insertion."""
         assert_program_stdout(
             "def int main():\n"
             "    dict[int]int nums = dict[int]int{0: 0}\n"
@@ -9154,12 +6777,6 @@ class TestDicts:
         )
 
     def test_repeated_insert_delete_churn_reuses_tombstone_slots(self):
-        """Inserting and deleting the SAME key 20 times in a row --
-        each iteration's own insert should reuse the tombstone left by
-        the previous iteration's own delete, not accumulate 20 fresh
-        tombstones (which the load-factor growth check would
-        otherwise eventually have to compensate for). A pre-existing,
-        never-deleted key survives the whole churn undisturbed."""
         assert_program_stdout(
             "def int main():\n"
             "    dict[str]int d = dict[str]int{'a': 1}\n"
@@ -9176,10 +6793,6 @@ class TestDicts:
         )
 
     def test_del_with_a_scalar_key(self):
-        """test_del_removes_only_the_given_key's own str-keyed version
-        only exercises hornet_dict_delete_str_key's own call site
-        inside _ir_del_call -- this covers the scalar-keyed one
-        (hornet_dict_delete_scalar_key) separately."""
         assert_program_stdout(
             "def int main():\n"
             "    dict[int]str codes = dict[int]str{1: 'one', 2: 'two'}\n"
@@ -9189,12 +6802,8 @@ class TestDicts:
             "dict[int]str{2: 'two'}\n",
         )
 
-    # -- stage 4 (partial): len(d) -- iteration itself still awaits `for` --
 
     def test_len_reflects_insert_and_delete(self):
-        """count (what len reads) means LIVE entries specifically,
-        unaffected by tombstones -- del must actually decrease what
-        len reports, not just leave a dead slot len still counts."""
         assert_program_stdout(
             "def int main():\n"
             "    dict[str]int ages = dict[str]int{'alice': 25, 'bob': 17}\n"
@@ -9248,7 +6857,6 @@ class TestDicts:
             match="requires an array, slice, str, or dict",
         )
 
-    # -- 'in' / 'not in': dict membership only for now -----------------------
 
     def test_in_reports_present_and_absent_keys(self):
         assert_program_stdout(
@@ -9263,15 +6871,6 @@ class TestDicts:
         )
 
     def test_in_respects_left_operand_precedence(self):
-        """`2 * 3 not in d` -- '*' has a HIGHER precedence than 'in'/
-        'not in' (both tier 6, the same as '=='), so this must parse
-        as `(2 * 3) not in d`, not `2 * (3 not in d)` (which wouldn't
-        even type-check, '*' rejecting a bool operand). This is what
-        actually exercises parse_binary's own precedence-respecting
-        `break` inside its 'not in' special case -- the branch that
-        stops a too-deep recursive call from swallowing 'not in' at
-        the wrong precedence level, letting the OUTER call consume it
-        against the already-folded `2 * 3` instead."""
         assert_program_stdout(
             "def int main():\n"
             "    dict[int]int d = dict[int]int{6: 1}\n"
@@ -9282,10 +6881,6 @@ class TestDicts:
         )
 
     def test_not_in_reports_present_and_absent_keys(self):
-        """'not in' builds Unary(NOT, Binary(IN, ...)) at parse time,
-        not a separate BinaryOp.NOT_IN -- this is the end-to-end proof
-        that composition actually works correctly, not just that it
-        parses."""
         assert_program_stdout(
             "def int main():\n"
             "    dict[str]int ages = dict[str]int{'alice': 25}\n"
@@ -9311,9 +6906,6 @@ class TestDicts:
         )
 
     def test_in_as_an_ordinary_bool_expression(self):
-        """Not just usable as an if-condition -- an ordinary, composable
-        BOOL-valued expression, assignable to a variable like any other
-        comparison's own result."""
         assert_program_stdout(
             "def int main():\n"
             "    dict[str]int ages = dict[str]int{'alice': 25}\n"
@@ -9324,10 +6916,6 @@ class TestDicts:
         )
 
     def test_in_with_a_scalar_key(self):
-        """test_in_reports_present_and_absent_keys's own str-keyed
-        version only exercises hornet_dict_contains_str_key's own call
-        site inside _ir_dict_contains -- this covers the scalar-keyed
-        one (hornet_dict_contains_scalar_key) separately."""
         assert_program_stdout(
             "def int main():\n"
             "    dict[int]str codes = dict[int]str{1: 'one'}\n"
@@ -9340,19 +6928,6 @@ class TestDicts:
         )
 
     def test_in_skips_past_tombstones_rather_than_stopping_at_them(self):
-        """The identical tombstone-correctness property test_tombstone_
-        does_not_break_lookup_for_a_key_that_probed_past_it already
-        proves for lookup, proved here for 'in' specifically: 100 int
-        keys inserted (guaranteeing real hash collisions), every EVEN
-        key deleted, then EVERY key from 0..99 tested with 'in' --
-        every surviving odd key must still report present despite
-        however many tombstones its own probe chain now passes
-        through, and every deleted even key must report absent. A
-        naive contains check that stopped at the first TOMBSTONE
-        (instead of skipping past it, the way EMPTY correctly IS a
-        stopping point) would incorrectly report an odd key absent
-        whenever a deleted even key happened to sit earlier in its
-        own probe chain."""
         assert_program_stdout(
             "def int main():\n"
             "    dict[int]int nums = dict[int]int{0: 0}\n"
@@ -9399,7 +6974,6 @@ class TestDicts:
             match="'in' requires a dict, array, or slice as its right operand",
         )
 
-    # -- in / not in: array and slice membership (linear scan) -----------------
 
     def test_in_with_an_array(self):
         assert_program_stdout(
@@ -9435,10 +7009,6 @@ class TestDicts:
         )
 
     def test_in_with_str_elements(self):
-        """Each element comparison recurses through _ir_composite_
-        equal exactly as array/struct equality's own element loop
-        does -- this exercises its own STR case (length-first, then
-        memcmp) specifically, not just the scalar one."""
         assert_program_stdout(
             "def int main():\n"
             "    [3]str names = ['alice', 'bob', 'carol']\n"
@@ -9453,8 +7023,6 @@ class TestDicts:
         )
 
     def test_in_with_struct_elements(self):
-        """Exercises _ir_composite_equal's own STRUCT case (per-field
-        recursion) as the element comparison."""
         assert_program_stdout(
             "type Point struct:\n"
             "    int x\n"
@@ -9475,9 +7043,6 @@ class TestDicts:
         )
 
     def test_not_in_with_an_array(self):
-        """The identical parse-time Unary(NOT, Binary(IN, ...))
-        composition dict's own 'not in' already uses -- proved here
-        end-to-end for array/slice too, not just that it parses."""
         assert_program_stdout(
             "def int main():\n"
             "    [3]int nums = [10, 20, 30]\n"
@@ -9492,11 +7057,6 @@ class TestDicts:
         )
 
     def test_in_evaluates_the_needle_exactly_once_for_side_effects(self):
-        """The needle's own address is materialized once, before the
-        loop even starts (_ir_materialize_value_into_scratch, called
-        a single time in _ir_array_slice_contains) -- a needle with
-        its own side effect must run it exactly once, never once per
-        element scanned."""
         assert_program_stdout(
             "def int get_target():\n"
             "    print('computing target')\n"
@@ -9511,10 +7071,6 @@ class TestDicts:
         )
 
     def test_in_with_an_uncomparable_element_type_is_rejected(self):
-        """Reuses _is_comparable_type, the identical check array/
-        struct equality's own element type already gets -- a slice
-        element (or one that contains one, at any depth) has no
-        well-defined comparison, so 'in' can't scan for it either."""
         assert_program_semantic_error(
             "def int main():\n"
             "    [][]int nested = [[1, 2], [3, 4]]\n"
@@ -9535,7 +7091,6 @@ class TestDicts:
             match="\\[3\\]str declares element type str, but 'in's own left operand is int",
         )
 
-    # -- nil (declared-but-uninitialized) dicts -------------------------------
 
     def test_nil_dict_len_and_membership(self):
         assert_program_stdout(
@@ -9571,12 +7126,6 @@ class TestDicts:
         )
 
     def test_nil_dict_write_bootstraps_a_real_dict(self):
-        """The first d[key] = value on a nil dict must allocate a
-        real backing array from scratch (see runtime.c's own capacity
-        == 0 growth floor, matching the identical fix slice's own
-        append growth policy already needed) -- confirmed here by
-        reading the value straight back out afterward, not just by
-        the write not crashing."""
         assert_program_stdout(
             "def int main():\n"
             "    dict[str]int d\n"
@@ -9589,9 +7138,6 @@ class TestDicts:
         )
 
     def test_nil_dict_with_a_scalar_key(self):
-        """test_nil_dict_write_bootstraps_a_real_dict's own str-keyed
-        version only exercises the str-keyed C functions' own capacity
-        == 0 guards -- this covers the scalar-keyed ones separately."""
         assert_program_stdout(
             "def int main():\n"
             "    dict[int]str d\n"
@@ -9605,11 +7151,6 @@ class TestDicts:
         )
 
     def test_nil_dict_grows_correctly_across_many_insertions(self):
-        """100 sequential inserts starting from a NIL dict (capacity
-        0), not a literal's own pre-sized capacity 8 -- proves the
-        capacity == 0 growth floor bootstraps correctly and every
-        subsequent grow-and-rehash cycle still works starting from
-        that bootstrapped size."""
         assert_program_stdout(
             "def int main():\n"
             "    dict[int]int d\n"
@@ -9625,15 +7166,6 @@ class TestDicts:
         )
 
     def test_nil_dict_escaping_its_own_function_still_works(self):
-        """Mirrors test_escaping_dict_variable_survives_past_its_own_
-        function from stage 1 (the heap-allocation bug that test was
-        written to catch), but starting from a NIL dict specifically
-        -- exercises the VarDecl-with-no-initializer case's own
-        is_heap_allocated branch (self._ir_malloc_and_store), since a
-        dict whose own address escapes via `&d` needs its descriptor
-        heap-allocated from the start, same as any other escaping
-        local, regardless of whether it started nil or literal-
-        constructed."""
         assert_program_stdout(
             "def *dict[str]int make_nil_dict():\n"
             "    dict[str]int d\n"
@@ -9647,17 +7179,8 @@ class TestDicts:
             "dict[str]int{'a': 1}\n",
         )
 
-    # -- dict-typed function/method return values -----------------------------
 
     def test_dict_typed_function_return_parses_and_works(self):
-        """The bug this pins: _check_starts_with_return_type's own
-        one-token type-starting check never included TokenType.DICT,
-        so `def dict[str]int foo():` failed to parse at all -- 'dict'
-        was silently treated as if it could only ever start the def's
-        own name, never a return type. Once past parsing, everything
-        else already worked: dict was already in COMPOSITE_KINDS, so
-        the hidden-pointer-return convention already knew how to
-        handle it."""
         assert_program_stdout(
             "def dict[str]int make_dict():\n"
             "    dict[str]int d = dict[str]int{'a': 1}\n"
@@ -9703,9 +7226,6 @@ class TestDicts:
         )
 
     def test_dict_typed_method_return(self):
-        """parse_method_def shares _check_starts_with_return_type
-        with parse_function -- this confirms the fix actually applies
-        there too, not just to ordinary top-level functions."""
         assert_program_stdout(
             "type Counter struct:\n"
             "    int start\n"
@@ -9722,9 +7242,6 @@ class TestDicts:
         )
 
     def test_nil_dict_returned_from_a_function(self):
-        """Combines this fix with the earlier nil-dict one: a nil
-        dict survives being returned by value from one function and
-        used correctly (bootstrapped by a write) in another."""
         assert_program_stdout(
             "def dict[int]int make_nil_dict():\n"
             "    dict[int]int d\n"
@@ -9740,14 +7257,6 @@ class TestDicts:
         )
 
     def test_returning_a_dict_literal_directly_now_works(self):
-        """Was a pinned, known-separate gap (same root cause as dict-
-        literal-as-struct-field-argument and dict-literal-as-array-
-        element: _ir_write_composite_value_into never learned
-        DictLiteral) -- now fixed via a dedicated Return-statement
-        case (ir/statements.py), since Return's own composite dispatch
-        never routed through that shared writer at all, even for
-        array/struct literals, so this needed its own wiring rather
-        than falling out of that other fix automatically."""
         assert_program_stdout(
             "def dict[str]int make_dict():\n"
             "    return dict[str]int{'a': 1, 'b': 2}\n"
@@ -9761,12 +7270,6 @@ class TestDicts:
         )
 
     def test_returning_a_nested_dict_literal_directly(self):
-        """Combines this fix with the earlier nested-value one: the
-        returned literal's own entries are themselves composite
-        (dict-of-dict and struct-valued dict), exercising _ir_write_
-        dict_literal_into's own existing recursion through the new
-        Return-statement wiring, not just a flat, all-scalar literal
-        like the test above."""
         assert_program_stdout(
             "def dict[str]dict[str]int make_nested():\n"
             "    return dict[str]dict[str]int{'outer': dict[str]int{'inner': 42}}\n"
@@ -9818,17 +7321,7 @@ class TestDicts:
         )
 
 
-    # -- dict-typed function/method arguments ----------------------------------
-
     def test_dict_typed_function_argument_works(self):
-        """The bug this pins: _ir_call_arguments' own dispatch had no
-        DICT case at all, so a dict-typed argument fell through to the
-        generic scalar fallback (gen_expr_ir) -- which, for a Variable,
-        just returns that variable's own permanent Temp unchanged. For
-        a composite type that Temp is never actually DEFINED by any
-        real IR (a dict's own value is always accessed through its
-        address, never loaded into one Temp), so this crashed IR
-        verification outright: 'Temp used... but never defined.'"""
         assert_program_stdout(
             "def int lookup(dict[str]int d, str key):\n"
             "    return d[key]\n"
@@ -9841,16 +7334,6 @@ class TestDicts:
         )
 
     def test_dict_returning_call_used_directly_as_an_argument(self):
-        """`lookup(make_dict(), 'a')` -- exercises a second, separate
-        bug fixed alongside the first: _collect_argument_temps_in_
-        expr's own pre-pass (which reserves a stack slot for a non-
-        addressable composite argument like this one, so _ir_
-        materialize_composite_call doesn't fall back to a fresh malloc
-        every time) also had no DICT case, using a hard-coded (ARRAY,
-        STRUCT, SUM) tuple instead of the shared COMPOSITE_KINDS set.
-        Fixed for consistency with array/struct's own treatment, even
-        though the fallback (malloc) would have still been correct,
-        just less efficient."""
         assert_program_stdout(
             "def dict[str]int make_dict():\n"
             "    dict[str]int d = dict[str]int{'a': 1}\n"
@@ -9893,19 +7376,6 @@ class TestDicts:
         )
 
     def test_dict_parameter_whose_address_escapes(self):
-        """A THIRD site needing the same fix, found while testing:
-        _ir_param_setup's own two-pass argument-capture code (ir/
-        builder.py) had the identical hard-coded (ARRAY, STRUCT, SUM)
-        tuple, missing DICT, in both its own incoming-argument-capture
-        pass and its own copy-into-the-local-slot pass -- a dict
-        parameter fell through to the plain-scalar path there too,
-        treating its own caller-provided ADDRESS as if it were the
-        24-byte descriptor's own raw bytes directly, corrupting the
-        local copy and segfaulting on first use. This test exercises
-        the heap-allocated-parameter branch of that same fix
-        specifically (the parameter's own address is taken and
-        returned), not just the ordinary stack-copy case every other
-        test in this section already covers."""
         assert_program_stdout(
             "def *dict[str]int get_ref(dict[str]int d):\n"
             "    return &d\n"
@@ -9935,13 +7405,6 @@ class TestDicts:
         )
 
     def test_dict_literal_as_a_direct_argument_now_works(self):
-        """Was a pinned, known-separate gap -- now fixed via _ir_
-        materialize_dict_literal (ir/dicts.py), mirroring _ir_
-        materialize_struct_literal's own reserve-or-malloc skeleton,
-        wired into _ir_call_arguments' own DICT case (ir/scalars.py).
-        Multiple direct-literal arguments in one call each need their
-        own independent address -- see the second call below, not
-        just the flat single-argument case."""
         assert_program_stdout(
             "def int lookup(dict[str]int d, str key):\n"
             "    return d[key]\n"
@@ -9954,11 +7417,6 @@ class TestDicts:
         )
 
     def test_two_dict_literal_arguments_in_one_call(self):
-        """Both arguments are direct literals in the SAME call --
-        confirms _reserve_argument_temp's own id(expr)-keyed slot
-        reservation (ir/builder.py's own _collect_argument_temps_in_
-        expr pre-pass) correctly gives each literal its own distinct
-        slot rather than the two colliding."""
         assert_program_stdout(
             "def int combine(dict[str]int a, dict[str]int b, str key1, str key2):\n"
             "    return a[key1] + b[key2]\n"
@@ -9995,8 +7453,6 @@ class TestDicts:
         )
 
 
-    # -- dict equality: mirrors slice's own none-comparison and rejection --
-
     def test_nil_dict_equals_none(self):
         assert_program_stdout(
             "def int main():\n"
@@ -10022,16 +7478,6 @@ class TestDicts:
         )
 
     def test_dict_vs_dict_equality_is_rejected(self):
-        """Mirrors slice's own bare-slice-vs-slice rejection: real
-        per-entry dict equality isn't implemented (unordered keys, and
-        two dicts holding identical entries can have completely
-        different bucket layouts depending on insertion/deletion
-        history, so there's no byte-for-byte shortcut the way array's
-        own fixed layout gives array equality) and isn't even fully
-        designed yet, so a bare dict-vs-dict comparison (neither side
-        none) is rejected at the semantic level rather than silently
-        always answering false -- a real feature to consider later,
-        not a "dicts are trivially never equal" design choice."""
         assert_semantic_error(
             "    dict[str]int a = dict[str]int{'x': 1}\n"
             "    dict[str]int b = dict[str]int{'x': 1}\n"
@@ -10042,9 +7488,6 @@ class TestDicts:
         )
 
     def test_dict_literal_vs_dict_equality_is_also_rejected(self):
-        """The rejection applies regardless of either operand's own
-        shape -- a direct dict literal on one or both sides is
-        rejected exactly like two plain dict variables are."""
         assert_semantic_error(
             "    dict[str]int d = dict[str]int{'a': 1}\n"
             "    if dict[str]int{'a': 1} == d:\n"
@@ -10056,17 +7499,7 @@ class TestDicts:
         )
 
 
-    # -- dict literal as a nested value -----------------------------------
-
     def test_dict_literal_as_a_struct_field_argument(self):
-        """The bug this pins: _ir_write_composite_value_into (the one
-        shared dispatcher struct/array-literal field/element recursion
-        already goes through) had no DictLiteral case at all, so a
-        dict literal used directly as a struct-literal field argument
-        crashed. _ir_write_dict_literal_into itself already existed
-        and was already fully general (dst_address, not tied to any
-        particular variable) -- this was purely a wiring gap, not
-        missing construction logic."""
         assert_program_stdout(
             "type Wrapper struct:\n"
             "    dict[str]int d\n"
@@ -10092,13 +7525,6 @@ class TestDicts:
         )
 
     def test_dict_of_dict(self):
-        """A dict literal whose own VALUE type is itself dict -- goes
-        through the identical recursion (_ir_write_dict_literal_into's
-        own per-entry _ir_materialize_value_into_scratch call, which
-        already dispatched generically on COMPOSITE_KINDS) as struct-
-        of-dict already did before this fix; only the reverse
-        direction (dict-of-X, X containing a nested dict LITERAL
-        specifically) was ever missing."""
         assert_program_stdout(
             "def int main():\n"
             "    dict[str]dict[str]int d = dict[str]dict[str]int{\n"
@@ -10113,9 +7539,6 @@ class TestDicts:
         )
 
     def test_three_level_nesting_struct_array_dict(self):
-        """Struct containing an array of dicts, each itself a nested
-        literal -- confirms the recursion genuinely composes across
-        multiple levels, not just the three specific shapes above."""
         assert_program_stdout(
             "type Bundle struct:\n"
             "    [2]dict[str]int items\n"
@@ -10129,37 +7552,13 @@ class TestDicts:
         )
 
 # ---------------------------------------------------------------------------
-# Pointers, stage 2: semantic analysis only. Go-style pointers -- safe by
-# construction via escape analysis (not yet built; that's stage 3), no
-# borrow checker, uniformly nullable via the existing `none` literal,
-# reusing the SAME "absent" zero value slices already have rather than a
-# separate optional-vs-non-optional split. No new IR/codegen exists yet:
-# every test here is analyze()-level only, exactly like TestSumTypes/
-# TestNarrowing were before their own later stages.
-#
-# `&`/`*` reuse the existing Unary/UnaryOp AST shape (ADDRESS_OF/
-# DEREFERENCE), not new node types -- see UnaryOp's own docstring in
-# parser.py for why, mirroring how NEGATE/COMPLEMENT/NOT already share
-# one shape despite each having its own type-checking rule. `&` is
-# restricted to a bare Variable operand for this first slice (struct
-# fields and array/slice elements are a deliberate, planned widening, not
-# a structural limitation -- see check_unary's own comment).
-#
-# Auto-deref (Go-style: `p.field` works directly on a *Circle, no
-# explicit `(*p).field` needed) is implemented in exactly ONE place for
-# field access -- _check_struct_and_field, shared by check_field (read)
-# and analyze_field_assign (write), so both work identically with zero
-# duplicated logic -- plus a second, deliberately separate copy in
-# _check_method_call for the receiver, since `.` should mean the same
-# thing for a method call as it does for a field access even though the
-# two aren't unified into one shared helper.
+# Pointers
 # ---------------------------------------------------------------------------
 
 class TestPointers:
 
     _CIRCLE = "type Circle struct:\n    int radius\n\n"
 
-    # -- accepted (analyze() must NOT raise) -------------------------------
 
     def test_basic_pointer_type_resolves(self):
         ast = _parse(
@@ -10273,12 +7672,6 @@ class TestPointers:
         analyze(ast)  # should not raise
 
     def test_struct_field_can_be_pointer_typed(self):
-        """The linked-structure case pointers exist to solve: a struct
-        pointing at itself through a pointer field is fine, unlike
-        embedding itself directly ever could be -- a pointer is always
-        a fixed 8 bytes regardless of what it points to, so this
-        doesn't reopen _check_struct_contains's own cycle detection at
-        all."""
         ast = _parse(
             "type Node struct:\n"
             "    int value\n"
@@ -10310,7 +7703,6 @@ class TestPointers:
         )
         analyze(ast)  # should not raise
 
-    # -- rejected -------------------------------------------------------
 
     def test_pointer_to_pointer_is_rejected(self):
         assert_program_semantic_error(
@@ -10323,10 +7715,6 @@ class TestPointers:
         )
 
     def test_address_of_a_field_is_now_accepted(self):
-        """Was rejected outright before this stage -- a Field chain
-        rooted in a named variable is now one of the allowed ADDRESS_OF
-        operand shapes, alongside a bare Variable and a struct
-        literal."""
         ast = _parse(
             self._CIRCLE +
             "def int main():\n"
@@ -10346,11 +7734,6 @@ class TestPointers:
         analyze(ast)  # should not raise
 
     def test_address_of_a_field_rooted_in_a_call_is_still_rejected(self):
-        """The one Field/Index shape still excluded: rooted in a
-        function call's own result rather than a named variable --
-        _root_variable_of's own restriction (see check_unary's own
-        ADDRESS_OF case), since there's no stable declaration for
-        escape analysis to attribute the resulting address to."""
         assert_program_semantic_error(
             self._CIRCLE +
             "def Circle makeCircle():\n"
@@ -10363,7 +7746,6 @@ class TestPointers:
         )
 
     def test_address_of_an_index_rooted_in_a_call_is_still_rejected(self):
-        """The Index counterpart to the Field case just above."""
         assert_program_semantic_error(
             "def [3]int makeArray():\n"
             "    return [1, 2, 3]\n"
@@ -10375,12 +7757,6 @@ class TestPointers:
         )
 
     def test_address_of_a_struct_literal_is_accepted(self):
-        """The one case besides a bare Variable check_unary's own
-        ADDRESS_OF restriction allows: `&Circle(5)` -- a struct literal
-        has no bare-variable identity of its own, but is a legitimate,
-        common pattern (constructing a fresh value specifically to
-        take its own address) rather than a structural non-starter the
-        way `&(x + 1)` (nothing to take the address OF at all) is."""
         ast = _parse(
             self._CIRCLE +
             "def int main():\n"
@@ -10390,11 +7766,6 @@ class TestPointers:
         analyze(ast)  # should not raise
 
     def test_address_of_a_non_struct_call_is_still_rejected(self):
-        """An ordinary function call, returning a scalar or a pointer,
-        is NOT the same shape as a struct literal -- `&someFn()` stays
-        rejected exactly like before, distinguished purely by registry
-        membership (expr.name in self.structs), the same disambiguation
-        check_call itself already uses."""
         assert_program_semantic_error(
             "def int makeFive():\n"
             "    return 5\n"
@@ -10415,9 +7786,6 @@ class TestPointers:
         )
 
     def test_dereferencing_a_pointer_to_struct_as_a_value_is_accepted(self):
-        """Was rejected outright before this stage -- struct is now
-        one of the composite kinds a dereferenced pointer can be read
-        as a whole value through."""
         ast = _parse(
             self._CIRCLE +
             "def int main():\n"
@@ -10450,12 +7818,6 @@ class TestPointers:
         analyze(ast)  # should not raise
 
     def test_dereferencing_a_pointer_to_sum_type_as_a_value_is_still_rejected(self):
-        """The one composite kind still restricted -- narrowing's own
-        concern, not the same "not built yet" reason array/slice/
-        struct were until now: a synthesized `*p` read has no slot and
-        no narrowing history to compare a resolved_type against the
-        way a bare Variable occurrence does (see _ir_struct_address's
-        own docstring)."""
         assert_program_semantic_error(
             "type Circle struct:\n"
             "    int radius\n"
@@ -10474,9 +7836,6 @@ class TestPointers:
         )
 
     def test_field_access_on_a_non_pointer_non_struct_is_still_rejected(self):
-        """Regression check: auto-deref only fires for POINTER-to-
-        STRUCT -- an ordinary non-struct, non-pointer base must still
-        be rejected exactly as before."""
         assert_program_semantic_error(
             "def int main():\n"
             "    int x = 5\n"
@@ -10510,9 +7869,6 @@ class TestPointers:
         )
 
     def test_bare_pointer_vs_incompatible_type_is_still_rejected(self):
-        """Regression check: only none-vs-pointer is carved out of the
-        equality rejection list -- an ordinary type mismatch through a
-        pointer must still be rejected."""
         assert_program_semantic_error(
             self._CIRCLE +
             "def int main():\n"
@@ -10526,21 +7882,7 @@ class TestPointers:
 
 
 # ---------------------------------------------------------------------------
-# Pointers, stage 3: actual codegen. Every test here is a compile-AND-RUN
-# check, deliberately -- this stage found five real, independent bugs that
-# a purely IR-level test suite would never have caught (a truncating 32-bit
-# move corrupting an address; is_wide_type missing from six separate
-# lowering sites; auto-deref missing from two more call sites beyond the
-# original _ir_struct_address fix; no NoneLiteral case in gen_expr_ir at
-# all; and, hardest to find, gen_binary_op's own width check silently
-# truncating pointer ARITHMETIC -- not just moves -- only visible once an
-# actual recursive linked-list traversal was run end to end). Several of
-# these tests exist specifically because they're the smallest programs
-# that once reproduced one of those bugs, not because they're
-# comprehensive coverage for its own sake.
-#
-# See tests/ir/test_pointers.py for the IR-level (construction-only)
-# counterparts.
+# Pointers
 # ---------------------------------------------------------------------------
 
 class TestPointersCodegen:
@@ -10569,11 +7911,6 @@ class TestPointersCodegen:
         )
 
     def test_address_of_a_struct_literal_purely_local(self):
-        """The non-escaping case, matching test_purely_local_pointer_is_
-        unaffected's own struct-literal counterpart: &Circle(5) never
-        leaves this function, so this should be exactly as simple as
-        a stack-allocated struct's own address always was, no malloc
-        involved at all."""
         assert_program_exit_code(
             self._CIRCLE +
             "def int main():\n"
@@ -10583,9 +7920,6 @@ class TestPointersCodegen:
         )
 
     def test_address_of_a_struct_literal_with_multiple_fields(self):
-        """Exercises _ir_write_struct_literal_into's own multi-field
-        write path through this new address-of-a-literal route, not
-        just the one-field case every other test here happens to use."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -10598,10 +7932,6 @@ class TestPointersCodegen:
         )
 
     def test_address_of_two_distinct_struct_literals_in_one_function(self):
-        """Two different &Circle(...) occurrences in the same function
-        each get their own, distinct synthetic decl_id/slot (keyed by
-        id() of each literal's own, separate AST node) -- confirms
-        neither ever aliases the other's own storage."""
         assert_program_exit_code(
             self._CIRCLE +
             "def int main():\n"
@@ -10705,10 +8035,6 @@ class TestPointersCodegen:
         )
 
     def test_deref_assign_with_a_dereferenced_source(self):
-        """`*q = *p` -- a struct-typed DerefAssign whose own VALUE is
-        itself a dereferenced pointer, not just a bare Variable/Field/
-        Index -- exercises ir/pointers.py's own _ir_deref_assign case
-        specifically."""
         assert_program_exit_code(
             self._CIRCLE +
             "def int main():\n"
@@ -10743,12 +8069,6 @@ class TestPointersCodegen:
         )
 
     def test_dereferencing_a_pointer_to_slice_as_a_function_argument(self):
-        """A real, standalone gap this closes: _ir_indexable_base's own
-        SLICE-typed dispatch (shared by _ir_slice_arg) never had a
-        Unary(DEREFERENCE) case at all, unlike its ARRAY-typed sibling
-        (already routed through is_composite_addressable) -- *p passed
-        directly as a slice-typed argument used to fail outright with
-        an IRError, not silently misbehave."""
         assert_program_exit_code(
             "def int sumIt([]int s):\n"
             "    int total = 0\n"
@@ -10767,10 +8087,6 @@ class TestPointersCodegen:
         )
 
     def test_indexing_directly_into_a_dereferenced_slice_pointer(self):
-        """_ir_indexable_base is shared by _ir_index_address too --
-        this falls out of the identical fix for free, not a separate
-        case: (*p)[i] needs the same descriptor address *p's own
-        function-argument use just above does."""
         assert_program_exit_code(
             "def int main():\n"
             "    [3]int arr = [10, 20, 30]\n"
@@ -10781,9 +8097,6 @@ class TestPointersCodegen:
         )
 
     def test_append_with_a_dereferenced_slice_pointer_as_its_first_argument(self):
-        """append's own first argument -- the one that might reuse its
-        own backing storage -- also routes through _ir_indexable_base,
-        so this falls out of the same fix too."""
         assert_program_exit_code(
             "def int main():\n"
             "    [5]int arr = [10, 20, 30, 0, 0]\n"
@@ -10795,9 +8108,6 @@ class TestPointersCodegen:
         )
 
     def test_address_of_a_field_purely_local(self):
-        """The non-escaping case: &c.radius never leaves this
-        function, so no heap promotion needed at all -- exactly as
-        simple as &c itself already is."""
         assert_program_exit_code(
             self._CIRCLE +
             "def int main():\n"
@@ -10817,11 +8127,6 @@ class TestPointersCodegen:
         )
 
     def test_address_of_a_field_through_an_auto_dereferenced_pointer(self):
-        """`&p.field` where p itself is a pointer (p: *Circle) --
-        auto-deref, not the struct-rooted case: p's own pointee is
-        already, independently safe, so this is just that already-
-        valid address plus field's own offset, no new heap-promotion
-        machinery involved for p itself at all."""
         assert_program_exit_code(
             self._CIRCLE +
             "def *int getFieldThroughPointer(*Circle p):\n"
@@ -10836,9 +8141,6 @@ class TestPointersCodegen:
         )
 
     def test_pointer_sees_a_later_mutation_of_the_pointee(self):
-        """The register-allocator exclusion's own reason to exist: x
-        must never live purely in a register once &x is taken, or a
-        later write to x could go unseen through p."""
         assert_program_exit_code(
             "def int main():\n"
             "    int x = 5\n"
@@ -10894,10 +8196,6 @@ class TestPointersCodegen:
         )
 
     def test_chained_auto_deref_field_read(self):
-        """b.next.value -- b.next is itself a pointer-typed field
-        access, not a bare variable; found a real bug the first time
-        this was tried (auto-deref was only implemented for
-        _ir_struct_address's Variable case, not Field/Index)."""
         assert_program_exit_code(
             self._NODE +
             "def int main():\n"
@@ -10949,9 +8247,6 @@ class TestPointersCodegen:
         )
 
     def test_none_as_a_pointer_assign_target_not_just_var_decl(self):
-        """q = none (Assign, not VarDecl) -- Assign's own scalar path
-        never needed the same NoneLiteral-exclusion VarDecl's did, but
-        worth checking directly rather than assumed."""
         assert_program_exit_code(
             self._CIRCLE +
             "def int main():\n"
@@ -10965,12 +8260,6 @@ class TestPointersCodegen:
         )
 
     def test_recursive_linked_list_traversal(self):
-        """The bug that took the most work to isolate: pointer
-        arithmetic for a field offset (head + 4, computing &head.next)
-        was silently lowered as a 32-bit add, corrupting the address --
-        invisible in every simpler test, only reachable once an actual
-        function called itself with a pointer parameter it needed to
-        both read AND advance."""
         assert_program_exit_code(
             self._NODE +
             "def int sumList(*Node head):\n"
@@ -11030,31 +8319,12 @@ class TestPointersCodegen:
 
 
 # ---------------------------------------------------------------------------
-# Pointer escape analysis: `&x` generalizes analyze_array_escapes' own
-# direct_backing edge, alongside array-slicing, exactly as scoped before
-# any of this was written. The composite case (a struct/array/sum local
-# whose address escapes) reuses the SAME heap-promotion machinery
-# already built for large locals -- genuinely made safe, not just
-# detected. A SCALAR local whose address escapes has no such machinery
-# (deliberately, the (b) side of the fork agreed on: detect and reject,
-# not build heap-indirection for scalars yet) -- rejected outright with
-# a clear CodegenError instead.
-#
-# test_dangling_pointer_program_is_now_rejected is the exact program
-# that motivated this whole stage -- confirmed, empirically, to compile
-# and run with a silently dangling pointer BEFORE this work, and to be
-# rejected outright now.
+# Pointer escape analysis
 # ---------------------------------------------------------------------------
 
 class TestPointerEscapeAnalysis:
 
     def test_scalar_wrapped_in_struct_escaping_is_genuinely_heap_safe(self):
-        """The motivating bug, stated plainly: this compiled and ran
-        with no error before this stage existed, silently returning a
-        pointer into a stack frame that had already been torn down --
-        now genuinely safe instead, verified the same way the struct
-        case already is: a deliberately clobbering intervening call
-        between makeDangling returning and h.p being read."""
         assert_program_exit_code(
             "type Holder struct:\n"
             "    *int p\n"
@@ -11078,8 +8348,6 @@ class TestPointerEscapeAnalysis:
         )
 
     def test_scalar_address_returned_directly_is_genuinely_heap_safe(self):
-        """Not just accepted -- verified actually safe, the identical
-        clobbering-call check the struct/Holder cases already get."""
         assert_program_exit_code(
             "def *int makeDangling():\n"
             "    int x = 42\n"
@@ -11100,14 +8368,6 @@ class TestPointerEscapeAnalysis:
         )
 
     def test_scalar_address_passed_to_another_function_is_genuinely_heap_safe(self):
-        """The existing, pre-pointer conservatism (any call argument
-        might escape, intraprocedurally -- see this same scenario's
-        own unit-level counterpart in test_escape_analysis.py) treats
-        &x here as escaping even though useIt itself never actually
-        stores it anywhere -- correct, if conservative: this compiler
-        analyzes one function at a time, not interprocedurally. Either
-        way, x is genuinely heap-promoted now, and *p reads back the
-        correct value through it."""
         assert_program_exit_code(
             "def int useIt(*int p):\n"
             "    return *p\n"
@@ -11122,13 +8382,6 @@ class TestPointerEscapeAnalysis:
         )
 
     def test_reassignment_after_escape_writes_through_the_same_box(self):
-        """The sharpest possible check on _ir_finish_scalar_var_decl vs
-        the Assign case's own, separate handling: once x has escaped
-        and been heap-promoted, `x = 99` must write THROUGH the box
-        &x already points at, not allocate a fresh one and repoint x's
-        own permanent Temp -- otherwise p would keep reading x's OLD
-        value (99 IS x's new value, and 42 was never returned) after
-        this reassignment, silently stale."""
         assert_program_exit_code(
             "def *int makeDangling():\n"
             "    int x = 42\n"
@@ -11143,17 +8396,6 @@ class TestPointerEscapeAnalysis:
         )
 
     def test_reading_the_escaped_variable_by_name_after_promotion(self):
-        """Every other test in this class only ever reads the escaped
-        value back THROUGH the pointer (*p) -- this one reads x itself,
-        by name, after its own address has already escaped and it's
-        been heap-promoted (`x = x + 1`, the read on the right-hand
-        side), exercising the OTHER half of the fix (ir/dispatch.py's
-        own Variable read case, an IRLoad through the box now, not a
-        direct Temp read) that every other test here happens not to
-        reach at all. A broken read here wouldn't just be wrong by a
-        small amount -- it would return whatever raw pointer value was
-        sitting in x's own permanent Temp, interpreted as an int, so
-        this is a sensitive check, not a marginal one."""
         assert_program_exit_code(
             "def *int makeAndRead():\n"
             "    int x = 42\n"
@@ -11168,12 +8410,6 @@ class TestPointerEscapeAnalysis:
         )
 
     def test_escaping_str_with_no_initializer_uses_the_empty_string_zero_value(self):
-        """str's own zero value is special-cased (the address of a
-        shared, static empty-string constant, never a null pointer --
-        see _ir_finish_scalar_var_decl's own docstring) even in the
-        non-escaping case; this confirms that path still produces a
-        genuinely usable, heap-boxed value when s itself escapes too,
-        not just when it stays local."""
         assert_program_exit_code(
             "def *str makeEmpty():\n"
             "    str s\n"
@@ -11188,15 +8424,6 @@ class TestPointerEscapeAnalysis:
         )
 
     def test_address_of_a_field_escaping_is_genuinely_heap_safe(self):
-        """&c.radius escaping (not &c itself) -- this is exactly the
-        case escape_analysis.py's own contribution() had no handling
-        for at all before this stage: value_expr.operand.name doesn't
-        crash on a Field operand (it HAS a .name field too, just
-        meaning the field's own name, not a variable's), so the OLD
-        code would silently resolve self.resolve('radius') -- looking
-        up a VARIABLE named 'radius', which doesn't exist -- and treat
-        this as never escaping at all. Same clobbering-call
-        verification as every other "genuinely safe" test here."""
         assert_program_exit_code(
             "type Circle struct:\n"
             "    int radius\n"
@@ -11220,11 +8447,6 @@ class TestPointerEscapeAnalysis:
         )
 
     def test_address_of_an_element_escaping_is_genuinely_heap_safe(self):
-        """The Index counterpart to the Field case just above --
-        &arr[i] escaping, not &arr itself. The OLD contribution() code
-        would have crashed outright here (an Index has no .name
-        attribute at all, unlike Field), rather than silently
-        misbehaving -- still a real gap, just a louder one."""
         assert_program_exit_code(
             "def *int getElemAddr():\n"
             "    [3]int arr = [10, 20, 30]\n"
@@ -11245,12 +8467,6 @@ class TestPointerEscapeAnalysis:
         )
 
     def test_escaping_parameter_is_genuinely_heap_safe(self):
-        """A PARAMETER's own address escaping, not just a local's --
-        exercises ir/builder.py's own _ir_param_setup scalar case
-        (a fresh param Temp, then the identical _ir_
-        finish_scalar_var_decl VarDecl's own initializer uses), the
-        one call site TestPointerEscapeAnalysis's own struct/scalar-
-        local tests above never reach at all."""
         assert_program_exit_code(
             "def *int identity(int x):\n"
             "    return &x\n"
@@ -11270,12 +8486,6 @@ class TestPointerEscapeAnalysis:
         )
 
     def test_struct_address_escaping_is_genuinely_heap_safe(self):
-        """Not just accepted -- verified actually safe: an intervening
-        call between makeCircle returning and p being read, deliberately
-        sized to plausibly clobber a dangling stack slot if c were NOT
-        genuinely heap-promoted (see this whole stage's own earlier
-        debugging history for why "it happened to still work" is not
-        the same as "it's actually safe")."""
         assert_program_exit_code(
             "type Circle struct:\n"
             "    int radius\n"
@@ -11299,17 +8509,6 @@ class TestPointerEscapeAnalysis:
         )
 
     def test_address_of_a_struct_literal_escaping_is_genuinely_heap_safe(self):
-        """The struct-LITERAL counterpart to the test just above --
-        &Circle(5) here, rather than &c for a named local c. This is
-        exactly the case escape_analysis.py's own contribution() had a
-        real, silent bug for before this stage: value_expr.operand.name
-        doesn't crash on a Call operand (it has a .name field too, just
-        meaning the struct's own name, not a variable's), so the OLD
-        code would silently resolve to nothing and treat this literal
-        as never escaping at all -- a genuine dangling-pointer risk
-        that would only show up as a wrong answer here, not a clean
-        rejection or a crash. Same clobbering-call verification as
-        every other "genuinely safe" test in this class."""
         assert_program_exit_code(
             "type Circle struct:\n"
             "    int radius\n"
@@ -11332,9 +8531,6 @@ class TestPointerEscapeAnalysis:
         )
 
     def test_purely_local_pointer_is_unaffected(self):
-        """A pointer whose target never escapes this same function must
-        stay exactly as fast/simple as before -- no rejection, no heap
-        promotion, ordinary stack storage throughout."""
         assert_program_exit_code(
             "def int main():\n"
             "    int x = 5\n"
@@ -11345,28 +8541,7 @@ class TestPointerEscapeAnalysis:
 
 
 # ---------------------------------------------------------------------------
-# `extern [type] NAME(params)`: declares a function implemented elsewhere
-# (in C, already linked in -- libc, by default, via gcc's own linker
-# invocation with no extra flags) and registers it into check_call's own
-# ordinary function registry (self.functions) -- calling one looks
-# identical to calling an ordinary Hornet function from that point on.
-#
-# v1 scope, deliberately: fixed-arity only (no variadics -- printf-style
-# functions need their own, separate follow-up, both for the SysV %al
-# convention and because a realistic variadic call can easily exceed the
-# 6-register limit this compiler's own calling convention already caps
-# at, with no stack-passed-argument support to fall back on). Every
-# param and the return type restricted to scalar or pointer kinds --
-# array/slice/struct/sum are excluded, most concretely because Hornet's
-# own struct layout has no padding or alignment at all, unlike C's,
-# which can silently disagree the moment a struct mixes narrow (int8/
-# uint8) fields with wider ones.
-#
-# IR/codegen needed NO new code at all: _ir_call/IRCall/CallInstr
-# already treat a call by name uniformly regardless of whether the
-# callee is Hornet-defined or extern-declared, confirmed end to end
-# below (malloc/free/strlen, actually linked against libc and run, not
-# just compiled).
+# extern functions
 # ---------------------------------------------------------------------------
 
 class TestExternFunctions:
@@ -11504,9 +8679,6 @@ class TestExternFunctions:
         analyze(ast)  # should not raise
 
     def test_extern_declared_after_its_own_call_site(self):
-        """Order-independence, matching ordinary functions: an extern
-        declared AFTER the function that calls it is no different from
-        one declared before."""
         ast = _parse(
             "def int main():\n"
             "    return abs(-5)\n"
@@ -11516,15 +8688,6 @@ class TestExternFunctions:
         analyze(ast)  # should not raise
 
     def test_extern_with_more_than_six_parameters(self):
-        """extern declarations never go through ir/builder.py's own
-        function-definition path at all (they have no body) -- this
-        exercises the OTHER registration path (check_extern_function_
-        decl, semantic.py) to confirm it never enforced its own 6-slot
-        limit in the first place, and that a call to one routes through
-        the exact same caller-side overflow logic an ordinary Hornet
-        call does. Compiles rather than links/runs -- no real 7+
-        argument libc function exists to declare and call here without
-        adding one to runtime.c purely for this test."""
         ast = _parse(
             "extern int sum7(int a, int b, int c, int d, int e, int f, int g)\n"
             "\n"
@@ -11546,19 +8709,6 @@ class TestExternFunctionsCodegen:
         )
 
     def test_malloc_and_free_via_extern(self):
-        """Exercises a pointer return value (malloc), writing and
-        reading through it, and a void-returning call taking a
-        pointer (free) -- both through extern declarations, via the
-        exact same IRCall/CallInstr path already proven by the
-        compiler's own internal calls to these same functions.
-
-        Previously also exercised str's own char*-compatibility
-        (`extern int strlen(str s)`) -- str is no longer FFI-
-        compatible at all now that it's a 16-byte {ptr, len}
-        descriptor rather than a plain pointer (see check_extern_
-        function_decl's own docstring, and test_extern_str_parameter_
-        is_rejected/test_extern_str_return_is_rejected below, which
-        cover that restriction directly)."""
         assert_program_exit_code(
             "extern *int malloc(int64 size)\n"
             "extern free(*int p)\n"
@@ -11582,12 +8732,6 @@ class TestExternFunctionsCodegen:
         )
 
     def test_extern_str_return_is_rejected(self):
-        """A non-str parameter, deliberately: the parameter loop runs
-        BEFORE the return-type check (see check_extern_function_decl's
-        own code order), so a str-typed parameter here would reject
-        for the wrong reason -- this needs the return type to be the
-        one and only str-typed thing in the signature to genuinely
-        exercise that specific check."""
         assert_program_semantic_error(
             "extern str getenv(int fd)\n"
             "\n"
@@ -11608,55 +8752,9 @@ class TestExternFunctionsCodegen:
         )
 
 
-# int8/uint8, step 1 of 3: the TYPE SYSTEM only -- lexer/parser keywords,
-# TypeKind/Type additions, literal range-checking, and arithmetic type-
-# checking rules (check_binary/check_unary). Deliberately NOT yet about
-# actual storage width or runtime wrapping behavior: codegen.py is
-# completely untouched by this step, and type_byte_width's own fallthrough
-# already returns 4 for int8/uint8 (an intermediate, deliberately
-# inefficient state -- see Type.INT8's own docstring) since nothing
-# explicitly recognizes them yet. That means a SIMPLE program with no
-# arithmetic (a literal assigned straight into an int8 variable, then read
-# back out unchanged) can genuinely compile and run correctly even at this
-# stage, but anything that needs int8/uint8 arithmetic to actually WRAP at
-# 8 bits does not yet -- these tests are deliberately semantic-layer-only
-# (type-checking passes or fails correctly), not full compile-and-run
-# assertions about runtime values, since that correctness doesn't exist
-# until storage becomes width-aware in a later step.
-#
-# int8/uint8's own literal-range-checking route (_check_value_flowing_into)
-# surfaced two real, pre-existing gaps unrelated to int8/uint8 itself, found
-# while making sure a struct-literal field could accept a range-checked
-# literal at all:
-#   1. check_struct_literal (both positional and named), _check_method_
-#      call, and check_call's own ordinary-function-argument loop all used
-#      _check_expr_allowing_struct_literal (no target type) instead of
-#      _check_value_flowing_into_allowing_struct_literal (which has both
-#      struct-literal detection AND a real target type) -- meaning an
-#      untyped array literal flowing into a slice-typed parameter or field
-#      never worked at any of those four call sites, not just for int8/
-#      uint8. analyze_return had the identical issue.
-#   2. _check_value_flowing_into's own untyped-array-literal special case
-#      only ever fired for a SLICE-kind target, never an ARRAY-kind one --
-#      so `[3]int arr = [1, 2, 3]` only ever worked by COINCIDENCE (an
-#      untyped literal's own default inferred element type, int, happens to
-#      already match that particular target), a coincidence that breaks for
-#      any element type a bare literal wouldn't naturally land on by
-#      itself, int8/uint8 included.
-# Both were genuine, findable bugs before int8/uint8 ever existed, not
-# something introduced by this feature -- see this class's own tests that
-# exercise them directly (test_int8_struct_field_positional and friends,
-# test_untyped_array_literal_into_slice_typed_struct_field).
-# ---------------------------------------------------------------------------
-
 class TestInt8Uint8TypeSystem:
     def _check(self, src, expect_error=None):
-        """Runs semantic analysis only -- no codegen, no gcc -- since
-        this step's own scope is entirely about type-checking, not
-        runtime behavior. Returns nothing; raises on an unexpected
-        outcome via a plain assert, mirroring assert_semantic_error's
-        own posture but for full programs (multiple functions/structs)
-        rather than a single main() body."""
+        """Semantic analysis only."""
         ast = _parse(src)
         if expect_error is None:
             analyze(ast)
@@ -11699,8 +8797,6 @@ class TestInt8Uint8TypeSystem:
         self._check("def int main():\n    uint8 x = 255\n    return 0\n")
 
     def test_uint8_literal_negative_is_rejected(self):
-        """uint8's own range starts at 0 -- a negative literal is out
-        of range, not a separate kind of error."""
         self._check(
             "def int main():\n    uint8 x = -1\n    return 0\n",
             expect_error="out of range",
@@ -11713,12 +8809,6 @@ class TestInt8Uint8TypeSystem:
         )
 
     def test_int_variable_does_not_implicitly_narrow_into_int8(self):
-        """An arbitrary int-typed EXPRESSION (a variable here, not a
-        literal) never gets the range-checked-literal treatment --
-        this is a real type mismatch, matching this language's
-        consistent 'explicit over implicit' stance (no implicit
-        narrowing, the same way there's no implicit int-to-bool
-        coercion)."""
         self._check(
             "def int main():\n"
             "    int y = 5\n"
@@ -11728,9 +8818,6 @@ class TestInt8Uint8TypeSystem:
         )
 
     def test_int8_arithmetic_stays_int8(self):
-        """int8 + int8 is int8, not promoted to int the way C's own
-        integer-promotion rules would have it -- verified by requiring
-        the result to fit into an int8-typed slot."""
         self._check(
             "def int main():\n"
             "    int8 a = 5\n"
@@ -11740,10 +8827,6 @@ class TestInt8Uint8TypeSystem:
         )
 
     def test_int8_arithmetic_result_rejected_by_a_wider_target(self):
-        """The flip side of the above: an int8 result can't flow into
-        an int-typed slot without an explicit cast (which doesn't
-        exist yet) -- proving the result type is genuinely int8, not
-        silently int underneath."""
         self._check(
             "def int main():\n"
             "    int8 a = 5\n"
@@ -11799,10 +8882,6 @@ class TestInt8Uint8TypeSystem:
         )
 
     def test_not_still_rejects_int8(self):
-        """'not' requires bool specifically -- int8/uint8 don't get
-        folded into the arithmetic-type acceptance check_unary's own
-        NEGATE/COMPLEMENT branch now has; NOT is a completely separate
-        branch, unaffected by this feature at all."""
         self._check(
             "def int main():\n"
             "    int8 a = 5\n"
@@ -11900,9 +8979,6 @@ class TestInt8Uint8TypeSystem:
         )
 
     def test_int8_struct_field_positional(self):
-        """The gap this class's own module comment describes: a
-        struct literal's positional argument loop used to skip the
-        target-aware check entirely."""
         self._check(
             "type S struct:\n"
             "    int8 x\n"
@@ -11936,12 +9012,6 @@ class TestInt8Uint8TypeSystem:
         )
 
     def test_untyped_array_literal_into_int8_array_target(self):
-        """The other gap this class's own module comment describes:
-        an untyped array literal flowing into an ARRAY-kind target
-        used to only ever check each element via plain check_expr,
-        which correctly infers int8/uint8 elements now that the
-        expected_element_type branch covers array targets too, not
-        just slice ones."""
         self._check(
             "def int main():\n"
             "    [3]int8 arr = [1, 2, 3]\n"
@@ -11957,12 +9027,6 @@ class TestInt8Uint8TypeSystem:
         )
 
     def test_untyped_array_literal_size_mismatch_still_caught(self):
-        """Regression check on the fix above: routing an array-target
-        literal through check_array_literal's own expected_element_
-        type branch returns the literal's own COMPUTED size, not the
-        target's, so a genuine size mismatch still surfaces as an
-        ordinary type mismatch at the call site -- nothing here
-        trusts the literal's own element count against the target."""
         self._check(
             "def int main():\n"
             "    [3]int8 arr = [1, 2]\n"
@@ -11971,11 +9035,6 @@ class TestInt8Uint8TypeSystem:
         )
 
     def test_untyped_array_literal_into_slice_typed_struct_field(self):
-        """A genuinely pre-existing, unrelated bug found while fixing
-        the struct-literal gap above: an untyped array literal never
-        correctly flowed into a slice-typed struct field at all,
-        since check_struct_literal's own argument loop had no target-
-        type awareness whatsoever before this fix."""
         self._check(
             "type Holder struct:\n"
             "    []int xs\n"
@@ -11986,10 +9045,6 @@ class TestInt8Uint8TypeSystem:
         )
 
     def test_ragged_array_literal_still_rejected(self):
-        """Regression check: a genuinely ragged/heterogeneous literal
-        must still be rejected, not silently accepted now that array
-        targets route through the same expected_element_type branch
-        slice targets already used."""
         self._check(
             "def int main():\n"
             "    [2][3]int8 matrix = [[1, 2, 3], [4, 5]]\n"
@@ -12024,49 +9079,7 @@ class TestInt8Uint8TypeSystem:
 
 
 # ---------------------------------------------------------------------------
-# int8/uint8, step 2 of 3: genuinely narrow (1-byte) STORAGE, layered on top
-# of step 1's already-correct type system. Full compile-and-run tests now,
-# unlike step 1's semantic-layer-only ones, since storage correctness is
-# exactly what this step is about.
-#
-# The central design: type_byte_width now returns 1 for int8/uint8 (making
-# every ADDRESS computation that already went through it -- array
-# indexing's own scale factor, a struct field's own offset -- correct for
-# free, no changes needed at either site). Every scalar READ site funnels
-# through a new _gen_read_scalar_into (sign/zero-extending via the new
-# MovSX/the existing MovZX rather than an ordinary 4-byte Mov), and every
-# scalar WRITE site through a new _gen_write_scalar_from (truncating via a
-# 1-byte MovB rather than a 4-byte Mov) -- the same "one choke point"
-# principle type_byte_width itself already demonstrated one level up.
-# Arithmetic wrapping needed NO changes to gen_binary_into/gen_unary_into
-# themselves: an operand is already correctly widened by the time it's
-# read, the result is already computed at ordinary 32-bit precision, and
-# truncation happens naturally the moment that result is written anywhere
-# -- see test_int8_addition_wraps and friends below, which is what actually
-# proves this rather than just asserting it.
-#
-# Two genuinely serious, pre-existing bugs were found (not introduced) by
-# this step, both from the same root cause: code that assumed a leaf's own
-# width was always a multiple of 4, an assumption that was only ever true
-# because no narrower type had existed until now.
-#   1. The array-equality and array-zero-init flat loops (_gen_array_flat_
-#      byte_equality_loop, _gen_array_flat_zero_loop) stepped 4 bytes at a
-#      time unconditionally -- reading or writing one byte past the end of
-#      any array whose total width wasn't a multiple of 4 (a [3]int8 array
-#      is 3 bytes). Fixed by parameterizing the step (1 for an int8/uint8
-#      leaf, 4 otherwise); the 1-byte equality case reads both sides via
-#      MovZX specifically BECAUSE byte equality doesn't care about sign
-#      interpretation, only raw identity.
-#   2. gen_array_copy -- the single mechanism behind plain array-to-array
-#      assignment, AND function parameter passing for an array argument --
-#      only ever emitted 8-byte chunks followed by EXACTLY one 4-byte
-#      remainder. A leaf width of 1 (a bare int8/uint8 leaf) or 5, 6, 9, ...
-#      (a STRUCT leaf containing an int8/uint8 field) satisfied neither
-#      condition, so the copy was a complete, SILENT no-op -- `arr2 = arr1`
-#      simply left arr2 unchanged, for any such leaf, with no error at all.
-#      Fixed by adding a third tier (a trailing run of 1-byte movbs for
-#      whatever remains after the 8- and 4-byte tiers), which generalizes
-#      correctly to any leaf width, not just int8/uint8's own narrow case.
+# int8/uint8
 # ---------------------------------------------------------------------------
 
 class TestInt8Uint8Storage:
@@ -12081,9 +9094,6 @@ class TestInt8Uint8Storage:
         )
 
     def test_int8_negative_literal_wraps_as_exit_code(self):
-        """Exit codes are unsigned bytes at the OS level -- -5 comes
-        back as 251, the correct two's-complement reinterpretation,
-        not a sign/truncation bug of its own."""
         assert_program_exit_code(
             "def int8 main():\n"
             "    int8 x = -5\n"
@@ -12100,9 +9110,6 @@ class TestInt8Uint8Storage:
         )
 
     def test_two_int8_locals_are_independently_stored(self):
-        """Proves adjacent 1-byte slots don't alias each other -- a
-        real risk the moment storage is genuinely narrower than a
-        stack slot's own natural alignment."""
         assert_program_exit_code(
             "def int8 main():\n"
             "    int8 a = 10\n"
@@ -12133,9 +9140,6 @@ class TestInt8Uint8Storage:
         )
 
     def test_int8_struct_field_read_second_field(self):
-        """The struct's second field specifically -- proves _field_
-        offset lays out the first (narrower) field correctly, not
-        just that a lone field works."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int8 x\n"
@@ -12160,11 +9164,6 @@ class TestInt8Uint8Storage:
         )
 
     def test_int_field_after_int8_field_in_struct(self):
-        """A wider field declared AFTER a narrower one -- proves its
-        own offset correctly accounts for the narrow field's real
-        (1-byte) width, not an assumed 4-byte one. Kept under 256 to
-        avoid any confusion with a process exit code's own unrelated
-        truncation to an unsigned byte at the OS level."""
         assert_program_exit_code(
             "type S struct:\n"
             "    int8 x\n"
@@ -12224,10 +9223,6 @@ class TestInt8Uint8Storage:
         )
 
     def test_int8_addition_wraps(self):
-        """100 + 100 = 200, out of int8's [-128, 127] range, wraps to
-        -56 -- the actual proof that widen-compute-truncate produces
-        correct wrapping arithmetic end to end, not just that the
-        type system allows the expression."""
         assert_program_exit_code(
             "def int8 main():\n"
             "    int8 a = 100\n"
@@ -12258,8 +9253,6 @@ class TestInt8Uint8Storage:
         )
 
     def test_int8_negate_boundary_wraps(self):
-        """-(-128) overflows int8's own range and wraps back to -128
-        -- the classic two's-complement negation-boundary case."""
         assert_program_exit_code(
             "def int8 main():\n"
             "    int8 a = -128\n"
@@ -12329,9 +9322,6 @@ class TestInt8Uint8Storage:
         )
 
     def test_uint8_comparison_is_unsigned(self):
-        """200 has to compare as GREATER than 100, not as a small or
-        negative number -- would fail if uint8 were ever accidentally
-        sign-extended instead of zero-extended when read."""
         assert_program_exit_code(
             "def uint8 main():\n"
             "    uint8 a = 200\n"
@@ -12354,9 +9344,6 @@ class TestInt8Uint8Storage:
         )
 
     def test_int8_array_equality_not_equal(self):
-        """Regression check on the equality-loop step-size fix: proves
-        it doesn't just avoid crashing on a non-multiple-of-4 width,
-        it still correctly detects a genuine difference."""
         assert_program_exit_code(
             "def int main():\n"
             "    [3]int8 a = [1, 2, 3]\n"
@@ -12387,13 +9374,6 @@ class TestInt8Uint8Storage:
         )
 
     def test_int8_array_zero_init_does_not_corrupt_adjacent_local(self):
-        """The actual regression check for the zero-loop step-size
-        bug: a [3]int8 array zeroed 4 bytes at a time would write one
-        byte past its own end, which -- depending on stack layout --
-        could corrupt an adjacent local. Declaring the guard BEFORE
-        the array puts it at a lower address, exactly where a 4-byte-
-        stepping over-write from the array's own zero-init would
-        land."""
         assert_program_exit_code(
             "def int8 main():\n"
             "    int8 guard = 42\n"
@@ -12428,11 +9408,6 @@ class TestInt8Uint8Storage:
         )
 
     def test_plain_array_assignment_with_int8_leaf(self):
-        """The actual regression check for the gen_array_copy bug: a
-        [3]int8 array's own leaf_width (1) satisfied neither of the
-        old two-tier copy loop's own conditions, making `b = a` a
-        complete, silent no-op. This is the single most direct test
-        of that fix."""
         assert_program_exit_code(
             "def int8 main():\n"
             "    [3]int8 a = [1, 2, 3]\n"
@@ -12443,10 +9418,6 @@ class TestInt8Uint8Storage:
         )
 
     def test_array_of_struct_with_int8_field_assignment(self):
-        """A struct LEAF containing an int8 field -- leaf_width 5 here
-        (1 + 4), which the old gen_array_copy also silently failed to
-        copy at all, for the identical underlying reason a bare int8
-        leaf did."""
         assert_program_exit_code(
             "type S struct:\n"
             "    int8 x\n"
@@ -12461,9 +9432,6 @@ class TestInt8Uint8Storage:
         )
 
     def test_array_of_struct_with_two_int8_fields_assignment(self):
-        """leaf_width 2 here (1 + 1) -- neither the 8- nor the 4-byte
-        tier ever fires at all; the whole copy is exclusively 1-byte
-        movbs."""
         assert_program_exit_code(
             "type Pair struct:\n"
             "    int8 a\n"
@@ -12478,9 +9446,6 @@ class TestInt8Uint8Storage:
         )
 
     def test_array_of_struct_with_mixed_field_widths_assignment(self):
-        """leaf_width 6 here (1 + 4 + 1) -- exercises all three tiers
-        (a 4-byte chunk, then two separate 1-byte ones) in a single
-        leaf's own copy."""
         assert_program_exit_code(
             "type Mixed struct:\n"
             "    int8 a\n"
@@ -12496,9 +9461,6 @@ class TestInt8Uint8Storage:
         )
 
     def test_array_parameter_with_int8_leaf(self):
-        """Function parameter passing for an array argument goes
-        through gen_array_copy too (see gen_function's own parameter
-        loop) -- the identical fix, a different call site."""
         assert_program_exit_code(
             "def int8 sumFirstTwo([3]int8 arr):\n"
             "    return arr[0] + arr[1]\n"
@@ -12521,9 +9483,6 @@ class TestInt8Uint8Storage:
         )
 
     def test_multidimensional_int8_array(self):
-        """Total width 6 (2*3*1) -- still not a multiple of 4,
-        exercising the same address math and flat-loop fixes one
-        dimension up."""
         assert_program_exit_code(
             "def int8 main():\n"
             "    [2][3]int8 m = [[1, 2, 3], [4, 5, 6]]\n"
@@ -12602,9 +9561,6 @@ class TestInt8Uint8Storage:
         )
 
     def test_append_int8_across_multiple_growths(self):
-        """Repeated append (forcing several reallocations) with an
-        adjacent local -- a stress test for corruption during backing-
-        array growth, not just a single, small append."""
         assert_program_exit_code(
             "def int main():\n"
             "    []int8 s = []int8[1]\n"
@@ -12630,12 +9586,6 @@ class TestInt8Uint8Storage:
         )
 
     def test_print_int8_now_supported(self):
-        """Superseded by step 3 (see TestInt8Uint8Print below): this
-        used to document print's own deliberate scope boundary for
-        step 2 (a clear CodegenError, since the type-descriptor
-        machinery didn't recognize int8/uint8 yet) -- now that it
-        does, this documents the boundary having moved instead of
-        just deleting the historical marker outright."""
         assert_program_stdout(
             "def int main():\n    int8 x = 5\n    print(x)\n    return 0\n",
             "5\n",
@@ -12643,36 +9593,7 @@ class TestInt8Uint8Storage:
 
 
 # ---------------------------------------------------------------------------
-# int8/uint8, step 3 of 3: print support, completing the feature. Only two
-# things needed adding, both because value_addr's own bytes are already
-# genuinely narrow (see step 2's own storage work) and every OTHER piece of
-# the print pipeline (gen_print_call_into itself, the buffer-append
-# primitives, the recursive array/slice/struct traversal) is completely
-# type-generic already:
-#   1. _get_or_build_type_descriptor needed two new kind tags (_TYPEDESC_
-#      INT8/_TYPEDESC_UINT8) with no extra fields, mirroring INT/BOOL's own
-#      shape exactly -- there's nothing useful to prefix a bare narrow int
-#      with, the same reason INT/BOOL themselves carry no name field.
-#   2. build_stringify_function needed two new dispatch branches, each
-#      IDENTICAL to the existing INT branch except for the widening
-#      instruction used to read value_addr's own single byte -- MovSX
-#      (sign-extend) for int8, MovZX (zero-extend) for uint8, rather than
-#      an ordinary 4-byte Mov. Once correctly widened into %eax, the exact
-#      same gen_int_to_decimal_into/bulk-append sequence INT already uses
-#      produces the correct decimal string for either -- there is no
-#      separate "narrow int to decimal" algorithm anywhere, because a
-#      correctly widened 32-bit value's own decimal representation doesn't
-#      depend on how many bits it started out occupying in memory.
-#
-# gen_print_call_into ITSELF needed no changes at all -- confirmed, not
-# assumed: its existing "int/bool/str, not a bare Variable" branch already
-# widens correctly (via the ordinary gen_expr_into, fixed back in step 2)
-# and writes the full, widened 32-bit value into a dedicated, 8-byte-wide
-# scratch slot -- writing more bytes than the type descriptor will
-# ultimately ask to be read back is harmless there specifically, since nothing
-# else shares that slot and a narrower read simply ignores the extra bytes,
-# which are still correct low-order bytes of the same widened value either
-# way.
+# int8/uint8
 # ---------------------------------------------------------------------------
 
 class TestInt8Uint8Print:
@@ -12709,9 +9630,6 @@ class TestInt8Uint8Print:
         )
 
     def test_print_uint8_max_boundary(self):
-        """255, not -1 or anything sign-related -- the actual proof
-        MovZX (not MovSX) is used for uint8, since 255's own low byte
-        (0xFF) sign-extended would print as -1 instead."""
         assert_program_stdout(
             "def int main():\n    uint8 x = 255\n    print(x)\n    return 0\n",
             "255\n",
@@ -12724,8 +9642,6 @@ class TestInt8Uint8Print:
         )
 
     def test_print_int8_non_variable_expression(self):
-        """Exercises gen_print_call_into's own "not a bare Variable"
-        scratch-slot path, not the direct-address-of-a-variable one."""
         assert_program_stdout(
             "def int8 main():\n"
             "    int8 a = 5\n"
@@ -12777,27 +9693,7 @@ class TestInt8Uint8Print:
 
 
 # ---------------------------------------------------------------------------
-# byte -- a built-in ALIAS for uint8 (the exact same Type.UINT8 instance,
-# not a third, distinct TypeKind), matching Go's own convention that a byte
-# is unsigned. Implemented as a second keyword mapped to the SAME TokenType
-# as 'uint8' (see lexer.py's own keywords table) and a second _TYPE_NAMES
-# entry pointing at the identical Type object (see semantic.py) -- nothing
-# in codegen.py needed any change at all, since every uint8-aware path
-# (type_byte_width, the scalar read/write helpers, array equality/zero-
-# init, print) already dispatches on Type.UINT8 directly and has no way to
-# ever learn 'byte' exists as a separate concept.
-#
-# The deliberate consequence, exercised directly below rather than left
-# implicit: byte is completely interchangeable with uint8 with no cast
-# needed in either direction, and -- like a user-written type alias --
-# leaves NO TRACE of itself anywhere downstream: an error message or
-# print() output always says "uint8", even for a value declared with
-# `byte`. test_byte_and_int8_are_still_incompatible is the one test that
-# proves this alias is scoped correctly: byte/uint8 interchange freely
-# with EACH OTHER, but still can't mix with int8 (a different, merely
-# same-width type) or int (a different width entirely) without a cast --
-# no implicit narrowing or promotion was accidentally introduced for
-# EITHER of the two types this aliasing touches.
+# byte
 # ---------------------------------------------------------------------------
 
 class TestByte:
@@ -12820,20 +9716,12 @@ class TestByte:
         )
 
     def test_byte_literal_out_of_range_error_says_uint8(self):
-        """The actual proof of 'leaves no trace of itself': the error
-        names uint8, the type byte actually IS under the hood, never
-        the word 'byte' the source code used."""
         assert_program_semantic_error(
             "def int main():\n    byte x = 300\n    return 0\n",
             match="out of range for uint8",
         )
 
     def test_byte_and_int8_are_still_incompatible(self):
-        """Scoping check: byte is an alias for uint8 specifically, not
-        a general 'any 8-bit type' wildcard -- it still can't mix with
-        int8 (same width, different signedness) without a cast, the
-        identical restriction uint8 and int8 already have with each
-        other."""
         assert_program_semantic_error(
             "def int main():\n"
             "    byte x = 5\n"
@@ -12870,9 +9758,6 @@ class TestByte:
         )
 
     def test_print_byte_array_shows_uint8_type_name(self):
-        """Another direct proof of 'leaves no trace': the array's own
-        printed type name is "[3]uint8", never "[3]byte", even though
-        every element was declared with `byte`."""
         assert_program_stdout(
             "def int main():\n"
             "    [3]byte arr = [1, 2, 3]\n"
@@ -12903,12 +9788,6 @@ class TestByte:
         )
 
     def test_byte_array_storage_is_genuinely_dense(self):
-        """No direct way to assert memory layout from a test, but this
-        exercises the same array-of-narrow-elements machinery step 2
-        built for uint8 (address math, flat equality/zero loops,
-        gen_array_copy's own 1-byte tier) -- byte inherits all of it
-        for free by virtue of being the identical Type object, with
-        nothing here needing its own, separate verification."""
         assert_program_exit_code(
             "def byte main():\n"
             "    [5]byte arr = [1, 2, 3, 4, 5]\n"
@@ -12917,51 +9796,12 @@ class TestByte:
         )
 
     def test_byte_is_a_reserved_keyword(self):
-        """Can't be used as an ordinary identifier, the same as any
-        other built-in type name -- 'int byte = 5' parses 'byte' as a
-        second type-starting token rather than a variable name, since
-        it lexes identically to 'uint8' (see lexer.py's own keywords
-        table)."""
         with pytest.raises(ParseError, match="Expected a variable name"):
             _parse("def int main():\n    int byte = 5\n    return byte\n")
 
 
 # ---------------------------------------------------------------------------
-# Casting -- `TYPE(expr)`, e.g. `int8(x)`. Scoped to int/int8/uint8 only:
-# widening (int8/uint8 -> int) is always safe, narrowing (int -> int8/
-# uint8) and same-width reinterpretation (int8 <-> uint8) both truncate/
-# wrap silently, matching this language's own established int8/uint8
-# arithmetic-wrapping behavior -- no runtime check or panic on overflow.
-# bool and str are deliberately excluded: this language already treats
-# bool as non-numeric everywhere else (no implicit int-to-bool coercion at
-# all), and str conversion is a fundamentally different KIND of operation
-# (formatting/parsing digits) than a numeric cast (a bit-level
-# reinterpretation) ever does, left for a separate, later feature.
-#
-# The one real subtlety, worth a dedicated test rather than just asserting
-# it: a cast's own RESULT has to be genuinely, correctly narrowed
-# IMMEDIATELY, not merely "correct once eventually written somewhere" --
-# `int8(300) + 5` needs 300 already wrapped to 44 before the addition
-# happens. test_cast_truncates_immediately_not_just_worked_when_written
-# is the test that actually proves this, and it specifically CAN'T use
-# addition/subtraction to do it: (a mod 256 + b) mod 256 == (a + b) mod
-# 256 regardless of when truncation happens, so an add/sub-based test
-# would pass identically whether the cast itself truncates or a bug left
-# truncation to happen only at the eventual write -- found and corrected
-# during this feature's own testing, not a hypothetical concern. Division
-# and comparison, whose own results genuinely depend on an operand's full
-# magnitude rather than just its low byte, are what actually distinguish
-# the two.
-#
-# A second, non-obvious change this feature needed: parse_statement's own
-# existing dispatch already treated any statement starting with a scalar
-# type keyword as unconditionally the start of a VarDecl -- committing to
-# parse_type() immediately. `int8(x)` used as a bare statement (discarding
-# its result) starts with that exact same token shape, so this needed a
-# one-token-of-lookahead fix (does '(' immediately follow the keyword?)
-# BEFORE that commitment, not after -- see parse_statement's own comment.
-# test_ordinary_vardecl_still_parses_correctly and test_cast_as_bare_
-# statement are the regression pair proving neither shape broke the other.
+# Casting
 # ---------------------------------------------------------------------------
 
 class TestCasting:
@@ -12990,10 +9830,6 @@ class TestCasting:
         analyze(ast)
 
     def test_cast_result_type_matches_target_exactly(self):
-        """A cast's own result has to flow into a slot of that EXACT
-        type -- casting to int8 doesn't somehow satisfy an int-typed
-        slot without ANOTHER cast, matching this language's consistent
-        no-implicit-widening stance even for a cast's own output."""
         ast = _parse(
             "def int main():\n"
             "    int8 x = 5\n"
@@ -13034,13 +9870,6 @@ class TestCasting:
             analyze(ast)
 
     def test_cast_to_a_type_alias_name_is_not_yet_supported(self):
-        """A documented, deliberate gap, not an oversight: `MyByte(x)`
-        parses as an ordinary Call (MyByte is an IDENTIFIER token,
-        never one of the five keyword types Cast recognizes -- see
-        Cast's own docstring), which check_call has no cast-aware case
-        for, so it's rejected as an undeclared function -- the same
-        underlying limitation already documented for constructing a
-        struct via its own alias name."""
         ast = _parse(
             "type MyByte = int8\n"
             "\n"
@@ -13053,10 +9882,6 @@ class TestCasting:
             analyze(ast)
 
     def test_ordinary_vardecl_still_parses_correctly(self):
-        """Regression check on parse_statement's own new lookahead:
-        proves the fix for disambiguating a bare cast statement from a
-        VarDecl didn't break the far more common VarDecl case it sits
-        right next to."""
         ast = _parse("def int main():\n    int8 x = 5\n    return 0\n")
         analyze(ast)
 
@@ -13113,14 +9938,6 @@ class TestCastingCodegen:
         )
 
     def test_cast_truncates_immediately_not_just_worked_when_written(self):
-        """The real proof this feature works correctly, not just that
-        it type-checks -- see this class's own module comment for why
-        this specifically has to use division (or comparison), never
-        addition/subtraction, to actually distinguish "the cast itself
-        truncates" from "truncation only happened to occur once written
-        to storage": 300/7 (uncorrected) is 42; 44/7 (the CORRECT,
-        truncated-then-divided value) is 6 -- a genuinely different
-        result, not one that coincidentally matches either way."""
         assert_program_exit_code(
             "def int8 main():\n"
             "    int x = 300\n"
@@ -13130,10 +9947,6 @@ class TestCastingCodegen:
         )
 
     def test_cast_truncation_proven_via_comparison_true_case(self):
-        """300 truncates to 44, which genuinely IS less than 50 -- an
-        untruncated 300 would also (coincidentally) satisfy `< 50` as
-        false, so this needs its OWN reverse-direction test just below
-        to fully rule out a missing truncation."""
         assert_program_exit_code(
             "def int main():\n"
             "    int x = 300\n"
@@ -13145,12 +9958,6 @@ class TestCastingCodegen:
         )
 
     def test_cast_truncation_proven_via_comparison_false_case(self):
-        """60 truncates to 60 (no wraparound needed), which is NOT
-        less than 50 -- if the cast failed to apply at all, this would
-        still correctly read as `60 < 50` == false by coincidence, so
-        the real proof is the PAIR of these two tests together: the
-        true case above only makes sense if 300 was actually narrowed
-        to a small number first."""
         assert_program_exit_code(
             "def int main():\n"
             "    int x = 60\n"
@@ -13162,11 +9969,6 @@ class TestCastingCodegen:
         )
 
     def test_cast_as_bare_statement(self):
-        """A cast used purely as a statement, discarding its own
-        result -- unusual, but has to compile and run without
-        crashing; also the direct regression check for parse_
-        statement's own new lookahead (see this class's own module
-        comment)."""
         assert_program_exit_code(
             "def int main():\n"
             "    int x = 5\n"
@@ -13240,10 +10042,6 @@ class TestCastingCodegen:
         )
 
     def test_widening_cast_of_a_literal_exceeding_int32_range_preserves_the_full_value(self):
-        """Bug fix: int64(1099511628211) used to truncate to 435
-        (32-bit reinterpretation of the literal) -- see check_cast
-        and gen_cast_narrowing_into's own docstrings. print(), not
-        return, since the exit code truncates to 8 bits regardless."""
         assert_program_stdout(
             "def int main():\n"
             "    print(int64(1099511628211))\n"
@@ -13252,7 +10050,6 @@ class TestCastingCodegen:
         )
 
     def test_widening_cast_of_a_negative_literal_exceeding_int32_range(self):
-        """Same bug, via the Unary NEGATE literal shape (`-huge`)."""
         assert_program_stdout(
             "def int main():\n"
             "    print(int64(-1099511628211))\n"
@@ -13261,9 +10058,6 @@ class TestCastingCodegen:
         )
 
     def test_repeated_multiplication_by_a_large_int64_literal_constant_in_a_called_function(self):
-        """The real shape that surfaced this bug: an FNV-1a-style
-        hash step, called in a loop. Expected value computed
-        independently in Python."""
         assert_program_stdout(
             "def int64 fnvStep(int64 h, byte b):\n"
             "    return (h ^ int64(b)) * int64(1099511628211)\n\n"
@@ -13280,41 +10074,12 @@ class TestCastingCodegen:
 
 
 # ---------------------------------------------------------------------------
-# int64, step 1 of 4: the TYPE SYSTEM only -- lexer/parser keywords,
-# TypeKind/Type additions, and arithmetic/cast type-checking rules, mirroring
-# int8/uint8's own step 1. Deliberately NOT yet about actual storage width or
-# 64-bit arithmetic: codegen.py is completely untouched by this step, and
-# type_byte_width's own fallthrough still returns 4 for int64 (an
-# intermediate, deliberately incorrect-but-harmless state for THIS step's own
-# scope, since nothing here exercises codegen at all) -- the identical
-# posture int8/uint8 went through first, in the opposite (narrowing, not
-# widening) direction.
-#
-# int64 is architecturally a bigger step than int8/uint8 overall (see the
-# design discussion that preceded this feature): unlike a narrower type,
-# which could reuse ordinary 32-bit arithmetic entirely via widen-compute-
-# truncate, int64 genuinely needs its own 64-bit instructions throughout,
-# since a 32-bit ADD/MUL/etc. isn't wide enough to hold every possible int64
-# result before any truncation could even apply. That real work is step 2's
-# job, not this one's -- these tests are semantic-layer-only, matching int8/
-# uint8's own step-1 tests.
-#
-# One deliberate, CONFIRMED design choice worth testing directly: unlike
-# int8/uint8 (which need a literal's value RANGE-checked, since narrowing can
-# lose information), a literal flowing into an int64 target needs no range
-# check at all -- int64's own range is a strict superset of int's -- but the
-# convenience still stops at a LITERAL specifically, matching int8/uint8's
-# own precedent: an arbitrary int-typed EXPRESSION (a variable) still needs
-# an explicit int64(...) cast, even though widening it would be perfectly
-# safe. test_int64_from_int_variable_still_requires_a_cast is the test that
-# proves the convenience didn't quietly become a general implicit-widening
-# rule.
+# int64
 # ---------------------------------------------------------------------------
 
 class TestInt64TypeSystem:
     def _check(self, src, expect_error=None):
-        """Mirrors TestInt8Uint8TypeSystem's own helper of the same
-        shape -- semantic analysis only, no codegen, no gcc."""
+        """Semantic analysis only."""
         ast = _parse(src)
         if expect_error is None:
             analyze(ast)
@@ -13333,15 +10098,9 @@ class TestInt64TypeSystem:
         self._check("def int64 main():\n    int64 x = -5\n    return 0\n")
 
     def test_int64_large_literal_widening(self):
-        """A value that wouldn't fit in int8/uint8 at all, and is well
-        past ordinary 32-bit int range too -- still just an ordinary
-        Constant node at parse time (this language has no int32-range
-        check on a plain int literal either), and int64's own literal
-        case needs no range check regardless."""
         self._check("def int64 main():\n    int64 x = 9000000000\n    return 0\n")
 
     def test_int64_is_int(self):
-        """`int64` is another spelling of `int`: no cast needed."""
         assert_program_stdout(
             "def int main():\n"
             "    int y = 5\n"
@@ -13463,34 +10222,7 @@ class TestInt64TypeSystem:
 
 
 # ---------------------------------------------------------------------------
-# int64, step 2 of 4 (storage + arithmetic + casting, per the design
-# discussion that preceded this feature -- casting ended up folding in here
-# naturally alongside storage, since it reuses the exact same gen_cast_
-# narrowing_into machinery int8/uint8 already built). Full compile-and-run
-# tests now, unlike step 1's semantic-layer-only ones.
-#
-# Unlike int8/uint8 (which could reuse ordinary 32-bit arithmetic entirely
-# via widen-compute-truncate), int64 genuinely needed its own 64-bit
-# instructions throughout -- ten new instruction classes (NegQ, NotQ, IMulQ,
-# Cqto, IDivQ, AndQ, OrQ, XorQ, ShiftLeftQ, ShiftRightArithmeticQ), plus
-# MovSXD for widening a cast INTO int64. gen_binary_op/gen_unary_op both took
-# a new operand_type parameter: callers still always pass the ordinary
-# 32-bit-named register, matching the convention _gen_read_scalar_into/
-# _gen_write_scalar_from already established, with these two methods
-# deciding internally whether to operate on the register's own 64-bit view.
-#
-# MANY of the tests below deliberately use a value beyond 32-bit range
-# (~2^31), not because a small value wouldn't exercise the code path, but
-# because a bug that silently truncated to 32 bits somewhere along the way
-# would still pass a small-value test by coincidence -- exactly the kind of
-# false confidence a large-value test is specifically designed to catch.
-# This is not a hypothetical concern: test_int64_function_argument_beyond_
-# 32bit_range is the direct regression test for a real bug FOUND this way --
-# gen_function's own parameter-binding logic read a stashed 64-bit argument
-# back out via a plain 32-bit Mov before ever handing it to _gen_write_
-# scalar_from, silently discarding an int64 argument's own high 32 bits.
-# Every SMALL-value version of that same test (e.g. identity(100)) passed
-# throughout development; only a large-value test ever caught it.
+# int64
 # ---------------------------------------------------------------------------
 
 class TestInt64Storage:
@@ -13503,9 +10235,6 @@ class TestInt64Storage:
         )
 
     def test_int64_large_literal_vardecl_and_return(self):
-        """9000000000 is well beyond 32-bit range; truncated to its
-        own low byte for the exit code, but the literal itself must
-        still be correctly, fully stored and read back."""
         assert_program_exit_code(
             "def int64 main():\n    int64 x = 9000000000\n    return x\n",
             9000000000 % 256,
@@ -13579,10 +10308,6 @@ class TestInt64Storage:
         )
 
     def test_int64_addition_beyond_32bit_range(self):
-        """5000000000 + 3000000000 = 8000000000. A bug that silently
-        wrapped at 32 bits (giving 3705032704, from 8000000000 mod
-        2^32) would fail the '> 4000000000' check below; only the
-        genuinely correct 64-bit sum passes it."""
         assert_program_exit_code(
             "def int main():\n"
             "    int64 a = 5000000000\n"
@@ -13605,9 +10330,6 @@ class TestInt64Storage:
         )
 
     def test_int64_multiplication_beyond_32bit_range(self):
-        """100000 * 100000 = 10,000,000,000, requiring genuine 64-bit
-        multiplication -- 32-bit imul would silently produce a
-        completely different, wrapped result."""
         assert_program_exit_code(
             "def int main():\n"
             "    int64 a = 100000\n"
@@ -13621,10 +10343,6 @@ class TestInt64Storage:
         )
 
     def test_int64_division_beyond_32bit_range(self):
-        """10000000000 / 3 = 3333333333 at correct 64-bit precision.
-        If division incorrectly operated on only the low 32 bits of
-        10000000000 (1410065408), the result (470021802) would be
-        far smaller than the threshold checked here."""
         assert_program_exit_code(
             "def int main():\n"
             "    int64 a = 10000000000\n"
@@ -13789,9 +10507,6 @@ class TestInt64Storage:
         )
 
     def test_cast_to_int8_truncates_immediately(self):
-        """The genuine proof, via division -- see this class's own
-        module comment for why addition/subtraction couldn't tell
-        this apart from a bug that deferred truncation until later."""
         assert_program_exit_code(
             "def int8 main():\n"
             "    int64 a = 300\n"
@@ -13811,12 +10526,6 @@ class TestInt64Storage:
         )
 
     def test_int64_function_argument_beyond_32bit_range(self):
-        """The direct regression test for the real gen_function
-        parameter-binding bug this step found and fixed -- see this
-        class's own module comment for the full story. Deliberately
-        checks the parameter's own value INSIDE the callee (no return
-        value involved at all), isolating the argument-passing
-        mechanism specifically from return-value propagation."""
         assert_program_exit_code(
             "def int checkParam(int64 x):\n"
             "    int64 threshold = 4000000000\n"
@@ -13830,10 +10539,6 @@ class TestInt64Storage:
         )
 
     def test_int64_return_value_beyond_32bit_range(self):
-        """The other half of the same regression -- return-value
-        propagation specifically, isolated from argument passing by
-        using identity() and checking the caller's own received
-        result."""
         assert_program_exit_code(
             "def int64 identity(int64 x):\n"
             "    return x\n"
@@ -13918,10 +10623,6 @@ class TestInt64Storage:
         )
 
     def test_int64_array_copy_beyond_32bit_range(self):
-        """The gen_array_copy fix from int8/uint8's own step 2 needed
-        no further changes for int64 -- 8 is already a clean multiple
-        of the 8-byte movq tier, so this exercises that generalization
-        held, rather than assuming it did."""
         assert_program_exit_code(
             "def int main():\n"
             "    [2]int64 a = [5000000000, 6000000000]\n"
@@ -13950,14 +10651,6 @@ class TestInt64Storage:
         )
 
     def test_print_int64_now_supported(self):
-        """Superseded by the print step (see TestInt64Print below):
-        this used to document print's own deliberate scope boundary
-        for step 2 (a clear CodegenError, since the type-descriptor
-        machinery didn't recognize int64 yet, and gen_int_to_decimal_
-        into is written entirely in 32-bit instructions) -- now that a
-        parallel 64-bit conversion routine exists, this documents the
-        boundary having moved instead of just deleting the historical
-        marker outright."""
         assert_program_stdout(
             "def int main():\n    int64 x = 5\n    print(x)\n    return 0\n",
             "5\n",
@@ -13965,41 +10658,7 @@ class TestInt64Storage:
 
 
 # ---------------------------------------------------------------------------
-# int64, step 3 of 3 (print), completing the feature. Needed real, new work
-# unlike int8/uint8's own print step: gen_int_to_decimal_into is written
-# entirely in 32-bit instructions throughout (not just at the read), so it
-# can't be reused for int64 the way it was for int8/uint8 -- this needed a
-# genuinely separate gen_int64_to_decimal_into, a new DivQ instruction (the
-# int64 counterpart to Div, handling INT64_MIN's own magnitude the identical
-# way Div already handles INT_MIN's), and its own, separately-sized 32-byte
-# scratch buffer (int64's own max magnitude needs up to 20 characters plus a
-# sign, well past the 16-byte buffer int/int8/uint8 already share).
-#
-# This step surfaced SEVEN separate instances of the exact same bug, spread
-# across gen_function's own parameter-binding, gen_print_call_into's own
-# scratch-slot write, gen_array_literal_into, gen_struct_literal_into, gen_
-# index_assign, gen_field_assign, and append's own _gen_write_value_at_
-# address_into: a hardcoded 32-bit `Mov` shuttling a computed value into a
-# protecting register (`r8d`) before some other operation (a stack pop, a
-# further dispatch) could safely proceed -- correct for int/int8/uint8/bool
-# (never wider than 4 bytes to begin with) but silently discarding int64's
-# own high 32 bits every time. All seven are covered by a direct regression
-# test below, each exercising a LARGE value specifically (never a small one
-# that would pass by coincidence either way -- see TestInt64Storage's own
-# module comment for why that distinction matters).
-#
-# Two further, more specific bugs, both in the same "an outer node's
-# corrected type never propagated to where codegen actually reads it"
-# family: gen_expr_into's own Unary case read type_of(expr.operand) instead
-# of type_of(expr) to pick 32- vs 64-bit dispatch, silently using 32-bit Neg
-# for a widened literal like `int64 x = -5` (invisible for int8/uint8 only
-# because their own unary dispatch never branched on operand type at all
-# before int64 existed); and the literal-widening logic itself never
-# annotated the INNER Constant node when the literal was negative
-# (`-9000000000`), so gen_expr_into's own Constant case still took the
-# 32-bit-immediate path even after the first fix. Both are covered directly
-# below (test_negative_literal_widening_uses_negq,
-# test_large_negative_literal_widening).
+# int64
 # ---------------------------------------------------------------------------
 
 class TestInt64Print:
@@ -14024,13 +10683,6 @@ class TestInt64Print:
         )
 
     def test_print_negative_int64_beyond_32bit_range(self):
-        """The direct regression test for the literal-widening bug
-        that affected the INNER Constant node's own annotation (see
-        this class's own module comment): -9000000000 parses as
-        Unary(NEGATE, Constant(9000000000)), and the inner literal's
-        own value exceeds 32-bit range, so gen_expr_into's own
-        Constant case has to correctly take the 64-bit-immediate path
-        for it specifically, not just the outer negation."""
         assert_program_stdout(
             "def int main():\n    int64 x = -9000000000\n    print(x)\n    return 0\n",
             "-9000000000\n",
@@ -14043,11 +10695,6 @@ class TestInt64Print:
         )
 
     def test_print_int64_min_boundary(self):
-        """INT64_MIN specifically -- the one value whose negation
-        doesn't change its own bit pattern at all, needing DivQ
-        (unsigned) rather than IDivQ to correctly extract its own
-        magnitude, mirroring Div's identical role for INT_MIN one
-        register-width down."""
         assert_program_stdout(
             "def int main():\n    int64 x = -9223372036854775808\n    print(x)\n    return 0\n",
             "-9223372036854775808\n",
@@ -14060,9 +10707,6 @@ class TestInt64Print:
         )
 
     def test_print_int64_non_variable_expression(self):
-        """Exercises gen_print_call_into's own scratch-slot path (not
-        a bare Variable) -- the direct regression test for that
-        specific fix, using a sum that exceeds 32-bit range."""
         assert_program_stdout(
             "def int main():\n"
             "    int64 a = 5000000000\n"
@@ -14094,13 +10738,6 @@ class TestInt64Print:
         )
 
     def test_print_slice_of_int64(self):
-        """The actual bug that started this investigation: a slice of
-        int64 printed complete garbage for every element (a plain
-        [3]int64 ARRAY already printed correctly at this point,
-        isolating the bug to slice construction specifically -- see
-        test_slice_of_int64_read_without_print below for the even
-        more direct regression, with print removed from the picture
-        entirely)."""
         assert_program_stdout(
             "def int main():\n"
             "    []int64 s = []int64[1, -2, 5000000000]\n"
@@ -14123,21 +10760,9 @@ class TestInt64Print:
 
 
 class TestInt64RegressionsFoundDuringPrintStep:
-    """Bugs found while chasing test_print_slice_of_int64 down, all in
-    codegen.py (not print itself, in most cases) -- see TestInt64Print's
-    own module comment for the shared root cause. Kept as their own class
-    since most of these don't involve print at all, despite being found
-    because of it."""
     pytestmark = GCC_SKIP
 
     def test_slice_of_int64_read_without_print(self):
-        """The actual root cause, isolated: reading a slice-of-int64
-        element back via ordinary indexing (comparison, no print
-        anywhere) already failed before print was ever involved --
-        this is what proved the bug was in slice construction, not
-        stringification. See gen_array_literal_into's own protect_dst
-        branch, called via gen_array_literal_heap_alloc_into for a
-        slice literal's backing array."""
         assert_program_exit_code(
             "def int main():\n"
             "    []int64 s = []int64[1, -2, 5000000000]\n"
@@ -14160,11 +10785,6 @@ class TestInt64RegressionsFoundDuringPrintStep:
         )
 
     def test_append_int64_large_value(self):
-        """Regression for _gen_write_value_at_address_into's own fix
-        -- this method never even routed through _gen_write_scalar_
-        from before, a latent (if not directly observed) bug for
-        int8/uint8 too, not just the int64 case this actually
-        surfaced it for."""
         assert_program_exit_code(
             "def int main():\n"
             "    []int64 s = []int64[1, 2]\n"
@@ -14177,7 +10797,6 @@ class TestInt64RegressionsFoundDuringPrintStep:
         )
 
     def test_index_assign_int64_large_value(self):
-        """Regression for gen_index_assign's own shuttle-copy fix."""
         assert_program_exit_code(
             "def int main():\n"
             "    [3]int64 arr = [0, 0, 0]\n"
@@ -14190,7 +10809,6 @@ class TestInt64RegressionsFoundDuringPrintStep:
         )
 
     def test_field_assign_int64_large_value(self):
-        """Regression for gen_field_assign's own shuttle-copy fix."""
         assert_program_exit_code(
             "type S struct:\n"
             "    int64 v\n"
@@ -14206,10 +10824,6 @@ class TestInt64RegressionsFoundDuringPrintStep:
         )
 
     def test_struct_literal_int64_field_large_value(self):
-        """Regression for gen_struct_literal_into's own shuttle-copy
-        fix, exercised via its protect_dst=True path specifically
-        (dst_mem.base is 'rax', not 'rbp') by constructing the struct
-        as part of an array literal element."""
         assert_program_exit_code(
             "type Big struct:\n"
             "    int64 v\n"
@@ -14224,13 +10838,6 @@ class TestInt64RegressionsFoundDuringPrintStep:
         )
 
     def test_negative_literal_widening_uses_negq(self):
-        """Regression for gen_expr_into's own Unary-case fix: reading
-        type_of(expr.operand) instead of type_of(expr) silently chose
-        32-bit Neg over NegQ for a widened literal. A small value
-        alone wouldn't catch this (both would produce the same low 32
-        bits), so this checks the WIDENED result directly via
-        comparison against another int64 value, not just that it
-        compiles."""
         assert_program_exit_code(
             "def int main():\n"
             "    int64 x = -5\n"
@@ -14242,14 +10849,6 @@ class TestInt64RegressionsFoundDuringPrintStep:
         )
 
     def test_large_negative_literal_widening(self):
-        """Regression for the inner-Constant-annotation fix -- see
-        this class's own module comment. -9000000000 needs the OUTER
-        Unary's own corrected int64 dispatch (NegQ, from the fix just
-        above) AND the INNER Constant's own corrected annotation (so
-        gen_expr_into's Constant case emits a 64-bit MovQ-immediate
-        for 9000000000, which doesn't fit in a 32-bit one at all) --
-        both fixes are needed together for this specific case, so it
-        exercises them jointly rather than in isolation."""
         assert_program_exit_code(
             "def int main():\n"
             "    int64 x = -9000000000\n"
@@ -14272,8 +10871,6 @@ class TestTypedArrayLiterals:
         )
 
     def test_typed_literal_matching_vardecl_type_is_redundant_but_valid(self):
-        """`[3]int arr = [3]int[1, 2, 3]` restates a type the
-        declaration already gives -- allowed, not an error."""
         assert_stdout(
             "    [3]int arr = [3]int[1, 2, 3]\n"
             "    print(arr)\n"
@@ -14289,10 +10886,6 @@ class TestTypedArrayLiterals:
         )
 
     def test_bare_statement_with_side_effecting_element(self):
-        """Proves a bare literal statement genuinely evaluates its
-        elements -- nothing ever reads the resulting array as a whole,
-        but each element still runs for its own side effect, exactly
-        like any other bare expression statement already does."""
         assert_program_stdout(
             "def int se():\n"
             "    print(99)\n"
@@ -14305,8 +10898,6 @@ class TestTypedArrayLiterals:
         )
 
     def test_single_element_typed_literal(self):
-        """One of the pair proving the trickiest parsing ambiguity is
-        resolved correctly -- see this class's own module-level note."""
         assert_exit_code(
             "    [1]int arr = [1]int[7]\n"
             "    return arr[0]",
@@ -14314,10 +10905,6 @@ class TestTypedArrayLiterals:
         )
 
     def test_untyped_single_element_literal_still_works(self):
-        """The other half of the pair: `[5]` alone (untyped, single-
-        element) must NOT be misparsed as the start of a typed
-        literal's own size bracket, despite sharing an identical
-        first three tokens with one."""
         assert_exit_code(
             "    [1]int arr = [5]\n"
             "    return arr[0]",
@@ -14365,11 +10952,6 @@ class TestTypedArrayLiterals:
         )
 
     def test_typed_literal_as_call_argument(self):
-        """Same lifted restriction untyped array values just got (see
-        test_array_literal_as_direct_call_argument in TestArrays) --
-        applies identically here, since it's about the expression
-        being an ArrayLiteral at all, not about whether it happens to
-        be typed."""
         assert_program_exit_code(
             "def int sum3([3]int arr):\n"
             "    return arr[0] + arr[1] + arr[2]\n"
@@ -14380,12 +10962,6 @@ class TestTypedArrayLiterals:
         )
 
     def test_non_literal_array_element_in_bare_statement_not_supported(self):
-        """A real, deliberate gap: an element that's itself a non-
-        literal array-typed expression (here, a bare Variable) inside
-        a BARE-statement literal has no side effect worth preserving,
-        but distinguishing that from an array-returning Call (which
-        might) isn't implemented -- rejected with a clear error rather
-        than silently guessing."""
         source = (
             "def int main():\n"
             "    [3]int arr = [1, 2, 3]\n"
@@ -14399,19 +10975,7 @@ class TestTypedArrayLiterals:
 
 
 class TestBoundsChecking:
-    """Every array access is runtime-checked (see codegen.py's
-    gen_index_address_into): a single unsigned comparison against the
-    array's size catches an over-large index and a negative one alike,
-    since a negative int reinterpreted unsigned becomes a huge positive
-    number. test_panic_message_survives_piped_output specifically
-    guards against a real bug found during development, not a
-    hypothetical one: abort() terminates via a raw signal, bypassing
-    the normal exit() path that would otherwise flush libc's buffered
-    stdio -- without an explicit fflush(NULL) before the abort() call,
-    the panic message was reliably printed to an interactive terminal
-    but silently lost whenever output was piped or redirected, which is
-    the common case for a program run non-interactively.
-    """
+    """Every array access is bounds-checked at runtime."""
     pytestmark = GCC_SKIP
 
     def test_index_too_large_aborts(self):
@@ -14429,10 +10993,6 @@ class TestBoundsChecking:
         )
 
     def test_valid_boundary_index_does_not_abort(self):
-        """The positive control: the LAST valid index (size - 1) must
-        not trip the bounds check -- proof the comparison's boundary
-        condition (unsigned >=, not >) is exactly right, not
-        off-by-one in either direction."""
         assert_exit_code(
             "    [3]int arr = [10, 20, 30]\n"
             "    int i = 2\n"
@@ -14441,13 +11001,6 @@ class TestBoundsChecking:
         )
 
     def test_panic_message_survives_piped_output(self):
-        """Regression test for a real bug found during development:
-        the "array index out of bounds" message must actually reach
-        stdout, not be silently discarded in an unflushed buffer when
-        abort() bypasses the normal exit() path. Captures output
-        directly (compile_and_run's capture_output=True) rather than
-        relying on an interactive terminal's line-buffering to mask
-        the bug the way a casual manual test would."""
         result = compile_and_run(
             "def int main():\n"
             "    [3]int arr = [1, 2, 3]\n"
@@ -14459,45 +11012,13 @@ class TestBoundsChecking:
 
 
 # ---------------------------------------------------------------------------
-# Size-based stack safety: an array over _STACK_ARRAY_LIMIT_BYTES (16KB,
-# hardcoded -- see codegen.py's is_heap_allocated) is heap-allocated
-# instead of living inline in its own stack slot, closing off the one
-# concrete danger fixed-size arrays already had before any of this
-# existed: nothing stopped a single huge array from silently blowing
-# the stack, the exact same way it wouldn't in C. This is deliberately
-# a PER-ARRAY check, not a per-frame budget -- see is_heap_allocated's
-# own docstring for the accepted gaps that leaves (several moderate
-# arrays in one function, or a moderate array under deep recursion,
-# can still exhaust the stack even though no single array ever trips
-# this check).
-#
-# test_exactly_at_threshold_stays_on_stack and
-# test_just_over_threshold_is_heap_allocated both inspect the generated
-# assembly directly (via generate_asm) rather than only checking exit
-# codes -- proof the boundary itself is exactly right (>, not >=),
-# not just that some array somewhere behaves plausibly.
-#
-# The other tests exist because heap-promoting an array is a real,
-# separate code path through nearly every piece of array codegen, not
-# a transparent swap of one allocator for another: gen_var_decl's
-# malloc-then-store-initializer path is fully distinct from its
-# malloc-then-copy path (an ArrayLiteral initializer vs. a Variable/
-# Index/Call one), gen_assign has to reuse the existing allocation
-# rather than mallocing again, and gen_function's parameter loop needs
-# its own independent copy of a heap-allocated argument to preserve
-# value semantics across a call, exactly like the stack-allocated case
-# already had. Every one of these is exercised directly below, not
-# just assumed to follow from the allocation-site change alone.
+# Size-based stack safety
 # ---------------------------------------------------------------------------
 
 class TestHeapAllocatedArrays:
     pytestmark = GCC_SKIP
 
     def test_exactly_at_threshold_stays_on_stack(self):
-        """The boundary case: exactly _STACK_ARRAY_LIMIT_BYTES (16384)
-        must NOT be heap-allocated -- checked by inspecting the
-        generated assembly for the complete absence of a malloc call,
-        not just by trusting a plausible-looking exit code."""
         n = 2048  # 2048 * 8 = 16384, exactly the threshold
         source = (
             f"def int main():\n"
@@ -14511,10 +11032,6 @@ class TestHeapAllocatedArrays:
         assert not mallocs
 
     def test_just_over_threshold_is_heap_allocated(self):
-        """The other side of the same boundary: even one byte over the
-        threshold must be heap-allocated -- checked by confirming a
-        malloc call is present, sized to the array's own exact
-        footprint, not merely "big enough"."""
         n = 2049  # 2049 * 8 = 16392, one int over the threshold
         source = (
             f"def int main():\n"
@@ -14538,11 +11055,6 @@ class TestHeapAllocatedArrays:
         )
 
     def test_heap_allocated_local_with_literal_initializer(self):
-        """gen_var_decl's malloc-then-store-initializer path is
-        genuinely distinct code from its malloc-then-copy path (see
-        this class's own module-level comment) -- exercised directly
-        with a literal large enough to force heap promotion, not
-        inferred from the Variable-initializer case below."""
         n = 4200  # 4200 * 4 = 16800 bytes, over the threshold
         elems = ', '.join(str(i % 10) for i in range(n))
         assert_program_exit_code(
@@ -14553,12 +11065,6 @@ class TestHeapAllocatedArrays:
         )
 
     def test_heap_allocated_value_semantics(self):
-        """The headline property, for heap-backed storage specifically:
-        assigning one heap-allocated array to another still copies
-        elements rather than aliasing the pointer -- reusing the
-        destination's existing allocation (see gen_assign's own array
-        case) rather than mallocing again, but still a real,
-        independent copy."""
         assert_exit_code(
             "    [10000]int a\n"
             "    [10000]int b\n"
@@ -14597,11 +11103,6 @@ class TestHeapAllocatedArrays:
         )
 
     def test_heap_allocated_parameter_value_semantics(self):
-        """The parameter-passing counterpart to
-        test_heap_allocated_value_semantics: a heap-allocated array
-        parameter still gets its own independent copy on entry (see
-        gen_function's own parameter loop) -- mutating it inside the
-        callee must never affect the caller's original."""
         assert_program_exit_code(
             "def int mutate([10000]int arr):\n"
             "    arr[0] = 999\n"
@@ -14616,12 +11117,6 @@ class TestHeapAllocatedArrays:
         )
 
     def test_heap_allocated_array_as_return_type(self):
-        """Array returns need no heap-allocation logic of their own at
-        all -- see is_heap_allocated's own scope note -- since an
-        array-typed return already writes directly through the
-        caller-provided hidden pointer (see gen_return), regardless of
-        the array's size. This just confirms that still holds once the
-        array involved happens to be heap-allocated."""
         assert_program_exit_code(
             "def [10000]int make():\n"
             "    [10000]int r\n"
@@ -14651,14 +11146,6 @@ class TestHeapAllocatedArrays:
         )
 
     def test_multiple_heap_allocated_parameters(self):
-        """Stress-tests gen_function's two-pass parameter handling:
-        every incoming argument register is stashed into its own
-        temporary slot before any parameter is processed, specifically
-        because a heap-allocated parameter's malloc call can clobber
-        ANY caller-saved register, including other, not-yet-processed
-        parameters' own incoming values. Three heap-allocated
-        parameters in one function is exactly the scenario that would
-        expose a mistake in that stashing."""
         assert_program_exit_code(
             "def int sum_firsts([10000]int a, [10000]int b, [10000]int c):\n"
             "    return a[0] + b[0] + c[0]\n"
@@ -14675,11 +11162,6 @@ class TestHeapAllocatedArrays:
         )
 
     def test_mixed_parameter_types_with_heap_allocated_array(self):
-        """A heap-allocated array parameter alongside ordinary scalar,
-        str, and small (stack-allocated) array parameters in the same
-        call -- confirms the two-pass parameter stashing handles a mix
-        of types correctly, not just a function whose parameters are
-        uniformly heap-allocated."""
         assert_program_exit_code(
             "def int mix(int a, str s, [3]int small, [10000]int big):\n"
             "    int slen_check = 0\n"
@@ -14697,110 +11179,17 @@ class TestHeapAllocatedArrays:
 
 
 # ---------------------------------------------------------------------------
-# Slices: Go-style views into an existing array or slice's own backing
-# storage -- a fixed {pointer, length} descriptor (16 bytes), NOT a
-# copy the way plain array assignment already is. This first pass is
-# deliberately view-only: no append, no growth, no capacity -- just
-# `base[low:high]`, both bounds optionally omitted, backed by whatever
-# array or slice `base` already is.
-#
-# test_slice_write_mutates_underlying_array and
-# test_overlapping_slices_alias_each_others_writes are the two tests
-# that actually prove the entire point of this feature holds at the
-# machine-code level, not just conceptually: a slice is a genuine
-# alias, so writing through one must be visible through the array it
-# came from, and through any OTHER slice that overlaps it -- if either
-# of these failed, slices would just be a more awkward way to copy an
-# array, not a real view.
-#
-# Any array that's ever sliced used to be claimed here as unconditionally
-# heap-allocated -- that was never actually true (is_heap_allocated only
-# ever checked size; see TestArrayEscapeAnalysis for the real mechanism,
-# and its own module-level note for the bug this gap caused in practice).
-# What actually keeps every test in this class safe is that none of them
-# let a slice outlive the stack frame its own backing array lives in --
-# see TestArrayEscapeAnalysis for what happens, and what's now done about
-# it, when one does.
+# Slices
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Array escape analysis: which array-typed declarations need to be heap-
-# allocated because a slice backed by them might outlive the function
-# they're declared in, independent of their own size. Before this
-# existed, is_heap_allocated only ever checked size -- a small array that
-# got sliced and had the slice returned kept its stack-allocated inline
-# slot regardless, leaving the returned slice's own pointer field
-# dangling into a stack frame that's already torn down by the time
-# anything reads it again. This was a REAL bug, not a hypothetical one:
-# it was found by compiling and running a real program (a function
-# taking a small array parameter, slicing it, and returning that slice),
-# where the corruption only became visible once enough OTHER function
-# calls ran between producing the slice and reading it again -- exactly
-# the "undefined behavior doesn't reliably manifest" trap that also means
-# a passing runtime-output test here doesn't, by itself, prove a given
-# array correctly escaped; see this class's own heavy use of asm-
-# inspection (checking for a real `malloc` call, via generate_asm
-# directly) precisely to sidestep that trap, rather than trusting that a
-# clean-looking exit code means nothing went wrong.
-#
-# The analysis itself is intraprocedural and FLOW-INSENSITIVE (see
-# analyze_array_escapes's own docstring in codegen.py for the full
-# algorithm and its remaining deliberate limitations): every assignment
-# to a slice-typed variable -- or write into an array- or slice-of-
-# slices element -- anywhere in a function is unioned together into one
-# combined answer for "what might this be backed by", used everywhere
-# that variable or container is read, rather than tracking which value
-# it holds (or which element holds what) at each specific point in the
-# code.
-#
-# test_local_array_sliced_but_not_returned_stays_on_the_stack is the
-# single most important test in this whole class, arguably more important
-# than the bug-fix tests themselves: it's what actually proves this is a
-# genuinely more precise analysis, not just "heap-allocate every array
-# that's ever sliced" wearing a fancier name. Every bug-fix test here
-# could pass even under that cruder rule; this one specifically requires
-# a small, sliced, but non-escaping array to remain stack-allocated, and
-# would fail under it.
-#
-# test_array_of_slices_element_escapes_correctly and its several siblings
-# just after it close a gap that used to be explicitly documented here as
-# known and deferred: a slice stored as an array- or slice-of-slices
-# ELEMENT (`rows[i] = arr[:]`) is now tracked, flow-insensitively, the
-# very same way a bare slice variable already was -- every write into ANY
-# element of such a container, anywhere in the function, is unioned into
-# one combined answer for the container as a whole, exactly the same
-# "one blob per declaration" treatment, just extended to a container's
-# elements collectively rather than per-index.
-#
-# test_deeply_nested_container_escapes_correctly and test_chained_
-# reslicing_with_no_intermediate_variable_escapes_correctly close a
-# SECOND, separately-rooted gap that used to be explicitly documented
-# here as known and deferred: a container reached through a further
-# Index (`matrix[i][j] = arr[:]`), or a Slice chained directly on
-# another Slice with no intermediate named variable at all
-# (`s1[0:3][0:2]`), both now correctly resolve to their own root
-# declaration's shared slot, at any depth -- not just the single-hop
-# case. test_scalar_read_through_a_slice_element_does_not_escape is the
-# precision test for THIS specific fix, mirroring test_local_array_
-# sliced_but_not_returned_stays_on_the_stack's own role for the array-
-# of-slices case above: closing the deeper-nesting gap by conflating
-# "does indexing this one more time yield a slice" with "does this
-# aggregate contain a slice somewhere" was a real bug found while
-# fixing it, not a hypothetical -- reading a plain int back OUT of a
-# slice element must never be mistaken for touching the container's own
-# slice-holding role just because the container, considered as a whole,
-# happens to hold a slice somewhere.
+# Array escape analysis
 # ---------------------------------------------------------------------------
 
 class TestArrayEscapeAnalysis:
     pytestmark = GCC_SKIP
 
     def test_small_sliced_parameter_returned_no_longer_corrupts(self):
-        """The user's own, originally-reported bug: a function takes a
-        small array PARAMETER, slices it, and returns that slice --
-        with enough subsequent function-call activity in the caller to
-        make a dangling stack pointer's corruption actually visible if
-        the parameter were still stack-allocated."""
         assert_program_stdout(
             "def []int sliceints([5]int arr):\n"
             "    []int a = arr[:]\n"
@@ -14823,10 +11212,6 @@ class TestArrayEscapeAnalysis:
         )
 
     def test_small_sliced_parameter_returned_is_actually_heap_allocated(self):
-        """The asm-level confirmation behind the test just above --
-        not just "the output looked right this time" (which undefined
-        behavior can produce by coincidence), but a genuine `malloc`
-        call sized to the array's own exact footprint."""
         source = (
             "def []int sliceints([5]int arr):\n"
             "    []int a = arr[:]\n"
@@ -14844,11 +11229,6 @@ class TestArrayEscapeAnalysis:
         assert 40 in mallocs  # 5 ints * 8 bytes
 
     def test_local_array_sliced_but_not_returned_stays_on_the_stack(self):
-        """THE test proving this is genuinely more precise than
-        "heap-allocate every array that's ever sliced" -- see this
-        class's own module-level note. A small array, sliced, but the
-        slice never escapes the function at all: must NOT be
-        promoted."""
         source = (
             "def int main():\n"
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
@@ -14861,10 +11241,6 @@ class TestArrayEscapeAnalysis:
         assert not mallocs
 
     def test_array_passed_by_value_not_sliced_stays_on_the_stack(self):
-        """A small array passed to another function, never sliced at
-        all -- ordinary value-semantics copying, nothing for escape
-        analysis to even consider. Confirms passing an array as a
-        plain argument doesn't itself trigger promotion."""
         source = (
             "def int helper([5]int a):\n"
             "    return a[0]\n"
@@ -14879,10 +11255,6 @@ class TestArrayEscapeAnalysis:
         assert not mallocs
 
     def test_transitive_reslicing_chain_escapes_correctly(self):
-        """arr backs s1, s1 backs s2, s2 is returned -- the analysis
-        has to follow the chain through TWO slice-to-slice hops, not
-        just one direct slice-of-an-array step, to find that arr
-        itself needs to escape."""
         assert_program_exit_code(
             "def []int make():\n"
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
@@ -14904,10 +11276,6 @@ class TestArrayEscapeAnalysis:
         )
 
     def test_append_chain_escapes_correctly(self):
-        """arr backs s1, s1 backs s2 via append (which might reuse
-        s1's own backing storage) -- append has to be treated as a
-        slice-to-slice dependency, not a fresh, unrelated value, for
-        this to work."""
         assert_program_exit_code(
             "def []int make():\n"
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
@@ -14928,11 +11296,6 @@ class TestArrayEscapeAnalysis:
         )
 
     def test_slicing_a_row_of_a_multi_dimensional_array_escapes_the_whole_array(self):
-        """Indexing into a multi-dimensional array's own row is still a
-        view into the SAME backing storage, not a copy -- slicing
-        `matrix[1]` has to be recognized as aliasing `matrix` itself,
-        not silently missed just because the base is an Index rather
-        than a bare Variable."""
         assert_program_exit_code(
             "def []int getRow():\n"
             "    [2][3]int matrix = [[1, 2, 3], [4, 5, 6]]\n"
@@ -14951,7 +11314,6 @@ class TestArrayEscapeAnalysis:
         )
 
     def test_slice_passed_to_a_non_escaping_parameter_stays_on_the_stack(self):
-        """The callee's escape summary says its parameter doesn't escape."""
         source = (
             "def int sumFirstTwo([]int s):\n"
             "    return s[0] + s[1]\n"
@@ -14982,10 +11344,6 @@ class TestArrayEscapeAnalysis:
         assert mallocs
 
     def test_array_of_slices_element_escapes_correctly(self):
-        """The gap this class used to document as known and deferred:
-        a slice stored into an array-of-slices ELEMENT (`rows[0] =
-        arr[:]`), with the whole container later returned, must make
-        the array it was sliced from escape too."""
         assert_program_stdout(
             "def [1][]int makeRows():\n"
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
@@ -15009,7 +11367,6 @@ class TestArrayEscapeAnalysis:
         )
 
     def test_array_of_slices_element_is_actually_heap_allocated(self):
-        """The asm-level confirmation behind the test just above."""
         source = (
             "def [1][]int makeRows():\n"
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
@@ -15027,11 +11384,6 @@ class TestArrayEscapeAnalysis:
         assert mallocs
 
     def test_slice_of_slices_element_escapes_correctly(self):
-        """The same gap, but the container itself is a SLICE-of-slices
-        (`[][]int`) rather than an array-of-slices -- a genuinely
-        different declaration shape (its outer kind is already SLICE,
-        not ARRAY) that has to be recognized as a container too, not
-        just the array-of-slices case."""
         assert_exit_code(
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
             "    [][]int rows = [][]int[[]int[]]\n"
@@ -15041,10 +11393,6 @@ class TestArrayEscapeAnalysis:
         )
 
     def test_reading_a_container_element_directly_escapes_it(self):
-        """`return rows[0]` -- reading and returning a single element,
-        never touching the container's own name at all -- must be
-        recognized as an escape exactly like `return rows` itself
-        would be."""
         assert_program_exit_code(
             "def []int makeRow():\n"
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
@@ -15065,8 +11413,6 @@ class TestArrayEscapeAnalysis:
         )
 
     def test_container_element_passed_to_a_non_escaping_parameter_stays_on_the_stack(self):
-        """A container element copied into a variable and passed to a callee whose
-        parameter doesn't escape."""
         source = (
             "def int sumFirstTwo([]int s):\n"
             "    return s[0] + s[1]\n"
@@ -15084,14 +11430,6 @@ class TestArrayEscapeAnalysis:
         assert not mallocs
 
     def test_container_element_never_read_does_not_trigger_promotion(self):
-        """THE precision test for this whole extension, mirroring
-        test_local_array_sliced_but_not_returned_stays_on_the_stack
-        above: a slice written into a container element that's never
-        returned, passed anywhere, or read back out through anything
-        that escapes -- must NOT promote the backing array. Every
-        other test in this class could pass even if writing into ANY
-        container element unconditionally promoted its own backing
-        array; this one specifically requires that NOT to happen."""
         source = (
             "def int main():\n"
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
@@ -15105,11 +11443,6 @@ class TestArrayEscapeAnalysis:
         assert not mallocs
 
     def test_slice_variable_backed_by_local_array_assigned_into_container_element(self):
-        """Transitive: a plain slice VARIABLE (itself backed by a
-        local array) flows into a container element, and the
-        container is what actually escapes -- the dependency has to
-        chain through both the variable-to-array and the container-
-        to-variable links."""
         assert_program_exit_code(
             "def [1][]int makeRows():\n"
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
@@ -15131,14 +11464,6 @@ class TestArrayEscapeAnalysis:
         )
 
     def test_append_into_a_container_element_escapes_correctly(self):
-        """append's own first argument might reuse ITS OWN backing
-        storage (see gen_append_call_into) -- so appending to a
-        container element, and returning the RESULT as a fresh
-        variable (not the container itself), still has to trace back
-        to the array the element was originally sliced from. This is
-        the test that actually isolates the fix: it fails without
-        contribution() recursing into append's own first argument
-        rather than only handling a bare Variable there."""
         assert_program_exit_code(
             "def []int makeRow():\n"
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
@@ -15160,12 +11485,6 @@ class TestArrayEscapeAnalysis:
         )
 
     def test_deeply_nested_container_escapes_correctly(self):
-        """The gap this class used to document as known and deferred:
-        a container reached through a further Index, not a bare
-        Variable (`matrix[i][j] = arr[:]`), must still resolve to its
-        own root declaration's shared slot -- verified end to end,
-        with enough intervening function-call activity to actually
-        surface corruption if the array were left stack-allocated."""
         assert_program_stdout(
             "def [1][1][]int makeMatrix():\n"
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
@@ -15189,7 +11508,6 @@ class TestArrayEscapeAnalysis:
         )
 
     def test_deeply_nested_container_is_actually_heap_allocated(self):
-        """The asm-level confirmation behind the test just above."""
         source = (
             "def [1][1][]int makeMatrix():\n"
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
@@ -15207,10 +11525,6 @@ class TestArrayEscapeAnalysis:
         assert mallocs
 
     def test_chained_reslicing_with_no_intermediate_variable_escapes_correctly(self):
-        """The second, separately-rooted gap this class used to
-        document as known and deferred: a Slice chained directly on
-        another Slice, with no intermediate named variable at all
-        (`s1[0:3][0:2]`), must still resolve to the correct root."""
         assert_program_stdout(
             "def []int make():\n"
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
@@ -15234,9 +11548,6 @@ class TestArrayEscapeAnalysis:
         )
 
     def test_chained_reslicing_directly_off_an_array_escapes_correctly(self):
-        """The same gap, one level shallower still: chaining a
-        re-slice directly off an array, with no intermediate slice
-        variable of ANY kind."""
         source = (
             "def []int make():\n"
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
@@ -15253,16 +11564,6 @@ class TestArrayEscapeAnalysis:
         assert mallocs
 
     def test_scalar_read_through_a_slice_element_does_not_escape(self):
-        """THE precision test for the deeper-nesting fix, mirroring
-        test_local_array_sliced_but_not_returned_stays_on_the_stack's
-        own role above: `rows[0][0]` reads a plain int back OUT of a
-        slice element -- indexing that slice ONE more time yields an
-        int, not another slice, so this must NOT be mistaken for
-        touching rows' own slice-holding role just because rows, taken
-        as a whole, happens to contain a slice somewhere. Conflating
-        those two questions was a real bug found while fixing the
-        deeper-nesting gap, not a hypothetical -- this is the test
-        that would have caught it."""
         source = (
             "def int main():\n"
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
@@ -15288,8 +11589,6 @@ class TestSlices:
         )
 
     def test_omitted_bounds(self):
-        """All three omitted-bound forms together: `arr[:]` (both),
-        `arr[2:]` (high only), `arr[:3]` (low only)."""
         assert_exit_code(
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
             "    []int a = arr[:]\n"
@@ -15300,10 +11599,6 @@ class TestSlices:
         )
 
     def test_slicing_a_slice(self):
-        """The trickiest case for gen_indexable_base_into/gen_slice_
-        into: the BASE being sliced is itself a slice, so its own
-        length is a runtime value read out of its descriptor, not a
-        compile-time constant the way an array base's is."""
         assert_exit_code(
             "    [6]int arr = [1, 2, 3, 4, 5, 6]\n"
             "    []int s = arr[1:5]\n"
@@ -15322,9 +11617,6 @@ class TestSlices:
         )
 
     def test_slicing_outer_dimension_of_2d_array(self):
-        """`matrix[0:2]` yields a slice of ROWS ([][3]int), not a
-        slice of ints -- confirmed by indexing two levels deep into
-        the result."""
         assert_exit_code(
             "    [3][3]int matrix = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]\n"
             "    [][3]int rows = matrix[0:2]\n"
@@ -15333,9 +11625,6 @@ class TestSlices:
         )
 
     def test_whole_slice_assignment(self):
-        """`s2 = s1` copies s1's own {ptr, len} DESCRIPTOR into s2's
-        slot -- after which s2 aliases whatever s1 aliased, not
-        whatever s2 originally pointed at."""
         assert_exit_code(
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
             "    []int s1 = arr[0:3]\n"
@@ -15346,9 +11635,6 @@ class TestSlices:
         )
 
     def test_slice_write_mutates_underlying_array(self):
-        """The headline property: a slice is a genuine ALIAS into its
-        base's own storage, not a copy -- writing through a slice
-        index must be visible through the array it came from too."""
         assert_exit_code(
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
             "    []int s = arr[1:4]\n"
@@ -15370,13 +11656,6 @@ class TestSlices:
         )
 
     def test_slice_parameter(self):
-        """A slice parameter is passed via two registers (its own
-        ptr, then len) directly, per the SysV ABI's own rule for a
-        16-byte, two-integer-eightbyte struct -- not through a stack
-        slot the way an ordinary scalar parameter's copy-on-entry
-        works, and not copied the way an array parameter is (a slice
-        parameter is just an alias, exactly like any other slice
-        variable)."""
         assert_program_exit_code(
             "def int first([]int s):\n"
             "    return s[0]\n"
@@ -15389,10 +11668,6 @@ class TestSlices:
         )
 
     def test_slice_return(self):
-        """A slice return value now goes through the same hidden-
-        output-pointer mechanism arrays already use -- not through a
-        plain %rax:%rdx pair the way it used to, back when a slice's
-        own descriptor still fit two registers."""
         assert_program_exit_code(
             "def []int make():\n"
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
@@ -15406,16 +11681,7 @@ class TestSlices:
 
 
 class TestSliceBoundsChecking:
-    """Slice bounds get their own message ("slice bounds out of
-    range", distinct from ordinary indexing's "array index out of
-    bounds") and their own comparison: `ja` (strictly "above"), not
-    `jae` -- unlike an ordinary index, where being equal to the
-    array's own size is already invalid, a slice's low/high are both
-    allowed to equal the base's length (`arr[5:5]` is a valid, empty-
-    slice-producing expression). test_low_equals_high_equals_length_
-    is_valid is the positive control proving that boundary is exactly
-    right, not off by one in either direction.
-    """
+    """Slice bounds have their own check and message."""
     pytestmark = GCC_SKIP
 
     def test_index_into_slice_out_of_bounds_aborts(self):
@@ -15452,9 +11718,6 @@ class TestSliceBoundsChecking:
         )
 
     def test_low_equals_high_equals_length_is_valid(self):
-        """The positive control: `arr[5:5]` on a 5-element array must
-        NOT abort -- it's a valid expression producing an empty
-        slice -- proof the `ja` (not `jae`) choice is exactly right."""
         assert_exit_code(
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
             "    []int s = arr[5:5]\n"
@@ -15463,11 +11726,6 @@ class TestSliceBoundsChecking:
         )
 
     def test_slice_bounds_panic_message(self):
-        """Regression-style check that the slice-specific message is
-        actually the one printed, not the ordinary indexing one --
-        confirming the bounds-check panic infrastructure's
-        generalization to multiple, distinct messages (see
-        codegen.py's _get_bounds_check_fail_label) works correctly."""
         result = compile_and_run(
             "def int main():\n"
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
@@ -15480,63 +11738,11 @@ class TestSliceBoundsChecking:
 
 
 # ---------------------------------------------------------------------------
-# Slice parameters and return values: a slice crosses a function
-# boundary via THREE consecutive integer argument registers as a
-# PARAMETER (its own ptr, len, then cap -- matching exactly what a real
-# C compiler does for an equivalent `struct{void*,long,long}` passed by
-# value under the SysV ABI), not copied on entry the way an array
-# parameter is. As a RETURN VALUE, it now goes through the same hidden-
-# output-pointer convention arrays already use -- not through a plain
-# %rax:%rdx pair the way it used to, back when a slice's own descriptor
-# still fit two registers, before cap was added as a third field.
-#
-# test_slice_interleaved_with_scalar_parameters and
-# test_one_slice_and_three_scalars_are_exactly_six_slots are the tests
-# that actually prove the trickiest part of this feature holds: since
-# a slice now costs 3 of the 6 available argument-register slots
-# instead of 1, the mapping from argument/parameter INDEX to register
-# INDEX is no longer 1:1 -- both the caller side
-# (_gen_call_arguments_into) and the callee side (gen_function's own
-# parameter loop) track a running slot count instead, and these tests
-# are what confirm a slice's own three slots land correctly among
-# ordinary scalar ones on both sides, not just when a slice happens to
-# be the only or the last parameter.
-#
-# test_exactly_six_slots_from_two_slice_parameters and
-# test_seven_slots_from_two_slices_and_a_scalar_is_rejected are the
-# positive/negative pair proving the boundary itself is exactly
-# right: 6 slots must be accepted, 7 must be cleanly rejected, not
-# silently truncated or off by one in either direction.
-#
-# test_writing_through_a_slice_parameter_mutates_callers_array is the
-# test that actually proves a slice parameter is a genuine alias
-# crossing the function boundary, not a copy -- matching the same
-# aliasing guarantee slices already have within a single function.
-# test_forwarding_a_slice_returning_calls_result is the free case the
-# hidden-pointer return convention makes possible: gen_slice_call_into
-# just passes the SAME destination address one level deeper, so
-# `return bar()` (bar also returning a slice) costs nothing beyond the
-# call itself.
+# Slice parameters and return values
 # ---------------------------------------------------------------------------
 
 class TestCapAwareSlicing:
-    """Re-slicing honors cap, not just len -- Go's own re-slicing rule:
-    `high` may reach all the way to a base's remaining CAPACITY, not
-    just its current length, and the result inherits that remaining
-    capacity (base_cap - low) rather than simply matching its own new
-    length. This is what makes `append` sometimes able to grow a
-    re-sliced view into its parent's own backing array -- see
-    TestAppend's own note on why these two features only really
-    became observable, and testable, together.
-
-    test_reslice_extends_beyond_len_but_within_cap and test_extending_
-    beyond_cap_still_aborts are the positive/negative pair that
-    actually prove the boundary moved from len to cap, not just that
-    SOME slicing still works: the positive case would have been
-    rejected under the old, len-only bounds check, and the negative
-    case confirms cap itself is still a real, enforced limit, not
-    removed entirely.
-    """
+    """Re-slicing may extend up to the capacity, as in Go."""
     pytestmark = GCC_SKIP
 
     def test_reslice_extends_beyond_len_but_within_cap(self):
@@ -15557,9 +11763,6 @@ class TestCapAwareSlicing:
         )
 
     def test_reslice_starting_partway_through_inherits_remaining_capacity(self):
-        """cap = base_cap - low, not just base_cap -- a re-slice that
-        doesn't start at zero still correctly accounts for the
-        offset."""
         assert_exit_code(
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
             "    []int s = arr[1:2]\n"
@@ -15569,10 +11772,6 @@ class TestCapAwareSlicing:
         )
 
     def test_omitted_high_still_defaults_to_len_not_cap(self):
-        """`arr[3:]` still means "from 3 to the current end" -- the
-        default for an OMITTED high bound is unaffected by cap-aware
-        slicing; only the upper limit an EXPLICIT high is allowed to
-        reach changed."""
         assert_exit_code(
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
             "    []int s = arr[0:2]\n"
@@ -15583,64 +11782,13 @@ class TestCapAwareSlicing:
 
 
 # ---------------------------------------------------------------------------
-# `append(s, value)`, Hornet's third builtin -- Go-style: returns a NEW
-# slice rather than mutating s in place. The underlying array doubles in
-# size on resize up to 256 elements, then grows by 1.25x after -- see
-# codegen.py's own gen_append_call_into for the full growth-and-aliasing
-# story this is built around.
-#
-# This landed together with cap-aware re-slicing (TestCapAwareSlicing),
-# not as two separate, sequential pieces of work: with every OTHER
-# slice-producing site setting cap equal to len, there was no way for a
-# Hornet program to ever produce a slice with cap > len until append
-# existed to create one -- so cap-aware re-slicing would have been
-# genuinely unobservable, and untestable, in isolation. The two features
-# are really one and the same underlying capability, viewed from its two
-# different ends (a slice with spare capacity, and something that
-# actually uses that spare capacity).
-#
-# test_append_reuses_backing_array_when_capacity_allows is the single
-# most important test in this whole class: it's the one that actually
-# proves the growth policy DOES something, not just that append works
-# mechanically. Every other test here could pass even if append always,
-# unconditionally reallocated on every call (matching the ordinary
-# semantics but throwing away the entire point of a growth policy) --
-# this one specifically requires spare capacity to be reused rather than
-# discarded, observable only because writing through the returned slice
-# is visible through the ORIGINAL backing array too.
-#
-# test_first_argument_can_be_an_unnamed_slice_expression (and its several
-# siblings just after it) document a restriction that USED to be here and
-# no longer is: append's first argument was originally narrower than
-# len's own "whatever gen_indexable_base_into accepts" generality (a bare
-# Variable or `none` only), on the theory that append exists specifically
-# to feed a reassignment (`x = append(x, v)`) and materializing an
-# arbitrary slice EXPRESSION into a scratch slot first, just to
-# immediately read it back out as an input, wasn't worth it for a
-# comparatively rare shape. That theory didn't hold up -- `append([]int[],
-# 1)`, building a slice from scratch in a single expression, turned out to
-# be exactly the shape someone reached for -- so the restriction was
-# lifted: any slice-typed expression works now (a slice literal, a
-# re-slice, an Index, another append call, a slice-returning function
-# call, ...), each materialized into the same shared, per-function
-# unnamed-slice scratch slot gen_indexable_base_into's own Slice-base case
-# already used, via gen_slice_value_into.
-#
-# test_unnamed_reslice_still_reuses_backing_array_when_capacity_allows is
-# the one that matters most among the new ones: it re-runs this class's
-# own most important existing test (see the note on
-# test_append_reuses_backing_array_when_capacity_allows above), but with
-# the re-slice passed directly as append's own first argument rather than
-# through a named variable first -- proving the growth policy's aliasing
-# behavior survives the materialization step, not just that materializing
-# an unnamed slice compiles at all.
+# `append`
 # ---------------------------------------------------------------------------
 
 class TestAppend:
     pytestmark = GCC_SKIP
 
     def test_basic_append(self):
-        """The user's own original example."""
         assert_program_stdout(
             "def int main():\n"
             "    []int x = []int[1, 2]\n"
@@ -15652,12 +11800,6 @@ class TestAppend:
         )
 
     def test_append_reuses_backing_array_when_capacity_allows(self):
-        """THE test proving the growth policy actually does something
-        -- see this class's own module-level note. A re-slice with
-        spare capacity (cap > len, thanks to cap-aware re-slicing)
-        gets appended to; the write must land in the ORIGINAL array's
-        own backing storage, observable by reading straight out of it,
-        not just out of the returned slice."""
         assert_exit_code(
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
             "    []int s = arr[0:2]\n"
@@ -15676,10 +11818,6 @@ class TestAppend:
         )
 
     def test_second_append_reuses_the_first_reallocations_spare_capacity(self):
-        """Proves the amortization actually chains: the FIRST append
-        (len 2 -> 3, forced to reallocate to cap 4) leaves spare room
-        a SECOND append (len 3 -> 4) can reuse without reallocating
-        again."""
         assert_exit_code(
             "    []int x = []int[1, 2]\n"
             "    []int y = append(x, 3)\n"
@@ -15714,11 +11852,6 @@ class TestAppend:
         )
 
     def test_append_nested_slice_construction(self):
-        """The value being appended flows through the same recursive
-        _check_value_flowing_into treatment any other value flowing
-        into an already-typed slot gets -- an untyped literal
-        appended to a slice-of-slices correctly constructs a fresh,
-        nested slice for the new element."""
         assert_exit_code(
             "    [][]int rows = [][]int[[1, 2]]\n"
             "    [][]int rows2 = append(rows, [5, 6])\n"
@@ -15727,11 +11860,6 @@ class TestAppend:
         )
 
     def test_many_appends_in_a_loop_retain_every_value(self):
-        """A real stress test across many reallocations, not just one
-        -- every one of 300 sequentially appended values must still be
-        readable afterward, proving the reuse/reallocate transitions
-        chain correctly over many iterations, not just the first one
-        or two."""
         assert_program_exit_code(
             "def int main():\n"
             "    []int x = none\n"
@@ -15749,9 +11877,6 @@ class TestAppend:
         )
 
     def test_growth_policy_boundary_at_256(self):
-        """257 sequential appends cross the growth policy's own
-        double-vs-quarter boundary (at cap == 256) at least once --
-        len must still come out exactly right on the far side."""
         assert_program_exit_code(
             "def int main():\n"
             "    []int x = none\n"
@@ -15797,9 +11922,6 @@ class TestAppend:
             analyze(_parse(source))
 
     def test_first_argument_can_be_an_unnamed_slice_literal(self):
-        """The user's own originally-reported example: building a
-        slice from scratch and appending to it in a single
-        expression, with no intermediate named variable at all."""
         assert_exit_code(
             "    []int s = append([]int[], 1)\n"
             "    return s[0]",
@@ -15822,12 +11944,6 @@ class TestAppend:
         )
 
     def test_unnamed_reslice_still_reuses_backing_array_when_capacity_allows(self):
-        """Re-runs this class's own most important existing test (see
-        test_append_reuses_backing_array_when_capacity_allows above),
-        but with the re-slice passed directly as append's own first
-        argument -- proving the growth policy's aliasing behavior
-        survives materialization into the scratch slot, not just that
-        an unnamed re-slice compiles at all."""
         assert_exit_code(
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
             "    []int t = append(arr[0:2], 99)\n"
@@ -15847,8 +11963,6 @@ class TestAppend:
         )
 
     def test_nested_append_calls(self):
-        """append's own result, itself unnamed, used directly as the
-        first argument to another append call."""
         assert_exit_code(
             "    []int s = append(append([]int[1], 2), 3)\n"
             "    return s[0] + s[1] + s[2]",
@@ -15863,13 +11977,6 @@ class TestAppend:
         )
 
     def test_append_a_named_struct_value(self):
-        """A struct-typed value appended to a slice of structs -- the
-        value argument itself is an ordinary struct-typed Variable
-        here, which already worked before the array-of-structs fix
-        (append's own codegen was never restricted to scalar element
-        types); test_append_a_struct_literal below is the newly-fixed
-        counterpart, where the value argument is a struct literal
-        directly."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -15890,17 +11997,6 @@ class TestAppend:
         )
 
     def test_append_a_struct_literal(self):
-        """Used to be rejected at the semantic layer: check_append_
-        call's own value-argument check called _check_value_flowing_
-        into directly, which doesn't recognize a struct literal --
-        found while validating the broader array/slice-of-structs
-        work, fixed by routing through _check_value_flowing_into_
-        allowing_struct_literal instead, the same helper every other
-        newly-allowed position now shares. Needed no codegen changes
-        at all: _gen_write_value_at_address_into's own STRUCT branch
-        (added for the array-of-structs literal fix) already hands
-        off to gen_struct_value_into, which already dispatches a
-        struct-literal Call correctly."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -15915,20 +12011,6 @@ class TestAppend:
         )
 
     def test_append_result_indexed_directly(self):
-        """Regression test for a real bug: `append(base, 3)[2]`, with
-        append's own result never assigned to a variable first, used
-        to fail at LINK time ("undefined reference to `append`"), not
-        just fall back to slower old-style codegen. gen_indexable_
-        base_into's own Call branch used to route ANY Call through
-        gen_slice_call_into unconditionally, with no check for append
-        by name at all -- unlike every real-IR path in this arc,
-        which has always excluded append from ordinary-Call handling
-        (it's a builtin, never a compiled function). gen_slice_call_
-        into emits an ordinary `call` to expr's own name literally, so
-        this tried to call a function actually named 'append', which
-        was never compiled -- confirmed by temporarily reverting the
-        fix and watching this exact program fail at link time, not
-        just produce a wrong value, before writing it in here."""
         assert_program_exit_code(
             "def int main():\n"
             "    []int base = [1, 2]\n"
@@ -15937,19 +12019,6 @@ class TestAppend:
         )
 
     def test_bare_append_statement_does_not_mutate_original(self):
-        """Regression test for a real bug: `append(base, 3)` used
-        directly as a bare, discarded statement (no variable to
-        receive the result) used to crash outright (CodegenError,
-        "can't call 'append' ... via gen_expr_into" -- a slice
-        descriptor doesn't fit in a single register, the same class of
-        crash a bare composite-returning Call or bare `none` statement
-        also hit). The growth/write side effect still needs to happen
-        even though the result is discarded -- confirmed here by
-        reading base's own len back out afterward and confirming it's
-        UNCHANGED (append is Go-style: base itself never gets
-        mutated, regardless of whether its own result is captured) --
-        and confirmed to have crashed on the reverted code before
-        writing this test in."""
         assert_program_exit_code(
             "def int main():\n"
             "    []int base = [1, 2]\n"
@@ -15959,21 +12028,6 @@ class TestAppend:
         )
 
     def test_append_result_indexed_as_function_argument(self):
-        """Regression test for a real bug: `sumPoint(append(s, Point(3,
-        4))[0])`, with append's own result never assigned to a
-        variable first, used to raise a KeyError (not even a clean
-        CodegenError) at compile time. The old-style argument-
-        materialization fallback's own pre-pass assumes ANY Index
-        argument already has a real address of its own (true for an
-        ordinary array/struct Variable, false here -- append's own
-        result has no pre-existing address at all), so it never
-        reserved the slot the fallback then tried to look up.
-        _ir_indexable_base's own new append case (see its own
-        docstring) closes this by making append(...) used as a base
-        real IR in the first place, so this old-style path -- and its
-        own bad assumption -- is never reached for this shape at all
-        anymore. Confirmed to have raised exactly this KeyError on the
-        reverted code before writing this test in."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -15989,20 +12043,6 @@ class TestAppend:
         )
 
     def test_append_result_indexed_as_vardecl_initializer(self):
-        """Regression test for a real bug, worse than the argument
-        case just above: `Point p = append(s, Point(3, 4))[0]` used to
-        crash with `TypeError: cannot unpack non-iterable NoneType
-        object` -- gen_statement_ir's own VarDecl dispatch fell all
-        the way through every explicit case for this shape without
-        any of them returning anything at all, so the method
-        implicitly returned None instead of a list of instructions,
-        several frames away from where the actual problem was.
-        _ir_indexable_base's own new append case fixes this exactly
-        the same way as the argument case above: append(...) used as
-        a base is real IR now, so this shape never reaches the old-
-        style dispatch chain that was failing to return at all.
-        Confirmed to have raised exactly this TypeError on the
-        reverted code before writing this test in."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -16016,17 +12056,6 @@ class TestAppend:
         )
 
     def test_append_result_indexed_as_equality_operand(self):
-        """`append(s, Point(3,4))[0] == other`, append's own result
-        indexed directly as one side of a struct equality comparison.
-        Unlike the two regression tests just above, this one already
-        worked correctly even before _ir_indexable_base's own new
-        append case (confirmed: this exact program still compiles and
-        runs correctly with that case temporarily reverted, falling
-        back to old-style gen_struct_equality_into instead) -- kept
-        here as real-IR coverage for the same underlying shape, not
-        as its own bug regression test. Confirmed via instrumentation
-        that this now reaches real IR with zero old-style
-        invocations, where it previously did not."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -16042,17 +12071,6 @@ class TestAppend:
         )
 
     def test_nested_append_as_slice_argument(self):
-        """`append(append(s, 1), 2)` -- an append call used directly
-        as ANOTHER append call's own slice argument, with neither
-        assigned to a variable first. Like the equality test just
-        above, this already worked correctly before _ir_indexable_
-        base's own new append case (the outer append's own value,
-        when real IR fails for the inner one, already fell back to
-        the fully general old-style gen_slice_value_into for the
-        whole assignment) -- kept here as real-IR coverage confirming
-        append composes with itself correctly, not as its own bug
-        regression test. Confirmed via instrumentation that this now
-        reaches real IR with zero old-style invocations."""
         assert_program_exit_code(
             "def int main():\n"
             "    []int s = none\n"
@@ -16063,31 +12081,11 @@ class TestAppend:
 
 
 class TestBareExpressionStatements:
-    """A handful of expression shapes used directly as a bare,
-    discarded statement -- `none` or an array/struct/slice-returning
-    Call alone on a line, with no variable to receive the result.
-    Regression coverage for two real bugs found auditing every
-    remaining IRRaw site in this compiler (since removed entirely --
-    see ir.py's own module docstring): gen_expr_ir's own catch-all
-    fallback used to delegate to gen_expr_into for anything it didn't
-    already have a real-IR case for, but gen_expr_into itself
-    defensively REJECTED both of these shapes (neither fits in a
-    single register) rather than handling them -- so reaching that
-    fallback with one of them crashed outright, despite gen_expr_ir's
-    own (wrong, at the time) docstring claim that it "covers" exactly
-    these cases. The actual fix routes around that fallback entirely,
-    in gen_statement_ir's own ExprStmt dispatch, for exactly these two
-    shapes (plus append, covered separately in TestAppend, for the
-    identical reason -- it's a builtin, never a compiled function, so
-    it needs its own, earlier check too)."""
+    """Expressions used as discarded statements."""
 
     pytestmark = GCC_SKIP
 
     def test_bare_none_statement_is_a_no_op(self):
-        """A bare `none` has no side effect of any kind -- it's a
-        pure literal -- so the correct treatment is zero instructions,
-        the same as a bare Constant/BoolLiteral statement. Confirmed
-        to have crashed (CodegenError) on the code before this fix."""
         assert_program_exit_code(
             "def int main():\n"
             "    none\n"
@@ -16096,10 +12094,6 @@ class TestBareExpressionStatements:
         )
 
     def test_bare_composite_returning_call_statement(self):
-        """`makeArr()` alone on a line, its own [3]int result entirely
-        discarded -- only the call's own side effect matters. Confirmed
-        to have crashed (CodegenError, "can't call 'makeArr' ... via
-        gen_expr_into") on the code before this fix."""
         assert_program_exit_code(
             "def [3]int makeArr():\n"
             "    return [1, 2, 3]\n"
@@ -16129,10 +12123,6 @@ class TestSliceParametersAndReturns:
         )
 
     def test_slice_interleaved_with_scalar_parameters(self):
-        """The test that actually proves the register-slot accounting
-        holds, not just that a slice CAN be a parameter: a slice
-        between two scalars needs its own two slots to land in the
-        right registers without disturbing either scalar's own slot."""
         assert_program_exit_code(
             "def int f(int a, []int s, int b):\n"
             "    return a + s[0] + s[1] + b\n"
@@ -16145,10 +12135,6 @@ class TestSliceParametersAndReturns:
         )
 
     def test_writing_through_a_slice_parameter_mutates_callers_array(self):
-        """Proves a slice parameter is a genuine alias crossing the
-        function boundary, not a copy -- the same aliasing guarantee
-        slices already have within a single function, now verified to
-        survive a call."""
         assert_program_exit_code(
             "def mutate([]int s):\n"
             "    s[0] = 42\n"
@@ -16176,16 +12162,6 @@ class TestSliceParametersAndReturns:
         )
 
     def test_forwarding_a_slice_returning_calls_result(self):
-        """The free case the hidden-pointer return convention makes
-        possible: gen_slice_call_into just passes the SAME destination
-        address one level deeper, so this costs nothing beyond the
-        call itself -- no intermediate copy, exactly like an array-
-        returning function's own hidden-pointer forwarding already
-        works. Used to be free for a different reason -- a slice
-        return coming back directly in %rax:%rdx meant there was
-        nothing to copy OR forward at all -- before cap grew a slice's
-        own descriptor past what that two-register convention could
-        hold."""
         assert_program_exit_code(
             "def []int inner():\n"
             "    [3]int arr = [7, 8, 9]\n"
@@ -16254,11 +12230,6 @@ class TestSliceParametersAndReturns:
         )
 
     def test_slice_parameter_with_heap_allocated_array_parameter(self):
-        """A slice parameter's own register-based passing has nothing
-        to do with an array parameter's own copy-on-entry mechanism
-        (heap-backed here, since 5000 ints exceeds the stack-array
-        threshold) -- this confirms the two coexist correctly in the
-        same call, each going through its own, independent path."""
         assert_program_exit_code(
             "def int combo([5000]int big, []int s):\n"
             "    return big[0] + big[4999] + s[0]\n"
@@ -16286,11 +12257,6 @@ class TestSliceParametersAndReturns:
         )
 
     def test_exactly_six_slots_from_two_slice_parameters(self):
-        """The positive half of the boundary pair: two slice
-        parameters alone need exactly 6 register slots (3 each, now
-        that a slice's own descriptor carries ptr/len/cap) -- the
-        limit itself -- and must be accepted, not rejected off by
-        one."""
         assert_program_exit_code(
             "def int f([]int a, []int b):\n"
             "    return a[0] + b[0]\n"
@@ -16305,9 +12271,6 @@ class TestSliceParametersAndReturns:
         )
 
     def test_seven_slots_from_two_slices_and_a_scalar_works_via_the_stack(self):
-        """One more scalar parameter pushes two slices (6 slots) to 7
-        total -- previously rejected; now the scalar is simply stack-
-        passed, and everything still reads back correctly."""
         assert_program_exit_code(
             "def int f([]int a, []int b, int c):\n"
             "    return a[0] + b[0] + c\n"
@@ -16322,18 +12285,6 @@ class TestSliceParametersAndReturns:
         )
 
     def test_a_slice_argument_straddling_the_register_stack_boundary(self):
-        """5 scalars fill slots 0-4, leaving exactly 1 register slot
-        (5, %r9) free -- not enough for a slice's own 3 (ptr/len/cap).
-        This is the sharpest version of the new overflow logic: the
-        SAME slice argument ends up split across the boundary, its ptr
-        component in the last register and its len/cap components on
-        the stack. Nothing in this compiler's own internal calling
-        convention treats a slice as one indivisible unit needing to
-        move together -- IRCall's own args list is already flat, ptr/
-        len/cap as three independent slots by the time a call is
-        built -- so this isn't a special case to handle, just this
-        compiler's ordinary per-slot routing landing on a case where
-        the 3 slots happen not to share one side of the boundary."""
         assert_program_exit_code(
             "def int f(int a, int b, int c, int d, int e, []int s):\n"
             "    return a + b + c + d + e + s[0] + len(s)\n"
@@ -16358,17 +12309,6 @@ class TestSliceParametersAndReturns:
         )
 
     def test_reslice_as_call_argument(self):
-        """Used to be rejected at the codegen layer: a bare Slice
-        expression (a re-slice) has no pre-existing descriptor of its
-        own to read at a call site -- now materialized into the same
-        shared, per-function scratch slot gen_indexable_base_into's
-        own analogous cases already use (_unnamed_slice_temp_offset),
-        via gen_slice_value_into, then read back out -- see gen_slice_
-        arg_into's own docstring for why sharing that one slot is safe
-        here, for a different reason than it is there (a slice
-        argument is passed BY VALUE, drained into registers and pushed
-        immediately, not by address that has to survive until the
-        call itself)."""
         assert_program_exit_code(
             "def int sum3([]int s):\n"
             "    return s[0] + s[1] + s[2]\n"
@@ -16393,10 +12333,6 @@ class TestSliceParametersAndReturns:
         )
 
     def test_two_unnamed_slices_alive_in_the_same_call(self):
-        """Both arguments need their own descriptor read out of the
-        SAME shared scratch slot in turn -- proving that sharing it is
-        actually safe, not just safe by luck because only one call
-        ever used it at a time before."""
         assert_program_exit_code(
             "def int addPairs([]int a, []int b):\n"
             "    return a[0] + a[1] + b[0] + b[1]\n"
@@ -16407,16 +12343,6 @@ class TestSliceParametersAndReturns:
         )
 
     def test_nested_unnamed_slice_materialization(self):
-        """`sum3(identity([]int[1, 2, 3]))` -- the OUTER call's own
-        argument is itself a slice-returning call whose OWN argument is
-        ANOTHER unnamed slice. This is the scenario that actually
-        exercises the "strictly nested, fully drained before reuse"
-        safety argument gen_slice_arg_into's own docstring makes for
-        the shared scratch slot: the inner literal's own materialization
-        has to complete and be pushed onto the real stack before
-        `call identity` ever runs, since identity's own hidden return
-        pointer (pointing at that SAME slot) only gets written through
-        once identity's own `return` executes, strictly after."""
         assert_program_exit_code(
             "def []int identity([]int s):\n"
             "    return s\n"
@@ -16444,8 +12370,6 @@ class TestSliceParametersAndReturns:
         )
 
     def test_slice_typed_index_as_argument(self):
-        """`rows[0]` -- one element of an array OF slices, used
-        directly as an argument."""
         assert_program_exit_code(
             "def int sum2([]int s):\n"
             "    return s[0] + s[1]\n"
@@ -16457,8 +12381,6 @@ class TestSliceParametersAndReturns:
         )
 
     def test_append_result_as_argument(self):
-        """append's own result, a Call, goes through the identical new
-        fallback path as any other unnamed slice-producing expression."""
         assert_program_exit_code(
             "def int sum3([]int s):\n"
             "    return s[0] + s[1] + s[2]\n"
@@ -16471,46 +12393,13 @@ class TestSliceParametersAndReturns:
 
 
 # ---------------------------------------------------------------------------
-# Indexing (and slicing) directly into an UNNAMED slice expression's own
-# result -- `arr[:][0]`, or `matrix[:][0][0]` -- without first assigning
-# the intermediate slice to a named variable. This closes a gap
-# explicitly left open when slices themselves were first built:
-# gen_indexable_base_into used to require a slice-typed base be a bare
-# Variable, since a Slice expression's own result is a freshly computed
-# descriptor with no pre-existing address to take.
-#
-# The fix materializes an unnamed Slice expression into a dedicated,
-# per-function scratch slot (_unnamed_slice_temp_offset, reserved
-# unconditionally in gen_function) and immediately reads it back out
-# into registers -- test_two_independent_materializations_in_one_
-# expression and test_materialization_inside_a_slice_bound_expression
-# are the tests that actually prove reusing ONE shared slot for this,
-# rather than a fresh one per nesting level, is genuinely safe:
-# gen_slice_into and gen_index_address_into both already compute their
-# own base FIRST and immediately drain it into registers (protected on
-# the real stack) before evaluating anything else, so a deeper
-# materialization's own write to the shared slot always happens (and is
-# always fully consumed) strictly before a shallower one writes there
-# too -- the same nested-lifetime discipline that makes one call stack
-# safe for recursion of any depth, just applied to one scratch memory
-# slot instead. Getting this wrong would show up as silently wrong
-# values from a mid-expression materialization stomping on another
-# still-pending one, not a crash -- exactly why these two tests, not
-# just the two basic examples, are the ones that matter most here.
-#
-# test_writing_through_an_unnamed_sliced_index and test_indexing_out_
-# of_bounds_on_an_unnamed_slice confirm the fix generalizes correctly
-# to the OTHER consumers of gen_indexable_base_into beyond plain
-# reading -- writing through an index, and the runtime bounds check --
-# not just the read path the two headline examples exercise.
+# Indexing unnamed slices
 # ---------------------------------------------------------------------------
 
 class TestIndexingUnnamedSlices:
     pytestmark = GCC_SKIP
 
     def test_indexing_a_sliced_array_directly(self):
-        """`[3]int arr = [1, 2, 3]; arr[:][0]` -- the first of the two
-        motivating examples."""
         assert_exit_code(
             "    [3]int arr = [1, 2, 3]\n"
             "    return arr[:][0]",
@@ -16518,8 +12407,6 @@ class TestIndexingUnnamedSlices:
         )
 
     def test_indexing_a_sliced_2d_array_directly(self):
-        """`[2][2]int arr = [[1, 2], [3, 4]]; arr[:][0][0]` -- the
-        second motivating example, one indexing level deeper."""
         assert_exit_code(
             "    [2][2]int arr = [[1, 2], [3, 4]]\n"
             "    return arr[:][0][0]",
@@ -16542,13 +12429,6 @@ class TestIndexingUnnamedSlices:
         )
 
     def test_slice_returning_call_as_unnamed_base(self):
-        """A slice-returning function's result is materialized through
-        the same shared scratch slot the Slice/Index cases use, then
-        read back out the same way -- it used to be even simpler than
-        that, arriving already sitting in %rax:%rdx by a dedicated
-        two-register return convention, needing no scratch slot at
-        all, back when a slice's own descriptor still fit two
-        registers."""
         assert_program_exit_code(
             "def []int make():\n"
             "    [3]int arr = [7, 8, 9]\n"
@@ -16593,10 +12473,6 @@ class TestIndexingUnnamedSlices:
         )
 
     def test_two_independent_materializations_in_one_expression(self):
-        """The strongest stress test of the 'one shared scratch slot
-        is safe' reasoning: both operands of this addition need their
-        OWN, separate materialization, and neither may be allowed to
-        corrupt the other's still-pending one."""
         assert_stdout(
             "    [3]int arr1 = [10, 20, 30]\n"
             "    [3]int arr2 = [1, 2, 3]\n"
@@ -16606,12 +12482,6 @@ class TestIndexingUnnamedSlices:
         )
 
     def test_materialization_inside_a_slice_bound_expression(self):
-        """An even more specific stress test: the materialization
-        happens while EVALUATING one of the outer slice's own low/high
-        bounds, after that outer slice's own base has already been
-        computed and protected on the stack -- proving the shared slot
-        is safe to reuse even mid-computation of an unrelated slice
-        expression, not just between two entirely separate ones."""
         assert_stdout(
             "    [5]int arr = [100, 200, 300, 400, 500]\n"
             "    [1]int idx_holder = [2]\n"
@@ -16622,33 +12492,7 @@ class TestIndexingUnnamedSlices:
 
 
 # ---------------------------------------------------------------------------
-# Printing arrays and slices: `TYPE[elem, elem, ...]` -- e.g.
-# `[3]int[1, 2, 3]` or `[]int[1, 2, 3]` -- the type name (matching
-# semantic.Type.__str__ exactly, so no new formatting logic was needed
-# for it) printed at EVERY level this appears, not just the outermost
-# one a print() call names directly: a nested row of a [2][3]int shows
-# its own "[3]int" name too (`[2][3]int[[3]int[1, 2, 3], [3]int[4, 5,
-# 6]]`), rather than suppressing it just because it's nested -- see
-# codegen.py's PRINTING section, and _get_or_build_type_descriptor's
-# own docstring, for the runtime mechanism (a name field baked into
-# every ARRAY/SLICE/STRUCT type descriptor, read and printed by
-# hornet_stringify itself on every recursive call, not something any
-# one print() call site special-cases for its own outermost argument
-# only). A str element is quoted inside a collection (`'alice'`) even
-# though a bare str argument to print still prints unquoted -- the two
-# behave differently on purpose, not by oversight.
-#
-# test_nested_2d_array_prints_its_own_name_at_every_level is the test
-# that actually proves the headline formatting decision holds, not
-# just the one-dimensional case both of the original examples showed.
-#
-# Since an array's length is known at compile time but a slice's is
-# only known at runtime, printing uses ONE uniform runtime loop for
-# both rather than unrolling arrays separately -- test_printing_a_
-# slice_of_a_slice exercises the harder, runtime-length path directly,
-# and test_multiple_prints_each_get_exactly_one_newline confirms the
-# loop never leaks an extra or missing newline across separate print
-# calls.
+# Printing arrays and slices
 # ---------------------------------------------------------------------------
 
 class TestPrintArraysAndSlices:
@@ -16672,11 +12516,6 @@ class TestPrintArraysAndSlices:
         )
 
     def test_nested_2d_array_prints_its_own_name_at_every_level(self):
-        """The test that actually proves the headline formatting
-        decision: EVERY level prints its own type name, not just the
-        outermost one -- a [2][3]int is a `[2][3]int` of `[3]int`
-        rows, and both names show, nested exactly as deep as the
-        value itself is."""
         assert_stdout(
             "    [2][3]int matrix = [[1, 2, 3], [4, 5, 6]]\n"
             "    print(matrix)\n"
@@ -16685,9 +12524,6 @@ class TestPrintArraysAndSlices:
         )
 
     def test_str_elements_are_quoted(self):
-        """A str element is quoted inside a collection even though a
-        bare str argument to print prints unquoted -- the two are
-        deliberately different conventions, not an inconsistency."""
         assert_stdout(
             "    [3]str names = ['alice', 'bob', 'carol']\n"
             "    print(names)\n"
@@ -16704,10 +12540,6 @@ class TestPrintArraysAndSlices:
         )
 
     def test_empty_slice_prints_with_no_trailing_comma(self):
-        """`arr[5:5]` is a valid, empty-slice-producing expression
-        (see TestSliceBoundsChecking's own positive control) -- this
-        confirms printing one produces `[]int[]` cleanly, not a
-        trailing comma or an error."""
         assert_stdout(
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
             "    []int s = arr[5:5]\n"
@@ -16726,10 +12558,6 @@ class TestPrintArraysAndSlices:
         )
 
     def test_printing_a_slice_of_a_slice(self):
-        """Exercises the harder of gen_indexable_base_into's two code
-        paths directly: the base's own length is a RUNTIME value read
-        out of its descriptor, not a compile-time constant the way an
-        array base's is."""
         assert_stdout(
             "    [6]int arr = [1, 2, 3, 4, 5, 6]\n"
             "    []int s = arr[1:5]\n"
@@ -16752,14 +12580,6 @@ class TestPrintArraysAndSlices:
 
 
     def test_array_literal_as_direct_print_argument(self):
-        """Used to be a real, deliberate gap, matching the same
-        restriction gen_array_arg_address_into used to impose on
-        array-typed call arguments before argument materialization
-        existed: a bare ArrayLiteral has no address of its own to
-        print through. Now materialized via the exact same _gen_
-        materialize_argument_temp_into mechanism a literal used as an
-        ordinary function-call argument already uses -- see gen_
-        print_call_into's own docstring."""
         assert_stdout(
             "    print([1, 2, 3])\n"
             "    return 0",
@@ -16804,10 +12624,6 @@ class TestPrintArraysAndSlices:
         )
 
     def test_two_unnamed_array_literals_printed_in_sequence(self):
-        """Each print() call's own materialized temp is fully consumed
-        before the next one runs -- proves this composes correctly
-        across multiple, independent print() calls in the same
-        function, not just a single isolated one."""
         assert_stdout(
             "    print([1, 2])\n"
             "    print([3, 4, 5])\n"
@@ -16816,14 +12632,6 @@ class TestPrintArraysAndSlices:
         )
 
     def test_slice_literal_as_direct_print_argument(self):
-        """Used to be a real, deliberate gap, matching the same
-        restriction print's array-typed argument used to have before
-        the previous fix: a bare Slice expression (a re-slice or a
-        slice literal) has no existing descriptor of its own to print
-        through. Now materialized via gen_slice_value_into into the
-        same shared _unnamed_slice_temp_offset scratch slot gen_
-        indexable_base_into's own analogous cases already use -- see
-        gen_print_call_into's own docstring."""
         assert_stdout(
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
             "    print(arr[1:3])\n"
@@ -16885,13 +12693,6 @@ class TestPrintArraysAndSlices:
         )
 
     def test_nested_unnamed_slice_materialization_in_print(self):
-        """`print(identity([]int[1, 2, 3]))` -- the print argument
-        itself is a slice-returning call whose OWN argument is another
-        unnamed slice, exercising the identical "strictly nested,
-        fully drained before reuse" safety argument already proven for
-        gen_slice_arg_into's own nested case, now with print as the
-        outermost consumer of the shared scratch slot instead of
-        another function call."""
         assert_program_stdout(
             "def []int identity([]int s):\n"
             "    return s\n"
@@ -16916,84 +12717,11 @@ class TestPrintArraysAndSlices:
 
 
 # ---------------------------------------------------------------------------
-# `none`: Hornet's nil-style zero value, analogous to Go's own `nil`, but
-# deliberately narrower internally -- see NoneLiteral's own docstring in
-# parser.py for why this doesn't need a general untyped-constant
-# mechanism (which this language has no other reason to have) to work
-# for everything usable today. Only slices are nilable so far.
-#
-# test_real_empty_slice_is_not_equal_to_none is the test that actually
-# proves the subtlest, easiest-to-get-wrong part of this feature: a
-# real, zero-length slice sliced from a real array (`arr[5:5]`) is NOT
-# `== none`, even though it's equally safe and equally zero-length for
-# every other purpose (indexing, printing, re-slicing) as a genuinely
-# nil one -- matching Go's own well-known nil-vs-empty-slice
-# distinction. Getting this wrong in either direction (checking length
-# instead of the pointer, or checking both) would silently conflate two
-# states Go -- and this test -- deliberately keeps apart.
-#
-# test_indexing_a_none_valued_slice_aborts and
-# test_printing_a_none_valued_slice confirm the OTHER half of the
-# design: a none-valued slice's {0, 0} descriptor needs no new
-# mechanism at all for indexing or printing, since both already handle
-# an ordinary zero-length slice correctly (see TestSliceBoundsChecking's
-# own `arr[5:5]` positive control) -- gen_none_into only had to produce
-# that descriptor, not teach every existing slice operation a new case.
+# `none`
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Slice literals: `[]int[1, 2, 3]` -- automatically creates a heap-
-# allocated backing array (sized to the literal's own element count) AND
-# the {ptr, len} descriptor pointing at it, in one expression. Also
-# `[]int s = [1, 2, 3]` (similar to how the untyped ARRAY-literal form
-# already works): an untyped bracket list flowing directly into a
-# slice-typed VarDecl/Assign is treated the same way, just with the
-# element type inferred from the DECLARED slice type instead of
-# restated in the literal.
-#
-# Implemented as parser sugar, not a new AST node: `[]int[1, 2, 3]`
-# parses directly into `Slice(array=ArrayLiteral(...), low=None,
-# high=None)` -- an implicit "the whole thing" slice of a freshly-
-# parsed array literal (see parser.py's own _parse_bracketed_literal)
-# -- which is what lets check_slice, gen_slice_into, and gen_
-# indexable_base_into handle it almost entirely via machinery that
-# already existed for named arrays; the one genuinely new piece is
-# gen_indexable_base_into's own ArrayLiteral case (materializing a
-# FRESH heap allocation, rather than computing the address of
-# something that already exists) and its shared helper, gen_array_
-# literal_heap_alloc_into.
-#
-# test_named_array_is_not_auto_compatible_with_slice_target is the
-# critical regression check proving the untyped form's own special-
-# casing is genuinely narrow: `[]int s = arr` (an ordinary, EXISTING
-# array, not a literal) must still be rejected -- only the specific
-# shape "value is an untyped ArrayLiteral" gets this treatment, not
-# "any array-typed value is compatible with a slice target," or
-# explicit slicing (`arr[:]`) would stop being necessary anywhere.
-#
-# test_empty_slice_literal_is_not_nil is the test that actually proves
-# the subtlest part of this feature: `[]int[]` gets a real, non-null
-# (if trivial) allocation -- `s == none` is FALSE for it, matching the
-# same nil-vs-empty distinction `arr[5:5]` already has (see TestNone's
-# own note), NOT treated as equivalent to `none` just because it's
-# empty. gen_array_literal_heap_alloc_into allocates at least 1 byte
-# even for zero elements specifically so this doesn't depend on
-# libc's own, implementation-defined malloc(0) behavior.
-#
-# test_bare_slice_literal_statement_with_side_effecting_element and
-# test_bare_slice_of_existing_array_statement together are what
-# actually proves gen_expr_stmt's own Slice case is correct, not just
-# convenient: a bare Slice-expression statement is fully computed --
-# including a genuine runtime bounds check, which
-# test_bare_out_of_range_slice_statement_aborts confirms survives even
-# though the result is immediately discarded -- reusing the same
-# per-function scratch slot gen_indexable_base_into's own Slice-base
-# case already needed, rather than skipping the computation as a
-# shortcut. This same fix, found by testing the slice-literal case
-# specifically, also closed a genuinely pre-existing, unrelated gap:
-# a bare statement slicing an ordinary, already-existing array
-# (`arr[:]` alone) was ALREADY broken before slice literals existed at
-# all -- gen_expr_stmt never had any Slice case whatsoever.
+# Slice literals
 # ---------------------------------------------------------------------------
 
 class TestSliceLiterals:
@@ -17025,10 +12753,6 @@ class TestSliceLiterals:
         )
 
     def test_untyped_literal_as_slice_vardecl_initializer(self):
-        """`[]int slice = [1, 2, 3]` -- similar to how the untyped
-        ARRAY-literal form already works, but the resulting value is
-        a genuine slice (a fresh backing array plus a descriptor), not
-        an array."""
         assert_exit_code(
             "    []int slice = [1, 2, 3]\n"
             "    return slice[0] + slice[1] + slice[2]",
@@ -17044,10 +12768,6 @@ class TestSliceLiterals:
         )
 
     def test_named_array_is_not_auto_compatible_with_slice_target(self):
-        """The critical regression check: only the specific shape
-        "value is an untyped ArrayLiteral" gets the implicit-slice
-        treatment -- an ordinary, already-existing array must still
-        be explicitly sliced (`arr[:]`)."""
         assert_semantic_error(
             "    [3]int arr = [1, 2, 3]\n"
             "    []int s = arr\n"
@@ -17056,11 +12776,6 @@ class TestSliceLiterals:
         )
 
     def test_empty_slice_literal_is_not_nil(self):
-        """The test that actually proves the subtlest part of this
-        feature: `[]int[]` gets a real, non-null allocation -- `s ==
-        none` is FALSE for it, matching the same nil-vs-empty
-        distinction `arr[5:5]` already has, not treated as `none`
-        just because it's empty."""
         assert_exit_code(
             "    []int s = []int[1, 2, 3]\n"
             "    s = []int[]\n"
@@ -17118,11 +12833,6 @@ class TestSliceLiterals:
         )
 
     def test_bare_slice_of_existing_array_statement(self):
-        """A genuinely pre-existing, unrelated gap this same fix
-        closed: a bare statement slicing an ordinary, already-existing
-        array (`arr[:]` alone) was already broken before slice
-        literals existed at all -- gen_expr_stmt never had a Slice
-        case whatsoever."""
         assert_exit_code(
             "    [3]int arr = [1, 2, 3]\n"
             "    arr[:]\n"
@@ -17131,9 +12841,6 @@ class TestSliceLiterals:
         )
 
     def test_bare_out_of_range_slice_statement_aborts(self):
-        """Proves the bare-statement Slice case is fully computed,
-        including its own runtime bounds check, not skipped as a
-        shortcut just because the result is discarded."""
         assert_crashes_with_sigabrt(
             "    [3]int arr = [1, 2, 3]\n"
             "    arr[0:10]\n"
@@ -17141,12 +12848,6 @@ class TestSliceLiterals:
         )
 
     def test_slice_literal_as_call_argument(self):
-        """Used to be rejected at the codegen layer, the same
-        restriction a bare re-slice expression had -- see gen_slice_
-        arg_into's own docstring for the fix (the exact same shared-
-        scratch-slot materialization, since a slice literal is just
-        another slice-typed expression with no address of its own to
-        read a descriptor from directly)."""
         assert_program_exit_code(
             "def int f([]int s):\n"
             "    return s[0]\n"
@@ -17158,55 +12859,13 @@ class TestSliceLiterals:
 
 
 # ---------------------------------------------------------------------------
-# Nested slices: a slice (or array) whose own ELEMENT type is itself a
-# slice -- `[][]int`, `[2][]int`, arbitrarily deep. Slice literals and
-# typed array literals both already worked one level deep (an array of
-# arrays, or a slice of arrays), but genuinely nested slice construction
-# -- a slice OF slices -- surfaced two real, separate gaps:
-#
-# 1. A semantic.py bug, not a deliberate scope boundary: check_array_
-#    literal's own element-checking loop called check_expr directly on
-#    each element rather than routing through _check_value_flowing_into,
-#    so an untyped inner literal never got the "this constructs a
-#    nested slice" treatment -- only a literal's own, TOP-level value
-#    ever did. `[][2]int` (an inner ARRAY element) happened to keep
-#    working by coincidence, since plain type equality was all THAT
-#    case ever needed -- which is exactly what masked the gap until a
-#    genuinely nested SLICE was tried. The same bug-class turned out to
-#    exist in two more places doing the identical "value flows into an
-#    already-typed slot" check: analyze_index_assign, and (on the
-#    codegen side, dispatching on the wrong type entirely)
-#    gen_index_assign itself.
-#
-# 2. A real, deliberately-scoped-out codegen gap: an array whose
-#    ELEMENTS are themselves slices was explicitly rejected in two
-#    places (gen_array_literal_into, gen_array_copy) as known,
-#    separable follow-up work. Closing it needed gen_slice_value_into
-#    generalized to handle an arbitrary destination (not just an
-#    ordinary local slot) -- see its own docstring -- which in turn
-#    needed gen_slice_into itself generalized the same way, since it
-#    used to explicitly assert dst_mem.base == 'rbp' and refuse
-#    anything else. TestChainedSliceIndexing and TestIndexAssignInto
-#    ArrayOfSlices are the two, closely-related pieces that fell out
-#    of that same generalization along the way, not separately
-#    requested but naturally in scope once gen_slice_value_into and
-#    gen_indexable_base_into both needed to handle a slice-typed Index
-#    result anyway.
-#
-# test_shallow_copy_semantics is the test that actually pins down a
-# real design decision, not just a mechanical fix: copying an array of
-# slices is a SHALLOW copy of each element's own {ptr, len} descriptor
-# -- matching how copying a bare slice variable (`s2 = s1`) already
-# works -- not a deep, recursive re-allocation. Mutating through the
-# copy's own element is observable through the original, since they
-# share the same backing data.
+# Nested slices
 # ---------------------------------------------------------------------------
 
 class TestNestedSlices:
     pytestmark = GCC_SKIP
 
     def test_typed_nested_slice_literal(self):
-        """The user's own, originally-failing example."""
         assert_program_exit_code(
             "def int main():\n"
             "    [][]int rows = [][]int[[1, 2], [3, 4]]\n"
@@ -17227,10 +12886,6 @@ class TestNestedSlices:
         )
 
     def test_deeply_nested_slice_of_slice_of_slice(self):
-        """Proves the fix is genuinely recursive, not a one-level-deep
-        patch -- semantic.py's _check_value_flowing_into calling back
-        into check_array_literal, which calls back into it again,
-        naturally handles arbitrary depth with no special-casing."""
         assert_program_exit_code(
             "def int main():\n"
             "    [][][]int x = [][][]int[[[1, 2], [3, 4]], [[5, 6], [7, 8]]]\n"
@@ -17241,10 +12896,6 @@ class TestNestedSlices:
         )
 
     def test_fixed_size_array_of_slices_construction(self):
-        """The array-typed form (`[N][]int`, a fixed-size array whose
-        elements are slices), not just the slice-of-slices form --
-        exercises gen_array_literal_into's own new SLICE-element case
-        directly."""
         assert_exit_code(
             "    [2][]int rows = [2][]int[[1, 2], [3, 4]]\n"
             "    return rows[0][0] + rows[0][1] + rows[1][0] + rows[1][1]",
@@ -17252,28 +12903,6 @@ class TestNestedSlices:
         )
 
     def test_array_of_slices_literal_via_reassignment_regression(self):
-        """Regression test for a real bug: _ir_write_composite_value_
-        into's dispatcher checked isinstance(value_expr, ArrayLiteral)
-        without also checking value_type.kind == ARRAY first. A slice
-        literal (`[1, 2]` used where a slice is expected) parses to
-        the IDENTICAL ArrayLiteral AST node as an array literal --
-        only the surrounding type context distinguishes them -- so
-        each inner [1, 2]/[3, 4] here was silently routed into
-        _ir_write_array_literal_into with value_type still SLICE,
-        which then computed a slice's own 24-byte descriptor width as
-        if it were the outer array's per-element width, corrupting
-        every element's computed address (a segfault or 'array index
-        out of bounds' abort, not a wrong-but-harmless answer).
-
-        This specific case -- an ASSIGN (reassigning an existing
-        variable), not a VarDecl -- is what actually caught this: the
-        bug was introduced when VarDecl/Assign/IndexAssign/FieldAssign
-        were first wired to call the same dispatcher Return's own
-        equivalent case already used, and Return's own prior test
-        coverage never happened to exercise a nested slice literal
-        through it, so the bug shipped silently until this wiring
-        exercised the exact same array-of-slices shape through a new
-        entry point."""
         assert_exit_code(
             "    [2][]int rows = [2][]int[[5, 6], [7, 8]]\n"
             "    rows = [2][]int[[1, 2], [3, 4]]\n"
@@ -17290,10 +12919,6 @@ class TestNestedSlices:
         )
 
     def test_printing_array_of_slices(self):
-        """Every level shows its own type name -- an array of slices
-        prints the outer array's own name, then each inner slice
-        element shows ITS OWN name too, not suppressed just because
-        it's nested."""
         assert_stdout(
             "    [2][]int rows = [2][]int[[1, 2], [3, 4]]\n"
             "    print(rows)\n"
@@ -17303,23 +12928,6 @@ class TestNestedSlices:
 
 
     def test_return_bare_slice_literal_from_slice_returning_function(self):
-        """Regression test for a real bug: gen_statement_ir's own
-        Return case used to dispatch a bare ArrayLiteral return value
-        (ARRAY vs SLICE) using type_of(stmt.value) -- but that's
-        ALWAYS ARRAY-kind for an ArrayLiteral node, correctly sized to
-        its own element count, regardless of what the function's own
-        declared return type resolves the overall expression to.
-        `return [7, 8, 9]` from a function declared to return []int
-        used to unconditionally take the ARRAY branch, writing the
-        three raw element bytes directly through the hidden pointer as
-        if it addressed the array's own backing -- when a SLICE
-        return's hidden pointer actually addresses a three-field
-        {ptr, len, cap} descriptor slot instead, corrupting memory the
-        moment the second element was written. This segfaulted before
-        the fix (self._current_return_type, the function's own
-        actually-declared return type, used for the dispatch instead)
-        -- confirmed by temporarily reverting it and seeing this exact
-        program crash before writing the test in here."""
         assert_program_exit_code(
             "def []int makeSlice():\n"
             "    return [7, 8, 9]\n"
@@ -17331,18 +12939,6 @@ class TestNestedSlices:
         )
 
     def test_return_bare_slice_literal_result_used_via_index_assign(self):
-        """A companion to test_return_bare_slice_literal_from_slice_
-        returning_function, from a different angle: assigns a slice-
-        literal-returning call's own result into an IndexAssign target
-        (a slice-typed array element) rather than a plain named
-        variable, alongside an ordinary slice-literal IndexAssign in
-        the same array. This combination is what the bug's own
-        corrupted memory first surfaced through during development,
-        initially looking like a separate, IndexAssign-specific bug
-        before tracing it back to the identical Return-dispatch root
-        cause the sibling test above already covers directly -- kept
-        here as its own test since the two genuinely exercise
-        different code paths converging on the same underlying call."""
         assert_program_exit_code(
             "def []int makeSlice():\n"
             "    return [7, 8, 9]\n"
@@ -17357,13 +12953,7 @@ class TestNestedSlices:
 
 
 class TestChainedSliceIndexing:
-    """`rows[0][1]` -- indexing directly into a slice-typed Index
-    result, with no intermediate named variable. A real, separate gap
-    from construction: gen_indexable_base_into's own Slice-as-base case
-    existed already (`arr[:][0]`), but an Index-as-base case (`rows[0]`
-    itself used as a further base) didn't -- its own docstring used to
-    say so explicitly, tied to array-of-slices not being constructible
-    at all yet."""
+    """`rows[0][1]` with no intermediate variable."""
     pytestmark = GCC_SKIP
 
     def test_chained_index_into_array_of_slices(self):
@@ -17382,13 +12972,6 @@ class TestChainedSliceIndexing:
 
 
 class TestArrayOfSlicesCopying:
-    """gen_array_copy's own, previously-rejected leaf-slice case --
-    the second of the two things explicitly requested alongside
-    construction. A SHALLOW copy of each element's own {ptr, len}
-    descriptor, matching how copying a bare slice variable (`s2 = s1`)
-    already works -- see test_shallow_copy_semantics, the test that
-    actually pins this design choice down rather than just exercising
-    the mechanics."""
     pytestmark = GCC_SKIP
 
     def test_variable_to_variable_copy(self):
@@ -17423,11 +13006,6 @@ class TestArrayOfSlicesCopying:
         )
 
     def test_shallow_copy_semantics(self):
-        """The design decision this whole class exists to pin down:
-        the copy's own slice elements point at the SAME backing data
-        as the original's, not independently, recursively re-allocated
-        ones -- mutating through the copy is observable through the
-        original."""
         assert_exit_code(
             "    [][]int x = [][]int[[1, 2], [3, 4]]\n"
             "    [][]int y = x\n"
@@ -17438,12 +13016,7 @@ class TestArrayOfSlicesCopying:
 
 
 class TestIndexAssignIntoArrayOfSlices:
-    """`rows[i] = value` where the indexed element is itself slice-
-    typed -- gen_index_assign's own, previously-scalar-only dispatch,
-    and analyze_index_assign's own, previously-plain check_expr call,
-    needed the exact same _check_value_flowing_into treatment
-    analyze_var_decl/analyze_assign already had, just at a third call
-    site."""
+    """`rows[i] = value` where the element is a slice."""
     pytestmark = GCC_SKIP
 
     def test_assign_named_slice_variable(self):
@@ -17464,8 +13037,6 @@ class TestIndexAssignIntoArrayOfSlices:
         )
 
     def test_assign_untyped_literal(self):
-        """The specific case that surfaced this gap: an untyped array
-        literal assigned directly into a slice-typed indexed element."""
         assert_exit_code(
             "    [2][]int rows = [2][]int[[1, 2], [3, 4]]\n"
             "    rows[0] = [9, 9, 9]\n"
@@ -17474,9 +13045,6 @@ class TestIndexAssignIntoArrayOfSlices:
         )
 
     def test_scalar_index_assign_still_works(self):
-        """Regression check: gen_index_assign's dispatch now derives
-        element_type from stmt.array's own type rather than stmt.
-        value's -- confirms the ordinary scalar path is unaffected."""
         assert_exit_code(
             "    [3]int arr = [1, 2, 3]\n"
             "    arr[1] = 99\n"
@@ -17516,17 +13084,6 @@ class TestNone:
         )
 
     def test_slice_index_assign_with_none(self):
-        """Regression test for a real bug: `rows[0] = none` used to
-        raise a hard CodegenError ("No codegen rule for a slice-typed
-        value: NoneLiteral") even via old-style codegen -- gen_slice_
-        value_into itself never had a NoneLiteral case at all, unlike
-        gen_slice_arg_into's own identical shape. VarDecl/Assign's own
-        analogous case (see test_slice_vardecl_with_none/test_slice_
-        assign_with_none just above) already worked correctly, just
-        still via old-style -- this was a genuinely broken shape, not
-        just a slower one. Confirmed to have raised exactly this
-        CodegenError on the reverted code before writing this test
-        in."""
         assert_program_exit_code(
             "def int main():\n"
             "    [1][]int rows\n"
@@ -17538,12 +13095,6 @@ class TestNone:
         )
 
     def test_slice_field_assign_with_none(self):
-        """`b.values = none` -- already worked correctly before this
-        arc's own real-IR fix (confirmed via instrumentation: this
-        already reached gen_statement's own shared, final old-style
-        fallback, unlike the IndexAssign case just above, which
-        crashed there instead), kept here as real-IR coverage, not a
-        bug regression test."""
         assert_program_exit_code(
             "type Box struct:\n"
             "    []int values\n"
@@ -17558,11 +13109,6 @@ class TestNone:
         )
 
     def test_return_bare_none_from_slice_returning_function(self):
-        """`return none` from a slice-returning function -- already
-        worked correctly before this arc's own real-IR fix (confirmed
-        via instrumentation, the same way as the FieldAssign case just
-        above), kept here as real-IR coverage, not a bug regression
-        test."""
         assert_program_exit_code(
             "def []int makeNone():\n"
             "    return none\n"
@@ -17576,24 +13122,6 @@ class TestNone:
         )
 
     def test_return_bare_none_from_pointer_returning_function(self):
-        """A real, constructed bug, found and fixed after this arc
-        first shipped: gen_statement_ir's own Return case treated ANY
-        bare `none` return value as needing the composite, hidden-
-        return-pointer path -- correct for the SLICE case just above,
-        but a pointer-returning function has no hidden return pointer
-        at all (it's returned directly in a register, like any other
-        scalar), so _ir_hidden_return_ptr's own lookup had no slot to
-        find and crashed the verifier outright: "IRLocalAddress
-        references unknown slot None". The fix gates the composite-
-        return check's own NoneLiteral clause on the return type
-        actually being SLICE, matching every other site in ir/
-        statements.py that intercepts a bare `none` (VarDecl/Assign/
-        IndexAssign/FieldAssign all already did this correctly) --
-        letting a pointer-returning `return none` fall through to the
-        ordinary scalar return path instead, where gen_expr_ir's own
-        NoneLiteral case (ir/dispatch.py) already produces the
-        correct null-pointer value, exactly as it already does for a
-        pointer-typed VarDecl/Assign initializer."""
         assert_program_stdout(
             "def *int maybeGet(bool flag):\n"
             "    if flag:\n"
@@ -17610,13 +13138,6 @@ class TestNone:
         )
 
     def test_return_address_still_works_from_the_same_pointer_returning_function(self):
-        """The companion case to the test just above, in the SAME
-        function -- confirms the fix's own new TypeKind.SLICE gate
-        doesn't accidentally disturb the OTHER branch's already-
-        working `return &x`, which must still route through the
-        ordinary scalar return path exactly as before (a pointer
-        return was never routed through the hidden-pointer path in
-        the first place; only a bare `none` was ever mis-routed)."""
         assert_program_stdout(
             "def *int maybeGet(bool flag):\n"
             "    if flag:\n"
@@ -17643,11 +13164,6 @@ class TestNone:
         )
 
     def test_real_empty_slice_is_not_equal_to_none(self):
-        """The test that actually proves the subtlest part of this
-        feature holds: `arr[5:5]` is a real, zero-length slice with a
-        non-null pointer -- equally safe and equally zero-length as a
-        genuinely nil slice for every other purpose, but NOT `==
-        none`, matching Go's own nil-vs-empty-slice distinction."""
         assert_exit_code(
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
             "    []int s = arr[5:5]\n"
@@ -17683,10 +13199,6 @@ class TestNone:
         )
 
     def test_indexing_a_none_valued_slice_aborts(self):
-        """A none-valued slice's length is 0, so this hits the exact
-        same bounds check (and the exact same "array index out of
-        bounds" message) as indexing into any other empty slice --
-        no none-specific codegen needed for this at all."""
         assert_crashes_with_sigabrt(
             "    []int s = none\n"
             "    return s[0]"
@@ -17701,11 +13213,6 @@ class TestNone:
         )
 
     def test_reslicing_a_none_valued_slice_at_zero_zero(self):
-        """`s[0:0]` on a none-valued slice produces ANOTHER
-        none-equal slice ({0,0} + 0*stride = {0,0}) -- confirming
-        gen_slice_into's existing machinery handles a none-valued base
-        correctly with no special-casing, the same way indexing and
-        printing already do."""
         assert_exit_code(
             "    []int s = none\n"
             "    []int s2 = s[0:0]\n"
@@ -17743,10 +13250,6 @@ class TestNone:
         )
 
     def test_comparing_none_to_none_is_rejected(self):
-        """`none == none` would otherwise trivially type-check --
-        Type.NONE equals itself the same way any type does -- so this
-        needed its own explicit exclusion, not just the slice-vs-none
-        exception (see check_binary's own comment)."""
         assert_semantic_error(
             "    return none == none",
             match="does not support slice, void, sum type, dict, or none operands",
@@ -17761,11 +13264,6 @@ class TestNone:
         )
 
     def test_none_as_a_slice_argument(self):
-        """Now that slice parameters are supported, `none` passed as
-        a slice-typed argument works correctly -- the callee receives
-        a genuinely nil slice ({ptr: 0, len: 0}), so indexing into it
-        aborts exactly like indexing into any other zero-length slice
-        would (see TestSliceBoundsChecking)."""
         result = compile_and_run(
             "def int first([]int s):\n"
             "    return s[0]\n"
@@ -17776,29 +13274,6 @@ class TestNone:
         assert result.returncode == -signal.SIGABRT
 
     def test_none_as_a_pointer_argument_does_not_corrupt_a_later_parameter(self):
-        """A real, constructed bug, found and fixed after this arc
-        first shipped: _ir_call_arguments' own SLICE-argument dispatch
-        was `arg_type.kind == TypeKind.SLICE or isinstance(arg,
-        NoneLiteral)` -- unconditional on the SECOND clause, so a bare
-        `none` passed to a POINTER-typed parameter also matched it,
-        routing through _ir_slice_arg and producing THREE IR values (a
-        nil slice's own {ptr, len, cap} triple) for a parameter
-        expecting exactly one. The pointer parameter's OWN value
-        happened to come out right regardless (ptr=0 is the correct
-        null pointer too), which is why test_none_as_a_pointer_
-        argument_reads_back_as_none just below -- an equivalent,
-        single-parameter case -- passed both before and after this
-        fix and doesn't by itself prove anything. What actually
-        exposed it: the two EXTRA, spurious values (len=0, cap=0)
-        still got passed into the call, silently shifting every
-        parameter declared after the pointer one register late. Here
-        `y` -- passed as 42 -- read back as 0 instead, corrupted by
-        the none argument declared just before it. The fix reads the
-        actual PARAMETER's own declared type (param_types[i], the
-        same lookup the sum-type widening check just above already
-        uses) to decide whether a bare `none` argument needs the
-        slice-triple shape at all, rather than assuming every `none`
-        argument must be one."""
         assert_program_stdout(
             "def int check(*int p, int y):\n"
             "    if p == none:\n"
@@ -17812,13 +13287,6 @@ class TestNone:
         )
 
     def test_none_as_a_pointer_argument_reads_back_as_none(self):
-        """The direct, single-parameter confirmation that `none`
-        passed to a pointer-typed parameter is itself still correct
-        after the fix above -- gen_expr_ir's own NoneLiteral case
-        (ir/dispatch.py) produces the null-pointer value here, exactly
-        as it already does for a pointer-typed VarDecl/Assign
-        initializer or a pointer-returning function's own `return
-        none`."""
         assert_program_stdout(
             "def bool isNull(*int p):\n"
             "    return p == none\n"
@@ -17831,12 +13299,6 @@ class TestNone:
         )
 
     def test_none_as_mixed_slice_and_pointer_arguments_in_one_call(self):
-        """Confirms the fix reads EACH argument position's own
-        parameter type independently (param_types[i], not some single,
-        call-wide assumption) -- a slice-typed `none` and a pointer-
-        typed `none` in the SAME call each still get their own,
-        correctly-shaped treatment: three values for the slice, one
-        for the pointer."""
         assert_program_stdout(
             "def bool takesBoth([]int s, *int p):\n"
             "    return s == none and p == none\n"
@@ -17850,15 +13312,11 @@ class TestNone:
 
 
 # ---------------------------------------------------------------------------
-# Semantic analysis: scope/declaration checking and the strict int/bool
-# type system. These never reach codegen -- each one asserts that
-# analyze() itself raises SemanticError -- so they don't need gcc and
-# aren't skipped when it's missing.
+# Semantic analysis
 # ---------------------------------------------------------------------------
 
 class TestSemanticErrors:
 
-    # -- scope / declaration errors --------------------------------------
 
     def test_reference_to_undeclared_variable(self):
         assert_semantic_error(
@@ -17882,10 +13340,6 @@ class TestSemanticErrors:
         )
 
     def test_declare_before_use_is_enforced_in_textual_order(self):
-        """A variable assigned above its own declaration is, from the
-        analyzer's point of view, simply not in scope yet -- see
-        semantic.py's module docstring for why that falls out of
-        walking statements in program order."""
         assert_semantic_error(
             "    a = 1\n"
             "    int a\n"
@@ -17894,9 +13348,6 @@ class TestSemanticErrors:
         )
 
     def test_self_referential_initializer(self):
-        """`int a = a` -- the right-hand `a` is checked before the new
-        `a` is added to scope, so this is indistinguishable from any
-        other undeclared reference."""
         assert_semantic_error(
             "    int a = a\n"
             "    return a",
@@ -17904,13 +13355,9 @@ class TestSemanticErrors:
         )
 
     def test_valid_program_does_not_raise(self):
-        """Sanity check on the harness itself: a well-formed program
-        must NOT raise, so the tests above are actually testing
-        something specific rather than everything just failing."""
         ast = _parse("def int main():\n    int a = 1\n    return a\n")
         analyze(ast)  # should not raise
 
-    # -- initialization / assignment / return type mismatches -----------
 
     def test_initializer_type_mismatch(self):
         assert_semantic_error(
@@ -17942,7 +13389,6 @@ class TestSemanticErrors:
             match="declared to return",
         )
 
-    # -- operator operand-type errors ------------------------------------
 
     def test_not_requires_bool_not_int(self):
         assert_semantic_error(
@@ -17964,28 +13410,18 @@ class TestSemanticErrors:
         )
 
     def test_arithmetic_requires_int_operands(self):
-        """- * / are int-only, unaffected by ADD's overload -- '+' gets
-        its own dedicated test below, since mixing bool into it hits a
-        different, ADD-specific error message."""
         assert_semantic_error(
             "    return true - false",
             match="requires two operands of the same integer type",
         )
 
     def test_add_requires_two_int_or_two_str_operands(self):
-        """'+' is overloaded (int+int is arithmetic, str+str is
-        concatenation -- see semantic.py's check_binary), so it doesn't
-        go through the generic _require_same_integer_type path the
-        other arithmetic operators use, and gets its own distinct
-        error message."""
         assert_semantic_error(
             "    return true + false",
             match="requires two operands of the same integer type",
         )
 
     def test_ordering_comparison_requires_int_operands(self):
-        """< > <= >= don't accept bool -- there's no inherent ordering
-        on bool in this language."""
         assert_semantic_error(
             "    return true < false",
             return_type="bool",
@@ -17993,12 +13429,6 @@ class TestSemanticErrors:
         )
 
     def test_chained_ordering_comparison_is_rejected(self):
-        """`1 < 2 < 3` parses left-associatively as `(1 < 2) < 3` (see
-        parser.py) -- and `1 < 2` produces bool, which `<` doesn't
-        accept. Under implicit-conversion languages this silently means
-        something most people don't intend (`(1<2)<3` happens to
-        evaluate `1<3`); strict typing turns it into a hard error
-        instead of a footgun."""
         assert_semantic_error(
             "    return 1 < 2 < 3",
             return_type="bool",
@@ -18027,28 +13457,20 @@ class TestSemanticErrors:
         )
 
     def test_equality_same_type_is_valid(self):
-        """The positive control for the test above: comparing two
-        values of the *same* type must NOT raise."""
         ast = _parse("def bool main():\n    return 1 == 1\n")
         analyze(ast)  # should not raise
         ast = _parse("def bool main():\n    return true == false\n")
         analyze(ast)  # should not raise
 
-    # -- literal type errors ---------------------------------------------
 
     def test_float_literal_is_rejected(self):
-        """There's no float type yet -- only int and bool -- even
-        though the lexer's NUMBER rule matches decimals."""
         assert_semantic_error(
             "    return 2.5",
             match="not a whole number",
         )
 
-    # -- if/elif/else: condition typing and block scoping ----------------
 
     def test_if_condition_must_be_bool(self):
-        """No int-as-truthy shortcut -- same rule as everywhere else in
-        this type system."""
         assert_semantic_error(
             "    if 1:\n"
             "        return 1\n"
@@ -18057,10 +13479,6 @@ class TestSemanticErrors:
         )
 
     def test_elif_condition_must_be_bool(self):
-        """The condition check applies to every elif in a chain, not
-        just the first `if` -- since an elif is just a nested If (see
-        parser.py's If docstring), this falls out of analyze_if being
-        called recursively rather than needing separate elif logic."""
         assert_semantic_error(
             "    if false:\n"
             "        return 1\n"
@@ -18071,9 +13489,6 @@ class TestSemanticErrors:
         )
 
     def test_variable_declared_in_if_does_not_leak_outside(self):
-        """A variable declared inside an if-block goes out of scope
-        once the block ends -- referencing it afterward is exactly as
-        invalid as referencing any other undeclared name."""
         assert_semantic_error(
             "    if true:\n"
             "        int a = 1\n"
@@ -18082,9 +13497,6 @@ class TestSemanticErrors:
         )
 
     def test_variable_declared_in_then_not_visible_in_else(self):
-        """then and else get independent scopes -- a name from one
-        branch isn't visible in the other, since they're mutually
-        exclusive at runtime."""
         assert_semantic_error(
             "    if true:\n"
             "        int a = 1\n"
@@ -18094,11 +13506,6 @@ class TestSemanticErrors:
         )
 
     def test_same_name_in_sibling_branches_is_allowed(self):
-        """The positive control for the two tests above: declaring `a`
-        independently in both an if and its else must NOT raise, since
-        they're separate scopes -- this is exactly the scenario that
-        motivated rewriting codegen's allocator (see codegen.py's LOCAL
-        VARIABLES section)."""
         ast = _parse(
             "def int main():\n"
             "    if true:\n"
@@ -18111,8 +13518,6 @@ class TestSemanticErrors:
         analyze(ast)  # should not raise
 
     def test_shadowing_outer_variable_in_if_is_allowed(self):
-        """A block-local declaration is allowed to shadow a
-        same-named variable from an enclosing scope."""
         ast = _parse(
             "def int main():\n"
             "    int a = 1\n"
@@ -18124,9 +13529,6 @@ class TestSemanticErrors:
         analyze(ast)  # should not raise
 
     def test_double_declaration_within_same_if_branch_is_rejected(self):
-        """Shadowing an *enclosing* scope is fine, but the ordinary
-        double-declaration rule still applies *within* a single
-        branch's own scope."""
         assert_semantic_error(
             "    if true:\n"
             "        int a = 1\n"
@@ -18136,7 +13538,6 @@ class TestSemanticErrors:
             match="already declared",
         )
 
-    # -- while/break/continue ---------------------------------------------
 
     def test_while_condition_must_be_bool(self):
         assert_semantic_error(
@@ -18161,9 +13562,6 @@ class TestSemanticErrors:
         )
 
     def test_break_inside_if_inside_while_is_allowed(self):
-        """loop_depth (see semantic.py's LOOPS section) has to survive
-        being nested inside a non-loop block -- an `if` between the
-        `break` and its enclosing `while` shouldn't matter."""
         ast = _parse(
             "def int main():\n"
             "    while true:\n"
@@ -18174,9 +13572,6 @@ class TestSemanticErrors:
         analyze(ast)  # should not raise
 
     def test_break_inside_if_not_inside_while_is_rejected(self):
-        """The negative control for the test above: an `if` on its own,
-        with no enclosing `while` at all, still correctly rejects a
-        `break` inside it."""
         assert_semantic_error(
             "    if true:\n"
             "        break\n"
@@ -18185,10 +13580,6 @@ class TestSemanticErrors:
         )
 
     def test_break_after_loop_ends_is_rejected(self):
-        """Proves loop_depth is correctly *decremented* once a while's
-        body finishes being analyzed -- a break textually after the
-        loop, at the same level, must not be treated as still being
-        inside it."""
         assert_semantic_error(
             "    while true:\n"
             "        return 1\n"
@@ -18206,12 +13597,6 @@ class TestSemanticErrors:
         )
 
     def test_break_in_outer_loop_after_inner_loop_ends_is_allowed(self):
-        """The positive control matching the nested-loop codegen tests
-        in TestWhileLoops: a break in the *outer* loop, positioned
-        after an inner loop's body has already been fully analyzed and
-        its scope popped, must still correctly resolve as being inside
-        the outer loop (loop_depth is a counter, not reset to 0 by the
-        inner loop's own pop)."""
         ast = _parse(
             "def int main():\n"
             "    while true:\n"
@@ -18223,7 +13608,6 @@ class TestSemanticErrors:
         )
         analyze(ast)  # should not raise
 
-    # -- str -----------------------------------------------------------
 
     def test_add_rejects_mixed_int_and_str(self):
         assert_semantic_error(
@@ -18235,8 +13619,6 @@ class TestSemanticErrors:
         )
 
     def test_subtract_rejects_str_operands(self):
-        """Only '+' is overloaded for str -- every other arithmetic
-        operator stays strictly int-only."""
         assert_semantic_error(
             "    str a = 'hello'\n"
             "    str b = 'world'\n"
@@ -18246,8 +13628,6 @@ class TestSemanticErrors:
         )
 
     def test_ordering_comparison_rejects_str_operands(self):
-        """No inherent ordering on str in this language, same as bool
-        -- only == and != are defined for it."""
         assert_semantic_error(
             "    str a = 'hello'\n"
             "    str b = 'world'\n"
@@ -18265,9 +13645,6 @@ class TestSemanticErrors:
         )
 
     def test_str_equality_same_type_is_valid(self):
-        """The positive control: comparing two str values with == must
-        NOT raise -- this is what makes string equality actually usable
-        at all."""
         ast = _parse(
             "def bool main():\n"
             "    str a = 'hello'\n"
@@ -18299,9 +13676,6 @@ class TestSemanticErrors:
         )
 
     def test_concatenation_type_checks_as_valid_str(self):
-        """The positive control for concatenation: `+` on two str
-        operands must produce a value assignable to a str variable,
-        with no error anywhere along the way."""
         ast = _parse(
             "def str main():\n"
             "    str a = 'hello'\n"
@@ -18311,7 +13685,6 @@ class TestSemanticErrors:
         )
         analyze(ast)  # should not raise
 
-    # -- functions -------------------------------------------------------
 
     def test_call_to_undeclared_function(self):
         assert_semantic_error(
@@ -18350,9 +13723,6 @@ class TestSemanticErrors:
         )
 
     def test_duplicate_parameter_name(self):
-        """A parameter is declared into the function's own scope exactly
-        like a local, so this is caught by the ordinary double-
-        declaration check, not a function-specific one."""
         assert_program_semantic_error(
             "def int add(int a, int a):\n"
             "    return a\n",
@@ -18360,10 +13730,6 @@ class TestSemanticErrors:
         )
 
     def test_recursive_call_is_allowed(self):
-        """The positive control: a function calling itself must NOT
-        raise, since self.functions already has this function's own
-        signature by the time its body is checked (see semantic.py's
-        FUNCTIONS section)."""
         ast = _parse(
             "def int fact(int n):\n"
             "    if n == 0:\n"
@@ -18373,10 +13739,6 @@ class TestSemanticErrors:
         analyze(ast)  # should not raise
 
     def test_mutual_recursion_with_forward_reference_is_allowed(self):
-        """The positive control for forward references specifically:
-        is_even calls is_odd, which is defined *after* it in the file --
-        must not raise, since every signature is collected before any
-        body is checked."""
         ast = _parse(
             "def bool is_even(int n):\n"
             "    if n == 0:\n"
@@ -18390,7 +13752,6 @@ class TestSemanticErrors:
         )
         analyze(ast)  # should not raise
 
-    # -- print (the first builtin) ----------------------------------------
 
     def test_print_wrong_argument_count_zero(self):
         assert_semantic_error(
@@ -18407,9 +13768,6 @@ class TestSemanticErrors:
         )
 
     def test_print_argument_must_still_be_well_typed(self):
-        """print accepts any *valid* type, but its argument still has to
-        actually type-check on its own -- an undeclared variable inside
-        it is still an error, same as anywhere else."""
         assert_semantic_error(
             "    print(undeclared_variable)\n"
             "    return 0",
@@ -18427,13 +13785,10 @@ class TestSemanticErrors:
         )
 
     def test_print_accepts_int_bool_and_str_without_raising(self):
-        """The positive control: all three types must be individually
-        acceptable to print, with no error for any of them."""
         for arg in ("5", "true", "'hello'"):
             ast = _parse(f"def int main():\n    print({arg})\n    return 0\n")
             analyze(ast)  # should not raise
 
-    # -- modulo and the bitwise operators (% & | ^ << >>) -----------------
 
     def test_modulo_requires_int_operands(self):
         assert_semantic_error(
@@ -18472,26 +13827,15 @@ class TestSemanticErrors:
         )
 
     def test_bitwise_and_equality_precedence_is_a_type_error(self):
-        """The C footgun, made real: `1 & 2 == 2` parses as
-        `1 & (2 == 2)` (== binds tighter than &, per parser.py's
-        _BINARY_OPS), so the right-hand side of & is bool, not int.
-        In C this silently compiles into something almost nobody
-        intends; here, strong typing turns it into a compile error
-        instead."""
         assert_semantic_error(
             "    return 1 & 2 == 2",
             match="requires two operands of the same integer type",
         )
 
     def test_bitwise_and_equality_with_explicit_parens_is_valid(self):
-        """The positive control for the test above: adding the
-        parentheses C programmers usually need to remember here
-        (`(1 & 2) == 2`) makes the grouping explicit and the program
-        valid."""
         ast = _parse("def bool main():\n    return (1 & 2) == 2\n")
         analyze(ast)  # should not raise
 
-    # -- arrays ------------------------------------------------------------
 
     def test_array_literal_size_mismatch(self):
         assert_semantic_error(
@@ -18501,15 +13845,6 @@ class TestSemanticErrors:
         )
 
     def test_ragged_2d_array_literal_is_rejected(self):
-        """A ragged literal like `[[1,2,3],[4,5]]` is rejected with no
-        special-cased "ragged" logic at all -- once Type is
-        structurally comparable, the two rows are just genuinely
-        different types ([3]int vs [2]int), caught by the exact same
-        check that rejects [3]int vs [3]bool. Routed through check_
-        array_literal's own expected_element_type branch here (the
-        VarDecl's own declared type is [2][3]int, an ARRAY, not a
-        SLICE), so the message names the declared element type
-        directly rather than describing a generic type mismatch."""
         assert_semantic_error(
             "    [2][3]int matrix = [[1, 2, 3], [4, 5]]\n"
             "    return matrix[0][0]",
@@ -18553,10 +13888,6 @@ class TestSemanticErrors:
         )
 
     def test_mismatched_array_equality_comparison_is_rejected(self):
-        """Different length, or different element type -- either one
-        is enough to reject: array equality (see TestArrayEquality)
-        requires the two sides to be the exact SAME array type, not
-        merely "both arrays"."""
         assert_semantic_error(
             "    [3]int a = [1, 2, 3]\n"
             "    [4]int b = [1, 2, 3, 4]\n"
@@ -18566,14 +13897,6 @@ class TestSemanticErrors:
         )
 
     def test_array_of_incomparable_structs_equality_comparison_is_rejected(self):
-        """Same shape, but the leaf type is a STRUCT with a slice-
-        typed field of its own -- rejected with its own, more
-        specific error than the generic slice/void/none one, since
-        THAT struct isn't comparable (see check_binary's own note on
-        why this is a real, principled boundary rather than an
-        arbitrary one). An array of a COMPARABLE struct (no slice
-        field anywhere) is fine now -- see TestStructEquality's own
-        test_array_of_comparable_structs."""
         assert_program_semantic_error(
             "type Holder struct:\n"
             "    []int xs\n"
@@ -18597,19 +13920,6 @@ class TestSemanticErrors:
         )
 
     def test_array_of_sum_types_equality_comparison_is_rejected(self):
-        """Was a silent, latent bug before _is_comparable_type learned
-        to reject SUM (mirroring its own SLICE rejection): array
-        equality's own scalar fallback treated a sum-typed element as
-        if it were an ordinary, register-width value, comparing only
-        some arbitrary, truncated slice of its actual tag-plus-payload
-        bytes -- confirmed to actually misreport two Shapes holding
-        the same variant with different field values as equal, rather
-        than failing loudly or comparing correctly. (No struct-with-
-        a-sum-typed-field counterpart test exists alongside this one:
-        a sum type is deliberately not allowed as a struct field's own
-        type at all yet -- see type_from_name's own docstring -- so
-        that shape isn't a constructible program in the first place.)
-        """
         ast = _parse(
             "type Circle struct:\n"
             "    int radius\n"
@@ -18632,13 +13942,6 @@ class TestSemanticErrors:
             analyze(ast)
 
     def test_array_of_dicts_equality_comparison_is_rejected(self):
-        """The identical bug _is_comparable_type's own SUM fix
-        addresses, for the identical underlying reason: a dict's own
-        descriptor begins with a raw, unstable heap pointer to its
-        backing buckets array, not any kind of logical value, so the
-        same scalar fallback comparing it is comparing implementation
-        detail that differs across separately-constructed dicts,
-        never a real notion of equality."""
         assert_semantic_error(
             "    [2]dict[str]int a\n"
             "    [2]dict[str]int b\n"
@@ -18662,14 +13965,6 @@ class TestSemanticErrors:
             analyze(ast)
 
     def test_array_as_function_param_and_return_type_checks_correctly(self):
-        """The positive control: semantic.py fully accepts arrays as
-        parameter and return types -- type_from_name and Type's
-        structural equality handle this with no special-casing needed
-        anywhere in this file. The gap is codegen-only (see
-        TestArrays' test_array_parameter_not_supported_yet and
-        test_array_return_not_supported_yet in the codegen-level
-        suite) -- semantic analysis alone has no reason to reject
-        this program."""
         ast = _parse(
             "def [3]int make_array(int a, int b, int c):\n"
             "    [3]int result = [a, b, c]\n"
@@ -18681,20 +13976,12 @@ class TestSemanticErrors:
         )
         analyze(ast)  # should not raise
 
-    # -- error messages carry a real source position ---------------------
-    # One test per raise SITE this file's SemanticError threads a node
-    # through in a genuinely different way (a statement, an expression,
-    # a top-level declaration) -- not one per message, since every site
-    # already gets the SAME mechanism (see test_semantic.py's own direct
-    # tests of SemanticError itself). These confirm that mechanism is
-    # actually wired correctly end-to-end, against real line numbers a
-    # person reading the source would count by hand.
 
     def test_type_mismatch_reports_the_expressions_own_line_and_column(self):
         ast = _parse(
             "def int main():\n"      # line 1
             "    bool b = true\n"    # line 2
-            "    int x = b + 1\n"    # line 3 -- 'b' (the Binary's own position) at column 13
+            "    int x = b + 1\n"
             "    return x\n"
         )
         with pytest.raises(SemanticError, match=re.escape("at line 3, column 13")):
@@ -18743,27 +14030,7 @@ class TestSemanticErrors:
 
 
 # ---------------------------------------------------------------------------
-# Single-line comments: `#` to end of line. Purely a lexer-level feature --
-# the COMMENT rule is discarded exactly like SKIP (whitespace) is, and never
-# reaches the parser at all, so none of these tests are really testing the
-# parser or codegen; they're testing that the lexer correctly makes a
-# comment invisible to everything downstream, in every position one could
-# plausibly appear.
-#
-# The one genuinely lexer-specific subtlety here is indentation: this
-# language's indentation tracking works by waiting for the first token on a
-# line that ISN'T itself NEWLINE or SKIP before measuring how deep that line
-# is indented (see lexer.py's own _handle_indentation and the comment
-# alongside its call site) -- which is also exactly how a blank line already
-# avoided needing special-case handling before comments existed at all.
-# COMMENT joins that same exclusion list, so a comment-only line falls out
-# of the SAME existing mechanism for free, with no separate logic written
-# for it. test_comment_only_line_as_first_content_in_a_block and
-# test_comment_only_line_does_not_affect_dedent are the two tests that
-# actually prove that holds, not just that comments are ignored in general:
-# a comment-only line sitting at the WRONG indentation (shallower or deeper
-# than the real code around it) must never itself trigger an INDENT/DEDENT,
-# or be mistaken for the block's first real line.
+# Single-line comments
 # ---------------------------------------------------------------------------
 
 class TestComments:
@@ -18805,11 +14072,6 @@ class TestComments:
         )
 
     def test_hash_inside_a_string_literal_is_not_a_comment(self):
-        """The whole point of the STRING rule already consuming its
-        entire match (opening quote to closing quote) before anything
-        else gets a chance to look inside it -- a '#' embedded in a
-        string must stay part of the string's own value, not truncate
-        it or start a comment mid-literal."""
         assert_stdout(
             "    str s = 'value # 42'\n"
             "    print(s)\n"
@@ -18818,11 +14080,6 @@ class TestComments:
         )
 
     def test_comment_only_line_as_first_content_in_a_block(self):
-        """A comment as the very first line of a function body, before
-        any real statement -- indentation must still be measured from
-        the first REAL line (the `if`), exactly as if the comment
-        line didn't exist, not from the comment's own (irrelevant)
-        indentation."""
         assert_exit_code(
             "    # nothing real here yet\n"
             "    if true:\n"
@@ -18832,10 +14089,6 @@ class TestComments:
         )
 
     def test_comment_only_line_does_not_affect_dedent(self):
-        """A comment-only line sitting between a nested block and the
-        code that follows it, indented shallower than the block it
-        interrupts -- must not itself be mistaken for the dedent, or
-        for a second one lower down that only comes from real code."""
         assert_exit_code(
             "    if true:\n"
             "        int x = 1\n"
@@ -18854,8 +14107,6 @@ class TestComments:
         )
 
     def test_empty_comment(self):
-        """A bare '#' with nothing after it -- still a complete,
-        valid (if content-free) comment."""
         assert_exit_code(
             "    #\n"
             "    return 3",
@@ -18871,10 +14122,6 @@ class TestComments:
         )
 
     def test_comments_do_not_disturb_multi_level_nesting(self):
-        """Comments scattered at every nesting depth around a genuinely
-        nested if/while structure -- the real test of whether comment
-        handling composes with indentation tracking generally, not
-        just in isolated single-level cases."""
         assert_exit_code(
             "    # top level\n"
             "    int total = 0\n"
@@ -18895,64 +14142,13 @@ class TestComments:
         )
 
 # ---------------------------------------------------------------------------
-# Structs: `type Name struct: <field>+`, a new, NOMINAL type with named,
-# ordered, heterogeneous fields, read and written via `.` (`p.x`,
-# `p.x = 1`). Value semantics throughout, exactly like an array -- copied
-# on VarDecl init, plain Assign, parameter passing, and return, never
-# aliased -- see codegen.py's own STRUCTS section for the full design,
-# including why the copy mechanism needed no new machinery at all
-# (gen_array_copy's own flat-byte-chunking loop, generalized to any leaf
-# width, already handles a struct correctly with no field-by-field
-# recursion).
-#
-# What's deliberately NOT covered here, each a real, enforced scope
-# boundary rather than a silently discovered gap (see codegen.py's own
-# STRUCTS section for the full reasoning behind each):
-#   - No struct literal syntax -- every struct value in this phase is
-#     built field-by-field, through a VarDecl followed by individual
-#     FieldAssign statements.
-#   - No `==` on structs, and no `print` on a struct (deferred pending a
-#     real string-building facility -- see codegen.py's own note).
-#
-# Slice-typed fields (`type Row struct: []int values`, directly, through an
-# array, or through a nested struct) used to be explicitly rejected here
-# too, for the identical reason arrays needed their own escape analysis
-# built out before they could be trusted: a struct escaping a function
-# with an unguarded slice field would silently reintroduce the exact
-# dangling-pointer bug analyze_array_escapes exists to prevent elsewhere.
-# That extension (field_slot_of, alongside indexed_slot_of -- see
-# codegen.py's own AGGREGATES AND SLOTS section) is now built, so slice-
-# typed fields are fully supported -- see test_slice_typed_field_basic_
-# read_and_write and its siblings below, especially test_struct_
-# escaping_via_return_promotes_slice_field_backing and test_non_
-# escaping_slice_field_stays_stack_allocated, which are to THIS
-# extension what test_local_array_sliced_but_not_returned_stays_on_the_
-# stack is to the array case: proof this is a genuinely sound AND
-# precise analysis, not just "heap-allocate every array a struct's
-# field is ever sliced from" wearing a fancier name.
-#
-# test_value_semantics_local_copy and test_value_semantics_across_a_call
-# are the two tests that matter most in this whole class: they're what
-# actually prove a struct copies rather than aliases, the foundational
-# claim everything else here builds on. Every other positive test could
-# pass even if structs silently aliased instead of copying (field reads/
-# writes would still "work"); these two specifically require that NOT to
-# be true.
+# Structs
 # ---------------------------------------------------------------------------
 
 class TestStructs:
     pytestmark = GCC_SKIP
 
     def test_type_struct_form_is_equivalent_to_bare_struct_form(self):
-        """`type Point struct: ...` -- a second, additional spelling
-        for a struct declaration (see parser.py's own parse_type_
-        declaration) -- must work end-to-end exactly like `struct
-        Point: ...` does: field read/write, a method call, everything
-        this whole class already exercises for the bare form. This is
-        the one integration-level check for the new spelling; every
-        other test in this class deliberately keeps using the bare
-        form, since the two are meant to be interchangeable, not
-        redundant to test twice throughout."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -18999,9 +14195,6 @@ class TestStructs:
         )
 
     def test_whole_struct_assignment(self):
-        """`q = p`, not field-by-field -- exercises gen_struct_value_
-        into's own Variable case (a flat copy via gen_array_copy), not
-        gen_field_assign at all."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -19018,8 +14211,6 @@ class TestStructs:
         )
 
     def test_value_semantics_local_copy(self):
-        """THE test proving a struct copies rather than aliases: `Point
-        q = p` then mutating q must never affect p."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -19036,9 +14227,6 @@ class TestStructs:
         )
 
     def test_value_semantics_across_a_call(self):
-        """The parameter-passing counterpart to test_value_semantics_
-        local_copy: mutating a struct PARAMETER inside a function must
-        never affect the caller's own struct."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -19102,10 +14290,6 @@ class TestStructs:
         )
 
     def test_array_typed_field_indexed(self):
-        """`b.data[0]` -- an array-typed FIELD, indexed further. Needed
-        its own fix in gen_array_address_into (a Field case, for
-        exactly this shape) -- found by this test failing outright,
-        not by inspection."""
         assert_program_exit_code(
             "type Row struct:\n"
             "    [3]int data\n"
@@ -19154,11 +14338,6 @@ class TestStructs:
         )
 
     def test_forwarding_a_struct_returning_call(self):
-        """`return bar()`, forwarding another struct-returning call's
-        result straight out -- free, via gen_struct_value_into's own
-        Call case, exactly like the identical array/slice case
-        already is (the same destination address passed one level
-        deeper, no intermediate copy)."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -19180,9 +14359,6 @@ class TestStructs:
         )
 
     def test_passing_a_struct_field_as_an_argument(self):
-        """`foo(s.inner)` -- a struct-typed argument that's a Field,
-        not a bare Variable, the one real addition a struct argument
-        needed beyond what an array argument already had."""
         assert_program_exit_code(
             "type Inner struct:\n"
             "    int v\n"
@@ -19200,10 +14376,6 @@ class TestStructs:
         )
 
     def test_large_struct_is_heap_allocated(self):
-        """A struct over _STACK_ARRAY_LIMIT_BYTES gets the identical
-        heap-promotion treatment a large array already does -- and the
-        parameter-copy convention still works correctly through the
-        resulting pointer (not just declaration)."""
         assert_program_exit_code(
             "type Big struct:\n"
             "    [5000]int data\n"
@@ -19220,7 +14392,6 @@ class TestStructs:
         )
 
     def test_large_struct_actually_uses_malloc(self):
-        """The asm-level confirmation behind the test just above."""
         source = (
             "type Big struct:\n"
             "    [5000]int data\n"
@@ -19235,10 +14406,6 @@ class TestStructs:
         assert mallocs
 
     def test_forward_reference(self):
-        """Struct A, declared first, references struct B, declared
-        later in the same file -- only possible because struct names
-        are all reserved up front, before any struct's own fields are
-        resolved (see _collect_structs's own pass 1)."""
         assert_program_exit_code(
             "type A struct:\n"
             "    B b\n"
@@ -19345,10 +14512,6 @@ class TestStructs:
             analyze(_parse(source))
 
     def test_cycle_via_array_field_is_rejected(self):
-        """`[5]B` counts as containment for cycle purposes, exactly
-        like a direct field would -- an array embeds its element
-        inline, N times over, so this is exactly as size-infinite as
-        a direct cycle."""
         source = (
             "type A struct:\n"
             "    [5]B b\n"
@@ -19362,8 +14525,6 @@ class TestStructs:
             analyze(_parse(source))
 
     def test_struct_containing_array_of_different_struct_is_fine(self):
-        """The positive control for the two cycle tests above: an
-        array of a DIFFERENT, non-cyclic struct must NOT be rejected."""
         ast = _parse(
             "type Point struct:\n"
             "    int x\n"
@@ -19376,11 +14537,6 @@ class TestStructs:
         analyze(ast)  # should not raise
 
     def test_nominal_typing_two_structs_with_same_fields_are_different_types(self):
-        """Two structs with identical field lists but different
-        declared names are different types -- falls out of Type's own
-        structural equality over its new struct_name field, with no
-        field-by-field comparison ever happening (see semantic.py's
-        own Type docstring)."""
         source = (
             "type A struct:\n"
             "    int v\n"
@@ -19399,14 +14555,6 @@ class TestStructs:
             analyze(_parse(source))
 
     def test_slice_typed_field_basic_read_and_write(self):
-        """Slice-typed fields (`type Row struct: []int values`) are
-        fully supported: semantic.py used to reject this outright as
-        an explicit scope boundary, until codegen.py's escape analysis
-        was extended (field_slot_of, alongside indexed_slot_of) to
-        give a slice field's own backing array the identical treatment
-        an array-of-slices element already has -- see codegen.py's own
-        STRUCTS section and analyze_array_escapes's own AGGREGATES AND
-        SLOTS section for the full design."""
         assert_program_exit_code(
             "type Row struct:\n"
             "    []int values\n"
@@ -19420,21 +14568,6 @@ class TestStructs:
         )
 
     def test_slice_literal_field_in_struct_literal_regression(self):
-        """Regression test for the same dispatch bug test_array_of_
-        slices_literal_via_reassignment_regression documents (see its
-        own docstring for the full account), but through the OTHER
-        recursive path into the same buggy dispatcher: a struct
-        literal's own field, not an array literal's own element.
-        `Row([10, 20, 30])` has one field, declared SLICE, given a
-        bare slice literal directly -- _ir_write_struct_literal_into
-        recurses into the identical _ir_write_composite_value_into
-        dispatcher for this field, so this exercises struct-literal
-        construction's own call site into the shared bug, independent
-        of the array-literal one the sibling regression test above
-        covers -- both needed fixing (they shared one root cause, a
-        single missing value_type.kind == ARRAY check), but a fix to
-        one call site's own recursion couldn't have been verified
-        against the other without a test like this one."""
         assert_program_exit_code(
             "type Row struct:\n"
             "    []int values\n"
@@ -19446,11 +14579,6 @@ class TestStructs:
         )
 
     def test_array_of_slices_field_is_supported(self):
-        """A slice field nested one level of array-wrapping deeper
-        (`[N][]int`) -- _contains_slice unwraps array nesting at any
-        depth, not just a bare slice field, the identical check
-        whole_value_node_of already uses for a plain array-of-slices
-        declaration."""
         assert_program_exit_code(
             "type Rows struct:\n"
             "    [2][]int values\n"
@@ -19465,9 +14593,6 @@ class TestStructs:
         )
 
     def test_slice_field_nested_through_another_struct_is_supported(self):
-        """A slice field reached transitively through a nested struct
-        field -- _contains_slice recurses into a nested struct's own
-        registered fields, not just the immediate field list."""
         assert_program_exit_code(
             "type Inner struct:\n"
             "    []int values\n"
@@ -19483,9 +14608,6 @@ class TestStructs:
         )
 
     def test_ordinary_array_field_is_not_rejected(self):
-        """The positive control for the slice-related field tests
-        throughout this class: an ordinary (non-slice) array field
-        must never be treated as needing any of this machinery."""
         ast = _parse(
             "type Fixed struct:\n"
             "    [3]int values\n"
@@ -19497,15 +14619,6 @@ class TestStructs:
         analyze(ast)  # should not raise
 
     def test_self_referential_struct_via_slice_field(self):
-        """`type Node struct: []Node children` -- explicitly the
-        motivating pattern cycle detection was scoped to allow from
-        day one (see semantic.py's own _check_struct_contains): a
-        slice field never counts as a sizing cycle, since its own
-        backing storage is a
-        separate, runtime-sized allocation, not embedded inline. Now
-        that slice-typed fields are supported at all, this is a real,
-        legal, intentional pattern -- a tree or linked structure built
-        from slices -- not merely tolerated."""
         assert_program_exit_code(
             "type Node struct:\n"
             "    int value\n"
@@ -19519,13 +14632,6 @@ class TestStructs:
         )
 
     def test_none_flows_into_a_slice_typed_field(self):
-        """`r.values = none` -- needed its own fix in gen_field_assign
-        (a NoneLiteral short-circuit before the SLICE dispatch,
-        mirroring gen_var_decl's/gen_assign's own identical one) --
-        found by testing, not by inspection: FieldAssign simply wasn't
-        a reachable path for any slice-typed value at all until slice-
-        typed fields were supported, so this gap was never exercised
-        until now."""
         assert_program_exit_code(
             "type Row struct:\n"
             "    []int values\n"
@@ -19538,14 +14644,6 @@ class TestStructs:
         )
 
     def test_untyped_array_literal_flows_into_a_slice_typed_field(self):
-        """`r.values = [1, 2, 3]` -- an untyped array literal assigned
-        directly into a slice-typed field gets the same recursive
-        slice-construction treatment every other already-typed slot
-        (a VarDecl, an Assign, an IndexAssign's own element) already
-        gives one, via _check_value_flowing_into -- built the general
-        way from the start in analyze_field_assign, so this needed no
-        semantic.py changes at all once slice-typed fields were
-        allowed through."""
         assert_program_exit_code(
             "type Row struct:\n"
             "    []int values\n"
@@ -19558,14 +14656,6 @@ class TestStructs:
         )
 
     def test_writing_a_scalar_element_of_a_slice_typed_field(self):
-        """`r.values[0] = 99` -- writing a plain int into an ELEMENT
-        of a slice-typed field, as opposed to writing a whole slice
-        INTO the field itself (test_slice_typed_field_basic_read_and_
-        write, above) -- an ordinary IndexAssign whose own target
-        happens to be a Field, needing no changes anywhere at all: the
-        field's own address is computed once (gen_field_address_into),
-        then indexing through it is identical to indexing through any
-        other slice."""
         assert_program_exit_code(
             "type Row struct:\n"
             "    []int values\n"
@@ -19592,26 +14682,8 @@ class TestStructs:
         with pytest.raises(SemanticError, match="Cannot assign"):
             analyze(_parse(source))
 
-    # -- escape analysis: does a slice field's own backing array get --
-    # -- correctly promoted when it needs to survive past its own    --
-    # -- frame? Every test below actually compiles, links, and RUNS  --
-    # -- the resulting binary, with a large intervening stack write  --
-    # -- specifically designed to clobber a wrongly-stack-allocated  --
-    # -- array if the analysis got it wrong -- this is exactly the   --
-    # -- same kind of test that already caught two real, genuine     --
-    # -- bugs while this feature was being built (see codegen.py's   --
-    # -- own contribution() and its _unwrap_slices helper): isolated --
-    # -- analysis alone said the wrong thing in both cases, and only --
-    # -- forcing the corruption to actually manifest end to end      --
-    # -- caught it.
 
     def test_struct_escaping_via_return_promotes_slice_field_backing(self):
-        """THE core test for this whole extension: a struct value
-        returned out of the function that built it must make its own
-        slice field's backing array survive past that function's own
-        frame -- verified by actually corrupting the stack region
-        that array used to occupy before ever reading the field back
-        out."""
         assert_program_exit_code(
             "type Row struct:\n"
             "    []int values\n"
@@ -19638,13 +14710,6 @@ class TestStructs:
         )
 
     def test_non_escaping_slice_field_stays_stack_allocated(self):
-        """THE precision test for this whole extension, mirroring
-        test_local_array_sliced_but_not_returned_stays_on_the_stack's
-        own role for plain slices: a struct whose slice field never
-        escapes must NOT force its own backing array onto the heap.
-        Every other test in this block could pass even if writing a
-        slice into ANY field unconditionally promoted its own backing
-        array; this one specifically requires that not to happen."""
         source = (
             "type Row struct:\n"
             "    []int values\n"
@@ -19661,16 +14726,6 @@ class TestStructs:
         assert not mallocs
 
     def test_reslicing_a_struct_slice_field_escapes_correctly(self):
-        """`r.values[0:2]` -- re-slicing a struct's OWN slice field --
-        was a real, separately-rooted bug found while building this
-        feature: contribution()'s own Slice case used to resolve the
-        thing being re-sliced via root_variable_name straight to its
-        raw declaration, which is correct for a bare Variable but
-        wrong for an aggregate element or field -- see _unwrap_slices
-        and contribution()'s own updated docstring for the full
-        story. This affected plain array-of-slices re-slicing too
-        (`rows[0][0:2]`), not just struct fields -- see
-        TestArrayEscapeAnalysis for that side of the same fix."""
         assert_program_exit_code(
             "type Row struct:\n"
             "    []int values\n"
@@ -19698,14 +14753,6 @@ class TestStructs:
         )
 
     def test_struct_to_struct_copy_propagates_slice_field_backing(self):
-        """`Row q = r` -- copying a whole struct value must still make
-        the copy's own field reach whatever backs the original's own
-        slice field, since both share the exact same underlying
-        storage (a struct copy is a shallow, alias-preserving flat
-        byte copy, exactly like an array-of-slices copy already is) --
-        falls out for free from whole_value_node_of giving BOTH `r`
-        and `q` the identical shared slot for their own struct type,
-        no separate propagation logic needed."""
         assert_program_exit_code(
             "type Row struct:\n"
             "    []int values\n"
@@ -19733,11 +14780,6 @@ class TestStructs:
         )
 
     def test_struct_slice_field_as_parameter_escapes_correctly(self):
-        """A struct passed as a function PARAMETER, with its own
-        slice field's value extracted and returned back out --
-        exercises the parameter-copy convention (a struct parameter is
-        copied on entry, exactly like an array one) alongside field
-        escape tracking together."""
         assert_program_exit_code(
             "type Row struct:\n"
             "    []int values\n"
@@ -19767,11 +14809,6 @@ class TestStructs:
         )
 
     def test_append_on_a_struct_slice_field_escapes_correctly(self):
-        """`append(r.values, v)` -- append's own first argument
-        already recurses through contribution() for any slice-valued
-        expression, not just a bare Variable, so a struct's own field
-        needed no separate fix here -- it falls out of field_slot_of
-        being wired into contribution()'s own Field case."""
         assert_program_exit_code(
             "type Row struct:\n"
             "    []int values\n"
@@ -19799,10 +14836,6 @@ class TestStructs:
         )
 
     def test_compound_assignment_to_a_field_now_works(self):
-        """`p.x += 1` -- was rejected at parse time before this stage;
-        now folded in alongside IndexAssign/DerefAssign, all three
-        sharing the identical read-modify-write-through-one-address
-        mechanism."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -19816,16 +14849,7 @@ class TestStructs:
 
 
 class TestStructLiterals:
-    """`Name(arg1, arg2, ...)` -- e.g. `Point p = Point(3, 4)` -- built
-    entirely on top of the ordinary Call node (no parser changes at
-    all; see codegen.py's own STRUCT LITERALS section), disambiguated
-    from a function call purely by struct-registry membership.
-    Positional, exhaustive, and deliberately scoped to exactly two
-    positions (a VarDecl initializer or a plain Assign value) -- the
-    execution-based tests below prove the VALUE this produces is
-    correct; the semantic-error tests prove every other position is
-    still rejected, matching an ordinary field-by-field construction's
-    own equivalent restriction there."""
+    """`Name(arg1, arg2, ...)`."""
 
     pytestmark = GCC_SKIP
 
@@ -19842,9 +14866,6 @@ class TestStructLiterals:
         )
 
     def test_construction_via_plain_assign(self):
-        """The other of the two positions this is valid in -- an
-        ALREADY-declared variable reassigned wholesale via a struct
-        literal, not just a VarDecl's own initializer."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -19908,10 +14929,6 @@ class TestStructLiterals:
         )
 
     def test_struct_typed_field_via_a_named_variable(self):
-        """A struct-typed field's own argument can be an ordinary
-        struct-typed expression (here, a Variable) -- just not ANOTHER
-        struct literal directly (see test_nested_struct_literal_is_
-        rejected below)."""
         assert_program_exit_code(
             "type Inner struct:\n"
             "    int v\n"
@@ -19928,23 +14945,6 @@ class TestStructLiterals:
         )
 
     def test_large_struct_literal_is_heap_allocated(self):
-        """A struct literal whose own struct type is over
-        _STACK_ARRAY_LIMIT_BYTES gets the identical heap-promotion
-        treatment gen_var_decl already gives any other large struct
-        (see is_heap_allocated) -- gen_struct_literal_into writes
-        through the malloc'd pointer (Memory('rax', 0)) instead of a
-        fixed %rbp-relative slot.
-
-        `fa`/`fb` are each individually well under the stack limit (so
-        neither triggers its OWN heap promotion as a local variable) --
-        only Big's combined width does -- which is what isolates the
-        malloc call this induces to Big's own declaration specifically
-        rather than to either array argument. Exit-code correctness
-        alone doesn't distinguish a genuinely heap-allocated result
-        from a stack-allocated one that happened to still work, so see
-        the asm-level test just below for the actual proof -- mirroring
-        TestStructs's own test_large_struct_is_heap_allocated / test_
-        large_struct_actually_uses_malloc pairing."""
         assert_program_exit_code(
             "type Big struct:\n"
             "    [2100]int a\n"
@@ -19960,21 +14960,6 @@ class TestStructLiterals:
         )
 
     def test_large_struct_literal_actually_uses_malloc(self):
-        """The asm-level confirmation behind the test just above.
-        Exactly one `call malloc`: fa/fb are each individually under
-        the stack limit and stay stack-allocated, so the one malloc
-        call present is attributable to Big's own declaration, not to
-        either array argument.
-
-        Matched via regex with an optional leading underscore, not a
-        literal "call    malloc" substring: Emitter prefixes external
-        symbols with a leading underscore on macOS (Mach-O convention
-        -- see its own symbol() method), so the actual instruction text
-        is `call    _malloc` there, not `call    malloc`. A plain
-        substring check would silently read as 0 matches on macOS
-        instead of failing loudly, which is exactly what happened here
-        before this fix -- caught by a person actually running this on
-        macOS, not by this sandbox, which only has Linux available."""
         source = (
             "type Big struct:\n"
             "    [1050]int a\n"
@@ -19992,11 +14977,6 @@ class TestStructLiterals:
         assert len(_heap_allocations(ast)) == 1
 
     def test_small_struct_literal_does_not_use_malloc(self):
-        """Negative control for the test just above: a struct literal
-        well under the stack limit should produce no malloc call at
-        all -- confirming the malloc count there actually tracks the
-        size threshold, rather than 'malloc' simply appearing in the
-        output incidentally (e.g. from unrelated program setup)."""
         source = (
             "type Point struct:\n"
             "    int x\n"
@@ -20026,11 +15006,6 @@ class TestStructLiterals:
         )
 
     def test_resulting_struct_can_be_passed_to_a_function(self):
-        """The ordinary struct VALUE a literal produces, once assigned
-        to a variable, is passed exactly like any other struct. The
-        literal itself can ALSO be passed directly now -- see test_
-        struct_literal_as_direct_function_argument below -- but this
-        variable-first form remains just as valid."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -20070,13 +15045,6 @@ class TestStructLiterals:
         )
 
     def test_struct_literal_as_direct_function_argument(self):
-        """Used to be rejected at the semantic layer entirely (a
-        struct literal was only ever valid as a VarDecl initializer or
-        an Assign value); check_call's own argument-checking loop now
-        recognizes this exact shape too, mirroring analyze_var_decl/
-        analyze_assign, and codegen materializes the literal into its
-        own dedicated stack slot before taking its address (see
-        codegen.py's _collect_argument_temps)."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -20091,18 +15059,6 @@ class TestStructLiterals:
         )
 
     def test_struct_literal_as_direct_return_value(self):
-        """Used to be rejected at the semantic layer entirely; analyze_
-        return now recognizes this exact shape too, mirroring analyze_
-        var_decl/analyze_assign/check_call's own argument loop. Needed
-        NO codegen changes at all: gen_return's own STRUCT branch
-        already routes through gen_struct_value_into via the hidden-
-        return-pointer convention, and that method already dispatches
-        a struct-literal Call correctly (gen_struct_literal_into) --
-        the exact same machinery a plain array literal already used in
-        this position with no restriction of its own (see
-        test_forwarding_a_struct_returning_call and TestArrays for the
-        array-returning-literal case, which never needed a semantic.py
-        change to begin with)."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -20118,14 +15074,6 @@ class TestStructLiterals:
         )
 
     def test_large_struct_literal_as_direct_return_value(self):
-        """Unlike a struct literal used as a function-call ARGUMENT
-        (which needed genuine new machinery -- _collect_argument_temps
-        -- to give it somewhere to live), a returned struct literal
-        needs no new storage question at all, regardless of size: the
-        CALLER already provides a real destination address via the
-        hidden-return-pointer convention (see gen_function's own
-        parameter handling), so this is exactly as simple for a large,
-        heap-promoted struct as for a small one."""
         assert_program_exit_code(
             "type Big struct:\n"
             "    [5000]int data\n"
@@ -20157,11 +15105,6 @@ class TestStructLiterals:
         )
 
     def test_nested_struct_literal_as_return_value(self):
-        """A nested struct literal (`Outer(Inner(1), 2)`) as a direct
-        return value -- both layers now allowed: the outer one via
-        analyze_return's own detection, the inner one via check_
-        struct_literal's own, identical detection in its argument
-        loop, recursing into itself."""
         assert_program_exit_code(
             "type Inner struct:\n"
             "    int v\n"
@@ -20193,11 +15136,6 @@ class TestStructLiterals:
         )
 
     def test_wrong_struct_type_as_return_value_is_rejected(self):
-        """The returned literal's own type (from ITS name, `B`) still
-        has to match the function's declared return type (`A`) --
-        analyze_return's new detection computes a real Type via check_
-        struct_literal, which _types_compatible then checks exactly
-        like any other returned value's type."""
         assert_program_semantic_error(
             "type A struct:\n"
             "    int x\n"
@@ -20213,12 +15151,6 @@ class TestStructLiterals:
         )
 
     def test_nested_struct_literal_via_var_decl(self):
-        """A nested struct literal (`Outer(Inner(1), 2)`) as a
-        VarDecl's own initializer -- the original, first-established
-        position, now also supporting nesting: the outer literal via
-        analyze_var_decl's own existing detection, the inner one via
-        check_struct_literal's own, identical detection in its
-        argument loop."""
         assert_program_exit_code(
             "type Inner struct:\n"
             "    int v\n"
@@ -20234,8 +15166,6 @@ class TestStructLiterals:
         )
 
     def test_nested_struct_literal_via_assign(self):
-        """The Assign counterpart -- nesting isn't specific to a
-        VarDecl's own initializer."""
         assert_program_exit_code(
             "type Inner struct:\n"
             "    int v\n"
@@ -20251,10 +15181,6 @@ class TestStructLiterals:
         )
 
     def test_three_levels_of_nested_struct_literals(self):
-        """No depth limit: each level's own argument-checking loop
-        (check_struct_literal's own, in semantic.py) is just this same
-        method again, so nesting works to any depth check_expr itself
-        could recurse to."""
         assert_program_exit_code(
             "type C struct:\n"
             "    int v\n"
@@ -20286,9 +15212,6 @@ class TestStructLiterals:
         )
 
     def test_type_error_inside_a_nested_struct_literal_is_still_reported(self):
-        """A genuine type error inside the INNER literal's own
-        argument is reported normally, not masked by anything about
-        the outer literal or the recursion itself."""
         assert_program_semantic_error(
             "type Inner struct:\n"
             "    int v\n"
@@ -20303,13 +15226,6 @@ class TestStructLiterals:
         )
 
     def test_struct_literal_as_field_assign_value(self):
-        """Used to be rejected at the semantic layer; analyze_field_
-        assign now recognizes this exact shape too, via the same _check_
-        value_flowing_into_allowing_struct_literal helper analyze_
-        var_decl/analyze_assign already use. Needed no codegen changes
-        at all: gen_field_assign's own STRUCT branch already calls
-        gen_struct_value_into, which already dispatches a struct-
-        literal Call correctly."""
         assert_program_exit_code(
             "type Inner struct:\n"
             "    int v\n"
@@ -20326,12 +15242,6 @@ class TestStructLiterals:
         )
 
     def test_struct_literal_as_index_assign_value(self):
-        """Used to be rejected at the semantic layer; analyze_index_
-        assign now recognizes this exact shape too, via the same
-        shared helper. Needed no codegen changes at all: gen_index_
-        assign's own STRUCT branch already calls gen_struct_value_
-        into, which already dispatches a struct-literal Call
-        correctly."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -20402,14 +15312,6 @@ class TestStructLiterals:
         )
 
     def test_large_struct_literal_as_index_assign_value(self):
-        """No NEW heap-allocation decision is introduced by this fix
-        specifically -- `bigs` (an array of one large Big struct) is
-        heap-promoted by the same, pre-existing is_heap_allocated size
-        check any array of large structs already gets, entirely
-        independent of whether it's populated via a struct literal or
-        field-by-field -- so this is purely an execution-correctness
-        check, not a new malloc-count proof the way argument
-        materialization needed one."""
         assert_program_exit_code(
             "type Big struct:\n"
             "    [5000]int data\n"
@@ -20440,11 +15342,6 @@ class TestStructLiterals:
         )
 
     def test_struct_literal_as_bare_statement(self):
-        """A struct literal used directly as a bare statement, its own
-        result entirely discarded -- proves each field's own value
-        still runs for its own side effect, exactly like a bare
-        array-literal statement already does (see test_bare_statement_
-        with_side_effecting_element)."""
         assert_program_stdout(
             "type Point struct:\n"
             "    int x\n"
@@ -20498,33 +15395,7 @@ class TestStructLiterals:
 
 
 # ---------------------------------------------------------------------------
-# Materializing an array/struct literal, or an ordinary array/struct-
-# returning call, when it's used directly as a function-call argument
-# (`foo([1,2,3])`, `foo(A(1,2))`, `foo(bar())`) rather than being assigned
-# to a named variable first. None of these have an address of their own
-# the way a Variable/Index/Field does, so each gets its own dedicated
-# stack slot -- discovered ahead of time by a real recursive expression
-# walk (codegen.py's _collect_argument_temps/_collect_argument_temps_in_
-# expr), not a single shared scratch slot the way an unnamed slice gets
-# (see gen_indexable_base_into's own docstring for why that trick doesn't
-# transfer here): unlike a slice descriptor, an array/struct argument is
-# passed BY ADDRESS, and that address has to stay valid right up until the
-# `call` itself executes -- including when a single call has MORE THAN ONE
-# such argument alive at once, which a shared slot could not have handled
-# correctly. test_two_array_literals_alive_in_the_same_call and test_two_
-# struct_literals_alive_in_the_same_call are the tests that most directly
-# prove this: each argument needs its own genuinely distinct backing
-# storage, not a slot reused after the first is "drained".
-#
-# The size threshold mirrors is_heap_allocated exactly: a small literal or
-# returning-call's result gets a real, permanent stack slot; a large one
-# is heap-allocated fresh at the call site instead, with no space
-# reserved in the caller's own frame at all -- proven at the asm level
-# below (a malloc count, and confirming the caller's own frame doesn't
-# balloon by the literal's own size), not just by a correct exit code
-# (which, as established earlier with structs, doesn't by itself
-# distinguish a genuinely heap-allocated result from a stack-allocated one
-# that happened to still work).
+# Argument materialization
 # ---------------------------------------------------------------------------
 
 class TestArgumentMaterialization:
@@ -20555,12 +15426,6 @@ class TestArgumentMaterialization:
         )
 
     def test_array_returning_call_as_argument(self):
-        """`foo(bar())`, where bar returns an array -- has no address
-        of its own the same way a literal doesn't, and is materialized
-        the identical way (gen_array_value_into already knows how to
-        write an ordinary returning Call's result into any Memory
-        destination, via gen_array_call_into -- nothing new needed
-        there, only somewhere real to put it)."""
         assert_program_exit_code(
             "def [3]int makeArr():\n"
             "    return [7, 8, 9]\n"
@@ -20594,12 +15459,6 @@ class TestArgumentMaterialization:
         )
 
     def test_two_array_literals_alive_in_the_same_call(self):
-        """THE test proving a single shared scratch slot (the trick
-        _unnamed_slice_temp_offset gets away with for slices) would
-        have been wrong here: both literals' own bytes have to remain
-        valid simultaneously, all the way through the `call` -- a
-        shared slot would let the second one's write clobber the
-        first's before the call ever runs."""
         assert_program_exit_code(
             "def int addPairs([2]int a, [2]int b):\n"
             "    return a[0] + a[1] + b[0] + b[1]\n"
@@ -20610,7 +15469,6 @@ class TestArgumentMaterialization:
         )
 
     def test_two_struct_literals_alive_in_the_same_call(self):
-        """The struct counterpart to the test just above."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -20639,11 +15497,6 @@ class TestArgumentMaterialization:
         )
 
     def test_literal_argument_nested_inside_another_call(self):
-        """`addOne(sum3([1, 2, 3]))` -- the array literal is an
-        argument to the INNER call, buried inside what's itself an
-        argument to the outer one. Exercises _collect_argument_temps_
-        in_expr's own Call-args recursion, not just its top-level
-        statement-level entry points."""
         assert_program_exit_code(
             "def int sum3([3]int arr):\n"
             "    return arr[0] + arr[1] + arr[2]\n"
@@ -20657,11 +15510,6 @@ class TestArgumentMaterialization:
         )
 
     def test_literal_argument_nested_inside_an_array_literal_element(self):
-        """`[sum3([1, 2, 3]), 4]` -- the inner call's own array-literal
-        argument is buried inside an ELEMENT of a completely different
-        array literal, not inside another call at all. Exercises
-        _collect_argument_temps_in_expr's own ArrayLiteral-element
-        recursion specifically."""
         assert_program_exit_code(
             "def int sum3([3]int arr):\n"
             "    return arr[0] + arr[1] + arr[2]\n"
@@ -20673,10 +15521,6 @@ class TestArgumentMaterialization:
         )
 
     def test_large_array_literal_argument_is_heap_allocated(self):
-        """Exit-code correctness alone wouldn't distinguish a genuinely
-        heap-allocated result from a stack-allocated one that happened
-        to still work -- see test_large_array_literal_argument_
-        actually_uses_malloc just below for the actual proof."""
         elements = ", ".join(str(i % 7) for i in range(5000))
         assert_program_exit_code(
             "def int sumFirstTwo([5000]int arr):\n"
@@ -20688,11 +15532,6 @@ class TestArgumentMaterialization:
         )
 
     def test_large_array_literal_argument_actually_uses_malloc(self):
-        """The asm-level confirmation behind the test just above.
-        Also confirms the CALLER's own frame doesn't balloon by the
-        literal's own ~20000-byte size -- _reserve_argument_temp
-        skipped reserving a slot for it entirely, exactly like it
-        would for a named local of the same size."""
         elements = ", ".join(str(i % 7) for i in range(5000))
         source = (
             "def int sumFirstTwo([5000]int arr):\n"
@@ -20727,7 +15566,6 @@ class TestArgumentMaterialization:
         )
 
     def test_large_struct_literal_argument_actually_uses_malloc(self):
-        """The asm-level confirmation behind the test just above."""
         source = (
             "type Big struct:\n"
             "    [5000]int data\n"
@@ -20745,11 +15583,6 @@ class TestArgumentMaterialization:
         assert _heap_allocations(ast)
 
     def test_small_literal_argument_does_not_use_malloc(self):
-        """Negative control for both malloc tests above: a small
-        literal argument, well under the stack limit, should produce
-        no malloc call at all -- confirming the malloc presence there
-        actually tracks the size threshold rather than appearing
-        incidentally."""
         source = (
             "def int sum3([3]int arr):\n"
             "    return arr[0] + arr[1] + arr[2]\n"
@@ -20763,11 +15596,6 @@ class TestArgumentMaterialization:
         assert not mallocs
 
     def test_nested_struct_literal_as_argument(self):
-        """A nested struct literal (`Outer(Inner(1), 2)`) as a direct
-        function-call argument -- both layers now allowed: the outer
-        one via check_call's own argument-loop detection, the inner
-        one via check_struct_literal's own, identical detection in its
-        own argument loop, recursing into itself."""
         assert_program_exit_code(
             "type Inner struct:\n"
             "    int v\n"
@@ -20786,48 +15614,11 @@ class TestArgumentMaterialization:
 
 
 # ---------------------------------------------------------------------------
-# NAMED-field struct construction: `A(x=1, y='a')`, as an alternative to
-# positional construction, and -- unlike positional, which stays exhaustive
-# -- allowed to be PARTIAL (`A(x=1)`, omitting a field entirely). This is a
-# genuinely new parser capability, not just a semantic/codegen extension the
-# way every other struct-literal position so far has been: `Call` gained a
-# new, separate `kwargs` field (mutually exclusive with `args` by
-# construction -- see its own docstring in parser.py), and parse_call
-# enforces "no mixing positional and named arguments in one call" as a hard
-# grammar rule, the same way Python treats its own identical restriction as
-# a SyntaxError rather than something deferred to runtime.
-#
-# Scoped to struct literals only, not a general named-arguments-for-any-
-# function feature: an ordinary function call written with named arguments
-# parses into the exact same shape a named struct literal does (the parser
-# has no way to tell them apart, not knowing what `name` refers to at all),
-# and is explicitly rejected by check_call once it resolves to an ordinary
-# function rather than a struct.
-#
-# Partial construction leaves an omitted field's own storage genuinely
-# uninitialized -- no implicit zero value, matching this language's existing
-# treatment of uninitialized memory everywhere else -- so gen_struct_
-# literal_into needed no new "fill in the gaps" logic at all: an omitted
-# field simply never appears in the (field_name, value_expr, field_type)
-# list it iterates, so no instructions are ever emitted for its offset.
-# Every other test here checks only the field(s) actually supplied, never a
-# deliberately-omitted one's own content, since that content is genuine UB
-# by design, not something a correct implementation is expected to produce
-# any particular value for.
+# NAMED-field struct construction
 # ---------------------------------------------------------------------------
 
 class TestCompositeCallAsAddressableBase:
-    """A composite-returning function call used directly as an
-    addressable base (`makeArr()[i]`, `makePoint().x`, `makeArr()
-    [a:b]`) -- previously unsupported at all, even old-style
-    (CodegenError, not just a slower fallback): the callee's own
-    result exists only via the hidden-pointer convention, so it needs
-    somewhere real to be written before it can be indexed into, field-
-    read, or sliced. See _ir_materialize_composite_call's own
-    docstring for the full design, and _collect_argument_temps_in_
-    expr's own Index/Field/Slice cases for where a slot is (or, for
-    Slice specifically, is deliberately never) reserved ahead of
-    time."""
+    """A composite-returning call used as a base: `makeArr()[i]`, `makePoint().x`."""
 
     pytestmark = GCC_SKIP
 
@@ -20866,14 +15657,6 @@ class TestCompositeCallAsAddressableBase:
         )
 
     def test_slice_produced_from_array_returning_call(self):
-        """`makeArr()[a:b]` -- a slice PRODUCED from a materialized
-        call's own result, not just a single element read out of it.
-        The resulting slice's own ptr aliases the materialized
-        backing directly, so this exercises the always-heap-allocate
-        path (see _ir_materialize_composite_call's own docstring) even
-        though the array itself is tiny -- see the assembly-inspecting
-        tests below for direct proof that this is really what
-        happens, not just a plausible-looking exit code."""
         assert_program_exit_code(
             "def [5]int makeArr():\n"
             "    return [1, 2, 3, 4, 5]\n"
@@ -20885,15 +15668,6 @@ class TestCompositeCallAsAddressableBase:
         )
 
     def test_slice_from_call_survives_a_second_unrelated_materialization(self):
-        """THE test proving a single shared (or reused) scratch slot
-        would have been wrong here, the identical role test_two_array_
-        literals_alive_in_the_same_call plays for TestArgumentMaterial
-        ization: the slice produced from makeArrayA()'s own result has
-        to keep pointing at valid data even after makeArrayB() is
-        called and materialized afterward -- if both calls' own
-        results shared one slot, or the second reused the first's now-
-        freed one, makeArrayB()'s own write would corrupt s's own
-        backing before it's ever read."""
         assert_program_exit_code(
             "def [5]int makeArrayA():\n"
             "    return [1, 2, 3, 4, 5]\n"
@@ -20909,11 +15683,6 @@ class TestCompositeCallAsAddressableBase:
         )
 
     def test_multiple_composite_calls_as_base_in_one_function(self):
-        """Three distinct calls, each used as an addressable base in
-        the same function -- proves each gets its own, independently
-        reserved slot (keyed by id(expr), the same mechanism _reserve_
-        argument_temp already uses for argument materialization), not
-        one shared slot silently overwritten by the next."""
         assert_program_exit_code(
             "def [3]int makeA():\n"
             "    return [1, 2, 3]\n"
@@ -20933,11 +15702,6 @@ class TestCompositeCallAsAddressableBase:
         )
 
     def test_composite_call_as_base_inside_a_loop(self):
-        """The same reserved slot is written and read anew every
-        iteration -- safe because each iteration's own value is fully
-        consumed (read into a scalar) before the next iteration's own
-        call ever runs, the same left-to-right, fully-sequential
-        evaluation order this arc has relied on throughout."""
         assert_program_exit_code(
             "def [3]int makeArr(int seed):\n"
             "    return [seed, seed + 1, seed + 2]\n"
@@ -20953,11 +15717,6 @@ class TestCompositeCallAsAddressableBase:
         )
 
     def test_small_array_returning_call_indexed_stays_on_stack(self):
-        """The size-threshold half of the design: an ordinary index
-        read of a SMALL composite-returning call's own result reuses a
-        reserved stack slot, exactly like an ordinary argument
-        materialization would -- no malloc call should appear in the
-        generated assembly at all."""
         source = (
             "def [3]int makeSmall():\n"
             "    return [1, 2, 3]\n"
@@ -20971,11 +15730,6 @@ class TestCompositeCallAsAddressableBase:
         assert not mallocs
 
     def test_large_array_returning_call_indexed_is_heap_allocated(self):
-        """The other side of the same threshold: a call returning an
-        array over _STACK_ARRAY_LIMIT_BYTES gets malloc'd fresh at the
-        point of the call instead, needing no reserved frame slot at
-        all -- the identical size-based rule _reserve_argument_temp
-        already applies to an ordinary argument."""
         n = 4097  # one int over the 16384-byte threshold
         source = (
             f"def [{n}]int makeBig():\n"
@@ -20993,12 +15747,6 @@ class TestCompositeCallAsAddressableBase:
         assert mallocs
 
     def test_slice_production_from_call_always_heap_allocates_regardless_of_size(self):
-        """Direct proof of the always-escape rule: even a TINY array-
-        returning call -- one small enough that an ordinary index read
-        of it stays on the stack (see test_small_array_returning_call_
-        indexed_stays_on_stack, same size) -- must still malloc when
-        the base is sliced rather than indexed, since the resulting
-        slice's own ptr can outlive this statement entirely."""
         source = (
             "def [3]int makeTiny():\n"
             "    return [1, 2, 3]\n"
@@ -21174,11 +15922,6 @@ class TestNamedStructLiterals:
         )
 
     def test_large_named_struct_literal(self):
-        """No new heap-allocation decision here either, for the same
-        reason IndexAssign/FieldAssign didn't need one: `Big` is
-        heap-promoted by the same, pre-existing is_heap_allocated size
-        check any large struct already gets, regardless of whether
-        it's populated positionally, by name, or field-by-field."""
         assert_program_exit_code(
             "type Big struct:\n"
             "    [5000]int data\n"
@@ -21228,10 +15971,6 @@ class TestNamedStructLiterals:
         )
 
     def test_named_arguments_rejected_for_ordinary_function(self):
-        """Named construction is scoped to struct literals only --
-        `foo(x=1)` parses into the exact same shape a named struct
-        literal does, and is explicitly rejected once check_call
-        resolves `foo` to an ordinary function."""
         assert_program_semantic_error(
             "def int foo(int x):\n"
             "    return x\n"
@@ -21253,10 +15992,6 @@ class TestNamedStructLiterals:
         )
 
     def test_positional_then_named_is_a_parse_error(self):
-        """Mixing is rejected as a hard GRAMMAR rule, not a semantic
-        one -- a ParseError, not a SemanticError -- since it's a pure
-        syntax-shape question the parser can answer without knowing
-        whether `A` even names a struct."""
         source = (
             "type A struct:\n"
             "    int x\n"
@@ -21283,12 +16018,6 @@ class TestNamedStructLiterals:
             _parse(source)
 
     def test_double_equals_in_argument_is_not_mistaken_for_named(self):
-        """`A(x == 1)` -- a single, ordinary POSITIONAL argument that
-        happens to be a boolean equality expression -- must not be
-        mistaken for a named argument. '==' (EQUAL) and '=' (ASSIGN)
-        are distinct tokens from the lexer, so this is unambiguous by
-        construction, not something parse_call has to specifically
-        guard against."""
         assert_program_exit_code(
             "type A struct:\n"
             "    bool x\n"
@@ -21304,28 +16033,7 @@ class TestNamedStructLiterals:
 
 
 # ---------------------------------------------------------------------------
-# Partial named construction now zero-fills an omitted field, reusing the
-# same _gen_zero_value_into a `T x` VarDecl with no initializer at all
-# already uses -- closing the deliberate, temporary inconsistency left open
-# when implicit zero-init first shipped (see TestImplicitZeroValue's own
-# module comment).
-#
-# Implementing this surfaced a THIRD, previously-undiscovered, genuinely
-# pre-existing bug in gen_struct_literal_into itself, distinct from the
-# offset-dropping one TestStructLiteralArrayFieldAddressRegression already
-# covers: dst_mem's own base was only ever protected (push/pop) around a
-# SCALAR field's own write, never around an array/slice/struct field's own
-# -- fine as long as nothing after such a field needed dst_mem.base to
-# still be valid, but an array- or struct-returning CALL populating one
-# field is a real function call, and real function calls are free to
-# clobber dst_mem.base's own physical register as an ordinary caller-saved
-# side effect. test_array_field_via_returning_call_followed_by_sibling_
-# field is the test that actually caught this -- verified directly (the
-# sibling field silently read back as 0 instead of its real value) rather
-# than merely reasoned about, matching how the address-offset bug was
-# found. Both this and the zero-fill feature needed the identical fix:
-# push/pop dst_mem.base around EVERY field's own write, not just the
-# scalar case.
+# Named construction zero-fill
 # ---------------------------------------------------------------------------
 
 class TestNamedStructLiteralZeroFill:
@@ -21358,9 +16066,6 @@ class TestNamedStructLiteralZeroFill:
         )
 
     def test_omitted_str_field(self):
-        """The omitted field is a real, valid (empty) string, not a
-        null pointer -- proven by concatenating onto it, not just by
-        not crashing when it's printed."""
         assert_program_stdout(
             "type Person struct:\n"
             "    int age\n"
@@ -21427,11 +16132,6 @@ class TestNamedStructLiteralZeroFill:
         )
 
     def test_omitted_array_field_followed_by_a_provided_scalar_field(self):
-        """Proves the array field's own zero-fill doesn't corrupt a
-        LATER, explicitly-provided sibling field's own address -- the
-        same push/pop protection this feature needed for
-        gen_struct_literal_into's own dst_mem.base, now exercised with
-        the omitted field coming FIRST."""
         assert_program_exit_code(
             "type Triple struct:\n"
             "    [5000]int mid\n"
@@ -21444,14 +16144,6 @@ class TestNamedStructLiteralZeroFill:
         )
 
     def test_array_field_via_returning_call_followed_by_sibling_field(self):
-        """A genuinely pre-existing, previously-undiscovered bug: an
-        array-returning-call field (an ordinary, fully-PROVIDED value,
-        nothing to do with zero-fill at all) followed by ANY sibling
-        field, on a heap-allocated struct, used to silently corrupt
-        that sibling field's own write -- the call clobbers dst_mem's
-        own base register as an ordinary side effect, and nothing
-        restored it before the next field assumed it was still valid.
-        See this class's own module comment for the fix."""
         assert_program_exit_code(
             "def [5000]int makeArr():\n"
             "    [5000]int a\n"
@@ -21485,13 +16177,6 @@ class TestNamedStructLiteralZeroFill:
         )
 
     def test_all_but_one_field_omitted(self):
-        """The most omitted a NAMED literal can validly be: at least
-        one `name=value` pair has to be written for the parser to
-        recognize named syntax at all (see Call's own docstring in
-        parser.py) -- `Point()` with zero arguments is indistinguishable
-        from positional-with-zero-args, and hits the ordinary exhaustive
-        'expects N arguments, got 0' error instead, not this feature at
-        all. Verified directly rather than assumed."""
         assert_program_exit_code(
             "type Triple struct:\n"
             "    int a\n"
@@ -21505,9 +16190,6 @@ class TestNamedStructLiteralZeroFill:
         )
 
     def test_three_consecutive_omitted_composite_fields(self):
-        """An array, a struct, and a slice field, all three omitted
-        and adjacent -- exercises protect_dst across three consecutive
-        zero-fills in a row, each of a genuinely different kind."""
         assert_program_exit_code(
             "type Inner struct:\n"
             "    int v\n"
@@ -21525,65 +16207,17 @@ class TestNamedStructLiteralZeroFill:
 
 
 # ---------------------------------------------------------------------------
-# Array/slice literals with struct-typed elements (`[p1, p2]`, `[Point(1,2),
-# Point(3,4)]`, `[N]Point[...]`, `[]Point[...]`). This was a real, pre-
-# existing gap in gen_array_literal_into (no STRUCT-typed element case at
-# all -- it fell through to gen_expr_into, which flatly rejects any
-# struct-typed read) that failed even for the simplest case, an array of
-# ordinary struct VARIABLES, with no literal construction involved. Every
-# OTHER operation on an array of structs -- declaring one, indexing into it
-# and reading/writing a field of one element, whole-array copy via plain
-# assignment, passing one as a parameter, returning one -- already worked
-# before this fix, since each routes through gen_array_copy (already
-# generic over leaf width) or gen_index_assign/gen_field_address_into
-# (which already had their own STRUCT cases); literal construction
-# specifically was the one gap. _gen_write_value_at_address_into (append's
-# own counterpart to gen_array_literal_into) had the identical gap, fixed
-# the same way.
-#
-# Closing this surfaced two more, smaller gaps in the immediate
-# neighborhood, both fixed alongside it: struct literals weren't allowed as
-# an array literal's own element at the semantic layer either (a sixth
-# position added to check_struct_literal's own allow-list, alongside
-# VarDecl/Assign/call-argument/return-value/nested-struct-literal-argument
-# -- see check_array_literal's own docstring), and a fully-typed array or
-# slice literal with a STRUCT element type (`[2]Point[...]`) never parsed
-# at all: _looks_like_typed_literal's own lookahead only recognized
-# int/bool/str/'[' as a type-starting token after the size bracket, never
-# an IDENTIFIER (a struct name) -- written before struct literals existed
-# to give one anything to disambiguate against. test_append_a_struct_
-# literal in TestAppend closes a third, related gap found the same way:
-# check_append_call's own value-argument check didn't recognize a struct
-# literal either.
+# Array/slice literals with struct-typed elements
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Regression: _gen_address_of_memory_into's own hidden-return-pointer
-# computation used to silently assume a non-'rbp' Memory base always carried
-# a zero offset -- true at every call site that existed when it was written,
-# since nothing had ever needed a struct FIELD's own address (as opposed to
-# the whole of some destination) passed on as a hidden output pointer. That
-# stopped being true once a struct literal's array-typed field could be
-# populated directly by an array-returning call: for a heap-allocated struct
-# whose array field isn't the FIRST one, gen_struct_literal_into's own
-# field_mem for that field is Memory('rax', <non-zero offset>), and the old
-# code silently discarded the offset, handing the returning call the WHOLE
-# STRUCT's own base address instead of the field's -- corrupting whatever
-# preceded that field along with the start of the array itself, with no
-# error raised at all. Fixed by having _gen_address_of_memory_into add the
-# offset via an ordinary AddQ when it's non-zero, which is a pure
-# generalization: every existing caller already only ever passed offset=0
-# for a non-'rbp' base, so nothing already working changes.
+# Struct literal array-field addresses
 # ---------------------------------------------------------------------------
 
 class TestStructLiteralArrayFieldAddressRegression:
     pytestmark = GCC_SKIP
 
     def test_array_returning_call_into_a_non_first_struct_field(self):
-        """The exact shape that surfaced the bug: `data` sits at a
-        non-zero offset (after `tag`), and Big is large enough to be
-        heap-allocated -- both conditions were necessary to reach the
-        buggy path at all."""
         assert_program_exit_code(
             "def [5000]int makeArr():\n"
             "    [5000]int a\n"
@@ -21601,9 +16235,6 @@ class TestStructLiteralArrayFieldAddressRegression:
         )
 
     def test_preceding_field_is_not_corrupted(self):
-        """The bug didn't just misplace the array -- it also
-        overwrote whatever came before it (here, `tag`) with the
-        start of the array-returning call's own result."""
         assert_program_exit_code(
             "def [5000]int makeArr():\n"
             "    [5000]int a\n"
@@ -21621,12 +16252,6 @@ class TestStructLiteralArrayFieldAddressRegression:
         )
 
     def test_struct_returning_call_into_a_non_first_struct_field(self):
-        """The identical bug shape one level over: a struct-typed
-        field (not an array-typed one) at a non-zero offset, populated
-        by a struct-returning call -- gen_struct_call_into is really
-        gen_array_call_into under a different name, so it shares the
-        exact same _gen_address_of_memory_into call and was fixed by
-        the same change."""
         assert_program_exit_code(
             "type Inner struct:\n"
             "    [5000]int data\n"
@@ -21648,31 +16273,7 @@ class TestStructLiteralArrayFieldAddressRegression:
 
 
 # ---------------------------------------------------------------------------
-# Implicit zero-value initialization: `int a` with no initializer at all now
-# gets that type's own implicit zero value -- 0 for int/bool, a shared empty-
-# string constant for str (NEVER a null pointer -- every string operation
-# dereferences one with no null check, so a null zero value would segfault
-# the instant anything touched it), none's own {ptr:0, len:0, cap:0}
-# descriptor for slice (the two are, by design, the identical
-# representation), and recursively for array/struct -- rather than the
-# genuinely uninitialized memory this used to leave behind. Function
-# parameters are unaffected: they always receive a real, caller-provided
-# value, so there's no "uninitialized parameter" case to begin with.
-#
-# codegen.py's own _gen_zero_value_into/_gen_zero_array_into mirror array
-# equality's own leaf-type dispatch almost exactly (flat-bytes for int/bool/
-# slice, a dedicated loop for str, a recursive one for struct), for the
-# identical underlying reason. test_heap_allocated_struct_with_non_first_
-# array_field and test_array_of_structs_with_array_field are the two tests
-# that matter most here, not just thorough coverage: they're the exact
-# register-collision shapes that caused real bugs during the analogous
-# struct/array equality work (a later sibling field's own address computed
-# from a base register an array's own zero-loop had silently clobbered, and
-# an outer array-of-structs loop's own index/base colliding with an inner
-# nested loop reusing the same fixed register names) -- both are protected
-# via the identical push/pop-around-the-risky-operation discipline already
-# established and proven there, and both are verified directly here rather
-# than merely reasoned about.
+# Implicit zero-value initialization
 # ---------------------------------------------------------------------------
 
 class TestImplicitZeroValue:
@@ -21691,13 +16292,6 @@ class TestImplicitZeroValue:
         )
 
     def test_int8_zero_value(self):
-        """No existing test exercised a local, scalar int8/uint8/
-        int64 declaration with no initializer at all -- every match
-        for this shape elsewhere in this file turned out to be a
-        struct field or an array element type instead. Genuinely new
-        coverage, not a migration: this shape was never generated as
-        real IR at all before (a TODO, not a bug -- gen_statement_ir's
-        own no-initializer scalar case simply didn't exist yet)."""
         assert_exit_code("    int8 v\n    return int(v)", 0)
 
     def test_uint8_zero_value(self):
@@ -21710,10 +16304,6 @@ class TestImplicitZeroValue:
         assert_stdout("    str s\n    print(s)\n    return 0", "\n")
 
     def test_str_zero_value_is_a_real_string_not_a_null_pointer(self):
-        """Concatenating onto a zero-valued str works -- proving it's
-        a valid pointer to a real (if empty) C string, not null. A
-        null zero value would segfault the instant anything touched
-        it, which is exactly why _get_empty_str_label exists."""
         assert_stdout(
             "    str s\n"
             "    str t = s + 'hi'\n"
@@ -21741,9 +16331,6 @@ class TestImplicitZeroValue:
         assert_stdout("    []int s\n    print(s)\n    return 0", "[]int[]\n")
 
     def test_slice_zero_value_equals_none(self):
-        """By design, a zero-valued slice and a none-valued one are
-        the identical representation -- see gen_none_into, reused
-        as-is for the slice case rather than needing its own logic."""
         assert_exit_code(
             "    []int s\n"
             "    if s == none:\n"
@@ -21753,10 +16340,6 @@ class TestImplicitZeroValue:
         )
 
     def test_append_to_a_zero_valued_slice(self):
-        """The first append to a zero-valued slice always reallocates
-        (len == cap == 0), so it never reads or writes through
-        whatever the zero value's own pointer happens to be -- safe
-        regardless of what that pointer points at."""
         assert_exit_code(
             "    []int s\n"
             "    s = append(s, 42)\n"
@@ -21851,11 +16434,6 @@ class TestImplicitZeroValue:
         )
 
     def test_heap_allocated_struct_with_non_first_array_field(self):
-        """`data` sits at a non-zero offset (after `tag`), and Big is
-        large enough to be heap-allocated -- the exact shape that
-        would corrupt `tag`'s own address if the array field's own
-        zero-loop weren't protecting the struct's own base register
-        across sibling fields (see this class's own module comment)."""
         assert_program_exit_code(
             "type Big struct:\n"
             "    int tag\n"
@@ -21868,11 +16446,6 @@ class TestImplicitZeroValue:
         )
 
     def test_scalar_array_scalar_sibling_fields_survive_zero_init_stack(self):
-        """A scalar field AFTER an array field, on a small (STACK-
-        allocated) struct -- proves the array field's own zero-fill
-        doesn't corrupt a LATER sibling field's own address, even
-        though this specific case (base == 'rbp') needs no protection
-        at all (see _gen_zero_value_into's own docstring for why)."""
         assert_program_exit_code(
             "type Triple struct:\n"
             "    int a\n"
@@ -21888,10 +16461,6 @@ class TestImplicitZeroValue:
         )
 
     def test_scalar_array_scalar_sibling_fields_survive_zero_init_heap(self):
-        """The identical shape, but large enough to force heap
-        allocation -- here the struct's own base IS an ordinary
-        register (not 'rbp'), so this is the case that actually
-        exercises the push/pop protection directly."""
         assert_program_exit_code(
             "type Triple struct:\n"
             "    int a\n"
@@ -21933,16 +16502,6 @@ class TestImplicitZeroValue:
         )
 
     def test_array_of_structs_with_array_field(self):
-        """The exact register-collision shape that caused a real bug
-        during the analogous struct/array equality work: an outer
-        array-of-structs zero-loop (%r12/%r13/%r14) recursing into a
-        per-element struct zero-fill, which itself dispatches to
-        ANOTHER array zero-loop (reusing the same fixed register
-        names, since there's no way to hand out a distinct set per
-        nesting depth at codegen time) for the struct's own array
-        field. Protected by the identical push/pop discipline already
-        proven for that earlier bug -- verified directly here, not
-        just reasoned about."""
         assert_program_exit_code(
             "type Bag struct:\n"
             "    [10]int items\n"
@@ -21955,9 +16514,6 @@ class TestImplicitZeroValue:
         )
 
     def test_doubly_nested_zero_value(self):
-        """A struct containing an array-of-structs field, where THAT
-        struct has its own str field -- one level deeper than the
-        test above."""
         assert_program_stdout(
             "type Item struct:\n"
             "    str name\n"
@@ -21974,9 +16530,6 @@ class TestImplicitZeroValue:
         )
 
     def test_function_parameters_are_never_implicitly_zeroed(self):
-        """A parameter always receives the caller's real, explicitly-
-        passed value -- there's no 'uninitialized parameter' case for
-        zero-init to apply to at all."""
         assert_program_exit_code(
             "def int identity(int x):\n"
             "    return x\n"
@@ -21987,9 +16540,6 @@ class TestImplicitZeroValue:
         )
 
     def test_explicit_array_initializer_on_heap_allocated_var_still_works(self):
-        """Regression check on gen_var_decl's own heap-allocated
-        branch: adding the zero-fill 'else' clause must not disturb
-        the existing 'write the real initializer' path."""
         elements = ", ".join(str(1 if i in (0, 1, 2, 4999) else 0) for i in range(5000))
         assert_exit_code(
             f"    [5000]int arr = [{elements}]\n"
@@ -22012,13 +16562,6 @@ class TestImplicitZeroValue:
         )
 
     def test_partial_named_struct_literal_now_zero_fills(self):
-        """The deliberate, temporary inconsistency this test used to
-        document is now closed: an omitted field in a named struct
-        literal gets its own implicit zero value too, the same as a
-        `T x` VarDecl with no initializer at all -- see gen_struct_
-        literal_into's own docstring in codegen.py for the actual
-        mechanism, and TestNamedStructLiterals for the fuller test
-        coverage of this specifically."""
         assert_program_exit_code(
             "type A struct:\n"
             "    int x\n"
@@ -22035,9 +16578,6 @@ class TestArraysOfStructs:
     pytestmark = GCC_SKIP
 
     def test_array_literal_of_struct_variables(self):
-        """The core gap: this failed even with no literal construction
-        involved at all -- two ordinary, already-declared struct
-        variables used as an array literal's own elements."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -22068,10 +16608,6 @@ class TestArraysOfStructs:
         )
 
     def test_fully_typed_array_literal_of_struct_literals(self):
-        """`[2]Point[Point(1,2), Point(3,4)]` -- exercises the parser
-        fix (_looks_like_typed_literal now recognizes an IDENTIFIER,
-        not just int/bool/str/'[', as starting a typed literal's own
-        element type) alongside the codegen fix."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -22084,10 +16620,6 @@ class TestArraysOfStructs:
         )
 
     def test_slice_typed_literal_of_struct_literals(self):
-        """The slice counterpart -- `[]Point[...]` -- to the fully-
-        typed array literal just above; the same parser lookahead fix
-        covers both shapes (see _looks_like_typed_literal's own two
-        checks, one per shape)."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -22100,12 +16632,6 @@ class TestArraysOfStructs:
         )
 
     def test_nested_typed_array_of_struct_literals(self):
-        """`[1][2]Point[[2]Point[...]]` -- an array of arrays of
-        structs, built via nested fully-typed literals. No special-
-        casing needed beyond the base STRUCT-element fix: gen_array_
-        literal_into's own ARRAY-typed-element branch already recurses
-        through gen_array_value_into regardless of what the innermost
-        leaf type turns out to be."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -22118,10 +16644,6 @@ class TestArraysOfStructs:
         )
 
     def test_mixed_element_kinds_in_one_array_literal(self):
-        """A struct literal, an ordinary struct variable, and a
-        struct-returning call, all as elements of the SAME array
-        literal -- each is a genuinely different expression shape
-        gen_struct_value_into has to dispatch on internally."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -22143,8 +16665,6 @@ class TestArraysOfStructs:
         )
 
     def test_indexed_struct_element_in_array_literal(self):
-        """`[base[0], base[1]]` -- each element is itself an Index
-        expression reading a struct out of a DIFFERENT array."""
         assert_program_exit_code(
             "type Point struct:\n"
             "    int x\n"
@@ -22186,12 +16706,6 @@ class TestArraysOfStructs:
         )
 
     def test_large_array_of_structs_literal_is_heap_allocated(self):
-        """Exit-code correctness alone wouldn't distinguish a
-        genuinely heap-allocated result from a stack-allocated one
-        that happened to still work -- see test_large_array_of_
-        structs_literal_actually_uses_malloc just below for the
-        actual proof. 2500 Points at 8 bytes each is 20000 bytes,
-        over the 16384-byte stack threshold."""
         elements = ", ".join(f"Point({i}, {i})" for i in range(2500))
         assert_program_exit_code(
             "type Point struct:\n"
@@ -22205,7 +16719,6 @@ class TestArraysOfStructs:
         )
 
     def test_large_array_of_structs_literal_actually_uses_malloc(self):
-        """The asm-level confirmation behind the test just above."""
         elements = ", ".join(f"Point({i}, {i})" for i in range(2500))
         source = (
             "type Point struct:\n"
@@ -22221,8 +16734,6 @@ class TestArraysOfStructs:
         assert _heap_allocations(ast)
 
     def test_small_array_of_structs_literal_does_not_use_malloc(self):
-        """Negative control: a small array-of-structs literal, well
-        under the stack limit, should produce no malloc call at all."""
         source = (
             "type Point struct:\n"
             "    int x\n"
@@ -22264,16 +16775,6 @@ class TestArraysOfStructs:
         )
 
     def test_bare_typed_struct_array_literal_statement_side_effect_is_still_rejected(self):
-        """A bare, unused array-literal STATEMENT (no assignment at
-        all) with struct-typed elements is a deliberate, separate
-        scope boundary from ordinary construction -- gen_array_
-        literal_side_effects_only never materializes a real array at
-        all for a bare statement, and a struct-typed element there
-        (literal or not) has no side-effect-only meaning worth
-        preserving, so it's explicitly rejected rather than silently
-        mishandled -- matching the identical, pre-existing treatment
-        ARRAY- and SLICE-typed elements already get in this same
-        position."""
         source = (
             "type Point struct:\n"
             "    int x\n"
@@ -22284,17 +16785,11 @@ class TestArraysOfStructs:
             "    return 0\n"
         )
         ast = _parse(source)
-        analyze(ast)  # type-checks fine -- the rejection is codegen-level only
+        analyze(ast)
         with pytest.raises(IRError, match="assign the literal to a variable first"):
             generate_asm(ast, target=ASM_TARGET)
 
     def test_single_element_array_literal_still_parses_as_untyped(self):
-        """Negative control for the parser fix: `[5]` alone (a single-
-        element, untyped array literal) must still parse as one, not
-        be swept up by _looks_like_typed_literal's newly-added
-        IDENTIFIER check -- there's no IDENTIFIER immediately after
-        this `]` at all, so this was never actually at risk, but it's
-        cheap to lock in explicitly given how central that method is."""
         assert_program_exit_code(
             "def int main():\n"
             "    [1]int a = [5]\n"
@@ -22304,34 +16799,7 @@ class TestArraysOfStructs:
 
 
 # ---------------------------------------------------------------------------
-# Printing structs: `Point(x: 1, y: 2)` -- the struct's own declared name,
-# then field name, ": ", then the field's own value, comma-separated,
-# wrapped in parentheses. The name is printed at EVERY level a struct
-# value appears, not just the outermost one a print() call names directly
-# -- a struct field that's itself a struct, or an array/slice element
-# that's a struct, shows its own name too, exactly like a nested array or
-# slice shows its own "[3]int"/"[]int" name at every level (see
-# TestPrintArraysAndSlices's own module-level note) -- both driven by the
-# identical mechanism: every ARRAY/SLICE/STRUCT type descriptor carries
-# its own name as a field, read and printed by hornet_stringify itself on
-# every recursive call (see codegen.py's PRINTING section and _get_or_
-# build_type_descriptor's own docstring), not something any one print()
-# call site special-cases for its own outermost argument only.
-#
-# The recursive cases here (a struct field that's itself a struct, an array
-# or slice of structs, and -- the design's own reason for existing at all --
-# a genuinely SELF-referential struct, like a tree node holding a slice of
-# its own type, see TestStructs's own test_self_referential_struct_via_
-# slice_field for the non-printing version of this same shape) are the
-# actual point of this class: printing any of these correctly requires
-# hornet_stringify to call itself, an arbitrary number of times, at
-# runtime -- something no compile-time-unrolled printing scheme could ever
-# do for a value whose depth isn't known until the program runs.
-# test_self_referential_struct_tree is the test that most directly proves
-# this: a Node holding a slice of Node -- the type descriptor build itself
-# has to handle its own self-reference (see codegen.py's _get_or_build_
-# type_descriptor), and the runtime recursion has no fixed depth limit at
-# all, unlike this test's own necessarily-finite tree.
+# Printing structs
 # ---------------------------------------------------------------------------
 
 class TestPrintStructs:
@@ -22379,10 +16847,6 @@ class TestPrintStructs:
         )
 
     def test_struct_with_str_field_is_quoted(self):
-        """A str field is quoted inside a struct's own print output,
-        exactly like a str element inside an array or slice -- the
-        same "quoted only when nested" convention TestPrintArraysAndSlices'
-        own test_str_elements_are_quoted already established."""
         assert_program_stdout(
             "type Person struct:\n"
             "    str name\n"
@@ -22398,9 +16862,6 @@ class TestPrintStructs:
         )
 
     def test_nested_struct(self):
-        """A struct field that's itself struct-typed -- the first,
-        simplest genuinely recursive case: hornet_stringify calls
-        itself once, for the nested Inner value."""
         assert_program_stdout(
             "type Inner struct:\n"
             "    int v\n"
@@ -22492,8 +16953,6 @@ class TestPrintStructs:
         )
 
     def test_struct_field_access_as_print_argument(self):
-        """print's own Field-access support (not just a bare
-        Variable) for a struct-typed argument -- `print(container.p)`."""
         assert_program_stdout(
             "type Point struct:\n"
             "    int x\n"
@@ -22512,9 +16971,6 @@ class TestPrintStructs:
         )
 
     def test_struct_array_index_as_print_argument(self):
-        """print's own Index support for a struct-typed argument --
-        `print(pts[0])` -- an array/slice ELEMENT, not the whole
-        container."""
         assert_program_stdout(
             "type Point struct:\n"
             "    int x\n"
@@ -22530,17 +16986,6 @@ class TestPrintStructs:
         )
 
     def test_self_referential_struct_tree(self):
-        """The design's own reason for existing: a struct holding a
-        slice of ITS OWN type -- Node's own type descriptor is
-        genuinely self-referential (see codegen.py's _get_or_build_
-        type_descriptor, which has to reserve its own label before
-        recursing into its own children's shared element descriptor,
-        precisely to make this not infinite-loop at compile time), and
-        printing one recurses through hornet_stringify an arbitrary
-        number of times at runtime -- three levels deep here (root ->
-        two children -> each child's own empty children slice), with
-        no compile-time-fixed depth anywhere in the codegen that makes
-        this work."""
         assert_program_stdout(
             "type Node struct:\n"
             "    int value\n"
@@ -22580,16 +17025,6 @@ class TestPrintStructs:
         )
 
     def test_struct_returning_call_as_direct_print_argument(self):
-        """Used to be a real, deliberate gap: print's struct-typed
-        argument was restricted to a Variable, Field, or Index --
-        gen_print_call_into's own old-style implementation had no way
-        to materialize an address for anything else. Now real IR
-        (_ir_print_call, via _ir_composite_operand_address -- the
-        same method equality already reuses) closes it for free,
-        matching what print's array/slice-typed argument already
-        supported (see test_array_returning_call_as_direct_print_
-        argument/test_slice_returning_call_as_direct_print_argument
-        just above)."""
         assert_program_stdout(
             "type Point struct:\n"
             "    int x\n"
@@ -22609,29 +17044,7 @@ class TestPrintStructs:
 
 
 class TestPrintStructLiterals:
-    """`print(Circle(5))` -- a struct literal passed DIRECTLY as
-    print's own argument, not first bound to a variable. Was
-    previously rejected at the semantic level: check_print_call used
-    plain check_expr, which routes any Call whose name is a declared
-    struct straight into check_call's own blanket rejection of a bare
-    struct literal (see check_call's own docstring for the full list
-    of positions a struct literal IS allowed in -- a plain function
-    call's own argument was already on that list; print's argument,
-    handled by a separate method entirely, wasn't). Fixed by having
-    check_print_call use _check_expr_allowing_struct_literal instead,
-    the same helper an ordinary function call's own arguments already
-    use for this identical purpose.
-
-    At the IR-building level, _ir_print_call needed a parallel fix:
-    _ir_composite_operand_address (the thing it delegates to for
-    every other STRUCT/ARRAY/SUM argument) deliberately never
-    recognizes a bare struct literal at all -- it's shared with Binary
-    equality, where a struct literal is deliberately NOT a valid
-    operand, so it can't be taught to accept one without wrongly
-    opening that door too. print(Circle(5)) is instead recognized as
-    its own case, routed through _ir_materialize_struct_literal -- the
-    same helper &Circle(5) and a bare struct-literal statement already
-    use for this exact shape."""
+    """`print(Circle(5))` with a literal argument."""
 
     pytestmark = GCC_SKIP
 
@@ -22671,11 +17084,6 @@ class TestPrintStructLiterals:
         )
 
     def test_nested_struct_literal(self):
-        """A struct literal whose own field is ITSELF a nested struct
-        literal (Rectangle's topLeft) -- confirms _ir_write_struct_
-        literal_into's own recursive handling of a struct-typed field
-        composes correctly with print's own new dispatch, not just
-        with an ordinary VarDecl initializer."""
         assert_program_stdout(
             "type Point struct:\n"
             "    int x\n"
@@ -22693,11 +17101,6 @@ class TestPrintStructLiterals:
         )
 
     def test_struct_literal_field_is_a_call_expression(self):
-        """Circle(makeRadius()) -- confirms a field expression with
-        its own side effects (an ordinary function call) is evaluated
-        and written correctly, not skipped or evaluated out of order,
-        when the struct literal containing it flows straight into
-        print rather than through an intermediate variable first."""
         assert_program_stdout(
             "type Circle struct:\n"
             "    int radius\n"
@@ -22712,13 +17115,6 @@ class TestPrintStructLiterals:
         )
 
     def test_multiple_struct_literal_print_calls_in_one_function(self):
-        """Two separate struct-literal Call nodes, each its own print
-        argument -- confirms each gets its own, independent argument-
-        temp slot (keyed by id(), same scheme every other synthetic
-        declaration in this compiler already uses -- see _allocate_
-        local_slot's own docstring for the identical concern in a
-        different feature), rather than colliding on a single shared
-        one."""
         assert_program_stdout(
             "type Circle struct:\n"
             "    int radius\n"
@@ -22731,14 +17127,6 @@ class TestPrintStructLiterals:
         )
 
     def test_struct_literal_as_a_field_access_base_works(self):
-        """A real gap, found and closed after this arc first shipped:
-        `Circle(5).radius` -- a struct literal directly as a field-
-        access base, no variable needed first. ir/structs.py's own
-        _ir_struct_address needed a new case for this (materializing
-        via _ir_materialize_struct_literal, mirroring the ordinary-
-        composite-returning-Call case it already had) -- unlike the
-        method-call-receiver gap, this one genuinely needed new IR-
-        building, not just a semantic.py restriction lift."""
         assert_program_stdout(
             "type Circle struct:\n"
             "    int radius\n"
@@ -22750,14 +17138,6 @@ class TestPrintStructLiterals:
         )
 
     def test_struct_literal_field_assign_base_is_allowed_though_pointless(self):
-        """The write-side companion to the test just above --
-        _check_struct_and_field is shared by check_field (read) and
-        analyze_field_assign (write), so lifting the restriction once
-        allows both. Writing into a freshly-constructed, immediately-
-        discarded literal's own field is pointless (nothing can ever
-        read it back) but harmless, and not worth excluding separately
-        from the one, shared check both routes go through -- this
-        just confirms it doesn't crash or misbehave."""
         assert_program_exit_code(
             "type Circle struct:\n"
             "    int radius\n"
@@ -22769,13 +17149,6 @@ class TestPrintStructLiterals:
         )
 
     def test_struct_literal_as_an_index_base_is_still_rejected(self):
-        """Confirms the generic rejection this arc's own three fixes
-        carved allowances OUT of is still very much alive for every
-        position that hasn't individually been given one -- an Index
-        base here, still funneling through check_expr's plain
-        dispatch into check_call's own struct-literal guard, exactly
-        as a Binary operand and a Field-access base themselves used to
-        before this arc."""
         assert_program_semantic_error(
             "type Circle struct:\n"
             "    int radius\n"
@@ -22786,16 +17159,6 @@ class TestPrintStructLiterals:
         )
 
     def test_struct_literal_as_a_binary_operand_works(self):
-        """A real gap, found and closed after this arc first shipped:
-        a struct literal is now a valid equality operand, on either
-        side -- _ir_composite_operand_address's own new STRUCT case
-        (ir/dispatch.py) materializes it via _ir_materialize_struct_
-        literal, the same primitive the field-access and method-
-        receiver gaps closed alongside this one both use. _is_
-        comparable_type already supported STRUCT equality generically
-        (recursing field by field) before this arc -- only the
-        literal-as-operand SHAPE was ever missing, not the underlying
-        comparison logic itself."""
         assert_program_exit_code(
             "type Circle struct:\n"
             "    int radius\n"
@@ -22809,10 +17172,6 @@ class TestPrintStructLiterals:
         )
 
     def test_struct_literal_as_a_binary_operand_on_the_left_works(self):
-        """The mirror image of the test just above -- either side of
-        `==` could be the struct literal, with no fixed "target" side
-        the way a VarDecl/argument's own declared type gives one, so
-        both operands needed the identical allowance in check_binary."""
         assert_program_exit_code(
             "type Circle struct:\n"
             "    int radius\n"
@@ -22826,9 +17185,6 @@ class TestPrintStructLiterals:
         )
 
     def test_two_struct_literals_compared_directly_works(self):
-        """Both sides a struct literal at once -- confirms this isn't
-        just "one side may be a literal if the other is an ordinary
-        variable", but a genuinely symmetric allowance."""
         assert_program_exit_code(
             "type Circle struct:\n"
             "    int radius\n"
@@ -22842,38 +17198,10 @@ class TestPrintStructLiterals:
 
 
 # ---------------------------------------------------------------------------
-# AST pretty-printing: Node.pretty(), used only for ad hoc inspection/
-# debugging (nothing in codegen.py or semantic.py calls it) -- so this
-# class exists purely to lock in the FORMAT itself, not to catch a
-# regression that would otherwise silently break compilation.
-#
-# Rewritten from 29 individual, hand-written pretty() methods (one per
-# Node subclass, each inventing its own "->"-arrow/bracket/"; "-join
-# layout) into ONE generic mechanism on the Node base class, driven by
-# dataclasses.fields() introspection -- inspired by astpretty
-# (https://github.com/asottile/astpretty), which pretty-prints stdlib
-# Python ASTs via the same "one line if it fits, an indented tree if it
-# doesn't" rule, rather than ast.dump's single unbroken line regardless
-# of size. test_new_node_subclass_needs_no_pretty_method_of_its_own is
-# the test that most directly proves the actual point of doing this
-# generically at all: a node type that has never existed before, with
-# no pretty() of its own, is still rendered correctly, which was NEVER
-# true of the old, one-method-per-subclass scheme.
-#
-# test_operator_symbol_is_quoted_not_bare guards a real bug caught
-# while building this: an operator's bare symbol glued directly onto
-# its own `op=` prefix with no delimiter is genuinely ambiguous for a
-# multi-character operator (`op===` for `==`, easy to misread as a
-# typo or a different operator entirely) -- fixed by quoting it like
-# any other string-valued field (`op='=='`).
+# AST pretty-printing
 # ---------------------------------------------------------------------------
-class TestCompoundAssignment:
-    """`arr[i] += 1`, `s.field += 1`, `*p += 1` -- all three target
-    shapes (Index/Field/Deref), all sharing the identical read-modify-
-    write-through-one-address mechanism (see _ir_compound_assign_
-    through_address's own docstring in ir/statements.py for why the
-    address is computed exactly once, not re-derived for the read and
-    the write separately)."""
+class TestCompoundAssignmentThroughAddresses:
+    """`arr[i] += 1`, `s.field += 1`, `*p += 1`."""
 
     def test_compound_index_assignment(self):
         assert_program_exit_code(
@@ -22909,15 +17237,6 @@ class TestCompoundAssignment:
         )
 
     def test_index_expression_is_evaluated_exactly_once(self):
-        """The core correctness property this feature depends on:
-        `arr[nextIndex(p)] += 100` must call nextIndex exactly once,
-        not twice (once to read the current value, once to write the
-        new one) -- a naive `arr[i] = arr[i] + 1`-style desugaring
-        would evaluate the index expression twice, silently wrong if
-        it has a side effect. nextIndex increments a counter through a
-        pointer and returns the counter's own PRE-increment value, so
-        the counter's own final value directly reports how many times
-        it was actually called."""
         assert_program_exit_code(
             "def int nextIndex(*int counter):\n"
             "    int current = *counter\n"
@@ -22934,9 +17253,6 @@ class TestCompoundAssignment:
         )
 
     def test_field_base_index_expression_is_evaluated_exactly_once(self):
-        """The FieldAssign counterpart: `arr[nextIndex(p)].field += 1`
-        -- base is an Index, not a bare Variable, so this exercises
-        the identical evaluate-once guarantee one level over."""
         assert_program_exit_code(
             "type Circle struct:\n"
             "    int radius\n"
@@ -22956,10 +17272,6 @@ class TestCompoundAssignment:
         )
 
     def test_compound_assignment_to_a_bool_element_is_rejected(self):
-        """Not an integer-family type -- check_binary, which _check_
-        compound_assign already routes every compound_op through,
-        already rejects this on its own, with its own existing error
-        message."""
         assert_program_semantic_error(
             "def int main():\n"
             "    [3]bool arr = [true, false, true]\n"
@@ -22969,10 +17281,6 @@ class TestCompoundAssignment:
         )
 
     def test_compound_assignment_to_a_str_element_is_rejected(self):
-        """str concatenation's own codegen shape (_ir_string_concat, a
-        fresh malloc'd buffer) is deliberately deferred -- see _check_
-        compound_assign's own docstring for why (Hornet's own string
-        representation is expected to change before too long)."""
         assert_program_semantic_error(
             "def int main():\n"
             "    []str arr = ['a', 'b']\n"
@@ -22994,13 +17302,6 @@ class TestCompoundAssignment:
         )
 
     def test_all_ten_compound_operators_parse_and_run(self):
-        """One test exercising every entry in _COMPOUND_ASSIGN_OPS
-        against an IndexAssign target, rather than one test per
-        operator -- the dispatch is already uniform (compound_op is
-        just threaded through to an ordinary IRBinOp), so this is
-        about confirming the grammar accepts all ten and each maps to
-        the right BinaryOp, not re-testing the shared mechanism ten
-        times over."""
         assert_program_exit_code(
             "def int main():\n"
             "    [10]int arr = [12, 12, 12, 12, 12, 12, 12, 12, 12, 12]\n"
@@ -23024,19 +17325,11 @@ class TestCompoundAssignment:
         )
 
 
-# ---------------------------------------------------------------------------
-
 class TestASTPrettyPrinting:
     def test_leaf_node_renders_compactly(self):
         assert Constant(value=1).pretty() == "Constant(value=1)"
 
     def test_zero_field_node_renders_with_no_arguments(self):
-        """Break/Continue have no fields of their own left to show
-        once resolved_type is excluded -- these render as a bare
-        `Break()`, not the old scheme's bare `"Break"` with no
-        parentheses at all, for consistency with every other node
-        (including astpretty's own convention for a zero-field AST
-        node, e.g. `Load()`)."""
         assert Break().pretty() == "Break()"
 
     def test_short_binary_expression_stays_on_one_line(self):
@@ -23047,8 +17340,6 @@ class TestASTPrettyPrinting:
         )
 
     def test_operator_symbol_is_quoted_not_bare(self):
-        """Specifically a multi-character operator, `==` -- see this
-        class's own module-level note for the real bug this guards."""
         ast = _parse("def int main():\n    return a == b\n")
         return_stmt = ast.functions[0].body[0]
         assert return_stmt.pretty() == (
@@ -23056,14 +17347,6 @@ class TestASTPrettyPrinting:
         )
 
     def test_nested_expression_expands_into_an_indented_tree(self):
-        """The test that actually proves the headline formatting
-        decision: once a node's own one-line rendering would be too
-        wide, it falls back to one indented `field=value` per line --
-        recursively, so a sub-expression that's ITSELF still short
-        enough (`Binary(op='<', left=Variable(name='x'),
-        right=Variable(name='y'))`) stays on its own single line even
-        though the overall condition, and one level of it above that,
-        both need to expand."""
         ast = _parse(
             "def int main():\n"
             "    if x < y and (y * 2 + 1) > x:\n"
@@ -23094,21 +17377,11 @@ class TestASTPrettyPrinting:
         )
 
     def test_empty_list_renders_as_bare_brackets(self):
-        """An empty list ALWAYS renders as a bare `[]`, regardless of
-        context -- never expanded onto its own multi-line block just
-        because the enclosing node itself needed to expand (Function
-        itself doesn't fit on one line here, but params=[] still
-        does)."""
         ast = _parse("def int empty():\n    return 0\n")
         fn = ast.functions[0]
         assert "params=[]" in fn.pretty()
 
     def test_resolved_type_is_never_shown(self):
-        """resolved_type is excluded from every node's own rendering,
-        before OR after semantic analysis has actually set it -- see
-        Node.pretty's own docstring for why: it's pure noise on every
-        leaf before analysis (always None), and redundant with just
-        reading it directly off the node after."""
         ast = _parse("def int main():\n    return 1 + 2\n")
         analyze(ast)
         return_stmt = ast.functions[0].body[0]
@@ -23116,13 +17389,6 @@ class TestASTPrettyPrinting:
         assert "resolved_type" not in return_stmt.pretty()
 
     def test_self_referential_struct_field_type_renders_correctly(self):
-        """`type Node struct: []Node children` -- SliceTypeExpr's own
-        element_type is just the plain string 'Node' at the AST level
-        (struct fields are named by string, not an actual cyclic
-        object reference -- see StructField's own docstring), so this
-        is a perfectly ordinary, non-recursive value for the generic
-        mechanism to render, with no special-casing needed despite the
-        struct's own self-reference."""
         ast = _parse(
             "type Node struct:\n"
             "    int value\n"
@@ -23144,12 +17410,6 @@ class TestASTPrettyPrinting:
         )
 
     def test_new_node_subclass_needs_no_pretty_method_of_its_own(self):
-        """The actual point of doing this generically at all: a node
-        type that has never existed in parser.py before, and defines
-        no pretty() of its own, is still rendered correctly -- unlike
-        the old scheme, where a brand new Node subclass with no
-        pretty() override would hit Node's own `raise
-        NotImplementedError` instead."""
         @dataclass
         class _FakeFutureNode(Node):
             label: str
@@ -23162,12 +17422,7 @@ class TestASTPrettyPrinting:
 
 
 # ---------------------------------------------------------------------------
-# for x in y / for x, y in z -- Stage 0: grammar and disambiguation only.
-# Parser-level only (ForIn is not yet wired into semantic.py or ir/, so an
-# end-to-end compiled-program test isn't possible yet) -- see ForIn's own
-# docstring in parser.py for the full design and its own deliberately-open
-# questions (mutation safety, per-iteration vs. shared binding, iterable
-# shape) that later stages settle, not this one.
+# for x in y / for x, y in z
 # ---------------------------------------------------------------------------
 
 class TestForInParsing:
@@ -23194,9 +17449,6 @@ class TestForInParsing:
         assert stmt.binding_names == ['i', 'x']
 
     def test_three_clause_for_still_parses_into_for(self):
-        """The pre-existing C-style form is untouched: parse_for's own
-        new dispatch falls through to it unchanged for anything that
-        isn't the iteration shape."""
         ast = _parse(
             "def int main():\n"
             "    for int i = 0; i < 10; i += 1:\n"
@@ -23207,13 +17459,6 @@ class TestForInParsing:
         assert isinstance(stmt, For)
 
     def test_struct_typed_three_clause_init_still_disambiguates_correctly(self):
-        """The one case where the two forms' own first two tokens
-        could plausibly be confused: a struct-typed three-clause init
-        (`for Point p = ...`) is TWO consecutive IDENTIFIERs, the one
-        shape the iteration form's own first binding (a single
-        IDENTIFIER followed by ',' or 'in', never a second IDENTIFIER)
-        can never itself produce -- confirms that disambiguation
-        actually holds, not just for the scalar-type-keyword case."""
         ast = _parse(
             "def int main():\n"
             "    for Point p = Point(1, 2); i < 10; i += 1:\n"
@@ -23224,11 +17469,6 @@ class TestForInParsing:
         assert isinstance(stmt, For)
 
     def test_forin_iterable_parses_as_an_ordinary_expression(self):
-        """The 'must be a bare addressable base' restriction is a
-        semantic-level concern (analyze_for_in, not yet built) -- the
-        parser itself accepts any expression here, exactly like
-        parse_for_init_clause/analyze_for already split syntax from
-        meaning for the three-clause form's own init clause."""
         ast = _parse(
             "def int main():\n"
             "    for x in make_arr():\n"
@@ -23240,9 +17480,6 @@ class TestForInParsing:
         assert isinstance(stmt.iterable, Call)
 
     def test_forin_body_supports_break_and_continue(self):
-        """parse_block is reused unchanged for this form's own body,
-        so break/continue need no new parser support at all -- this
-        confirms that rather than assuming it."""
         ast = _parse(
             "def int main():\n"
             "    for x in arr:\n"
@@ -23257,9 +17494,6 @@ class TestForInParsing:
         assert isinstance(stmt.body[1], Continue)
 
     def test_forin_missing_in_is_rejected(self):
-        """No 'in' at all falls through to the three-clause path's own
-        existing error (a bare identifier is not a valid VarDecl
-        either) -- not a crash, and not a silently-wrong parse."""
         with pytest.raises(ParseError):
             _parse(
                 "def int main():\n"
@@ -23270,10 +17504,7 @@ class TestForInParsing:
 
 
 # ---------------------------------------------------------------------------
-# for x in y / for x, y in z -- Stage 1: semantic analysis only. IR-building
-# doesn't exist yet (Stage 2/3), so every test here calls analyze() directly
-# and stops -- no compiled-program test is possible until then. See
-# analyze_for_in's own docstring in semantic.py for the full design.
+# for x in y / for x, y in z
 # ---------------------------------------------------------------------------
 
 class TestForInSemantics:
@@ -23309,7 +17540,6 @@ class TestForInSemantics:
         analyze(ast)  # should not raise
 
     def test_dict_single_binding_analyzes_correctly(self):
-        """One binding over a dict binds the KEY type only."""
         ast = _parse(
             "def int main():\n"
             "    dict[str]int d = dict[str]int{'a': 1}\n"
@@ -23331,11 +17561,6 @@ class TestForInSemantics:
         analyze(ast)  # should not raise
 
     def test_bare_call_iterable_is_rejected(self):
-        """A function call result directly as the iterable is
-        rejected outright -- see analyze_for_in's own docstring for
-        why (unlike re-slicing an existing, named variable, a call's
-        own result might alias one of ITS OWN parameters, which this
-        intraprocedural analysis has no way to know)."""
         ast = _parse(
             "def []int make():\n"
             "    []int s = [1, 2, 3]\n"
@@ -23353,9 +17578,6 @@ class TestForInSemantics:
             analyze(ast)
 
     def test_append_call_as_iterable_is_rejected(self):
-        """append(...) is a Call node too, so it's caught by the
-        identical rejection -- no separate carve-out needed, or
-        given, for a builtin specifically."""
         ast = _parse(
             "def int main():\n"
             "    []int s = [1, 2, 3]\n"
@@ -23370,16 +17592,6 @@ class TestForInSemantics:
             analyze(ast)
 
     def test_field_rooted_in_call_iterable_is_rejected(self):
-        """A real, pre-existing bug, closed as a direct consequence of
-        this restriction, not just a new one: Field's own base was
-        never restricted before this check existed, so `for x in
-        makeBox().items:` used to compile cleanly and then panic at
-        RUNTIME with a false "reallocated" report (makeBox() evaluated
-        twice -- once for the loop's own base address, once for the
-        mutation-safety recheck -- landing two different, freshly-
-        materialized instances, whose descriptor addresses always
-        differ regardless of any actual mutation). Now a clean,
-        compile-time error instead."""
         ast = _parse(
             "type Box struct:\n"
             "    []int items\n"
@@ -23399,9 +17611,6 @@ class TestForInSemantics:
             analyze(ast)
 
     def test_index_rooted_in_call_iterable_is_rejected(self):
-        """The identical shape one level down: Index's own base can
-        also be a Call (`makeRows()[i]`), and needs the identical
-        rejection root_variable_of already gives Field's own base."""
         ast = _parse(
             "def [2][]int makeRows():\n"
             "    return [[1, 2], [3, 4]]\n"
@@ -23418,12 +17627,6 @@ class TestForInSemantics:
             analyze(ast)
 
     def test_slice_rooted_in_call_iterable_is_rejected(self):
-        """Re-slicing is allowed (see test_reslicing_a_variable_
-        iterable_analyzes_correctly below), but only when rooted in a
-        real, named variable -- re-slicing a call's own result
-        directly (`makeSlice()[a:b]`) has the identical aliasing
-        problem a bare call does, one level nested, and is rejected
-        the same way."""
         ast = _parse(
             "def []int makeSlice():\n"
             "    return [1, 2, 3, 4, 5]\n"
@@ -23458,9 +17661,6 @@ class TestForInSemantics:
         analyze(ast)  # should not raise
 
     def test_reslicing_a_variable_iterable_analyzes_correctly(self):
-        """`arr[a:b]` as the iterable directly -- allowed because
-        root_variable_of finds the real, named `arr` underneath,
-        unlike the rejected, call-rooted cases just above."""
         ast = _parse(
             "def int main():\n"
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
@@ -23471,11 +17671,6 @@ class TestForInSemantics:
         analyze(ast)  # should not raise
 
     def test_non_addressable_iterable_is_rejected(self):
-        """The general, catch-all shape rejection -- an iterable that
-        isn't a Variable/Field/Index/Slice/ArrayLiteral/DictLiteral
-        (or a Call, given its own dedicated, more specific rejection
-        message just above) at all, a bare arithmetic expression
-        here."""
         ast = _parse(
             "def int main():\n"
             "    int n = 3\n"
@@ -23505,10 +17700,6 @@ class TestForInSemantics:
             analyze(ast)
 
     def test_element_binding_type_is_actually_enforced(self):
-        """Confirms the bound variable's own type is genuinely used for
-        real type-checking inside the body, not accepted unconditionally
-        -- a str-typed binding assigned into an int-typed local fails
-        exactly like any other type mismatch would."""
         ast = _parse(
             "def int main():\n"
             "    [3]str names = ['a', 'b', 'c']\n"
@@ -23575,22 +17766,6 @@ class TestForInSemantics:
         analyze(ast)  # should not raise
 
     def test_address_of_a_for_in_binding_is_now_supported(self):
-        """Was a real, constructed memory-corruption bug, rejected
-        outright at the semantic level until escape_analysis.py's own
-        for-in binding decl_id scheme was brought in line with ir/
-        builder.py's own (see escape_analysis.py's own ForIn case in
-        walk_statements for the full story: both files independently
-        invented a synthetic id for the same binding, but different,
-        incompatible ones, so an escaping binding was correctly
-        IDENTIFIED by escape_analysis.py yet never actually FOUND by
-        ir/builder.py's own _is_heap_allocated lookup). Once the two
-        ids matched, no further change was needed anywhere else: the
-        exact same heap-promotion machinery every ordinary VarDecl/
-        Param already goes through just started working for a for-in
-        binding too. This mirrors the original failing repro exactly
-        -- &x taken inside the loop, stored in a variable, returned
-        from the enclosing function -- and confirms it now reads back
-        the correct value instead of corrupted memory."""
         assert_program_stdout(
             "def *int last_element_address([]int arr):\n"
             "    *int p = none\n"
@@ -23607,25 +17782,6 @@ class TestForInSemantics:
         )
 
     def test_escaping_for_in_binding_gets_a_fresh_allocation_per_iteration(self):
-        """A binding's own storage is still SHARED across iterations
-        when its address never escapes the enclosing function (see
-        test_for_in_binding_address_not_escaping_the_function_still_
-        shares_one_slot just below -- that part of the design is
-        untouched by this fix, and deliberately so). But the moment
-        &x's own resulting value genuinely escapes -- passed to
-        another function, here, rather than merely copied into a
-        different local within the SAME function -- _ir_finish_
-        scalar_var_decl's own malloc runs fresh every time it's
-        called, which for a for-in binding is once per iteration:
-        each escaping capture gets its own, independent box, not a
-        pointer to the one, shared slot every ordinary (non-escaping)
-        iteration still uses. Confirmed here by capturing &x at two
-        DIFFERENT iterations (i == 0 and i == 2) through an ordinary
-        helper function (identity -- deliberately not append, whose
-        own arguments escape_analysis.py's scan_expr_for_escaping_
-        calls doesn't track as escaping at all) and reading back the
-        two DISTINCT values each iteration actually saw, not the
-        final iteration's value twice over."""
         assert_program_stdout(
             "def *int identity(*int p):\n"
             "    return p\n"
@@ -23646,22 +17802,6 @@ class TestForInSemantics:
         )
 
     def test_for_in_binding_address_not_escaping_the_function_still_shares_one_slot(self):
-        """The companion case to the test just above, confirming this
-        fix is narrowly scoped to the escaping case and doesn't
-        change the still-open, still-deliberate "shared slot" design
-        (see ForIn's own docstring in parser.py) for anything else.
-        Here &x is taken at two different iterations but never
-        leaves main at all -- just copied into two other LOCAL
-        pointer variables, never returned or passed to another
-        function -- so escape_analysis.py correctly determines
-        neither capture needs heap promotion (nothing escapes main's
-        own stack frame while it's still executing), and both
-        correctly read back the SAME, final value: x's one, shared
-        stack slot's own last-written contents, exactly as it
-        already behaved for the non-escaping case before this fix,
-        and exactly as an equivalent explicit while-loop with one
-        int declared outside it and reused every iteration already
-        would."""
         assert_program_stdout(
             "def int main():\n"
             "    []int s = [1, 2, 3]\n"
@@ -23679,15 +17819,6 @@ class TestForInSemantics:
         )
 
     def test_address_of_a_shadowed_name_inside_the_body_is_still_allowed(self):
-        """Shadowing-correctness was never actually about the (now-
-        removed) rejection this once accompanied -- it's ordinary
-        scope resolution, unrelated to whether &x on the OUTER
-        binding itself is allowed. An inner VarDecl that shadows the
-        binding name (inside its own, separately-pushed scope -- an
-        `if` here) is a genuinely different declaration, with its own
-        decl_id and its own escape-analysis treatment, entirely
-        independent of the outer for-in binding's own -- taking ITS
-        address is unaffected by anything about the outer name."""
         ast = _parse(
             "def int main():\n"
             "    [3]int arr = [1, 2, 3]\n"
@@ -23701,8 +17832,7 @@ class TestForInSemantics:
 
 
 # ---------------------------------------------------------------------------
-# for x in y / for x, y in z -- IR-building. Stage 2 (array/slice) and Stage
-# 3 (dict) are both implemented -- see gen_statement_ir's own ForIn case.
+# for x in y / for x, y in z
 # ---------------------------------------------------------------------------
 
 class TestForInArraySlice:
@@ -23760,10 +17890,6 @@ class TestForInArraySlice:
         )
 
     def test_str_elements(self):
-        """Exercises IRCopy's own composite path for the element
-        binding (str is in COMPOSITE_KINDS, unlike int/bool), not
-        just the scalar IRLoad-then-_ir_finish_scalar_var_decl path
-        the int-element tests above already cover."""
         assert_program_stdout(
             "def int main():\n"
             "    [3]str names = ['alice', 'bob', 'carol']\n"
@@ -23774,11 +17900,6 @@ class TestForInArraySlice:
         )
 
     def test_struct_elements(self):
-        """Exercises the SAME IRCopy composite path, plus the
-        synthesized Variable(name=...) node's own dispatch through
-        _ir_struct_address specifically (str goes through _ir_str_
-        address instead) -- both share the code path, but this
-        confirms it for STRUCT specifically, field reads included."""
         assert_program_stdout(
             "type Point struct:\n"
             "    int x\n"
@@ -23806,11 +17927,6 @@ class TestForInArraySlice:
         )
 
     def test_continue_skips_to_the_next_element(self):
-        """Confirms continue_label's own distinct existence actually
-        matters: continue must still advance i (the identical reason
-        For's own increment_label exists for its own increment
-        clause) before re-checking the loop condition, not skip the
-        advance and infinite-loop."""
         assert_program_stdout(
             "def int main():\n"
             "    [5]int arr = [10, 20, 30, 40, 50]\n"
@@ -23823,10 +17939,6 @@ class TestForInArraySlice:
         )
 
     def test_safe_in_place_element_mutation_does_not_panic(self):
-        """The mutation-safety check is precise, not a blanket ban on
-        touching the collection during iteration: an ordinary in-
-        place element write never changes the slice's own base
-        address, so it must never falsely trigger the panic."""
         assert_program_stdout(
             "def int main():\n"
             "    []int s = [1, 2, 3]\n"
@@ -23838,13 +17950,6 @@ class TestForInArraySlice:
         )
 
     def test_slice_reallocation_during_iteration_panics(self):
-        """The actual, positive confirmation of the mutation-safety
-        design discussed before implementation: an append that forces
-        reallocation invalidates this iterator's own cached base
-        address, and must panic (via hornet_panic, the same runtime
-        function bounds-check failures already use, hence the shared
-        assert_crashes_with_sigabrt helper) rather than silently
-        continuing to walk what's now stale, possibly-freed memory."""
         assert_crashes_with_sigabrt(
             "    []int s = [1]\n"
             "    int i = 0\n"
@@ -23858,22 +17963,6 @@ class TestForInArraySlice:
         )
 
     def test_index_based_iterable_with_mutated_index_does_not_false_panic(self):
-        """A real, constructed bug found and fixed after this stage
-        first shipped: `for x in rows[i]:`, i reassigned inside the
-        body. The mutation-safety recheck used to re-CALL _ir_
-        indexable_base(stmt.iterable) a second time every iteration --
-        which re-resolves rows[i] against i's CURRENT value, not the
-        one loop start actually captured, so reassigning i made the
-        recheck compare two DIFFERENT slices' own ptr values (rows[0]
-        vs. rows[1]) and falsely report "reallocated". The fix caches
-        the iterable's own DESCRIPTOR address once, up front (_ir_
-        slice_address, computed before the body could ever mutate
-        whatever the Index/Field chain's own address depends on), and
-        re-LOADS its ptr field from that same, fixed address on every
-        recheck -- confirms the loop correctly keeps iterating the
-        SAME slice (rows[0]) determined at loop start, unaffected by
-        i changing partway through, and exits cleanly rather than
-        panicking."""
         assert_program_stdout(
             "type Rows = [2][]int\n"
             "\n"
@@ -23888,11 +17977,6 @@ class TestForInArraySlice:
         )
 
     def test_index_based_iterable_still_detects_genuine_reallocation(self):
-        """The fix above must not accidentally disable real detection:
-        an append that actually reallocates the SAME slice (rows[0],
-        the one genuinely being iterated) still needs to panic, not
-        just avoid false positives when an unrelated index variable
-        changes."""
         assert_crashes_with_sigabrt(
             "    [2][]int rows = [[1], [10, 20]]\n"
             "    int i = 0\n"
@@ -23907,10 +17991,6 @@ class TestForInArraySlice:
         )
 
     def test_array_literal_iterable_iterates_correctly(self):
-        """A bare bracketed literal as the iterable directly -- no
-        VarDecl needed first. Resolves to ARRAY, absent a declared
-        type to widen against (the identical default resolution an
-        untyped ArrayLiteral gets everywhere else)."""
         assert_program_stdout(
             "def int main():\n"
             "    for x in [10, 20, 30]:\n"
@@ -23920,7 +18000,6 @@ class TestForInArraySlice:
         )
 
     def test_reslicing_an_array_iterates_correctly(self):
-        """`arr[a:b]` as the iterable directly, single-binding form."""
         assert_program_stdout(
             "def int main():\n"
             "    [5]int arr = [10, 20, 30, 40, 50]\n"
@@ -23931,9 +18010,6 @@ class TestForInArraySlice:
         )
 
     def test_reslicing_a_slice_two_binding_iterates_correctly(self):
-        """`s[a:b]` as the iterable directly, two-binding form -- the
-        index binding is re-indexed from 0 within the RE-SLICE, not
-        the original slice's own indices."""
         assert_program_stdout(
             "def int main():\n"
             "    []int s = [1, 2, 3, 4, 5]\n"
@@ -23945,20 +18021,6 @@ class TestForInArraySlice:
         )
 
     def test_reslicing_root_reallocation_panics(self):
-        """The new mutation-safety case this arc's own work was
-        specifically about: re-slicing an existing, named SLICE
-        variable (`s[0:len(s)]`), then reallocating THAT root variable
-        during the loop -- must still panic, via a separately-cached
-        read of the root's own ptr (not stmt.iterable's own base_addr,
-        which is already offset from the root and would never match
-        it even without any mutation at all). Re-slices the WHOLE
-        slice (not a short sub-range) specifically to guarantee enough
-        iterations for at least one append to actually exhaust the
-        spare capacity already left over from the while loop's own
-        prior growth and force a real reallocation -- a short re-slice
-        risks a false negative here (confirmed directly: an earlier,
-        2-element re-slice never actually reallocated at all, since
-        the prior growth's own spare capacity absorbed both appends)."""
         assert_crashes_with_sigabrt(
             "    []int s = [1, 2, 3, 4, 5]\n"
             "    int j = 0\n"
@@ -23972,9 +18034,6 @@ class TestForInArraySlice:
         )
 
     def test_reslicing_safe_in_place_mutation_does_not_panic(self):
-        """The companion case to the test just above: re-slicing, then
-        an in-place element overwrite (no reallocation at all) through
-        the ORIGINAL slice, not the re-slice -- must not panic."""
         assert_program_stdout(
             "def int main():\n"
             "    []int s = [1, 2, 3, 4, 5]\n"
@@ -23987,13 +18046,6 @@ class TestForInArraySlice:
         )
 
     def test_reslicing_an_array_root_needs_no_mutation_check(self):
-        """Re-slicing a fixed-size ARRAY (not a slice) -- the root
-        itself can never be reallocated at all (matching the plain
-        ARRAY case's own "no check needed" rule, just applied to the
-        root here rather than stmt.iterable directly, since stmt.
-        iterable -- the re-slice's own result -- is always SLICE-typed
-        regardless of what its own root is). Confirms this doesn't
-        panic and doesn't need one to behave correctly."""
         assert_program_stdout(
             "def int main():\n"
             "    [5]int arr = [1, 2, 3, 4, 5]\n"
@@ -24004,10 +18056,6 @@ class TestForInArraySlice:
         )
 
     def test_array_needs_no_mutation_check_at_all(self):
-        """An array's own address can never change (fixed size, no
-        reallocation possible) -- confirms iterating one while doing
-        the closest available "mutation" (an in-place element write)
-        never panics, unlike the slice case above."""
         assert_program_stdout(
             "def int main():\n"
             "    [3]int arr = [1, 2, 3]\n"
@@ -24019,14 +18067,6 @@ class TestForInArraySlice:
         )
 
     def test_oversized_struct_element_is_heap_allocated_correctly(self):
-        """Exercises the size-based heap-promotion branch specifically
-        (_is_heap_allocated's own pure-size half, not the escape-
-        tracking one the address-of restriction above exists because
-        of): an element type large enough to cross _STACK_ARRAY_
-        LIMIT_BYTES needs its own fresh malloc'd box each binding
-        (_ir_malloc_and_store), with the destination address computed
-        from that box afterward -- confirms both items' own data
-        round-trip correctly, not just that this doesn't crash."""
         assert_program_stdout(
             "type Huge struct:\n"
             "    [5000]int data\n"
@@ -24042,16 +18082,6 @@ class TestForInArraySlice:
         )
 
     def test_slice_element_escaping_via_return_is_tracked_correctly(self):
-        """Exercises escape_analysis.py's own ForIn case specifically
-        for a binding whose own type contains a slice (an int element
-        wouldn't reach that code path at all -- see its own
-        docstring): the matching element is assigned into a variable
-        that then escapes via return, which must correctly heap-
-        promote the outer array being iterated (or whatever ITS own
-        contents are ultimately derived from) so the returned slice's
-        own backing data survives past this function -- not a crash
-        this time, a correctness check on the actual returned
-        content."""
         assert_program_stdout(
             "def []int find_matching(int target_len):\n"
             "    [][]int lists = [[1, 2], [3, 4, 5], [6]]\n"
@@ -24072,12 +18102,6 @@ class TestForInArraySlice:
         )
 
     def test_dict_iteration_now_works(self):
-        """Was Stage 3's own placeholder ("not implemented yet") --
-        replaced now that Stage 3 has actually landed. See
-        TestForInDict below for the full dict-iteration test suite;
-        this one just confirms the single-key form specifically works
-        end to end, closing out what this test used to pin as a known
-        gap."""
         assert_program_stdout(
             "def int main():\n"
             "    dict[str]int d = dict[str]int{'a': 1}\n"
@@ -24088,9 +18112,7 @@ class TestForInArraySlice:
         )
 
 # ---------------------------------------------------------------------------
-# for k in d / for k, v in d -- Stage 3: dict IR-building. The last of the
-# three collection kinds -- see _ir_for_in_dict's own docstring (ir/dicts.py)
-# for the full bucket-walk design and its own mutation-safety check.
+# for k in d / for k, v in d
 # ---------------------------------------------------------------------------
 
 class TestForInDict:
@@ -24117,11 +18139,6 @@ class TestForInDict:
         )
 
     def test_key_value_binding_int_keyed(self):
-        """A scalar-keyed dict specifically -- exercises hornet_dict_
-        insert_scalar_key's own bucket layout (the key region holds the
-        raw key bytes directly, not a {ptr, len} pair the way a str
-        key's own region does), confirming the walk's own key_width
-        computation is correct for this shape too, not just str."""
         assert_program_stdout(
             "def int main():\n"
             "    dict[int]str codes = dict[int]str{1: 'one', 2: 'two', 3: 'three'}\n"
@@ -24134,14 +18151,6 @@ class TestForInDict:
         )
 
     def test_tombstones_are_correctly_skipped(self):
-        """The identical tombstone-correctness property test_in_skips_
-        past_tombstones_rather_than_stopping_at_them already proves for
-        'in', proved here for iteration specifically: every even key
-        deleted (guaranteeing real tombstones scattered through the
-        bucket array), every surviving odd key must still be visited
-        exactly once despite however many tombstones sit between its
-        own bucket and wherever the walk currently is, and no deleted
-        even key may be visited at all."""
         assert_program_stdout(
             "def int main():\n"
             "    dict[int]int nums = dict[int]int{0: 0}\n"
@@ -24168,11 +18177,6 @@ class TestForInDict:
         )
 
     def test_struct_valued_dict(self):
-        """Exercises _ir_bind_for_in_value's own composite IRCopy path
-        for the VALUE binding specifically (the key is str, str, in
-        both other dict tests above -- also composite, but this
-        confirms a genuinely different composite kind works too, field
-        reads included)."""
         assert_program_stdout(
             "type Point struct:\n"
             "    int x\n"
@@ -24215,10 +18219,6 @@ class TestForInDict:
         )
 
     def test_continue_skips_to_the_next_bucket(self):
-        """continue_label is shared with the empty/tombstone-bucket
-        skip -- confirms an EXPLICIT continue from inside the body
-        gets the identical 'advance i, re-check the loop condition'
-        treatment, not just the implicit skip case."""
         assert_program_stdout(
             "def int main():\n"
             "    dict[str]int d = dict[str]int{'a': 1, 'b': 2, 'c': 3}\n"
@@ -24233,9 +18233,6 @@ class TestForInDict:
         )
 
     def test_safe_in_place_value_overwrite_does_not_panic(self):
-        """The mutation-safety check is precise, not a blanket ban:
-        an ordinary value overwrite for an EXISTING key never touches
-        buckets_ptr, so it must never falsely trigger the panic."""
         assert_program_stdout(
             "def int main():\n"
             "    dict[str]int d = dict[str]int{'a': 1, 'b': 2, 'c': 3}\n"
@@ -24249,9 +18246,6 @@ class TestForInDict:
         )
 
     def test_safe_delete_during_iteration_does_not_panic(self):
-        """Tombstoning is in-place too -- never touches buckets_ptr --
-        so deleting the current key mid-iteration must also be safe
-        and unchecked, unlike a growth-triggering insert."""
         assert_program_stdout(
             "def int main():\n"
             "    dict[str]int d = dict[str]int{'x': 1, 'y': 2}\n"
@@ -24265,13 +18259,6 @@ class TestForInDict:
         )
 
     def test_growth_triggering_insert_during_iteration_panics(self):
-        """The actual, positive confirmation of the mutation-safety
-        design: an insert that crosses the growth threshold
-        reallocates the WHOLE buckets array, invalidating this
-        iterator's own cached buckets_ptr -- must panic (via hornet_
-        panic, the same runtime function bounds-check failures and
-        the slice case already use) rather than silently continuing to
-        walk what's now stale, possibly-freed memory."""
         assert_crashes_with_sigabrt(
             "    dict[int]int d = dict[int]int{1: 1}\n"
             "    int i = 0\n"
@@ -24285,11 +18272,6 @@ class TestForInDict:
         )
 
     def test_dict_literal_iterable_iterates_correctly(self):
-        """A bare dict literal as the iterable directly -- no VarDecl
-        needed first. Needs no mutation-safety recheck at all (see
-        _ir_for_in_dict's own docstring): its own backing buckets are
-        freshly allocated and referenced by nothing else in the
-        program, ever."""
         assert_program_stdout(
             "def int main():\n"
             "    for k, v in dict[str]int{'a': 1, 'b': 2}:\n"
@@ -24313,8 +18295,6 @@ _ESCAPE_PRELUDE = (
     "    return z[3]\n"
 )
 
-# Each program returns a slice of a small local array through some
-# indirection, clobbers the stack, then prints it.
 _ESCAPE_CASES = {
     'pointer_param_field': (
         "def fill(*S out):\n"
