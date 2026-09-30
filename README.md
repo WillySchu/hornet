@@ -62,6 +62,10 @@ python3 compile.py program.ht --platform linux
 
 A generated program that uses runtime functions such as `print` must also be linked with `runtime/runtime.c`. `build.py` handles this automatically.
 
+### Errors
+
+Compile errors are reported as `file:line:col: error: message` with the source line and a caret; several semantic errors can be reported in one run. Both tools exit with status 1 for errors in the program and 2 for internal compiler errors. `--traceback` shows the Python traceback instead.
+
 ### Testing
 
 Run the test suite from the repository root with:
@@ -70,7 +74,15 @@ Run the test suite from the repository root with:
 pytest
 ```
 
-The tests cover the lexer, parser, semantic analysis, module discovery and merging, IR construction and verification, optimization, the native backend, escape analysis, runtime behavior, and end-to-end compiled programs.
+The tests cover the lexer, parser, semantic analysis, module discovery and merging, IR construction and verification, optimization, the native backend, escape analysis, runtime behavior, and end-to-end compiled programs, including seeded random programs checked against a Python model.
+
+### Benchmarks
+
+```bash
+python3 benchmarks/run_benchmarks.py            # time every benchmark
+python3 benchmarks/run_benchmarks.py --icount   # also count executed instructions (needs valgrind)
+python3 benchmarks/run_benchmarks.py --json out.json --compare benchmarks/baseline.json
+```
 
 ---
 
@@ -81,10 +93,10 @@ Hornet currently provides:
 * Functions and recursion
 * Static typing with explicit integer conversions
 * Block scoping and shadowing
-* `int`, `int8`, `uint8`, `byte`, `int64`, `bool`, and `str`
+* `int` (64-bit), `int32`, `int8`, `uint8`, `byte`, `bool`, and `str`
 * Fixed-size arrays
 * Slices
-* Nominal structs and methods
+* Nominal structs, methods, and pointer receivers
 * Type aliases
 * Single-level pointers
 * Tagged sum types
@@ -98,7 +110,7 @@ Hornet currently provides:
 * Arithmetic, comparison, logical, bitwise, and membership operators
 * Compound assignment
 * Runtime bounds checking
-* Built-ins such as `print`, `len`, `append`, and `del`
+* Built-ins such as `print`, `len`, `append`, `del`, and `bytes`, and `str(...)` conversions
 * Modules and imports
 * External C functions through `extern`
 * A small fixed set of compiler-defined `intrinsic` functions
@@ -125,13 +137,15 @@ int x = 42  # Another comment
 Hornet has four integer types:
 
 ```text
-int
-int8
-uint8
-int64
+int     64-bit signed
+int32   32-bit signed
+int8    8-bit signed
+uint8   8-bit unsigned
 ```
 
-`byte` is a built-in alias for `uint8`, not a separate type.
+`byte` is a built-in alias for `uint8` and `int64` an alias for `int`, not separate types.
+
+Arithmetic wraps at the type's width; division truncates toward zero; shift counts use the low bits of the count (6 for `int`, 5 otherwise). Dividing by zero, and `int`/`int32` minimum divided by `-1`, trap.
 
 Integer operations do not perform C-style implicit promotions. Operands normally need to have matching integer types:
 
@@ -184,6 +198,17 @@ str s = 'hello world'
 byte first = s[0]
 str word = s[0:5]
 ```
+
+`len(s)` is the length in bytes. Strings convert to and from bytes; `str(...)` and `bytes(...)` copy, so the results are independent:
+
+```hornet
+str one = str(s[0])         # a one-byte str
+[]byte buf = bytes(s)       # a mutable copy
+buf[0] = "H"
+str back = str(buf)         # 'Hello world'; s is unchanged
+```
+
+`+` copies both operands, so building a long string by repeated `+` is quadratic; use `Builder` from `stdlib/strings.ht` instead.
 
 ## Byte Literals
 
@@ -247,7 +272,7 @@ p.x = 42
 print(*p)
 ```
 
-The current implementation intentionally restricts pointer types and some address-taking operations; see [Current Limitations](#current-limitations).
+Field access through a pointer dereferences automatically. Pointers are single-level; see [Current Limitations](#current-limitations).
 
 ## Sum Types
 
@@ -282,9 +307,9 @@ Dictionary keys currently must be one of:
 
 ```text
 int
+int32
 int8
 uint8
-int64
 bool
 str
 ```
@@ -420,7 +445,23 @@ Point p = Point(10, 20)
 print(p.sum())
 ```
 
-Struct values use value semantics: assigning or passing one copies its value rather than implicitly creating a reference.
+Struct values use value semantics: assigning or passing one copies its value rather than implicitly creating a reference, and a method's receiver is a copy.
+
+A method whose receiver is written `*name` receives a pointer and can modify the struct:
+
+```hornet
+type Counter struct:
+    int n
+
+    def inc(*c, int by):
+        c.n += by
+
+Counter c = Counter(0)
+c.inc(5)        # passes &c
+print(c.n)      # 5
+```
+
+The receiver must be addressable (a variable, field, index, or dereference) or already a pointer; calling a pointer method on a temporary such as a call result is an error. Methods of either kind can be called through a pointer.
 
 ---
 
@@ -457,7 +498,7 @@ Appending may allocate a new backing store:
 values = append(values, 4)
 ```
 
-The runtime owns the backing-storage growth algorithm; the compiler remains responsible for slice address calculation and bounds checking.
+When the backing store is full, capacity grows to 1, then doubles up to 256, then grows by a quarter; the compiled code picks the new capacity and `hornet_slice_grow` in the runtime copies the elements.
 
 ---
 
@@ -559,7 +600,7 @@ for key, value in counts:
     print(value)
 ```
 
-The iterable expression must currently be a plain variable, field, or index expression whose type is an array, slice, or dictionary. Direct iteration over a literal or a function-call result is not yet supported.
+The iterable must be an array, slice, or dictionary given as a variable, field, index, slice expression, or array/dictionary literal. Iterating over a function-call result or a dereference is not yet supported.
 
 The implementation currently uses one loop binding storage location for the whole iteration. Taking the address of an iteration binding is therefore rejected.
 
@@ -588,7 +629,7 @@ in
 not in
 ```
 
-Membership currently applies to dictionaries only.
+Membership applies to dictionary keys and array or slice elements.
 
 ### Logical
 
@@ -645,7 +686,7 @@ match shape as s:
         print(s.side)
 ```
 
-The current implementation checks match exhaustiveness during semantic analysis.
+The current implementation checks match exhaustiveness during semantic analysis. A function still needs a `return` after a `match` whose arms all return.
 
 More general flow-sensitive narrowing through arbitrary boolean expressions and control-flow paths is still future work.
 
@@ -660,7 +701,10 @@ print
 len
 append
 del
+bytes
 ```
+
+`str(...)` conversions are described under [Strings](#strings).
 
 ## `print`
 
@@ -677,15 +721,14 @@ Arrays, slices, structs, dictionaries, and supported sum-type values are recursi
 
 ## `len`
 
-`len` returns the size of an array, slice, or dictionary:
+`len` returns the size of an array, slice, dictionary, or string (in bytes):
 
 ```hornet
 print(len(values))
 print(len(view))
 print(len(counts))
+print(len('hello'))
 ```
-
-`len` does not currently apply to strings.
 
 ## `append`
 
@@ -695,6 +738,10 @@ print(len(counts))
 []int values = []int[1, 2]
 values = append(values, 3)
 ```
+
+## `bytes`
+
+`bytes(s)` returns a new `[]byte` copy of the string `s`.
 
 ## `del`
 
@@ -768,6 +815,8 @@ An omitted return type means the function returns no value.
 
 The current FFI restricts `extern` parameters and return values to scalar and pointer types. Hornet arrays, slices, structs, sum types, and strings do not currently have a general direct FFI representation.
 
+Hornet's `int` is 64-bit; declare C `int` parameters and results as `int32` (for example `extern int32 close(int32 fd)`). `long`, `size_t`, and `ssize_t` are `int`.
+
 Foreign calls use the same IR call and backend calling-convention machinery as ordinary Hornet function calls.
 
 ## Intrinsics
@@ -815,11 +864,46 @@ hash_str
 
 ## `stdlib/fmt.ht`
 
-Currently provides integer-to-string conversion for non-negative `int` values:
+Integer formatting:
 
 ```hornet
-str s = int_to_str(1234)
+str a = int_to_str(-1234)       # '-1234'
+str b = int_to_hex(255)         # 'ff'
+str c = pad_left('7', 3, "0")   # '007'
 ```
+
+## `stdlib/strings.ht`
+
+A growable buffer, and searching and splitting helpers:
+
+```hornet
+Builder b = Builder(none)
+b.write('n=')
+b.write_int(42)
+b.write_byte("!")
+str s = b.to_str()              # 'n=42!'; also length() and reset()
+
+[]str parts = split('a,b,,c', ',')
+str joined = join(parts, '|')
+bool yes = starts_with(s, 'n=')   # also ends_with
+int at = index_of(s, '42')        # -1 if absent; also index_from, index_of_byte
+str t = trim('  padded \n')
+str r = repeat('ab', 3)
+```
+
+## `stdlib/errors.ht`
+
+The error convention for functions that can fail: a result sum type holding either the value or an `Error`.
+
+```hornet
+type Error struct:
+    str message
+
+type StrResult is str | Error
+type IntResult is int | Error
+```
+
+Handle a result with `match` or `is`, or use `must_str`/`must_int` to take the value and panic on error. `panic` is for bugs.
 
 ## `stdlib/os.ht`
 
@@ -846,9 +930,11 @@ It currently provides language-level services including:
 
 * `print` and recursive value formatting
 * `hornet_panic` for runtime failures
-* `hornet_slice_grow` for slice backing-storage growth
+* `hornet_slice_grow`, which copies a slice into a larger backing store
+* `hornet_bytes` for `bytes(s)`
 * dictionary hash-table support
 * runtime type-descriptor support
+* output, file creation, exit, and OS error messages for `stdlib/os.ht` (`hornet_write_fd`, `hornet_open_write`, `hornet_exit`, `hornet_error_message`)
 
 The runtime is deliberately separate from the x86-64 backend. The compiler is responsible for semantic operations such as type checking, aggregate layout, address calculation, and bounds-check generation; the runtime implements selected algorithms and services that are better expressed as ordinary native code.
 
@@ -905,9 +991,13 @@ Hornet runtime   external libraries
        native executable
 ```
 
-The frontend constructs a complete `IRProgram` before the x86-64 backend begins lowering it. The intermediate representation is independent of the x86-64 assembly representation and is the natural boundary for future optimization passes and additional native backends.
+The frontend constructs a complete `IRProgram` before the x86-64 backend begins lowering it. The intermediate representation is independent of the x86-64 assembly representation and is the natural boundary for optimization passes and additional native backends.
 
-The backend owns architecture-specific concerns such as register allocation, stack-frame layout, the native calling convention, instruction selection, and assembly emission.
+Escape analysis decides which locals must live on the heap. It is a points-to analysis per function, with per-parameter escape summaries so that passing `&x` to a function that doesn't keep the pointer leaves `x` on the stack.
+
+The IR optimizer repeats constant folding, identity simplification, constant-branch and unreachable-block removal, copy and constant propagation within blocks, copy coalescing, and dead-code elimination until nothing changes. `ir/cfg.py` provides the shared control-flow and liveness analysis.
+
+The backend owns architecture-specific concerns: linear-scan register allocation (values live across calls get callee-saved registers), stack-frame layout with prologues that save only the registers a function uses, the native calling convention, instruction selection that works directly on registers, stack slots, and immediates, division by constants via multiplication, a peephole pass, and assembly emission.
 
 Some IR operations deliberately lower to runtime calls. A runtime operation does not require a special calling mechanism; runtime functions participate in the same native call machinery as other external functions.
 
@@ -923,6 +1013,9 @@ desugar.py         AST desugaring
 modules.py         Module discovery
 merge.py           Module merging and name resolution
 escape_analysis.py Escape analysis
+typesys.py         Types and type layout
+ops.py             Operator enums
+diagnostics.py     Error types and error reporting
 
 ir/                Intermediate representation and IR construction
 optimize/          IR optimization passes
@@ -1005,23 +1098,23 @@ Hornet is still experimental. Some notable limitations are:
 * `for ... in ...` currently requires a variable, field, or index as its iterable expression; literals and call results must be assigned to a variable first.
 * `is` is limited to dedicated `if`/`elif` condition shapes rather than being a general boolean expression.
 * Sum-type narrowing does not yet fully propagate through arbitrary control flow or `else` branches.
-* Nested sum-type variants are still restricted.
+* Nested sum-type variants are still restricted, and a struct field cannot have a sum type.
 * Sum-type equality is not implemented.
 * Slice equality and dictionary equality are not implemented.
-* `in` currently supports dictionaries only.
-* String membership is not implemented.
-* `len` does not currently apply to strings.
+* `in` does not apply to strings.
 * The FFI currently supports only scalar and pointer arguments/results.
 * Passing structs by value through FFI is not yet supported.
 * The standard library currently provides only a small subset of filesystem, process, path, formatting, and collection facilities.
-* File I/O is currently read-only.
 * Generic types and generic functions are not implemented.
 * First-class function types and closures are not implemented.
 * Variadic functions and variadic FFI calls are not implemented.
-* There is no garbage collector yet.
+* There is no garbage collector yet; string concatenation in particular never frees its intermediate strings.
 * There are no floating-point types yet.
 * Multithreading is not implemented.
-* The compiler does not yet have a mature error/result abstraction for ordinary library code; several standard-library errors currently become runtime panics.
+* Without generics, each result type is a separate named sum type, and slice-valued results must be wrapped in a struct (slices cannot be sum-type variants). There is no operator for propagating errors, and ignoring a result is not diagnosed.
+* `extern` declarations are visible to every module after merging, even without an import.
+* Printing a struct defined in another module shows its internal name, such as `errors$Error(...)`.
+* A slice literal whose element type is a dictionary (`[]dict[int]int[...]`) does not parse.
 
 ---
 
@@ -1031,7 +1124,7 @@ A longer-term goal is to rewrite the compiler itself in Hornet.
 
 The current language already has most of the structural features needed by a compiler implementation: structs, arrays, slices, dictionaries, pointers, sum types, pattern matching, modules, FFI, and native compilation.
 
-The remaining work is increasingly concentrated in the standard library and operating-system interface rather than the compiler backend itself.
+The standard library now covers file and stream I/O, process exit, string building and searching, integer formatting, and an error convention, so the next step is porting the compiler itself, starting with the lexer.
 
 The repository contains `SELF_HOST_CHECKLIST.md` to track that work.
 
@@ -1067,21 +1160,21 @@ Garbage collection is not a prerequisite for bootstrapping the compiler. A compi
 
 Current and future work includes:
 
-* Expanding the standard library, especially filesystem, path, process, and byte/string facilities
-* Better error/result handling
+* Expanding the standard library, especially directory, path, and process facilities
+* Error-propagation syntax for result types
 * More complete pointer and address-taking support
-* More precise escape analysis for iterators and aliases
+* More precise escape analysis for iterators, aliases, and data more than one pointer away from a call argument
 * More general sum-type narrowing
 * Additional sum-type composition and equality support
 * Generic types and functions
 * First-class function types and closures
-* String formatting and richer text processing
+* Richer string formatting
 * Regex support
 * Richer FFI, including aggregate types where a stable ABI can be defined
 * Potential garbage collection and a more explicit ownership model
 * More IR optimizations, including common-subexpression and bounds-check elimination
 * Better aggregate copying and layout decisions
-* More sophisticated register allocation
+* More sophisticated register allocation, including spill choices weighted by use count and loop depth
 * Additional native targets, including a future AArch64/Apple Silicon backend
 
 Hornet is intentionally developed incrementally: new language features are accompanied by parser, semantic-analysis, IR, backend/runtime, and end-to-end tests whenever appropriate.
