@@ -1,6 +1,6 @@
 # Hornet
 
-Hornet is an experimental, statically typed programming language with an indentation-based syntax and a native compiler targeting x86-64 Linux and macOS.
+Hornet is an experimental, statically typed programming language with an indentation-based syntax and a native compiler targeting x86-64 and AArch64 on Linux and macOS.
 
 The language is intentionally small, but the implementation includes a real compiler pipeline, a standalone intermediate representation, an optimizing native backend, a small runtime, modules, dictionaries, pointers, tagged sum types, pattern matching, and a C-compatible FFI.
 
@@ -24,7 +24,7 @@ The compiler itself is written in Python and currently has no third-party Python
 
 To build a runnable native executable, you also need a C compiler/linker. The project uses `gcc` in its build and test tooling.
 
-The native backend targets x86-64 Linux and macOS. On an Apple Silicon Mac the default target is x86-64 macOS, built with `gcc -arch x86_64` and run under Rosetta 2.
+The native backends target x86-64 and AArch64 on Linux and macOS. On macOS the architecture is chosen with `gcc -arch`, so an Apple Silicon Mac can also build x86-64 programs and run them under Rosetta 2.
 
 Building for a foreign Linux architecture needs a cross toolchain named `<arch>-linux-gnu-gcc`, and running the result needs qemu-user (on Debian/Ubuntu: `apt install gcc-aarch64-linux-gnu qemu-user`). The test suite uses them when present and skips what they're needed for otherwise.
 
@@ -45,7 +45,7 @@ The target is written `arch-os`: `x86_64-linux`, `x86_64-macos`, `aarch64-linux`
 python3 build.py program.ht --target x86_64-linux -o program
 ```
 
-Without `--target`, the host is used, or x86-64 on the host's operating system while the host's architecture has no backend. Only x86-64 has a backend so far; asking for another architecture is an error.
+Without `--target`, the host is used.
 
 ### Generate Assembly
 
@@ -77,7 +77,11 @@ pytest
 
 The tests cover the lexer, parser, semantic analysis, module discovery and merging, IR construction and verification, optimization, the native backend, escape analysis, runtime behavior, and end-to-end compiled programs, including seeded random programs checked against a Python model.
 
-Backend-specific tests live in `tests/backend/<arch>/` and shared backend tests in `tests/backend/common/`. End-to-end programs are built and run for every target that has a backend and can run on the machine (natively, under Rosetta 2, or under qemu-user), and every such target must produce the same output.
+Backend-specific tests live in `tests/backend/<arch>/` and shared backend tests in `tests/backend/common/`. End-to-end programs are built and run for every target that can run on the machine (natively, under Rosetta 2, or under qemu-user), and every such target must produce the same output. That makes the suite several times slower where a second target runs under emulation; to test fewer targets, list them:
+
+```bash
+HORNET_E2E_TARGETS=x86_64-linux pytest
+```
 
 ### Formatting
 
@@ -161,7 +165,7 @@ uint8   8-bit unsigned
 
 `byte` is a built-in alias for `uint8` and `int64` an alias for `int`, not separate types.
 
-Arithmetic wraps at the type's width; division truncates toward zero; shift counts use the low bits of the count (6 for `int`, 5 otherwise). Dividing by zero, and `int`/`int32` minimum divided by `-1`, trap.
+Arithmetic wraps at the type's width; division truncates toward zero; shift counts use the low bits of the count (6 for `int`, 5 otherwise). Dividing by zero panics (`integer division by zero`), as does dividing the `int` or `int32` minimum by `-1` (`integer overflow in division`); for `int8` and `uint8` that quotient wraps. Constant expressions reject both at compile time.
 
 Integer operations do not perform C-style implicit promotions. Operands normally need to have matching integer types:
 
@@ -1035,7 +1039,7 @@ Escape analysis decides which locals must live on the heap. It is a points-to an
 
 The IR optimizer repeats constant folding, identity simplification, constant-branch and unreachable-block removal, copy and constant propagation within blocks, copy coalescing, and dead-code elimination until nothing changes. `ir/cfg.py` provides the shared control-flow and liveness analysis.
 
-`backend/` holds one package per architecture, chosen by the target, plus `backend/common/` for what they share: linear-scan register allocation over the target's register lists (values live across calls get callee-saved registers), stack-frame slot layout, the magic numbers for division by constants, and jump cleanups. The x86-64 backend (`backend/x86_64/`) adds the SysV calling convention, prologues that save only the registers a function uses, instruction selection that works directly on registers, stack slots, and immediates, a peephole pass, and AT&T-syntax assembly emission for Linux and macOS.
+`backend/` holds one package per architecture, chosen by the target, plus `backend/common/` for what they share: linear-scan register allocation over the target's register lists (values live across calls get callee-saved registers), stack-frame slot layout, the magic numbers for division by constants, and jump cleanups. Each backend adds its calling convention (SysV for `backend/x86_64/`, AAPCS64 for `backend/aarch64/`), prologues that save only the registers a function uses, instruction selection that works directly on registers, stack slots, and immediates, a peephole pass, and assembly emission for Linux and macOS (AT&T syntax on x86-64). The AArch64 backend also rewrites accesses to stack slots beyond the reach of a load or store's offset after the frame is laid out.
 
 Some IR operations deliberately lower to runtime calls. A runtime operation does not require a special calling mechanism; runtime functions participate in the same native call machinery as other external functions.
 
@@ -1060,7 +1064,7 @@ ir/                Intermediate representation and IR construction
 optimize/          IR optimization passes
 
 target.py          Compilation targets (arch-os)
-backend/           Native backends: common/ shared pieces, x86_64/ the x86-64 backend
+backend/           Native backends: common/ shared pieces, x86_64/ and aarch64/
 runtime/           Native Hornet runtime
 stdlib/            Hornet standard-library modules
 
@@ -1132,7 +1136,6 @@ The example is intentionally modest. Its purpose is to exercise the language and
 
 Hornet is still experimental. Some notable limitations are:
 
-* Only x86-64 has a backend so far (Linux and macOS); AArch64 targets are recognized but not yet implemented.
 * Pointer-to-pointer types are parsed but rejected semantically.
 * Some advanced pointer/address-taking cases remain unsupported.
 * Taking the address of a `for ... in ...` binding is currently rejected because iterator-binding escape tracking is not yet precise enough.
@@ -1217,7 +1220,7 @@ Current and future work includes:
 * More IR optimizations, including common-subexpression and bounds-check elimination
 * Better aggregate copying and layout decisions
 * More sophisticated register allocation, including spill choices weighted by use count and loop depth
-* Additional native targets, including a future AArch64/Apple Silicon backend
+* Additional native targets
 
 Hornet is intentionally developed incrementally: new language features are accompanied by parser, semantic-analysis, IR, backend/runtime, and end-to-end tests whenever appropriate.
 
