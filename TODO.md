@@ -17,6 +17,9 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
+- Printing a struct defined in another module shows its internal name: print(write\_file(bad, x)) prints errors$Error(message: …).
+- must\_str and must\_int need a dead return after an exhaustive match, because semantic analysis doesn't treat match as covering every path.
+- Nothing warns when a result is ignored, such as a bare write\_stdout(...) statement.
 - Make IRReadArgument architecturally independent.
 - Struct fields are resolved before sum types, so a sum type used as a field type is unknown at that point.
 - A slice literal whose element type is a dict ([]dict[int]int[...]) fails to parse with "Expected a variable name".

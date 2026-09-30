@@ -9,7 +9,6 @@ example program works, not a stand-in for it.
 """
 
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -116,9 +115,10 @@ def test_wc_empty_file():
 
 
 @GCC_SKIP
-def test_wc_panics_on_a_missing_file():
+def test_wc_reports_a_missing_file_and_exits_1():
     with tempfile.TemporaryDirectory() as tmpdir:
         missing_path = str(Path(tmpdir) / "does_not_exist.txt")
         result = _run_wc(tmpdir, args=[missing_path])
-        assert result.returncode == -signal.SIGABRT
-        assert "could not open file" in result.stdout
+        assert result.returncode == 1
+        assert result.stdout == ""
+        assert result.stderr == f"wc: could not open '{missing_path}': No such file or directory\n"

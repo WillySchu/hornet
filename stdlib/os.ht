@@ -1,5 +1,6 @@
-from 'c' import from_cstring, to_cstring, panic, from_raw_parts, calloc
+from 'c' import from_cstring, to_cstring, from_raw_parts, calloc
 from 'strings' import Builder, write, to_str
+from 'errors' import Error, StrResult, IntResult
 
 # argv -> []str. hornet_argv_get does the C-side indexing.
 extern *byte hornet_argv_get(*byte argv, int index)
@@ -17,51 +18,61 @@ extern int32 close(int32 fd)
 extern int hornet_write_fd(int fd, *byte buf, int n)
 extern int hornet_open_write(*byte path)
 extern hornet_exit(int code)
+extern *byte hornet_error_message()
 intrinsic *byte _raw_ptr(str s)
 intrinsic int _raw_len(str s)
 
-def str read_all_from_fd(int32 fd):
-    # Read fd to EOF; panics on read error.
+def str _os_reason():
+    return from_cstring(hornet_error_message())
+
+# Read fd to EOF.
+def StrResult read_all_from_fd(int32 fd):
     Builder b = Builder(none)
     *byte chunk = calloc(65536, 1)
     int n = read(fd, chunk, 65536)
     while n != 0:
         if n < 0:
-            panic('read error')
+            return Error('read failed: ' + _os_reason())
         write(&b, from_raw_parts(chunk, n))
         n = read(fd, chunk, 65536)
     return to_str(&b)
 
-def str read_file(str path):
+def StrResult read_file(str path):
     int32 fd = open(to_cstring(path), 0)
     if fd < int32(0):
-        panic('could not open file: ' + path)
-    str contents = read_all_from_fd(fd)
+        return Error('could not open \'' + path + '\': ' + _os_reason())
+    StrResult contents = read_all_from_fd(fd)
     close(fd)
+    if contents is Error:
+        return Error('could not read \'' + path + '\': ' + contents.message)
     return contents
 
-def str read_stdin():
+def StrResult read_stdin():
     return read_all_from_fd(0)
 
+def IntResult _write_fd(int fd, str s):
+    int n = hornet_write_fd(fd, _raw_ptr(s), _raw_len(s))
+    if n < 0:
+        return Error('write failed: ' + _os_reason())
+    return n
 
-def _write_fd(int fd, str s):
-    if hornet_write_fd(fd, _raw_ptr(s), _raw_len(s)) < 0:
-        panic('write error')
+# Write s to stdout without a trailing newline (print adds one). Bytes written, or an Error.
+def IntResult write_stdout(str s):
+    return _write_fd(1, s)
 
-# Write s to stdout without a trailing newline (print adds one).
-def write_stdout(str s):
-    _write_fd(1, s)
+def IntResult write_stderr(str s):
+    return _write_fd(2, s)
 
-def write_stderr(str s):
-    _write_fd(2, s)
-
-# Create or truncate `path` and write `content`; panics on error.
-def write_file(str path, str content):
+# Create or truncate `path` and write `content`. Bytes written, or an Error.
+def IntResult write_file(str path, str content):
     int fd = hornet_open_write(to_cstring(path))
     if fd < 0:
-        panic('could not open file for writing: ' + path)
-    _write_fd(fd, content)
+        return Error('could not open \'' + path + '\' for writing: ' + _os_reason())
+    IntResult written = _write_fd(fd, content)
     close(int32(fd))
+    if written is Error:
+        return Error('could not write \'' + path + '\': ' + written.message)
+    return written
 
 # Flush pending output and exit with `code`.
 def exit(int code):

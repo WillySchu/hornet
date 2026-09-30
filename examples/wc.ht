@@ -1,4 +1,5 @@
-from 'os' import get_args, read_file, read_stdin
+from 'os' import get_args, read_file, read_stdin, write_stderr, exit
+from 'errors' import Error, StrResult
 from 'fmt' import int_to_str
 
 # Simplified wc: lines, words, bytes per file plus a total; stdin if no files.
@@ -26,6 +27,16 @@ def int count_words(str s):
             in_word = true
     return count
 
+# The contents, or report the error and exit with status 1.
+def str contents_or_exit(StrResult r):
+    match r as v:
+        is str:
+            return v
+        is Error:
+            write_stderr('wc: ' + v.message + '\n')
+            exit(1)
+    return ''
+
 def str format_counts(int lines, int words, int byte_count, str label):
     str result = int_to_str(lines) + ' ' + int_to_str(words) + ' ' + int_to_str(byte_count)
     if len(label) > 0:
@@ -36,7 +47,7 @@ def int main(int argc, *byte argv):
     []str args = get_args(argc, argv)
 
     if len(args) <= 1:
-        str contents = read_stdin()
+        str contents = contents_or_exit(read_stdin())
         print(format_counts(count_lines(contents), count_words(contents), len(contents), ''))
         return 0
 
@@ -44,7 +55,7 @@ def int main(int argc, *byte argv):
     int total_words = 0
     int total_bytes = 0
     for int i = 1; i < len(args); i += 1:
-        str contents = read_file(args[i])
+        str contents = contents_or_exit(read_file(args[i]))
         int lines = count_lines(contents)
         int words = count_words(contents)
         int byte_count = len(contents)

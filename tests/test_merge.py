@@ -1088,9 +1088,9 @@ def test_stdlib_os_module_read_file_reads_a_real_file():
         data_path = _write(tmpdir, "data.txt", "line one\nline two\nline three")
         entry = _write(
             tmpdir, "main.ht",
-            "from 'os' import read_file\n\n"
+            "from 'os' import read_file\nfrom 'errors' import must_str\n\n"
             "def int main():\n"
-            f"    str contents = read_file('{data_path}')\n"
+            f"    str contents = must_str(read_file('{data_path}'))\n"
             "    print(len(contents))\n"
             "    print(contents)\n"
             "    return 0\n",
@@ -1109,9 +1109,9 @@ def test_stdlib_os_module_read_file_handles_a_file_larger_than_one_chunk():
         data_path = _write(tmpdir, "big.txt", big_content)
         entry = _write(
             tmpdir, "main.ht",
-            "from 'os' import read_file\n\n"
+            "from 'os' import read_file\nfrom 'errors' import must_str\n\n"
             "def int main():\n"
-            f"    str contents = read_file('{data_path}')\n"
+            f"    str contents = must_str(read_file('{data_path}'))\n"
             "    print(len(contents))\n"
             "    return 0\n",
         )
@@ -1119,28 +1119,33 @@ def test_stdlib_os_module_read_file_handles_a_file_larger_than_one_chunk():
         assert result.stdout == f"{len(big_content)}\n"
 
 
-def test_stdlib_os_module_read_file_panics_on_a_missing_file():
+def test_stdlib_os_module_read_file_returns_an_error_for_a_missing_file():
     with tempfile.TemporaryDirectory() as tmpdir:
         missing_path = str(Path(tmpdir) / "does_not_exist.txt")
         entry = _write(
             tmpdir, "main.ht",
-            "from 'os' import read_file\n\n"
+            "from 'os' import read_file\nfrom 'errors' import Error, StrResult, must_str\n\n"
             "def int main():\n"
-            f"    str contents = read_file('{missing_path}')\n"
+            f"    StrResult r = read_file('{missing_path}')\n"
+            "    if r is Error:\n"
+            "        print(r.message)\n"
+            f"    str contents = must_str(read_file('{missing_path}'))\n"
             "    return 0\n",
         )
         result = _compile_and_run(entry, tmpdir)
+        message = f"could not open '{missing_path}': No such file or directory"
+        assert result.stdout.startswith(message + "\n")
         assert result.returncode == -signal.SIGABRT
-        assert "could not open file" in result.stdout
+        assert result.stdout.count(message) == 2
 
 
 def test_stdlib_os_module_read_stdin_reads_piped_input():
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
-            "from 'os' import read_stdin\n\n"
+            "from 'os' import read_stdin\nfrom 'errors' import must_str\n\n"
             "def int main():\n"
-            "    str contents = read_stdin()\n"
+            "    str contents = must_str(read_stdin())\n"
             "    print(len(contents))\n"
             "    print(contents)\n"
             "    return 0\n",
@@ -1155,9 +1160,9 @@ def test_stdlib_os_module_read_stdin_with_no_input_reads_empty():
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
-            "from 'os' import read_stdin\n\n"
+            "from 'os' import read_stdin\nfrom 'errors' import must_str\n\n"
             "def int main():\n"
-            "    str contents = read_stdin()\n"
+            "    str contents = must_str(read_stdin())\n"
             "    print(len(contents))\n"
             "    return 0\n",
         )
@@ -1175,14 +1180,14 @@ def test_stdlib_os_module_read_file_and_read_stdin_share_read_all_from_fd():
         data_path = _write(tmpdir, "data.txt", content)
         entry = _write(
             tmpdir, "main.ht",
-            "from 'os' import read_file, read_stdin, get_args\n\n"
+            "from 'os' import read_file, read_stdin, get_args\nfrom 'errors' import must_str\n\n"
             "def int main(int argc, *byte argv):\n"
             "    []str args = get_args(argc, argv)\n"
             "    str contents = ''\n"
             "    if len(args) > 1:\n"
-            "        contents = read_file(args[1])\n"
+            "        contents = must_str(read_file(args[1]))\n"
             "    else:\n"
-            "        contents = read_stdin()\n"
+            "        contents = must_str(read_stdin())\n"
             "    print(contents)\n"
             "    return 0\n",
         )

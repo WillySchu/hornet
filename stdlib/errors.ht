@@ -1,0 +1,25 @@
+# Error values for functions that can fail. panic stays for bugs.
+from 'c' import panic
+
+type Error struct:
+    str message
+
+type StrResult is str | Error
+type IntResult is int | Error
+
+# The value, or panic with the error's message.
+def str must_str(StrResult r):
+    match r as v:
+        is str:
+            return v
+        is Error:
+            panic(v.message)
+    return ''
+
+def int must_int(IntResult r):
+    match r as v:
+        is int:
+            return v
+        is Error:
+            panic(v.message)
+    return 0

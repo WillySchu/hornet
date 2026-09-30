@@ -287,6 +287,11 @@ int64_t hornet_open_write(const char *path) {
     return open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 }
 
+// strerror(errno) for the most recent failed call.
+const char *hornet_error_message(void) {
+    return strerror(errno);
+}
+
 // Flush stdio, then exit.
 void hornet_exit(int64_t code) {
     fflush(NULL);

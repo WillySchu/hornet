@@ -827,11 +827,14 @@ Provides a small POSIX-style operating-system interface:
 
 ```hornet
 []str args = get_args(argc, argv)
-str contents = read_file('input.txt')
-str stdin_contents = read_stdin()
+StrResult contents = read_file('input.txt')
+StrResult stdin_contents = read_stdin()
+IntResult written = write_file('output.txt', 'hello')
+write_stdout('no trailing newline')
+exit(0)
 ```
 
-File access is currently read-only. Writing files, richer directory/path APIs, and additional process facilities remain future work.
+Functions that can fail return a result from `stdlib/errors.ht` (`StrResult is str | Error`, `IntResult is int | Error`); handle it with `match` or `is`, or use `must_str`/`must_int` to panic on error. Directory/path APIs remain future work.
 
 ---
 
@@ -950,8 +953,17 @@ The repository includes `examples/wc.ht`, a small word/line/byte counting progra
 A simplified version looks like:
 
 ```hornet
-from 'os' import get_args, read_file, read_stdin
-from 'fmt' import int_to_str
+from 'os' import get_args, read_file, read_stdin, write_stderr, exit
+from 'errors' import Error, StrResult
+
+def str contents_or_exit(StrResult r):
+    match r as v:
+        is str:
+            return v
+        is Error:
+            write_stderr(v.message + '\n')
+            exit(1)
+    return ''
 
 def int count_lines(str s):
     int count = 0
@@ -964,12 +976,10 @@ def int main(int argc, *byte argv):
     []str args = get_args(argc, argv)
 
     if len(args) <= 1:
-        str contents = read_stdin()
-        print(count_lines(contents))
+        print(count_lines(contents_or_exit(read_stdin())))
         return 0
 
-    str contents = read_file(args[1])
-    print(count_lines(contents))
+    print(count_lines(contents_or_exit(read_file(args[1]))))
     return 0
 ```
 
