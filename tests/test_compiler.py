@@ -12195,6 +12195,24 @@ class TestMainSignature:
             build_executable(str(src), str(tmp_path / 'lib'))
 
 
+class TestTypedLiterals:
+    pytestmark = GCC_SKIP
+
+    @pytest.mark.parametrize("decl,expr,expected", [
+        ("[]dict[int]int s", "[]dict[int]int[dict[int]int{1: 2}]", "2"),
+        ("[1]dict[int]int s", "[1]dict[int]int[dict[int]int{1: 2}]", "2"),
+        ("[][]int s", "[][]int[[]int[0], []int[2]]", "2"),
+    ])
+    def test_typed_literal_of_containers(self, decl, expr, expected):
+        key = "[1]" if "dict" in decl else "[0]"
+        assert_program_stdout(f"def int main():\n    {decl} = {expr}\n    print(s[len(s) - 1]{key})\n    return 0\n",
+                              expected + "\n")
+
+    def test_indexing_an_untyped_literal_is_not_a_typed_literal(self):
+        assert_program_stdout("def int main():\n    int x = 4\n    print([x, 2][0])\n    print([5][0])\n    return 0\n",
+                              "4\n5\n")
+
+
 class TestStatementsEndTheirLine:
     @pytest.mark.parametrize("line", ["print(1) 2 3", "int y = 1 2", "x = 2 x = 3", "return 0 1", "x 5"])
     def test_trailing_tokens_are_rejected(self, line):

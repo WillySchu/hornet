@@ -193,8 +193,9 @@ class Return(Node):
 
 @dataclass
 class ArrayTypeExpr(Node):
-    """`[N]T`; nests row-major."""
-    size: int
+    """`[N]T`; nests row-major. `size` is an int, or a constant expression until semantic
+    analysis replaces it with its value."""
+    size: Union[int, 'Node']
     element_type: Union[str, 'ArrayTypeExpr', 'SliceTypeExpr']
 
 
@@ -581,6 +582,10 @@ _COMPOUND_ASSIGN_OPS = {
 _ASSIGNMENT_TOKENS = {TokenType.ASSIGN, *_COMPOUND_ASSIGN_OPS.keys()}
 
 
+_TYPE_START_TOKENS = (TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.INT32, TokenType.BOOL,
+                      TokenType.STR, TokenType.IDENTIFIER, TokenType.STAR, TokenType.DICT)
+
+
 class Parser:
     def __init__(self, tokens: List[Token]):
         if len(tokens) == 0:
@@ -894,15 +899,23 @@ class Parser:
                 self.advance()
                 element_type = self.parse_type()
                 return SliceTypeExpr(element_type=element_type, line=open_tok.line, col=open_tok.col)
-            size_tok = self.expect(
-                TokenType.NUMBER,
-                "Expected an array size (a positive integer literal), or ']' for a slice type",
-            )
-            if '.' in size_tok.val:
-                raise self._error(f"Array size must be a whole number, got '{size_tok.val}'", size_tok)
-            size = int(size_tok.val)
-            if size <= 0:
-                raise self._error(f"Array size must be positive, got {size}", size_tok)
+            if self.check(TokenType.NUMBER) and self.peek(1).type == TokenType.CLOSE_BRACKET:
+                size_tok = self.advance()
+                if '.' in size_tok.val:
+                    raise self._error(f"Array size must be a whole number, got '{size_tok.val}'", size_tok)
+                size = int(size_tok.val)
+                if size <= 0:
+                    raise self._error(f"Array size must be positive, got {size}", size_tok)
+            else:
+                # A constant expression, resolved during semantic analysis.
+                start = self.pos
+                try:
+                    size = self.parse_expression()
+                except ParseError:
+                    if self.pos != start:
+                        raise
+                    raise self._error("Expected an array size (a positive integer or constant expression), "
+                                      "or ']' for a slice type", self.current())
             self.expect(TokenType.CLOSE_BRACKET, "Expected ']' after array size")
             element_type = self.parse_type()
             return ArrayTypeExpr(size=size, element_type=element_type, line=open_tok.line, col=open_tok.col)
@@ -1425,14 +1438,22 @@ class Parser:
         raise self._error(f"Expected an expression, got {describe_token(tok)}", tok)
 
     def _looks_like_typed_literal(self) -> bool:
-        """Whether '[' starts a typed literal rather than an untyped one."""
+        """Whether '[' starts a typed literal (`[3]int[...]`, `[N][]T[...]`, `[]dict[K]V[...]`) rather
+        than an untyped one: one or more bracket groups followed by the start of a type."""
         if not self.check(TokenType.OPEN_BRACKET):
             return False
-        if self.peek(1).type == TokenType.CLOSE_BRACKET:
-            return self.peek(2).type in (TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.INT32, TokenType.BOOL, TokenType.STR, TokenType.IDENTIFIER, TokenType.OPEN_BRACKET, TokenType.STAR)
-        if self.peek(1).type == TokenType.NUMBER and self.peek(2).type == TokenType.CLOSE_BRACKET:
-            return self.peek(3).type in (TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.INT32, TokenType.BOOL, TokenType.STR, TokenType.IDENTIFIER, TokenType.OPEN_BRACKET, TokenType.STAR)
-        return False
+        k = 0
+        while self.peek(k).type == TokenType.OPEN_BRACKET:
+            depth = 0
+            while True:
+                t = self.peek(k).type
+                if t == TokenType.EOF:
+                    return False
+                depth += (t == TokenType.OPEN_BRACKET) - (t == TokenType.CLOSE_BRACKET)
+                k += 1
+                if depth == 0:
+                    break
+        return self.peek(k).type in _TYPE_START_TOKENS
 
     def _parse_bracketed_literal(self, parsed_type: Union[str, 'ArrayTypeExpr', 'SliceTypeExpr']) -> Node:
         """Bracketed elements after a pre-parsed literal type."""

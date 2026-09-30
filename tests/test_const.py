@@ -115,3 +115,76 @@ def test_local_names_cannot_reuse_a_constant(tmp_path, binding):
 def test_parameter_cannot_reuse_a_constant(tmp_path):
     message = compile_and_run_expect_error(tmp_path, "const int A = 1\ndef int main(int A):\n    return 0\n")
     assert "can't also be a variable name" in message
+
+
+@GCC_SKIP
+def test_constant_array_sizes():
+    assert_program_stdout(
+        "const int N = 2\n"
+        "const int8 SMALL = int8(3)\n"
+        "type Pair = [N]int\n"
+        "type P struct:\n"
+        "    [N]int xs\n"
+        "    [N * 2][SMALL]int grid\n"
+        "type Q struct:\n"
+        "    int y\n"
+        "type PQ is P | Q\n"
+        "def [N]int doubled([N]int a):\n"
+        "    return [N]int[a[0] * 2, a[1] * 2]\n"
+        "def int main():\n"
+        "    Pair pair = [5, 6]\n"
+        "    P p\n"
+        "    p.xs = doubled(pair)\n"
+        "    p.grid[3][2] = 7\n"
+        "    PQ v = p\n"
+        "    dict[str][N]int d\n"
+        "    d['k'] = p.xs\n"
+        "    print(d['k'])\n"
+        "    print(len(p.grid))\n"
+        "    print(len(p.grid[0]))\n"
+        "    if v is P:\n"
+        "        print(v.grid[3][2])\n"
+        "    return 0\n",
+        "[2]int[10, 12]\n4\n3\n7\n",
+    )
+
+
+@pytest.mark.parametrize('source,match', [
+    ("def int main():\n    int n = 3\n    [n]int a\n    return 0\n", "Array size must be a constant expression, but 'n' isn't a constant"),
+    ("def int f():\n    return 2\ndef int main():\n    [f()]int a\n    return 0\n", "Array size must be a constant expression, not a call"),
+    ("const int N = 2 - 5\ndef int main():\n    [N]int a\n    return 0\n", "Array size must be positive, got -3"),
+    ("const str N = 'x'\ndef int main():\n    [N]int a\n    return 0\n", "Array size must be an integer, got str"),
+    ("const int N = 3\ndef int main():\n    [N]int a = [1, 2]\n    return 0\n", r"declared \[3\]int"),
+])
+def test_bad_constant_array_sizes_are_rejected(source, match):
+    assert_program_semantic_error(source, match=match)
+
+
+@GCC_SKIP
+def test_constant_array_sizes_across_modules(tmp_path):
+    (tmp_path / 'lib.ht').write_text(
+        "const int N = 3\n"
+        "const int _M = 2\n"
+        "type Buf struct:\n"
+        "    [N]int xs\n"
+        "    [_M]int ys\n"
+        "def [N]int make():\n"
+        "    return [N]int[1, 2, 3]\n")
+    main = tmp_path / 'main.ht'
+    main.write_text(
+        "from 'lib' import N, Buf, make\n"
+        "import 'lib'\n"
+        "def int main():\n"
+        "    [N]int a = make()\n"
+        "    [lib.N * 2]int b\n"
+        "    Buf buf = Buf(a, [7, 8])\n"
+        "    print(len(b))\n"
+        "    print(buf.xs[2] + buf.ys[1])\n"
+        "    return 0\n")
+    from build import build_executable
+    from tests.targets import on_every_target, run_binary
+    exe = tmp_path / 'm'
+    def build_and_run(target):
+        build_executable(str(main), str(exe), target=target)
+        return run_binary(target, [exe], capture_output=True, text=True)
+    assert on_every_target(build_and_run).stdout == "6\n11\n"

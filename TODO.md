@@ -18,7 +18,6 @@ Updates:
 - Printing a struct defined in another module shows its internal name: print(write\_file(bad, x)) prints errors$Error(message: …).
 - Nothing warns when a result is ignored, such as a bare write\_stdout(...) statement.
 - Struct fields are resolved before sum types, so a sum type used as a field type is unknown at that point.
-- A slice literal whose element type is a dict ([]dict[int]int[...]) fails to parse with "Expected a variable name".
 - Weight spills by use count and loop depth.
 - Per function dict scratch slot is allocated but never used?
 - Module errors have a line but no column.

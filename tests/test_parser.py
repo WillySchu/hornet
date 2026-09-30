@@ -802,7 +802,7 @@ def test_parse_type_array_missing_size():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape('Expected an array size (a positive integer literal), or \']\' for a slice type at line 1, column 2')):
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an array size (a positive integer or constant expression), or \']\' for a slice type at line 1, column 2')):
         p.parse_type()
 
 
@@ -1052,7 +1052,7 @@ def test_parse_statement_array_no_size():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape('Expected an array size (a positive integer literal), or \']\' for a slice type at line 1, column 2')):
+    with pytest.raises(parser.ParseError, match=re.escape('Expected an array size (a positive integer or constant expression), or \']\' for a slice type at line 1, column 2')):
         p.parse_statement()
 
 

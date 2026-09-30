@@ -10,6 +10,7 @@ stashed on Program.
 """
 
 import argparse
+import dataclasses
 from dataclasses import fields
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -275,7 +276,11 @@ class SemanticAnalyzer:
         self._narrowed_names: set = set()  # currently narrowed variable names
 
     def analyze(self, program: Program) -> None:
-        # Order matters: 1. reserve struct names so aliases can target them.
+        # Order matters: 0. constant array sizes become literals before any type is resolved.
+        self._collect_consts(program)
+        self._resolve_array_sizes(program)
+
+        # 1. Reserve struct names so aliases can target them.
         struct_registry = self._reserve_struct_names(program.structs)
 
         # 2. Resolve aliases before struct fields, which may use them.
@@ -292,9 +297,6 @@ class SemanticAnalyzer:
 
         # 3.6. Methods, after struct resolution.
         self.methods = self._collect_methods(program)
-
-        # 3.7. Constants: types now resolve; values are evaluated on demand in step 4.7.
-        self._collect_consts(program)
 
         # 4. All signatures before any body, so order doesn't matter.
         self.functions = {}
@@ -383,6 +385,50 @@ class SemanticAnalyzer:
             if cd.name in self.const_decls:
                 raise SemanticError(f"Constant '{cd.name}' is already declared", cd)
             self.const_decls[cd.name] = cd
+
+    def _resolve_array_sizes(self, program: Program) -> None:
+        """Replace each `[EXPR]T` size with its value: a positive integer computed from literals and
+        constants only (whose types must therefore be builtin)."""
+        seen = set()
+        stack = [program]
+        while stack:
+            node = stack.pop()
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            if isinstance(node, ArrayTypeExpr) and not isinstance(node.size, int):
+                node.size = self._array_size_value(node.size)
+            if dataclasses.is_dataclass(node) and not isinstance(node, type):
+                for f in dataclasses.fields(node):
+                    value = getattr(node, f.name)
+                    for v in value if isinstance(value, (list, tuple)) else [value]:
+                        if isinstance(v, (Node, Program)):
+                            stack.append(v)
+                        elif isinstance(v, tuple):
+                            stack.extend(x for x in v if isinstance(x, Node))
+
+    def _array_size_value(self, expr: Node) -> int:
+        stack = [expr]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, Call):
+                raise SemanticError("Array size must be a constant expression, not a call", node)
+            if isinstance(node, Variable) and node.name not in self.const_decls:
+                raise SemanticError(
+                    f"Array size must be a constant expression, but '{node.name}' isn't a constant", node)
+            if dataclasses.is_dataclass(node):
+                stack.extend(v for f in dataclasses.fields(node) if isinstance(v := getattr(node, f.name), Node))
+        saved_scopes, self.scopes = self.scopes, [{}]
+        try:
+            size_type = self.check_expr(expr)
+            if size_type not in _INTEGER_TYPES:
+                raise SemanticError(f"Array size must be an integer, got {size_type}", expr)
+            value = self._const_eval(expr)
+        finally:
+            self.scopes = saved_scopes
+        if value <= 0:
+            raise SemanticError(f"Array size must be positive, got {value}", expr)
+        return value
 
     def _check_const_name_collisions(self, program: Program) -> None:
         for name, cd in self.const_decls.items():

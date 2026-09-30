@@ -159,6 +159,9 @@ def _rewrite_type_expr(type_expr, own_names: Set[str], canonical_module: Optiona
         field_name = 'pointee_type' if isinstance(type_expr, PointerTypeExpr) else 'element_type'
         setattr(type_expr, field_name, _rewrite_type_expr(
             getattr(type_expr, field_name), own_names, canonical_module, import_aliases, named_imports, ctx))
+        if isinstance(type_expr, ArrayTypeExpr) and not isinstance(type_expr.size, int):
+            # A constant-expression size names constants like any other expression.
+            type_expr.size = _rewrite_node(type_expr.size, own_names, canonical_module, import_aliases, named_imports, ctx)
         return type_expr
     if isinstance(type_expr, str) and type_expr in own_names:
         return _mangle(canonical_module, type_expr)
