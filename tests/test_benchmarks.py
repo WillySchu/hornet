@@ -90,15 +90,17 @@ def test_every_benchmark_program_has_an_expected_exit_code():
 
 
 @GCC_SKIP
-def test_benchmark_runner_end_to_end(tmp_path):
-    """run_benchmarks.py itself runs, without timing, and its stats add up."""
+@each_e2e_target
+def test_benchmark_runner_end_to_end(target, tmp_path):
+    """run_benchmarks.py itself runs for each target, with one timing run, and its stats add up."""
     import json
     import subprocess
     import sys
     out = tmp_path / 'results.json'
     runner = PROGRAMS_DIR.parent / 'run_benchmarks.py'
     result = subprocess.run(
-        [sys.executable, str(runner), '--runs', '0', '--json', str(out), '--compare', str(tmp_path / 'none.json')],
+        [sys.executable, str(runner), '--runs', '1', '--target', str(target), '--json', str(out),
+         '--compare', str(tmp_path / 'none.json')],
         capture_output=True, text=True,
     )
     assert result.returncode == 0, result.stderr

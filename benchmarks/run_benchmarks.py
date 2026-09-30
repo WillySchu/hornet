@@ -1,6 +1,7 @@
 """Benchmarks: generated-code size, register-allocation stats, and runtime for benchmarks/programs/."""
 
 import argparse
+import importlib
 import json
 import re
 import shutil
@@ -17,30 +18,28 @@ from desugar import desugar_methods
 from merge import merge_programs
 from modules import discover_modules
 from semantic import analyze
-from backend.x86_64.emitter import Emitter
-from build import RUNTIME_C_PATH, c_compiler
-from target import default_target
+from build import RUNTIME_C_PATH, c_compiler, run_prefix
+from target import TARGET_NAMES, Target, default_target
 from ir.program_builder import build_ir_program
 from optimize.optimizer import optimize
 from backend.common.regalloc import allocation_stats
-from backend.x86_64.codegen import CodeGenerator
 
 PROGRAMS_DIR = Path(__file__).parent / 'programs'
 BASELINE_PATH = Path(__file__).parent / 'baseline.json'
 TIMING_RUNS = 7
 EXECUTION_TIMEOUT = 30
 
-ASM_TARGET = default_target()
-
 STAT_KEYS = ('total_temps', 'address_taken_excluded', 'eligible', 'allocated', 'spilled', 'live_across_call')
 
 
-def _instrumented_generate(program):
-    """The x86-64 AsmProgram plus (ir, temp homes, params, assignment) for each function."""
-    generator = CodeGenerator()
+def _instrumented_generate(program, target: Target):
+    """Assembly text for `target` plus (ir, temp homes, params, assignment) for each function."""
+    backend = f'backend.{target.arch}'
+    generator = importlib.import_module(f'{backend}.codegen').CodeGenerator()
     generator.allocation_log = []
     asm_program = generator.generate(optimize(build_ir_program(program)))
-    return asm_program, generator.allocation_log
+    emitter = importlib.import_module(f'{backend}.emitter').Emitter(target)
+    return emitter.emit(asm_program), generator.allocation_log
 
 
 def _sum_stats(per_function: list) -> dict:
@@ -60,14 +59,14 @@ def _instruction_count(asm_text: str) -> int:
     return count
 
 
-def _time_binary(bin_path: Path, runs: int) -> float:
+def _time_binary(bin_path: Path, runs: int, target: Target) -> float:
     """Minimum wall-clock time over `runs` runs; 0.0 if runs is 0."""
     times = [0.0]
     if runs:
         times = []
     for _ in range(runs):
         start = time.perf_counter()
-        subprocess.run([str(bin_path)], capture_output=True, timeout=EXECUTION_TIMEOUT)
+        subprocess.run(run_prefix(target) + [str(bin_path)], capture_output=True, timeout=EXECUTION_TIMEOUT)
         times.append(time.perf_counter() - start)
     return min(times)
 
@@ -84,36 +83,37 @@ def _executed_instructions(bin_path: Path) -> int:
     return int(match.group(1).replace(',', ''))
 
 
-def run_one(ht_path: Path, runs: int = TIMING_RUNS, icount: bool = False) -> dict:
-    """Compile, link, and time one benchmark; optionally count executed instructions."""
+def run_one(ht_path: Path, runs: int = TIMING_RUNS, icount: bool = False, target: Target = None) -> dict:
+    """Compile, link, and time one benchmark for `target` (default: this machine's); optionally
+    count executed instructions."""
+    target = target or default_target()
     with tempfile.TemporaryDirectory() as tmpdir:
         entry, modules = discover_modules(str(ht_path))
         program = merge_programs(entry, modules)
         desugar_methods(program)
         analyze(program)
 
-        asm_program, captured = _instrumented_generate(program)
-        asm_text = Emitter(ASM_TARGET).emit(asm_program)
+        asm_text, captured = _instrumented_generate(program, target)
 
         asm_path = Path(tmpdir) / 'program.s'
         bin_path = Path(tmpdir) / 'program'
         runtime_o_path = Path(tmpdir) / 'runtime.o'
         asm_path.write_text(asm_text)
 
-        runtime_cc_cmd = c_compiler(ASM_TARGET)
+        runtime_cc_cmd = c_compiler(target)
         runtime_cc_cmd += ['-c', str(RUNTIME_C_PATH), '-o', str(runtime_o_path)]
         runtime_result = subprocess.run(runtime_cc_cmd, capture_output=True, text=True)
         if runtime_result.returncode != 0:
             raise RuntimeError(f"gcc failed to compile runtime.c:\n{runtime_result.stderr}")
 
-        gcc_cmd = c_compiler(ASM_TARGET)
+        gcc_cmd = c_compiler(target)
         gcc_cmd += [str(asm_path), str(runtime_o_path), '-o', str(bin_path)]
         result = subprocess.run(gcc_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(f"gcc failed to assemble/link {ht_path.name}:\n{result.stderr}")
 
         per_function_stats = [allocation_stats(*c) for c in captured]
-        elapsed = _time_binary(bin_path, runs)
+        elapsed = _time_binary(bin_path, runs, target)
         executed = _executed_instructions(bin_path) if icount else None
 
     return {
@@ -185,14 +185,21 @@ def main():
     arg_parser.add_argument('--json', type=Path, help='Also write results to this file')
     arg_parser.add_argument('--icount', action='store_true', help='Count executed instructions with valgrind (slow, deterministic)')
     arg_parser.add_argument('--compare', type=Path, help='Diff against this results file instead of baseline.json')
+    arg_parser.add_argument('--target', choices=TARGET_NAMES, default=str(default_target()),
+                            help=f'Target to build and run for (default: {default_target()}); foreign '
+                                 'architectures run under qemu-user, so their times are not comparable')
     arg_parser.add_argument('programs', nargs='*', help='Benchmark names to run (default: all)')
     args = arg_parser.parse_args()
+    target = Target.parse(args.target)
 
     if shutil.which('gcc') is None:
         print("gcc not found on PATH -- these benchmarks compile and execute real binaries.", file=sys.stderr)
         sys.exit(1)
     if args.icount and shutil.which('valgrind') is None:
         print("--icount needs valgrind on PATH.", file=sys.stderr)
+        sys.exit(1)
+    if args.icount and run_prefix(target):
+        print("--icount needs a target that runs natively.", file=sys.stderr)
         sys.exit(1)
 
     paths = sorted(PROGRAMS_DIR.glob('*.ht'))
@@ -201,7 +208,7 @@ def main():
     results = {}
     for ht_path in paths:
         print(f"Running {ht_path.stem}...", file=sys.stderr)
-        results[ht_path.stem] = run_one(ht_path, args.runs, args.icount)
+        results[ht_path.stem] = run_one(ht_path, args.runs, args.icount, target)
 
     print()
     print(format_report(results))

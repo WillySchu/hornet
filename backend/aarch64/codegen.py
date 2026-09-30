@@ -67,6 +67,7 @@ class CodeGenerator:
         self.saved = []  # callee-saved registers the current function uses, as x names
         self._fail_labels = {}  # message -> label, per function
         self._message_labels = {}  # message -> static string label, per program
+        self.allocation_log = None  # set to a list to record (ir, temp homes, params, assignment) per function
 
     def generate(self, ir_program: IRProgram) -> AsmProgram:
         self.ir_program = ir_program
@@ -80,6 +81,8 @@ class CodeGenerator:
         overflow = max((len(i.args) - MAX_REGISTER_ARGS for i in body if isinstance(i, IRCall)), default=0)
         self.frame.reserve_outgoing(8 * overflow)
         self.assignment = allocate_registers(body, ALLOCATABLE_REGISTERS, CALLEE_SAVED_POOL, ir_fn.temp_homes, ir_fn.params)
+        if self.allocation_log is not None:
+            self.allocation_log.append((body, ir_fn.temp_homes, ir_fn.params, dict(self.assignment)))
         used = set(self.assignment.values())
         self.saved = [r for r in CALLEE_SAVED_POOL if r in used]
         selector = Selector(self, ir_fn)
