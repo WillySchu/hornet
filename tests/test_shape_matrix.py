@@ -16,7 +16,7 @@ def test_no_internal_compiler_error(name, source, expected, tmp_path):
     path = tmp_path / 'p.ht'
     path.write_text(source)
     try:
-        compile_to_asm(str(path), platform='linux')
+        compile_to_asm(str(path), target='x86_64-linux')
     except CompileError:
         pass  # a clean rejection is fine; anything else fails the test
 
@@ -30,7 +30,7 @@ def test_sampled_programs_run_correctly(name, source, expected, tmp_path):
     path = tmp_path / 'p.ht'
     path.write_text(source)
     try:
-        compile_to_asm(str(path), platform='linux')
+        compile_to_asm(str(path), target='x86_64-linux')
     except CompileError:
         pytest.skip('rejected by semantic analysis')
     result = compile_and_run(source)

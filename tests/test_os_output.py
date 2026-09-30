@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 
 from build import build_executable
-from tests.test_compiler import ASM_PLATFORM, GCC_SKIP
+from tests.test_compiler import ASM_TARGET, GCC_SKIP
 
 
 def compile_and_run(source: str) -> subprocess.CompletedProcess:
@@ -13,7 +13,7 @@ def compile_and_run(source: str) -> subprocess.CompletedProcess:
     with tempfile.TemporaryDirectory() as tmp:
         src, exe = Path(tmp) / 'p.ht', Path(tmp) / 'p'
         src.write_text(source)
-        build_executable(str(src), str(exe), platform=ASM_PLATFORM)
+        build_executable(str(src), str(exe), target=ASM_TARGET)
         return subprocess.run([str(exe)], capture_output=True, text=True, timeout=10)
 
 

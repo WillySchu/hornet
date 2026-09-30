@@ -144,7 +144,7 @@ main:
 def test_c_convention_caller_keeps_callee_saved_registers(tmp_path):
     src = tmp_path / 'work.ht'
     src.write_text(_HORNET)
-    (tmp_path / 'work.s').write_text(compile_to_asm(str(src), platform='linux'), encoding='latin-1')
+    (tmp_path / 'work.s').write_text(compile_to_asm(str(src), target='x86_64-linux'), encoding='latin-1')
     (tmp_path / 'harness.s').write_text(_HARNESS)
     exe = tmp_path / 'abi'
     subprocess.run(['gcc', str(tmp_path / 'harness.s'), str(tmp_path / 'work.s'), '-o', str(exe)], check=True)

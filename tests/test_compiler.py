@@ -693,7 +693,8 @@ import pytest
 from compile import generate_asm
 from codegen.errors import CodegenError
 from ir.errors import IRError
-from build import RUNTIME_C_PATH
+from build import RUNTIME_C_PATH, c_compiler
+from target import default_target
 from desugar import desugar_methods
 from lexer import lex
 from parser import Break, Call, Constant, Continue, For, ForIn, Node, Parser, ParseError
@@ -722,17 +723,10 @@ GCC_SKIP = pytest.mark.skipif(
 # codegen, let alone gcc, so it shouldn't be skipped just because gcc
 # happens to be missing.
 
-# These tests actually assemble and run the generated code, so the
-# assembly's platform has to match whatever `gcc` on *this* machine will
-# actually produce/link -- not be hardcoded to one platform. On macOS
-# that also means explicitly targeting x86_64: this compiler only ever
-# generates x86-64, but Apple Silicon Macs default to arm64, and Xcode's
-# toolchain needs to be told `-arch x86_64` to assemble/link x86-64 input
-# instead of rejecting it outright. The resulting binary then runs under
-# Rosetta 2 (installed automatically the first time it's needed, or via
-# `softwareupdate --install-rosetta`).
+# Programs are compiled for, and run on, this machine's default target (x86-64 on macOS runs
+# under Rosetta 2 on Apple Silicon: `softwareupdate --install-rosetta`).
 HOST_IS_MACOS = sys.platform == "darwin"
-ASM_PLATFORM = "macos" if HOST_IS_MACOS else "linux"
+ASM_TARGET = default_target()
 
 # How long a compiled program gets to run before it's treated as hung.
 # Every test in this file finishes in well under a second normally; a
@@ -775,7 +769,7 @@ def _compile_to_binary(source: str, tmp: Path) -> tuple[Path, str]:
     bin_path = tmp / "program"
     runtime_o_path = tmp / "runtime.o"
 
-    asm = generate_asm(ast, platform=ASM_PLATFORM)
+    asm = generate_asm(ast, target=ASM_TARGET)
     # Latin-1, not write_text's own default UTF-8 -- see compile.py's
     # own, identical comment for why: a str literal's own raw bytes
     # can legitimately be any 0-255 value now (\xNN escapes), and
@@ -792,10 +786,7 @@ def _compile_to_binary(source: str, tmp: Path) -> tuple[Path, str]:
     # assembled inline here). Unconditional, regardless of whether
     # THIS particular program happens to call print, matching
     # build_executable's own reasoning exactly.
-    runtime_cc_cmd = ["gcc"]
-    if HOST_IS_MACOS:
-        runtime_cc_cmd += ["-arch", "x86_64"]
-    runtime_cc_cmd += ["-c", str(RUNTIME_C_PATH), "-o", str(runtime_o_path)]
+    runtime_cc_cmd = c_compiler(ASM_TARGET) + ["-c", str(RUNTIME_C_PATH), "-o", str(runtime_o_path)]
     runtime_result = subprocess.run(runtime_cc_cmd, capture_output=True, text=True)
     if runtime_result.returncode != 0:
         pytest.fail(
@@ -805,10 +796,7 @@ def _compile_to_binary(source: str, tmp: Path) -> tuple[Path, str]:
             f"--- gcc stderr ---\n{runtime_result.stderr}\n"
         )
 
-    gcc_cmd = ["gcc"]
-    if HOST_IS_MACOS:
-        gcc_cmd += ["-arch", "x86_64"]
-    gcc_cmd += [str(asm_path), str(runtime_o_path), "-o", str(bin_path)]
+    gcc_cmd = c_compiler(ASM_TARGET) + [str(asm_path), str(runtime_o_path), "-o", str(bin_path)]
 
     result = subprocess.run(gcc_cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -880,8 +868,8 @@ def _run_binary(bin_path: Path, asm: str) -> subprocess.CompletedProcess:
 
 def compile_and_run(source: str) -> subprocess.CompletedProcess:
     """Runs `source` through the real lex -> parse -> analyze -> codegen
-    pipeline, assembles and links it with gcc (using ASM_PLATFORM, the
-    platform this test process is actually running on -- see above),
+    pipeline, assembles and links it with gcc (for ASM_TARGET, this
+    machine's default target -- see above),
     and runs the resulting binary, subject to EXECUTION_TIMEOUT below.
 
     Returns the CompletedProcess so callers can inspect `.returncode`:
@@ -974,7 +962,7 @@ def assert_program_codegen_error(source: str, match: str = None) -> None:
     ast = _parse(source)
     analyze(ast)
     with pytest.raises(CodegenError, match=match):
-        generate_asm(ast, platform=ASM_PLATFORM)
+        generate_asm(ast, target=ASM_TARGET)
 
 
 def assert_stdout(body: str, expected_stdout: str, return_type: str = "int") -> None:
@@ -3545,7 +3533,7 @@ class TestTypeAnnotation:
         ast = _parse("def int main():\n    return 1 + 2\n")
         # Deliberately not calling analyze(ast) here.
         with pytest.raises(IRError, match="no struct registry"):
-            generate_asm(ast, platform=ASM_PLATFORM)
+            generate_asm(ast, target=ASM_TARGET)
 
 
 # ---------------------------------------------------------------------------
@@ -11525,7 +11513,7 @@ class TestExternFunctions:
             "    return sum7(1, 2, 3, 4, 5, 6, 7)\n"
         )
         analyze(ast)
-        generate_asm(ast, platform=ASM_PLATFORM)  # should not raise
+        generate_asm(ast, target=ASM_TARGET)  # should not raise
 
 
 class TestExternFunctionsCodegen:
@@ -14388,7 +14376,7 @@ class TestTypedArrayLiterals:
         ast = _parse(source)
         analyze(ast)
         with pytest.raises(IRError, match="assign the literal to a variable first"):
-            generate_asm(ast, platform=ASM_PLATFORM)
+            generate_asm(ast, target=ASM_TARGET)
 
 
 class TestBoundsChecking:
@@ -14500,7 +14488,7 @@ class TestHeapAllocatedArrays:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        asm = generate_asm(ast, target=ASM_TARGET)
         assert "malloc" not in asm
 
     def test_just_over_threshold_is_heap_allocated(self):
@@ -14517,7 +14505,7 @@ class TestHeapAllocatedArrays:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        asm = generate_asm(ast, target=ASM_TARGET)
         assert "malloc" in asm
         assert "$16392" in asm
 
@@ -14832,7 +14820,7 @@ class TestArrayEscapeAnalysis:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        asm = generate_asm(ast, target=ASM_TARGET)
         assert "malloc" in asm
         assert "$40" in asm  # 5 ints * 8 bytes
 
@@ -14850,7 +14838,7 @@ class TestArrayEscapeAnalysis:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        asm = generate_asm(ast, target=ASM_TARGET)
         assert "malloc" not in asm
 
     def test_array_passed_by_value_not_sliced_stays_on_the_stack(self):
@@ -14868,7 +14856,7 @@ class TestArrayEscapeAnalysis:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        asm = generate_asm(ast, target=ASM_TARGET)
         assert "malloc" not in asm
 
     def test_transitive_reslicing_chain_escapes_correctly(self):
@@ -14956,7 +14944,7 @@ class TestArrayEscapeAnalysis:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        asm = generate_asm(ast, target=ASM_TARGET)
         assert "malloc" not in asm
 
     def test_slice_passed_to_a_parameter_that_escapes_is_promoted(self):
@@ -14971,7 +14959,7 @@ class TestArrayEscapeAnalysis:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        asm = generate_asm(ast, target=ASM_TARGET)
         assert "malloc" in asm
 
     def test_array_of_slices_element_escapes_correctly(self):
@@ -15016,7 +15004,7 @@ class TestArrayEscapeAnalysis:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        asm = generate_asm(ast, target=ASM_TARGET)
         assert "malloc" in asm
 
     def test_slice_of_slices_element_escapes_correctly(self):
@@ -15073,7 +15061,7 @@ class TestArrayEscapeAnalysis:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        asm = generate_asm(ast, target=ASM_TARGET)
         assert "malloc" not in asm
 
     def test_container_element_never_read_does_not_trigger_promotion(self):
@@ -15094,7 +15082,7 @@ class TestArrayEscapeAnalysis:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        asm = generate_asm(ast, target=ASM_TARGET)
         assert "malloc" not in asm
 
     def test_slice_variable_backed_by_local_array_assigned_into_container_element(self):
@@ -15196,7 +15184,7 @@ class TestArrayEscapeAnalysis:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        asm = generate_asm(ast, target=ASM_TARGET)
         assert "malloc" in asm
 
     def test_chained_reslicing_with_no_intermediate_variable_escapes_correctly(self):
@@ -15242,7 +15230,7 @@ class TestArrayEscapeAnalysis:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        asm = generate_asm(ast, target=ASM_TARGET)
         assert "malloc" in asm
 
     def test_scalar_read_through_a_slice_element_does_not_escape(self):
@@ -15265,7 +15253,7 @@ class TestArrayEscapeAnalysis:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        asm = generate_asm(ast, target=ASM_TARGET)
         assert "malloc" not in asm
 
 
@@ -19224,7 +19212,7 @@ class TestStructs:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        asm = generate_asm(ast, target=ASM_TARGET)
         assert "malloc" in asm
 
     def test_forward_reference(self):
@@ -19650,7 +19638,7 @@ class TestStructs:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        asm = generate_asm(ast, target=ASM_TARGET)
         assert "malloc" not in asm
 
     def test_reslicing_a_struct_slice_field_escapes_correctly(self):
@@ -19982,7 +19970,7 @@ class TestStructLiterals:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        asm = generate_asm(ast, target=ASM_TARGET)
         assert len(re.findall(r"call\s+_?malloc\b", asm)) == 1
 
     def test_small_struct_literal_does_not_use_malloc(self):
@@ -20002,7 +19990,7 @@ class TestStructLiterals:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        asm = generate_asm(ast, target=ASM_TARGET)
         assert "malloc" not in asm
 
     def test_value_semantics_mutating_a_copy_does_not_affect_the_original(self):
@@ -20697,7 +20685,7 @@ class TestArgumentMaterialization:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        asm = generate_asm(ast, target=ASM_TARGET)
         assert len(re.findall(r"call\s+_?malloc\b", asm)) >= 1
 
         main_frame_size = None
@@ -20755,7 +20743,7 @@ class TestArgumentMaterialization:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        asm = generate_asm(ast, target=ASM_TARGET)
         assert len(re.findall(r"call\s+_?malloc\b", asm)) >= 1
 
     def test_small_literal_argument_does_not_use_malloc(self):
@@ -20773,7 +20761,7 @@ class TestArgumentMaterialization:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        asm = generate_asm(ast, target=ASM_TARGET)
         assert "malloc" not in asm
 
     def test_nested_struct_literal_as_argument(self):
@@ -20981,7 +20969,7 @@ class TestCompositeCallAsAddressableBase:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        asm = generate_asm(ast, target=ASM_TARGET)
         assert "malloc" not in asm
 
     def test_large_array_returning_call_indexed_is_heap_allocated(self):
@@ -21003,7 +20991,7 @@ class TestCompositeCallAsAddressableBase:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        asm = generate_asm(ast, target=ASM_TARGET)
         assert "malloc" in asm
 
     def test_slice_production_from_call_always_heap_allocates_regardless_of_size(self):
@@ -21023,7 +21011,7 @@ class TestCompositeCallAsAddressableBase:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        asm = generate_asm(ast, target=ASM_TARGET)
         assert "malloc" in asm
 
 
@@ -22232,7 +22220,7 @@ class TestArraysOfStructs:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        asm = generate_asm(ast, target=ASM_TARGET)
         assert len(re.findall(r"call\s+_?malloc\b", asm)) >= 1
 
     def test_small_array_of_structs_literal_does_not_use_malloc(self):
@@ -22249,7 +22237,7 @@ class TestArraysOfStructs:
         )
         ast = _parse(source)
         analyze(ast)
-        asm = generate_asm(ast, platform=ASM_PLATFORM)
+        asm = generate_asm(ast, target=ASM_TARGET)
         assert "malloc" not in asm
 
     def test_mismatched_struct_types_in_array_literal_is_rejected(self):
@@ -22301,7 +22289,7 @@ class TestArraysOfStructs:
         ast = _parse(source)
         analyze(ast)  # type-checks fine -- the rejection is codegen-level only
         with pytest.raises(IRError, match="assign the literal to a variable first"):
-            generate_asm(ast, platform=ASM_PLATFORM)
+            generate_asm(ast, target=ASM_TARGET)
 
     def test_single_element_array_literal_still_parses_as_untyped(self):
         """Negative control for the parser fix: `[5]` alone (a single-

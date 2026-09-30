@@ -35,6 +35,7 @@ from codegen.ir_lowering import InstructionSelector
 from codegen.register_allocator import allocate_registers
 from codegen.scalars_lowering import ScalarsLoweringMixin
 from codegen.utils import as_qword_register
+from target import Target
 
 
 # IR -> assembly AST
@@ -164,6 +165,6 @@ class CodeGenerator(
 
 # Entry points
 
-def lower_to_asm(ir_program: IRProgram, platform: str = 'macos') -> str:
+def lower_to_asm(ir_program: IRProgram, target: Target) -> str:
     """Lower an optimized IRProgram to assembly text."""
-    return Emitter(platform=platform).emit(CodeGenerator().generate(ir_program))
+    return Emitter(target).emit(CodeGenerator().generate(ir_program))

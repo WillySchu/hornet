@@ -49,6 +49,8 @@ def _source_line(path: Optional[str], line: int) -> Optional[str]:
 
 def format_error(err: CompileError) -> str:
     """`file:line:col: error: message`, then the source line and a caret."""
+    if not err.file and not err.line:
+        return f"error: {err.message}"
     loc = _display_path(err.file) if err.file else '<input>'
     if err.line:
         loc += f":{err.line}"

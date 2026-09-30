@@ -18,7 +18,8 @@ from merge import merge_programs
 from modules import discover_modules
 from semantic import analyze
 from codegen.emitter import Emitter
-from build import RUNTIME_C_PATH
+from build import RUNTIME_C_PATH, c_compiler
+from target import default_target
 from ir.program_builder import build_ir_program
 from optimize.optimizer import optimize
 import codegen.codegen as codegen_module
@@ -30,8 +31,7 @@ BASELINE_PATH = Path(__file__).parent / 'baseline.json'
 TIMING_RUNS = 7
 EXECUTION_TIMEOUT = 30
 
-HOST_IS_MACOS = sys.platform == 'darwin'
-ASM_PLATFORM = 'macos' if HOST_IS_MACOS else 'linux'
+ASM_TARGET = default_target()
 
 STAT_KEYS = ('total_temps', 'address_taken_excluded', 'eligible', 'allocated', 'spilled', 'live_across_call')
 
@@ -125,24 +125,20 @@ def run_one(ht_path: Path, runs: int = TIMING_RUNS, icount: bool = False) -> dic
         analyze(program)
 
         asm_program, captured = _instrumented_generate(program)
-        asm_text = Emitter(platform=ASM_PLATFORM).emit(asm_program)
+        asm_text = Emitter(ASM_TARGET).emit(asm_program)
 
         asm_path = Path(tmpdir) / 'program.s'
         bin_path = Path(tmpdir) / 'program'
         runtime_o_path = Path(tmpdir) / 'runtime.o'
         asm_path.write_text(asm_text)
 
-        runtime_cc_cmd = ['gcc']
-        if HOST_IS_MACOS:
-            runtime_cc_cmd += ['-arch', 'x86_64']
+        runtime_cc_cmd = c_compiler(ASM_TARGET)
         runtime_cc_cmd += ['-c', str(RUNTIME_C_PATH), '-o', str(runtime_o_path)]
         runtime_result = subprocess.run(runtime_cc_cmd, capture_output=True, text=True)
         if runtime_result.returncode != 0:
             raise RuntimeError(f"gcc failed to compile runtime.c:\n{runtime_result.stderr}")
 
-        gcc_cmd = ['gcc']
-        if HOST_IS_MACOS:
-            gcc_cmd += ['-arch', 'x86_64']
+        gcc_cmd = c_compiler(ASM_TARGET)
         gcc_cmd += [str(asm_path), str(runtime_o_path), '-o', str(bin_path)]
         result = subprocess.run(gcc_cmd, capture_output=True, text=True)
         if result.returncode != 0:

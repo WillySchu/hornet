@@ -11,11 +11,13 @@ stringify, the buffer helpers) kept internal.
 """
 import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
 import pytest
+
+from build import c_compiler
+from target import default_target
 
 RUNTIME_DIR = Path(__file__).resolve().parent.parent.parent / "runtime"
 RUNTIME_C = RUNTIME_DIR / "runtime.c"
@@ -24,13 +26,9 @@ TEST_CALLER_C = RUNTIME_DIR / "test_linked_separately.c"
 GCC_AVAILABLE = shutil.which("gcc") is not None
 pytestmark = pytest.mark.skipif(not GCC_AVAILABLE, reason="gcc not available")
 
-# Same convention as build.py/tests/test_compiler.py/benchmarks/
-# run_benchmarks.py: without this, gcc's own default target on an
-# Apple Silicon Mac is arm64, not x86-64 -- these two tests link
-# object files together and run the result, so a consistent target
-# matters even though nothing here mixes in Hornet-generated x86-64
-# assembly directly (unlike compile_and_run's own build).
-HOST_IS_MACOS = sys.platform == "darwin"
+# Built for the default target, the same as compiled Hornet programs.
+TARGET = default_target()
+CC = c_compiler(TARGET)
 
 
 def test_runtime_and_caller_link_and_run_correctly():
@@ -39,16 +37,15 @@ def test_runtime_and_caller_link_and_run_correctly():
         caller_o = f"{tmpdir}/caller.o"
         binary = f"{tmpdir}/test_bin"
 
-        arch_flags = ["-arch", "x86_64"] if HOST_IS_MACOS else []
         subprocess.run(
-            ["gcc", *arch_flags, "-c", "-Wall", "-Wextra", "-std=c11", str(RUNTIME_C), "-o", runtime_o],
+            [*CC, "-c", "-Wall", "-Wextra", "-std=c11", str(RUNTIME_C), "-o", runtime_o],
             check=True, capture_output=True, text=True,
         )
         subprocess.run(
-            ["gcc", *arch_flags, "-c", "-Wall", "-Wextra", "-std=c11", str(TEST_CALLER_C), "-o", caller_o],
+            [*CC, "-c", "-Wall", "-Wextra", "-std=c11", str(TEST_CALLER_C), "-o", caller_o],
             check=True, capture_output=True, text=True,
         )
-        subprocess.run(["gcc", *arch_flags, runtime_o, caller_o, "-o", binary], check=True, capture_output=True, text=True)
+        subprocess.run([*CC, runtime_o, caller_o, "-o", binary], check=True, capture_output=True, text=True)
 
         result = subprocess.run([binary], capture_output=True, text=True)
         assert result.returncode == 0
@@ -70,9 +67,8 @@ def test_hornet_runtime_entry_points_are_the_only_external_symbols():
     whatever links against this object file."""
     with tempfile.TemporaryDirectory() as tmpdir:
         runtime_o = f"{tmpdir}/runtime.o"
-        arch_flags = ["-arch", "x86_64"] if HOST_IS_MACOS else []
         subprocess.run(
-            ["gcc", *arch_flags, "-c", "-Wall", "-Wextra", "-std=c11", str(RUNTIME_C), "-o", runtime_o],
+            [*CC, "-c", "-Wall", "-Wextra", "-std=c11", str(RUNTIME_C), "-o", runtime_o],
             check=True, capture_output=True, text=True,
         )
         nm_result = subprocess.run(["nm", "-g", runtime_o], check=True, capture_output=True, text=True)
@@ -94,5 +90,5 @@ def test_hornet_runtime_entry_points_are_the_only_external_symbols():
             "hornet_error_message", "hornet_exit", "hornet_hash_bytes", "hornet_open_write", "hornet_panic", "hornet_print",
             "hornet_slice_grow", "hornet_write_fd",
         ]
-        expected_names = [f"_{n}" for n in names] if HOST_IS_MACOS else names
+        expected_names = [f"_{n}" for n in names] if TARGET.os == 'macos' else names
         assert sorted(external_symbols) == sorted(expected_names)

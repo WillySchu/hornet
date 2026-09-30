@@ -2,18 +2,17 @@
 
 from codegen.assembly_ast import AsmProgram, AsmFunction, CallInstr
 from codegen.utils import escape_for_asciz
+from target import Target
 
 
 class Emitter:
-    """`platform` controls symbol prefixes and section names."""
+    """The target's OS controls symbol prefixes and section names."""
 
-    def __init__(self, platform: str = 'macos'):
-        if platform not in ('macos', 'linux'):
-            raise ValueError("platform must be 'macos' or 'linux'")
-        self.platform = platform
+    def __init__(self, target: Target):
+        self.os = target.os
 
     def symbol(self, name: str) -> str:
-        return f"_{name}" if self.platform == 'macos' else name
+        return f"_{name}" if self.os == 'macos' else name
 
     def emit(self, program: AsmProgram) -> str:
         lines: list[str] = []
@@ -32,7 +31,7 @@ class Emitter:
                 for f in fields:
                     lines.append(f"    .quad {f}")
             lines.append("")
-        if self.platform == 'linux':
+        if self.os == 'linux':
             lines.append('.section .note.GNU-stack,"",@progbits')
         return "\n".join(lines).rstrip() + "\n"
 

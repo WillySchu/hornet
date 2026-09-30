@@ -478,7 +478,7 @@ class LeaQFrameSlot(Instruction):
 
 @dataclass
 class CallInstr(Instruction):
-    """Call a symbol; the Emitter applies platform naming."""
+    """Call a symbol; the Emitter applies the target's symbol naming."""
     target: str
     mnemonic = "call"
 

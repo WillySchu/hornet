@@ -10,19 +10,19 @@ example program works, not a stand-in for it.
 
 import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
 import pytest
 
+from build import c_compiler
 from compile import compile_to_asm
+from target import default_target
 
 RUNTIME_C_PATH = Path(__file__).parent.parent / "runtime" / "runtime.c"
 WC_PATH = Path(__file__).parent.parent / "examples" / "wc.ht"
 
-HOST_IS_MACOS = sys.platform == "darwin"
-ASM_PLATFORM = "macos" if HOST_IS_MACOS else "linux"
+ASM_TARGET = default_target()
 
 GCC_AVAILABLE = shutil.which("gcc") is not None
 GCC_SKIP = pytest.mark.skipif(
@@ -42,20 +42,16 @@ def _run_wc(tmpdir: str, args: list = None, stdin: str = None) -> subprocess.Com
     links, and runs it with the given argv[1:]/stdin -- mirrors
     tests/test_merge.py's own _compile_and_run, but always against
     this one, fixed entry file."""
-    asm = compile_to_asm(str(WC_PATH), platform=ASM_PLATFORM)
+    asm = compile_to_asm(str(WC_PATH), target=ASM_TARGET)
 
     asm_path = Path(tmpdir) / "program.s"
     asm_path.write_text(asm, encoding="latin-1")
     runtime_o = Path(tmpdir) / "runtime.o"
-    runtime_cc_cmd = ["gcc"]
-    if HOST_IS_MACOS:
-        runtime_cc_cmd += ["-arch", "x86_64"]
+    runtime_cc_cmd = c_compiler(ASM_TARGET)
     runtime_cc_cmd += ["-c", str(RUNTIME_C_PATH), "-o", str(runtime_o)]
     subprocess.run(runtime_cc_cmd, check=True, capture_output=True)
     binary = Path(tmpdir) / "program"
-    gcc_cmd = ["gcc"]
-    if HOST_IS_MACOS:
-        gcc_cmd += ["-arch", "x86_64"]
+    gcc_cmd = c_compiler(ASM_TARGET)
     gcc_cmd += [str(asm_path), str(runtime_o), "-o", str(binary)]
     link = subprocess.run(gcc_cmd, capture_output=True, text=True)
     assert link.returncode == 0, f"link failed:\n{link.stderr}\n--- asm ---\n{asm}"

@@ -63,9 +63,9 @@ def test_constants_across_modules(tmp_path):
     from pathlib import Path
     import subprocess
     from build import build_executable
-    from tests.test_compiler import ASM_PLATFORM
+    from tests.test_compiler import ASM_TARGET
     exe = Path(tmp_path) / 'm'
-    build_executable(str(main), str(exe), platform=ASM_PLATFORM)
+    build_executable(str(main), str(exe), target=ASM_TARGET)
     assert subprocess.run([str(exe)], capture_output=True, text=True).stdout == "3\nhi kinds\n100\n"
 
 
@@ -81,7 +81,7 @@ def compile_and_run_expect_error(tmp_path, source: str) -> str:
     main = tmp_path / 'main.ht'
     main.write_text(source)
     with pytest.raises(CompileError) as e:
-        compile_to_asm(str(main), 'linux')
+        compile_to_asm(str(main), 'x86_64-linux')
     return str(e.value)
 
 

@@ -7,7 +7,7 @@ import pytest
 
 from build import build_executable
 from lexer import Lexer, TokenType
-from tests.test_compiler import ASM_PLATFORM, GCC_SKIP
+from tests.test_compiler import ASM_TARGET, GCC_SKIP
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCES = sorted(
@@ -17,7 +17,7 @@ SOURCES = sorted(
 @pytest.fixture(scope='session')
 def hfmt(tmp_path_factory):
     exe = tmp_path_factory.mktemp('hfmt') / 'hfmt'
-    build_executable(str(ROOT / 'tools' / 'hfmt' / 'main.ht'), str(exe), platform=ASM_PLATFORM)
+    build_executable(str(ROOT / 'tools' / 'hfmt' / 'main.ht'), str(exe), target=ASM_TARGET)
     return exe
 
 
@@ -141,7 +141,7 @@ def test_formatting_repo_files_is_stable_and_keeps_meaning(hfmt, path, tmp_path)
     # Sibling modules are formatted too, so relative imports resolve to formatted code.
     for sibling in path.parent.glob('*.ht'):
         (tmp_path / sibling.name).write_text(_run(hfmt, stdin=sibling.read_text()).stdout)
-    assert compile_to_asm(str(tmp_path / path.name), 'linux') == compile_to_asm(str(path), 'linux')
+    assert compile_to_asm(str(tmp_path / path.name), 'x86_64-linux') == compile_to_asm(str(path), 'x86_64-linux')
 
 
 # -- command line ---------------------------------------------------------------
@@ -254,20 +254,20 @@ def test_formatting_scrambled_programs_keeps_meaning(hfmt, name, source, tmp_pat
     original = tmp_path / 'original.ht'
     original.write_text(source)
     try:
-        expected = compile_to_asm(str(original), 'linux')
+        expected = compile_to_asm(str(original), 'x86_64-linux')
     except CompileError:
         pytest.skip('rejected by semantic analysis')
     import zlib
     scrambled = scramble(source, zlib.crc32(name.encode()))
     assert scrambled != source
     (tmp_path / 'scrambled.ht').write_text(scrambled)
-    assert compile_to_asm(str(tmp_path / 'scrambled.ht'), 'linux') == expected  # the scrambler itself is sound
+    assert compile_to_asm(str(tmp_path / 'scrambled.ht'), 'x86_64-linux') == expected  # the scrambler itself is sound
     r = _run(hfmt, stdin=scrambled)
     assert r.returncode == 0, r.stderr + scrambled
     assert _run(hfmt, stdin=r.stdout).stdout == r.stdout
     formatted = tmp_path / 'formatted.ht'
     formatted.write_text(r.stdout)
-    assert compile_to_asm(str(formatted), 'linux') == expected
+    assert compile_to_asm(str(formatted), 'x86_64-linux') == expected
 
 
 @GCC_SKIP

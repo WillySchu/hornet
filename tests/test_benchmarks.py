@@ -17,7 +17,7 @@ import pytest
 
 from build import build_executable
 from compile import compile_to_asm
-from tests.test_compiler import ASM_PLATFORM, GCC_SKIP, _run_binary
+from tests.test_compiler import ASM_TARGET, GCC_SKIP, _run_binary
 
 PROGRAMS_DIR = Path(__file__).parent.parent / 'benchmarks' / 'programs'
 
@@ -66,8 +66,8 @@ RERUNS = 10
 def test_benchmark_still_compiles_and_runs_correctly(name, tmp_path):
     path = str(PROGRAMS_DIR / f'{name}.ht')
     bin_path = tmp_path / 'program'
-    build_executable(path, str(bin_path), platform=ASM_PLATFORM)  # full driver, so imports work
-    asm = compile_to_asm(path, platform=ASM_PLATFORM)
+    build_executable(path, str(bin_path), target=ASM_TARGET)  # full driver, so imports work
+    asm = compile_to_asm(path, target=ASM_TARGET)
     expected = EXPECTED_EXIT_CODES[name]
     for run in range(1, RERUNS + 1):
         result = _run_binary(bin_path, asm)
