@@ -8,6 +8,7 @@ kept sign/zero-extended to 32 bits, as on x86-64.
 
 from backend.aarch64.assembly import AddrOf, Call, Cond, FrameSlot, Imm, Instr, LabelDef, LabelRef, Mem, Reg, Shift, SymPage, SymPageOffset, FP
 from backend.aarch64.calling_convention import ARG_REGISTERS, MAX_REGISTER_ARGS, SCRATCH_A, SCRATCH_B, SCRATCH_RESULT
+from backend.common.division import is_power_of_two, magic
 from backend.errors import CodegenError
 from ir.cfg import uses
 from ir.ir import (
@@ -288,6 +289,8 @@ class Selector:
             self.emit(_ALU[op], d, a, Imm(right.value & ((1 << bits) - 1)))
         elif op in (BinaryOp.SHIFT_LEFT, BinaryOp.SHIFT_RIGHT) and isinstance(right, IRConst):
             self.emit(_ALU[op], d, a, Imm(right.value & (bits - 1)))
+        elif op in (BinaryOp.DIVIDE, BinaryOp.MODULO) and isinstance(right, IRConst) and right.value not in (0, 1, -1):
+            self._divmod_by_constant(op, d, a, right.value)
         elif op == BinaryOp.MODULO:
             b = self.value_in(right, SCRATCH_B)
             q = sized(SCRATCH_Q, instr.left.type)
@@ -299,6 +302,38 @@ class Selector:
         else:
             raise CodegenError(f"aarch64: no lowering for binary operator {op}")
         self.finish(dst, d)
+
+    def _divmod_by_constant(self, op, d: Reg, a: Reg, divisor: int) -> None:
+        """Signed division or modulo by a constant with multiply-high and shifts (backend/common/division.py).
+        Narrower operands are sign-extended and divided as 64-bit; the low half is the result."""
+        n, q, t = SCRATCH_A, SCRATCH_RESULT, SCRATCH_B
+        if a.name[0] == 'w':
+            self.emit('sxtw', n, a)
+        elif a != n:
+            self.emit('mov', n, a)
+        ad = abs(divisor)
+        if is_power_of_two(ad):
+            k = ad.bit_length() - 1
+            self.emit('asr', q, n, Imm(63))
+            self.emit('add', q, n, q, Shift('lsr', 64 - k))
+            self.emit('asr', q, q, Imm(k))
+        else:
+            m, shift = magic(ad)
+            self.mov_imm(t, m)
+            self.emit('smulh', q, n, t)
+            if m < 0:
+                self.emit('add', q, q, n)
+            if shift:
+                self.emit('asr', q, q, Imm(shift))
+            self.emit('add', q, q, q, Shift('lsr', 63))
+        if divisor < 0:
+            self.emit('neg', q, q)
+        if op == BinaryOp.MODULO:
+            self.mov_imm(t, divisor)
+            self.emit('msub', q, q, t, n)
+        result = q if d.name[0] == 'x' else q.w
+        if result != d:
+            self.emit('mov', d, result)
 
     def _cast(self, instr: IRCast) -> None:
         src, dst = instr.src, instr.dst

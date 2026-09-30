@@ -117,3 +117,11 @@ def test_cross_toolchain_and_run_prefix_selection(monkeypatch):
 def test_missing_toolchain_is_a_build_error():
     with pytest.raises(build.BuildError, match="'no-such-cc' not found"):
         build._run(["no-such-cc", "-c", "x.c"], "compiling runtime.c")
+
+
+def test_default_target_is_the_host_now_that_both_architectures_have_backends(monkeypatch):
+    import target
+    from target import Target
+    for host in (Target('aarch64', 'macos'), Target('x86_64', 'linux'), Target('aarch64', 'linux')):
+        monkeypatch.setattr(target, 'host_target', lambda host=host: host)
+        assert target.default_target() == host

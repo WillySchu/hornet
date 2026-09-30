@@ -1,7 +1,11 @@
 """Integer division and modulo panic on a zero divisor, and on MIN / -1 for int and int32 (where
 the quotient doesn't fit), identically on every target. Runs on each function's IR after it is built."""
 
-from ir.ir import IRBinOp, IRBranch, IRCall, IRConst, IRJump, IRLabel, IRStaticDataAddress
+from dataclasses import replace
+
+from folding import fold_cast, fold_unary_op
+from ir.cfg import writes
+from ir.ir import IRBinOp, IRBranch, IRCall, IRCast, IRConst, IRJump, IRLabel, IRMove, IRStaticDataAddress, IRUnOp, Temp
 from ops import BinaryOp
 from typesys import Type
 
@@ -18,6 +22,25 @@ def _message_label(ir_program, message: str) -> str:
     return labels[message]
 
 
+def _track_constants(instr, constants: dict) -> None:
+    def known(v):
+        if isinstance(v, IRConst):
+            return v.value
+        return constants.get(v.id) if isinstance(v, Temp) else None
+
+    value = None
+    if isinstance(instr, IRMove):
+        value = known(instr.src)
+    elif isinstance(instr, IRUnOp) and known(instr.operand) is not None:
+        value = fold_unary_op(instr.op, known(instr.operand), instr.dst.type)
+    elif isinstance(instr, IRCast) and known(instr.src) is not None:
+        value = fold_cast(instr.dst.type, known(instr.src), instr.src.type)
+    for t in writes(instr):
+        constants.pop(t.id, None)
+    if value is not None:
+        constants[instr.dst.id] = value
+
+
 def insert_division_checks(ir_fn, ir_program) -> None:
     ids = ir_program.ids
     panics: dict = {}  # message -> label of this function's panic block
@@ -28,10 +51,19 @@ def insert_division_checks(ir_fn, ir_program) -> None:
         return panics[message]
 
     out = []
+    constants: dict = {}  # temp id -> value, for temps set to a constant earlier in the same block
     for instr in ir_fn.body:
+        if isinstance(instr, IRLabel):
+            constants.clear()
         if not (isinstance(instr, IRBinOp) and instr.op in (BinaryOp.DIVIDE, BinaryOp.MODULO)):
+            _track_constants(instr, constants)
             out.append(instr)
             continue
+        if isinstance(instr.right, Temp) and instr.right.id in constants:
+            # A divisor computed from constants (such as `-3`) becomes a constant, so it needs no
+            # check and backends can divide by it with multiplication.
+            instr = replace(instr, right=IRConst(constants[instr.right.id], instr.right.type))
+        _track_constants(instr, constants)
         divisor, t = instr.right, instr.left.type
         known = divisor.value if isinstance(divisor, IRConst) else None
         if known is None or known == 0:

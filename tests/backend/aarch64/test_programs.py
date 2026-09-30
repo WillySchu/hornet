@@ -1,5 +1,5 @@
 """Programs built for aarch64-linux and run under qemu-user, checked against expected output
-and against x86-64. (AArch64 joins the full end-to-end suite once its backend is complete.)"""
+and against x86-64. The whole end-to-end suite also runs on aarch64-linux where it can."""
 
 import pytest
 
@@ -83,3 +83,21 @@ def test_bounds_check_panics():
 def test_random_program(seed):
     source, expected = Gen(seed).program()
     assert build_and_run(source, A64).stdout == expected
+
+
+def _truncated(a: int, b: int) -> tuple:
+    q = abs(a) // abs(b)
+    q = q if (a < 0) == (b < 0) else -q
+    return q, a - b * q
+
+
+def test_division_by_constants_matches_truncating_division():
+    divisors = [2, 3, 7, 10, 16, -3, -16, 1000000007, 4611686018427387904]
+    numbers = [0, 1, -1, 7, -7, 2 ** 63 - 1, -2 ** 63, 123456789]
+    lines = [f"    print(n / {d})\n    print(n % {d})\n" for d in divisors]
+    source = ("def int main():\n    [8]int ns = [" + ", ".join(str(n) if n != -2 ** 63 else "-9223372036854775807 - 1"
+                                                    for n in numbers) + "]\n"
+              "    for int i = 0; i < 8; i += 1:\n        int n = ns[i]\n"
+              + "".join("    " + line.replace("\n    ", "\n        ") for line in lines) + "    return 0\n")
+    expected = "".join(f"{q}\n{r}\n" for n in numbers for d in divisors for q, r in [_truncated(n, d)])
+    assert _same_as_x86(source).stdout == expected

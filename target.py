@@ -9,9 +9,9 @@ OSES = ('linux', 'macos')
 TARGET_NAMES = tuple(f"{a}-{o}" for a in ARCHES for o in OSES)
 
 # Architectures with a complete backend: the default target and end-to-end tests use these.
-IMPLEMENTED_ARCHES = ('x86_64',)
+IMPLEMENTED_ARCHES = ('x86_64', 'aarch64')
 # Architectures whose backend is being built: selectable with --target, not yet the default.
-IN_PROGRESS_ARCHES = ('aarch64',)
+IN_PROGRESS_ARCHES = ()
 
 
 @dataclass(frozen=True)
