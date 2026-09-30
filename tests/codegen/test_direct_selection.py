@@ -9,14 +9,14 @@ import random
 
 import pytest
 
-from codegen.assembly_ast import (
+from backend.x86_64.assembly_ast import (
     Add, AddQ, And, AndQ, Cdq, Cmp, CmpQ, Cqto, FrameSlot, IDiv, IDivQ, IMul, IMulQ, IMulWide, Imm, Mov, MovQ,
     MovSXD, MovZX, ShiftImmQ, Neg, NegQ, Not, NotQ, Or, OrQ, Register, SetCC, ShiftLeft, ShiftLeftQ, ShiftRightArithmetic,
     ShiftRightArithmeticQ, Sub, SubQ, Xor, XorQ,
 )
-from codegen.codegen import CodeGenerator
-from codegen.ir_lowering import InstructionSelector
-from codegen.utils import _QWORD_REGISTER_ALIASES
+from backend.x86_64.codegen import CodeGenerator
+from backend.x86_64.ir_lowering import InstructionSelector
+from backend.x86_64.utils import _QWORD_REGISTER_ALIASES
 from ir.id_allocator import IdAllocator
 from ir.ir import IRBinOp, IRConst, IRFunction, IRMove, IRProgram, IRUnOp, Temp
 from ops import BinaryOp, UnaryOp

@@ -1,7 +1,7 @@
 """AsmProgram -> AT&T assembly text."""
 
-from codegen.assembly_ast import AsmProgram, AsmFunction, CallInstr
-from codegen.utils import escape_for_asciz
+from backend.x86_64.assembly_ast import AsmProgram, AsmFunction, CallInstr
+from backend.common.text import escape_for_asciz
 from target import Target
 
 

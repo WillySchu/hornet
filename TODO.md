@@ -17,6 +17,7 @@ Documentation:
 - Clean up test\_compiler.py, the docstring of which is quite stale.
 
 Updates:
+- Update README.
 - Printing a struct defined in another module shows its internal name: print(write\_file(bad, x)) prints errors$Error(message: …).
 - must\_str and must\_int need a dead return after an exhaustive match, because semantic analysis doesn't treat match as covering every path.
 - Nothing warns when a result is ignored, such as a bare write\_stdout(...) statement.

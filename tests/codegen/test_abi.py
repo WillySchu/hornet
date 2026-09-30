@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from codegen.assembly_ast import Leave, LeaQFrame, MovQ, Pop, Push, Register, Ret
-from codegen.calling_convention import CALLEE_SAVED_REGISTERS
-from codegen.codegen import CodeGenerator
-from codegen.utils import as_qword_register
+from backend.x86_64.assembly_ast import Leave, LeaQFrame, MovQ, Pop, Push, Register, Ret
+from backend.x86_64.calling_convention import CALLEE_SAVED_REGISTERS
+from backend.x86_64.codegen import CodeGenerator
+from backend.x86_64.utils import as_qword_register
 from compile import compile_to_asm
 from desugar import desugar_methods
 from ir.program_builder import build_ir_program

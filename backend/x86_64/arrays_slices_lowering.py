@@ -1,6 +1,6 @@
 """Array/slice instruction selection: copies and bounds-check panics."""
 
-from codegen.assembly_ast import (
+from backend.x86_64.assembly_ast import (
     CallInstr,
     Instruction,
     Label,
@@ -12,7 +12,7 @@ from codegen.assembly_ast import (
     Register,
 )
 from typesys import leaf_type, type_byte_width
-from codegen.utils import as_byte_register
+from backend.x86_64.utils import as_byte_register
 from typesys import Type
 
 

@@ -4,7 +4,7 @@ import random
 
 import pytest
 
-from codegen.divide_by_constant import is_power_of_two, magic
+from backend.common.division import is_power_of_two, magic
 
 M64 = (1 << 64) - 1
 

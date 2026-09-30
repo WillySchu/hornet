@@ -1,6 +1,6 @@
 """Scalar instruction selection: operators, casts, and scalar loads/stores."""
 
-from codegen.assembly_ast import (
+from backend.x86_64.assembly_ast import (
     Add,
     AddQ,
     And,
@@ -40,8 +40,8 @@ from codegen.assembly_ast import (
     Xor,
     XorQ,
 )
-from codegen.errors import CodegenError
-from codegen.utils import as_qword_register, COMPARISON_CONDITION_CODES, as_byte_register
+from backend.errors import CodegenError
+from backend.x86_64.utils import as_qword_register, COMPARISON_CONDITION_CODES, as_byte_register
 from typesys import is_wide_type
 from ops import BinaryOp, UnaryOp
 from typesys import Type

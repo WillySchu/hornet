@@ -17,14 +17,13 @@ from desugar import desugar_methods
 from merge import merge_programs
 from modules import discover_modules
 from semantic import analyze
-from codegen.emitter import Emitter
+from backend.x86_64.emitter import Emitter
 from build import RUNTIME_C_PATH, c_compiler
 from target import default_target
 from ir.program_builder import build_ir_program
 from optimize.optimizer import optimize
-import codegen.codegen as codegen_module
-import codegen.register_allocator as ra_module
-import ir.cfg as cfg
+from backend.common.regalloc import allocation_stats
+from backend.x86_64.codegen import CodeGenerator
 
 PROGRAMS_DIR = Path(__file__).parent / 'programs'
 BASELINE_PATH = Path(__file__).parent / 'baseline.json'
@@ -37,42 +36,11 @@ STAT_KEYS = ('total_temps', 'address_taken_excluded', 'eligible', 'allocated', '
 
 
 def _instrumented_generate(program):
-    """CodeGenerator.generate, capturing (ir, temp_home_slots, params, assignment) per function."""
-    captured = []
-    original = ra_module.allocate_registers
-
-    def wrapper(ir, temp_home_slots=None, params=()):
-        assignment = original(ir, temp_home_slots, params)
-        captured.append((list(ir), dict(temp_home_slots or {}), list(params), dict(assignment)))
-        return assignment
-
-    codegen_module.allocate_registers = wrapper
-    try:
-        ir_program = build_ir_program(program)
-        ir_program = optimize(ir_program)
-        asm_program = codegen_module.CodeGenerator().generate(ir_program)
-    finally:
-        codegen_module.allocate_registers = original
-    return asm_program, captured
-
-
-def _allocation_stats(ir: list, temp_home_slots: dict, params: list, assignment: dict) -> dict:
-    """Allocation breakdown, using the same eligibility rules as allocate_registers."""
-    blocks = cfg.build_blocks(ir)
-    live_in, live_out = cfg.liveness(blocks)
-    intervals = ra_module.compute_live_intervals(blocks, live_in, live_out)
-    for p in params:
-        if p.id in intervals:
-            intervals[p.id].start = -1
-    eligible = ra_module.eligible_intervals(ir, intervals, temp_home_slots)
-    return {
-        'total_temps': len(intervals),
-        'address_taken_excluded': len(intervals) - len(eligible),
-        'eligible': len(eligible),
-        'allocated': len(assignment),
-        'spilled': len(eligible) - len(assignment),
-        'live_across_call': len(ra_module.call_crossing(ir, eligible)),
-    }
+    """The x86-64 AsmProgram plus (ir, temp homes, params, assignment) for each function."""
+    generator = CodeGenerator()
+    generator.allocation_log = []
+    asm_program = generator.generate(optimize(build_ir_program(program)))
+    return asm_program, generator.allocation_log
 
 
 def _sum_stats(per_function: list) -> dict:
@@ -144,7 +112,7 @@ def run_one(ht_path: Path, runs: int = TIMING_RUNS, icount: bool = False) -> dic
         if result.returncode != 0:
             raise RuntimeError(f"gcc failed to assemble/link {ht_path.name}:\n{result.stderr}")
 
-        per_function_stats = [_allocation_stats(*c) for c in captured]
+        per_function_stats = [allocation_stats(*c) for c in captured]
         elapsed = _time_binary(bin_path, runs)
         executed = _executed_instructions(bin_path) if icount else None
 

@@ -3,7 +3,7 @@ width aliasing and GAS string escaping. See tests/codegen/test_ir_
 utils.py for the semantic-level half (type_byte_width/leaf_type/
 type_of) split out alongside ir/utils.py itself."""
 
-from codegen.utils import escape_for_asciz
+from backend.common.text import escape_for_asciz
 
 # TODO(will): Test as_qword_register
 

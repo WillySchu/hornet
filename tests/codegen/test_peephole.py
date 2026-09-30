@@ -1,7 +1,7 @@
 """Tests for codegen/peephole.py."""
 
-from codegen.assembly_ast import Imm, JCC, Jae, Je, Jmp, Label, Memory, Mov, MovQ, Register
-from codegen.peephole import optimize_asm
+from backend.x86_64.assembly_ast import Imm, JCC, Jae, Je, Jmp, Label, Memory, Mov, MovQ, Register
+from backend.x86_64.peephole import optimize_asm
 
 rax, rbx, eax, ebx = Register('rax'), Register('rbx'), Register('eax'), Register('ebx')
 slot = Memory(base='rbp', offset=-16)

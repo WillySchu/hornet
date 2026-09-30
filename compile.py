@@ -4,26 +4,14 @@ import argparse
 import sys
 
 from desugar import desugar_methods
-from diagnostics import CompileError, run_cli
+from backend import lower_to_asm
+from diagnostics import run_cli
 from ir.program_builder import build_ir_program
 from merge import merge_programs
 from modules import discover_modules
 from optimize.optimizer import optimize
 from semantic import analyze
-from target import IMPLEMENTED_ARCHES, TARGET_NAMES, Target, as_target, default_target
-
-
-class TargetError(CompileError):
-    """A target the compiler has no backend for."""
-
-
-def lower_for_target(ir_program, target: Target) -> str:
-    """Hand an optimized IRProgram to the target architecture's backend."""
-    if target.arch == 'x86_64':
-        from codegen.codegen import lower_to_asm
-        return lower_to_asm(ir_program, target)
-    raise TargetError(
-        f"no backend for {target.arch} yet (implemented: {', '.join(IMPLEMENTED_ARCHES)})")
+from target import TARGET_NAMES, as_target, default_target
 
 
 def add_target_argument(parser: argparse.ArgumentParser) -> None:
@@ -52,7 +40,7 @@ def main():
 def generate_asm(program, target=None) -> str:
     """Build IR from an analyzed Program, optimize, and lower to assembly for `target`
     (a Target, an `arch-os` string, or None for the default)."""
-    return lower_for_target(optimize(build_ir_program(program)), as_target(target))
+    return lower_to_asm(optimize(build_ir_program(program)), as_target(target))
 
 
 def compile_to_asm(source: str, target=None) -> str:

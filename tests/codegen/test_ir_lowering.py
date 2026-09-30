@@ -1,7 +1,7 @@
 """Tests for ir_lowering.py's InstructionSelector: compare/branch fusion."""
 
-from codegen.codegen import CodeGenerator
-from codegen.ir_lowering import InstructionSelector
+from backend.x86_64.codegen import CodeGenerator
+from backend.x86_64.ir_lowering import InstructionSelector
 from ir.id_allocator import IdAllocator
 from ir.ir import IRFunction, IRProgram, Temp
 from semantic import Type
@@ -31,7 +31,7 @@ def _cmp_branch_ir(extra_use: bool = False, gap: bool = False) -> list:
 
 
 def test_comparison_feeding_only_the_next_branch_is_fused():
-    from codegen.assembly_ast import CmpQ, JCC, Jmp, SetCC
+    from backend.x86_64.assembly_ast import CmpQ, JCC, Jmp, SetCC
     out = _selector_with({10: 'r10d', 11: 'r11d', 12: 'r12d'}).lower_ir(_cmp_branch_ir())
     assert not any(isinstance(i, SetCC) for i in out)
     assert any(isinstance(i, CmpQ) for i in out)
@@ -39,12 +39,12 @@ def test_comparison_feeding_only_the_next_branch_is_fused():
 
 
 def test_comparison_with_another_use_is_not_fused():
-    from codegen.assembly_ast import SetCC
+    from backend.x86_64.assembly_ast import SetCC
     out = _selector_with({10: 'r10d', 11: 'r11d', 12: 'r12d', 13: 'ebx'}).lower_ir(_cmp_branch_ir(extra_use=True))
     assert any(isinstance(i, SetCC) for i in out)
 
 
 def test_comparison_not_directly_before_branch_is_not_fused():
-    from codegen.assembly_ast import SetCC
+    from backend.x86_64.assembly_ast import SetCC
     out = _selector_with({10: 'r10d', 11: 'r11d', 12: 'r12d', 13: 'ebx'}).lower_ir(_cmp_branch_ir(gap=True))
     assert any(isinstance(i, SetCC) for i in out)

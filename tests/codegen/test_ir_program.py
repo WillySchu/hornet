@@ -20,7 +20,7 @@ import desugar
 import parser
 import semantic
 from lexer import lex
-from codegen.codegen import CodeGenerator
+from backend.x86_64.codegen import CodeGenerator
 from ir.ir import IRFunction, IRInstr, IRProgram
 from ir.program_builder import build_ir_program
 
@@ -169,7 +169,7 @@ def test_lowering_does_not_modify_the_ir():
     """Spill and outgoing-argument slots belong to the backend, not the IRFunction."""
     import copy
     from pathlib import Path
-    from codegen.codegen import CodeGenerator
+    from backend.x86_64.codegen import CodeGenerator
     from desugar import desugar_methods
     from ir.program_builder import build_ir_program
     from merge import merge_programs

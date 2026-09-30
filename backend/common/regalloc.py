@@ -1,18 +1,11 @@
-"""Linear-scan register allocation over the IR. Temps live across a call get callee-saved registers only."""
+"""Linear-scan register allocation over the IR, for any target: the backend supplies its register lists.
+Temps live across a call get callee-saved registers only."""
 
 from dataclasses import dataclass
 from typing import Optional
 
 from ir.cfg import Block, build_blocks, liveness, reads, writes
 from ir.ir import IRCall, IRLocalAddress, Temp
-
-# Allocatable registers: no SysV argument role, no implicit instruction role, not scratch
-# (%rax, %rcx, %rdx, %r8, %r9). Caller-saved come first so values not live across a call
-# leave the callee-saved ones free. Callee-saved registers are saved by the prologue when used.
-CALLER_SAVED_POOL = ['r10d', 'r11d']
-CALLEE_SAVED_POOL = ['ebx', 'r12d', 'r13d', 'r14d', 'r15d']
-ALLOCATABLE_REGISTERS = CALLER_SAVED_POOL + CALLEE_SAVED_POOL
-
 
 @dataclass
 class LiveInterval:
@@ -73,8 +66,8 @@ def _is_hazard(interval: LiveInterval, pos: int, ir: list) -> bool:
     return interval.temp not in ir[pos].args
 
 
-def linear_scan(intervals: dict, available_registers: list[str] = ALLOCATABLE_REGISTERS,
-                crossing: frozenset = frozenset(), callee_saved: list[str] = CALLEE_SAVED_POOL) -> dict:
+def linear_scan(intervals: dict, available_registers: list[str], crossing: frozenset = frozenset(),
+                callee_saved: list[str] = ()) -> dict:
     """Poletto & Sarkar linear scan. Intervals in `crossing` may only use `callee_saved`
     registers; others take the first free register in `available_registers` order.
     When none is allowed and free, spill whichever interval ends last."""
@@ -111,13 +104,34 @@ def linear_scan(intervals: dict, available_registers: list[str] = ALLOCATABLE_RE
     return assignment
 
 
-def allocate_registers(ir: list, temp_home_slots: Optional[dict] = None, params: list = ()) -> dict:
-    """temp.id -> register for one function's IR. `params` arrive before the first instruction."""
+def function_intervals(ir: list, params: list = ()) -> dict:
+    """Live intervals for one function; `params` arrive before the first instruction."""
     blocks = build_blocks(ir)
     live_in, live_out = liveness(blocks)
     intervals = compute_live_intervals(blocks, live_in, live_out)
     for p in params:
         if p.id in intervals:
             intervals[p.id].start = -1  # so a call at instruction 0 is seen as crossing it
+    return intervals
+
+
+def allocate_registers(ir: list, registers: list[str], callee_saved: list[str],
+                       temp_home_slots: Optional[dict] = None, params: list = ()) -> dict:
+    """temp.id -> register for one function's IR. `registers` in preference order (caller-saved
+    first, so callee-saved ones stay free for values live across calls)."""
+    eligible = eligible_intervals(ir, function_intervals(ir, params), temp_home_slots)
+    return linear_scan(eligible, registers, frozenset(call_crossing(ir, eligible)), callee_saved)
+
+
+def allocation_stats(ir: list, temp_home_slots: dict, params: list, assignment: dict) -> dict:
+    """How a function's temps fared: counts of all, address-taken, eligible, allocated, spilled, live across a call."""
+    intervals = function_intervals(ir, params)
     eligible = eligible_intervals(ir, intervals, temp_home_slots)
-    return linear_scan(eligible, crossing=frozenset(call_crossing(ir, eligible)))
+    return {
+        'total_temps': len(intervals),
+        'address_taken_excluded': len(intervals) - len(eligible),
+        'eligible': len(eligible),
+        'allocated': len(assignment),
+        'spilled': len(eligible) - len(assignment),
+        'live_across_call': len(call_crossing(ir, eligible)),
+    }

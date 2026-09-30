@@ -1,7 +1,7 @@
 """Machine-level helpers: register aliases, condition codes, argument registers, string escaping."""
 
-from codegen.assembly_ast import Operand, Register
-from codegen.errors import CodegenError
+from backend.x86_64.assembly_ast import Operand, Register
+from backend.errors import CodegenError
 from ops import BinaryOp
 
 
@@ -49,14 +49,3 @@ def as_qword_register(reg: Operand) -> Register:
     if not isinstance(reg, Register) or reg.name not in _QWORD_REGISTER_ALIASES:
         raise CodegenError(f"No 64-bit alias known for register operand: {reg!r}")
     return Register(_QWORD_REGISTER_ALIASES[reg.name])
-
-
-def escape_for_asciz(s: str) -> str:
-    """Escape `s` for `.asciz`."""
-    s = s.replace('\\', '\\\\')
-    s = s.replace('"', '\\"')
-    s = s.replace('\n', '\\n')
-    s = s.replace('\t', '\\t')
-    s = s.replace('\r', '\\r')
-    s = s.replace('\0', '\\000')
-    return s

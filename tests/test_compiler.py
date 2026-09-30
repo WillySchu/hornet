@@ -691,7 +691,7 @@ from typing import Optional
 import pytest
 
 from compile import generate_asm
-from codegen.errors import CodegenError
+from backend.errors import CodegenError
 from ir.errors import IRError
 from build import RUNTIME_C_PATH, c_compiler
 from target import default_target

@@ -16,14 +16,13 @@ from ir.ir import (
     Temp,
 )
 from ir.cfg import build_blocks, liveness
-from codegen.register_allocator import (
+from backend.x86_64.calling_convention import ALLOCATABLE_REGISTERS, CALLEE_SAVED_POOL
+from backend.common.regalloc import (
     compute_live_intervals,
     call_crossing,
     eligible_intervals,
     linear_scan,
     LiveInterval,
-    ALLOCATABLE_REGISTERS,
-    CALLEE_SAVED_POOL,
     allocate_registers,
 )
 from parser import BinaryOp
@@ -209,7 +208,7 @@ def test_call_crossing_excludes_temp_defined_by_its_own_ircall():
 # -- linear_scan ---------------------------------------------------------------
 
 def test_linear_scan_empty():
-    assert linear_scan({}) == {}
+    assert linear_scan({}, ALLOCATABLE_REGISTERS) == {}
 
 
 def test_linear_scan_fewer_intervals_than_registers_all_assigned():
@@ -285,7 +284,7 @@ def test_allocatable_registers_are_caller_saved_first():
 
 def test_crossing_intervals_get_only_callee_saved_registers():
     intervals = {i: LiveInterval(temp=t(i), start=i, end=10) for i in range(4)}
-    result = linear_scan(intervals, crossing=frozenset({0, 2}))
+    result = linear_scan(intervals, ALLOCATABLE_REGISTERS, frozenset({0, 2}), CALLEE_SAVED_POOL)
     assert result[0] in CALLEE_SAVED_POOL and result[2] in CALLEE_SAVED_POOL
     assert result[1] == 'r10d' and result[3] == 'r11d'
 
@@ -293,14 +292,14 @@ def test_crossing_intervals_get_only_callee_saved_registers():
 def test_crossing_interval_evicts_a_non_crossing_one_holding_a_callee_saved_register():
     intervals = {i: LiveInterval(temp=t(i), start=i, end=20 - i) for i in range(7)}
     intervals[7] = LiveInterval(temp=t(7), start=7, end=8)
-    result = linear_scan(intervals, crossing=frozenset({7}))
+    result = linear_scan(intervals, ALLOCATABLE_REGISTERS, frozenset({7}), CALLEE_SAVED_POOL)
     assert result[7] in CALLEE_SAVED_POOL
     assert len(result) == 7 and len(set(result.values())) == 7
 
 
 def test_crossing_intervals_beyond_callee_saved_pool_spill():
     intervals = {i: LiveInterval(temp=t(i), start=i, end=10) for i in range(6)}
-    result = linear_scan(intervals, crossing=frozenset(range(6)))
+    result = linear_scan(intervals, ALLOCATABLE_REGISTERS, frozenset(range(6)), CALLEE_SAVED_POOL)
     assert len(result) == 5
     assert set(result.values()) == set(CALLEE_SAVED_POOL)
 
@@ -321,7 +320,7 @@ def test_allocate_registers_keeps_call_crossing_temp_in_callee_saved_register():
         IRBinOp(dst=t(2), op=BinaryOp.ADD, left=t(0), right=t(1)),
         IRReturn(value=t(2)),
     ]
-    result = allocate_registers(ir)
+    result = allocate_registers(ir, ALLOCATABLE_REGISTERS, CALLEE_SAVED_POOL)
     assert result[0] in CALLEE_SAVED_POOL
 
 
@@ -341,7 +340,7 @@ def test_allocate_registers_no_longer_spills_four_simultaneously_live_temps():
         IRBinOp(dst=t(4), op=BinaryOp.ADD, left=t(4), right=t(3)),
         IRReturn(value=t(4)),
     ]
-    result = allocate_registers(ir)
+    result = allocate_registers(ir, ALLOCATABLE_REGISTERS, CALLEE_SAVED_POOL)
     assert {0, 1, 2, 3} <= result.keys()
     assigned = [result[i] for i in (0, 1, 2, 3)]
     assert len(set(assigned)) == 4  # four genuinely distinct registers, not a spill in disguise
@@ -355,4 +354,4 @@ def test_param_live_across_a_call_at_the_first_instruction_gets_a_callee_saved_r
         IRBinOp(dst=t(2), op=BinaryOp.ADD, left=t(0), right=t(1)),
         IRReturn(value=t(2)),
     ]
-    assert allocate_registers(ir, params=[t(0)])[0] in CALLEE_SAVED_POOL
+    assert allocate_registers(ir, ALLOCATABLE_REGISTERS, CALLEE_SAVED_POOL, params=[t(0)])[0] in CALLEE_SAVED_POOL

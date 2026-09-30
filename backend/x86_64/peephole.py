@@ -1,14 +1,14 @@
-"""Assembly-level cleanups on one function's finished instruction list.
+"""Assembly-level cleanups on one function's finished instruction list: the common jump rules
+(backend.common.jumps), and
 
-- `jCC A; jmp B; A:` -> `jNCC B; A:`
-- `jmp L; L:` -> `L:`
 - `movq a, b; movq b, a` -> `movq a, b`
 - `movq r, r` -> removed
 
 32-bit moves are never removed: `movl` clears the upper half of its destination.
 """
 
-from codegen.assembly_ast import Imm, Instruction, JCC, Ja, Jae, Je, Jg, Jle, Jmp, Jne, Label, MovQ
+from backend.common.jumps import drop_jumps_to_next, invert_branches
+from backend.x86_64.assembly_ast import Imm, Instruction, JCC, Ja, Jae, Je, Jg, Jle, Jmp, Jne, Label, MovQ
 
 INVERSE_CC = {
     'e': 'ne', 'ne': 'e',
@@ -29,27 +29,26 @@ def _cond(instr: Instruction):
     return (cc, instr.target) if cc else None
 
 
-def _invert_branches(instrs: list) -> list:
-    out = []
-    i = 0
-    while i < len(instrs):
-        cond = _cond(instrs[i])
-        if (cond and i + 2 < len(instrs) and isinstance(instrs[i + 1], Jmp)
-                and isinstance(instrs[i + 2], Label) and instrs[i + 2].name == cond[1]):
-            out.append(JCC(INVERSE_CC[cond[0]], instrs[i + 1].target))
-            i += 2
-            continue
-        out.append(instrs[i])
-        i += 1
-    return out
+class _Jumps:
+    """x86 spelling of jumps and labels for backend.common.jumps."""
+
+    def label(self, instr):
+        return instr.name if isinstance(instr, Label) else None
+
+    def jump(self, instr):
+        return instr.target if isinstance(instr, Jmp) else None
+
+    def branch(self, instr):
+        return _cond(instr)
+
+    def make_branch(self, cc, target):
+        return JCC(cc, target)
+
+    def invert(self, cc):
+        return INVERSE_CC[cc]
 
 
-def _drop_jumps_to_next(instrs: list) -> list:
-    return [
-        instr for i, instr in enumerate(instrs)
-        if not (isinstance(instr, Jmp) and i + 1 < len(instrs)
-                and isinstance(instrs[i + 1], Label) and instrs[i + 1].name == instr.target)
-    ]
+_JUMPS = _Jumps()
 
 
 def _drop_redundant_moves(instrs: list) -> list:
@@ -68,7 +67,7 @@ def _drop_redundant_moves(instrs: list) -> list:
 def optimize_asm(instrs: list) -> list:
     """Apply every rule until nothing changes."""
     while True:
-        new = _drop_redundant_moves(_drop_jumps_to_next(_invert_branches(instrs)))
+        new = _drop_redundant_moves(drop_jumps_to_next(invert_branches(instrs, _JUMPS), _JUMPS))
         if new == instrs:
             return new
         instrs = new

@@ -8,7 +8,7 @@ and %r9 are never allocated, so they are always free as scratch.
 
 from typing import Optional
 
-from codegen.assembly_ast import (
+from backend.x86_64.assembly_ast import (
     JCC,
     Add,
     AddQ,
@@ -82,9 +82,10 @@ from ir.ir import (
 )
 from typesys import is_wide_type
 from ir.cfg import uses
-from codegen.peephole import INVERSE_CC
-from codegen.divide_by_constant import is_power_of_two, magic
-from codegen.utils import as_byte_register, as_qword_register, ARG_REGISTERS_32, ARG_REGISTERS_64, COMPARISON_CONDITION_CODES
+from backend.common.frame import Frame
+from backend.x86_64.peephole import INVERSE_CC
+from backend.common.division import is_power_of_two, magic
+from backend.x86_64.utils import as_byte_register, as_qword_register, ARG_REGISTERS_32, ARG_REGISTERS_64, COMPARISON_CONDITION_CODES
 from typesys import Type
 from ops import BinaryOp, UnaryOp
 
@@ -95,12 +96,14 @@ class InstructionSelector:
     def __init__(self, host, ir_fn):
         self.host = host
         self.ir_fn = ir_fn
+        if host.frame is None:  # a selector used on its own (tests)
+            host.frame = Frame(ir_fn, host.ir_program.struct_registry, host.ir_program.sum_type_registry)
 
     def _temp_mem(self, temp: Temp) -> Operand:
         """Frame slot for `temp`: its variable's slot, or a spill slot allocated on first use."""
         if temp.id in self.ir_fn.temp_homes:
             return FrameSlot(slot=self.ir_fn.temp_homes[temp.id])
-        return FrameSlot(slot=self.host.spill_slot(temp))
+        return FrameSlot(slot=self.host.frame.spill_slot(temp))
 
     def _gen_load_value(self, value: IRValue, dst: Register) -> list[Instruction]:
         """Load an IRValue into `dst` (32-bit name; widened by type)."""
@@ -509,7 +512,7 @@ class InstructionSelector:
                     wide = is_wide_type(arg_value.type)
                     scratch = as_qword_register(Register('eax')) if wide else Register('eax')
                     out.extend(self._gen_load_value(arg_value, Register('eax')))
-                    dst = FrameSlot(self.host._outgoing_slot, 8 * (i - 6))
+                    dst = FrameSlot(self.host.frame.outgoing, 8 * (i - 6))
                     out.append(MovQ(src=scratch, dst=dst) if wide else Mov(src=scratch, dst=dst))
                 out.append(CallInstr(instr.name))
                 if instr.dst is not None:
