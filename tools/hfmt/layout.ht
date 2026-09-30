@@ -186,37 +186,122 @@ def str _spaces(int n):
         b.write_byte(" ")
     return b.to_str()
 
-def LayoutResult layout([]Token toks):
-    []Line lines = _split_lines(toks)
-    int bad = _assign_levels(lines)
-    if bad >= 0:
-        return LayoutError('unindent does not match any outer indentation level', lines[bad].toks[0].line, 1)
-    Builder out = Builder(none)
+# `#text` -> `# text`; other comment text is left alone.
+def str _comment(str raw):
+    str text = trim(raw)
+    if len(text) > 1 and text[1] != " " and text[1] != "\t":
+        return '# ' + text[1:len(text)]
+    return text
+
+# One formatted output line and what the blank-line rules need to know about it.
+type Out struct:
+    str text
+    bool blank
+    bool top_statement  # starts a statement at level 0
+    bool top_comment  # comment-only line at level 0
+    bool opener  # ends with a block-opening ':'
+
+def []Out _format_lines([]Line lines):
+    []Out outs = none
     State s = State(false, Token(0, '', 0, 0, 0), false, false, none, none, false, 0, false)
     int statement_level = 0
     for l in lines:
         if l.blank:
-            out.write('\n')
+            outs = append(outs, Out('', true, false, false, false))
             continue
-        if _starts_statement(l):
+        bool starts = _starts_statement(l)
+        if starts:
             statement_level = l.level
             s.reset()
         int indent = l.level * INDENT
         if l.continuation:
             indent = (statement_level + l.depth) * INDENT
-        out.write(_spaces(indent))
+        Builder b = Builder(none)
+        b.write(_spaces(indent))
         bool first = true
+        bool opener = false
         for t in l.toks:
             if t.kind == TK_COMMENT:
                 if not first:
-                    out.write('  ')
-                out.write(trim(t.text))
+                    b.write('  ')
+                b.write(_comment(t.text))
                 continue
             bool unary = _is_unary(t, s)
             if not first and _space_before(t, unary, s):
-                out.write(' ')
-            out.write(t.text)
+                b.write(' ')
+            b.write(t.text)
             _advance(&s, t, unary)
+            opener = t.kind == TK_OP and t.text == ':' and len(s.brackets) == 0
             first = false
-        out.write('\n')
-    return out.to_str()
+        bool top_comment = l.comment_only and not l.continuation and l.level == 0
+        outs = append(outs, Out(b.to_str(), false, starts and l.level == 0, top_comment, opener))
+    return outs
+
+# Collapse blank runs to one; drop blanks at the start, the end, and right after a block opener.
+def []Out _collapse_blanks([]Out outs):
+    []Out r = none
+    for o in outs:
+        if o.blank:
+            if len(r) == 0 or r[len(r) - 1].blank or r[len(r) - 1].opener:
+                continue
+        r = append(r, o)
+    while len(r) > 0 and r[len(r) - 1].blank:
+        r = r[0:len(r) - 1]
+    return r
+
+# A top-level statement (with its body) or a block of consecutive top-level comment lines.
+type Unit struct:
+    int start
+    int end  # exclusive, before any trailing blank line
+    bool blank_after  # followed by a blank line in the input
+    bool comment
+    bool multi  # a statement spanning more than one line
+
+# Exactly one blank line around multi-line top-level definitions (and the comments directly
+# above them); consecutive one-line declarations keep whatever the input had (0 or 1).
+def []Out _space_top_level([]Out r):
+    []Unit units = none
+    for i, o in r:
+        bool comment_start = o.top_comment and (i == 0 or not r[i - 1].top_comment)
+        if o.top_statement or comment_start or (i == 0 and not o.blank):
+            units = append(units, Unit(i, i, false, o.top_comment, false))
+    for k, u in units:
+        int next = len(r)
+        if k + 1 < len(units):
+            next = units[k + 1].start
+        int end = next
+        if end > u.start and r[end - 1].blank:
+            end -= 1
+            units[k].blank_after = true
+        units[k].end = end
+        units[k].multi = not u.comment and end - u.start > 1
+    # A comment block directly above a definition takes the definition's side of the rule.
+    []bool wide = none
+    for u in units:
+        wide = append(wide, u.multi)
+    int k = len(units) - 2
+    while k >= 0:
+        if units[k].comment and not units[k].blank_after:
+            wide[k] = wide[k + 1]
+        k -= 1
+    []Out out = none
+    for k2, u in units:
+        for int i = u.start; i < u.end; i += 1:
+            out = append(out, r[i])
+        if k2 + 1 < len(units):
+            bool attached = u.comment and not u.blank_after
+            if not attached and (wide[k2] or wide[k2 + 1] or u.blank_after):
+                out = append(out, Out('', true, false, false, false))
+    return out
+
+def LayoutResult layout([]Token toks):
+    []Line lines = _split_lines(toks)
+    int bad = _assign_levels(lines)
+    if bad >= 0:
+        return LayoutError('unindent does not match any outer indentation level', lines[bad].toks[0].line, 1)
+    []Out outs = _space_top_level(_collapse_blanks(_format_lines(lines)))
+    Builder b = Builder(none)
+    for o in outs:
+        b.write(o.text)
+        b.write('\n')
+    return b.to_str()

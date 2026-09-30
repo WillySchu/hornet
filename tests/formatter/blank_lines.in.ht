@@ -1,0 +1,34 @@
+
+
+import 'fmt'
+from 'c' import panic
+
+extern int32 close(int32 fd)
+const int A = 1
+const int B = 2
+# comment for f
+def int f():
+
+    x = 1
+
+
+
+    return x
+def int g():
+    return 1
+# standalone
+
+
+
+# attached to h
+def int h():
+    if true:
+
+        return 1
+    return 0
+type P struct:
+    int a
+type Alias []int
+type S is A | B
+
+
