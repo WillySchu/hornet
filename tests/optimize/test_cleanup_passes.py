@@ -1,7 +1,7 @@
 """Tests for copy coalescing, copy propagation, dead code elimination, and branch simplification."""
 
 from ir.ir import (
-    IRBinOp, IRBranch, IRCall, IRConst, IRFunction, IRJump, IRLabel, IRLocalAddress, IRMove, IRReadArgument, IRReturn, IRStore, Temp,
+    IRBinOp, IRBranch, IRCall, IRConst, IRFunction, IRJump, IRLabel, IRLocalAddress, IRMove, IRReturn, IRStore, Temp,
 )
 from ir.verify import verify_function
 from ops import BinaryOp
@@ -157,7 +157,8 @@ def test_constant_branch_becomes_jump_and_dead_arm_is_removed():
 
 def test_pinned_temps_are_those_homed_in_address_taken_slots():
     f = fn(IRLocalAddress(dst=t(5), slot=3), IRReturn(value=None))
-    assert pinned_temps(f, {1: 3, 2: 4}) == {1}
+    f.temp_homes = {1: 3, 2: 4}
+    assert pinned_temps(f) == {1}
 
 
 def test_optimize_function_result_still_verifies():
@@ -168,8 +169,8 @@ def test_optimize_function_result_still_verifies():
         IRLabel('.a'), add(t(3), t(0), t(1)), IRMove(dst=t(4), src=t(3)), IRReturn(value=t(4)),
         IRLabel('.b'), IRReturn(value=c(0)),
     )
-    f.body.insert(0, IRReadArgument(dst=t(0), index=0))
-    optimize_function(f, {})
+    f.params = [t(0)]
+    optimize_function(f)
     verify_function(f)
     assert f.body[-2:] == [add(t(3), t(0), t(1)), IRReturn(value=t(3))]
     assert not any(isinstance(i, (IRBranch, IRMove)) and getattr(i, 'dst', None) == t(4) for i in f.body)

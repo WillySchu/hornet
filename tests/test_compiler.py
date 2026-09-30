@@ -11240,7 +11240,7 @@ class TestPointerEscapeAnalysis:
     def test_escaping_parameter_is_genuinely_heap_safe(self):
         """A PARAMETER's own address escaping, not just a local's --
         exercises ir/builder.py's own _ir_param_setup scalar case
-        (IRReadArgument into a fresh Temp, then the identical _ir_
+        (a fresh param Temp, then the identical _ir_
         finish_scalar_var_decl VarDecl's own initializer uses), the
         one call site TestPointerEscapeAnalysis's own struct/scalar-
         local tests above never reach at all."""

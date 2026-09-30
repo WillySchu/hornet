@@ -37,13 +37,13 @@ STAT_KEYS = ('total_temps', 'address_taken_excluded', 'eligible', 'allocated', '
 
 
 def _instrumented_generate(program):
-    """CodeGenerator.generate, capturing (ir, temp_home_slots, assignment) per function."""
+    """CodeGenerator.generate, capturing (ir, temp_home_slots, params, assignment) per function."""
     captured = []
     original = ra_module.allocate_registers
 
-    def wrapper(ir, temp_home_slots=None):
-        assignment = original(ir, temp_home_slots)
-        captured.append((list(ir), dict(temp_home_slots or {}), dict(assignment)))
+    def wrapper(ir, temp_home_slots=None, params=()):
+        assignment = original(ir, temp_home_slots, params)
+        captured.append((list(ir), dict(temp_home_slots or {}), list(params), dict(assignment)))
         return assignment
 
     codegen_module.allocate_registers = wrapper
@@ -56,11 +56,14 @@ def _instrumented_generate(program):
     return asm_program, captured
 
 
-def _allocation_stats(ir: list, temp_home_slots: dict, assignment: dict) -> dict:
+def _allocation_stats(ir: list, temp_home_slots: dict, params: list, assignment: dict) -> dict:
     """Allocation breakdown, using the same eligibility rules as allocate_registers."""
     blocks = cfg.build_blocks(ir)
     live_in, live_out = cfg.liveness(blocks)
     intervals = ra_module.compute_live_intervals(blocks, live_in, live_out)
+    for p in params:
+        if p.id in intervals:
+            intervals[p.id].start = -1
     eligible = ra_module.eligible_intervals(ir, intervals, temp_home_slots)
     return {
         'total_temps': len(intervals),

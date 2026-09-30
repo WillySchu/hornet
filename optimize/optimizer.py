@@ -12,14 +12,14 @@ from optimize.identity_reduction import reduce_identities
 MAX_ROUNDS = 10
 
 
-def pinned_temps(ir_fn: IRFunction, temp_home_slots: dict) -> set:
+def pinned_temps(ir_fn: IRFunction) -> set:
     """Temps whose home slot has its address taken: they can change through memory."""
     addressed = {instr.slot for instr in ir_fn.body if isinstance(instr, IRLocalAddress)}
-    return {tid for tid, slot in temp_home_slots.items() if slot in addressed}
+    return {tid for tid, slot in ir_fn.temp_homes.items() if slot in addressed}
 
 
-def optimize_function(ir_fn: IRFunction, temp_home_slots: dict) -> None:
-    pinned = pinned_temps(ir_fn, temp_home_slots)
+def optimize_function(ir_fn: IRFunction) -> None:
+    pinned = pinned_temps(ir_fn)
     for _ in range(MAX_ROUNDS):
         before = list(ir_fn.body)
         simplify_branches(ir_fn)
@@ -34,6 +34,6 @@ def optimize_function(ir_fn: IRFunction, temp_home_slots: dict) -> None:
 
 def optimize(ir_program: IRProgram) -> IRProgram:
     for ir_fn in ir_program.functions:
-        optimize_function(ir_fn, ir_program.ids._temp_offsets)
+        optimize_function(ir_fn)
     verify_program(ir_program)  # a pass may break an invariant
     return ir_program

@@ -12,7 +12,6 @@ from ir.ir import (
     IRLabel,
     IRLoad,
     IRMove,
-    IRReadArgument,
     IRReturn,
     IRStore,
     Temp,
@@ -290,22 +289,11 @@ def test_liveness_irboundscheck_reads_index_and_length_and_writes_nothing():
     assert t(1) in live_in[0]
 
 
-def test_liveness_irreadargument_defines_dst_and_reads_nothing():
-    """The same shape of bug test_liveness_irload_address_and_dst
-    documents (a real one this module shipped with): IRReadArgument
-    had no case in _writes at all, making a function's own parameters
-    invisible as DEFINITIONS -- see compute_live_intervals' own
-    companion test below for the concrete consequence (an interval
-    starting earlier than the parameter's true definition)."""
-    ir = [
-        IRReadArgument(dst=t(0), index=0),
-        IRReturn(value=t(0)),
-    ]
-    blocks = build_blocks(ir)
-    live_in, live_out = liveness(blocks)
-    # t(0) is defined HERE, by this instruction -- not received from
-    # outside this block.
-    assert t(0) not in live_in[0]
+def test_param_read_before_any_write_is_live_into_the_entry():
+    """Params aren't written by any instruction, so they are live coming into the entry block."""
+    blocks = build_blocks([IRReturn(value=t(0))])
+    live_in, _ = liveness(blocks)
+    assert t(0) in live_in[0]
 
 
 # -- predecessors, flatten, reverse_postorder, remove_unreachable, uses -------

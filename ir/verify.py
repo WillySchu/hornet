@@ -52,7 +52,7 @@ def verify_function(ir_fn: IRFunction) -> None:
             f"{ir_fn.name}: hidden_return_ptr_slot references unknown slot {ir_fn.hidden_return_ptr_slot}"
         )
 
-    defined_ids = set()
+    defined_ids = {t.id for t in ir_fn.params}
     for op in ir_fn.body:
         defined_ids.update(t.id for t in writes(op))
     for op in ir_fn.body:

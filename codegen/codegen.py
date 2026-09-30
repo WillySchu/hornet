@@ -29,7 +29,8 @@ from codegen.assembly_ast import (
 from codegen.calling_convention import CALLEE_SAVED_REGISTERS
 from codegen.emitter import Emitter
 from codegen.peephole import optimize_asm
-from ir.ir import IRCall, IRFunction, IRProgram
+from ir.ir import IRCall, IRFunction, IRProgram, Temp
+from typesys import type_byte_width
 from codegen.ir_lowering import InstructionSelector
 from codegen.register_allocator import allocate_registers
 from codegen.scalars_lowering import ScalarsLoweringMixin
@@ -48,6 +49,9 @@ class CodeGenerator(
         self._saved_registers: List[str] = []
         self._slot_offsets: Dict[int, int] = {}  # slot id -> %rbp offset; set by _resolve_frame_layout
         self._register_assignment: Dict[int, str] = {}
+        self._frame_slots: Dict[object, int] = {}  # slot key -> width, for the function being lowered
+        self._spill_slots: Dict[int, object] = {}  # temp id -> slot key
+        self._outgoing_slot = None
         # fail labels reset per function; message labels cached per program
         self._bounds_check_fail_labels = {}
         self._bounds_check_message_labels = {}
@@ -58,18 +62,18 @@ class CodeGenerator(
         Outgoing stack arguments go at the bottom (%rsp). Runs once per function after lower_ir."""
         saved_bytes = 8 * len(self._saved_registers)
         next_offset = -saved_bytes
-        for slot_id, width in ir_fn.slot_widths.items():
-            if slot_id == ir_fn.outgoing_stack_args_slot:
+        for slot_id, width in self._frame_slots.items():
+            if slot_id == self._outgoing_slot:
                 continue
             next_offset -= width
             self._slot_offsets[slot_id] = next_offset
         used = -next_offset
-        if ir_fn.outgoing_stack_args_slot is not None:
-            used += ir_fn.slot_widths[ir_fn.outgoing_stack_args_slot]
+        if self._outgoing_slot is not None:
+            used += self._frame_slots[self._outgoing_slot]
         # %rsp must be 16-byte aligned at calls: saved registers plus frame is a multiple of 16.
         self._frame_bytes = (used + 15) // 16 * 16 - saved_bytes
-        if ir_fn.outgoing_stack_args_slot is not None:
-            self._slot_offsets[ir_fn.outgoing_stack_args_slot] = -(saved_bytes + self._frame_bytes)
+        if self._outgoing_slot is not None:
+            self._slot_offsets[self._outgoing_slot] = -(saved_bytes + self._frame_bytes)
 
     def _patch_frame_slots(self, instructions: List[Instruction]) -> None:
         """Replace logical slot placeholders with resolved frame offsets."""
@@ -97,6 +101,10 @@ class CodeGenerator(
         self.ir_program = ir_program
         self._bounds_check_fail_labels = {}
         self._slot_offsets = {}
+        # The frame: the IR's slots plus this backend's own (outgoing arguments, spills), which
+        # are kept here so lowering never modifies the IR.
+        self._frame_slots = dict(ir_fn.slot_widths)
+        self._spill_slots = {}
         ir = ir_fn.body
 
         # Reserve outgoing stack-argument space before lower_ir needs it.
@@ -104,16 +112,14 @@ class CodeGenerator(
             (len(instr.args) - 6 for instr in ir if isinstance(instr, IRCall)),
             default=0,
         )
-        if max_overflow_slots > 0:
-            ir_fn.outgoing_stack_args_slot = self.ir_program.ids.new_slot(
-                8 * max_overflow_slots, "outgoing_stack_args", ir_fn,
-            )
+        self._outgoing_slot = self.new_frame_slot(8 * max_overflow_slots) if max_overflow_slots > 0 else None
 
-        self._register_assignment = allocate_registers(ir, self.ir_program.ids._temp_offsets)
+        self._register_assignment = allocate_registers(ir, ir_fn.temp_homes, ir_fn.params)
         used = {as_qword_register(Register(r)).name for r in self._register_assignment.values()}
         self._saved_registers = [r for r in CALLEE_SAVED_REGISTERS if r in used]
-        instructions = []
-        instructions.extend(InstructionSelector(self, ir_fn).lower_ir(ir))
+        selector = InstructionSelector(self, ir_fn)
+        instructions = selector.lower_params(ir_fn.params, ir)
+        instructions.extend(selector.lower_ir(ir))
         self._resolve_frame_layout(ir_fn)
         self._patch_frame_slots(instructions)
         self._register_assignment = {}
@@ -130,6 +136,19 @@ class CodeGenerator(
             prologue.append(SubQ(src=Imm(self._frame_bytes), dst=Register('rsp')))
 
         return AsmFunction(name=ir_fn.name, instructions=prologue + instructions)
+
+    def new_frame_slot(self, width: int):
+        """A backend-owned frame slot (its key never collides with the IR's integer slot ids)."""
+        key = ('backend', len(self._frame_slots))
+        self._frame_slots[key] = width
+        return key
+
+    def spill_slot(self, temp: Temp):
+        """The frame slot holding `temp` when it has no register."""
+        if temp.id not in self._spill_slots:
+            width = type_byte_width(temp.type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+            self._spill_slots[temp.id] = self.new_frame_slot(width)
+        return self._spill_slots[temp.id]
 
     def _gen_epilogue(self) -> List[Instruction]:
         """Restore saved callee-saved registers (from just below %rbp), then leave/ret."""

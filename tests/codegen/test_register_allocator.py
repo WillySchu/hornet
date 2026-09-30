@@ -11,7 +11,6 @@ from ir.ir import (
     IRJump,
     IRLabel,
     IRMove,
-    IRReadArgument,
     IRReturn,
     IRUnOp,
     Temp,
@@ -70,31 +69,6 @@ def test_compute_live_intervals_loop_carried_spans_the_whole_loop():
     # NOT stop short partway through, which a naive scan could do.
     assert intervals[0].start == 0
     assert intervals[0].end >= 5
-
-
-def test_compute_live_intervals_irreadargument_is_the_temps_true_start():
-    """The concrete consequence of the bug test_liveness_
-    irreadargument_defines_dst_and_reads_nothing documents: with
-    IRReadArgument invisible to _writes, a parameter Temp read later
-    in the SAME block it arrives in looked like a block-level "use"
-    needing to already be live coming IN -- stretching its interval
-    back to the block's own start (index 0 here) rather than its true
-    definition (index 1). Not a correctness bug (a too-WIDE interval
-    is still safe, just needlessly pessimistic -- see this fix's own
-    commit message for the full reasoning), but a real, checkable one:
-    this assertion fails with intervals[0].start == 0 without the fix."""
-    ir = [
-        IRMove(dst=t(1), src=IRConst(99, Type.INT)),  # 0: unrelated filler, BEFORE t(0)'s own def
-        IRReadArgument(dst=t(0), index=0),             # 1: t(0)'s true definition
-        IRMove(dst=t(2), src=IRConst(1, Type.INT)),    # 2: more filler
-        IRBinOp(dst=t(3), op=BinaryOp.ADD, left=t(0), right=t(2)),  # 3: t(0)'s only use
-        IRReturn(value=t(3)),                          # 4
-    ]
-    blocks = build_blocks(ir)
-    live_in, live_out = liveness(blocks)
-    intervals = compute_live_intervals(blocks, live_in, live_out)
-    assert intervals[0].start == 1
-    assert intervals[0].end == 3
 
 
 # -- eligible_intervals -------------------------------------------------------
@@ -371,3 +345,14 @@ def test_allocate_registers_no_longer_spills_four_simultaneously_live_temps():
     assert {0, 1, 2, 3} <= result.keys()
     assigned = [result[i] for i in (0, 1, 2, 3)]
     assert len(set(assigned)) == 4  # four genuinely distinct registers, not a spill in disguise
+
+
+def test_param_live_across_a_call_at_the_first_instruction_gets_a_callee_saved_register():
+    """Params arrive before instruction 0, so a call there crosses them."""
+    from ir.ir import IRCall
+    ir = [
+        IRCall(dst=t(1), name='malloc', args=[IRConst(8, Type.INT)]),
+        IRBinOp(dst=t(2), op=BinaryOp.ADD, left=t(0), right=t(1)),
+        IRReturn(value=t(2)),
+    ]
+    assert allocate_registers(ir, params=[t(0)])[0] in CALLEE_SAVED_POOL

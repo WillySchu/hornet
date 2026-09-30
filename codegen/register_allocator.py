@@ -111,10 +111,13 @@ def linear_scan(intervals: dict, available_registers: list[str] = ALLOCATABLE_RE
     return assignment
 
 
-def allocate_registers(ir: list, temp_home_slots: Optional[dict] = None) -> dict:
-    """temp.id -> register for one function's IR."""
+def allocate_registers(ir: list, temp_home_slots: Optional[dict] = None, params: list = ()) -> dict:
+    """temp.id -> register for one function's IR. `params` arrive before the first instruction."""
     blocks = build_blocks(ir)
     live_in, live_out = liveness(blocks)
     intervals = compute_live_intervals(blocks, live_in, live_out)
+    for p in params:
+        if p.id in intervals:
+            intervals[p.id].start = -1  # so a call at instruction 0 is seen as crossing it
     eligible = eligible_intervals(ir, intervals, temp_home_slots)
     return linear_scan(eligible, crossing=frozenset(call_crossing(ir, eligible)))

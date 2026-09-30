@@ -7,7 +7,7 @@ from ir.errors import IRError
 from ir.utils import COMPOSITE_KINDS, is_composite_addressable, type_of
 from typesys import type_byte_width
 from ir.ir import (
-    IRBranch, IRCall, IRCast, IRConst, IRCopy, IRFunction, IRJump, IRLocalAddress, IRReadArgument, IRReturn, IRStore, Temp,
+    IRBranch, IRCall, IRCast, IRConst, IRCopy, IRFunction, IRJump, IRLocalAddress, IRReturn, IRStore, Temp,
 )
 from ir.arrays_slices import ArraysSlicesMixin
 from ir.dicts import DictsMixin
@@ -73,11 +73,9 @@ class IRFunctionBuilder(
         # Declarations needing heap storage (size or escape).
         self._escaping_decl_ids = analyze_array_escapes(fn, self.ir_program.struct_registry, self.ir_program.escape_summaries)
 
-        # Composite returns take a hidden result pointer as argument 0.
-        arg_shift = 0
+        # Composite returns take the destination address as the first argument word.
         if return_type.kind in COMPOSITE_KINDS:
             ir_fn.hidden_return_ptr_slot = self.ir_program.ids.new_slot(8, "hidden_return_ptr", ir_fn)
-            arg_shift = 1
 
         # Per-function scratch slots for print/dict arguments.
         self._unnamed_slice_temp_slot = self.ir_program.ids.new_slot(24, "unnamed_slice_temp", ir_fn)
@@ -95,7 +93,7 @@ class IRFunctionBuilder(
         self._collect_argument_temps(fn.body, ir_fn)
         self.locals = {}
 
-        param_setup_ir = self._ir_param_setup(fn, param_types, arg_shift, ir_fn)
+        param_setup_ir = self._ir_param_setup(fn, param_types, ir_fn)
 
         statement_ir = []
         for stmt in fn.body:
@@ -107,50 +105,43 @@ class IRFunctionBuilder(
             ir_fn.body.append(IRReturn(value=None))
         return ir_fn
 
-    def _ir_param_setup(self, fn: Function, param_types: List[Type], arg_shift: int, ir_fn: IRFunction) -> list:
-        """IR for the hidden return pointer and parameters."""
+    def _ir_param_setup(self, fn: Function, param_types: List[Type], ir_fn: IRFunction) -> list:
+        """ir_fn.params (see IRFunction), and IR storing them into the parameters' variables."""
         ir = []
-        reg_index = arg_shift
+        ids = self.ir_program.ids
         hidden_ptr = None
         if ir_fn.hidden_return_ptr_slot is not None:
-            hidden_ptr = self.ir_program.ids.new_temp(Type.INT64)
-            ir.append(IRReadArgument(dst=hidden_ptr, index=0))
+            hidden_ptr = ids.new_temp(Type.INT64)
+            ir_fn.params.append(hidden_ptr)
         captured = []
         for p, p_type in zip(fn.params, param_types):
             if p_type.kind == TypeKind.SLICE:
-                ptr_value = self.ir_program.ids.new_temp(Type.INT64)
-                len_value = self.ir_program.ids.new_temp(Type.INT)
-                cap_value = self.ir_program.ids.new_temp(Type.INT)
-                ir.append(IRReadArgument(dst=ptr_value, index=reg_index))
-                ir.append(IRReadArgument(dst=len_value, index=reg_index + 1))
-                ir.append(IRReadArgument(dst=cap_value, index=reg_index + 2))
-                reg_index += 3
-                captured.append((ptr_value, len_value, cap_value))
+                words = (ids.new_temp(Type.INT64), ids.new_temp(Type.INT), ids.new_temp(Type.INT))
+                ir_fn.params.extend(words)
+                captured.append(words)
             elif p_type.kind == TypeKind.STR:
-                # str: {ptr, len} in two argument slots.
-                ptr_value = self.ir_program.ids.new_temp(Type.INT64)
-                len_value = self.ir_program.ids.new_temp(Type.INT)
-                ir.append(IRReadArgument(dst=ptr_value, index=reg_index))
-                ir.append(IRReadArgument(dst=len_value, index=reg_index + 1))
-                reg_index += 2
-                captured.append((ptr_value, len_value))
+                words = (ids.new_temp(Type.INT64), ids.new_temp(Type.INT))
+                ir_fn.params.extend(words)
+                captured.append(words)
             elif p_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM, TypeKind.DICT):
-                caller_ptr = self.ir_program.ids.new_temp(Type.INT64)
-                ir.append(IRReadArgument(dst=caller_ptr, index=reg_index))
-                reg_index += 1
+                caller_ptr = ids.new_temp(Type.INT64)
+                ir_fn.params.append(caller_ptr)
                 captured.append(caller_ptr)
             else:
                 self._bind_param(p, ir_fn)
-                incoming = self.ir_program.ids.new_temp(p_type)
-                if fn.name == 'main' and reg_index == 0 and p_type == Type.INT:
-                    # C passes argc as a 32-bit int; sign-extend it.
-                    argc = self.ir_program.ids.new_temp(Type.INT32)
-                    ir.append(IRReadArgument(dst=argc, index=reg_index))
+                if fn.name == 'main' and not ir_fn.params and p_type == Type.INT:
+                    # main's argc is a C int; widen it.
+                    argc = ids.new_temp(Type.INT32)
+                    ir_fn.params.append(argc)
+                    incoming = ids.new_temp(p_type)
                     ir.append(IRCast(dst=incoming, src=argc))
+                    ir.extend(self._ir_finish_scalar_var_decl(p.name, id(p), p_type, incoming))
+                elif self._is_heap_allocated(id(p), p_type):
+                    incoming = ids.new_temp(p_type)
+                    ir_fn.params.append(incoming)
+                    ir.extend(self._ir_finish_scalar_var_decl(p.name, id(p), p_type, incoming))
                 else:
-                    ir.append(IRReadArgument(dst=incoming, index=reg_index))
-                ir.extend(self._ir_finish_scalar_var_decl(p.name, id(p), p_type, incoming))
-                reg_index += 1
+                    ir_fn.params.append(self._local_temp(id(p)))  # arrives directly in its variable
                 captured.append(None)
 
         if hidden_ptr is not None:
@@ -209,7 +200,7 @@ class IRFunctionBuilder(
         slot = ir_fn.var_slots[id(p)]
         p_type = p.resolved_type
         temp_type = Type(TypeKind.POINTER, element_type=p_type) if self._is_heap_allocated(id(p), p_type) else p_type
-        self.locals[id(p)] = (slot, p_type, id(p), self.ir_program.ids.temp_at_offset(temp_type, slot))
+        self.locals[id(p)] = (slot, p_type, id(p), self.ir_program.ids.temp_at_offset(temp_type, slot, ir_fn))
         return slot
 
     def _allocate_local_slot(self, stmt: VarDecl, ir_fn: IRFunction) -> None:
@@ -351,14 +342,14 @@ class IRFunctionBuilder(
         slot = ir_fn.var_slots[id(stmt)]
         var_type = stmt.resolved_type
         temp_type = Type(TypeKind.POINTER, element_type=var_type) if self._is_heap_allocated(id(stmt), var_type) else var_type
-        self.locals[id(stmt)] = (slot, var_type, id(stmt), self.ir_program.ids.temp_at_offset(temp_type, slot))
+        self.locals[id(stmt)] = (slot, var_type, id(stmt), self.ir_program.ids.temp_at_offset(temp_type, slot, ir_fn))
         return slot
 
     def _bind_for_in_binding(self, stmt: ForIn, index: int, binding_type: Type, ir_fn: IRFunction) -> int:
         """Bind a ForIn binding in scope."""
         slot = ir_fn.var_slots[(id(stmt), index)]
         temp_type = Type(TypeKind.POINTER, element_type=binding_type) if self._is_heap_allocated((id(stmt), index), binding_type) else binding_type
-        self.locals[(id(stmt), index)] = (slot, binding_type, (id(stmt), index), self.ir_program.ids.temp_at_offset(temp_type, slot))
+        self.locals[(id(stmt), index)] = (slot, binding_type, (id(stmt), index), self.ir_program.ids.temp_at_offset(temp_type, slot, ir_fn))
         return slot
 
     def _decl(self, ref) -> object:

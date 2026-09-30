@@ -163,3 +163,26 @@ def test_ir_program_carries_its_own_ids():
     ast = _parse_and_analyze("def int main():\n    return 1\n")
     ir_program = build_ir_program(ast)
     assert ir_program.ids is not None
+
+
+def test_lowering_does_not_modify_the_ir():
+    """Spill and outgoing-argument slots belong to the backend, not the IRFunction."""
+    import copy
+    from pathlib import Path
+    from codegen.codegen import CodeGenerator
+    from desugar import desugar_methods
+    from ir.program_builder import build_ir_program
+    from merge import merge_programs
+    from modules import discover_modules
+    from optimize.optimizer import optimize
+    from semantic import analyze
+    path = Path(__file__).resolve().parent.parent.parent / 'benchmarks' / 'programs' / 'register_pressure.ht'
+    entry, modules = discover_modules(str(path))
+    program = merge_programs(entry, modules)
+    desugar_methods(program)
+    analyze(program)
+    ir_program = optimize(build_ir_program(program))
+    before = copy.deepcopy([(f.slot_widths, f.slot_labels, f.temp_homes, f.body) for f in ir_program.functions])
+    first = CodeGenerator().generate(ir_program)
+    assert [(f.slot_widths, f.slot_labels, f.temp_homes, f.body) for f in ir_program.functions] == before
+    assert CodeGenerator().generate(ir_program) == first

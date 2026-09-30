@@ -72,13 +72,6 @@ class IRCall:
 
 
 @dataclass
-class IRReadArgument:
-    """dst = incoming argument `index` (SysV order)."""
-    dst: Temp
-    index: int
-
-
-@dataclass
 class IRReturn:
     """Return value; None for bare return."""
     value: Optional[IRValue]
@@ -167,7 +160,6 @@ IRInstr = Union[
     IRLoad,
     IRLocalAddress,
     IRMove,
-    IRReadArgument,
     IRReturn,
     IRSliceBoundsCheck,
     IRStaticDataAddress,
@@ -178,15 +170,22 @@ IRInstr = Union[
 
 @dataclass
 class IRFunction:
-    """One function's IR plus its frame-slot registry (slot id -> width, label)."""
+    """One function's IR plus its frame-slot registry (slot id -> width, label).
+
+    `params` are the Temps holding the function's incoming argument words, in order. Hornet's
+    calling convention, independent of any target: a composite return value's destination
+    address comes first, then each parameter as one word, except str (ptr, len) and slices
+    (ptr, len, cap); arrays, structs, sum types, and dicts are passed by address. Where each
+    word arrives is the backend's business."""
     name: str
     body: list = field(default_factory=list)
     return_type: Optional[Type] = None
+    params: list = field(default_factory=list)
     slot_widths: dict = field(default_factory=dict)
     slot_labels: dict = field(default_factory=dict)
     hidden_return_ptr_slot: Optional[int] = None
     var_slots: dict = field(default_factory=dict)
-    outgoing_stack_args_slot: Optional[int] = None  # set by lower_function; always placed last in the frame
+    temp_homes: dict = field(default_factory=dict)  # named-variable Temp id -> its variable's slot
 
 
 @dataclass

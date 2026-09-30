@@ -72,7 +72,6 @@ from ir.ir import (
     IRLoad,
     IRLocalAddress,
     IRMove,
-    IRReadArgument,
     IRReturn,
     IRSliceBoundsCheck,
     IRStaticDataAddress,
@@ -81,7 +80,7 @@ from ir.ir import (
     IRValue,
     Temp,
 )
-from typesys import is_wide_type, type_byte_width
+from typesys import is_wide_type
 from ir.cfg import uses
 from codegen.peephole import INVERSE_CC
 from codegen.divide_by_constant import is_power_of_two, magic
@@ -98,13 +97,10 @@ class InstructionSelector:
         self.ir_fn = ir_fn
 
     def _temp_mem(self, temp: Temp) -> Operand:
-        """Frame slot for `temp`, allocated on first use."""
-        if temp.id in self.host.ir_program.ids._temp_offsets:
-            return FrameSlot(slot=self.host.ir_program.ids._temp_offsets[temp.id])
-        if temp.id not in self.host.ir_program.ids._temp_slots:
-            width = type_byte_width(temp.type, self.host.ir_program.struct_registry, self.host.ir_program.sum_type_registry)
-            self.host.ir_program.ids._temp_slots[temp.id] = self.host.ir_program.ids.new_slot(width, f"temp:{temp.id}", self.ir_fn)
-        return FrameSlot(slot=self.host.ir_program.ids._temp_slots[temp.id])
+        """Frame slot for `temp`: its variable's slot, or a spill slot allocated on first use."""
+        if temp.id in self.ir_fn.temp_homes:
+            return FrameSlot(slot=self.ir_fn.temp_homes[temp.id])
+        return FrameSlot(slot=self.host.spill_slot(temp))
 
     def _gen_load_value(self, value: IRValue, dst: Register) -> list[Instruction]:
         """Load an IRValue into `dst` (32-bit name; widened by type)."""
@@ -400,17 +396,6 @@ class InstructionSelector:
                 return None
             return self._direct_cmp(instr.value, instr.bound, width) + [
                 Ja(self.host._get_bounds_check_fail_label("slice bounds out of range"))]
-        if isinstance(instr, IRReadArgument):
-            width = self._width(instr.dst.type)
-            if width is None:
-                return None
-            d = self._loc(instr.dst, width)
-            if instr.index < 6:
-                src = Register((ARG_REGISTERS_64 if width == 8 else ARG_REGISTERS_32)[instr.index])
-                return self._mov(src, d, width)
-            if isinstance(d, Register):
-                return self._mov(Memory('rbp', 16 + 8 * (instr.index - 6)), d, width)
-            return None
         if isinstance(instr, IRLocalAddress):
             d = self._loc(instr.dst, 8)
             if isinstance(d, Register):
@@ -448,6 +433,29 @@ class InstructionSelector:
         if wide:
             return CmpQ(src=Register('rcx'), dst=Register('rax'))
         return Cmp(src=Register('ecx'), dst=Register('eax'))
+
+    def lower_params(self, params: list, body: list) -> list[Instruction]:
+        """Move each incoming argument word (SysV: 6 registers, then the caller's stack) into its Temp.
+        Words the body never reads are skipped."""
+        read = uses(body)
+        out: list = []
+        for index, temp in enumerate(params):
+            if temp.id in read:
+                out.extend(self._read_argument(temp, index))
+        return out
+
+    def _read_argument(self, dst: Temp, index: int) -> list:
+        width = self._width(dst.type)
+        if width is not None:
+            d = self._loc(dst, width)
+            if index < 6:
+                return self._mov(Register((ARG_REGISTERS_64 if width == 8 else ARG_REGISTERS_32)[index]), d, width)
+            if isinstance(d, Register):
+                return self._mov(Memory('rbp', 16 + 8 * (index - 6)), d, width)
+        wide = is_wide_type(dst.type)
+        src = Register((ARG_REGISTERS_64 if wide else ARG_REGISTERS_32)[index]) if index < 6 else Memory('rbp', 16 + 8 * (index - 6))
+        return [MovQ(src=src, dst=Register('rax')) if wide else Mov(src=src, dst=Register('eax'))] + \
+            self._gen_write_temp_from(Register('eax'), dst)
 
     def lower_ir(self, instructions: list) -> list[Instruction]:
         """Lower an IR fragment."""
@@ -501,19 +509,11 @@ class InstructionSelector:
                     wide = is_wide_type(arg_value.type)
                     scratch = as_qword_register(Register('eax')) if wide else Register('eax')
                     out.extend(self._gen_load_value(arg_value, Register('eax')))
-                    dst = FrameSlot(self.ir_fn.outgoing_stack_args_slot, 8 * (i - 6))
+                    dst = FrameSlot(self.host._outgoing_slot, 8 * (i - 6))
                     out.append(MovQ(src=scratch, dst=dst) if wide else Mov(src=scratch, dst=dst))
                 out.append(CallInstr(instr.name))
                 if instr.dst is not None:
                     out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
-            elif isinstance(instr, IRReadArgument):
-                wide = is_wide_type(instr.dst.type)
-                if instr.index < 6:
-                    src = Register((ARG_REGISTERS_64 if wide else ARG_REGISTERS_32)[instr.index])
-                else:
-                    src = Memory('rbp', 16 + 8 * (instr.index - 6))
-                out.append(MovQ(src=src, dst=Register('rax')) if wide else Mov(src=src, dst=Register('eax')))
-                out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
             elif isinstance(instr, IRReturn):
                 if instr.value is not None:
                     out.extend(self._gen_load_value(instr.value, Register('eax')))

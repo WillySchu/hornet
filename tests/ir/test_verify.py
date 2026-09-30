@@ -5,7 +5,6 @@ explicitly (def-after-use)."""
 import pytest
 
 from ir.ir import (
-    IRBinOp,
     IRBranch,
     IRCall,
     IRFunction,
@@ -14,12 +13,10 @@ from ir.ir import (
     IRLocalAddress,
     IRMove,
     IRProgram,
-    IRReadArgument,
     IRReturn,
     Temp,
 )
 from ir.verify import IRVerificationError, verify_function, verify_program
-from parser import BinaryOp
 from semantic import Type
 
 
@@ -172,12 +169,10 @@ def test_def_after_use_still_passes():
     verify_function(fn(body=body))  # no raise
 
 
-def test_read_argument_counts_as_definition():
-    body = [
-        IRReadArgument(dst=t(0), index=0),
-        IRReturn(value=t(0)),
-    ]
-    verify_function(fn(body=body))  # no raise
+def test_param_counts_as_definition():
+    f = fn(body=[IRReturn(value=t(0))])
+    f.params = [t(0)]
+    verify_function(f)  # no raise
 
 
 def test_call_argument_must_be_defined_raises():

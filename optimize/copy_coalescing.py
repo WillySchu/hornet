@@ -4,11 +4,11 @@ from dataclasses import replace
 
 from ir.cfg import uses
 from ir.ir import (
-    IRBinOp, IRCall, IRCast, IRFunction, IRLoad, IRLocalAddress, IRMove, IRReadArgument, IRStaticDataAddress,
+    IRBinOp, IRCall, IRCast, IRFunction, IRLoad, IRLocalAddress, IRMove, IRStaticDataAddress,
     IRUnOp, Temp,
 )
 
-_DEFINES = (IRMove, IRBinOp, IRUnOp, IRCast, IRLoad, IRLocalAddress, IRStaticDataAddress, IRCall, IRReadArgument)
+_DEFINES = (IRMove, IRBinOp, IRUnOp, IRCast, IRLoad, IRLocalAddress, IRStaticDataAddress, IRCall)
 
 
 def coalesce_copies(ir_fn: IRFunction, pinned: set) -> None:

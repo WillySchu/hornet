@@ -19,7 +19,6 @@ from ir.ir import (
     IRLoad,
     IRLocalAddress,
     IRMove,
-    IRReadArgument,
     IRReturn,
     IRSliceBoundsCheck,
     IRStaticDataAddress,
@@ -39,7 +38,7 @@ READ_FIELDS = {
 }
 
 # Instructions whose only effect is writing `dst`.
-PURE = (IRMove, IRBinOp, IRUnOp, IRCast, IRLocalAddress, IRStaticDataAddress, IRReadArgument)
+PURE = (IRMove, IRBinOp, IRUnOp, IRCast, IRLocalAddress, IRStaticDataAddress)
 
 
 def replace_reads(instr, mapping: dict):
@@ -88,7 +87,7 @@ def reads(instr) -> set:
 
 def writes(instr) -> set:
     """Temps `instr` writes."""
-    if isinstance(instr, (IRMove, IRBinOp, IRUnOp, IRLoad, IRLocalAddress, IRStaticDataAddress, IRCast, IRReadArgument)):
+    if isinstance(instr, (IRMove, IRBinOp, IRUnOp, IRLoad, IRLocalAddress, IRStaticDataAddress, IRCast)):
         return {instr.dst}
     if isinstance(instr, IRCall):
         return {instr.dst} if instr.dst is not None else set()
