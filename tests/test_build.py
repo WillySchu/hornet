@@ -80,15 +80,20 @@ def test_targets_parse_and_default_to_an_implemented_architecture():
         Target.parse('arm-linux')
 
 
-def test_unimplemented_architecture_is_a_clean_error(tmp_path):
+def test_every_target_compiles_from_the_command_line(tmp_path):
     src = tmp_path / 'p.ht'
     src.write_text("def int main():\n    return 0\n")
-    r = subprocess.run([sys.executable, str(REPO_ROOT / 'compile.py'), str(src), '--target', 'aarch64-linux'],
-                       capture_output=True, text=True)
-    assert (r.returncode, r.stderr) == (1, "error: no backend for aarch64 yet (implemented: x86_64)\n")
-    r = subprocess.run([sys.executable, str(REPO_ROOT / 'compile.py'), str(src), '--target', 'x86_64-macos'],
-                       capture_output=True, text=True)
-    assert r.returncode == 0 and '_main:' in r.stdout
+    for name, label in [('x86_64-macos', '_main:'), ('aarch64-linux', '\nmain:'), ('aarch64-macos', '_main:')]:
+        r = subprocess.run([sys.executable, str(REPO_ROOT / 'compile.py'), str(src), '--target', name],
+                           capture_output=True, text=True)
+        assert r.returncode == 0 and label in r.stdout, (name, r.stderr)
+
+
+def test_architecture_without_a_backend_is_a_clean_error():
+    from backend import TargetError, lower_to_asm
+    from target import Target
+    with pytest.raises(TargetError, match="no backend for riscv64 yet"):
+        lower_to_asm(None, Target('riscv64', 'linux'))
 
 
 def test_cross_toolchain_and_run_prefix_selection(monkeypatch):

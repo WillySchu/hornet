@@ -1,0 +1,138 @@
+"""AArch64 backend driver: register allocation, instruction selection, frame layout, prologue/epilogue.
+
+Frame: x29 points at the saved x29/x30 pair; below it the callee-saved registers this function
+uses, then slots, then outgoing stack arguments at sp. sp stays 16-byte aligned.
+"""
+
+from backend.aarch64.assembly import (
+    AsmFunction, AsmProgram, Call, Imm, Instr, LabelDef, LabelRef, Mem, Reg, SymPage, SymPageOffset, FP, LR, SP,
+)
+from backend.aarch64.calling_convention import ALLOCATABLE_REGISTERS, CALLEE_SAVED_POOL, MAX_REGISTER_ARGS
+from backend.aarch64.emitter import Emitter
+from backend.aarch64.legalize import legalize, materialize
+from backend.aarch64.lowering import INVERSE, Selector
+from backend.common.frame import Frame
+from backend.common.jumps import drop_jumps_to_next, invert_branches
+from backend.common.regalloc import allocate_registers
+from ir.ir import IRCall, IRProgram
+from target import Target
+
+
+class _Jumps:
+    """AArch64 spelling of jumps and labels for backend.common.jumps."""
+
+    def label(self, instr):
+        return instr.name if isinstance(instr, LabelDef) else None
+
+    def jump(self, instr):
+        return instr.operands[0].name if isinstance(instr, Instr) and instr.mnemonic == 'b' else None
+
+    def branch(self, instr):
+        if isinstance(instr, Instr) and instr.mnemonic.startswith('b.'):
+            return instr.mnemonic[2:], instr.operands[0].name
+        if isinstance(instr, Instr) and instr.mnemonic in ('cbz', 'cbnz'):
+            return (instr.mnemonic, instr.operands[0]), instr.operands[1].name
+        return None
+
+    def make_branch(self, cond, target):
+        if isinstance(cond, tuple):
+            return Instr(cond[0], (cond[1], LabelRef(target)))
+        return Instr(f'b.{cond}', (LabelRef(target),))
+
+    def invert(self, cond):
+        if isinstance(cond, tuple):
+            return ('cbnz' if cond[0] == 'cbz' else 'cbz', cond[1])
+        return INVERSE[cond]
+
+
+_JUMPS = _Jumps()
+
+
+def _peephole(instrs: list) -> list:
+    while True:
+        new = drop_jumps_to_next(invert_branches(instrs, _JUMPS), _JUMPS)
+        # `mov xN, xN` does nothing (`mov wN, wN` clears the top half, so it stays).
+        new = [i for i in new if not (isinstance(i, Instr) and i.mnemonic == 'mov' and len(i.operands) == 2
+                                      and i.operands[0] == i.operands[1] and i.operands[0].name.startswith('x'))]
+        if new == instrs:
+            return new
+        instrs = new
+
+
+class CodeGenerator:
+    def __init__(self):
+        self.ir_program = None
+        self.frame = None
+        self.assignment = {}
+        self.saved = []  # callee-saved registers the current function uses, as x names
+        self._fail_labels = {}  # message -> label, per function
+        self._message_labels = {}  # message -> static string label, per program
+
+    def generate(self, ir_program: IRProgram) -> AsmProgram:
+        self.ir_program = ir_program
+        return AsmProgram([self.lower_function(fn) for fn in ir_program.functions],
+                          ir_program.string_literals, ir_program.type_descriptors)
+
+    def lower_function(self, ir_fn) -> AsmFunction:
+        prog = self.ir_program
+        self.frame = Frame(ir_fn, prog.struct_registry, prog.sum_type_registry)
+        body = ir_fn.body
+        overflow = max((len(i.args) - MAX_REGISTER_ARGS for i in body if isinstance(i, IRCall)), default=0)
+        self.frame.reserve_outgoing(8 * overflow)
+        self.assignment = allocate_registers(body, ALLOCATABLE_REGISTERS, CALLEE_SAVED_POOL, ir_fn.temp_homes, ir_fn.params)
+        used = set(self.assignment.values())
+        self.saved = [r for r in CALLEE_SAVED_POOL if r in used]
+        selector = Selector(self, ir_fn)
+        selector.lower_params(ir_fn.params, body)
+        self._fail_labels = {}
+        instrs = selector.lower(body) + self._panic_blocks()
+        save_area = 16 * ((len(self.saved) + 1) // 2)
+        self.frame.layout(save_area=save_area)
+        instrs = _peephole(legalize(instrs, self.frame))
+        return AsmFunction(ir_fn.name, self._prologue(save_area + self.frame.size) + instrs)
+
+    def fail_label(self, message: str) -> str:
+        """Label of this function's panic block for `message`."""
+        if message not in self._fail_labels:
+            self._fail_labels[message] = self.ir_program.ids.new_label("bounds_check_fail")
+        return self._fail_labels[message]
+
+    def _panic_blocks(self) -> list:
+        out = []
+        for message, label in self._fail_labels.items():
+            if message not in self._message_labels:
+                self._message_labels[message] = self.ir_program.ids.new_label("bounds_msg")
+                self.ir_program.string_literals.append((self._message_labels[message], message))
+            msg = self._message_labels[message]
+            x0 = Reg('x0')
+            out += [LabelDef(label), Instr('adrp', (x0, SymPage(msg))), Instr('add', (x0, x0, SymPageOffset(msg))),
+                    Call('hornet_panic')]
+        return out
+
+    def _save_pairs(self) -> list:
+        """(registers, offset below x29) for saving/restoring callee-saved registers in pairs."""
+        regs = [Reg(r) for r in self.saved]
+        return [(regs[k:k + 2], -16 * (k // 2 + 1)) for k in range(0, len(regs), 2)]
+
+    def _prologue(self, total: int) -> list:
+        out = [Instr('stp', (FP, LR, Mem(SP, -16, 'pre'))), Instr('mov', (FP, SP))]
+        if total:
+            if total <= 4095:
+                out.append(Instr('sub', (SP, SP, Imm(total))))
+            else:
+                out += materialize(Reg('x9'), total) + [Instr('sub', (SP, SP, Reg('x9')))]
+        for regs, offset in self._save_pairs():
+            out.append(Instr('stp', (regs[0], regs[1], Mem(FP, offset))) if len(regs) == 2
+                       else Instr('str', (regs[0], Mem(FP, offset))))
+        return out
+
+    def epilogue(self) -> list:
+        out = []
+        for regs, offset in self._save_pairs():
+            out.append(Instr('ldp', (regs[0], regs[1], Mem(FP, offset))) if len(regs) == 2
+                       else Instr('ldr', (regs[0], Mem(FP, offset))))
+        return out + [Instr('mov', (SP, FP)), Instr('ldp', (FP, LR, Mem(SP, 16, 'post'))), Instr('ret')]
+
+
+def lower_to_asm(ir_program: IRProgram, target: Target) -> str:
+    return Emitter(target).emit(CodeGenerator().generate(ir_program))

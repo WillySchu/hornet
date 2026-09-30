@@ -41,3 +41,15 @@ def on_every_target(build_and_run, label: str = '') -> subprocess.CompletedProce
             f"{first_target}: {first.returncode} {first.stdout!r} {first.stderr!r}\n"
             f"{target}: {r.returncode} {r.stdout!r} {r.stderr!r}")
     return first
+
+
+def build_and_run(source: str, target: Target, stdin: str = '', timeout: int = 20) -> subprocess.CompletedProcess:
+    """Build `source` (full driver) for one target and run it."""
+    import tempfile
+    from pathlib import Path
+    from build import build_executable
+    with tempfile.TemporaryDirectory() as tmp:
+        src, exe = Path(tmp) / 'p.ht', Path(tmp) / 'p'
+        src.write_text(source)
+        build_executable(str(src), str(exe), target=target)
+        return run_binary(target, [exe], input=stdin, capture_output=True, text=True, timeout=timeout)

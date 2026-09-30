@@ -1,7 +1,7 @@
 """Backends, one package per architecture, each exposing lower_to_asm(ir_program, target) -> str."""
 
 from diagnostics import CompileError
-from target import IMPLEMENTED_ARCHES, Target
+from target import IMPLEMENTED_ARCHES, IN_PROGRESS_ARCHES, Target
 
 
 class TargetError(CompileError):
@@ -13,4 +13,7 @@ def lower_to_asm(ir_program, target: Target) -> str:
     if target.arch == 'x86_64':
         from backend.x86_64.codegen import lower_to_asm as lower
         return lower(ir_program, target)
-    raise TargetError(f"no backend for {target.arch} yet (implemented: {', '.join(IMPLEMENTED_ARCHES)})")
+    if target.arch == 'aarch64':
+        from backend.aarch64.codegen import lower_to_asm as lower
+        return lower(ir_program, target)
+    raise TargetError(f"no backend for {target.arch} yet (available: {', '.join(IMPLEMENTED_ARCHES + IN_PROGRESS_ARCHES)})")
