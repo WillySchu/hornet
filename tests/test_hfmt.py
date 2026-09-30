@@ -268,3 +268,9 @@ def test_formatting_scrambled_programs_keeps_meaning(hfmt, name, source, tmp_pat
     formatted = tmp_path / 'formatted.ht'
     formatted.write_text(r.stdout)
     assert compile_to_asm(str(formatted), 'linux') == expected
+
+
+@GCC_SKIP
+def test_repository_sources_are_formatted(hfmt):
+    r = _run(hfmt, '--check', *map(str, SOURCES))
+    assert (r.returncode, r.stdout, r.stderr) == (0, '', ''), 'run tools/hfmt on these files:\n' + r.stdout

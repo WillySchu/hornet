@@ -1,12 +1,15 @@
 # AST-interpreter style: recursive match dispatch over sum-typed nodes.
 type Num struct:
     int v
+
 type Add struct:
     int l
     int r
+
 type Mul struct:
     int l
     int r
+
 type Node is Num | Add | Mul
 
 def int eval([]Node nodes, int i):
