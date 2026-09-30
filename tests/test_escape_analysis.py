@@ -589,3 +589,49 @@ def test_pointer_aliasing_through_a_struct_field_assign_propagates():
     result = ea.analyze_array_escapes(fn, ast.struct_registry)
     assert c_decl_id in result
 
+
+
+def _heap_names(source: str, fn_index: int = 0) -> set:
+    """Names of the VarDecls (and for-in bindings) in one function that need the heap."""
+    ast = parse_and_analyze(source)
+    fn = ast.functions[fn_index]
+    heap = ea.analyze_array_escapes(fn, {}, ea.compute_escape_summaries(ast.functions, {}))
+    names = set()
+    stack = list(fn.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, parser.VarDecl) and id(node) in heap:
+            names.add(node.name)
+        if isinstance(node, parser.ForIn):
+            names.update(n for i, n in enumerate(node.binding_names) if (id(node), i) in heap)
+        stack.extend(ea._children(node))
+    return names
+
+
+@pytest.mark.parametrize("loop,decl", [
+    ("for int i = 0; i < 3; i += 1:", "        int x = i"),
+    ("while len(ps) < 3:", "        int x = 1"),
+    ("for v in [1, 2]:", "        int x = v"),
+])
+def test_body_declaration_held_outside_its_loop_needs_the_heap(loop, decl):
+    source = f"def main():\n    []*int ps\n    {loop}\n{decl}\n        ps = append(ps, &x)\n    print(len(ps))\n"
+    assert 'x' in _heap_names(source)
+
+
+def test_loop_variable_and_binding_held_outside_the_loop_need_the_heap():
+    source = ("def main():\n    []*int ps\n    for int i = 0; i < 3; i += 1:\n        ps = append(ps, &i)\n"
+              "    for v in [1, 2]:\n        ps = append(ps, &v)\n    print(len(ps))\n")
+    assert _heap_names(source) == {'i', 'v'}
+
+
+def test_address_used_only_within_the_iteration_stays_on_the_stack():
+    source = ("def bump(*int p):\n    *p += 1\n"
+              "def main():\n    int t = 0\n    for int i = 0; i < 3; i += 1:\n        int x = i\n"
+              "        *int p = &x\n        *p += 1\n        bump(&x)\n        t += x\n    print(t)\n")
+    assert _heap_names(source, 1) == set()
+
+
+def test_inner_loop_declaration_held_by_the_outer_loop_body_needs_the_heap():
+    source = ("def main():\n    for int i = 0; i < 2; i += 1:\n        *int last = none\n"
+              "        for int j = 0; j < 2; j += 1:\n            int x = j\n            last = &x\n        print(*last)\n")
+    assert _heap_names(source) == {'x'}

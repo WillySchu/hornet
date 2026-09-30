@@ -16,7 +16,14 @@ function's summary says whether each PARAM(i) escapes. At a call with a
 summary, only arguments whose parameter escapes do; for the others, the
 callee may still leak or overwrite what their memory holds, so their
 contents escape and their memory may come to hold EXT. Calls without a
-summary (externs, intrinsics) escape every argument."""
+summary (externs, intrinsics) escape every argument.
+
+Storage declared inside a loop (body declarations, the loop variable, for-in bindings,
+`&S()` literals) is fresh on each iteration, so it also needs the heap when a location
+declared outside that loop may come to hold its address: the address would outlive the
+iteration that created it."""
+
+import dataclasses
 
 from typing import Optional, Union
 
@@ -104,8 +111,21 @@ class EscapeAnalyzer:
             self._close_escapes()
             if not self.changed:
                 break
-        return {t for t in self.esc
+        heap = self.esc | self._iteration_escapes()
+        return {t for t in heap
                 if t != EXT and not (isinstance(t, tuple) and isinstance(t[0], str))}
+
+    def _iteration_escapes(self) -> set:
+        """Locations declared inside some loop whose address may be held outside it."""
+        out = set()
+        for inner in _loop_scopes(self.fn.body):
+            reached = [u for t, held in self.H.items() if t not in inner for u in held if u in inner]
+            while reached:
+                u = reached.pop()
+                if u not in out:
+                    out.add(u)
+                    reached.extend(v for v in self.H.get(u, ()) if v in inner)
+        return out
 
     def param_escapes(self) -> list[bool]:
         """After analyze(): whether each parameter's pointed-into memory escapes."""
@@ -321,6 +341,52 @@ class EscapeAnalyzer:
             pass
         else:
             self.vals(stmt)
+
+
+def _children(node) -> list:
+    out = []
+    for f in dataclasses.fields(node):
+        value = getattr(node, f.name)
+        for v in value if isinstance(value, (list, tuple)) else [value]:
+            if isinstance(v, Node):
+                out.append(v)
+            elif isinstance(v, tuple):
+                out.extend(x for x in v if isinstance(x, Node))
+    return out
+
+
+def _declared_within(nodes: list) -> set:
+    """Locations declared anywhere in `nodes` (DeclIds, including `&S()` literal locations)."""
+    out = set()
+    stack = list(nodes)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, VarDecl):
+            out.add(id(node))
+        elif isinstance(node, ForIn):
+            out.update((id(node), i) for i in range(len(node.binding_names)))
+        elif isinstance(node, Call):
+            out.add(id(node))
+        elif isinstance(node, IsCheck) and node.binding_decl is not None:
+            stack.append(node.binding_decl)
+        stack.extend(_children(node))
+    return out
+
+
+def _loop_scopes(statements: list) -> list:
+    """For each loop in `statements`, the set of locations declared inside it (loop variable and
+    for-in bindings included)."""
+    scopes = []
+    stack = list(statements)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ForIn):
+            # The iterable is evaluated once, before the first iteration.
+            scopes.append(_declared_within(node.body) | {(id(node), i) for i in range(len(node.binding_names))})
+        elif isinstance(node, (While, For)):
+            scopes.append(_declared_within(_children(node)))
+        stack.extend(_children(node))
+    return scopes
 
 
 def compute_escape_summaries(functions: list[Function], structs: dict[str, StructInfo]) -> dict:

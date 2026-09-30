@@ -173,6 +173,7 @@ class StatementsMixin:
             self.loop_labels.pop()
             ir.append(IRJump(increment_label))
             ir.append(IRLabel(increment_label))
+            ir.extend(self._ir_fresh_loop_variable(stmt))
             ir.extend(self.gen_statement_ir(stmt.increment, ir_fn))
             ir.append(IRJump(start_label))
             ir.append(IRLabel(end_label))
@@ -634,6 +635,34 @@ class StatementsMixin:
         raise IRError(
             f"No real-IR case for statement of type {type(stmt).__name__}: {stmt!r}"
         )
+
+    def _ir_fresh_loop_variable(self, stmt: For) -> list:
+        """Each iteration has its own loop variable: when its address outlives an iteration it lives
+        on the heap, and the next iteration gets a new copy before the increment runs."""
+        decl = stmt.init
+        if not isinstance(decl, VarDecl):
+            return []
+        var_type = self._local_type(decl)
+        if not self._is_heap_allocated(id(decl), var_type):
+            return []
+        size = type_byte_width(var_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+        fresh = self.ir_program.ids.new_temp(Type.INT64)
+        ir = [IRCall(dst=fresh, name='malloc', args=[IRConst(size, Type.INT64)])]
+        if var_type.kind in COMPOSITE_KINDS:
+            slot_addr, old = self.ir_program.ids.new_temp(Type.INT64), self.ir_program.ids.new_temp(Type.INT64)
+            return ir + [
+                IRLocalAddress(dst=slot_addr, slot=self._local_slot(decl)),
+                IRLoad(dst=old, address=slot_addr),
+                IRCopy(dst_address=fresh, src_address=old, value_type=var_type),
+                IRStore(address=slot_addr, value=fresh, value_type=Type.INT64),
+            ]
+        box = self._local_temp(id(decl))
+        value = self.ir_program.ids.new_temp(var_type)
+        return ir + [
+            IRLoad(dst=value, address=box),
+            IRStore(address=fresh, value=value, value_type=var_type),
+            IRMove(dst=box, src=fresh),
+        ]
 
     def _ir_discarded_composite(self, expr):
         """A composite value used as a statement: evaluate it (calls, bounds checks, lookups) into a

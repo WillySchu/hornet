@@ -14,8 +14,8 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
+- Consider adding a semantic AST with type information rather than annotating the existing AST from the parser.
 - Printing a struct defined in another module shows its internal name: print(write\_file(bad, x)) prints errors$Error(message: …).
-- must\_str and must\_int need a dead return after an exhaustive match, because semantic analysis doesn't treat match as covering every path.
 - Nothing warns when a result is ignored, such as a bare write\_stdout(...) statement.
 - Struct fields are resolved before sum types, so a sum type used as a field type is unknown at that point.
 - A slice literal whose element type is a dict ([]dict[int]int[...]) fails to parse with "Expected a variable name".
@@ -23,10 +23,8 @@ Updates:
 - Per function dict scratch slot is allocated but never used?
 - Module errors have a line but no column.
 - Lexer line number shifts with string literal containing a raw newline.
-- Reject not supported yet errors in semantic analysis rather than IR building.
 - hornet\_panic currently writes to stdout, not stderr.
 - Add symbol table to replace IR builder's use if id() as declaration keys.
-- Pointer receivers for methods.
 - Dicts as sum types.
 - `in` checking for strings.
 - Sum type equality.
@@ -75,14 +73,11 @@ Updates:
 - Multithreading
 - `gen_array_copy` currently copies each leaf one by one, so for small leaf types (int8, etc.) this is calling many `movb` rather than a few `movq`.
 - Consider aligning struct storage rather than packing.
-- Consider adding a semantic AST with type information rather than annotating the existing AST from the parser.
 - Bounds Check Elimination.
 - Interfaces.
 - Error handling.
 - GC...
 - Free memory `malloc`ed by string concatenation.
 - Explore graph coloring algorithm for register allocation (Chaitin-Briggs).
-- Consider renaming CodeGenerator to something like X86Backend.
 - Link to non libc functions for FFI?
 - Call hornet code from C?
-- for-loop binding variables (both the existing three-clause form and the new for x in y form) currently share one stack slot for the entire loop, not a fresh one per iteration — so &x taken inside the body always points at whatever the final iteration left there, regardless of which iteration actually took the address. This matches Go's pre-1.22 behavior, which Go itself changed after years of this being a recurring bug source. Revisit: should each iteration get its own binding instead?

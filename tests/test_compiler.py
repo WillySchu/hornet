@@ -12161,6 +12161,35 @@ class TestStatementsEndTheirLine:
         _parse("def int main():\n    if true:\n        print(1)  # c\n    while false:\n        break\n    return 0\n")
 
 
+class TestFreshStoragePerIteration:
+    """Variables declared in a loop, loop variables, and for-in bindings are fresh on each iteration."""
+
+    pytestmark = GCC_SKIP
+
+    @pytest.mark.parametrize("source,expected", [
+        pytest.param("def int main():\n    []*int ps\n    for int i = 0; i < 3; i += 1:\n        ps = append(ps, &i)\n    print(*ps[0])\n    print(*ps[1])\n    print(*ps[2])\n    return 0\n", "0\n1\n2\n", id='for loop var per iteration'),
+        pytest.param("def int main():\n    []*int ps\n    for int i = 0; i < 6; i += 1:\n        ps = append(ps, &i)\n        i += 1\n    print(*ps[0])\n    print(*ps[1])\n    print(len(ps))\n    return 0\n", "1\n3\n3\n", id='for loop var modified in body'),
+        pytest.param("def int main():\n    *int keep = none\n    int n = 0\n    for int i = 0; i < 10; i += 1:\n        if i == 2:\n            keep = &i\n        n += 1\n    *keep = 100\n    print(n)\n    print(*keep)\n    return 0\n", "10\n100\n", id='for loop var modified via pointer'),
+        pytest.param("def int main():\n    []*int ps\n    []int s = [5, 6, 7]\n    for v in s:\n        ps = append(ps, &v)\n    print(*ps[0] + *ps[1] * 10 + *ps[2] * 100)\n    return 0\n", "765\n", id='for-in binding per iteration'),
+        pytest.param("def int main():\n    []*int ps\n    []int s = [5, 6, 7]\n    for i, v in s:\n        ps = append(ps, &i)\n    print(*ps[0] + *ps[1] * 10 + *ps[2] * 100)\n    return 0\n", "210\n", id='for-in index binding per iteration'),
+        pytest.param("def int main():\n    []*int ps\n    dict[int]int d\n    d[1] = 10\n    d[2] = 20\n    for k, v in d:\n        ps = append(ps, &v)\n    print(*ps[0] + *ps[1])\n    return 0\n", "30\n", id='for-in dict bindings per iteration'),
+        pytest.param("type P struct:\n    int x\ndef int main():\n    []*P ps\n    for int i = 0; i < 3; i += 1:\n        ps = append(ps, &P(i))\n    print(ps[0].x + ps[1].x * 10 + ps[2].x * 100)\n    return 0\n", "210\n", id='struct literal address per iteration'),
+        pytest.param("def int main():\n    []*int all\n    for int i = 0; i < 2; i += 1:\n        *int last = none\n        for int j = 0; j < 2; j += 1:\n            int x = i * 10 + j\n            last = &x\n        all = append(all, last)\n    print(*all[0])\n    print(*all[1])\n    return 0\n", "1\n11\n", id='nested loop inner var held by outer-body var'),
+        pytest.param("def int main():\n    int total = 0\n    for int i = 0; i < 5; i += 1:\n        int x = i\n        *int p = &x\n        *p += 1\n        total += x\n    print(total)\n    return 0\n", "15\n", id='pointer only used within iteration stays correct'),
+        pytest.param("def int main():\n    [][]int all\n    for int i = 0; i < 3; i += 1:\n        all = append(all, []int[i])\n    print(all[0][0] + all[1][0] * 10 + all[2][0] * 100)\n    return 0\n", "210\n", id='slice literal in loop'),
+        pytest.param("def int main():\n    [][]int all\n    for int i = 0; i < 3; i += 1:\n        [1]int a = [i]\n        all = append(all, a[0:1])\n    print(all[0][0] + all[1][0] * 10 + all[2][0] * 100)\n    return 0\n", "210\n", id='array var slice in loop'),
+        pytest.param("def int main():\n    []*int ps\n    int i = 0\n    while i < 3:\n        ps = append(ps, &i)\n        i += 1\n    print(*ps[0])\n    return 0\n", "3\n", id='while loop var from outside unaffected'),
+        pytest.param("def int main():\n    []*int8 ps\n    for int8 i = int8(0); i < int8(3); i += int8(1):\n        ps = append(ps, &i)\n    print(*ps[0] + *ps[2])\n    return 0\n", "2\n", id='int8 loop var'),
+        pytest.param("def int main():\n    []*str ps\n    for str s = 'a'; len(s) < 4; s = s + 'b':\n        ps = append(ps, &s)\n    print(*ps[0])\n    print(*ps[2])\n    return 0\n", "a\nabb\n", id='for loop str var per iteration'),
+        pytest.param("def int main():\n    []*[]int ps\n    for []int s = []int[]; len(s) < 3; s = append(s, 7):\n        ps = append(ps, &s)\n    print(len(*ps[0]))\n    print(len(*ps[2]))\n    return 0\n", "0\n2\n", id='for loop slice var per iteration'),
+        pytest.param("type P struct:\n    int x\ndef int main():\n    []*P ps\n    for int i = 0; i < 3; i += 1:\n        P p = P(i)\n        ps = append(ps, &p)\n    print(ps[0].x)\n    return 0\n", "0\n", id='escaping struct in loop distinct'),
+        pytest.param("def int main():\n    []*int ps\n    int i = 0\n    while i < 3:\n        int x = i\n        ps = append(ps, &x)\n        i += 1\n    print(*ps[0])\n    return 0\n", "0\n", id='escaping var in while distinct'),
+        pytest.param("def int main():\n    []*int ps\n    for int i = 0; i < 3; i += 1:\n        int x = i\n        ps = append(ps, &x)\n    print(*ps[0])\n    print(*ps[2])\n    return 0\n", "0\n2\n", id='pointer to var declared in loop is distinct'),
+    ])
+    def test_program(self, source, expected):
+        assert_program_stdout(source, expected)
+
+
 class TestSliceParametersAndReturns:
     pytestmark = GCC_SKIP
 
@@ -17857,7 +17886,7 @@ class TestForInSemantics:
             "1\n3\n",
         )
 
-    def test_for_in_binding_address_not_escaping_the_function_still_shares_one_slot(self):
+    def test_for_in_binding_address_not_escaping_the_function_is_still_fresh_per_iteration(self):
         assert_program_stdout(
             "def int main():\n"
             "    []int s = [1, 2, 3]\n"
@@ -17871,7 +17900,7 @@ class TestForInSemantics:
             "    print(*p1)\n"
             "    print(*p2)\n"
             "    return 0\n",
-            "3\n3\n",
+            "1\n3\n",
         )
 
     def test_address_of_a_shadowed_name_inside_the_body_is_still_allowed(self):
