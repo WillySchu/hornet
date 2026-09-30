@@ -22,9 +22,11 @@ def int main():
 
 The compiler itself is written in Python and currently has no third-party Python dependencies.
 
-To build a runnable native executable, you also need a C compiler/linker. The project currently uses `gcc` in its build and test tooling.
+To build a runnable native executable, you also need a C compiler/linker. The project uses `gcc` in its build and test tooling.
 
-The native backend targets x86-64 Linux and macOS. On an Apple Silicon Mac, the compiler currently produces x86-64 output and the build tooling requests an x86-64 build from the system compiler.
+The native backend targets x86-64 Linux and macOS. On an Apple Silicon Mac the default target is x86-64 macOS, built with `gcc -arch x86_64` and run under Rosetta 2.
+
+Building for a foreign Linux architecture needs a cross toolchain named `<arch>-linux-gnu-gcc`, and running the result needs qemu-user (on Debian/Ubuntu: `apt install gcc-aarch64-linux-gnu qemu-user`). The test suite uses them when present and skips what they're needed for otherwise.
 
 ### Build an Executable
 
@@ -37,27 +39,26 @@ python3 build.py program.ht -o program
 
 `build.py` compiles the Hornet source, compiles the bundled native runtime, and links the two together into an executable.
 
-The target platform can be selected explicitly:
+The target is written `arch-os`: `x86_64-linux`, `x86_64-macos`, `aarch64-linux`, or `aarch64-macos`.
 
 ```bash
-python3 build.py program.ht --platform linux -o program
-python3 build.py program.ht --platform macos -o program
+python3 build.py program.ht --target x86_64-linux -o program
 ```
 
-When `--platform` is omitted, the host platform (`linux` or `macos`) is used for the platform-specific symbol/linking conventions.
+Without `--target`, the host is used, or x86-64 on the host's operating system while the host's architecture has no backend. Only x86-64 has a backend so far; asking for another architecture is an error.
 
 ### Generate Assembly
 
 `compile.py` stops after assembly generation and is useful when inspecting the compiler's output:
 
 ```bash
-python3 compile.py program.ht --platform linux -o program.s
+python3 compile.py program.ht --target x86_64-linux -o program.s
 ```
 
 Without `-o`, assembly is written to standard output:
 
 ```bash
-python3 compile.py program.ht --platform linux
+python3 compile.py program.ht
 ```
 
 A generated program that uses runtime functions such as `print` must also be linked with `runtime/runtime.c`. `build.py` handles this automatically.
@@ -75,6 +76,8 @@ pytest
 ```
 
 The tests cover the lexer, parser, semantic analysis, module discovery and merging, IR construction and verification, optimization, the native backend, escape analysis, runtime behavior, and end-to-end compiled programs, including seeded random programs checked against a Python model.
+
+Backend-specific tests live in `tests/backend/<arch>/` and shared backend tests in `tests/backend/common/`. End-to-end programs are built and run for every target that has a backend and can run on the machine (natively, under Rosetta 2, or under qemu-user), and every such target must produce the same output.
 
 ### Formatting
 
@@ -971,7 +974,7 @@ It currently provides language-level services including:
 * runtime type-descriptor support
 * output, file creation, exit, and OS error messages for `stdlib/os.ht` (`hornet_write_fd`, `hornet_open_write`, `hornet_exit`, `hornet_error_message`)
 
-The runtime is deliberately separate from the x86-64 backend. The compiler is responsible for semantic operations such as type checking, aggregate layout, address calculation, and bounds-check generation; the runtime implements selected algorithms and services that are better expressed as ordinary native code.
+The runtime is deliberately separate from the native backends. The compiler is responsible for semantic operations such as type checking, aggregate layout, address calculation, and bounds-check generation; the runtime implements selected algorithms and services that are better expressed as ordinary native code.
 
 The runtime currently uses the platform C library for lower-level services such as memory allocation and byte copying rather than wrapping every libc primitive in a Hornet-specific API.
 
@@ -1006,7 +1009,7 @@ Semantic analysis
 IR optimization
      │
      ▼
-x86-64 backend
+native backend (per architecture)
      │
      ├── frame layout
      ├── register allocation
@@ -1015,7 +1018,7 @@ x86-64 backend
      └── assembly emission
      │
      ▼
-x86-64 assembly
+native assembly
      │
      ├───────────────┐
      ▼               ▼
@@ -1026,13 +1029,13 @@ Hornet runtime   external libraries
        native executable
 ```
 
-The frontend constructs a complete `IRProgram` before the x86-64 backend begins lowering it. The intermediate representation is independent of the x86-64 assembly representation and is the natural boundary for optimization passes and additional native backends.
+The frontend constructs a complete `IRProgram` before a backend begins lowering it. The IR is independent of any target: a function's incoming arguments are an ordered list of word-sized temporaries in Hornet's own calling convention (a composite return value's destination address first, then one word per parameter, except two for `str` and three for slices, with arrays, structs, sum types, and dicts passed by address), and where each word physically arrives is decided by the backend. Lowering never modifies the IR.
 
 Escape analysis decides which locals must live on the heap. It is a points-to analysis per function, with per-parameter escape summaries so that passing `&x` to a function that doesn't keep the pointer leaves `x` on the stack.
 
 The IR optimizer repeats constant folding, identity simplification, constant-branch and unreachable-block removal, copy and constant propagation within blocks, copy coalescing, and dead-code elimination until nothing changes. `ir/cfg.py` provides the shared control-flow and liveness analysis.
 
-The backend owns architecture-specific concerns: linear-scan register allocation (values live across calls get callee-saved registers), stack-frame layout with prologues that save only the registers a function uses, the native calling convention, instruction selection that works directly on registers, stack slots, and immediates, division by constants via multiplication, a peephole pass, and assembly emission.
+`backend/` holds one package per architecture, chosen by the target, plus `backend/common/` for what they share: linear-scan register allocation over the target's register lists (values live across calls get callee-saved registers), stack-frame slot layout, the magic numbers for division by constants, and jump cleanups. The x86-64 backend (`backend/x86_64/`) adds the SysV calling convention, prologues that save only the registers a function uses, instruction selection that works directly on registers, stack slots, and immediates, a peephole pass, and AT&T-syntax assembly emission for Linux and macOS.
 
 Some IR operations deliberately lower to runtime calls. A runtime operation does not require a special calling mechanism; runtime functions participate in the same native call machinery as other external functions.
 
@@ -1056,7 +1059,8 @@ diagnostics.py     Error types and error reporting
 ir/                Intermediate representation and IR construction
 optimize/          IR optimization passes
 
-codegen/           x86-64 backend and assembly representation
+target.py          Compilation targets (arch-os)
+backend/           Native backends: common/ shared pieces, x86_64/ the x86-64 backend
 runtime/           Native Hornet runtime
 stdlib/            Hornet standard-library modules
 
@@ -1128,7 +1132,7 @@ The example is intentionally modest. Its purpose is to exercise the language and
 
 Hornet is still experimental. Some notable limitations are:
 
-* The native backend currently supports x86-64 Linux and macOS only.
+* Only x86-64 has a backend so far (Linux and macOS); AArch64 targets are recognized but not yet implemented.
 * Pointer-to-pointer types are parsed but rejected semantically.
 * Some advanced pointer/address-taking cases remain unsupported.
 * Taking the address of a `for ... in ...` binding is currently rejected because iterator-binding escape tracking is not yet precise enough.
