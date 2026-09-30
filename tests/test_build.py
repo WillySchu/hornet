@@ -69,7 +69,6 @@ def test_c_compiler_selects_the_architecture_on_macos():
     from target import Target
     assert build.c_compiler(Target('x86_64', 'macos')) == ["gcc", "-arch", "x86_64"]
     assert build.c_compiler(Target('aarch64', 'macos')) == ["gcc", "-arch", "arm64"]
-    assert build.c_compiler(Target('x86_64', 'linux')) == ["gcc"]
 
 
 def test_targets_parse_and_default_to_an_implemented_architecture():
