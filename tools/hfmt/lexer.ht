@@ -1,0 +1,179 @@
+# Lexer for hfmt. Unlike the compiler's lexer it keeps comments and every
+# physical newline, and records the bracket depth at each newline.
+
+const int TK_IDENT = 1
+const int TK_KEYWORD = 2
+const int TK_NUMBER = 3
+const int TK_STRING = 4
+const int TK_BYTE = 5
+const int TK_OP = 6
+const int TK_COMMENT = 7
+const int TK_NEWLINE = 8
+const int TK_EOF = 9
+
+type Token struct:
+    int kind
+    str text
+    int line
+    int col
+    int depth  # open brackets before this token
+
+type Tokens struct:
+    []Token items
+
+type LexError struct:
+    str message
+    int line
+    int col
+
+type LexResult is Tokens | LexError
+
+def str kind_name(int kind):
+    if kind == TK_IDENT:
+        return 'IDENT'
+    if kind == TK_KEYWORD:
+        return 'KEYWORD'
+    if kind == TK_NUMBER:
+        return 'NUMBER'
+    if kind == TK_STRING:
+        return 'STRING'
+    if kind == TK_BYTE:
+        return 'BYTE'
+    if kind == TK_OP:
+        return 'OP'
+    if kind == TK_COMMENT:
+        return 'COMMENT'
+    if kind == TK_NEWLINE:
+        return 'NEWLINE'
+    return 'EOF'
+
+def dict[str]bool _keywords():
+    dict[str]bool kw = dict[str]bool{}
+    []str words = []str['def', 'int', 'int8', 'uint8', 'int64', 'int32', 'byte', 'str', 'return', 'and', 'or', 'not',
+        'bool', 'true', 'false', 'if', 'else', 'elif', 'for', 'while', 'break', 'continue', 'none', 'struct', 'type',
+        'is', 'in', 'match', 'as', 'import', 'from', 'extern', 'intrinsic', 'dict', 'const']
+    for w in words:
+        kw[w] = true
+    return kw
+
+def bool is_digit(byte c):
+    return c >= "0" and c <= "9"
+
+def bool is_ident_start(byte c):
+    return (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_"
+
+def bool is_ident_char(byte c):
+    return is_ident_start(c) or is_digit(c)
+
+# Longest operator starting at i, or ''.
+def str _operator_at(str src, int i):
+    []str three = []str['<<=', '>>=']
+    []str two = []str['==', '!=', '>=', '<=', '<<', '>>', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=']
+    str one = '()[]{}><:;,=+-*/%~&|^.'
+    int n = len(src)
+    if i + 3 <= n:
+        for op in three:
+            if src[i:i + 3] == op:
+                return op
+    if i + 2 <= n:
+        for op in two:
+            if src[i:i + 2] == op:
+                return op
+    for k in one:
+        if src[i] == k:
+            return src[i:i + 1]
+    return ''
+
+def byte _closer(byte open):
+    if open == "(":
+        return ")"
+    if open == "[":
+        return "]"
+    return "}"
+
+def LexResult lex(str src):
+    dict[str]bool keywords = _keywords()
+    []Token toks = none
+    []byte opens = none
+    []int open_lines = none
+    []int open_cols = none
+    int n = len(src)
+    int i = 0
+    int line = 1
+    int line_start = 0
+    while i < n:
+        byte c = src[i]
+        int col = i - line_start + 1
+        int depth = len(opens)
+        if c == " " or c == "\t" or c == "\r":
+            i += 1
+        elif c == "\n":
+            toks = append(toks, Token(TK_NEWLINE, '', line, col, depth))
+            i += 1
+            line += 1
+            line_start = i
+        elif c == "#":
+            int j = i
+            while j < n and src[j] != "\n":
+                j += 1
+            toks = append(toks, Token(TK_COMMENT, src[i:j], line, col, depth))
+            i = j
+        elif is_digit(c):
+            int j = i
+            while j < n and is_digit(src[j]):
+                j += 1
+            if j + 1 < n and src[j] == "." and is_digit(src[j + 1]):
+                j += 1
+                while j < n and is_digit(src[j]):
+                    j += 1
+            toks = append(toks, Token(TK_NUMBER, src[i:j], line, col, depth))
+            i = j
+        elif is_ident_start(c):
+            int j = i
+            while j < n and is_ident_char(src[j]):
+                j += 1
+            str word = src[i:j]
+            int kind = TK_IDENT
+            if word in keywords:
+                kind = TK_KEYWORD
+            toks = append(toks, Token(kind, word, line, col, depth))
+            i = j
+        elif c == "'" or c == "\"":
+            int start_line = line
+            int j = i + 1
+            while j < n and src[j] != c:
+                if src[j] == "\\":
+                    j += 1
+                if j < n and src[j] == "\n":
+                    line += 1
+                    line_start = j + 1
+                j += 1
+            if j >= n:
+                return LexError('unterminated literal', start_line, col)
+            int kind = TK_STRING
+            if c == "\"":
+                kind = TK_BYTE
+            toks = append(toks, Token(kind, src[i:j + 1], start_line, col, depth))
+            i = j + 1
+        else:
+            str op = _operator_at(src, i)
+            if len(op) == 0:
+                return LexError('unexpected character \'' + src[i:i + 1] + '\'', line, col)
+            if op == '(' or op == '[' or op == '{':
+                opens = append(opens, c)
+                open_lines = append(open_lines, line)
+                open_cols = append(open_cols, col)
+            elif op == ')' or op == ']' or op == '}':
+                if len(opens) == 0 or _closer(opens[len(opens) - 1]) != c:
+                    return LexError('unmatched \'' + op + '\'', line, col)
+                opens = opens[0:len(opens) - 1]
+                open_lines = open_lines[0:len(open_lines) - 1]
+                open_cols = open_cols[0:len(open_cols) - 1]
+                depth = len(opens)
+            toks = append(toks, Token(TK_OP, op, line, col, depth))
+            i += len(op)
+    if len(opens) > 0:
+        int k = len(opens) - 1
+        return LexError('unclosed \'' + str(opens[k]) + '\'', open_lines[k], open_cols[k])
+    toks = append(toks, Token(TK_EOF, '', line, i - line_start + 1, 0))
+    return Tokens(toks)

@@ -1,0 +1,57 @@
+# hfmt: Hornet source formatter.
+from 'os' import get_args, read_file, read_stdin, write_stdout, write_stderr, exit
+from 'errors' import Error, StrResult
+from 'fmt' import int_to_str
+from 'strings' import Builder
+from 'lexer' import lex, kind_name, LexResult, LexError, Tokens, TK_NEWLINE
+
+def str _usage():
+    return 'usage: hfmt --tokens [file]\n'
+
+def str _source(str path):
+    StrResult r = read_stdin()
+    if len(path) > 0:
+        r = read_file(path)
+    match r as v:
+        is str:
+            return v
+        is Error:
+            write_stderr('hfmt: ' + v.message + '\n')
+            exit(1)
+    return ''
+
+# One line per token: KIND line col text (NEWLINE shows its bracket depth instead).
+def dump_tokens(str path, str src):
+    match lex(src) as r:
+        is LexError:
+            write_stderr(path + ':' + int_to_str(r.line) + ':' + int_to_str(r.col) + ': error: ' + r.message + '\n')
+            exit(1)
+        is Tokens:
+            Builder b = Builder(none)
+            for t in r.items:
+                b.write(kind_name(t.kind))
+                b.write(' ')
+                b.write_int(t.line)
+                b.write(' ')
+                b.write_int(t.col)
+                b.write(' ')
+                if t.kind == TK_NEWLINE:
+                    b.write_int(t.depth)
+                else:
+                    b.write(t.text)
+                b.write('\n')
+            write_stdout(b.to_str())
+
+def int main(int argc, *byte argv):
+    []str args = get_args(argc, argv)
+    if len(args) < 2 or args[1] != '--tokens':
+        write_stderr(_usage())
+        return 2
+    str path = ''
+    if len(args) > 2:
+        path = args[2]
+    str label = path
+    if len(label) == 0:
+        label = '<stdin>'
+    dump_tokens(label, _source(path))
+    return 0

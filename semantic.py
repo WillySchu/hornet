@@ -1216,11 +1216,11 @@ class SemanticAnalyzer:
         self._pop_scope()
 
     def analyze_for_in(self, stmt: ForIn, return_type: Type) -> None:
-        """`for a[, b] in iterable:` over arrays, slices, and dicts."""
-        if not isinstance(stmt.iterable, (Variable, Field, Index, Slice, ArrayLiteral, DictLiteral, Call)):
+        """`for a[, b] in iterable:` over arrays, slices, dicts, and strings (bytes)."""
+        if not isinstance(stmt.iterable, (Variable, Field, Index, Slice, ArrayLiteral, DictLiteral, StringLiteral, Call)):
             raise SemanticError(
                 f"'for ... in' requires a variable, field, index, "
-                f"slice, or array/dict literal as its own iterable, "
+                f"slice, or array/dict/str literal as its own iterable, "
                 f"not a {type(stmt.iterable).__name__}",
                 stmt.iterable,
             )
@@ -1234,14 +1234,16 @@ class SemanticAnalyzer:
                 stmt.iterable,
             )
         iterable_type = self.check_expr(stmt.iterable)
-        if iterable_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.DICT):
+        if iterable_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.DICT, TypeKind.STR):
             raise SemanticError(
-                f"'for ... in' requires an array, slice, or dict as its own "
+                f"'for ... in' requires an array, slice, dict, or str as its own "
                 f"iterable, got {iterable_type}",
                 stmt.iterable,
             )
         num_bindings = len(stmt.binding_names)
-        if iterable_type.kind == TypeKind.DICT:
+        if iterable_type.kind == TypeKind.STR:
+            binding_types = [Type.INT, Type.UINT8] if num_bindings == 2 else [Type.UINT8]
+        elif iterable_type.kind == TypeKind.DICT:
             binding_types = [iterable_type.key_type, iterable_type.element_type][:num_bindings]
         else:
             binding_types = [Type.INT, iterable_type.element_type] if num_bindings == 2 else [iterable_type.element_type]

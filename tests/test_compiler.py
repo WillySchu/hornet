@@ -23501,7 +23501,7 @@ class TestForInSemantics:
         with pytest.raises(
             SemanticError,
             match="'for ... in' requires a variable, field, index, "
-                  "slice, or array/dict literal",
+                  "slice, or array/dict/str literal",
         ):
             analyze(ast)
 
@@ -23515,7 +23515,7 @@ class TestForInSemantics:
         )
         with pytest.raises(
             SemanticError,
-            match="'for ... in' requires an array, slice, or dict as its own iterable",
+            match="'for ... in' requires an array, slice, dict, or str as its own iterable",
         ):
             analyze(ast)
 

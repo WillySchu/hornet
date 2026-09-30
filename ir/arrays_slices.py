@@ -548,13 +548,17 @@ class ArraysSlicesMixin:
         return ir
 
     def _ir_for_in_array_slice(self, stmt: ForIn, ir_fn) -> list:
-        """`for [i,] x in array/slice`."""
+        """`for [i,] x in array/slice/str`."""
         iterable_type = type_of(stmt.iterable)
-        element_type = iterable_type.element_type
-        element_width = type_byte_width(element_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
-        is_slice = iterable_type.kind == TypeKind.SLICE
-
-        base = self._ir_indexable_base(stmt.iterable)
+        if iterable_type.kind == TypeKind.STR:
+            str_ir, str_ptr, str_len = self._ir_str_value(stmt.iterable)
+            base = (str_ir, str_ptr, str_len, None)
+            element_type, element_width, is_slice = Type.UINT8, 1, False
+        else:
+            element_type = iterable_type.element_type
+            element_width = type_byte_width(element_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+            is_slice = iterable_type.kind == TypeKind.SLICE
+            base = self._ir_indexable_base(stmt.iterable)
         if base is None:
             raise IRError(
                 f"_ir_indexable_base returned None for an ARRAY/SLICE-typed "
