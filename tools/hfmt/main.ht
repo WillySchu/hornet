@@ -2,17 +2,36 @@
 from 'os' import get_args, read_file, read_stdin, write_stdout, write_stderr, exit
 from 'errors' import Error, StrResult
 from 'fmt' import int_to_str
-from 'strings' import Builder
+from 'strings' import Builder, starts_with
 from 'lexer' import lex, kind_name, LexResult, LexError, Tokens, TK_NEWLINE
+from 'layout' import layout, LayoutError
 
 def str _usage():
-    return 'usage: hfmt --tokens [file]\n'
+    return 'usage: hfmt [file] | hfmt --tokens [file]\n'
+
+def _fail(str path, int line, int col, str message):
+    write_stderr(path + ':' + int_to_str(line) + ':' + int_to_str(col) + ': error: ' + message + '\n')
+    exit(1)
+
+# Formatted source on stdout.
+def format_to_stdout(str path, str src):
+    match lex(src) as r:
+        is LexError:
+            _fail(path, r.line, r.col, r.message)
+        is Tokens:
+            match layout(r.items) as f:
+                is LayoutError:
+                    _fail(path, f.line, f.col, f.message)
+                is str:
+                    write_stdout(f)
+
+def StrResult _read(str path):
+    if len(path) > 0:
+        return read_file(path)
+    return read_stdin()
 
 def str _source(str path):
-    StrResult r = read_stdin()
-    if len(path) > 0:
-        r = read_file(path)
-    match r as v:
+    match _read(path) as v:
         is str:
             return v
         is Error:
@@ -24,8 +43,7 @@ def str _source(str path):
 def dump_tokens(str path, str src):
     match lex(src) as r:
         is LexError:
-            write_stderr(path + ':' + int_to_str(r.line) + ':' + int_to_str(r.col) + ': error: ' + r.message + '\n')
-            exit(1)
+            _fail(path, r.line, r.col, r.message)
         is Tokens:
             Builder b = Builder(none)
             for t in r.items:
@@ -44,14 +62,21 @@ def dump_tokens(str path, str src):
 
 def int main(int argc, *byte argv):
     []str args = get_args(argc, argv)
-    if len(args) < 2 or args[1] != '--tokens':
+    bool tokens = len(args) > 1 and args[1] == '--tokens'
+    int first = 1
+    if tokens:
+        first = 2
+    if len(args) > first + 1 or (len(args) > first and starts_with(args[first], '-')):
         write_stderr(_usage())
         return 2
     str path = ''
-    if len(args) > 2:
-        path = args[2]
+    if len(args) > first:
+        path = args[first]
     str label = path
     if len(label) == 0:
         label = '<stdin>'
-    dump_tokens(label, _source(path))
+    if tokens:
+        dump_tokens(label, _source(path))
+    else:
+        format_to_stdout(label, _source(path))
     return 0

@@ -1,0 +1,18 @@
+def int main():
+    str t = s[1:len(s) - 1]
+    str u = s[:2]
+    str w = s[i + 1:]
+    []int all = xs[:]
+    dict[str]int d = dict[str]int{'a': 1, 'b': 2}
+    int n = int(b) + int8(3)
+    str one = str(b)
+    []int lit = []int[1, 2]
+    byte c = 'abc'[0]
+    int m = a.b(c).d[0]
+    if (x):
+        return (a)
+    for int i = 0; i < 3; i += 1:
+        print(i)
+    for k, v in d:
+        del(d, k)
+    return len(t)

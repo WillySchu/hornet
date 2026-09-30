@@ -1,0 +1,12 @@
+def *Node first(*Node n, []*int ps):
+    int x = -1
+    int y = x - -1
+    int z = f(-x, -y) * -2
+    *int p = &x
+    int w = *p + ~x
+    bool b = not (x == 1)
+    [2]*int arr = [&x, p]
+    int v = arr[0] * 2 - (x) - -z
+    int u = (x
+        - y)
+    return -1

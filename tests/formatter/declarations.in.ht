@@ -1,0 +1,7 @@
+from 'strings'   import Builder,trim as t
+import 'fmt' as f
+extern int32 close( int32 fd )
+intrinsic int _raw_len(str s)
+const  int  LIMIT=1<<4
+type Shape is Circle|Square
+type Alias []int

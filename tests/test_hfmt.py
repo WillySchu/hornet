@@ -105,4 +105,40 @@ def test_lex_errors_are_reported_with_position(hfmt, src, message):
 
 @GCC_SKIP
 def test_usage_error(hfmt):
-    assert _run(hfmt).returncode == 2
+    assert _run(hfmt, '--tokens', 'a', 'b').returncode == 2
+    assert _run(hfmt, '--bogus').returncode == 2
+
+
+# -- formatting ---------------------------------------------------------------
+
+GOLDEN = sorted((ROOT / 'tests' / 'formatter').glob('*.in.ht'))
+
+
+@GCC_SKIP
+@pytest.mark.parametrize('case', GOLDEN, ids=lambda p: p.name[:-len('.in.ht')])
+def test_golden(hfmt, case):
+    expected = case.with_name(case.name.replace('.in.ht', '.out.ht')).read_text()
+    r = _run(hfmt, str(case))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == expected
+    assert _run(hfmt, stdin=expected).stdout == expected  # formatting twice changes nothing
+
+
+@GCC_SKIP
+def test_inconsistent_dedent_is_an_error(hfmt):
+    r = _run(hfmt, stdin="def f():\n    if x:\n        y = 1\n      z = 2\n")
+    assert (r.returncode, r.stderr) == (1, "<stdin>:4:1: error: unindent does not match any outer indentation level\n")
+
+
+@GCC_SKIP
+@pytest.mark.parametrize('path', SOURCES, ids=lambda p: f"{p.parent.name}/{p.name}")
+def test_formatting_repo_files_is_stable_and_keeps_meaning(hfmt, path, tmp_path):
+    """Formatting twice changes nothing, and the formatted file compiles to identical assembly."""
+    from compile import compile_to_asm
+    formatted = _run(hfmt, str(path))
+    assert formatted.returncode == 0, formatted.stderr
+    assert _run(hfmt, stdin=formatted.stdout).stdout == formatted.stdout
+    # Sibling modules are formatted too, so relative imports resolve to formatted code.
+    for sibling in path.parent.glob('*.ht'):
+        (tmp_path / sibling.name).write_text(_run(hfmt, str(sibling)).stdout)
+    assert compile_to_asm(str(tmp_path / path.name), 'linux') == compile_to_asm(str(path), 'linux')

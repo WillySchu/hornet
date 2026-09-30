@@ -1,0 +1,222 @@
+# Indentation and spacing. Line breaks stay where they are; tokens are
+# re-joined with canonical spacing and each line is re-indented.
+from 'strings' import Builder, trim
+from 'lexer' import Token, TK_IDENT, TK_KEYWORD, TK_NUMBER, TK_STRING, TK_BYTE, TK_OP, TK_COMMENT, TK_NEWLINE, TK_EOF
+
+const int INDENT = 4
+
+# One physical line.
+type Line struct:
+    []Token toks  # without the trailing NEWLINE
+    int depth  # open brackets at the start of the line
+    int width  # original indentation, in columns
+    int level  # block level, for lines that start a statement
+    bool blank
+    bool comment_only
+    bool continuation  # starts inside brackets (or with a closing bracket)
+
+type Lines struct:
+    []Line items
+
+type LayoutError struct:
+    str message
+    int line
+    int col
+
+type LayoutResult is str | LayoutError
+
+def []Line _split_lines([]Token toks):
+    []Line lines = none
+    []Token cur = none
+    for t in toks:
+        if t.kind == TK_NEWLINE or t.kind == TK_EOF:
+            if t.kind == TK_EOF and len(cur) == 0:
+                break
+            Line l = Line(cur, t.depth, 0, 0, len(cur) == 0, false, false)
+            if len(cur) > 0:
+                l.depth = cur[0].depth
+                l.width = cur[0].col - 1
+                l.comment_only = cur[0].kind == TK_COMMENT
+                l.continuation = cur[0].depth > 0 or _is_closer(cur[0])
+            lines = append(lines, l)
+            cur = none
+        else:
+            cur = append(cur, t)
+    return lines
+
+def bool _starts_statement(Line l):
+    return not l.blank and not l.comment_only and not l.continuation
+
+# Block levels from the original indentation widths, like the compiler's INDENT/DEDENT.
+# Returns the index of a line whose dedent matches no outer level, or -1.
+def int _assign_levels([]Line lines):
+    []int stack = []int[0]
+    for i, l in lines:
+        if _starts_statement(l):
+            int top = stack[len(stack) - 1]
+            if l.width > top:
+                stack = append(stack, l.width)
+            while l.width < stack[len(stack) - 1]:
+                stack = stack[0:len(stack) - 1]
+            if l.width != stack[len(stack) - 1]:
+                return i
+            lines[i].level = len(stack) - 1
+    # Comment-only lines outside brackets take the level of the next statement.
+    int next_level = 0
+    int k = len(lines) - 1
+    while k >= 0:
+        if _starts_statement(lines[k]):
+            next_level = lines[k].level
+        elif lines[k].comment_only and not lines[k].continuation:
+            lines[k].level = next_level
+        k -= 1
+    return -1
+
+def bool _is_type_keyword(str w):
+    return w == 'int' or w == 'int8' or w == 'uint8' or w == 'int32' or w == 'int64' or w == 'byte' or w == 'str' or w == 'bool' or w == 'dict'
+
+def bool _is_opener(Token t):
+    return t.kind == TK_OP and (t.text == '(' or t.text == '[' or t.text == '{')
+
+def bool _is_closer(Token t):
+    return t.kind == TK_OP and (t.text == ')' or t.text == ']' or t.text == '}')
+
+def bool _is_word(Token t):
+    return t.kind == TK_IDENT or t.kind == TK_KEYWORD or t.kind == TK_NUMBER or t.kind == TK_STRING or t.kind == TK_BYTE
+
+# Spacing state within one statement.
+type State struct:
+    bool has_prev
+    Token prev
+    bool prev_value  # prev ends an operand
+    bool prev_unary  # prev is a unary operator
+    []byte brackets  # open bracket characters
+    []bool type_brackets  # parallel: '[' opened in prefix position (a type or array literal)
+    bool closed_type_bracket  # prev is ']' closing a type bracket
+    int count  # tokens so far in the statement
+    bool type_decl  # the statement starts with 'type'
+
+    def reset(*s):
+        s.has_prev = false
+        s.prev_value = false
+        s.prev_unary = false
+        s.brackets = none
+        s.type_brackets = none
+        s.closed_type_bracket = false
+        s.count = 0
+        s.type_decl = false
+
+    def byte top(s):
+        if len(s.brackets) == 0:
+            return " "
+        return s.brackets[len(s.brackets) - 1]
+
+def bool _ends_value(Token t, bool closed_type_bracket):
+    if t.kind == TK_IDENT or t.kind == TK_NUMBER or t.kind == TK_STRING or t.kind == TK_BYTE:
+        return true
+    if t.kind == TK_KEYWORD:
+        return t.text == 'true' or t.text == 'false' or t.text == 'none'
+    if t.kind == TK_OP:
+        return t.text == ')' or t.text == '}' or (t.text == ']' and not closed_type_bracket)
+    return false
+
+# Whether cur is a unary operator given the previous token's state.
+def bool _is_unary(Token cur, State s):
+    if cur.kind != TK_OP:
+        return false
+    if cur.text == '~':
+        return true
+    if cur.text == '-' or cur.text == '*' or cur.text == '&':
+        return not s.prev_value
+    return false
+
+# A single space between s.prev and cur (both on the same line)?
+def bool _space_before(Token cur, bool cur_unary, State s):
+    Token p = s.prev
+    str pt = p.text
+    str ct = cur.text
+    if _is_opener(p) and p.kind == TK_OP:
+        return false
+    if _is_closer(cur):
+        return false
+    if cur.kind == TK_OP and (ct == ',' or ct == ';'):
+        return false
+    if p.kind == TK_OP and (pt == ',' or pt == ';'):
+        return true
+    if cur.kind == TK_OP and ct == ':':
+        return false
+    if p.kind == TK_OP and pt == ':':
+        return s.top() == "{"
+    if (cur.kind == TK_OP and ct == '.') or (p.kind == TK_OP and pt == '.'):
+        return false
+    if s.prev_unary:
+        return false
+    if cur.kind == TK_OP and (ct == '(' or ct == '[' or ct == '{'):
+        if s.type_decl and s.count == 2:
+            return true  # `type Name [3]int`
+        if p.kind == TK_IDENT or p.kind == TK_STRING or (p.kind == TK_OP and (pt == ')' or pt == ']')):
+            return false
+        return not (p.kind == TK_KEYWORD and _is_type_keyword(pt))
+    if p.kind == TK_OP and pt == ']' and s.closed_type_bracket and (_is_word(cur) or cur_unary):
+        return false  # [3]int, []*int
+    return true
+
+def _advance(*State s, Token cur, bool cur_unary):
+    s.closed_type_bracket = false
+    if cur.kind == TK_OP and (cur.text == '(' or cur.text == '[' or cur.text == '{'):
+        s.brackets = append(s.brackets, cur.text[0])
+        s.type_brackets = append(s.type_brackets, cur.text == '[' and not s.prev_value)
+    elif _is_closer(cur) and len(s.brackets) > 0:
+        s.closed_type_bracket = cur.text == ']' and s.type_brackets[len(s.type_brackets) - 1]
+        s.brackets = s.brackets[0:len(s.brackets) - 1]
+        s.type_brackets = s.type_brackets[0:len(s.type_brackets) - 1]
+    s.prev_value = _ends_value(cur, s.closed_type_bracket)
+    s.prev_unary = cur_unary
+    s.prev = cur
+    s.has_prev = true
+    s.count += 1
+    if s.count == 1:
+        s.type_decl = cur.kind == TK_KEYWORD and cur.text == 'type'
+    elif s.count == 2 and s.type_decl:
+        s.prev_value = false  # `type Name []int`: a type follows the name
+
+def str _spaces(int n):
+    Builder b = Builder(none)
+    for int i = 0; i < n; i += 1:
+        b.write_byte(" ")
+    return b.to_str()
+
+def LayoutResult layout([]Token toks):
+    []Line lines = _split_lines(toks)
+    int bad = _assign_levels(lines)
+    if bad >= 0:
+        return LayoutError('unindent does not match any outer indentation level', lines[bad].toks[0].line, 1)
+    Builder out = Builder(none)
+    State s = State(false, Token(0, '', 0, 0, 0), false, false, none, none, false, 0, false)
+    int statement_level = 0
+    for l in lines:
+        if l.blank:
+            out.write('\n')
+            continue
+        if _starts_statement(l):
+            statement_level = l.level
+            s.reset()
+        int indent = l.level * INDENT
+        if l.continuation:
+            indent = (statement_level + l.depth) * INDENT
+        out.write(_spaces(indent))
+        bool first = true
+        for t in l.toks:
+            if t.kind == TK_COMMENT:
+                if not first:
+                    out.write('  ')
+                out.write(trim(t.text))
+                continue
+            bool unary = _is_unary(t, s)
+            if not first and _space_before(t, unary, s):
+                out.write(' ')
+            out.write(t.text)
+            _advance(&s, t, unary)
+            first = false
+        out.write('\n')
+    return out.to_str()

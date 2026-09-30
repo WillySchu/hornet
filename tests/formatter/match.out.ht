@@ -1,0 +1,9 @@
+def int area(Shape s):
+    match s as v:
+        is Circle:
+            return v.r * v.r
+        is Square:
+            return v.side
+    if s is Circle as c:
+        return c.r
+    return 0

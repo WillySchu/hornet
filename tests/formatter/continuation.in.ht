@@ -1,0 +1,15 @@
+def int main():
+  int total = add(1,
+       2,
+            3)
+  dict[str]int d = dict[str]int{
+ 'a': 1,
+     'b': 2,
+        }
+  []int xs = []int[
+      f(1,
+  2),
+   3]
+  print(total +
+ len(d))
+  return 0

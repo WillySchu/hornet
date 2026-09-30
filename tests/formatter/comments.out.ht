@@ -1,0 +1,10 @@
+# top comment
+def int f():
+    # leads the if
+    if true:  # tight
+        # leads the return
+        return 1  # one space
+    int x = [1,  # in a list
+        # alone in a list
+        2]
+    return 0  #   spaced
