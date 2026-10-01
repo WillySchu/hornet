@@ -1214,3 +1214,38 @@ def test_stdlib_fmt_module_int_to_str_formats_a_negative_number():
         assert result.stdout == "-5\n"
 
 
+
+
+def test_types_and_names_inside_literals_are_resolved_across_modules():
+    """Typed array literals, dict types and literals, dict entries, and named arguments all name
+    module types and constants that merging must rename."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _write(
+            tmpdir, "lib.ht",
+            "type Q struct:\n    int y\n"
+            "const int K = 5\n"
+            "def int _helper():\n    return 7\n"
+            "def int own():\n"
+            "    []Q qs = []Q[Q(1)]\n"
+            "    [1]*Q qp = [1]*Q[&qs[0]]\n"
+            "    dict[str]Q d = dict[str]Q{'a': Q(2)}\n"
+            "    dict[int]int e = dict[int]int{K: _helper()}\n"
+            "    Q n = Q(y=K)\n"
+            "    return qs[0].y + qp[0].y + d['a'].y + e[K] + n.y\n",
+        )
+        entry = _write(
+            tmpdir, "main.ht",
+            "import 'lib'\n"
+            "from 'lib' import Q\n"
+            "def int main():\n"
+            "    []lib.Q qs = []lib.Q[lib.Q(1)]\n"
+            "    [1]Q qa = [1]Q[Q(2)]\n"
+            "    dict[str]lib.Q d = dict[str]lib.Q{'a': lib.Q(3)}\n"
+            "    []dict[str]lib.Q ds = []dict[str]lib.Q[d]\n"
+            "    dict[int]*lib.Q pm\n"
+            "    print(qs[0].y + qa[0].y + d['a'].y + ds[0]['a'].y + len(pm))\n"
+            "    print(lib.own())\n"
+            "    return 0\n",
+        )
+        result = _compile_and_run(entry, tmpdir)
+        assert result.stdout == "9\n16\n", result.stdout + result.stderr

@@ -10,6 +10,7 @@ from parser import (
     ArrayTypeExpr,
     Assign,
     Call,
+    DictTypeExpr,
     Field,
     ForIn,
     MethodDef,
@@ -33,7 +34,10 @@ class MergeError(CompileError):
 
 
 # Node fields holding type expressions.
-_TYPE_FIELD_NAMES = frozenset({'var_type', 'return_type', 'field_type', 'target_type', 'type', 'type_name', 'const_type'})
+# Node fields holding a type expression. 'type_expr' is a typed array literal's type; 'key_type' and
+# 'value_type' a dict literal's.
+_TYPE_FIELD_NAMES = frozenset({'var_type', 'return_type', 'field_type', 'target_type', 'type', 'type_name', 'const_type',
+                               'type_expr', 'key_type', 'value_type'})
 
 
 def _mangle(canonical_module: str, name: str) -> str:
@@ -163,6 +167,10 @@ def _rewrite_type_expr(type_expr, own_names: Set[str], canonical_module: Optiona
             # A constant-expression size names constants like any other expression.
             type_expr.size = _rewrite_node(type_expr.size, own_names, canonical_module, import_aliases, named_imports, ctx)
         return type_expr
+    if isinstance(type_expr, DictTypeExpr):
+        type_expr.key_type = _rewrite_type_expr(type_expr.key_type, own_names, canonical_module, import_aliases, named_imports, ctx)
+        type_expr.value_type = _rewrite_type_expr(type_expr.value_type, own_names, canonical_module, import_aliases, named_imports, ctx)
+        return type_expr
     if isinstance(type_expr, str) and type_expr in own_names:
         return _mangle(canonical_module, type_expr)
     if isinstance(type_expr, str):
@@ -230,10 +238,9 @@ def _rewrite_node(node, own_names: Set[str], canonical_module: Optional[str], im
                 setattr(node, f.name, _rewrite_node(
                     value, own_names, canonical_module, import_aliases, named_imports, ctx))
         return node
-    if isinstance(node, list):
-        return [
-            _rewrite_node(item, own_names, canonical_module, import_aliases, named_imports, ctx) for item in node
-        ]
+    if isinstance(node, (list, tuple)):  # tuples: dict literal entries, named call arguments
+        items = [_rewrite_node(item, own_names, canonical_module, import_aliases, named_imports, ctx) for item in node]
+        return items if isinstance(node, list) else tuple(items)
     return node
 
 
