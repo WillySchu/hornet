@@ -1,86 +1,57 @@
 # Benchmarks
 
-Six `.ht` programs, checked in specifically to keep "how is a change
-actually affecting generated code" from staying opaque -- which was
-fine while nothing in the compiler cared about performance, but stops
-being fine now that `codegen/register_allocator.py` exists.
+Programs in `programs/` for tracking how compiler changes affect generated code. `run_benchmarks.py` measures them; it is not part of `pytest`.
 
-## What's measured
+## Measurements
 
-For each program, `run_benchmarks.py`:
+Per program:
 
-- **Instruction count** -- a simple, deterministic proxy for
-  generated-code size (counts real instruction lines in the emitted
-  assembly, skipping labels/directives/comments).
-- **Register-allocation stats** -- for every `Temp` created while
-  compiling the program: how many total, how many were eligible for
-  allocation, how many actually got a register vs. spilled to memory,
-  and *why* the ineligible ones were excluded (backs a named variable,
-  vs. its live range spans an `IRCall` -- see
-  `register_allocator.py`'s own module docstring for what those two
-  exclusions mean and why they exist).
-- **Wall-clock runtime** -- the minimum of several runs of the actual
-  compiled-and-linked binary. Noisier than the other two, and the one
-  number here that isn't perfectly reproducible run to run -- read it
-  as a rough signal, not an exact figure.
+- **instrs**: instruction lines in the emitted assembly (labels, directives, and comments excluded).
+- **Register allocation** (`backend/common/regalloc.py`, summed over functions):
+  - `temps`: all Temps.
+  - `addr`: Temps excluded because their home slot's address is taken.
+  - `elig`: the rest.
+  - `alloc`/`spill`: eligible Temps that got a register or a frame slot.
+  - `x-call`: eligible Temps live across a call, which may use only callee-saved registers.
+- **time(ms)**: minimum wall-clock time over `--runs` runs (default 7). It is noisy; read it as a rough signal.
+- **exec(M)**: millions of instructions executed, from valgrind's cachegrind. It is deterministic. Only with `--icount`, which needs a natively runnable target.
 
 ## Usage
 
+```bash
+python3 benchmarks/run_benchmarks.py                      # all programs, host target
+python3 benchmarks/run_benchmarks.py tokenize branchy     # selected programs
+python3 benchmarks/run_benchmarks.py --runs 0             # skip timing
+python3 benchmarks/run_benchmarks.py --icount             # add executed-instruction counts
+python3 benchmarks/run_benchmarks.py --target aarch64-linux
+python3 benchmarks/run_benchmarks.py --json out.json      # also write results
+python3 benchmarks/run_benchmarks.py --compare out.json   # diff against a results file
+python3 benchmarks/run_benchmarks.py --save-baseline      # overwrite baseline.json
 ```
-python3 benchmarks/run_benchmarks.py                  # run and print a report
-python3 benchmarks/run_benchmarks.py --save-baseline   # also overwrite baseline.json
-```
 
-With no flag, if `baseline.json` already exists, the report includes a
-diff against it (instruction count delta, runtime % change, allocated-
-Temp count delta) for each program. Run with `--save-baseline` to
-accept the current numbers as the new baseline -- do this deliberately,
-after confirming a change's effect on these numbers is the one you
-intended, not as a routine part of every commit.
+Without `--compare`, results are diffed against `baseline.json` if it exists. The diff shows the instruction delta, time %, allocated-Temp delta, and executed % (when both sides have it).
 
-This script is deliberately **not** part of the regular `pytest`
-run: these programs are sized to take tens to hundreds of milliseconds
-each specifically so the timing measurement means something, and
-running them (several times each, for the minimum) on every test run
-would make the suite noticeably slower for a signal that's only
-useful when you're actually asking a performance question.
+`baseline.json` doesn't record the machine or target it came from. Only compare it on the same host and target. Foreign targets run under qemu-user, so their times aren't comparable.
 
-## Keeping these honest
+## Tests
 
-`tests/test_benchmarks.py` *is* part of the regular suite -- it just
-compiles and runs each program once, with no timing, and asserts the
-already-known-correct exit code. That's what stops a benchmark program
-from silently drifting into testing something else (or nothing) as the
-language evolves, without needing to run the slower, noisier
-measurement script just to catch it.
+`tests/test_benchmarks.py` builds each program for each end-to-end target and checks its exit code. Under `pytest --full` it also runs each binary 10 times, to catch ASLR-dependent faults. It also runs the runner and checks that its stats add up, and with valgrind present it tests `--icount`. Every `.ht` file here needs an expected exit code there. Results are exit codes, so they stay in 0–255.
 
-## The programs
+## Programs
 
-Each targets a different corner of what the register allocator can
-and can't currently see, on purpose -- see the design discussion this
-suite came out of for the full reasoning, but briefly:
-
-- `arithmetic_heavy.ht` -- pure scalar arithmetic, no calls, no
-  composite types. The allocator's actual sweet spot today.
-- `recursive_fibonacci.ht` -- call-bound rather than named-variable-
-  bound; almost every `Temp`'s live range crosses an `IRCall`.
-- `loop_accumulator.ht` -- dominated by named-variable reads/writes
-  (the accumulator, the loop counter), which are unconditionally
-  excluded from allocation today regardless of anything else (see
-  `Temp.is_named_local`'s own docstring for why).
-- `array_heavy.ht`, `struct_heavy.ht`, `string_heavy.ht` -- each
-  exercises a feature area that used to be entirely `IRRaw`-wrapped
-  old-style codegen, essentially untouched by the allocator at all,
-  back when these three were first added. That's no longer true --
-  array/struct/string operations have since migrated to real IR along
-  with everything else (see ir.py's own module docstring), so these
-  now exercise the allocator like any other program; they're kept
-  around for their own historical instruction-count/runtime trend
-  lines, not as a "how much is the allocator blind to" control group
-  anymore.
-
-Every program's expected result was checked against an independent,
-pure-Python reference computation, not just accepted from a first
-compile -- and every return value is deliberately kept within 0-255,
-since process exit codes are truncated to a single byte regardless of
-what the Hornet program itself computes or returns.
+| Program | Exercises |
+| --- | --- |
+| `arithmetic_heavy` | Scalar arithmetic, unary operators, and narrowing casts in a hot loop; no calls |
+| `array_heavy` | Bubble sort, indexing into bare literals, array equality |
+| `branchy` | `if`/`elif` chains, short-circuit `and`/`or`, Collatz loops |
+| `calling_convention_heavy` | Array, slice, and struct arguments; composite returns used directly |
+| `calls_in_loop` | Locals live across calls to a leaf function |
+| `copy_heavy` | Whole-array, struct, and slice copies; `append`; slicing |
+| `dict_heavy` | `int`- and `str`-keyed insert, delete, lookup, and iteration |
+| `loop_accumulator` | Scalar accumulation and per-iteration zero-initialization |
+| `recursive_fibonacci` | Call-bound recursion |
+| `register_pressure` | Twelve values live across a loop body |
+| `string_heavy` | Repeated concatenation and string equality |
+| `struct_heavy` | Field arithmetic and struct equality |
+| `sum_type_walk` | Recursive `match` dispatch over a sum-typed tree |
+| `tokenize` | Lexer-style byte scan over a 270 KB `str` |

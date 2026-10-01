@@ -20,7 +20,7 @@ def int main():
 
 ### Requirements
 
-The compiler itself is written in Python and currently has no third-party Python dependencies.
+The compiler itself is written in Python and has no third-party Python dependencies. The tests need `pytest`; `pytest-xdist` (`pytest -n auto`) is optional.
 
 To build a runnable native executable, you also need a C compiler/linker. The project uses `gcc` in its build and test tooling.
 
@@ -37,7 +37,7 @@ python3 build.py program.ht -o program
 ./program
 ```
 
-`build.py` compiles the Hornet source, compiles the bundled native runtime, and links the two together into an executable.
+`build.py` compiles the Hornet source, compiles the bundled native runtime, and links the two together into an executable. The compiled runtime is cached per target under `$HORNET_CACHE_DIR` (default `~/.cache/hornet`).
 
 The target is written `arch-os`: `x86_64-linux`, `x86_64-macos`, `aarch64-linux`, or `aarch64-macos`.
 
@@ -69,18 +69,20 @@ Compile errors are reported as `file:line:col: error: message` with the source l
 
 ### Testing
 
-Run the test suite from the repository root with:
+Run the test suite from the repository root:
 
 ```bash
-pytest
+pytest           # unit tests, plus end-to-end tests on the host target
+pytest --quick   # unit tests only; nothing is built or run
+pytest --full    # every runnable target, plus slow tests (benchmark reruns, formatter fuzzing, sanitizers)
 ```
 
 The tests cover the lexer, parser, semantic analysis, module discovery and merging, IR construction and verification, optimization, the native backend, escape analysis, runtime behavior, and end-to-end compiled programs, including seeded random programs checked against a Python model.
 
-Backend-specific tests live in `tests/backend/<arch>/` and shared backend tests in `tests/backend/common/`. End-to-end programs are built and run for every target that can run on the machine (natively, under Rosetta 2, or under qemu-user), and every such target must produce the same output. That makes the suite several times slower where a second target runs under emulation; to test fewer targets, list them:
+Backend-specific tests live in `tests/backend/<arch>/` and shared backend tests in `tests/backend/common/`. With `--full`, end-to-end programs are built and run for every target that can run on the machine (natively, under Rosetta 2, or under qemu-user), and every such target must produce the same output. `HORNET_E2E_TARGETS` overrides the targets in any tier:
 
 ```bash
-HORNET_E2E_TARGETS=x86_64-linux pytest
+HORNET_E2E_TARGETS=x86_64-linux,aarch64-linux pytest
 ```
 
 ### Formatting
@@ -91,7 +93,8 @@ HORNET_E2E_TARGETS=x86_64-linux pytest
 python3 build.py tools/hfmt/main.ht -o hfmt
 ./hfmt file.ht other.ht        # format in place (files are written only if they change)
 ./hfmt --check file.ht         # list files that would change; exit 1 if any
-./hfmt < file.ht               # format stdin to stdout
+./hfmt < file.ht               # format stdin to stdout (also `-` as a file name)
+./hfmt --tokens file.ht        # dump tokens
 ```
 
 It normalizes whitespace only and keeps line breaks: 4-space indentation (plus 4 per open bracket on continuation lines), canonical spacing around operators, commas, and colons, two spaces before an inline comment and one after `#`, at most one blank line in a row, and exactly one blank line around multi-line top-level definitions (consecutive one-line declarations stay together). The repository's own `.ht` files are kept formatted by the test suite.
@@ -104,6 +107,8 @@ python3 benchmarks/run_benchmarks.py --icount   # also count executed instructio
 python3 benchmarks/run_benchmarks.py --json out.json --compare benchmarks/baseline.json
 ```
 
+See `benchmarks/README.md`.
+
 ---
 
 # Language Overview
@@ -114,7 +119,7 @@ Hornet currently provides:
 * Static typing with explicit integer conversions
 * Block scoping and shadowing
 * `int` (64-bit), `int32`, `int8`, `uint8`, `byte`, `bool`, and `str`
-* Fixed-size arrays
+* Fixed-size arrays, sized by literals or constants
 * Slices
 * Nominal structs, methods, and pointer receivers
 * Type aliases and compile-time constants
@@ -250,6 +255,7 @@ Array sizes are part of the type:
 [3]int values = [1, 2, 3]
 [8]byte buffer
 [2][3]int matrix = [[1, 2, 3], [4, 5, 6]]
+[LIMIT + 1]int table      # sizes may be constant expressions
 ```
 
 ## Slices
@@ -273,6 +279,14 @@ Structs are nominal types:
 type Point struct:
     int x
     int y
+```
+
+## Type Aliases
+
+`type Name = T` gives an existing type another name; values of the two are interchangeable, but struct literals use the struct's own name:
+
+```hornet
+type Grid = [3][3]int
 ```
 
 ## Pointers
@@ -307,6 +321,8 @@ type Square struct:
 
 type Shape is Circle | Square
 ```
+
+A variant may be a struct, scalar, `str`, array, slice, dictionary, or pointer type, but not another sum type. A sum-typed variable has no zero value, so it needs an initializer.
 
 The representation uses a discriminant and payload storage for the largest variant.
 
@@ -356,6 +372,8 @@ bool finished = false
 str message = 'hello'
 ```
 
+Without one, a variable holds its type's zero value: `0`, `false`, `''`, `none` for pointers, slices, and dictionaries, and zeroed arrays and structs. A `none` slice or dictionary behaves as empty, and a `none` dictionary can be written to. Sum types have no zero value.
+
 Blocks introduce lexical scopes, and shadowing is allowed in nested scopes:
 
 ```hornet
@@ -384,7 +402,7 @@ const str GREETING = 'hello ' + 'world'
 const bool DEBUG = LIMIT > 1000 and not false
 ```
 
-The value is computed at compile time from literals, other constants (in any order), operators, string concatenation, and integer casts, with the same wraparound as at runtime. Constants are imported and qualified like other top-level names (`from 'lexer' import TK_IDENT`, `lexer.TK_IDENT`), and a leading `_` makes one private. They can't be assigned or have their address taken, and a local variable, parameter, or loop binding can't reuse the name of a constant visible in its file.
+The value is computed at compile time from literals, other constants (in any order), operators, string concatenation, and integer casts, with the same wraparound as at runtime. Integer constants can size arrays. Constants are imported and qualified like other top-level names (`from 'lexer' import TK_IDENT`, `lexer.TK_IDENT`), and a leading `_` makes one private. They can't be assigned or have their address taken, and a local variable, parameter, or loop binding can't reuse the name of a constant visible in its file.
 
 ---
 
@@ -421,6 +439,8 @@ The conventional executable entry point is:
 def int main():
     return 0
 ```
+
+`main` returns the exit status as `int`, `int32`, `int8`, `uint8`, or `bool`.
 
 A command-line program can instead use the native process arguments directly:
 
@@ -644,7 +664,7 @@ for key, value in counts:
 
 The iterable must be an array, slice, dictionary, or string given as a variable, field, index, slice expression, or array/dictionary/string literal. Iterating over a function-call result or a dereference is not yet supported.
 
-The implementation currently uses one loop binding storage location for the whole iteration. Taking the address of an iteration binding is therefore rejected.
+Each iteration has its own bindings, so taking a binding's address is allowed. Reallocating the iterated slice (e.g. by `append`) or growing the iterated dictionary inside the loop panics.
 
 `break` and `continue` apply to the innermost enclosing loop.
 
@@ -663,6 +683,8 @@ The implementation currently uses one loop binding storage location for the whol
 ```text
 <  >  <=  >=  ==  !=
 ```
+
+Ordering applies to integers of the same type. Equality applies to integers, `bool`, `str`, pointers, and arrays and structs of comparable types; slices, pointers, and dictionaries can also be compared with `none`.
 
 ### Membership
 
@@ -698,7 +720,7 @@ and  or  not
 <<= >>=
 ```
 
-Compound assignments are desugared into ordinary assignments plus the corresponding binary operation.
+A compound assignment evaluates its target once.
 
 ---
 
@@ -728,7 +750,7 @@ match shape as s:
         print(s.side)
 ```
 
-The current implementation checks match exhaustiveness during semantic analysis. A function still needs a `return` after a `match` whose arms all return.
+`match` must be exhaustive. A `match` whose arms all return counts as returning; an arm ending in a call such as `panic` does not, so a `return` is still needed after it.
 
 More general flow-sensitive narrowing through arbitrary boolean expressions and control-flow paths is still future work.
 
@@ -894,7 +916,7 @@ panic()
 
 ## `stdlib/hash.ht`
 
-Hash functions used by dictionaries and available to ordinary Hornet code:
+FNV-1a hash functions for ordinary Hornet code (dictionaries hash in the runtime):
 
 ```text
 hash_int64
@@ -955,8 +977,10 @@ Provides a small POSIX-style operating-system interface:
 []str args = get_args(argc, argv)
 StrResult contents = read_file('input.txt')
 StrResult stdin_contents = read_stdin()
+StrResult fd_contents = read_all_from_fd(fd)
 IntResult written = write_file('output.txt', 'hello')
 write_stdout('no trailing newline')
+write_stderr('error\n')
 exit(0)
 ```
 
@@ -974,9 +998,9 @@ It currently provides language-level services including:
 * `hornet_panic` for runtime failures
 * `hornet_slice_grow`, which copies a slice into a larger backing store
 * `hornet_bytes` for `bytes(s)`
-* dictionary hash-table support
-* runtime type-descriptor support
-* output, file creation, exit, and OS error messages for `stdlib/os.ht` (`hornet_write_fd`, `hornet_open_write`, `hornet_exit`, `hornet_error_message`)
+* dictionary hash tables, hashed with FNV-1a (`hornet_hash_bytes`)
+* runtime type descriptors (`hornet_typedesc_tags.h` is generated from `ir/strings.py` by `runtime/generate_typedesc_header.py`)
+* argument access, output, file creation, exit, and OS error messages for `stdlib/os.ht` (`hornet_argv_get`, `hornet_write_fd`, `hornet_open_write`, `hornet_exit`, `hornet_error_message`)
 
 The runtime is deliberately separate from the native backends. The compiler is responsible for semantic operations such as type checking, aggregate layout, address calculation, and bounds-check generation; the runtime implements selected algorithms and services that are better expressed as ordinary native code.
 
@@ -995,22 +1019,25 @@ Hornet source
    Lexer
      │
      ▼
-   Parser
+   Parser ──────── one AST per module
      │
      ▼
-    AST
+Module discovery and merging ── one AST, names mangled `module$name`
      │
      ▼
- Desugaring
+ Desugaring ────── methods become free functions
      │
      ▼
-Semantic analysis
+Semantic analysis ── types and symbols annotated on the AST
      │
      ▼
- IRProgram
+IR construction ── escape analysis, null and division checks
      │
      ▼
-IR optimization
+ IRProgram (verified)
+     │
+     ▼
+IR optimization (re-verified)
      │
      ▼
 native backend (per architecture)
@@ -1035,7 +1062,7 @@ Hornet runtime   external libraries
 
 The frontend constructs a complete `IRProgram` before a backend begins lowering it. The IR is independent of any target: a function's incoming arguments are an ordered list of word-sized temporaries in Hornet's own calling convention (a composite return value's destination address first, then one word per parameter, except two for `str` and three for slices, with arrays, structs, sum types, and dicts passed by address), and where each word physically arrives is decided by the backend. Lowering never modifies the IR.
 
-Escape analysis decides which locals must live on the heap. It is a points-to analysis per function, with per-parameter escape summaries so that passing `&x` to a function that doesn't keep the pointer leaves `x` on the stack.
+Escape analysis decides which locals must live on the heap; heap storage comes from `malloc` and is never freed. It is a flow-insensitive points-to analysis per function, run on the analyzed AST, with per-parameter escape summaries so that passing `&x` to a function that doesn't keep the pointer leaves `x` on the stack.
 
 The IR optimizer repeats constant folding, identity simplification, constant-branch and unreachable-block removal, copy and constant propagation within blocks, copy coalescing, and dead-code elimination until nothing changes. `ir/cfg.py` provides the shared control-flow and liveness analysis.
 
@@ -1051,13 +1078,14 @@ Some IR operations deliberately lower to runtime calls. A runtime operation does
 lexer.py           Lexical analysis
 parser.py          AST construction
 semantic.py        Semantic analysis and type checking
-desugar.py         AST desugaring
+desugar.py         Methods to free functions
 modules.py         Module discovery
 merge.py           Module merging and name resolution
 escape_analysis.py Escape analysis
 folding.py         Compile-time integer arithmetic (constants and IR folding)
 typesys.py         Types and type layout
 ops.py             Operator enums
+symbols.py         Symbol table (one Symbol per declared variable)
 diagnostics.py     Error types and error reporting
 
 ir/                Intermediate representation and IR construction
@@ -1075,12 +1103,13 @@ benchmarks/        Benchmark programs and tooling
 
 build.py           Build a runnable executable
 compile.py         Generate native assembly
-SELF_HOST_CHECKLIST.md
-                   Self-hosting requirements and progress
+test.sh            Build, run, and delete one program: ./test.sh path/without_ext
+Dockerfile, entrypoint.sh
+                   Assemble and run an x86-64 `.s` file in a Linux container
 TODO.md            Open language, compiler, runtime, and tooling work
 ```
 
-Editor support is also included for Vim and TextMate-compatible editors. `Hornet.tmbundle/` contains the TextMate grammar used by editors such as PyCharm.
+Editor support is also included for Vim (`hornet-vim/`) and TextMate-compatible editors. `Hornet.tmbundle/` contains the TextMate grammar used by editors such as PyCharm.
 
 ---
 
@@ -1138,11 +1167,12 @@ Hornet is still experimental. Some notable limitations are:
 
 * Pointer-to-pointer types are parsed but rejected semantically.
 * Some advanced pointer/address-taking cases remain unsupported.
-* Taking the address of a `for ... in ...` binding is currently rejected because iterator-binding escape tracking is not yet precise enough.
-* `for ... in ...` currently requires a variable, field, or index as its iterable expression; literals and call results must be assigned to a variable first.
+* `for ... in ...` can't iterate a function-call result or a dereference; assign it to a variable first.
 * `is` is limited to dedicated `if`/`elif` condition shapes rather than being a general boolean expression.
 * Sum-type narrowing does not yet fully propagate through arbitrary control flow or `else` branches.
-* Nested sum-type variants are still restricted, and a struct field cannot have a sum type.
+* A sum type can't be a variant of another sum type, and a struct field can't have a sum type, even behind a pointer or slice, so recursive data such as an AST can't be expressed.
+* There are no enums; integer constants stand in for them.
+* There is no no-return type, so a `return` is still needed after a call to `panic` or `exit` that ends a function.
 * Sum-type equality is not implemented.
 * Slice equality and dictionary equality are not implemented.
 * `in` does not apply to strings.
@@ -1155,11 +1185,10 @@ Hornet is still experimental. Some notable limitations are:
 * There is no garbage collector yet; string concatenation in particular never frees its intermediate strings.
 * There are no floating-point types yet.
 * Multithreading is not implemented.
-* Without generics, each result type is a separate named sum type, and slice-valued results must be wrapped in a struct (slices cannot be sum-type variants). There is no operator for propagating errors, and ignoring a result is not diagnosed.
+* Without generics, each result type is a separate named sum type. There is no operator for propagating errors, and ignoring a result is not diagnosed.
+* Panics print a message but no source location, and stack overflow is an unreported `SIGSEGV`.
 * `extern` declarations are visible to every module after merging, even without an import.
 * Printing a struct defined in another module shows its internal name, such as `errors$Error(...)`.
-* A slice literal whose element type is a dictionary (`[]dict[int]int[...]`) does not parse.
-* A constant can't be used as an array size (`[LIMIT]int`).
 
 ---
 
@@ -1167,11 +1196,9 @@ Hornet is still experimental. Some notable limitations are:
 
 A longer-term goal is to rewrite the compiler itself in Hornet.
 
-The current language already has most of the structural features needed by a compiler implementation: structs, arrays, slices, dictionaries, pointers, sum types, pattern matching, modules, FFI, and native compilation.
+The current language already has most of the structural features needed by a compiler implementation: structs, arrays, slices, dictionaries, pointers, sum types, pattern matching, modules, FFI, and native compilation. The main gap is recursive data: a struct field can't yet have a sum type, so an AST can't be expressed.
 
 The standard library now covers file and stream I/O, process exit, string building and searching, integer formatting, and an error convention. The formatter in `tools/hfmt` is the first substantial tool written in Hornet; it includes a Hornet lexer that is tested token-for-token against the compiler's own. The next step is porting the compiler itself, starting from that lexer.
-
-The repository contains `SELF_HOST_CHECKLIST.md` to track that work.
 
 The intended progression is roughly:
 
