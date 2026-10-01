@@ -109,6 +109,25 @@ def test_lex_errors_are_reported_with_position(hfmt, src, message):
 def test_usage_error(hfmt):
     assert _run(hfmt, '--tokens', 'a', 'b').returncode == 2
     assert _run(hfmt, '--bogus').returncode == 2
+    assert _run(hfmt, '--tokens', '--check').returncode == 2
+    assert _run(hfmt, '-', '-', stdin='').returncode == 2
+
+
+def test_flags_may_follow_files_and_dash_names_stdin(hfmt, tmp_path):
+    messy, tidy = "def int main():\n  return 0\n", "def int main():\n    return 0\n"
+    path = tmp_path / 'a.ht'
+    path.write_text(messy)
+    r = _run(hfmt, str(path), '--check')
+    assert (r.returncode, r.stdout) == (1, f"{path}\n") and path.read_text() == messy
+    assert _run(hfmt, '-', stdin=messy).stdout == tidy
+    r = _run(hfmt, '--check', '-', stdin=messy)
+    assert (r.returncode, r.stdout) == (1, "<stdin>\n")
+    assert _run(hfmt, '-', '--check', stdin=tidy).returncode == 0
+    assert _run(hfmt, '-', '--tokens', stdin=tidy).stdout == _run(hfmt, '--tokens', stdin=tidy).stdout
+    assert _run(hfmt, str(path), '--tokens').stdout.startswith('KEYWORD 1 1 def')
+    # stdin alongside files: the files are formatted in place, stdin goes to stdout
+    r = _run(hfmt, str(path), '-', stdin=messy)
+    assert (r.returncode, r.stdout, path.read_text()) == (0, tidy, tidy)
 
 
 # -- formatting ---------------------------------------------------------------

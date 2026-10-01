@@ -186,11 +186,14 @@ def str _spaces(int n):
         b.write_byte(" ")
     return b.to_str()
 
-# `#text` -> `# text`; other comment text is left alone.
+# `#text` -> `# text` and `##text` -> `## text` (any run of `#`); other comment text is left alone.
 def str _comment(str raw):
     str text = trim(raw)
-    if len(text) > 1 and text[1] != " " and text[1] != "\t":
-        return '# ' + text[1:len(text)]
+    int hashes = 0
+    while hashes < len(text) and text[hashes] == "#":
+        hashes += 1
+    if hashes < len(text) and text[hashes] != " " and text[hashes] != "\t":
+        return text[0:hashes] + ' ' + text[hashes:len(text)]
     return text
 
 # One formatted output line and what the blank-line rules need to know about it.

@@ -3,4 +3,8 @@
 # already spaced
 #	tabbed
 ##banner
+### already spaced banner
+####
+#####deep
 x = 1 #inline
+y = 2 ##inline banner

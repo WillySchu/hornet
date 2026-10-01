@@ -1,9 +1,10 @@
 # hfmt: Hornet source formatter.
 #
-#   hfmt                   format stdin to stdout
+#   hfmt                   format stdin to stdout (also `-` among the files)
 #   hfmt file ...          format files in place (written only if they change)
 #   hfmt --check file ...  list files that would change; exit 1 if any
 #   hfmt --tokens [file]   dump the token stream
+# Flags may appear anywhere among the arguments.
 from 'os' import get_args, read_file, read_stdin, write_file, write_stdout, write_stderr, exit
 from 'errors' import Error, StrResult, IntResult
 from 'fmt' import int_to_str
@@ -11,7 +12,7 @@ from 'strings' import Builder, starts_with
 from 'lexer' import lex, kind_name, LexError, Tokens, TK_NEWLINE
 from 'layout' import layout, LayoutError
 
-const str USAGE = 'usage: hfmt [--check] [file ...]\n       hfmt --tokens [file]\n'
+const str USAGE = 'usage: hfmt [--check] [file | - ...]\n       hfmt --tokens [file | -]\n'
 
 type FormatError struct:
     str message  # path:line:col: error: ...
@@ -94,50 +95,67 @@ def bool _process_file(str path, bool check):
                     return true
     return false
 
+# Format (or check) standard input, writing the result to standard output.
+def bool _process_stdin(bool check):
+    str src = _source_or_exit('')
+    match format_source('<stdin>', src) as f:
+        is FormatError:
+            write_stderr(f.message + '\n')
+            return false
+        is str:
+            if check:
+                if f != src:
+                    write_stdout('<stdin>\n')
+                    return false
+                return true
+            write_stdout(f)
+            return true
+    return false
+
 def int main(int argc, *byte argv):
     []str args = get_args(argc, argv)
     bool tokens = false
     bool check = false
+    bool stdin_named = false
     []str files = none
     for i, a in args:
         if i == 0:
             continue
-        if a == '--tokens' and i == 1:
+        if a == '--tokens':
             tokens = true
-        elif a == '--check' and i == 1:
+        elif a == '--check':
             check = true
+        elif a == '-':
+            if stdin_named:
+                write_stderr(USAGE)
+                return 2
+            stdin_named = true
+            files = append(files, a)
         elif starts_with(a, '-'):
             write_stderr(USAGE)
             return 2
         else:
             files = append(files, a)
     if tokens:
-        if len(files) > 1:
+        if check or len(files) > 1:
             write_stderr(USAGE)
             return 2
         str path = ''
         str label = '<stdin>'
-        if len(files) == 1:
+        if len(files) == 1 and files[0] != '-':
             path = files[0]
             label = path
         write_stdout(dump_tokens(label, _source_or_exit(path)))
         return 0
     if len(files) == 0:
-        str src = _source_or_exit('')
-        match format_source('<stdin>', src) as f:
-            is FormatError:
-                write_stderr(f.message + '\n')
-                return 1
-            is str:
-                if check:
-                    if f != src:
-                        write_stdout('<stdin>\n')
-                        return 1
-                    return 0
-                write_stdout(f)
-        return 0
+        files = append(files, '-')
     int status = 0
     for path in files:
-        if not _process_file(path, check):
+        bool ok = false
+        if path == '-':
+            ok = _process_stdin(check)
+        else:
+            ok = _process_file(path, check)
+        if not ok:
             status = 1
     return status
