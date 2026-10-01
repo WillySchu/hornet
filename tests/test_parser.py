@@ -3534,3 +3534,9 @@ def test_trailing_comma_in_parameter_lists_is_optional(with_comma, without):
 def test_a_parameter_list_comma_needs_a_parameter_before_it(source):
     with pytest.raises(parser.ParseError, match="Expected a type"):
         _parse_program(source)
+
+
+def test_dict_types_as_variants_and_in_is_checks():
+    prog = _parse_program("type R is dict[str]int | E\ndef int main():\n    if r is dict[str]int:\n        return 1\n    return 0\n")
+    assert prog.sum_types[0].variants[0] == parser.DictTypeExpr(key_type='str', value_type='int')
+    assert prog.functions[0].body[0].condition.type_name == parser.DictTypeExpr(key_type='str', value_type='int')

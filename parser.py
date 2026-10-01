@@ -1161,8 +1161,8 @@ class Parser:
         return expr
 
     def _parse_qualifiable_type_name(self, expected_message: str) -> Union[str, QualifiedTypeExpr, ArrayTypeExpr, SliceTypeExpr, PointerTypeExpr]:
-        """A possibly qualified type name, builtin type keyword, or array/slice/pointer type."""
-        if self.check(TokenType.STAR, TokenType.OPEN_BRACKET):
+        """A possibly qualified type name, builtin type keyword, or array/slice/pointer/dict type."""
+        if self.check(TokenType.STAR, TokenType.OPEN_BRACKET, TokenType.DICT):
             return self.parse_type()
         if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.INT32, TokenType.BOOL, TokenType.STR):
             return self.advance().val

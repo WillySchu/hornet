@@ -5,6 +5,7 @@ DECLS = """type C struct:
 type D struct:
     int k
 type U is C | D
+type V is dict[int]int | []int
 type P struct:
     int x
     []int s
@@ -26,6 +27,8 @@ def dict[int]int mk_d():
     return dict[int]int{1: 2}
 def str mk_t():
     return 'ab'
+def V mk_v():
+    return dict[int]int{1: 2}
 """
 
 # key: (type text, literal, holder field, printed canonical value, comparable)
@@ -36,6 +39,7 @@ TYPES = {
     'u': ('U', 'C(1)', None, 'C(r: 1)', False),  # sum-typed struct fields aren't supported
     'd': ('dict[int]int', 'dict[int]int{1: 2}', 'fd', 'dict[int]int{1: 2}', False),
     't': ('str', "'ab'", 'ft', 'ab', True),
+    'v': ('V', 'dict[int]int{1: 2}', None, 'dict[int]int{1: 2}', False),  # a sum with a dict variant
 }
 
 
@@ -65,6 +69,8 @@ def shapes(k: str):
         out.append(('bytes_round_trip', [], 'str(bytes(mk_t()))', canon))
     if k == 'u':
         out.append(('variant_var', ["C cv = C(1)"], 'cv', canon))
+    if k == 'v':
+        out.append(('variant_var', ["dict[int]int dv = dict[int]int{1: 2}"], 'dv', canon))
     return out
 
 

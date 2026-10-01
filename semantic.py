@@ -586,7 +586,7 @@ class SemanticAnalyzer:
                     raise SemanticError(
                         f"Sum type '{std.name}' names '{variant_name}' as "
                         f"a variant, but '{variant_name}' isn't a declared "
-                        f"struct or a valid scalar/str/array/slice/pointer "
+                        f"struct or a valid scalar/str/array/slice/pointer/dict "
                         f"type",
                         std,
                     )

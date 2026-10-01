@@ -4536,7 +4536,7 @@ class TestSumTypes:
             "\n"
             "def int main():\n"
             "    return 0\n",
-            match="isn't a declared struct or a valid scalar/str/array/slice/pointer type",
+            match="isn't a declared struct or a valid scalar/str/array/slice/pointer/dict type",
         )
 
     def test_duplicate_variant_is_rejected(self):
@@ -12301,6 +12301,65 @@ class TestNoneDereference:
             "    *P h = &b\n    int s = 0\n    while h != none:\n        s += h.x + h.x\n        h = h.next\n"
             "    print(s + len(c.s))\n    return 0\n",
             "11\n")
+
+
+class TestContainerVariants:
+    pytestmark = GCC_SKIP
+
+    DECLS = "type E struct:\n    int c\ntype R is dict[str]int | E\n"
+
+    def test_a_narrowed_dict_variant_supports_every_dict_operation(self):
+        assert_program_stdout(
+            self.DECLS + "def R make(bool ok):\n    if ok:\n        return dict[str]int{'a': 1}\n    return E(7)\n"
+            "def int main():\n"
+            "    R r = make(true)\n"
+            "    match r:\n"
+            "        is dict[str]int:\n"
+            "            r['b'] = 2\n"
+            "            r['c'] = 3\n"
+            "            del(r, 'c')\n"
+            "            print(len(r))\n"
+            "            print(r['a'] + r['b'])\n"
+            "            print('b' in r)\n"
+            "            int t = 0\n"
+            "            for k, v in r:\n"
+            "                t += v\n"
+            "            print(t)\n"
+            "        is E:\n"
+            "            print(r.c)\n"
+            "    print(r)\n"
+            "    R e = make(false)\n"
+            "    if e is E:\n"
+            "        print(e.c)\n"
+            "    return 0\n",
+            "2\n3\ntrue\n3\ndict[str]int{'a': 1, 'b': 2}\n7\n")
+
+    def test_a_match_binding_over_an_element_narrows_to_the_dict(self):
+        assert_program_stdout(
+            self.DECLS + "def int main():\n"
+            "    []R rs = [E(1), dict[str]int{'x': 5}]\n"
+            "    int t = 0\n"
+            "    for i, _ in rs:\n"
+            "        match rs[i] as v:\n"
+            "            is dict[str]int:\n"
+            "                v['y'] = 6\n"
+            "                t += v['x'] + v['y'] + len(v)\n"
+            "            is E:\n"
+            "                t += v.c\n"
+            "    print(t)\n"
+            "    return 0\n",
+            "14\n")
+
+    def test_a_slice_variant(self):
+        assert_program_stdout(
+            "type E struct:\n    int c\ntype S is []int | E\n"
+            "def int main():\n    S s = []int[1, 2]\n    if s is []int:\n        s[1] = 5\n"
+            "        print(len(s) + s[0])\n    print(s)\n    return 0\n",
+            "3\n[]int[1, 5]\n")
+
+    def test_a_non_type_variant_names_what_is_allowed(self):
+        assert_program_semantic_error("type R is nope | int\ndef int main():\n    return 0\n",
+                                      match="valid scalar/str/array/slice/pointer/dict type")
 
 
 class TestStatementsEndTheirLine:

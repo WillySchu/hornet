@@ -6,7 +6,7 @@ Hashing, probing, and growth live in runtime.c.
 from ir.errors import IRError
 from ir.ir import IRBinOp, IRBranch, IRCall, IRConst, IRJump, IRLabel, IRLoad, IRLocalAddress, IRMove, IRStaticDataAddress, IRStore
 from ir.utils import COMPOSITE_KINDS, type_of
-from typesys import type_byte_width
+from typesys import SUM_TYPE_TAG_WIDTH, type_byte_width
 from parser import (
     Call,
     DictLiteral,
@@ -37,11 +37,15 @@ class DictsMixin:
             slot = self._local_slot(expr)
             addr_temp = self.ir_program.ids.new_temp(Type.INT64)
             ir = [IRLocalAddress(dst=addr_temp, slot=slot)]
+            base = addr_temp
             if self._is_heap_allocated(self._local_decl_id(expr), slot_type):
-                loaded = self.ir_program.ids.new_temp(Type.INT64)
-                ir.append(IRLoad(dst=loaded, address=addr_temp))
-                return ir, loaded
-            return ir, addr_temp
+                base = self.ir_program.ids.new_temp(Type.INT64)
+                ir.append(IRLoad(dst=base, address=addr_temp))
+            if slot_type.kind == TypeKind.SUM:  # narrowed to its dict variant: the dict follows the tag
+                payload = self.ir_program.ids.new_temp(Type.INT64)
+                ir.append(IRBinOp(dst=payload, op=BinaryOp.ADD, left=base, right=IRConst(SUM_TYPE_TAG_WIDTH, Type.INT64)))
+                return ir, payload
+            return ir, base
         if isinstance(expr, DictLiteral):
             # Dict literal as for-in iterable.
             return self._ir_materialize_dict_literal(expr)
