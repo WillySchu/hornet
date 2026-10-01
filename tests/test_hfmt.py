@@ -295,3 +295,34 @@ def test_formatting_scrambled_programs_keeps_meaning(hfmt, name, source, tmp_pat
 def test_repository_sources_are_formatted(hfmt):
     r = _run(hfmt, '--check', *map(str, SOURCES))
     assert (r.returncode, r.stdout, r.stderr) == (0, '', ''), 'run tools/hfmt on these files:\n' + r.stdout
+
+
+def test_trailing_comma_changes_keep_meaning(hfmt, tmp_path):
+    from compile import compile_to_asm
+    source = "type P struct:\n    int x\n" + (ROOT / 'tests' / 'formatter' / 'trailing_commas.in.ht').read_text()
+    formatted = _run(hfmt, stdin=source).stdout
+    assert formatted != source
+    (tmp_path / 'a.ht').write_text(source)
+    (tmp_path / 'b.ht').write_text(formatted)
+    assert compile_to_asm(str(tmp_path / 'a.ht'), 'x86_64-linux') == compile_to_asm(str(tmp_path / 'b.ht'), 'x86_64-linux')
+
+
+def test_pointer_element_type_commas_keep_meaning(hfmt, tmp_path):
+    from compile import compile_to_asm
+    source = (
+        "type P struct:\n    int x\n"
+        "def int main():\n"
+        "    P p = P(1)\n"
+        "    []*P ps = []*P[\n        &p\n    ]\n"
+        "    [1]*P pa = [1]*P[\n        &p\n    ]\n"
+        "    [][]*P pp = [][]*P[\n        ps\n    ]\n"
+        "    [2]int xs = [3, 4]\n"
+        "    int z = xs[0] * xs[\n        1\n    ]\n"
+        "    [2][1]*P grid = [2][1]*P[\n        [1]*P[&p],\n        [1]*P[&p]\n    ]\n"
+        "    print(len(ps) + len(pa) + len(pp) + z + len(grid))\n"
+        "    return 0\n")
+    formatted = _run(hfmt, stdin=source).stdout
+    assert "        &p,\n" in formatted and "        1\n    ]" in formatted
+    (tmp_path / 'a.ht').write_text(source)
+    (tmp_path / 'b.ht').write_text(formatted)
+    assert compile_to_asm(str(tmp_path / 'a.ht'), 'x86_64-linux') == compile_to_asm(str(tmp_path / 'b.ht'), 'x86_64-linux')

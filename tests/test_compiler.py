@@ -12197,6 +12197,22 @@ class TestTypedLiterals:
         assert_program_stdout(f"def int main():\n    {decl} = {expr}\n    print(s[len(s) - 1]{key})\n    return 0\n",
                               expected + "\n")
 
+    def test_an_indexed_literal_times_a_value_is_not_a_typed_literal(self):
+        assert_program_stdout(
+            "def int main():\n    int x = 3\n    int y = 4\n"
+            "    print([x][0] * y)\n    print([5][0] * y)\n    print([x, 2][1] * (y))\n    return 0\n",
+            "12\n20\n8\n")
+
+    def test_typed_literals_of_pointers(self):
+        assert_program_stdout(
+            "type P struct:\n    int x\nconst int N = 2\n"
+            "def int main():\n    P p = P(5)\n"
+            "    [N]*P a = [N]*P[&p, &p]\n"
+            "    [2][1]*P g = [2][1]*P[[1]*P[&p], [1]*P[&p]]\n"
+            "    []*int s = []*int[&p.x]\n"
+            "    print(a[1].x + g[1][0].x + *s[0])\n    return 0\n",
+            "15\n")
+
     def test_indexing_an_untyped_literal_is_not_a_typed_literal(self):
         assert_program_stdout("def int main():\n    int x = 4\n    print([x, 2][0])\n    print([5][0])\n    return 0\n",
                               "4\n5\n")

@@ -1,0 +1,44 @@
+def int add(
+    int a,
+    int b,
+):
+    return a + b
+
+def int main():
+    [3]int a = [1, 2, 3]
+    []int s = []int[
+        4,
+        5,  # five
+    ]
+    print(add(1, 2))
+    print(add(
+            1,
+            2,
+        ))
+    dict[str]int d = dict[str]int{
+        'a': 1,
+        'b': 2,
+    }
+    int g = (
+        1 + 2
+    )
+    int h = int(
+        g
+    )
+    print(s[
+            0
+        ])
+    []P ps = []P[
+        P(1),
+    ]
+    [][]int m = [
+        []int[1],
+        []int[
+            2,
+        ],
+    ]
+    []int e = []int[
+    ]
+    print(add(a[0],
+            2))
+    return 0

@@ -14,6 +14,8 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
+- Unresolvable in the compiler too: [x][0] * ys[1] still parses as a typed literal. It's the same token shape as [N][M]\*P[…], so the parser can't tell them apart without knowing whether ys is a type. Writing ([x][0]) * ys[1] avoids it.
+- hfmt spacing (cosmetic, pre-existing): [x][0] * 2 is printed as [x][0]\*2. The spacing logic reads a * after a value-starting bracket as a pointer type. The meaning is unchanged.
 - Consider adding a semantic AST with type information rather than annotating the existing AST from the parser.
 - Printing a struct defined in another module shows its internal name: print(write\_file(bad, x)) prints errors$Error(message: …).
 - Nothing warns when a result is ignored, such as a bare write\_stdout(...) statement.

@@ -1453,7 +1453,23 @@ class Parser:
                 k += 1
                 if depth == 0:
                     break
-        return self.peek(k).type in _TYPE_START_TOKENS
+        if self.peek(k).type != TokenType.STAR:
+            return self.peek(k).type in _TYPE_START_TOKENS
+        # `*` might instead be a multiplication (`[x][0] * y`): a pointer element type must run on to
+        # the elements' '['.
+        while self.peek(k).type == TokenType.STAR:
+            k += 1
+        if self.peek(k).type in (TokenType.OPEN_BRACKET, TokenType.DICT):
+            return True
+        if self.peek(k).type == TokenType.IDENTIFIER:
+            k += 1
+            if self.peek(k).type == TokenType.DOT and self.peek(k + 1).type == TokenType.IDENTIFIER:
+                k += 2
+        elif self.peek(k).type in _TYPE_START_TOKENS:
+            k += 1
+        else:
+            return False
+        return self.peek(k).type == TokenType.OPEN_BRACKET
 
     def _parse_bracketed_literal(self, parsed_type: Union[str, 'ArrayTypeExpr', 'SliceTypeExpr']) -> Node:
         """Bracketed elements after a pre-parsed literal type."""

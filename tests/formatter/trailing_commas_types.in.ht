@@ -1,0 +1,32 @@
+def int main():
+    []*P ps = []*P[
+        &p
+    ]
+    [1]*P pa = [1]*P[
+        &p
+    ]
+    []lib.Q qs = []lib.Q[
+        lib.Q(1)
+    ]
+    []*lib.Q qp = []*lib.Q[
+        &q
+    ]
+    [][]*P pp = [][]*P[
+        ps
+    ]
+    int z = xs[0] * ys[
+        1
+    ]
+    int w = [x][0] * ys[
+        1
+    ]
+    x = [2][3]*P[
+        a
+    ]
+    y = [][3]*P[
+        a
+    ]
+    w = f()[0] * ys[
+        1
+    ]
+    return 0

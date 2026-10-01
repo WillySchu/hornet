@@ -297,8 +297,105 @@ def []Out _space_top_level([]Out r):
                 out = append(out, Out('', true, false, false, false))
     return out
 
+# The last token in toks that isn't a newline or comment, or -1.
+def int _last_significant([]Token toks):
+    int k = len(toks) - 1
+    while k >= 0 and (toks[k].kind == TK_NEWLINE or toks[k].kind == TK_COMMENT):
+        k -= 1
+    return k
+
+# Index of the `[` matching the `]` at out[k], or -1.
+def int _matching_open([]Token out, int k):
+    int depth = 0
+    int i = k
+    while i >= 0:
+        if _is_closer(out[i]):
+            depth += 1
+        elif _is_opener(out[i]):
+            depth -= 1
+            if depth == 0:
+                return i
+        i -= 1
+    return -1
+
+# Whether the identifier at out[k] ends a typed literal's element type: `[]P`, `[2]*P`, `[]lib.P`,
+# `[][]*lib.P`. Going back from the name (possibly qualified, possibly behind `*`s) there must be a
+# run of bracket groups that starts where a value would start. `xs[0] * ys` has the same tokens as
+# `[]*P` but `[0]` follows a value. `[x][0] * ys` (an indexed literal times an index) can't be told
+# from `[N][M]*P` at all, so a pointer element type behind two or more sized groups is not treated
+# as a list: hfmt then leaves the commas alone, which is always safe.
+def bool _follows_element_type([]Token out, int k):
+    int i = _last_significant(out[0:k])
+    if i >= 1 and out[i].kind == TK_OP and out[i].text == '.' and out[i - 1].kind == TK_IDENT:
+        i = _last_significant(out[0:i - 1])  # qualified name: step over `lib.`
+    int stars = 0
+    while i >= 0 and out[i].kind == TK_OP and out[i].text == '*':
+        stars += 1
+        i = _last_significant(out[0:i])
+    int groups = 0
+    bool empty_group = false
+    while i >= 0 and out[i].kind == TK_OP and out[i].text == ']':
+        int open = _matching_open(out, i)
+        if open < 0 or out[open].text != '[':
+            return false
+        groups += 1
+        empty_group = empty_group or open == i - 1
+        i = _last_significant(out[0:open])
+    if groups == 0 or (stars > 0 and groups >= 2 and not empty_group):
+        return false
+    return i < 0 or not _ends_value(out[i], false)
+
+# Whether an opening bracket starts a comma-separated list that may end with a trailing comma: call
+# arguments and parameters `f(`, array and slice literals `[` (untyped, or after a typed literal's
+# element type), and dict literals `{`. Not grouping parentheses, casts, indexing, or type brackets.
+def bool _opens_list([]Token out, Token opener):
+    if opener.text == '{':
+        return true
+    int k = _last_significant(out)
+    if k < 0:
+        return opener.text == '['
+    Token prev = out[k]
+    if opener.text == '(':
+        return prev.kind == TK_IDENT
+    if prev.kind == TK_KEYWORD:
+        if prev.text == 'dict' or prev.text == 'true' or prev.text == 'false' or prev.text == 'none':
+            return false
+        return true  # an element type (`[]int[`) or a keyword like `return`/`in` before a literal
+    if prev.kind == TK_IDENT:
+        return _follows_element_type(out, k)
+    if prev.kind == TK_OP:
+        return prev.text != ')' and prev.text != ']' and prev.text != '}'
+    return false
+
+# Trailing commas: dropped when the closing bracket follows on the same line (`[1, 2,]` -> `[1, 2]`),
+# added to a list whose closing bracket is on its own line.
+def []Token _trailing_commas([]Token toks):
+    []Token out = none
+    []bool lists = none  # per open bracket: whether it is a list
+    for t in toks:
+        if _is_opener(t):
+            lists = append(lists, _opens_list(out, t))
+        elif _is_closer(t) and len(lists) > 0:
+            bool is_list = lists[len(lists) - 1]
+            lists = lists[0:len(lists) - 1]
+            int n = len(out)
+            if n > 0 and out[n - 1].kind == TK_OP and out[n - 1].text == ',':
+                out = out[0:n - 1]
+            elif n > 0 and out[n - 1].kind == TK_NEWLINE and is_list:
+                int last = _last_significant(out)
+                Token e = out[last]
+                if not (e.kind == TK_OP and (e.text == ',' or _is_opener(e))):
+                    []Token spliced = none
+                    for i, x in out:
+                        spliced = append(spliced, x)
+                        if i == last:
+                            spliced = append(spliced, Token(TK_OP, ',', e.line, e.col + len(e.text), e.depth))
+                    out = spliced
+        out = append(out, t)
+    return out
+
 def LayoutResult layout([]Token toks):
-    []Line lines = _split_lines(toks)
+    []Line lines = _split_lines(_trailing_commas(toks))
     int bad = _assign_levels(lines)
     if bad >= 0:
         return LayoutError('unindent does not match any outer indentation level', lines[bad].toks[0].line, 1)
