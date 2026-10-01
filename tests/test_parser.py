@@ -642,7 +642,7 @@ def test_parse_params_single_param():
     assert expected == p.parse_params()
 
 
-def test_parse_params_two_params_no_second():
+def test_parse_params_trailing_comma():
     tokens = [
         lexer.Token(lexer.TokenType.INT, 'int', 1, 1),
         lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 1, 5),
@@ -652,12 +652,7 @@ def test_parse_params_two_params_no_second():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(
-        parser.ParseError,
-        match=re.escape(
-            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name, '[size]type', or '[]type'), got ')' at line 1, column 7"
-        )):
-        p.parse_params()
+    assert p.parse_params() == [parser.Param(name='a', type='int')]
 
 
 def test_parse_params_two_params_no_name():
@@ -3495,3 +3490,47 @@ def test_extern_function_requires_a_name():
 def test_extern_function_requires_parens():
     with pytest.raises(parser.ParseError, match="Expected '\\(' after function name"):
         _parse_program("extern int abs\n")
+
+
+@pytest.mark.parametrize("with_comma,without", [
+    ("f(1, 2,)", "f(1, 2)"),
+    ("f(\n        1,\n        2,\n    )", "f(1, 2)"),
+    ("P(x=1, y=2,)", "P(x=1, y=2)"),
+    ("c.m(1,)", "c.m(1)"),
+    ("[1, 2,]", "[1, 2]"),
+    ("[]int[1,]", "[]int[1]"),
+    ("[2]int[\n        1,\n        2,\n    ]", "[2]int[1, 2]"),
+])
+def test_trailing_comma_is_optional(with_comma, without):
+    def body(expr):
+        return _parse_program(f"def int main():\n    x = {expr}\n    return 0\n").functions[0].body[0]
+    assert body(with_comma) == body(without)
+
+
+@pytest.mark.parametrize("expr", ["f(,)", "[1,, 2]", "[]int[,]", "f(1,,)"])
+def test_a_comma_needs_an_element_before_it(expr):
+    with pytest.raises(parser.ParseError, match="Expected an expression, got ','"):
+        _parse_program(f"def int main():\n    x = {expr}\n    return 0\n")
+
+
+@pytest.mark.parametrize("with_comma,without", [
+    ("def int f(int a,):\n    return a\n", "def int f(int a):\n    return a\n"),
+    ("def int f(\n    int a,\n    str b,\n):\n    return a\n", "def int f(int a, str b):\n    return a\n"),
+    ("extern int32 abs(int32 x,)\n", "extern int32 abs(int32 x)\n"),
+    ("type C struct:\n    int n\n    def int m(self, int a,):\n        return a\n",
+     "type C struct:\n    int n\n    def int m(self, int a):\n        return a\n"),
+    ("type C struct:\n    int n\n    def inc(*self,):\n        self.n += 1\n",
+     "type C struct:\n    int n\n    def inc(*self):\n        self.n += 1\n"),
+])
+def test_trailing_comma_in_parameter_lists_is_optional(with_comma, without):
+    assert _parse_program(with_comma) == _parse_program(without)
+
+
+@pytest.mark.parametrize("source", [
+    "def int f(,):\n    return 1\n",
+    "def int f(int a,,):\n    return 1\n",
+    "type C struct:\n    int n\n    def int m(self,,):\n        return 1\n",
+])
+def test_a_parameter_list_comma_needs_a_parameter_before_it(source):
+    with pytest.raises(parser.ParseError, match="Expected a type"):
+        _parse_program(source)

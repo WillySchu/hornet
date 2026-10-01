@@ -12202,6 +12202,25 @@ class TestTypedLiterals:
                               "4\n5\n")
 
 
+class TestTrailingCommas:
+    pytestmark = GCC_SKIP
+
+    def test_trailing_commas_in_literals_calls_and_parameters(self):
+        assert_program_stdout(
+            "type P struct:\n    int x\n    int y\n"
+            "    def int sum(self, int k,):\n        return self.x + self.y + k\n"
+            "def int add(\n    int a,\n    int b,\n):\n    return a + b\n"
+            "def int main():\n"
+            "    [2]int a = [\n        1,\n        2,\n    ]\n"
+            "    []int s = []int[3, 4,]\n"
+            "    s = append(s, 5,)\n"
+            "    P p = P(x=a[0], y=s[2],)\n"
+            "    print(add(\n        p.sum(10,),\n        len(s),\n    ))\n"
+            "    return 0\n",
+            "19\n",
+        )
+
+
 class TestStatementsEndTheirLine:
     @pytest.mark.parametrize("line", ["print(1) 2 3", "int y = 1 2", "x = 2 x = 3", "return 0 1", "x 5"])
     def test_trailing_tokens_are_rejected(self, line):

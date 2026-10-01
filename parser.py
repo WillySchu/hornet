@@ -843,7 +843,7 @@ class Parser:
         receiver_is_pointer = self.match(TokenType.STAR)
         receiver_tok = self.expect(TokenType.IDENTIFIER, "Expected a receiver name as a method's first parameter")
         params: List[Param] = []
-        while self.match(TokenType.COMMA):
+        while self.match(TokenType.COMMA) and not self.check(TokenType.CLOSE_PAREN):  # trailing comma
             params.append(self.parse_param())
         self.expect(TokenType.CLOSE_PAREN, "Expected ')' after parameter list")
         self.expect(TokenType.COLON, "Expected ':' to start the method body")
@@ -856,12 +856,12 @@ class Parser:
         )
 
     def parse_params(self) -> List[Param]:
-        """`T name, ...` up to, not including, ')'."""
+        """`T name, ...` up to, not including, ')'; a trailing comma is allowed."""
         params = []
         if self.check(TokenType.CLOSE_PAREN):
             return params
         params.append(self.parse_param())
-        while self.match(TokenType.COMMA):
+        while self.match(TokenType.COMMA) and not self.check(TokenType.CLOSE_PAREN):
             params.append(self.parse_param())
         return params
 
@@ -1369,7 +1369,7 @@ class Parser:
                         start_tok,
                     )
                 args.append(value)
-            if not self.match(TokenType.COMMA):
+            if not self.match(TokenType.COMMA) or self.check(TokenType.CLOSE_PAREN):  # trailing comma
                 break
         return args, kwargs
 
@@ -1473,7 +1473,7 @@ class Parser:
         elements = []
         if not self.check(TokenType.CLOSE_BRACKET):
             elements.append(self.parse_expression())
-            while self.match(TokenType.COMMA):
+            while self.match(TokenType.COMMA) and not self.check(TokenType.CLOSE_BRACKET):  # trailing comma
                 elements.append(self.parse_expression())
         self.expect(TokenType.CLOSE_BRACKET, "Expected ']' to close array literal")
         return ArrayLiteral(elements=elements, type_expr=type_expr, line=open_tok.line, col=open_tok.col)
@@ -1536,7 +1536,7 @@ class Parser:
                             start_tok,
                         )
                     args.append(value)
-                if not self.match(TokenType.COMMA):
+                if not self.match(TokenType.COMMA) or self.check(TokenType.CLOSE_PAREN):  # trailing comma
                     break
         self.expect(TokenType.CLOSE_PAREN, "Expected ')' to close a call's argument list")
         return Call(name=name_tok.val, args=args, kwargs=kwargs, line=name_tok.line, col=name_tok.col)
