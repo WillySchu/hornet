@@ -318,11 +318,11 @@ def test_pointer_element_type_commas_keep_meaning(hfmt, tmp_path):
         "    [][]*P pp = [][]*P[\n        ps\n    ]\n"
         "    [2]int xs = [3, 4]\n"
         "    int z = xs[0] * xs[\n        1\n    ]\n"
-        "    [2][1]*P grid = [2][1]*P[\n        [1]*P[&p],\n        [1]*P[&p]\n    ]\n"
+        "    [2][1]*P grid = [\n        [1]*P[&p],\n        [1]*P[&p]\n    ]\n"
         "    print(len(ps) + len(pa) + len(pp) + z + len(grid))\n"
         "    return 0\n")
     formatted = _run(hfmt, stdin=source).stdout
-    assert "        &p,\n" in formatted and "        1\n    ]" in formatted
+    assert "        &p,\n" in formatted and "        1\n    ]" in formatted and "[1]*P[&p],\n    ]" in formatted
     (tmp_path / 'a.ht').write_text(source)
     (tmp_path / 'b.ht').write_text(formatted)
     assert compile_to_asm(str(tmp_path / 'a.ht'), 'x86_64-linux') == compile_to_asm(str(tmp_path / 'b.ht'), 'x86_64-linux')

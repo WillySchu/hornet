@@ -12197,6 +12197,21 @@ class TestTypedLiterals:
         assert_program_stdout(f"def int main():\n    {decl} = {expr}\n    print(s[len(s) - 1]{key})\n    return 0\n",
                               expected + "\n")
 
+    def test_an_indexed_literal_times_an_index_is_a_multiplication(self):
+        # The same tokens as a typed literal like `[N][M]*P[...]`; the multiplication wins.
+        assert_program_stdout(
+            "def int main():\n    int x = 3\n    [2]int ys = [4, 5]\n"
+            "    print([x][0] * ys[1])\n    print([x, 2][1] * ys[0] + [7][0] * ys[1])\n    return 0\n",
+            "15\n43\n")
+
+    @pytest.mark.parametrize("literal,match", [
+        ("[1][1]*P[[1]*P[&p]]", "'P' is a type, but this reads as a multiplication"),
+        ("[2][1]*P[[1]*P[&p], [1]*P[&p]]", "Expected ']' after array index, got ',' -- a typed literal of pointers"),
+    ])
+    def test_a_typed_literal_read_as_a_multiplication_is_explained(self, literal, match):
+        with pytest.raises((SemanticError, ParseError), match=match):
+            analyze(_parse(f"type P struct:\n    int x\ndef int main():\n    P p = P(1)\n    print({literal})\n    return 0\n"))
+
     def test_an_indexed_literal_times_a_value_is_not_a_typed_literal(self):
         assert_program_stdout(
             "def int main():\n    int x = 3\n    int y = 4\n"
@@ -12208,7 +12223,7 @@ class TestTypedLiterals:
             "type P struct:\n    int x\nconst int N = 2\n"
             "def int main():\n    P p = P(5)\n"
             "    [N]*P a = [N]*P[&p, &p]\n"
-            "    [2][1]*P g = [2][1]*P[[1]*P[&p], [1]*P[&p]]\n"
+            "    [2][1]*P g = [[1]*P[&p], [1]*P[&p]]\n"
             "    []*int s = []*int[&p.x]\n"
             "    print(a[1].x + g[1][0].x + *s[0])\n    return 0\n",
             "15\n")

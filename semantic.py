@@ -873,6 +873,22 @@ class SemanticAnalyzer:
             raise SemanticError(f"Variable '{name}' is already declared in this scope", node)
         self.scopes[-1][name] = (type_, decl_id)
 
+    def _reject_typed_literal_read_as_multiplication(self, expr: Binary) -> None:
+        """`[2][1]*P[...]` parses as `[2][1] * P[...]` (an indexed literal times an index): explain when
+        the right side's name is a type, which is surely what was meant."""
+        def root(node):
+            while isinstance(node, Index):
+                node = node.array
+            return node
+        name = root(expr.right)
+        if (isinstance(name, Variable) and isinstance(root(expr.left), ArrayLiteral) and isinstance(expr.left, Index)
+                and (name.name in self.structs or name.name in self.sum_types or name.name in self.type_aliases)
+                and not any(name.name in scope for scope in self.scopes)):
+            raise SemanticError(
+                f"'{name.name}' is a type, but this reads as a multiplication: a typed literal of pointers with "
+                f"only fixed sizes, like `[2][1]*{name.name}[...]`, can't be written inline -- give the variable "
+                f"(or parameter) the type and use an untyped literal, e.g. `[2][1]*{name.name} g = [...]`", expr)
+
     def _resolve(self, name: str, node: Optional[Node] = None) -> Tuple[Type, object]:
         """(type, decl id) of `name`, innermost-first; constants (decl id None) after locals."""
         for scope in reversed(self.scopes):
@@ -1903,6 +1919,8 @@ class SemanticAnalyzer:
         return True  # INT, BOOL, STR, POINTER
 
     def check_binary(self, expr: Binary) -> Type:
+        if expr.op == BinaryOp.MULTIPLY:
+            self._reject_typed_literal_read_as_multiplication(expr)
         left_type = self._check_expr_allowing_struct_literal(expr.left)
         right_type = self._check_expr_allowing_struct_literal(expr.right)
         op = expr.op

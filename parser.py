@@ -594,6 +594,7 @@ class Parser:
             raise ValueError('tokens must be terminated by an EOF')
         self.tokens = tokens
         self.pos = 0
+        self._ambiguous_element_brackets: set = set()  # token positions; see _looks_like_typed_literal
 
     def _error(self, message: str, tok: Token) -> 'ParseError':
         return ParseError(message, tok.file, tok.line, tok.col)
@@ -1375,6 +1376,7 @@ class Parser:
 
     def parse_index_or_slice(self, array_expr: Node) -> Node:
         """Index or Slice after '['."""
+        open_pos = self.pos - 1
         if self.check(TokenType.COLON):
             self.advance()
             high = None if self.check(TokenType.CLOSE_BRACKET) else self.parse_expression()
@@ -1388,6 +1390,11 @@ class Parser:
             self.expect(TokenType.CLOSE_BRACKET, "Expected ']' to close a slice expression")
             return Slice(array=array_expr, low=first, high=high, line=array_expr.line, col=array_expr.col)
 
+        if self.check(TokenType.COMMA) and open_pos in self._ambiguous_element_brackets:
+            raise self._error(
+                "Expected ']' after array index, got ',' -- a typed literal of pointers with only fixed sizes, "
+                "like `[2][1]*P[a, b]`, reads as a multiplication: give the variable (or parameter) the type and "
+                "use an untyped literal, e.g. `[2][1]*P g = [a, b]`", self.current())
         self.expect(TokenType.CLOSE_BRACKET, "Expected ']' after array index")
         return Index(array=array_expr, index=first, line=array_expr.line, col=array_expr.col)
 
@@ -1443,7 +1450,11 @@ class Parser:
         if not self.check(TokenType.OPEN_BRACKET):
             return False
         k = 0
+        groups = 0
+        empty_group = False
         while self.peek(k).type == TokenType.OPEN_BRACKET:
+            groups += 1
+            empty_group = empty_group or self.peek(k + 1).type == TokenType.CLOSE_BRACKET
             depth = 0
             while True:
                 t = self.peek(k).type
@@ -1462,6 +1473,14 @@ class Parser:
         if self.peek(k).type in (TokenType.OPEN_BRACKET, TokenType.DICT):
             return True
         if self.peek(k).type == TokenType.IDENTIFIER:
+            if groups >= 2 and not empty_group:
+                # `[x][0] * ys[1]` and `[N][M]*P[...]` are the same tokens; whether `ys`/`P` is a type
+                # is only known later, so this shape is always the multiplication (see check_binary).
+                j = k + 1
+                if self.peek(j).type == TokenType.DOT and self.peek(j + 1).type == TokenType.IDENTIFIER:
+                    j += 2
+                self._ambiguous_element_brackets.add(self.pos + j)
+                return False
             k += 1
             if self.peek(k).type == TokenType.DOT and self.peek(k + 1).type == TokenType.IDENTIFIER:
                 k += 2
