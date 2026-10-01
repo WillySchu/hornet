@@ -1105,9 +1105,7 @@ def test_stdlib_os_module_read_file_returns_an_error_for_a_missing_file():
         )
         result = _compile_and_run(entry, tmpdir)
         message = f"could not open '{missing_path}': No such file or directory"
-        assert result.stdout.startswith(message + "\n")
-        assert result.returncode == -signal.SIGABRT
-        assert result.stdout.count(message) == 2
+        assert (result.returncode, result.stdout, result.stderr) == (-signal.SIGABRT, message + "\n", message + "\n")
 
 
 def test_stdlib_os_module_read_stdin_reads_piped_input():

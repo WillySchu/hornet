@@ -93,4 +93,4 @@ def test_search_trim_repeat():
 @GCC_SKIP
 def test_split_with_empty_separator_panics():
     r = compile_and_run(_IMPORTS + "def int main():\n    split('a', '')\n    return 0\n")
-    assert r.returncode != 0 and 'empty separator' in r.stdout
+    assert r.returncode != 0 and 'empty separator' in r.stderr

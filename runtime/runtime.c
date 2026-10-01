@@ -311,8 +311,10 @@ void hornet_print(void *value_addr, const unsigned char *type_desc) {
 
 // Print `msg` and abort.
 void hornet_panic(const char *msg) {
-    puts(msg);
-    fflush(NULL);
+    fflush(stdout);  // the program's own output first
+    fputs(msg, stderr);
+    fputc('\n', stderr);
+    fflush(stderr);
     abort();
 }
 

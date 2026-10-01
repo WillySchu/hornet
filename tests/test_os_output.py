@@ -88,8 +88,7 @@ def test_write_file_to_missing_directory_returns_an_error(tmp_path):
         f"must_int(write_file('{tmp_path}/no/such/dir/f', 'x'))\n"
         "return 0")
     message = f"could not open '{tmp_path}/no/such/dir/f' for writing: No such file or directory"
-    assert r.stdout.startswith(message + "\n")
-    assert r.returncode != 0 and r.stdout.count(message) == 2
+    assert (r.stdout, r.stderr) == (message + "\n", message + "\n") and r.returncode != 0
 
 
 def test_write_functions_return_bytes_written(tmp_path):
