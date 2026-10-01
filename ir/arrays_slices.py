@@ -67,7 +67,7 @@ class ArraysSlicesMixin:
             return self._ir_field_address(expr)
         if isinstance(expr, Unary) and expr.op == UnaryOp.DEREFERENCE:
             # `*p` as a whole array: p is the address.
-            return self.gen_expr_ir(expr.operand)
+            return self._ir_pointer(expr.operand)
         return None
 
     def _ir_slice_address(self, expr: Node):
@@ -105,7 +105,7 @@ class ArraysSlicesMixin:
             return self._ir_field_address(expr)
         if isinstance(expr, Unary) and expr.op == UnaryOp.DEREFERENCE:
             # `*p` as a whole slice: p is the descriptor address.
-            return self.gen_expr_ir(expr.operand)
+            return self._ir_pointer(expr.operand)
         return None
 
     def _ir_materialize_composite_call(
@@ -194,7 +194,7 @@ class ArraysSlicesMixin:
                 return addr_ir + ir, ptr_temp, len_temp, cap_temp
             if isinstance(expr, Unary) and expr.op == UnaryOp.DEREFERENCE:
                 # `*p` as a slice base.
-                addr_ir, descriptor_addr = self.gen_expr_ir(expr.operand)
+                addr_ir, descriptor_addr = self._ir_pointer(expr.operand)
                 ir, ptr_temp, len_temp, cap_temp = self._ir_read_slice_descriptor_from_address(descriptor_addr)
                 return addr_ir + ir, ptr_temp, len_temp, cap_temp
             if isinstance(expr, Call) and expr.name == 'append':

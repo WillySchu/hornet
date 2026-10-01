@@ -6,6 +6,7 @@ from ir.id_allocator import IdAllocator
 from ir.ir import IRProgram
 from ir.builder import IRFunctionBuilder
 from ir.division_checks import insert_division_checks
+from ir.null_checks import expand_null_checks
 from ir.verify import verify_program
 from parser import Program
 
@@ -43,6 +44,7 @@ def build_ir_program(program: Program) -> IRProgram:
     ir_program.escape_summaries = compute_escape_summaries(program.functions, program.struct_registry)
     ir_program.functions = [IRFunctionBuilder(ir_program).gen_function_ir(fn) for fn in program.functions]
     for ir_fn in ir_program.functions:
+        expand_null_checks(ir_fn, ir_program)
         insert_division_checks(ir_fn, ir_program)
     verify_program(ir_program)
     return ir_program

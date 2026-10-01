@@ -396,13 +396,13 @@ def test_liveness_needs_several_passes_through_nested_loops():
 
 def test_read_fields_agree_with_reads():
     from ir.cfg import READ_FIELDS, reads, replace_reads
-    from ir.ir import IRCast, IRSliceBoundsCheck, IRUnOp
+    from ir.ir import IRCast, IRNullCheck, IRSliceBoundsCheck, IRUnOp
     samples = [
         IRMove(dst=t(0), src=t(1)), IRCast(dst=t(0), src=t(1)), IRBinOp(dst=t(0), op=BinaryOp.ADD, left=t(1), right=t(2)),
         IRCall(dst=t(0), name='g', args=[t(1), t(2)]), IRReturn(value=t(1)), IRBranch(cond=t(1), true_label='a', false_label='b'),
         IRLoad(dst=t(0), address=t(1)), IRStore(address=t(1), value=t(2), value_type=Type.INT),
         IRCopy(dst_address=t(1), src_address=t(2), value_type=Type.INT), IRBoundsCheck(index=t(1), length=t(2)),
-        IRSliceBoundsCheck(value=t(1), bound=t(2)), IRUnOp(dst=t(0), op=None, operand=t(1)),
+        IRSliceBoundsCheck(value=t(1), bound=t(2)), IRUnOp(dst=t(0), op=None, operand=t(1)), IRNullCheck(pointer=t(1)),
     ]
     assert {type(s) for s in samples} == set(READ_FIELDS)
     for s in samples:

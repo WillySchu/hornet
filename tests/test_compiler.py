@@ -12252,6 +12252,43 @@ class TestTrailingCommas:
         )
 
 
+class TestNoneDereference:
+    pytestmark = GCC_SKIP
+
+    P = "type P struct:\n    int x\n    *P next\n    []int s\n    dict[str]int d\n"
+
+    @pytest.mark.parametrize("setup,statement", [
+        ("    *int p = none\n", "print(*p)"),
+        ("    *int p = none\n", "*p = 3"),
+        ("    *int p = none\n", "*p += 1"),
+        ("    *P p = none\n", "print(p.x)"),
+        ("    *P p = none\n", "p.x = 1"),
+        ("    *P p = none\n", "p.x += 1"),
+        ("    *P p = none\n", "P q = *p"),
+        ("    *P p = none\n", "p.s = append(p.s, 1)"),
+        ("    *P p = none\n", "p.d['a'] = 1"),
+        ("    *P p = none\n", "print(len(p.s))"),
+        ("    *str p = none\n", "print(*p)"),
+        ("    *[]int p = none\n", "print(len(*p))"),
+        ("    P c = P(3, none, none, dict[str]int{})\n    *P p = &c\n", "print(p.next.x)"),
+    ])
+    def test_dereferencing_none_panics(self, setup, statement):
+        result = compile_and_run(f"{self.P}def int main():\n{setup}    {statement}\n    return 0\n")
+        assert (result.returncode, result.stdout) == (-signal.SIGABRT, "dereference of none\n")
+
+    def test_pointer_receiver_method_on_none_panics(self):
+        result = compile_and_run("type C struct:\n    int n\n    def inc(*self):\n        self.n += 1\n"
+                                 "def int main():\n    *C p = none\n    p.inc()\n    return 0\n")
+        assert (result.returncode, result.stdout) == (-signal.SIGABRT, "dereference of none\n")
+
+    def test_valid_pointers_still_work(self):
+        assert_program_stdout(
+            self.P + "def int main():\n    P c = P(3, none, []int[1], dict[str]int{})\n    P b = P(2, &c, none, dict[str]int{})\n"
+            "    *P h = &b\n    int s = 0\n    while h != none:\n        s += h.x + h.x\n        h = h.next\n"
+            "    print(s + len(c.s))\n    return 0\n",
+            "11\n")
+
+
 class TestStatementsEndTheirLine:
     @pytest.mark.parametrize("line", ["print(1) 2 3", "int y = 1 2", "x = 2 x = 3", "return 0 1", "x 5"])
     def test_trailing_tokens_are_rejected(self, line):

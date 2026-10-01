@@ -115,6 +115,14 @@ class IRCopy:
 
 
 @dataclass
+class IRNullCheck:
+    """Panic if pointer is none. Built by the IR builder at each dereference and expanded into a
+    branch to a panic block right after the function is built (ir/null_checks.py), so passes and
+    backends never see it."""
+    pointer: IRValue
+
+
+@dataclass
 class IRBoundsCheck:
     """Panic if unsigned index >= length."""
     index: IRValue

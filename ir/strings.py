@@ -136,7 +136,7 @@ class StringsMixin:
             return self._ir_index_address(expr)
         if isinstance(expr, Unary) and expr.op == UnaryOp.DEREFERENCE:
             # `*p` as a whole str.
-            return self.gen_expr_ir(expr.operand)
+            return self._ir_pointer(expr.operand)
         return None
 
     def _ir_read_str_descriptor_from_address(self, descriptor_addr) -> tuple:

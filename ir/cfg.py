@@ -10,6 +10,7 @@ from typing import Optional
 from ir.ir import (
     IRBinOp,
     IRBoundsCheck,
+    IRNullCheck,
     IRBranch,
     IRCall,
     IRCast,
@@ -34,7 +35,7 @@ READ_FIELDS = {
     IRMove: ('src',), IRCast: ('src',), IRBinOp: ('left', 'right'), IRUnOp: ('operand',),
     IRCall: ('args',), IRReturn: ('value',), IRBranch: ('cond',), IRLoad: ('address',),
     IRStore: ('address', 'value'), IRCopy: ('dst_address', 'src_address'),
-    IRBoundsCheck: ('index', 'length'), IRSliceBoundsCheck: ('value', 'bound'),
+    IRBoundsCheck: ('index', 'length'), IRSliceBoundsCheck: ('value', 'bound'), IRNullCheck: ('pointer',),
 }
 
 # Instructions whose only effect is writing `dst`.
@@ -82,6 +83,8 @@ def reads(instr) -> set:
         return {v for v in (instr.index, instr.length) if isinstance(v, Temp)}
     if isinstance(instr, IRSliceBoundsCheck):
         return {v for v in (instr.value, instr.bound) if isinstance(v, Temp)}
+    if isinstance(instr, IRNullCheck):
+        return {instr.pointer} if isinstance(instr.pointer, Temp) else set()
     return set()
 
 

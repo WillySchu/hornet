@@ -51,7 +51,7 @@ class DictsMixin:
             return self._ir_field_address(expr)
         if isinstance(expr, Unary) and expr.op == UnaryOp.DEREFERENCE:
             # `*p` as a whole dict.
-            return self.gen_expr_ir(expr.operand)
+            return self._ir_pointer(expr.operand)
         return None
 
     def _ir_materialize_value_into_scratch(self, expr: Node, value_type: Type, ir_fn, label: str):

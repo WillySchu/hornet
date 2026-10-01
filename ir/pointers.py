@@ -1,10 +1,10 @@
 """Pointer IR: `&x` and `*p`."""
 
 from ir.errors import IRError
-from ir.ir import IRBinOp, IRConst, IRLoad, IRLocalAddress, IRStore, IRValue
+from ir.ir import IRBinOp, IRConst, IRLoad, IRLocalAddress, IRNullCheck, IRStore, IRValue
 from ir.utils import COMPOSITE_KINDS, type_of
 from typesys import SUM_TYPE_TAG_WIDTH
-from parser import Call, DerefAssign, Field, Index, Unary, Variable
+from parser import Call, DerefAssign, Field, Index, Node, Unary, Variable
 from ops import BinaryOp
 from typesys import Type, TypeKind
 
@@ -66,16 +66,21 @@ class PointersMixin:
             return ir, payload_addr
         return ir, base_addr
 
+    def _ir_pointer(self, expr: Node) -> tuple[list, IRValue]:
+        """The value of pointer-typed `expr`, about to be dereferenced: checked not to be none."""
+        ir, value = self.gen_expr_ir(expr)
+        return ir + [IRNullCheck(value)], value
+
     def _ir_dereference(self, expr: Unary) -> tuple[list, IRValue]:
         """`*p`: load the pointee."""
-        operand_ir, operand_value = self.gen_expr_ir(expr.operand)
+        operand_ir, operand_value = self._ir_pointer(expr.operand)
         return self._ir_load(operand_ir, operand_value, type_of(expr))
 
     def _ir_deref_assign(self, stmt: DerefAssign) -> list:
         """`*pointer = value`."""
         pointer_type = type_of(stmt.pointer)
         pointee_type = pointer_type.element_type
-        ptr_ir, ptr_value = self.gen_expr_ir(stmt.pointer)
+        ptr_ir, ptr_value = self._ir_pointer(stmt.pointer)
 
         if pointee_type.kind not in COMPOSITE_KINDS:
             if stmt.compound_op is not None:

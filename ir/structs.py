@@ -23,12 +23,12 @@ class StructsMixin:
         """Address of a struct-typed expression."""
         if isinstance(expr, (Field, Index)) and expr.resolved_type is not None and expr.resolved_type.kind == TypeKind.POINTER:
             # Auto-deref a pointer-typed field base.
-            return self.gen_expr_ir(expr)
+            return self._ir_pointer(expr)
         if isinstance(expr, Variable):
             var_type = self._local_type(expr)
             if var_type.kind == TypeKind.POINTER:
                 # Auto-deref: use the pointer's value.
-                return self.gen_expr_ir(expr)
+                return self._ir_pointer(expr)
             slot = self._local_slot(expr)
             struct_type = var_type
             slot_addr = self.ir_program.ids.new_temp(Type.INT64)
@@ -64,7 +64,7 @@ class StructsMixin:
             return self._ir_index_address(expr)
         if isinstance(expr, Unary) and expr.op == UnaryOp.DEREFERENCE:
             # `*p` as a whole struct.
-            return self.gen_expr_ir(expr.operand)
+            return self._ir_pointer(expr.operand)
         if self._is_ordinary_composite_call(expr):
             return self._ir_materialize_composite_call(expr, type_of(expr))
         if isinstance(expr, Call) and expr.name in self.ir_program.struct_registry:
