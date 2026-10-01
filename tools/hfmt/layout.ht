@@ -95,6 +95,10 @@ type State struct:
     bool closed_type_bracket  # prev is ']' closing a type bracket
     int count  # tokens so far in the statement
     bool type_decl  # the statement starts with 'type'
+    bool decl_header  # the statement starts with 'def', 'extern', or 'intrinsic'
+    int chain_groups  # consecutive type brackets in the current chain (`[2][3]` is 2)
+    bool chain_empty  # the chain has a `[]`
+    bool chain_decl  # the chain started where only a type can be (a declaration)
 
     def reset(*s):
         s.has_prev = false
@@ -105,6 +109,10 @@ type State struct:
         s.closed_type_bracket = false
         s.count = 0
         s.type_decl = false
+        s.decl_header = false
+        s.chain_groups = 0
+        s.chain_empty = false
+        s.chain_decl = false
 
     def byte top(s):
         if len(s.brackets) == 0:
@@ -129,6 +137,28 @@ def bool _is_unary(Token cur, State s):
     if cur.text == '-' or cur.text == '*' or cur.text == '&':
         return not s.prev_value
     return false
+
+# Whether the `*` at toks[i], after a type bracket, multiplies rather than starting a pointer type,
+# following the compiler: `[x][0] * 2` and, outside declarations, `[x][0] * ys[1]` multiply (a
+# pointer element type behind two or more sized dimensions can't be written in an expression).
+def bool _star_multiplies([]Token toks, int i, State s):
+    if i + 1 >= len(toks):
+        return false
+    Token n = toks[i + 1]
+    if n.kind == TK_NUMBER or n.kind == TK_STRING or n.kind == TK_BYTE:
+        return true
+    if n.kind == TK_KEYWORD and (n.text == 'not' or n.text == 'true' or n.text == 'false' or n.text == 'none'):
+        return true
+    if n.kind == TK_OP and n.text != '[':
+        return true  # `(`, `-`, `&`, `*`: no type starts that way
+    if s.chain_decl or n.kind != TK_IDENT:
+        return false
+    if s.chain_groups >= 2 and not s.chain_empty:
+        return true
+    int k = i + 2
+    if k + 1 < len(toks) and toks[k].kind == TK_OP and toks[k].text == '.' and toks[k + 1].kind == TK_IDENT:
+        k += 2
+    return not (k < len(toks) and toks[k].kind == TK_OP and toks[k].text == '[')  # a literal's elements
 
 # A single space between s.prev and cur (both on the same line)?
 def bool _space_before(Token cur, bool cur_unary, State s):
@@ -161,13 +191,33 @@ def bool _space_before(Token cur, bool cur_unary, State s):
         return false  # [3]int, []*int
     return true
 
+# Whether a type bracket opened now would be in a declaration, where only a type can be: the start
+# of a statement or a for loop's initializer, a return type, a parameter, or an alias's target.
+def bool _declaration_position(State s):
+    if s.count == 0 or s.type_decl:
+        return true
+    Token p = s.prev
+    if p.kind == TK_KEYWORD and (p.text == 'def' or p.text == 'extern' or p.text == 'intrinsic' or p.text == 'for'):
+        return true
+    return s.decl_header and len(s.brackets) == 1 and p.kind == TK_OP and (p.text == '(' or p.text == ',')
+
 def _advance(*State s, Token cur, bool cur_unary):
+    bool continues_chain = s.closed_type_bracket
     s.closed_type_bracket = false
     if cur.kind == TK_OP and (cur.text == '(' or cur.text == '[' or cur.text == '{'):
+        bool type_bracket = cur.text == '[' and not s.prev_value
+        if type_bracket and continues_chain:
+            s.chain_groups += 1
+        elif type_bracket:
+            s.chain_groups = 1
+            s.chain_empty = false
+            s.chain_decl = _declaration_position(*s)
         s.brackets = append(s.brackets, cur.text[0])
-        s.type_brackets = append(s.type_brackets, cur.text == '[' and not s.prev_value)
+        s.type_brackets = append(s.type_brackets, type_bracket)
     elif _is_closer(cur) and len(s.brackets) > 0:
         s.closed_type_bracket = cur.text == ']' and s.type_brackets[len(s.type_brackets) - 1]
+        if s.closed_type_bracket and s.prev.kind == TK_OP and s.prev.text == '[':
+            s.chain_empty = true
         s.brackets = s.brackets[0:len(s.brackets) - 1]
         s.type_brackets = s.type_brackets[0:len(s.type_brackets) - 1]
     s.prev_value = _ends_value(cur, s.closed_type_bracket)
@@ -176,6 +226,7 @@ def _advance(*State s, Token cur, bool cur_unary):
     s.has_prev = true
     s.count += 1
     if s.count == 1:
+        s.decl_header = cur.kind == TK_KEYWORD and (cur.text == 'def' or cur.text == 'extern' or cur.text == 'intrinsic')
         s.type_decl = cur.kind == TK_KEYWORD and cur.text == 'type'
     elif s.count == 2 and s.type_decl:
         s.prev_value = false  # `type Name []int`: a type follows the name
@@ -206,7 +257,7 @@ type Out struct:
 
 def []Out _format_lines([]Line lines):
     []Out outs = none
-    State s = State(false, Token(0, '', 0, 0, 0), false, false, none, none, false, 0, false)
+    State s = State(false, Token(0, '', 0, 0, 0), false, false, none, none, false, 0, false, false, 0, false, false)
     int statement_level = 0
     for l in lines:
         if l.blank:
@@ -223,13 +274,15 @@ def []Out _format_lines([]Line lines):
         b.write(_spaces(indent))
         bool first = true
         bool opener = false
-        for t in l.toks:
+        for i, t in l.toks:
             if t.kind == TK_COMMENT:
                 if not first:
                     b.write('  ')
                 b.write(_comment(t.text))
                 continue
             bool unary = _is_unary(t, s)
+            if unary and t.text == '*' and s.closed_type_bracket and _star_multiplies(l.toks, i, s):
+                unary = false
             if not first and _space_before(t, unary, s):
                 b.write(' ')
             b.write(t.text)

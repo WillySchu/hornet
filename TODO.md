@@ -14,7 +14,6 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- hfmt spacing (cosmetic, pre-existing): [x][0] * 2 is printed as [x][0]\*2. The spacing logic reads a * after a value-starting bracket as a pointer type. The meaning is unchanged.
 - Consider adding a semantic AST with type information rather than annotating the existing AST from the parser.
 - Printing a struct defined in another module shows its internal name: print(write\_file(bad, x)) prints errors$Error(message: …).
 - Nothing warns when a result is ignored, such as a bare write\_stdout(...) statement.

@@ -1,0 +1,25 @@
+type P struct:
+    int x
+    [2][3]*P grid
+
+type Grid = [2][3]*P
+
+def [2][3]*P make([2][3]*P g, []*P ps):
+    return g
+
+extern int32 f([2]*P a)
+
+def int main():
+    int a = [x][0] * 2
+    int b = [x][0] * (a + 1)
+    int c = [x][0] * ys[1]
+    int d = [x][0] * y
+    int e = [x, 2][1] * -a
+    [2][3]*P g
+    []*P ps = []*P[&p]
+    [2]*P pa = [2]*P[&p, &p]
+    [2][1]*int pi = [2][1]*int[[1]*int[&a], [1]*int[&a]]
+    [][2]*P pq = [][2]*P[[2]*P[&p, &p]]
+    for [2]*P q = pa; true; q = pa:
+        break
+    return [x][0] * ys[1] + [5]*P[&p][0].x

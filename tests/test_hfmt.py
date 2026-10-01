@@ -326,3 +326,25 @@ def test_pointer_element_type_commas_keep_meaning(hfmt, tmp_path):
     (tmp_path / 'a.ht').write_text(source)
     (tmp_path / 'b.ht').write_text(formatted)
     assert compile_to_asm(str(tmp_path / 'a.ht'), 'x86_64-linux') == compile_to_asm(str(tmp_path / 'b.ht'), 'x86_64-linux')
+
+
+def test_star_spacing_follows_the_compilers_reading(hfmt, tmp_path):
+    """Where hfmt spaces a `*` (a multiplication) or keeps it tight (a pointer type), the compiler
+    reads it the same way: both spellings compile to the same program."""
+    from compile import compile_to_asm
+    source = (
+        "type P struct:\n    int x\n"
+        "def [1]*P keep([1]*P a):\n    return a\n"
+        "def int main():\n"
+        "    int x = 3\n    [2]int ys = [4, 5]\n    P p = P(6)\n"
+        "    int a = [x][0]*2\n"
+        "    int b = [x][0]*ys[1]\n"
+        "    [2][1]*P g = [[1]*P[&p], [1]*P[&p]]\n"
+        "    [1]*P one = keep([1]*P[&p])\n"
+        "    print(a + b + g[1][0].x + one[0].x)\n"
+        "    return 0\n")
+    formatted = _run(hfmt, stdin=source).stdout
+    assert "[x][0] * 2" in formatted and "[x][0] * ys[1]" in formatted and "keep([1]*P[&p])" in formatted
+    (tmp_path / 'a.ht').write_text(source)
+    (tmp_path / 'b.ht').write_text(formatted)
+    assert compile_to_asm(str(tmp_path / 'a.ht'), 'x86_64-linux') == compile_to_asm(str(tmp_path / 'b.ht'), 'x86_64-linux')

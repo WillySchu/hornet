@@ -17,10 +17,10 @@ def int main():
     int z = xs[0] * ys[
         1
     ]
-    int w = [x][0]*ys[
+    int w = [x][0] * ys[
         1
     ]
-    x = [2][3]*P[
+    x = [2][3] * P[
         a
     ]
     y = [][3]*P[
