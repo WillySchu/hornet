@@ -111,8 +111,8 @@ class ArraysSlicesMixin:
     def _ir_materialize_composite_call(
             self, call_expr: Call, value_type: Type) -> tuple[Union[IRLocalAddress, IRCall], Temp]:
         """Materialize a composite call's result; returns (ir, address)."""
-        if id(call_expr) in self._argument_temp_slots:
-            slot = self._argument_temp_slots[id(call_expr)]
+        if call_expr.nid in self._argument_temp_slots:
+            slot = self._argument_temp_slots[call_expr.nid]
             addr = self.ir_program.ids.new_temp(Type.INT64)
             addr_ir = [IRLocalAddress(dst=addr, slot=slot)]
         else:
@@ -125,8 +125,8 @@ class ArraysSlicesMixin:
     def _ir_materialize_array_literal(self, expr: ArrayLiteral):
         """Materialize an ArrayLiteral; returns (ir, address) or None."""
         array_type = type_of(expr)
-        if id(expr) in self._argument_temp_slots:
-            slot = self._argument_temp_slots[id(expr)]
+        if expr.nid in self._argument_temp_slots:
+            slot = self._argument_temp_slots[expr.nid]
             addr = self.ir_program.ids.new_temp(Type.INT64)
             addr_ir = [IRLocalAddress(dst=addr, slot=slot)]
         else:
@@ -524,7 +524,7 @@ class ArraysSlicesMixin:
     def _ir_bind_for_in_value(self, stmt: ForIn, binding_index: int, binding_type: Type, source_addr, ir_fn) -> list:
         """Copy a value at source_addr into a for-in binding."""
         if binding_type.kind in COMPOSITE_KINDS:
-            decl_id = (id(stmt), binding_index)
+            decl_id = stmt.symbols[binding_index].id
             slot = ir_fn.var_slots[decl_id]
             if self._is_heap_allocated(decl_id, binding_type):
                 ir = self._ir_malloc_and_store(binding_type, slot)
@@ -544,7 +544,7 @@ class ArraysSlicesMixin:
             return ir
         value = self.ir_program.ids.new_temp(binding_type)
         ir = [IRLoad(dst=value, address=source_addr)]
-        ir.extend(self._ir_finish_scalar_var_decl(stmt.binding_names[binding_index], (id(stmt), binding_index), binding_type, value))
+        ir.extend(self._ir_finish_scalar_var_decl(stmt.binding_names[binding_index], stmt.symbols[binding_index].id, binding_type, value))
         return ir
 
     def _ir_for_in_array_slice(self, stmt: ForIn, ir_fn) -> list:
@@ -645,7 +645,7 @@ class ArraysSlicesMixin:
         ir.append(IRBinOp(dst=elem_addr, op=BinaryOp.ADD, left=base_addr, right=offset_temp))
 
         if len(slots) == 2:
-            ir.extend(self._ir_finish_scalar_var_decl(stmt.binding_names[0], (id(stmt), 0), Type.INT, i))
+            ir.extend(self._ir_finish_scalar_var_decl(stmt.binding_names[0], stmt.symbols[0].id, Type.INT, i))
             element_index = 1
         else:
             element_index = 0

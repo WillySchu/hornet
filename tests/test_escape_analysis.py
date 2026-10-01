@@ -141,51 +141,14 @@ def test_analyze_array_escapes_empty():
 
 
 def test_analyze_array_escapes_fn_on_uninitialized_slice():
-    fn = parser.Function(
-        name='f',
-        return_type=None,
-        body=[
-            parser.VarDecl(
-                name='sl',
-                var_type=parser.SliceTypeExpr(
-                    element_type='int',
-                ),
-            ),
-            parser.Call(
-                name='fn',
-                args=[parser.Variable(name='sl')],
-            ),
-        ],
-    )
-    expected = set()
-    res = ea.analyze_array_escapes(fn, {})
-    assert expected == res
+    ast = parse_and_analyze("def f():\n    []int sl\n    fn(sl)\n\ndef fn([]int x):\n    print(len(x))\n")
+    assert ea.analyze_array_escapes(ast.functions[0], {}) == set()
 
 
 # TODO(will): I feel like this should escape?
 def test_analyze_array_escapes_fn_on_initialized_slice():
-    fn = parser.Function(
-        name='f',
-        return_type=None,
-        body=[
-            parser.VarDecl(
-                name='sl',
-                var_type=parser.SliceTypeExpr(
-                    element_type='int',
-                ),
-                init=parser.ArrayLiteral(
-                    elements=[parser.Constant(1), parser.Constant(2), parser.Constant(3)]
-                ),
-            ),
-            parser.Call(
-                name='fn',
-                args=[parser.Variable(name='sl')],
-            ),
-        ],
-    )
-    expected = set()
-    res = ea.analyze_array_escapes(fn, {})
-    assert expected == res
+    ast = parse_and_analyze("def f():\n    []int sl = [1, 2, 3]\n    fn(sl)\n\ndef fn([]int x):\n    print(len(x))\n")
+    assert ea.analyze_array_escapes(ast.functions[0], {}) == set()
 
 
 # TODO(will): I feel like this should escape?
@@ -317,7 +280,7 @@ def test_store_through_pointer_param_escapes():
         "    [3]int a = [1, 2, 3]\n"
         "    out.s = a[:]\n"
     )
-    assert id(fn.body[0]) in res
+    assert fn.body[0].symbol.id in res
 
 
 def test_store_into_dict_param_escapes():
@@ -326,7 +289,7 @@ def test_store_into_dict_param_escapes():
         "    [3]int a = [1, 2, 3]\n"
         "    d[0] = a[:]\n"
     )
-    assert id(fn.body[0]) in res
+    assert fn.body[0].symbol.id in res
 
 
 def test_store_into_slice_param_escapes():
@@ -335,7 +298,7 @@ def test_store_into_slice_param_escapes():
         "    [3]int a = [1, 2, 3]\n"
         "    rows[0] = a[:]\n"
     )
-    assert id(fn.body[0]) in res
+    assert fn.body[0].symbol.id in res
 
 
 def test_append_element_escapes_with_result():
@@ -346,7 +309,7 @@ def test_append_element_escapes_with_result():
         "    s = append(s, a[:])\n"
         "    return s\n"
     )
-    assert id(fn.body[0]) in res
+    assert fn.body[0].symbol.id in res
 
 
 def test_local_only_aggregate_stays_on_stack():
@@ -356,7 +319,7 @@ def test_local_only_aggregate_stays_on_stack():
         "    [][]int rows = [][]int[a[:]]\n"
         "    return len(rows[0])\n"
     )
-    assert id(fn.body[0]) not in res
+    assert fn.body[0].symbol.id not in res
 
 
 def test_store_into_local_via_pointer_then_return_escapes():
@@ -370,8 +333,8 @@ def test_store_into_local_via_pointer_then_return_escapes():
         "    q.s = a[:]\n"
         "    return v\n"
     )
-    assert id(fn.body[0]) in res
-    assert id(fn.body[1]) not in res
+    assert fn.body[0].symbol.id in res
+    assert fn.body[1].symbol.id not in res
 
 # ---------------------------------------------------------------------------
 # Pointers: `&x` as a second way to produce a direct_backing edge,
@@ -409,7 +372,7 @@ def test_address_of_a_struct_local_returned_directly_escapes():
         "    return &c\n"
     )
     fn = ast.functions[0]
-    c_decl_id = id(fn.body[0])
+    c_decl_id = fn.body[0].symbol.id
     result = ea.analyze_array_escapes(fn, ast.struct_registry)
     assert c_decl_id in result
 
@@ -425,7 +388,7 @@ def test_address_of_a_struct_local_never_escapes_stays_out_of_the_result():
         "    return p.radius\n"
     )
     fn = ast.functions[0]
-    c_decl_id = id(fn.body[0])
+    c_decl_id = fn.body[0].symbol.id
     result = ea.analyze_array_escapes(fn, ast.struct_registry)
     assert c_decl_id not in result
 
@@ -440,7 +403,7 @@ def test_address_of_a_scalar_local_returned_directly_is_now_heap_promoted():
         "    return &x\n"
     )
     fn = ast.functions[0]
-    x_decl_id = id(fn.body[0])
+    x_decl_id = fn.body[0].symbol.id
     result = ea.analyze_array_escapes(fn, ast.struct_registry)
     assert x_decl_id in result
 
@@ -463,7 +426,7 @@ def test_address_of_a_scalar_local_wrapped_in_a_returned_struct_is_now_heap_prom
         "    return Holder(&x)\n"
     )
     fn = ast.functions[0]
-    x_decl_id = id(fn.body[0])
+    x_decl_id = fn.body[0].symbol.id
     result = ea.analyze_array_escapes(fn, ast.struct_registry)
     assert x_decl_id in result
 
@@ -482,7 +445,7 @@ def test_address_of_a_scalar_local_passed_as_a_call_argument_is_now_heap_promote
         "    return useIt(&x)\n"
     )
     fn = ast.functions[1]  # caller, not useIt
-    x_decl_id = id(fn.body[0])
+    x_decl_id = fn.body[0].symbol.id
     result = ea.analyze_array_escapes(fn, ast.struct_registry)
     assert x_decl_id in result
 
@@ -502,7 +465,7 @@ def test_address_of_a_field_resolves_to_the_containing_struct():
         "    return &s.radius\n"
     )
     fn = ast.functions[0]
-    s_decl_id = id(fn.body[0])
+    s_decl_id = fn.body[0].symbol.id
     result = ea.analyze_array_escapes(fn, ast.struct_registry)
     assert s_decl_id in result
 
@@ -515,7 +478,7 @@ def test_address_of_an_element_resolves_to_the_containing_array():
         "    return &arr[1]\n"
     )
     fn = ast.functions[0]
-    arr_decl_id = id(fn.body[0])
+    arr_decl_id = fn.body[0].symbol.id
     result = ea.analyze_array_escapes(fn, ast.struct_registry)
     assert arr_decl_id in result
 
@@ -539,7 +502,7 @@ def test_address_of_a_field_through_an_auto_dereferenced_pointer_does_not_escape
         "    return &p.radius\n"
     )
     fn = ast.functions[0]
-    p_decl_id = id(fn.params[0])
+    p_decl_id = fn.params[0].symbol.id
     result = ea.analyze_array_escapes(fn, ast.struct_registry)
     assert p_decl_id not in result
 
@@ -561,7 +524,7 @@ def test_address_of_via_reassignment_not_just_var_decl_init():
         "    return p\n"
     )
     fn = ast.functions[0]
-    c_decl_id = id(fn.body[0])
+    c_decl_id = fn.body[0].symbol.id
     result = ea.analyze_array_escapes(fn, ast.struct_registry)
     assert c_decl_id in result
 
@@ -586,7 +549,7 @@ def test_pointer_aliasing_through_a_struct_field_assign_propagates():
         "    return h\n"
     )
     fn = ast.functions[0]
-    c_decl_id = id(fn.body[0])
+    c_decl_id = fn.body[0].symbol.id
     result = ea.analyze_array_escapes(fn, ast.struct_registry)
     assert c_decl_id in result
 
@@ -601,10 +564,10 @@ def _heap_names(source: str, fn_index: int = 0) -> set:
     stack = list(fn.body)
     while stack:
         node = stack.pop()
-        if isinstance(node, parser.VarDecl) and id(node) in heap:
+        if isinstance(node, parser.VarDecl) and node.symbol.id in heap:
             names.add(node.name)
         if isinstance(node, parser.ForIn):
-            names.update(n for i, n in enumerate(node.binding_names) if (id(node), i) in heap)
+            names.update(n for n, sym in zip(node.binding_names, node.symbols) if sym.id in heap)
         stack.extend(ea._children(node))
     return names
 

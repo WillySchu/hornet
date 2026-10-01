@@ -191,17 +191,17 @@ class StatementsMixin:
                 self._bind_local(stmt, ir_fn)
                 if stmt.init is not None:
                     ir, value = self.gen_expr_ir(stmt.init)
-                    return ir + self._ir_finish_scalar_var_decl(stmt.name, id(stmt), var_type, value)
+                    return ir + self._ir_finish_scalar_var_decl(stmt.name, stmt.symbol.id, var_type, value)
                 else:
                     # No initializer: zero value.
                     t = IRConst(0, var_type)
                     ir = []
-                    return ir + self._ir_finish_scalar_var_decl(stmt.name, id(stmt), var_type, t)
+                    return ir + self._ir_finish_scalar_var_decl(stmt.name, stmt.symbol.id, var_type, t)
             # Widen a variant into a sum; sums always have initializers.
             if var_type.kind == TypeKind.SUM and type_of(stmt.init).kind != TypeKind.SUM:
                 slot = self._bind_local(stmt, ir_fn)
                 ir = []
-                if self._is_heap_allocated(id(stmt), var_type):
+                if self._is_heap_allocated(stmt.symbol.id, var_type):
                     ir.extend(self._ir_malloc_and_store(var_type, slot))
                 dst_ir, dst_address = self._ir_struct_address(self._var_ref(stmt))
                 ir.extend(dst_ir)
@@ -215,7 +215,7 @@ class StatementsMixin:
             ):
                 slot = self._bind_local(stmt, ir_fn)
                 ir = []
-                if self._is_heap_allocated(id(stmt), var_type):
+                if self._is_heap_allocated(stmt.symbol.id, var_type):
                     # New destination: allocate before writing.
                     ir.extend(self._ir_malloc_and_store(var_type, slot))
                 return ir + self._ir_copy_assign(self._var_ref(stmt), stmt.init, var_type)
@@ -223,7 +223,7 @@ class StatementsMixin:
             if var_type.kind == TypeKind.STR:
                 slot = self._bind_local(stmt, ir_fn)
                 ir = []
-                if self._is_heap_allocated(id(stmt), var_type):
+                if self._is_heap_allocated(stmt.symbol.id, var_type):
                     ir.extend(self._ir_malloc_and_store(var_type, slot))
                 if stmt.init is not None:
                     value_ir, ptr_value, len_value = self._ir_str_value(stmt.init)
@@ -268,7 +268,7 @@ class StatementsMixin:
                          and stmt.init.name not in self.ir_program.struct_registry)):
                 slot = self._bind_local(stmt, ir_fn)
                 ir = []
-                if self._is_heap_allocated(id(stmt), var_type):
+                if self._is_heap_allocated(stmt.symbol.id, var_type):
                     ir.extend(self._ir_malloc_and_store(var_type, slot))
                 address_fn = {
                     TypeKind.ARRAY: self._ir_array_address,
@@ -287,7 +287,7 @@ class StatementsMixin:
                          or (isinstance(stmt.init, Call) and stmt.init.name in self.ir_program.struct_registry))):
                 slot = self._bind_local(stmt, ir_fn)
                 ir = []
-                if self._is_heap_allocated(id(stmt), var_type):
+                if self._is_heap_allocated(stmt.symbol.id, var_type):
                     ir.extend(self._ir_malloc_and_store(var_type, slot))
                 address_fn = self._ir_array_address if var_type.kind == TypeKind.ARRAY else self._ir_struct_address
                 dst_ir, dst_address = address_fn(self._var_ref(stmt))
@@ -303,7 +303,7 @@ class StatementsMixin:
             if var_type.kind == TypeKind.DICT and isinstance(stmt.init, DictLiteral):
                 slot = self._bind_local(stmt, ir_fn)
                 ir = []
-                if self._is_heap_allocated(id(stmt), var_type):
+                if self._is_heap_allocated(stmt.symbol.id, var_type):
                     ir.extend(self._ir_malloc_and_store(var_type, slot))
                 dst_ir, dst_address = self._ir_dict_address(self._var_ref(stmt))
                 ir.extend(dst_ir)
@@ -318,7 +318,7 @@ class StatementsMixin:
             if var_type.kind == TypeKind.DICT and stmt.init is None:
                 slot = self._bind_local(stmt, ir_fn)
                 ir = []
-                if self._is_heap_allocated(id(stmt), var_type):
+                if self._is_heap_allocated(stmt.symbol.id, var_type):
                     ir.extend(self._ir_malloc_and_store(var_type, slot))
                 dst_ir, dst_address = self._ir_dict_address(self._var_ref(stmt))
                 ir.extend(dst_ir)
@@ -341,7 +341,7 @@ class StatementsMixin:
             if var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and stmt.init is None:
                 slot = self._bind_local(stmt, ir_fn)
                 ir = []
-                if self._is_heap_allocated(id(stmt), var_type):
+                if self._is_heap_allocated(stmt.symbol.id, var_type):
                     ir.extend(self._ir_malloc_and_store(var_type, slot))
                 address_fn = self._ir_array_address if var_type.kind == TypeKind.ARRAY else self._ir_struct_address
                 dst_ir, dst_address = address_fn(self._var_ref(stmt))
@@ -643,7 +643,7 @@ class StatementsMixin:
         if not isinstance(decl, VarDecl):
             return []
         var_type = self._local_type(decl)
-        if not self._is_heap_allocated(id(decl), var_type):
+        if not self._is_heap_allocated(decl.symbol.id, var_type):
             return []
         size = type_byte_width(var_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
         fresh = self.ir_program.ids.new_temp(Type.INT64)
@@ -656,7 +656,7 @@ class StatementsMixin:
                 IRCopy(dst_address=fresh, src_address=old, value_type=var_type),
                 IRStore(address=slot_addr, value=fresh, value_type=Type.INT64),
             ]
-        box = self._local_temp(id(decl))
+        box = self._local_temp(decl.symbol.id)
         value = self.ir_program.ids.new_temp(var_type)
         return ir + [
             IRLoad(dst=value, address=box),
@@ -704,7 +704,7 @@ class StatementsMixin:
 
     def _ir_box_local(self, stmt, var_type, slot) -> list:
         """malloc storage for a heap-allocated local before its first write; [] otherwise."""
-        return self._ir_malloc_and_store(var_type, slot) if self._is_heap_allocated(id(stmt), var_type) else []
+        return self._ir_malloc_and_store(var_type, slot) if self._is_heap_allocated(stmt.symbol.id, var_type) else []
 
     def _ir_malloc_and_store(self, var_type, slot: int) -> list:
         """malloc a heap local's storage and store the pointer in its slot."""

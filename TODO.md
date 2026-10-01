@@ -22,7 +22,6 @@ Updates:
 - Module errors have a line but no column.
 - Lexer line number shifts with string literal containing a raw newline.
 - hornet\_panic currently writes to stdout, not stderr.
-- Add symbol table to replace IR builder's use if id() as declaration keys.
 - Dicts as sum types.
 - `in` checking for strings.
 - Sum type equality.

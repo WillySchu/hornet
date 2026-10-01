@@ -83,8 +83,8 @@ class DictsMixin:
     def _ir_materialize_dict_literal(self, expr: DictLiteral):
         """Materialize a dict literal; returns (ir, address)."""
         dict_type = type_of(expr)
-        if id(expr) in self._argument_temp_slots:
-            slot = self._argument_temp_slots[id(expr)]
+        if expr.nid in self._argument_temp_slots:
+            slot = self._argument_temp_slots[expr.nid]
             addr = self.ir_program.ids.new_temp(Type.INT64)
             addr_ir = [IRLocalAddress(dst=addr, slot=slot)]
         else:

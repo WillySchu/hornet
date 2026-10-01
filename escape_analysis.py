@@ -73,7 +73,7 @@ def is_heap_allocated(t: Type, structs: dict[str, StructInfo], sum_types: dict) 
     return t.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM) and type_byte_width(t, structs, sum_types) > _STACK_ARRAY_LIMIT_BYTES
 
 
-# id() of a VarDecl/Param/`&S()` Call, or (id(ForIn), binding index).
+# A declaration's Symbol.id, or ('literal', nid) for an `&S()` struct literal's storage.
 DeclId = Union[int, tuple]
 
 
@@ -89,7 +89,12 @@ def _is_external(t) -> bool:
 
 
 def _heap(node: Node) -> tuple:
-    return ('heap', id(node))
+    return ('heap', node.nid)
+
+
+def _literal(node: Node) -> tuple:
+    """An `S(...)` struct literal's own storage, which may need the heap like a variable's."""
+    return ('literal', node.nid)
 
 
 class EscapeAnalyzer:
@@ -106,14 +111,13 @@ class EscapeAnalyzer:
             self.changed = False
             for i, p in enumerate(self.fn.params):
                 self._add(_param(i), {EXT})
-                self._add(id(p), {_param(i)})
+                self._add(p.symbol.id, {_param(i)})
             self.walk_statements(self.fn.body)
             self._close_escapes()
             if not self.changed:
                 break
         heap = self.esc | self._iteration_escapes()
-        return {t for t in heap
-                if t != EXT and not (isinstance(t, tuple) and isinstance(t[0], str))}
+        return {t for t in heap if t != EXT and not (isinstance(t, tuple) and t[0] in ('heap', 'param'))}
 
     def _iteration_escapes(self) -> set:
         """Locations declared inside some loop whose address may be held outside it."""
@@ -192,7 +196,7 @@ class EscapeAnalyzer:
         if isinstance(expr, Unary) and expr.op == UnaryOp.DEREFERENCE:
             return self.vals(expr.operand)
         if isinstance(expr, Call) and expr.name in self.structs:
-            t = id(expr)
+            t = _literal(expr)
             self._add(t, self.vals(expr))
             return {t}
         # Rvalue: materialized in fresh, non-promotable storage.
@@ -301,7 +305,7 @@ class EscapeAnalyzer:
 
     def walk_statement(self, stmt: Node) -> None:
         if isinstance(stmt, VarDecl):
-            self._add(id(stmt), self.vals(stmt.init) if stmt.init is not None else set())
+            self._add(stmt.symbol.id, self.vals(stmt.init) if stmt.init is not None else set())
         elif isinstance(stmt, Assign):
             self._store({stmt.decl_id} if stmt.decl_id is not None else {EXT}, self.vals(stmt.value))
         elif isinstance(stmt, IndexAssign):
@@ -335,7 +339,7 @@ class EscapeAnalyzer:
             it = self.vals(stmt.iterable)
             elems = it if k == TypeKind.ARRAY else self._contents(it)
             for i in range(len(stmt.binding_names)):
-                self._add((id(stmt), i), elems)
+                self._add(stmt.symbols[i].id, elems)
             self.walk_statements(stmt.body)
         elif isinstance(stmt, (Break, Continue)):
             pass
@@ -362,11 +366,11 @@ def _declared_within(nodes: list) -> set:
     while stack:
         node = stack.pop()
         if isinstance(node, VarDecl):
-            out.add(id(node))
+            out.add(node.symbol.id)
         elif isinstance(node, ForIn):
-            out.update((id(node), i) for i in range(len(node.binding_names)))
+            out.update(sym.id for sym in node.symbols)
         elif isinstance(node, Call):
-            out.add(id(node))
+            out.add(_literal(node))
         elif isinstance(node, IsCheck) and node.binding_decl is not None:
             stack.append(node.binding_decl)
         stack.extend(_children(node))
@@ -382,7 +386,7 @@ def _loop_scopes(statements: list) -> list:
         node = stack.pop()
         if isinstance(node, ForIn):
             # The iterable is evaluated once, before the first iteration.
-            scopes.append(_declared_within(node.body) | {(id(node), i) for i in range(len(node.binding_names))})
+            scopes.append(_declared_within(node.body) | {sym.id for sym in node.symbols})
         elif isinstance(node, (While, For)):
             scopes.append(_declared_within(_children(node)))
         stack.extend(_children(node))

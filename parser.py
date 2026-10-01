@@ -1,6 +1,7 @@
 """Recursive-descent parser: tokens -> AST. Precedence climbing for binary operators."""
 
 import argparse
+import itertools
 import re
 from dataclasses import dataclass, field, fields
 from enum import auto, Enum
@@ -14,8 +15,8 @@ from diagnostics import CompileError
 # AST nodes
 
 _PRETTY_MAX_WIDTH = 88
-# Positions and semantic annotations; omitted from pretty().
-_HIDDEN_FIELDS = {'resolved_type', 'line', 'col', 'file', 'decl_id', 'narrowed_type', 'resolved_return_type', 'binding_types'}
+_HIDDEN_FIELDS = {'resolved_type', 'line', 'col', 'file', 'nid', 'decl_id', 'symbol', 'symbols', 'narrowed_type',
+                  'resolved_return_type', 'binding_types'}
 _PRETTY_INDENT = "    "
 
 
@@ -65,12 +66,20 @@ def _pretty_node(node: 'Node', indent: int) -> str:
     return f"{class_name}(\n{inner},\n{_PRETTY_INDENT * indent})"
 
 
+_node_numbers = itertools.count()
+
+
 @dataclass
 class Node:
-    """AST base. pretty() renders any node generically."""
+    """AST base. pretty() renders any node generically. Every node gets a number (`nid`) when it is
+    created: passes key per-node facts on it, never on object identity."""
     line: int = field(default=0, kw_only=True, compare=False, repr=False)
     col: int = field(default=0, kw_only=True, compare=False, repr=False)
     file: Optional[str] = field(default=None, kw_only=True, compare=False, repr=False)
+    nid: int = field(default=-1, kw_only=True, compare=False, repr=False)
+
+    def __post_init__(self):
+        self.nid = next(_node_numbers)
 
     def pretty(self) -> str:
         return _pretty_node(self, indent=0)
@@ -232,6 +241,7 @@ class VarDecl(Node):
     var_type: Union[str, ArrayTypeExpr, SliceTypeExpr]
     init: Optional[Node] = None
     resolved_type: Any = field(default=None, compare=False, repr=False)
+    symbol: Any = field(default=None, compare=False, repr=False)  # set by semantic analysis
 
 
 @dataclass
@@ -310,7 +320,7 @@ class ExprStmt(Node):
 
 @dataclass
 class IsCheck(Node):
-    """If-condition `NAME is T` or `EXPR is T as NAME`. Not a general expression. For the second form semantic analysis sets binding_decl, a VarDecl binding NAME to the subject; built once so IR and escape analysis share its id()."""
+    """If-condition `NAME is T` or `EXPR is T as NAME`. Not a general expression. For the second form semantic analysis sets binding_decl, a VarDecl binding NAME to the subject, whose Symbol IR and escape analysis share."""
     variable_name: str
     type_name: Union[str, QualifiedTypeExpr, ArrayTypeExpr, SliceTypeExpr, PointerTypeExpr]
     subject: Optional[Node] = None
@@ -352,6 +362,7 @@ class ForIn(Node):
     iterable: Node
     body: List[Node]
     binding_types: Any = field(default=None, compare=False, repr=False)
+    symbols: Any = field(default=None, compare=False, repr=False)  # per binding; set by semantic analysis
 
 
 @dataclass
@@ -370,6 +381,7 @@ class Param(Node):
     name: str
     type: Union[str, ArrayTypeExpr, SliceTypeExpr]
     resolved_type: Any = field(default=None, compare=False, repr=False)
+    symbol: Any = field(default=None, compare=False, repr=False)  # set by semantic analysis
 
 
 @dataclass

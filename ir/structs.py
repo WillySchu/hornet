@@ -152,8 +152,8 @@ class StructsMixin:
     def _ir_materialize_struct_literal(self, expr: Call):
         """Materialize a struct literal; returns (ir, address)."""
         struct_type = type_of(expr)
-        if id(expr) in self._argument_temp_slots:
-            slot = self._argument_temp_slots[id(expr)]
+        if expr.nid in self._argument_temp_slots:
+            slot = self._argument_temp_slots[expr.nid]
             addr = self.ir_program.ids.new_temp(Type.INT64)
             addr_ir = [IRLocalAddress(dst=addr, slot=slot)]
         else:

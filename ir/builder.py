@@ -62,7 +62,7 @@ class IRFunctionBuilder(
 
     def gen_function_ir(self, fn: Function) -> IRFunction:
         """Build `fn`'s IRFunction: slots, params, body."""
-        # id(ArrayLiteral or Call) -> slot
+        # nid of an ArrayLiteral or Call -> slot
         self._argument_temp_slots = {}
         ir_fn = IRFunction(name=fn.name)
         self.ir_fn = ir_fn
@@ -135,13 +135,13 @@ class IRFunctionBuilder(
                     ir_fn.params.append(argc)
                     incoming = ids.new_temp(p_type)
                     ir.append(IRCast(dst=incoming, src=argc))
-                    ir.extend(self._ir_finish_scalar_var_decl(p.name, id(p), p_type, incoming))
-                elif self._is_heap_allocated(id(p), p_type):
+                    ir.extend(self._ir_finish_scalar_var_decl(p.name, p.symbol.id, p_type, incoming))
+                elif self._is_heap_allocated(p.symbol.id, p_type):
                     incoming = ids.new_temp(p_type)
                     ir_fn.params.append(incoming)
-                    ir.extend(self._ir_finish_scalar_var_decl(p.name, id(p), p_type, incoming))
+                    ir.extend(self._ir_finish_scalar_var_decl(p.name, p.symbol.id, p_type, incoming))
                 else:
-                    ir_fn.params.append(self._local_temp(id(p)))  # arrives directly in its variable
+                    ir_fn.params.append(self._local_temp(p.symbol.id))  # arrives directly in its variable
                 captured.append(None)
 
         if hidden_ptr is not None:
@@ -153,15 +153,15 @@ class IRFunctionBuilder(
             if p_type.kind == TypeKind.SLICE:
                 ptr_value, len_value, cap_value = cap
                 slot = self._bind_param(p, ir_fn)
-                if self._is_heap_allocated(id(p), p_type):
+                if self._is_heap_allocated(p.symbol.id, p_type):
                     ir.extend(self._ir_malloc_and_store(p_type, slot))
-                ir_dst, param_addr = self._ir_slice_address(Variable(name=p.name, decl_id=id(p)))
+                ir_dst, param_addr = self._ir_slice_address(Variable(name=p.name, decl_id=p.symbol.id))
                 ir.extend(ir_dst)
                 ir.extend(self._ir_write_slice_descriptor_into_address(param_addr, ptr_value, len_value, cap_value))
             elif p_type.kind == TypeKind.STR:
                 ptr_value, len_value = cap
                 slot = self._bind_param(p, ir_fn)
-                if self._is_heap_allocated(id(p), p_type):
+                if self._is_heap_allocated(p.symbol.id, p_type):
                     size = type_byte_width(p_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
                     new_ptr = self.ir_program.ids.new_temp(Type.INT64)
                     ir.append(IRCall(dst=new_ptr, name='malloc', args=[IRConst(size, Type.INT64)]))
@@ -178,7 +178,7 @@ class IRFunctionBuilder(
                 slot = self._bind_param(p, ir_fn)
                 param_addr = self.ir_program.ids.new_temp(Type.INT64)
                 ir.append(IRLocalAddress(dst=param_addr, slot=slot))
-                if self._is_heap_allocated(id(p), p_type):
+                if self._is_heap_allocated(p.symbol.id, p_type):
                     size = type_byte_width(p_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
                     new_ptr = self.ir_program.ids.new_temp(Type.INT64)
                     ir.append(IRCall(dst=new_ptr, name='malloc', args=[IRConst(size, Type.INT64)]))
@@ -192,30 +192,30 @@ class IRFunctionBuilder(
         """One slot per parameter; heap-allocated params get an 8-byte pointer slot."""
         for p in params:
             p_type = p.resolved_type
-            width = 8 if self._is_heap_allocated(id(p), p_type) else type_byte_width(p_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
-            ir_fn.var_slots[id(p)] = self.ir_program.ids.new_slot(width, f"param:{p.name}", ir_fn)
+            width = 8 if self._is_heap_allocated(p.symbol.id, p_type) else type_byte_width(p_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+            ir_fn.var_slots[p.symbol.id] = self.ir_program.ids.new_slot(width, f"param:{p.symbol}", ir_fn)
 
     def _bind_param(self, p: Param, ir_fn: IRFunction) -> int:
         """Bind `p` in scope to its slot and Temp."""
-        slot = ir_fn.var_slots[id(p)]
+        slot = ir_fn.var_slots[p.symbol.id]
         p_type = p.resolved_type
-        temp_type = Type(TypeKind.POINTER, element_type=p_type) if self._is_heap_allocated(id(p), p_type) else p_type
-        self.locals[id(p)] = (slot, p_type, id(p), self.ir_program.ids.temp_at_offset(temp_type, slot, ir_fn))
+        temp_type = Type(TypeKind.POINTER, element_type=p_type) if self._is_heap_allocated(p.symbol.id, p_type) else p_type
+        self.locals[p.symbol.id] = (slot, p_type, p.symbol.id, self.ir_program.ids.temp_at_offset(temp_type, slot, ir_fn))
         return slot
 
     def _allocate_local_slot(self, stmt: VarDecl, ir_fn: IRFunction) -> None:
         """Allocate a VarDecl's slot (also used for IsCheck binding_decl)."""
         var_type = stmt.resolved_type
         width = 8 if self._is_heap_allocated(
-            id(stmt), var_type) else type_byte_width(var_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
-        ir_fn.var_slots[id(stmt)] = self.ir_program.ids.new_slot(width, f"local:{stmt.name}", ir_fn)
+            stmt.symbol.id, var_type) else type_byte_width(var_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+        ir_fn.var_slots[stmt.symbol.id] = self.ir_program.ids.new_slot(width, f"local:{stmt.symbol}", ir_fn)
 
     def _allocate_for_in_binding_slot(self, stmt: ForIn, index: int, binding_type: Type, ir_fn: IRFunction) -> None:
-        """Allocate a ForIn binding's slot, keyed by (id(stmt), index)."""
+        """Allocate a ForIn binding's slot, keyed by stmt.symbols[index].id."""
         width = 8 if self._is_heap_allocated(
-            (id(stmt), index), binding_type) else type_byte_width(binding_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
-        ir_fn.var_slots[(id(stmt), index)] = self.ir_program.ids.new_slot(
-            width, f"for_in:{stmt.binding_names[index]}", ir_fn)
+            stmt.symbols[index].id, binding_type) else type_byte_width(binding_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+        ir_fn.var_slots[stmt.symbols[index].id] = self.ir_program.ids.new_slot(
+            width, f"for_in:{stmt.symbols[index]}", ir_fn)
 
     def _collect_locals(self, statements: List[Node], ir_fn: IRFunction) -> None:
         """Allocate slots for every VarDecl and binding in `statements`."""
@@ -305,9 +305,9 @@ class IRFunctionBuilder(
             if (expr.op == UnaryOp.ADDRESS_OF and isinstance(expr.operand, Call)
                     and expr.operand.name in self.ir_program.struct_registry):
                 struct_type = type_of(expr.operand)
-                if not self._is_heap_allocated(id(expr.operand), struct_type):
+                if not self._is_heap_allocated(('literal', expr.operand.nid), struct_type):
                     width = type_byte_width(struct_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
-                    self._argument_temp_slots[id(expr.operand)] = self.ir_program.ids.new_slot(width, "struct_literal_address", ir_fn)
+                    self._argument_temp_slots[expr.operand.nid] = self.ir_program.ids.new_slot(width, "struct_literal_address", ir_fn)
         elif isinstance(expr, Index):
             self._collect_argument_temps_in_expr(expr.array, ir_fn)
             self._collect_argument_temps_in_expr(expr.index, ir_fn)
@@ -331,33 +331,33 @@ class IRFunctionBuilder(
                 self._collect_argument_temps_in_expr(element, ir_fn)
 
     def _reserve_argument_temp(self, expr: Node, t: Type, ir_fn: IRFunction) -> None:
-        """Reserve a slot for a composite temporary keyed by id(expr)."""
+        """Reserve a slot for a composite temporary keyed by expr.nid."""
         if is_heap_allocated(t, self.ir_program.struct_registry, self.ir_program.sum_type_registry):
             return
         width = type_byte_width(t, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
-        self._argument_temp_slots[id(expr)] = self.ir_program.ids.new_slot(width, "argument_temp", ir_fn)
+        self._argument_temp_slots[expr.nid] = self.ir_program.ids.new_slot(width, "argument_temp", ir_fn)
 
     def _bind_local(self, stmt: VarDecl, ir_fn: IRFunction) -> int:
         """Bind `stmt` in scope to its slot and Temp."""
-        slot = ir_fn.var_slots[id(stmt)]
+        slot = ir_fn.var_slots[stmt.symbol.id]
         var_type = stmt.resolved_type
-        temp_type = Type(TypeKind.POINTER, element_type=var_type) if self._is_heap_allocated(id(stmt), var_type) else var_type
-        self.locals[id(stmt)] = (slot, var_type, id(stmt), self.ir_program.ids.temp_at_offset(temp_type, slot, ir_fn))
+        temp_type = Type(TypeKind.POINTER, element_type=var_type) if self._is_heap_allocated(stmt.symbol.id, var_type) else var_type
+        self.locals[stmt.symbol.id] = (slot, var_type, stmt.symbol.id, self.ir_program.ids.temp_at_offset(temp_type, slot, ir_fn))
         return slot
 
     def _bind_for_in_binding(self, stmt: ForIn, index: int, binding_type: Type, ir_fn: IRFunction) -> int:
         """Bind a ForIn binding in scope."""
-        slot = ir_fn.var_slots[(id(stmt), index)]
-        temp_type = Type(TypeKind.POINTER, element_type=binding_type) if self._is_heap_allocated((id(stmt), index), binding_type) else binding_type
-        self.locals[(id(stmt), index)] = (slot, binding_type, (id(stmt), index), self.ir_program.ids.temp_at_offset(temp_type, slot, ir_fn))
+        slot = ir_fn.var_slots[stmt.symbols[index].id]
+        temp_type = Type(TypeKind.POINTER, element_type=binding_type) if self._is_heap_allocated(stmt.symbols[index].id, binding_type) else binding_type
+        self.locals[stmt.symbols[index].id] = (slot, binding_type, stmt.symbols[index].id, self.ir_program.ids.temp_at_offset(temp_type, slot, ir_fn))
         return slot
 
     def _decl(self, ref) -> object:
-        """Decl id of `ref`: a decl id, VarDecl, Param, or a node annotated with decl_id."""
+        """Decl id (Symbol.id) of `ref`: a decl id, VarDecl, Param, or a node annotated with decl_id."""
         if isinstance(ref, (int, tuple)):
             return ref
         if isinstance(ref, (VarDecl, Param)):
-            return id(ref)
+            return ref.symbol.id
         decl_id = getattr(ref, 'decl_id', None)
         if decl_id is None:
             raise IRError(f"{ref!r} has no decl_id -- semantic.analyze() must run first")

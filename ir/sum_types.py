@@ -37,8 +37,8 @@ class SumTypesMixin:
 
     def _ir_materialize_sum_type_value(self, expr: Node, sum_type: Type):
         """Materialize a widened variant; returns (ir, address)."""
-        if id(expr) in self._argument_temp_slots:
-            slot = self._argument_temp_slots[id(expr)]
+        if expr.nid in self._argument_temp_slots:
+            slot = self._argument_temp_slots[expr.nid]
             addr = self.ir_program.ids.new_temp(Type.INT64)
             addr_ir = [IRLocalAddress(dst=addr, slot=slot)]
         else:

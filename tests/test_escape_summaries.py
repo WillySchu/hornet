@@ -16,7 +16,7 @@ def _escapes(source: str, fn_name: str = 'leak'):
     summaries = compute_escape_summaries(program.functions, program.struct_registry)
     fn = next(f for f in program.functions if f.name == fn_name)
     escaping = analyze_array_escapes(fn, program.struct_registry, summaries)
-    return [s.name for s in fn.body if isinstance(s, VarDecl) and id(s) in escaping], summaries
+    return [s.name for s in fn.body if isinstance(s, VarDecl) and s.symbol.id in escaping], summaries
 
 
 # Each leaks `x` (or `n`) out of leak() through a callee; the local must be heap-allocated.

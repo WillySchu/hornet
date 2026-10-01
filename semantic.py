@@ -4,9 +4,10 @@ Strict typing: no implicit conversions; integer operands must match exactly. Blo
 scope lexically and may shadow. Non-void functions must return on all paths.
 
 Later passes rely on these annotations instead of re-resolving: resolved_type on expressions,
-VarDecls, and Params; decl_id on Variable/Assign/IsCheck (id() of the declaring VarDecl/Param,
-or (id(ForIn), index)); resolved_return_type, binding_types, narrowed_type; and the registries
-stashed on Program.
+VarDecls, and Params; a Symbol (symbols.py) on each VarDecl and Param (`symbol`) and ForIn
+(`symbols`, one per binding), with decl_id on Variable/Assign/IsCheck naming the declaration's
+Symbol.id; resolved_return_type, binding_types, narrowed_type; and the symbol table and
+registries stashed on Program.
 """
 
 import argparse
@@ -19,6 +20,7 @@ from lexer import lex
 from typesys import StructInfo, SumTypeInfo, Type, TypeKind
 from desugar import mangle_method_name
 from folding import fold_binary_op, fold_cast, fold_unary_op
+from symbols import SymbolTable
 from parser import (
     ConstDecl,
     ArrayLiteral,
@@ -276,6 +278,8 @@ class SemanticAnalyzer:
         self._narrowed_names: set = set()  # currently narrowed variable names
 
     def analyze(self, program: Program) -> None:
+        self.symbols = SymbolTable()
+        program.symbols = self.symbols
         # Order matters: 0. constant array sizes become literals before any type is resolved.
         self._collect_consts(program)
         self._resolve_array_sizes(program)
@@ -393,9 +397,9 @@ class SemanticAnalyzer:
         stack = [program]
         while stack:
             node = stack.pop()
-            if id(node) in seen:
+            if node.nid in seen:
                 continue
-            seen.add(id(node))
+            seen.add(node.nid)
             if isinstance(node, ArrayTypeExpr) and not isinstance(node.size, int):
                 node.size = self._array_size_value(node.size)
             if dataclasses.is_dataclass(node) and not isinstance(node, type):
@@ -846,7 +850,8 @@ class SemanticAnalyzer:
         # Params are locals; _declare also catches duplicates.
         for p in fn.params:
             p.resolved_type = type_from_name(p.type, self.structs, self.type_aliases, p, self.sum_types)
-            self._declare(p.name, p.resolved_type, p, id(p))
+            p.symbol = self.symbols.new(p.name, 'param', p.resolved_type, p)
+            self._declare(p.name, p.resolved_type, p, p.symbol.id)
         return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.structs, self.type_aliases, fn, self.sum_types)
         fn.resolved_return_type = return_type
         for stmt in fn.body:
@@ -868,7 +873,7 @@ class SemanticAnalyzer:
 
     def _declare(self, name: str, type_: Type, node: Optional[Node], decl_id) -> None:
         """Declare in the innermost scope; shadowing outer scopes is allowed.
-        decl_id identifies the storage: id() of a VarDecl/Param, or (id(ForIn), index)."""
+        decl_id is the declaration's Symbol.id."""
         if name in self.scopes[-1]:
             raise SemanticError(f"Variable '{name}' is already declared in this scope", node)
         self.scopes[-1][name] = (type_, decl_id)
@@ -1013,7 +1018,8 @@ class SemanticAnalyzer:
                     stmt,
                 )
         stmt.resolved_type = declared_type
-        self._declare(stmt.name, declared_type, stmt, id(stmt))
+        stmt.symbol = self.symbols.new(stmt.name, 'local', declared_type, stmt)
+        self._declare(stmt.name, declared_type, stmt, stmt.symbol.id)
 
     def analyze_assign(self, stmt: Assign) -> None:
         if stmt.name in self._narrowed_names:
@@ -1193,7 +1199,10 @@ class SemanticAnalyzer:
                     file=stmt.condition.file,
                 )
                 stmt.condition.binding_decl.resolved_type = subject_type
-            self._declare(stmt.condition.variable_name, subject_type, stmt.condition, id(stmt.condition.binding_decl))
+            sym = self.symbols.new(stmt.condition.variable_name, 'narrowing', subject_type, stmt.condition)
+            if stmt.condition.binding_decl is not None:  # None when the subject isn't a sum; rejected below
+                stmt.condition.binding_decl.symbol = sym
+            self._declare(stmt.condition.variable_name, subject_type, stmt.condition, sym.id)
 
         condition_type = self.check_expr(stmt.condition)
         if condition_type != Type.BOOL:
@@ -1335,8 +1344,9 @@ class SemanticAnalyzer:
             binding_types = [Type.INT, iterable_type.element_type] if num_bindings == 2 else [iterable_type.element_type]
         stmt.binding_types = binding_types
         self._push_scope()
-        for i, (name, binding_type) in enumerate(zip(stmt.binding_names, binding_types)):
-            self._declare(name, binding_type, stmt, (id(stmt), i))
+        stmt.symbols = [self.symbols.new(name, 'binding', t, stmt) for name, t in zip(stmt.binding_names, binding_types)]
+        for name, binding_type, sym in zip(stmt.binding_names, binding_types, stmt.symbols):
+            self._declare(name, binding_type, stmt, sym.id)
         self.loop_depth += 1
         for s in stmt.body:
             self.analyze_statement(s, return_type)
