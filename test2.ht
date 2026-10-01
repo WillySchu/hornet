@@ -1,9 +1,0 @@
-def int main():
-    Node node
-    node.value = 5
-    print(node)
-    return 0
-
-
-type Node struct:
-    int value
