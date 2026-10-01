@@ -20,7 +20,6 @@ Updates:
 - Nothing warns when a result is ignored, such as a bare write\_stdout(...) statement.
 - Struct fields are resolved before sum types, so a sum type used as a field type is unknown at that point.
 - Weight spills by use count and loop depth.
-- Per function dict scratch slot is allocated but never used?
 - Module errors have a line but no column.
 - Lexer line number shifts with string literal containing a raw newline.
 - hornet\_panic currently writes to stdout, not stderr.
