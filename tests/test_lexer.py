@@ -1,5 +1,9 @@
 """Tests for the lexer."""
 
+import re
+
+import pytest
+
 import lexer
 
 
@@ -1074,3 +1078,22 @@ def test_dot():
     ]
 
     assert expected == res
+
+
+@pytest.mark.parametrize("source,message", [
+    ("x = 'a\nb'\n", "Newline in string literal -- a literal ends on its own line; write \\n for a newline"),
+    ('x = "a\nb"\n', "Newline in byte literal"),
+    ("x = 'a\\\nb'\n", "Newline in string literal"),
+    ("x = 'abc", "Unterminated string literal"),
+    ('x = "a', "Unterminated byte literal"),
+])
+def test_a_literal_ends_on_its_own_line(source, message):
+    with pytest.raises(lexer.LexError, match=re.escape(message)) as e:
+        lexer.Lexer(source).tokenize()
+    assert (e.value.line, e.value.col) == (1, 5)
+
+
+def test_escaped_newlines_and_quotes_stay_one_line():
+    toks = lexer.Lexer("x = 'a\\nb\\'c' + \"\\n\"\ny = 1\n").tokenize()
+    assert [(t.type.name, t.line) for t in toks if t.type.name in ('STRING', 'BYTE', 'IDENTIFIER')] == [
+        ('IDENTIFIER', 1), ('STRING', 1), ('BYTE', 1), ('IDENTIFIER', 2)]

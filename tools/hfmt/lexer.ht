@@ -145,8 +145,8 @@ def LexResult lex(str src):
                 if src[j] == "\\":
                     j += 1
                 if j < n and src[j] == "\n":
-                    line += 1
-                    line_start = j + 1
+                    # A literal ends on its own line, as in the compiler.
+                    return LexError('newline in literal (write \\n)', start_line, col)
                 j += 1
             if j >= n:
                 return LexError('unterminated literal', start_line, col)

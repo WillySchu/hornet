@@ -176,8 +176,9 @@ class Lexer:
         self.rules = [
             ('NUMBER',      r'\d+(\.\d+)?'),
             ('IDENTIFIER',  r'[a-zA-Z_]\w*'),
-            ('STRING',      r"'([^'\\]|\\.)*'"),
-            ('BYTE',        r'"([^"\\]|\\.)*"'),
+            # Literals end on their own line: a raw newline inside one is an error (UNCLOSED).
+            ('STRING',      r"'([^'\\\n]|\\.)*'"),
+            ('BYTE',        r'"([^"\\\n]|\\.)*"'),
 
             # Longer operators must precede their prefixes (greedy alternation).
             ('SHIFT_LEFT_ASSIGN',  r'<<='),
@@ -224,13 +225,14 @@ class Lexer:
 
             ('COMMENT',       r'#[^\n]*'),  # Stops before '\n' so NEWLINE is still emitted.
             ('SKIP',          r'[ \t\r]+'),
+            ('UNCLOSED',      r"'([^'\\\n]|\\.)*|\"([^\"\\\n]|\\.)*"),  # a literal cut off by a newline or the end
             ('MISMATCH',      r'.'),
         ]
 
         self.regex = re.compile('|'.join(f'(?P<{name}>{pattern})' for name, pattern in self.rules))
 
     def tokenize(self):
-        """Tokenize, emitting INDENT/DEDENT from the indent stack. Blank lines are skipped; tabs count as one column. Known issue: a raw newline inside a string literal doesn't advance self.line."""
+        """Tokenize, emitting INDENT/DEDENT from the indent stack. Blank lines are skipped; tabs count as one column."""
         for match in self.regex.finditer(self.source):
             kind = match.lastgroup
             value = match.group(kind)
@@ -342,6 +344,12 @@ class Lexer:
                 continue
             elif kind == 'SKIP':
                 continue
+            elif kind == 'UNCLOSED':
+                what = 'String' if value[0] == "'" else 'Byte'
+                if match.end() < len(self.source):
+                    raise LexError(f"Newline in {what.lower()} literal -- a literal ends on its own line; "
+                                   f"write \\n for a newline", self.file, self.line, column)
+                raise LexError(f"Unterminated {what.lower()} literal", self.file, self.line, column)
             elif kind == 'MISMATCH':
                 raise LexError(f"Unexpected character '{value}'", self.file, self.line, column)
             else:

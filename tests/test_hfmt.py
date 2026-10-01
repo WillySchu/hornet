@@ -92,8 +92,10 @@ def test_tokens_keep_comments_and_bracket_depth(hfmt):
 
 @GCC_SKIP
 @pytest.mark.parametrize('src,message', [
-    ("x = 'abc\n", "<stdin>:1:5: error: unterminated literal"),
+    ("x = 'abc", "<stdin>:1:5: error: unterminated literal"),
     ("x = \"a", "<stdin>:1:5: error: unterminated literal"),
+    ("x = 'a\nb'\n", "<stdin>:1:5: error: newline in literal (write \\n)"),
+    ("x = \"a\\\nb\"\n", "<stdin>:1:5: error: newline in literal (write \\n)"),
     ("f(1))\n", "<stdin>:1:5: error: unmatched ')'"),
     ("f(1]\n", "<stdin>:1:4: error: unmatched ']'"),
     ("x = [1,\n  2\n", "<stdin>:1:5: error: unclosed '['"),
@@ -173,14 +175,14 @@ def test_in_place_formats_changed_files_only_and_continues_past_errors(hfmt, tmp
     messy, clean, broken = tmp_path / 'messy.ht', tmp_path / 'clean.ht', tmp_path / 'broken.ht'
     messy.write_text("x=1\n")
     clean.write_text("y = 2\n")
-    broken.write_text("z = 'oops\n")
+    broken.write_text("z = 'oops")
     os.utime(clean, (1_000_000, 1_000_000))
     r = _run(hfmt, str(messy), str(broken), str(clean))
     assert r.returncode == 1
     assert r.stderr == f"{broken}:1:5: error: unterminated literal\n"
     assert messy.read_text() == "x = 1\n"
     assert clean.stat().st_mtime == 1_000_000  # unchanged files aren't rewritten
-    assert broken.read_text() == "z = 'oops\n"
+    assert broken.read_text() == "z = 'oops"
 
 
 @GCC_SKIP
