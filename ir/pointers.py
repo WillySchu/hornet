@@ -1,9 +1,9 @@
 """Pointer IR: `&x` and `*p`."""
 
 from ir.errors import IRError
-from ir.ir import IRBinOp, IRConst, IRLoad, IRLocalAddress, IRNullCheck, IRStore, IRValue
+from ir.ir import IRBinOp, IRCall, IRConst, IRLoad, IRLocalAddress, IRNullCheck, IRStore, IRValue
 from ir.utils import COMPOSITE_KINDS, type_of
-from typesys import SUM_TYPE_TAG_WIDTH
+from typesys import SUM_TYPE_TAG_WIDTH, type_byte_width
 from parser import Call, DerefAssign, Field, Index, Node, Unary, Variable
 from ops import BinaryOp
 from typesys import Type, TypeKind
@@ -12,6 +12,14 @@ from typesys import Type, TypeKind
 class PointersMixin:
     def _ir_address_of(self, expr: Unary) -> tuple[list, IRValue]:
         """`&x` for locals, struct literals, and field/index chains."""
+        if expr.boxed_sum is not None:
+            # `&Variant(...)` as a pointer to the sum: a new heap value of the sum holding the variant.
+            size = type_byte_width(expr.boxed_sum, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+            address = self.ir_program.ids.new_temp(Type.INT64)
+            write_ir = self._ir_write_sum_type_value_into(address, expr.operand, expr.boxed_sum)
+            if write_ir is None:
+                raise IRError(f"No IR for a boxed variant: {expr.operand!r}")
+            return [IRCall(dst=address, name='malloc', args=[IRConst(size, Type.INT64)])] + write_ir, address
         if isinstance(expr.operand, Call):
             result = self._ir_materialize_struct_literal(expr.operand)
             if result is None:

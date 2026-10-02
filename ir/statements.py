@@ -187,8 +187,8 @@ class StatementsMixin:
                     t = IRConst(0, var_type)
                     ir = []
                     return ir + self._ir_finish_scalar_var_decl(stmt.name, stmt.symbol.id, var_type, t)
-            # Widen a variant into a sum; sums always have initializers.
-            if var_type.kind == TypeKind.SUM and type_of(stmt.init).kind != TypeKind.SUM:
+            # Widen a variant into a sum.
+            if var_type.kind == TypeKind.SUM and stmt.init is not None and type_of(stmt.init).kind != TypeKind.SUM:
                 slot = self._bind_local(stmt, ir_fn)
                 ir = []
                 if self._is_heap_allocated(stmt.symbol.id, var_type):
@@ -306,8 +306,8 @@ class StatementsMixin:
                     ir.extend(self._ir_malloc_and_store(var_type, slot))
                 dst_ir, dst_address = self._ir_dict_address(self._var_ref(stmt))
                 return ir + dst_ir + self._ir_new_empty_dict_into(dst_address)
-            # Zero array or struct.
-            if var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and stmt.init is None:
+            # Zero array, struct, or sum (a sum's zero is its `none` variant).
+            if var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM) and stmt.init is None:
                 slot = self._bind_local(stmt, ir_fn)
                 ir = []
                 if self._is_heap_allocated(stmt.symbol.id, var_type):
@@ -476,6 +476,13 @@ class StatementsMixin:
             field_type = self._check_struct_and_field_type(stmt.base, stmt.name)
             if field_type.kind not in COMPOSITE_KINDS:
                 return self._ir_field_assign(stmt, field_type)
+            widening = field_type.kind == TypeKind.SUM and type_of(stmt.value).kind != TypeKind.SUM
+            if widening:
+                # A variant into a sum-typed field: write its tag and payload.
+                dst_ir, dst_address = self._ir_field_address(Field(base=stmt.base, name=stmt.name))
+                write_ir = self._ir_write_sum_type_value_into(dst_address, stmt.value, field_type)
+                if write_ir is not None:
+                    return dst_ir + write_ir
             if (
                     field_type.kind in COMPOSITE_KINDS
                     and is_composite_addressable(stmt.value)
@@ -510,6 +517,7 @@ class StatementsMixin:
                 address_fn = {
                     TypeKind.ARRAY: self._ir_array_address,
                     TypeKind.STRUCT: self._ir_struct_address,
+                    TypeKind.SUM: self._ir_struct_address,
                     TypeKind.SLICE: self._ir_slice_address,
                     TypeKind.DICT: self._ir_dict_address,
                     TypeKind.STR: self._ir_str_address,

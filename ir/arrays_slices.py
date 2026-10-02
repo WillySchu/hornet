@@ -310,6 +310,10 @@ class ArraysSlicesMixin:
 
     def _ir_write_zero_value_into(self, dst_address, value_type: Type) -> list:
         """Write value_type's zero value through dst_address."""
+        if value_type.kind == TypeKind.SUM:
+            # Semantic analysis allows this only for a sum with a `none` variant: that variant is the zero.
+            variants = self.ir_program.sum_type_registry[value_type.sum_type_name].variants
+            return [IRStore(address=dst_address, value=IRConst(variants.index(Type.NONE), Type.INT32), value_type=Type.INT32)]
         if value_type.kind == TypeKind.SLICE:
             zero_ptr = IRConst(0, Type.INT64)
             zero_int = IRConst(0, Type.INT)

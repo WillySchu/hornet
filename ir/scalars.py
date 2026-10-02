@@ -117,12 +117,12 @@ class ScalarsMixin:
                 arg_ir.extend(ir)
                 arg_values.append(addr_value)
             elif arg_type.kind == TypeKind.SUM:
-                if isinstance(arg, (Variable, Field, Index)):
+                if is_composite_addressable(arg):  # a variable, field, element, or `*p`
                     result = self._ir_struct_address(arg)
                     if result is None:
                         raise IRError(
                             f"_ir_struct_address returned None for a SUM-typed "
-                            f"Variable/Field/Index argument ({arg!r}) -- expected to "
+                            f"addressable argument ({arg!r}) -- expected to "
                             f"always succeed for this shape")
                     ir, addr_value = result
                 elif self._is_ordinary_composite_call(arg):

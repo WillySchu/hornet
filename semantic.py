@@ -293,13 +293,15 @@ class SemanticAnalyzer:
         self.type_aliases = self._collect_type_aliases(program.type_aliases, struct_registry)
         program.type_alias_registry = self.type_aliases
 
-        # 3. Resolve struct fields, then check cycles.
-        self.structs = self._resolve_struct_fields(program.structs, struct_registry)
+        # 3. Resolve struct fields; sum-type names are reserved first so fields can name them.
+        reserved_sums = {std.name: None for std in program.sum_types}
+        self.structs = self._resolve_struct_fields(program.structs, struct_registry, reserved_sums)
         program.struct_registry = self.structs
 
-        # 3.5. Sum types need resolved structs.
+        # 3.5. Sum types need resolved structs. Then no type may contain itself by value.
         self.sum_types = self._resolve_sum_types(program.sum_types, self.structs)
         program.sum_type_registry = self.sum_types
+        self._check_value_containment(program)
 
         # 3.6. Methods, after struct resolution.
         self.methods = self._collect_methods(program)
@@ -701,8 +703,9 @@ class SemanticAnalyzer:
             registry[sd.name] = None
         return registry
 
-    def _resolve_struct_fields(self, struct_defs: List[StructDef], registry: Dict[str, StructInfo]) -> Dict[str, StructInfo]:
-        """Resolve field types, then reject containment cycles."""
+    def _resolve_struct_fields(self, struct_defs: List[StructDef], registry: Dict[str, StructInfo],
+                               sum_names: Dict[str, None]) -> Dict[str, StructInfo]:
+        """Resolve field types (which may name structs and sum types declared anywhere)."""
         for sd in struct_defs:
             fields: Dict[str, Type] = {}
             for f in sd.fields:
@@ -711,43 +714,46 @@ class SemanticAnalyzer:
                         f"Field '{f.name}' is already declared in struct '{sd.name}'",
                         f,
                     )
-                fields[f.name] = type_from_name(f.field_type, registry, self.type_aliases, f)
+                fields[f.name] = type_from_name(f.field_type, registry, self.type_aliases, f, sum_names)
             registry[sd.name] = StructInfo(name=sd.name, fields=fields)
-
-        by_name = {sd.name: sd for sd in struct_defs}
-        for sd in struct_defs:
-            self._check_struct_contains(sd.name, registry, path=[], by_name=by_name)
-
         return registry
 
-    def _check_struct_contains(self, name: str, registry: Dict[str, StructInfo], path: List[str], by_name: Dict[str, StructDef]) -> None:
-        """DFS for struct containment cycles through fields and arrays (slices and pointers break cycles)."""
-        if name in path:
-            cycle = ' -> '.join(path + [name])
-            raise SemanticError(
-                f"Struct '{name}' cannot contain itself, directly or "
-                f"transitively: {cycle}",
-                by_name[name],
-            )
-        info = registry[name]
-        for field_type in info.fields.values():
-            contained = self._directly_embedded_struct_name(field_type)
-            if contained is not None:
-                self._check_struct_contains(contained, registry, path + [name], by_name)
+    def _check_value_containment(self, program: Program) -> None:
+        """No struct or sum type may contain itself by value (directly, through arrays, or through
+        another struct or sum): it would have no finite size. Pointers, slices and dicts are
+        indirections, so recursion through them is fine."""
+        decl = {sd.name: sd for sd in program.structs}
+        decl.update({std.name: std for std in program.sum_types})
 
-    @staticmethod
-    def _directly_embedded_struct_name(field_type: Type) -> Optional[str]:
-        """Struct name embedded by `field_type` directly or via arrays, else None."""
-        while field_type.kind == TypeKind.ARRAY:
-            field_type = field_type.element_type
-        return field_type.struct_name if field_type.kind == TypeKind.STRUCT else None
+        def embedded(t: Type) -> Optional[str]:
+            while t.kind == TypeKind.ARRAY:
+                t = t.element_type
+            if t.kind == TypeKind.STRUCT:
+                return t.struct_name
+            if t.kind == TypeKind.SUM:
+                return t.sum_type_name
+            return None
 
-    @staticmethod
-    def _contains_sum_type_at_any_array_depth(t: Type) -> bool:
-        """Whether `t` is a sum type or an array of one."""
-        while t.kind == TypeKind.ARRAY:
-            t = t.element_type
-        return t.kind == TypeKind.SUM
+        def contents(name: str) -> List[Tuple[str, str]]:
+            """(member description, embedded type name) for each by-value member."""
+            if name in self.structs:
+                pairs = [(f"{name}.{field}", embedded(t)) for field, t in self.structs[name].fields.items()]
+            else:
+                pairs = [(f"{name}'s {t} variant", embedded(t)) for t in self.sum_types[name].variants]
+            return [(desc, inner) for desc, inner in pairs if inner is not None]
+
+        def visit(name: str, path: List[Tuple[str, str]]) -> None:
+            for desc, inner in contents(name):
+                if any(n == inner for n, _ in path) or inner == path[0][0]:
+                    chain = [d for _, d in path[1:]] + [desc]
+                    raise SemanticError(
+                        f"'{inner}' contains itself by value ({' -> '.join(chain)}), so it would have no "
+                        f"finite size -- hold it through a pointer (*{inner}), slice, or dict instead",
+                        decl[inner])
+                visit(inner, path + [(inner, desc)])
+
+        for name in decl:
+            visit(name, [(name, name)])
 
     def check_extern_function_decl(self, ext: ExternFunctionDecl) -> None:
         """Validate an extern signature (scalars and pointers only) and register it."""
@@ -963,6 +969,15 @@ class SemanticAnalyzer:
             array_type = self.check_array_literal(expr, expected_element_type=target_type.element_type)
             expr.resolved_type = array_type
             return target_type if target_type.kind == TypeKind.SLICE else array_type
+        if (target_type.kind == TypeKind.POINTER and target_type.element_type.kind == TypeKind.SUM
+                and isinstance(expr, Unary) and expr.op == UnaryOp.ADDRESS_OF
+                and isinstance(expr.operand, Call) and expr.operand.name in self.structs):
+            # `&Variant(...)` where a pointer to the sum is expected: a new sum value holding that variant.
+            variant_type = self.check_struct_literal(expr.operand)
+            if variant_type in self.sum_types[target_type.element_type.sum_type_name].variants:
+                expr.boxed_sum = target_type.element_type
+                expr.resolved_type = target_type
+                return target_type
         value_type = self.check_expr(expr)
         if value_type == Type.NONE and target_type.kind == TypeKind.SLICE:
             raise SemanticError(f"A slice is never none -- write `[]` (or leave the {target_type} uninitialized) "
@@ -1008,12 +1023,13 @@ class SemanticAnalyzer:
 
     def analyze_var_decl(self, stmt: VarDecl) -> None:
         declared_type = type_from_name(stmt.var_type, self.structs, self.type_aliases, stmt, self.sum_types)
-        if stmt.init is None and self._contains_sum_type_at_any_array_depth(declared_type):
-            # Sum types have no zero value; require an initializer.
+        missing = self._without_zero_value(declared_type) if stmt.init is None else None
+        if missing is not None:
+            # Only a sum with a `none` variant has a zero value (that variant).
+            what = f"{missing} has" if missing == declared_type else f"{declared_type} contains {missing}, which has"
             raise SemanticError(
-                f"'{stmt.name}' (declared {declared_type}) has no "
-                f"initializer -- a sum type has no natural zero value, "
-                f"so one is required here",
+                f"'{stmt.name}' (declared {declared_type}) has no initializer -- {what} no zero value, "
+                f"so one is required here (a sum type's zero value is its `none` variant, if it has one)",
                 stmt,
             )
         if stmt.init is not None:
@@ -1574,9 +1590,33 @@ class SemanticAnalyzer:
                     f"should be {expected_type}, got {value_type}",
                     value,
                 )
+        for field_name, field_type in field_types.items():
+            if field_name not in seen:
+                missing = self._without_zero_value(field_type)
+                if missing is not None:
+                    raise SemanticError(
+                        f"Struct literal for '{expr.name}' omits field '{field_name}', but {missing} has no "
+                        f"zero value (only a sum type with a `none` variant does) -- give the field a value",
+                        expr)
         result = Type(TypeKind.STRUCT, struct_name=expr.name)
         expr.resolved_type = result
         return result
+
+    def _without_zero_value(self, t: Type, seen: Optional[set] = None) -> Optional[Type]:
+        """The sum type that keeps `t` from having a zero value, or None if it has one. A sum's zero
+        value is its `none` variant; a struct or array has one if all its parts do."""
+        seen = set() if seen is None else seen
+        while t.kind == TypeKind.ARRAY:
+            t = t.element_type
+        if t.kind == TypeKind.SUM:
+            return None if Type.NONE in self.sum_types[t.sum_type_name].variants else t
+        if t.kind == TypeKind.STRUCT and t.struct_name not in seen:
+            seen.add(t.struct_name)
+            for field_type in self.structs[t.struct_name].fields.values():
+                missing = self._without_zero_value(field_type, seen)
+                if missing is not None:
+                    return missing
+        return None
 
     def _check_method_call(self, expr: Call) -> Type:
         """Resolve `receiver.name(args)` and rewrite it in place to a mangled call."""
@@ -1891,16 +1931,7 @@ class SemanticAnalyzer:
                     f"'*' requires a pointer operand, got {operand_type}",
                     expr,
                 )
-            pointee_type = operand_type.element_type
-            if pointee_type.kind == TypeKind.SUM:
-                raise SemanticError(
-                    f"'*' on a pointer to {pointee_type} (a sum type) "
-                    f"isn't supported yet as a value -- write through it "
-                    f"with '*p = value', or access a field directly "
-                    f"(auto-deref already handles 'p.field')",
-                    expr,
-                )
-            return pointee_type
+            return operand_type.element_type
         raise SemanticError(f"No semantic rule for unary operator: {expr.op}", expr)
 
     def check_cast(self, expr: Cast) -> Type:

@@ -176,6 +176,7 @@ class Unary(Node):
     op: UnaryOp
     operand: Node
     resolved_type: Optional[Any] = None
+    boxed_sum: Any = field(default=None, compare=False, repr=False)  # `&Variant(...)` as a pointer to this sum
 
 
 @dataclass

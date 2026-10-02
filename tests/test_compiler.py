@@ -4570,8 +4570,8 @@ class TestSumTypes:
             match="has no initializer",
         )
 
-    def test_sum_type_as_a_struct_field_is_rejected(self):
-        assert_program_semantic_error(
+    def test_sum_type_as_a_struct_field(self):
+        assert_program_stdout(
             "type Circle struct:\n"
             "    int radius\n"
             "\n"
@@ -4584,12 +4584,15 @@ class TestSumTypes:
             "    Shape s\n"
             "\n"
             "def int main():\n"
+            "    Container c = Container(Circle(2))\n"
+            "    c.s = Square(3)\n"
+            "    print(c)\n"
             "    return 0\n",
-            match="Unknown type 'Shape'",
+            "Container(s: Square(side: 3))\n",
         )
 
-    def test_array_of_sum_type_as_a_struct_field_is_also_rejected(self):
-        assert_program_semantic_error(
+    def test_array_of_sum_type_as_a_struct_field(self):
+        assert_program_stdout(
             "type Circle struct:\n"
             "    int radius\n"
             "\n"
@@ -4599,11 +4602,13 @@ class TestSumTypes:
             "type Shape is Circle | Square\n"
             "\n"
             "type Container struct:\n"
-            "    [3]Shape shapes\n"
+            "    [2]Shape shapes\n"
             "\n"
             "def int main():\n"
+            "    Container c = Container([Circle(1), Square(2)])\n"
+            "    print(c.shapes[1])\n"
             "    return 0\n",
-            match="Unknown type 'Shape'",
+            "Square(side: 2)\n",
         )
 
     def test_equality_between_sum_types_is_rejected(self):
@@ -5739,15 +5744,21 @@ class TestNarrowingNonBareVariable:
             match="not one of Shape's own",
         )
 
-    def test_sum_typed_struct_field_is_still_rejected(self):
-        assert_program_semantic_error(
+    def test_narrowing_a_sum_typed_struct_field(self):
+        assert_program_exit_code(
             self._SHAPE_DECLS +
             "type Holder struct:\n"
             "    Shape s\n"
             "\n"
             "def int main():\n"
+            "    Holder h = Holder(Square(6))\n"
+            "    match h.s as v:\n"
+            "        is Circle:\n"
+            "            return v.radius\n"
+            "        is Square:\n"
+            "            return v.side\n"
             "    return 0\n",
-            match="Unknown type 'Shape'",
+            expected=6,
         )
 
     def test_two_independent_bindings_coexist(self):
@@ -7822,8 +7833,8 @@ class TestPointers:
         )
         analyze(ast)  # should not raise
 
-    def test_dereferencing_a_pointer_to_sum_type_as_a_value_is_still_rejected(self):
-        assert_program_semantic_error(
+    def test_dereferencing_a_pointer_to_sum_type_as_a_value(self):
+        assert_program_exit_code(
             "type Circle struct:\n"
             "    int radius\n"
             "\n"
@@ -7836,8 +7847,11 @@ class TestPointers:
             "    Shape shape = Circle(5)\n"
             "    *Shape p = &shape\n"
             "    Shape copy = *p\n"
+            "    shape = Square(1)\n"
+            "    if copy is Circle:\n"
+            "        return copy.radius\n"
             "    return 0\n",
-            match="'\\*' on a pointer to Shape \\(a sum type\\) isn't supported",
+            expected=5,
         )
 
     def test_field_access_on_a_non_pointer_non_struct_is_still_rejected(self):
@@ -12529,6 +12543,140 @@ class TestSlicesAreNeverNone:
             "1\n7\n5\n")
 
 
+class TestRecursiveTypes:
+    """Sum types inside structs, recursion through pointers, slices and dicts, and `&Variant(...)`."""
+
+    pytestmark = GCC_SKIP
+
+    TREE = (
+        "type Num struct:\n    int v\n"
+        "type Bin struct:\n    str op\n    *Expr left\n    *Expr right\n"
+        "type Expr is Num | Bin | none\n"
+        "def int eval(*Expr p):\n"
+        "    match *p as e:\n"
+        "        is Num:\n            return e.v\n"
+        "        is Bin:\n"
+        "            if e.op == '+':\n                return eval(e.left) + eval(e.right)\n"
+        "            return eval(e.left) * eval(e.right)\n"
+        "        is none:\n            return 0\n"
+        "    return 0\n"
+    )
+
+    def test_a_tree_through_pointers(self):
+        assert_program_stdout(
+            self.TREE +
+            "def *Expr build(int depth):\n"
+            "    if depth == 0:\n        return &Num(1)\n"
+            "    return &Bin('+', build(depth - 1), build(depth - 1))\n"
+            "def int main():\n"
+            "    Expr e = Bin('+', &Num(1), &Bin('*', &Num(2), &Num(3)))\n"
+            "    print(eval(&e))\n    print(eval(build(10)))\n"
+            "    Expr nothing\n    print(eval(&nothing))\n"
+            "    return 0\n",
+            "7\n1024\n0\n")
+
+    def test_a_tree_built_from_locals_outlives_its_function(self):
+        assert_program_stdout(
+            self.TREE +
+            "def int clobber(int a):\n    [64]int big\n    for int i = 0; i < 64; i += 1:\n        big[i] = a + i\n"
+            "    return big[63]\n"
+            "def Expr make(int a, int b):\n    Expr l = Num(a)\n    Expr r = Num(b)\n    return Bin('*', &l, &r)\n"
+            "def int main():\n    Expr e = make(6, 7)\n    clobber(1)\n    print(eval(&e))\n    return 0\n",
+            "42\n")
+
+    def test_a_tree_through_slices(self):
+        assert_program_stdout(
+            "type Num struct:\n    int v\n"
+            "type Bin struct:\n    str op\n    []Expr kids\n"
+            "type Expr is Num | Bin\n"
+            "def int eval(Expr e):\n"
+            "    match e as x:\n"
+            "        is Num:\n            return x.v\n"
+            "        is Bin:\n"
+            "            int t = 0\n"
+            "            for k in x.kids:\n                t += eval(k)\n"
+            "            return t\n"
+            "    return 0\n"
+            "def int main():\n"
+            "    Expr e = Bin('+', [Num(1), Bin('+', [Num(2), Num(3)]), Num(4)])\n"
+            "    print(eval(e))\n    print(e)\n    return 0\n",
+            "10\nBin(op: '+', kids: []Expr[Num(v: 1), Bin(op: '+', kids: []Expr[Num(v: 2), Num(v: 3)]), Num(v: 4)])\n")
+
+    def test_a_linked_list_built_in_a_loop(self):
+        assert_program_stdout(
+            "type Cons struct:\n    int head\n    *List tail\n"
+            "type List is Cons | none\n"
+            "def int total(*List p):\n"
+            "    int t = 0\n"
+            "    while true:\n"
+            "        match *p as c:\n"
+            "            is Cons:\n                t += c.head\n                p = c.tail\n"
+            "            is none:\n                return t\n"
+            "    return t\n"
+            "def int main():\n"
+            "    List empty\n    *List l = &empty\n"
+            "    for int i = 1; i <= 10; i += 1:\n        l = &Cons(i, l)\n"
+            "    print(total(l))\n    return 0\n",
+            "55\n")
+
+    def test_mutually_recursive_types(self):
+        assert_program_stdout(
+            "type Num struct:\n    int v\n"
+            "type Neg struct:\n    *Expr e\n"
+            "type Expr is Num | Neg\n"
+            "type Print struct:\n    Expr e\n"
+            "type Block struct:\n    []Stmt body\n"
+            "type Stmt is Print | Block\n"
+            "def int value(Expr e):\n"
+            "    match e as x:\n        is Num:\n            return x.v\n        is Neg:\n            return -value(*x.e)\n"
+            "    return 0\n"
+            "def run(Stmt s):\n"
+            "    match s as x:\n"
+            "        is Print:\n            print(value(x.e))\n"
+            "        is Block:\n            for t in x.body:\n                run(t)\n"
+            "def int main():\n"
+            "    run(Block([Print(Num(1)), Block([Print(Neg(&Num(2)))]), Print(Num(3))]))\n"
+            "    return 0\n",
+            "1\n-2\n3\n")
+
+    def test_sum_typed_fields(self):
+        assert_program_stdout(
+            "type C struct:\n    int r\ntype D struct:\n    int k\ntype U is C | D\n"
+            "type MaybeC is C | none\n"
+            "type Box struct:\n    int n\n    U u\n    MaybeC m\n"
+            "def U mk():\n    return D(4)\n"
+            "def int main():\n"
+            "    Box b = Box(1, C(2), none)\n    C c = C(3)\n"
+            "    b.u = c\n    print(b.u)\n    b.u = mk()\n    print(b.u)\n"
+            "    Box z = Box(n=5, u=C(6))\n    print(z)\n"
+            "    [2]Box bs = [b, z]\n    bs[0].m = C(7)\n    print(bs[0].m)\n"
+            "    return 0\n",
+            "C(r: 3)\nD(k: 4)\nBox(n: 5, u: C(r: 6), m: none)\nC(r: 7)\n")
+
+    def test_zero_values(self):
+        assert_program_stdout(
+            "type Num struct:\n    int v\ntype MaybeNum is Num | none\n"
+            "type Pair struct:\n    int k\n    MaybeNum m\n"
+            "def int main():\n    MaybeNum a\n    Pair p\n    [2]MaybeNum arr\n"
+            "    print(a)\n    print(p)\n    print(Pair(k=3))\n    print(arr)\n    return 0\n",
+            "none\nPair(k: 0, m: none)\nPair(k: 3, m: none)\n[2]MaybeNum[none, none]\n")
+
+    @pytest.mark.parametrize("source,match", [
+        ("type N struct:\n    N n\n", "'N' contains itself by value \\(N.n\\)"),
+        ("type A struct:\n    B b\ntype B struct:\n    [2]A items\n", "'A' contains itself by value \\(A.b -> B.items\\)"),
+        ("type L struct:\n    int v\ntype Add struct:\n    Expr left\ntype Expr is L | Add\n",
+         "'Add' contains itself by value \\(Add.left -> Expr's Add variant\\).*pointer \\(\\*Add\\)"),
+        ("type C struct:\n    int r\ntype U is C | int\ntype Box struct:\n    U u\n"
+         "def int f():\n    Box b\n    return 0\n", "Box contains U, which has no zero value"),
+        ("type C struct:\n    int r\ntype U is C | int\ntype Box struct:\n    int n\n    U u\n"
+         "def int f():\n    print(Box(n=1))\n    return 0\n", "omits field 'u', but U has no zero value"),
+        ("type C struct:\n    int r\ntype U is C | int\n"
+         "def int f():\n    C c = C(1)\n    *U p = &c\n    return 0\n", "Cannot initialize 'p'"),
+    ])
+    def test_rejected(self, source, match):
+        assert_program_semantic_error(source + "def int main():\n    return 0\n", match=match)
+
+
 class TestStatementsEndTheirLine:
     @pytest.mark.parametrize("line", ["print(1) 2 3", "int y = 1 2", "x = 2 x = 3", "return 0 1", "x 5"])
     def test_trailing_tokens_are_rejected(self, line):
@@ -14906,7 +15054,7 @@ class TestStructs:
             "def int main():\n"
             "    return 0\n"
         )
-        with pytest.raises(SemanticError, match="cannot contain itself"):
+        with pytest.raises(SemanticError, match="contains itself by value"):
             analyze(_parse(source))
 
     def test_mutual_cycle_is_rejected(self):
@@ -14919,7 +15067,7 @@ class TestStructs:
             "def int main():\n"
             "    return 0\n"
         )
-        with pytest.raises(SemanticError, match="cannot contain itself"):
+        with pytest.raises(SemanticError, match="contains itself by value"):
             analyze(_parse(source))
 
     def test_cycle_via_array_field_is_rejected(self):
@@ -14932,7 +15080,7 @@ class TestStructs:
             "def int main():\n"
             "    return 0\n"
         )
-        with pytest.raises(SemanticError, match="cannot contain itself"):
+        with pytest.raises(SemanticError, match="contains itself by value"):
             analyze(_parse(source))
 
     def test_struct_containing_array_of_different_struct_is_fine(self):

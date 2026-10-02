@@ -16,6 +16,7 @@ type H struct:
     P fp
     dict[int]int fd
     str ft
+    U fu
 def [2]int mk_a():
     return [1, 2]
 def []int mk_s():
@@ -39,7 +40,7 @@ TYPES = {
     'a': ('[2]int', '[1, 2]', 'fa', '[2]int[1, 2]', True),
     's': ('[]int', '[]int[1, 2]', 'fs', '[]int[1, 2]', False),
     'p': ('P', 'P(1, []int[2])', 'fp', 'P(x: 1, s: []int[2])', False),
-    'u': ('U', 'C(1)', None, 'C(r: 1)', False),  # sum-typed struct fields aren't supported
+    'u': ('U', 'C(1)', 'fu', 'C(r: 1)', False),
     'd': ('dict[int]int', 'dict[int]int{1: 2}', 'fd', 'dict[int]int{1: 2}', False),
     't': ('str', "'ab'", 'ft', 'ab', True),
     'v': ('V', 'dict[int]int{1: 2}', None, 'dict[int]int{1: 2}', False),  # a sum with a dict variant
@@ -48,8 +49,8 @@ TYPES = {
 
 
 def _holder(k: str) -> str:
-    vals = {'a': '[1, 2]', 's': '[]int[1, 2]', 'p': 'P(1, []int[2])', 'd': 'dict[int]int{1: 2}', 't': "'ab'"}
-    return "H(" + ", ".join(vals[x] for x in 'aspdt') + ")"
+    vals = {'a': '[1, 2]', 's': '[]int[1, 2]', 'p': 'P(1, []int[2])', 'd': 'dict[int]int{1: 2}', 't': "'ab'", 'u': 'C(1)'}
+    return "H(" + ", ".join(vals[x] for x in 'aspdtu') + ")"
 
 
 def shapes(k: str):
