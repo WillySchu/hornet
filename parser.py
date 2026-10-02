@@ -142,6 +142,13 @@ class Index(Node):
 
 
 @dataclass
+class SliceLiteral(Node):
+    """`[]T[e1, ...]`: a new slice holding the elements."""
+    element_type: Any
+    elements: List[Node]
+
+
+@dataclass
 class Slice(Node):
     """`array[low:high]`: a view over [low, high); either bound optional."""
     array: Node
@@ -228,18 +235,11 @@ class VarDecl(Node):
 
 @dataclass
 class Assign(Node):
-    """`name = value`."""
-    name: str
+    """`target = value`, or `target op= value` (`op` the operator); the target is a name, field,
+    index, or dereference, as written."""
+    target: Node
     value: Node
-
-
-@dataclass
-class IndexAssign(Node):
-    """`array[index] = value`."""
-    array: Node
-    index: Node
-    value: Node
-    compound_op: Optional[BinaryOp] = None
+    op: Optional[BinaryOp] = None
 
 
 @dataclass
@@ -247,23 +247,6 @@ class Field(Node):
     """`base.name`; pointers auto-deref."""
     base: Node
     name: str
-
-
-@dataclass
-class FieldAssign(Node):
-    """`base.name = value`."""
-    base: Node
-    name: str
-    value: Node
-    compound_op: Optional[BinaryOp] = None
-
-
-@dataclass
-class DerefAssign(Node):
-    """`*pointer = value`."""
-    pointer: Node
-    value: Node
-    compound_op: Optional[BinaryOp] = None
 
 
 @dataclass
@@ -571,7 +554,6 @@ _COMPOUND_ASSIGN_OPS = {
     TokenType.SHIFT_RIGHT_ASSIGN: BinaryOp.SHIFT_RIGHT,
 }
 
-_ASSIGNMENT_TOKENS = {TokenType.ASSIGN, *_COMPOUND_ASSIGN_OPS.keys()}
 
 
 _TYPE_START_TOKENS = (TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.INT32, TokenType.BOOL,
@@ -1007,8 +989,6 @@ class Parser:
             start_tok = self.current()
             parsed_type = self.parse_type()
             return self.parse_var_decl(var_type=parsed_type, start_tok=start_tok)
-        if self.check(TokenType.IDENTIFIER) and self.peek(1).type in _ASSIGNMENT_TOKENS:
-            return self.parse_assign()
         return self.parse_expr_stmt_or_assign()
 
     def parse_while(self) -> While:
@@ -1070,10 +1050,11 @@ class Parser:
         )
 
     def _parse_for_increment_clause(self) -> Node:
-        """Increment clause: always an assignment to a bare variable."""
+        """Increment clause: an assignment."""
         start_tok = self.current()
-        if self.check(TokenType.IDENTIFIER) and self.peek(1).type in _ASSIGNMENT_TOKENS:
-            return self.parse_assign()
+        statement = self.parse_expr_stmt_or_assign()
+        if isinstance(statement, Assign):
+            return statement
         raise self._error(
             f"Expected an assignment (e.g. `i += 1`) as the for-loop's own increment "
             f"clause",
@@ -1223,22 +1204,6 @@ class Parser:
             init = self.parse_expression()
         return VarDecl(name=name_tok.val, var_type=var_type, init=init, line=start_tok.line, col=start_tok.col)
 
-    def parse_assign(self) -> Assign:
-        """`a = expr`; compound forms desugar to `a = a op expr`."""
-        name_tok = self.expect(TokenType.IDENTIFIER)
-        op_tok = self.advance()
-        value = self.parse_expression()
-
-        if op_tok.type == TokenType.ASSIGN:
-            return Assign(name=name_tok.val, value=value, line=name_tok.line, col=name_tok.col)
-
-        binary_op = _COMPOUND_ASSIGN_OPS[op_tok.type]
-        desugared_value = Binary(
-            op=binary_op, left=Variable(name=name_tok.val, line=name_tok.line, col=name_tok.col), right=value,
-            line=name_tok.line, col=name_tok.col,
-        )
-        return Assign(name=name_tok.val, value=desugared_value, line=name_tok.line, col=name_tok.col)
-
     def parse_return(self) -> Return:
         """`return [expr]`."""
         start_tok = self.expect(TokenType.RETURN)
@@ -1248,24 +1213,19 @@ class Parser:
         return Return(value=value, line=start_tok.line, col=start_tok.col)
 
     def parse_expr_stmt_or_assign(self) -> Node:
-        """Expression statement, or index/field/deref assignment (parse the LHS, then check for '=')."""
+        """Expression statement, or assignment to a name, field, index, or dereference (parse the
+        left side, then check for '=' or a compound operator)."""
         expr = self.parse_expression()
         op_tok = self.current()
         compound_op = _COMPOUND_ASSIGN_OPS.get(op_tok.type)
         if op_tok.type == TokenType.ASSIGN or compound_op is not None:
-            if isinstance(expr, Index):
-                self.advance()
-                value = self.parse_expression()
-                return IndexAssign(array=expr.array, index=expr.index, value=value, compound_op=compound_op, line=expr.line, col=expr.col)
-            if isinstance(expr, Field):
-                self.advance()
-                value = self.parse_expression()
-                return FieldAssign(base=expr.base, name=expr.name, value=value, compound_op=compound_op, line=expr.line, col=expr.col)
-            if isinstance(expr, Unary) and expr.op == UnaryOp.DEREFERENCE:
-                self.advance()
-                value = self.parse_expression()
-                return DerefAssign(pointer=expr.operand, value=value, compound_op=compound_op, line=expr.line, col=expr.col)
-            raise self._error(f"Left-hand side of '{op_tok.val}' is not assignable", op_tok)
+            assignable = isinstance(expr, (Variable, Index, Field)) or (
+                isinstance(expr, Unary) and expr.op == UnaryOp.DEREFERENCE)
+            if not assignable:
+                raise self._error(f"Left-hand side of '{op_tok.val}' is not assignable", op_tok)
+            self.advance()
+            value = self.parse_expression()
+            return Assign(target=expr, value=value, op=compound_op, line=expr.line, col=expr.col)
         return ExprStmt(expr=expr, line=expr.line, col=expr.col)
 
     def parse_expression(self) -> Node:
@@ -1476,13 +1436,9 @@ class Parser:
     def _parse_bracketed_literal(self, parsed_type: Union[str, 'ArrayTypeExpr', 'SliceTypeExpr']) -> Node:
         """Bracketed elements after a pre-parsed literal type."""
         if isinstance(parsed_type, SliceTypeExpr):
-            array_literal = self.parse_array_literal()
-            array_literal.type_expr = ArrayTypeExpr(
-                size=len(array_literal.elements),
-                element_type=parsed_type.element_type,
-                line=parsed_type.line, col=parsed_type.col,
-            )
-            return Slice(array=array_literal, low=None, high=None, line=parsed_type.line, col=parsed_type.col)
+            elements = self.parse_array_literal().elements
+            return SliceLiteral(element_type=parsed_type.element_type, elements=elements,
+                                line=parsed_type.line, col=parsed_type.col)
         return self.parse_array_literal(type_expr=parsed_type)
 
     def parse_array_literal(self, type_expr: Optional['ArrayTypeExpr'] = None) -> ArrayLiteral:

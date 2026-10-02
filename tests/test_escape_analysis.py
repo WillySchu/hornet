@@ -418,7 +418,7 @@ def test_address_of_via_reassignment_not_just_var_decl_init():
 
 
 def test_pointer_aliasing_through_a_struct_field_assign_propagates():
-    """s.field = someOtherPointer (FieldAssign, a pointer-VALUED RHS
+    """s.field = someOtherPointer (a field assignment, a pointer-VALUED RHS
     that's itself a Variable, not a bare &x) needs to propagate the
     aliasing through slice_deps -- if the whole struct later escapes,
     whatever someOtherPointer itself pointed at must be found too."""

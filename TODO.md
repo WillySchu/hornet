@@ -14,7 +14,6 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- Compound assignment to a plain name is still rewritten by the parser.
 - The 0.2–3.5% benchmark regressions from the new IR builder.
 - Printing a struct defined in another module shows its internal name: print(write\_file(bad, x)) prints errors$Error(message: …).
 - Nothing warns when a result is ignored, such as a bare write\_stdout(...) statement.

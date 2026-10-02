@@ -34,14 +34,12 @@ from parser import (
     Cast,
     Constant,
     Continue,
-    DerefAssign,
     DictLiteral,
     DictTypeExpr,
     ExprStmt,
     ExternFunctionDecl,
     Field,
     QualifiedTypeExpr,
-    FieldAssign,
     For,
     ForIn,
     Function,
@@ -49,7 +47,6 @@ from parser import (
     Param,
     If,
     Index,
-    IndexAssign,
     IntrinsicDecl,
     IsCheck,
     Match,
@@ -60,6 +57,7 @@ from parser import (
     Program,
     Return,
     Slice,
+    SliceLiteral,
     SliceTypeExpr,
     StringLiteral,
     StructDef,
@@ -1010,12 +1008,6 @@ class SemanticAnalyzer:
             self.analyze_var_decl(stmt)
         elif isinstance(stmt, Assign):
             self.analyze_assign(stmt)
-        elif isinstance(stmt, IndexAssign):
-            self.analyze_index_assign(stmt)
-        elif isinstance(stmt, FieldAssign):
-            self.analyze_field_assign(stmt)
-        elif isinstance(stmt, DerefAssign):
-            self.analyze_deref_assign(stmt)
         elif isinstance(stmt, Return):
             self.analyze_return(stmt, return_type)
         elif isinstance(stmt, If):
@@ -1142,97 +1134,46 @@ class SemanticAnalyzer:
         self._declare(stmt.name, declared_type, stmt, self.facts.symbols[stmt.nid].id)
 
     def analyze_assign(self, stmt: Assign) -> None:
-        if stmt.name in self._narrowed_names:
-            raise SemanticError(
-                f"Cannot reassign '{stmt.name}' while it's narrowed by "
-                f"an enclosing 'is' check -- assign to a different "
-                f"variable instead",
-                stmt,
-            )
-        if self._const_key(stmt.name) is not None and not any(stmt.name in scope for scope in self.scopes):
-            raise SemanticError(f"Cannot assign to constant '{stmt.name}'", stmt)
-        declared_type, self.facts.decls[stmt.nid] = self._resolve(stmt.name, stmt)
-        value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, declared_type)
-        if not self._types_compatible(value_type, declared_type):
-            raise SemanticError(
-                f"Cannot assign a value of type {value_type} to '{stmt.name}' "
-                f"(declared {declared_type})",
-                stmt,
-            )
-
-    def _check_compound_assign(
-            self,
-            compound_op: BinaryOp,
-            target_type: Type,
-            target_expr_for_check: Node,
-            value_expr: Node,
-            stmt: Node) -> None:
-        """Check a compound assignment via a synthetic Binary."""
-        if target_type == Type.STR and compound_op == BinaryOp.ADD:
-            raise SemanticError(
-                f"Compound assignment ('+=') to a str-typed target isn't "
-                f"supported yet -- string concatenation has a different "
-                f"codegen shape than arithmetic compound assignment; "
-                f"write it as a plain '=' instead",
-                stmt,
-            )
-        synthetic = Binary(
-            op=compound_op, left=target_expr_for_check, right=value_expr, line=stmt.line, col=stmt.col, file=stmt.file)
-        self.check_binary(synthetic)
-
-    def analyze_index_assign(self, stmt: IndexAssign) -> None:
-        """`array[index] = value`."""
-        element_type = self._check_indexable_and_index(stmt.array, stmt.index)
-        if stmt.compound_op is not None:
-            target_expr = Index(array=stmt.array, index=stmt.index, line=stmt.line, col=stmt.col, file=stmt.file)
-            value_expr = stmt.value
-            self._check_compound_assign(stmt.compound_op, element_type, target_expr, value_expr, stmt)
+        """`target = value` or `target op= value`, to a name, field, element, or pointee."""
+        target = stmt.target
+        if isinstance(target, Variable):
+            if target.name in self._narrowed_names:
+                raise SemanticError(
+                    f"Cannot reassign '{target.name}' while it's narrowed by an enclosing 'is' check -- assign to "
+                    f"a different variable instead",
+                    stmt,
+                )
+            if self._const_key(target.name) is not None and not any(target.name in scope for scope in self.scopes):
+                raise SemanticError(f"Cannot assign to constant '{target.name}'", stmt)
+            target_type, self.facts.decls[target.nid] = self._resolve(target.name, stmt)
+            what = f"to '{target.name}' (declared {target_type})"
+        elif isinstance(target, Index):
+            target_type = self._check_indexable_and_index(target.array, target.index)
+            what = f"to an array element of type {target_type}"
+        elif isinstance(target, Field):
+            if target.nid in self.module_set.qualified:
+                raise SemanticError(f"Cannot assign to constant '{target.name}'", stmt)
+            target_type = self._check_struct_and_field(target.base, target.name)
+            what = f"to field '{target.name}' of type {target_type}"
+        else:
+            pointer_type = self.check_expr(target.operand)
+            if pointer_type.kind != TypeKind.POINTER:
+                raise SemanticError(
+                    f"Cannot dereference a value of type {pointer_type} for assignment -- '*' requires a pointer "
+                    f"operand",
+                    target.operand,
+                )
+            target_type = pointer_type.element_type
+            what = f"through a pointer to {target_type}"
+        self.facts.types[target.nid] = target_type
+        if stmt.op is not None:
+            # Checked as the operation it performs: `target op value`.
+            self.check_binary(Binary(op=stmt.op, left=target, right=stmt.value, line=stmt.line, col=stmt.col,
+                                     file=stmt.file))
             return
-        value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, element_type)
-        if not self._types_compatible(value_type, element_type):
-            raise SemanticError(
-                f"Cannot assign a value of type {value_type} to an array "
-                f"element of type {element_type}",
-                stmt,
-            )
-
-    def analyze_field_assign(self, stmt: FieldAssign) -> None:
-        """`base.name = value`."""
-        field_type = self._check_struct_and_field(stmt.base, stmt.name)
-        if stmt.compound_op is not None:
-            target_expr = Field(base=stmt.base, name=stmt.name, line=stmt.line, col=stmt.col, file=stmt.file)
-            self._check_compound_assign(stmt.compound_op, field_type, target_expr, stmt.value, stmt)
-            return
-        value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, field_type)
-        if not self._types_compatible(value_type, field_type):
-            raise SemanticError(
-                f"Cannot assign a value of type {value_type} to field "
-                f"'{stmt.name}' of type {field_type}",
-                stmt,
-            )
-
-    def analyze_deref_assign(self, stmt: DerefAssign) -> None:
-        """`*pointer = value`."""
-        pointer_type = self.check_expr(stmt.pointer)
-        if pointer_type.kind != TypeKind.POINTER:
-            raise SemanticError(
-                f"Cannot dereference a value of type {pointer_type} for "
-                f"assignment -- '*' requires a pointer operand",
-                stmt.pointer,
-            )
-        pointee_type = pointer_type.element_type
-        if stmt.compound_op is not None:
-            target_expr = Unary(
-                op=UnaryOp.DEREFERENCE, operand=stmt.pointer, line=stmt.line, col=stmt.col, file=stmt.file)
-            self._check_compound_assign(stmt.compound_op, pointee_type, target_expr, stmt.value, stmt)
-            return
-        value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, pointee_type)
-        if not self._types_compatible(value_type, pointee_type):
-            raise SemanticError(
-                f"Cannot assign a value of type {value_type} through a "
-                f"pointer to {pointee_type}",
-                stmt,
-            )
+        value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, target_type)
+        if not self._types_compatible(value_type, target_type):
+            raise SemanticError(f"Cannot assign a value of type {value_type} {what}", stmt)
 
     def _check_indexable_and_index(self, base_expr: Node, index_expr: Node) -> Type:
         """Check an array/slice/dict base and its index; return the element type."""
@@ -1460,7 +1401,8 @@ class SemanticAnalyzer:
     def analyze_for_in(self, stmt: ForIn, return_type: Type) -> None:
         """`for a[, b] in iterable:` over arrays, slices, dicts, and strings (bytes)."""
         if not isinstance(
-                stmt.iterable, (Variable, Field, Index, Slice, ArrayLiteral, DictLiteral, StringLiteral, Call)):
+                stmt.iterable,
+                (Variable, Field, Index, Slice, ArrayLiteral, SliceLiteral, DictLiteral, StringLiteral, Call)):
             raise SemanticError(
                 f"'for ... in' requires a variable, field, index, "
                 f"slice, or array/dict/str literal as its own iterable, "
@@ -1531,6 +1473,8 @@ class SemanticAnalyzer:
             result = self.check_variable(expr)
         elif isinstance(expr, ArrayLiteral):
             result = self.check_array_literal(expr)
+        elif isinstance(expr, SliceLiteral):
+            result = self.check_slice_literal(expr)
         elif isinstance(expr, DictLiteral):
             result = self.check_dict_literal(expr)
         elif isinstance(expr, Index):
@@ -1583,6 +1527,16 @@ class SemanticAnalyzer:
                     )
                 seen_constant_keys.add(constant_key)
         return Type(TypeKind.DICT, key_type=key_type, element_type=value_type)
+
+    def check_slice_literal(self, expr: 'SliceLiteral') -> Type:
+        """`[]T[e, ...]`."""
+        element_type = self._type(expr.element_type, expr)
+        for i, element in enumerate(expr.elements, start=1):
+            actual = self._check_value_flowing_into_allowing_struct_literal(element, element_type)
+            if not self._types_compatible(actual, element_type):
+                raise SemanticError(
+                    f"Slice literal declares element type {element_type}, but element {i} is {actual}", element)
+        return Type(TypeKind.SLICE, element_type=element_type)
 
     def check_array_literal(self, expr: ArrayLiteral, expected_element_type: Optional[Type] = None) -> Type:
         """`[e, ...]` or `[N]T[...]`; homogeneous. Untyped literals need an expected element type."""
@@ -1837,8 +1791,8 @@ class SemanticAnalyzer:
                 f"assignment's value, a direct function-call or "
                 f"method-call argument, a method-call receiver, a "
                 f"direct return value, an array literal's own "
-                f"element, an IndexAssign's own element, a "
-                f"FieldAssign's own field or base, a field-access "
+                f"element, an assigned element or field, an assigned "
+                f"field's base, a field-access "
                 f"base, a binary operand, or a bare statement -- not "
                 f"most other kinds of expressions (an Index/Slice "
                 f"base, a Cast's own expression, ...); assign it to a "
@@ -2332,19 +2286,13 @@ class _TypedTreeBuilder:
         if isinstance(s, syntax.VarDecl):
             return [self.declare(s)]
         if isinstance(s, syntax.Assign):
-            symbol = self.symbols[self.facts.decls[s.nid]]
-            return [typed.Assign(typed.Local(symbol.type, symbol), self.convert(s.value, symbol.type))]
-        if isinstance(s, (syntax.IndexAssign, syntax.FieldAssign, syntax.DerefAssign)):
-            if isinstance(s, syntax.IndexAssign):
-                target = self.index(syntax.Index(array=s.array, index=s.index))
-            elif isinstance(s, syntax.FieldAssign):
-                target = self.field(syntax.Field(base=s.base, name=s.name))
+            if isinstance(s.target, syntax.Variable):
+                symbol = self.symbols[self.facts.decls[s.target.nid]]
+                target = typed.Local(symbol.type, symbol)
             else:
-                pointer = self.expr(s.pointer)
-                target = typed.Deref(pointer.type.element_type, pointer)
-            if s.compound_op is not None:
-                return [typed.CompoundAssign(target, s.compound_op, self.convert(s.value, target.type))]
-            return [typed.Assign(target, self.convert(s.value, target.type))]
+                target = self.expr(s.target)
+            value = self.convert(s.value, target.type)
+            return [typed.Assign(target, value) if s.op is None else typed.CompoundAssign(target, s.op, value)]
         if isinstance(s, syntax.ExprStmt):
             return [typed.ExprStmt(self.expr(s.expr))]
         if isinstance(s, syntax.Return):
@@ -2465,11 +2413,14 @@ class _TypedTreeBuilder:
                                               for k, v in e.entries))
         if isinstance(e, syntax.Index):
             return self.index(e)
+        if isinstance(e, syntax.SliceLiteral):
+            elements = tuple(self.convert(x, self.ty(e).element_type) for x in e.elements)
+            return typed.SliceLiteral(self.ty(e), elements) if elements else typed.EmptySlice(self.ty(e))
         if (
                 isinstance(e, syntax.Slice) and isinstance(e.array, syntax.ArrayLiteral)
                 and e.low is None and e.high is None
         ):
-            # A typed slice literal, `[]T[...]`: new storage holding the elements.
+            # `[...][:]`: new storage holding the elements, like a slice literal.
             elements = tuple(self.convert(x, self.ty(e).element_type) for x in e.array.elements)
             return typed.SliceLiteral(self.ty(e), elements) if elements else typed.EmptySlice(self.ty(e))
         if isinstance(e, syntax.Slice):

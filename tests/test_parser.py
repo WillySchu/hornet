@@ -400,12 +400,9 @@ def test_parse_program():
                     ),
                     body=[
                         parser.Assign(
-                            name='i',
-                            value=parser.Binary(
-                                op=parser.BinaryOp.ADD,
-                                left=parser.Variable(name='i'),
-                                right=parser.Constant(value=1),
-                            ),
+                            target=parser.Variable(name='i'),
+                            value=parser.Constant(value=1),
+                            op=parser.BinaryOp.ADD,
                         ),
                         parser.If(
                             condition=parser.Variable(name='a'),
@@ -1373,7 +1370,7 @@ def test_parse_statement_assign():
     ]
     p = parser.Parser(tokens)
 
-    expected = parser.Assign(name='a', value=parser.Constant(value=3))
+    expected = parser.Assign(target=parser.Variable(name='a'), value=parser.Constant(value=3))
 
     assert expected == p.parse_statement()
 
@@ -2141,11 +2138,11 @@ def test_parse_assign_empty():
 
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape("Expected identifier, got end of input at line 1, column 1")):
-        p.parse_assign()
+    with pytest.raises(parser.ParseError, match=re.escape("Expected an expression, got end of input at line 1, column 1")):
+        p.parse_expr_stmt_or_assign()
 
 
-def test_parse_assign_no_assign():
+def test_parse_assign_no_assign_is_an_expression_statement():
     tokens = [
         lexer.Token(lexer.TokenType.IDENTIFIER, 'a', 1, 1),
         lexer.Token(lexer.TokenType.EOF, '', 1, 2),
@@ -2153,8 +2150,7 @@ def test_parse_assign_no_assign():
 
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape("Expected an expression, got end of input at line 1, column 2")):
-        p.parse_assign()
+    assert p.parse_expr_stmt_or_assign() == parser.ExprStmt(expr=parser.Variable(name='a'))
 
 
 def test_parse_assign_no_value():
@@ -2167,7 +2163,7 @@ def test_parse_assign_no_value():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape("Expected an expression, got end of input at line 1, column 3")):
-        p.parse_assign()
+        p.parse_expr_stmt_or_assign()
 
 
 def test_parse_assign():
@@ -2180,9 +2176,9 @@ def test_parse_assign():
 
     p = parser.Parser(tokens)
 
-    expected = parser.Assign(name='a', value=parser.Constant(value=1))
+    expected = parser.Assign(target=parser.Variable(name='a'), value=parser.Constant(value=1))
 
-    assert expected == p.parse_assign()
+    assert expected == p.parse_expr_stmt_or_assign()
 
 
 def test_parse_assign_compound_addition():
@@ -2195,9 +2191,9 @@ def test_parse_assign_compound_addition():
 
     p = parser.Parser(tokens)
 
-    expected = parser.Assign(name='a', value=parser.Binary(op=parser.BinaryOp.ADD, left=parser.Variable(name='a'), right=parser.Constant(value=1)))
+    expected = parser.Assign(target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.ADD)
 
-    assert expected == p.parse_assign()
+    assert expected == p.parse_expr_stmt_or_assign()
 
 
 def test_parse_assign_compound_subtraction():
@@ -2210,9 +2206,9 @@ def test_parse_assign_compound_subtraction():
 
     p = parser.Parser(tokens)
 
-    expected = parser.Assign(name='a', value=parser.Binary(op=parser.BinaryOp.SUBTRACT, left=parser.Variable(name='a'), right=parser.Constant(value=1)))
+    expected = parser.Assign(target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.SUBTRACT)
 
-    assert expected == p.parse_assign()
+    assert expected == p.parse_expr_stmt_or_assign()
 
 
 def test_parse_assign_compound_multiplication():
@@ -2225,9 +2221,9 @@ def test_parse_assign_compound_multiplication():
 
     p = parser.Parser(tokens)
 
-    expected = parser.Assign(name='a', value=parser.Binary(op=parser.BinaryOp.MULTIPLY, left=parser.Variable(name='a'), right=parser.Constant(value=1)))
+    expected = parser.Assign(target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.MULTIPLY)
 
-    assert expected == p.parse_assign()
+    assert expected == p.parse_expr_stmt_or_assign()
 
 
 def test_parse_assign_compound_division():
@@ -2240,9 +2236,9 @@ def test_parse_assign_compound_division():
 
     p = parser.Parser(tokens)
 
-    expected = parser.Assign(name='a', value=parser.Binary(op=parser.BinaryOp.DIVIDE, left=parser.Variable(name='a'), right=parser.Constant(value=1)))
+    expected = parser.Assign(target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.DIVIDE)
 
-    assert expected == p.parse_assign()
+    assert expected == p.parse_expr_stmt_or_assign()
 
 
 def test_parse_assign_compound_modulo():
@@ -2255,9 +2251,9 @@ def test_parse_assign_compound_modulo():
 
     p = parser.Parser(tokens)
 
-    expected = parser.Assign(name='a', value=parser.Binary(op=parser.BinaryOp.MODULO, left=parser.Variable(name='a'), right=parser.Constant(value=1)))
+    expected = parser.Assign(target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.MODULO)
 
-    assert expected == p.parse_assign()
+    assert expected == p.parse_expr_stmt_or_assign()
 
 
 def test_parse_assign_compound_bitwise_and():
@@ -2270,9 +2266,9 @@ def test_parse_assign_compound_bitwise_and():
 
     p = parser.Parser(tokens)
 
-    expected = parser.Assign(name='a', value=parser.Binary(op=parser.BinaryOp.BITWISE_AND, left=parser.Variable(name='a'), right=parser.Constant(value=1)))
+    expected = parser.Assign(target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.BITWISE_AND)
 
-    assert expected == p.parse_assign()
+    assert expected == p.parse_expr_stmt_or_assign()
 
 
 def test_parse_assign_compound_bitwise_or():
@@ -2285,9 +2281,9 @@ def test_parse_assign_compound_bitwise_or():
 
     p = parser.Parser(tokens)
 
-    expected = parser.Assign(name='a', value=parser.Binary(op=parser.BinaryOp.BITWISE_OR, left=parser.Variable(name='a'), right=parser.Constant(value=1)))
+    expected = parser.Assign(target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.BITWISE_OR)
 
-    assert expected == p.parse_assign()
+    assert expected == p.parse_expr_stmt_or_assign()
 
 
 def test_parse_assign_compound_bitwise_xor():
@@ -2300,9 +2296,9 @@ def test_parse_assign_compound_bitwise_xor():
 
     p = parser.Parser(tokens)
 
-    expected = parser.Assign(name='a', value=parser.Binary(op=parser.BinaryOp.BITWISE_XOR, left=parser.Variable(name='a'), right=parser.Constant(value=1)))
+    expected = parser.Assign(target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.BITWISE_XOR)
 
-    assert expected == p.parse_assign()
+    assert expected == p.parse_expr_stmt_or_assign()
 
 
 def test_parse_assign_compound_shift_left():
@@ -2315,9 +2311,9 @@ def test_parse_assign_compound_shift_left():
 
     p = parser.Parser(tokens)
 
-    expected = parser.Assign(name='a', value=parser.Binary(op=parser.BinaryOp.SHIFT_LEFT, left=parser.Variable(name='a'), right=parser.Constant(value=1)))
+    expected = parser.Assign(target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.SHIFT_LEFT)
 
-    assert expected == p.parse_assign()
+    assert expected == p.parse_expr_stmt_or_assign()
 
 
 def test_parse_assign_compound_shift_right():
@@ -2330,9 +2326,9 @@ def test_parse_assign_compound_shift_right():
 
     p = parser.Parser(tokens)
 
-    expected = parser.Assign(name='a', value=parser.Binary(op=parser.BinaryOp.SHIFT_RIGHT, left=parser.Variable(name='a'), right=parser.Constant(value=1)))
+    expected = parser.Assign(target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.SHIFT_RIGHT)
 
-    assert expected == p.parse_assign()
+    assert expected == p.parse_expr_stmt_or_assign()
 
 
 # TODO(will): Test parse_expr_stmt_or_index_assign
@@ -2493,23 +2489,21 @@ def test_position_assign_is_its_name_token():
         lexer.Token(lexer.TokenType.NUMBER, '1', 11, 9),
         lexer.Token(lexer.TokenType.EOF, '', 11, 10),
     ]
-    result = parser.Parser(tokens).parse_assign()
+    result = parser.Parser(tokens).parse_expr_stmt_or_assign()
     assert (result.line, result.col) == (11, 5)
 
 
-def test_position_compound_assign_desugared_binary_matches_name_token():
-    """`x += 1` desugars to Assign(Binary(...)) -- both the outer
-    Assign and the synthesized Binary/Variable should take x's own
-    position, not the operator's."""
+def test_position_compound_assign_is_its_target():
+    """`x += 1` is one Assign carrying the operator, positioned at its target, not the operator."""
     tokens = [
         lexer.Token(lexer.TokenType.IDENTIFIER, 'x', 12, 5),
         lexer.Token(lexer.TokenType.PLUS_ASSIGN, '+=', 12, 7),
         lexer.Token(lexer.TokenType.NUMBER, '1', 12, 10),
         lexer.Token(lexer.TokenType.EOF, '', 12, 11),
     ]
-    result = parser.Parser(tokens).parse_assign()
-    assert (result.line, result.col) == (12, 5)
-    assert (result.value.line, result.value.col) == (12, 5)  # the desugared Binary
+    result = parser.Parser(tokens).parse_expr_stmt_or_assign()
+    assert (result.line, result.col) == (12, 5) and result.op == parser.BinaryOp.ADD
+    assert (result.target.line, result.target.col) == (12, 5)
 
 
 def test_position_return_is_its_keyword_token():
@@ -3212,7 +3206,7 @@ def test_parse_statement_dispatches_to_match():
 # Pointers, stage 1: grammar only. `*T` in type position (PointerTypeExpr),
 # `&`/`*` as new unary operators (UnaryOp.ADDRESS_OF/DEREFERENCE, reusing
 # the existing AMPERSAND/STAR tokens -- no new lexer tokens needed at
-# all), and `*pointer = value` as a new assignment target (DerefAssign).
+# all), and `*pointer = value` as a new assignment target (an Assign whose target is a dereference).
 #
 # The one genuinely hard part: '*' can start EITHER a pointer TYPE
 # (`*Circle p`, a VarDecl) OR a dereference EXPRESSION (`*p = 5`, an
@@ -3304,9 +3298,9 @@ def test_dereference_read_expression():
 
 
 def test_dereference_assignment_is_not_mistaken_for_a_pointer_var_decl():
-    """The critical disambiguation case: `*p = 10` is a DerefAssign,
-    NOT a (nonsensical) attempt at a pointer-typed VarDecl whose
-    pointee type happens to be spelled 'p'."""
+    """The critical disambiguation case: `*p = 10` is an assignment through
+    a dereference, NOT a (nonsensical) attempt at a pointer-typed VarDecl
+    whose pointee type happens to be spelled 'p'."""
     prog = _parse_program(
         "def int main():\n"
         "    int x = 5\n"
@@ -3315,9 +3309,8 @@ def test_dereference_assignment_is_not_mistaken_for_a_pointer_var_decl():
         "    return x\n"
     )
     deref_assign = prog.functions[0].body[2]
-    assert isinstance(deref_assign, parser.DerefAssign)
-    assert isinstance(deref_assign.pointer, parser.Variable)
-    assert deref_assign.pointer.name == 'p'
+    assert isinstance(deref_assign, parser.Assign) and deref_assign.op is None
+    assert deref_assign.target == parser.Unary(op=parser.UnaryOp.DEREFERENCE, operand=parser.Variable(name='p'))
     assert deref_assign.value == parser.Constant(value=10)
 
 
@@ -3357,9 +3350,7 @@ def test_dereference_of_a_non_type_falls_through_when_speculative_parse_fails():
 
 
 def test_compound_assignment_through_a_dereference_now_parses():
-    """`*p += 1` -- was rejected at parse time before this stage; now
-    parses into a DerefAssign carrying compound_op, mirroring
-    IndexAssign/FieldAssign exactly."""
+    """`*p += 1`: an assignment through a dereference, carrying the operator."""
     program = _parse_program(
         "def int main():\n"
         "    int x = 5\n"
@@ -3368,8 +3359,8 @@ def test_compound_assignment_through_a_dereference_now_parses():
         "    return x\n"
     )
     stmt = program.functions[0].body[2]
-    assert isinstance(stmt, parser.DerefAssign)
-    assert stmt.compound_op == parser.BinaryOp.ADD
+    assert isinstance(stmt, parser.Assign) and isinstance(stmt.target, parser.Unary)
+    assert stmt.op == parser.BinaryOp.ADD
 
 
 # ---------------------------------------------------------------------------

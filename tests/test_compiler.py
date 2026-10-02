@@ -1022,8 +1022,7 @@ class TestForLoops:
         with pytest.raises(ParseError, match="Expected an assignment"):
             _parse(
                 "def int main():\n"
-                "    [3]int arr = [1, 2, 3]\n"
-                "    for int i = 0; i < 3; arr[i] = 5:\n"
+                "    for int i = 0; i < 3; print(i):\n"
                 "        print(i)\n"
                 "    return 0\n"
             )
@@ -17833,25 +17832,54 @@ class TestCompoundAssignmentThroughAddresses:
             match="requires two operands of the same integer type",
         )
 
-    def test_compound_assignment_to_a_str_element_is_rejected(self):
-        assert_program_semantic_error(
-            "def int main():\n"
-            "    []str arr = ['a', 'b']\n"
-            "    arr[0] += 'c'\n"
-            "    return 0\n",
-            match="Compound assignment \\('\\+='\\) to a str-typed target",
-        )
-
-    def test_compound_assignment_to_a_str_field_is_rejected(self):
-        assert_program_semantic_error(
+    @pytest.mark.skipif(not GCC_AVAILABLE, reason="gcc not available")
+    def test_plus_assign_concatenates_into_every_kind_of_str_target(self):
+        """`+=` on a str appends, for a name, element, field, pointee, and dict entry alike; the
+        target's address is evaluated once."""
+        assert_program_stdout(
             "type Holder struct:\n"
             "    str s\n"
             "\n"
+            "def int next(*int calls):\n"
+            "    *calls += 1\n"
+            "    return 0\n"
+            "\n"
             "def int main():\n"
-            "    Holder h = Holder('a')\n"
-            "    h.s += 'b'\n"
+            "    str s = 'a'\n"
+            "    s += 'b'\n"
+            "    []str arr = ['x', 'y']\n"
+            "    int calls = 0\n"
+            "    arr[next(&calls)] += 'z'\n"
+            "    Holder h = Holder('h')\n"
+            "    h.s += 'i'\n"
+            "    *str p = &s\n"
+            "    *p += 'c'\n"
+            "    dict[str]str d = dict[str]str{'k': 'v'}\n"
+            "    d['k'] += 'w'\n"
+            "    print(s + ' ' + arr[0] + ' ' + h.s + ' ' + d['k'])\n"
+            "    print(calls)\n"
             "    return 0\n",
-            match="Compound assignment \\('\\+='\\) to a str-typed target",
+            "abc xz hi vw\n1\n",
+        )
+
+    @pytest.mark.skipif(not GCC_AVAILABLE, reason="gcc not available")
+    def test_for_in_over_a_typed_slice_literal(self):
+        """Once rejected as if it were a call result, since `[]T[...]` was parsed as a slice of an array."""
+        assert_program_stdout(
+            "def int main():\n    for i, x in []int[5, 6]:\n        print(i + x)\n    return 0\n", "5\n7\n")
+
+    @pytest.mark.skipif(not GCC_AVAILABLE, reason="gcc not available")
+    def test_for_increment_may_assign_to_any_target(self):
+        assert_program_stdout(
+            "type Counter struct:\n"
+            "    int i\n"
+            "\n"
+            "def int main():\n"
+            "    Counter c = Counter(0)\n"
+            "    for int n = 0; c.i < 3; c.i += 1:\n"
+            "        print(c.i)\n"
+            "    return 0\n",
+            "0\n1\n2\n",
         )
 
     def test_all_ten_compound_operators_parse_and_run(self):

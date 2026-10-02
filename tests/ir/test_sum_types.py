@@ -277,7 +277,7 @@ def test_array_literal_of_already_sum_typed_elements_does_not_crash():
 def test_index_assign_into_sum_typed_array_element_writes_discriminant():
     """shapes[0] = Square(3) -- the actual bug found: element_type.
     kind not in (SLICE, STRUCT) is true for SUM too (SUM is neither),
-    so this fell into the scalar IndexAssign path, which tried to
+    so this fell into the scalar element-assignment path, which tried to
     gen_expr_ir a struct-literal Call -- not even a wrong-width bug
     like the others, straight to IRError with no real IR produced at
     all."""
@@ -291,7 +291,7 @@ def test_index_assign_into_sum_typed_array_element_writes_discriminant():
     fn = _fn(ir_program, 'main')
     tag_writes = [w for w in _discriminant_writes(fn.body) if w.value.value == 1]
     # Two Square tags now: the array literal's own second element,
-    # and the IndexAssign's -- just confirming the IndexAssign's own
+    # and the element assignment's -- just confirming its own
     # write happened at all (it wouldn't have, before the fix) rather
     # than trying to disentangle which of the two is which.
     assert len(tag_writes) == 2

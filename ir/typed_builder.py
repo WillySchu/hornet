@@ -209,6 +209,18 @@ class TypedFunctionBuilder:
         if isinstance(s, t.Assign):
             return self.assign(s.target, s.value)
         if isinstance(s, t.CompoundAssign):
+            if isinstance(s.target, t.Local):  # read and written in place: `x = x op v`
+                kind = t.StrConcat if s.target.type == Type.STR else lambda type_, l, r: t.Binary(type_, s.op, l, r)
+                return self.assign(s.target, kind(s.target.type, s.target, s.value))
+            if s.target.type == Type.STR:  # `+=`: the place's address once, then concatenate
+                ir, address = self.place_address(s.target)
+                read_ir, left_ptr, left_len = self.read_str(address)
+                value_ir, right_ptr, right_len = self.str_value(s.value)
+                concat_ir, ptr, length = self.concat(left_ptr, left_len, right_ptr, right_len)
+                len_ir, len_address = self.offset(address, 8)
+                return ir + read_ir + value_ir + concat_ir + len_ir + [
+                    IRStore(address=address, value=ptr, value_type=Type.INT64),
+                    IRStore(address=len_address, value=length, value_type=Type.INT)]
             if not _scalar(s.target.type):
                 raise NotYetPorted(f"compound assignment of {s.target.type}")
             ir, address = self.place_address(s.target)
@@ -489,13 +501,8 @@ class TypedFunctionBuilder:
         if isinstance(e, t.StrConcat):
             left_ir, left_ptr, left_len = self.str_value(e.left)
             right_ir, right_ptr, right_len = self.str_value(e.right)
-            total, buffer, right_dst = self.temp(Type.INT), self.temp(), self.temp()
-            return left_ir + right_ir + [
-                IRBinOp(dst=total, op=BinaryOp.ADD, left=left_len, right=right_len),
-                IRCall(dst=buffer, name='malloc', args=[total]),
-                IRCall(dst=None, name='memcpy', args=[buffer, left_ptr, left_len]),
-                IRBinOp(dst=right_dst, op=BinaryOp.ADD, left=buffer, right=left_len),
-                IRCall(dst=None, name='memcpy', args=[right_dst, right_ptr, right_len])], buffer, total
+            concat_ir, buffer, total = self.concat(left_ptr, left_len, right_ptr, right_len)
+            return left_ir + right_ir + concat_ir, buffer, total
         if isinstance(e, t.SliceOf):
             base_ir, ptr, length = self.str_value(e.base)
             bounds_ir, low, high = self.bounds(e, length)
@@ -1084,3 +1091,12 @@ class TypedFunctionBuilder:
             IRBinOp(dst=i, op=BinaryOp.ADD, left=i, right=IRConst(1, Type.INT)), IRJump(start), IRLabel(found),
             IRMove(dst=result, src=IRConst(1, Type.BOOL)), IRJump(start + "_done"), IRLabel(end),
             IRMove(dst=result, src=IRConst(0, Type.BOOL)), IRJump(start + "_done"), IRLabel(start + "_done")], result
+
+    def concat(self, left_ptr, left_len, right_ptr, right_len) -> tuple:
+        """A new string holding both: (ir, ptr, len)."""
+        total, buffer, right_dst = self.temp(Type.INT), self.temp(), self.temp()
+        return [IRBinOp(dst=total, op=BinaryOp.ADD, left=left_len, right=right_len),
+                IRCall(dst=buffer, name='malloc', args=[total]),
+                IRCall(dst=None, name='memcpy', args=[buffer, left_ptr, left_len]),
+                IRBinOp(dst=right_dst, op=BinaryOp.ADD, left=buffer, right=left_len),
+                IRCall(dst=None, name='memcpy', args=[right_dst, right_ptr, right_len])], buffer, total
