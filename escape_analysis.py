@@ -18,49 +18,15 @@ callee may still leak or overwrite what their memory holds, so their
 contents escape and their memory may come to hold EXT. Calls without a
 summary (externs, intrinsics) escape every argument.
 
-Storage declared inside a loop (body declarations, the loop variable, for-in bindings,
-`&S()` literals) is fresh on each iteration, so it also needs the heap when a location
+Runs on the typed tree (typed_ast.py). Storage declared inside a loop (body declarations, the
+loop variable, for-in bindings, `&S()` literals) is fresh on each iteration, so it also needs the heap when a location
 declared outside that loop may come to hold its address: the address would outlive the
 iteration that created it."""
 
-import dataclasses
-
+from dataclasses import fields
 from typing import Optional, Union
 
-from parser import (
-    ArrayLiteral,
-    Assign,
-    Binary,
-    BoolLiteral,
-    Break,
-    ByteLiteral,
-    Call,
-    Cast,
-    Constant,
-    Continue,
-    DerefAssign,
-    DictLiteral,
-    ExprStmt,
-    Field,
-    FieldAssign,
-    For,
-    ForIn,
-    Function,
-    If,
-    Index,
-    IndexAssign,
-    IsCheck,
-    Node,
-    NoneLiteral,
-    Return,
-    Slice,
-    StringLiteral,
-    Unary,
-    VarDecl,
-    Variable,
-    While,
-)
-from ops import UnaryOp
+import typed_ast as t
 from typesys import StructInfo, Type, TypeKind
 from typesys import type_byte_width
 
@@ -68,9 +34,10 @@ from typesys import type_byte_width
 _STACK_ARRAY_LIMIT_BYTES = 16384
 
 
-def is_heap_allocated(t: Type, structs: dict[str, StructInfo], sum_types: dict) -> bool:
+def is_heap_allocated(type_: Type, structs: dict[str, StructInfo], sum_types: dict) -> bool:
     """Size-based promotion only; escape analysis adds the rest (TypedFunctionBuilder.heap)."""
-    return t.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM) and type_byte_width(t, structs, sum_types) > _STACK_ARRAY_LIMIT_BYTES
+    return type_.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM) and \
+        type_byte_width(type_, structs, sum_types) > _STACK_ARRAY_LIMIT_BYTES
 
 
 # A declaration's Symbol.id, or ('literal', nid) for an `&S()` struct literal's storage.
@@ -84,21 +51,26 @@ def _param(i: int) -> tuple:
     return ('param', i)
 
 
-def _is_external(t) -> bool:
-    return t == EXT or (isinstance(t, tuple) and t[0] == 'param')
+def _is_external(loc) -> bool:
+    return loc == EXT or (isinstance(loc, tuple) and loc[0] == 'param')
 
 
-def _heap(node: Node) -> tuple:
+def _heap(node) -> tuple:
     return ('heap', node.nid)
 
 
-def _literal(node: Node) -> tuple:
+def _literal(node) -> tuple:
     """An `S(...)` struct literal's own storage, which may need the heap like a variable's."""
     return ('literal', node.nid)
 
 
+_NO_POINTERS = (t.IntLit, t.BoolLit, t.StrLit, t.NoneLit, t.ZeroValue, t.NewEmptyDict, t.EmptySlice)
+_OPERATORS = (t.Unary, t.Binary, t.StrConcat, t.StrCompare, t.TagTest, t.Len, t.DictContains, t.ElementContains,
+              t.StrIndex, t.Print, t.DictDelete)
+
+
 class EscapeAnalyzer:
-    def __init__(self, fn: Function, structs: dict[str, StructInfo], summaries: Optional[dict] = None):
+    def __init__(self, fn: t.Function, structs: dict[str, StructInfo], summaries: Optional[dict] = None):
         self.fn = fn
         self.structs = structs
         self.summaries = summaries or {}
@@ -109,21 +81,21 @@ class EscapeAnalyzer:
     def analyze(self) -> set[DeclId]:
         while True:
             self.changed = False
-            for i, p in enumerate(self.fn.params):
+            for i, symbol in enumerate(self.fn.params):
                 self._add(_param(i), {EXT})
-                self._add(p.symbol.id, {_param(i)})
+                self._add(symbol.id, {_param(i)})
             self.walk_statements(self.fn.body)
             self._close_escapes()
             if not self.changed:
                 break
         heap = self.esc | self._iteration_escapes()
-        return {t for t in heap if t != EXT and not (isinstance(t, tuple) and t[0] in ('heap', 'param'))}
+        return {loc for loc in heap if loc != EXT and not (isinstance(loc, tuple) and loc[0] in ('heap', 'param'))}
 
     def _iteration_escapes(self) -> set:
         """Locations declared inside some loop whose address may be held outside it."""
         out = set()
         for inner in _loop_scopes(self.fn.body):
-            reached = [u for t, held in self.H.items() if t not in inner for u in held if u in inner]
+            reached = [u for loc, held in self.H.items() if loc not in inner for u in held if u in inner]
             while reached:
                 u = reached.pop()
                 if u not in out:
@@ -137,8 +109,8 @@ class EscapeAnalyzer:
 
     # -- lattice helpers
 
-    def _add(self, t, vals: set) -> None:
-        cur = self.H.setdefault(t, set())
+    def _add(self, loc, vals: set) -> None:
+        cur = self.H.setdefault(loc, set())
         if not vals <= cur:
             cur |= vals
             self.changed = True
@@ -149,25 +121,25 @@ class EscapeAnalyzer:
             self.changed = True
 
     def _store(self, targets: set, vals: set) -> None:
-        for t in targets:
-            if _is_external(t):
+        for loc in targets:
+            if _is_external(loc):
                 self._escape(vals)
             else:
-                self._add(t, vals)
+                self._add(loc, vals)
 
     def _contents(self, targets: set) -> set:
         out = set()
-        for t in targets:
-            out |= self.H.get(t, set())
+        for loc in targets:
+            out |= self.H.get(loc, set())
         return out
 
     def _close_escapes(self) -> None:
         stack = list(self.esc)
         while stack:
-            t = stack.pop()
-            if t != EXT:
-                self._add(t, {EXT})
-            for u in self.H.get(t, ()):
+            loc = stack.pop()
+            if loc != EXT:
+                self._add(loc, {EXT})
+            for u in self.H.get(loc, ()):
                 if u not in self.esc:
                     self.esc.add(u)
                     self.changed = True
@@ -175,118 +147,106 @@ class EscapeAnalyzer:
 
     # -- expressions
 
-    @staticmethod
-    def _kind(expr: Node) -> Optional[TypeKind]:
-        t = getattr(expr, 'resolved_type', None)
-        return t.kind if t is not None else None
-
-    def loc(self, expr: Node) -> set:
-        """Locations `expr`'s storage may reside in."""
-        if isinstance(expr, Variable):
-            return {expr.decl_id} if expr.decl_id is not None else {EXT}
-        if isinstance(expr, Field):
-            if self._kind(expr.base) == TypeKind.POINTER:
-                return self.vals(expr.base)
-            return self.loc(expr.base)
-        if isinstance(expr, Index):
-            self.vals(expr.index)
-            if self._kind(expr.array) == TypeKind.ARRAY:
-                return self.loc(expr.array)
-            if self._kind(expr.array) == TypeKind.DICT:
-                # A dict's entries live in its shared heap table, which any copy of the dict reaches.
-                self.vals(expr.array)
-                return {EXT}
-            return self.vals(expr.array)
-        if isinstance(expr, Unary) and expr.op == UnaryOp.DEREFERENCE:
-            return self.vals(expr.operand)
-        if isinstance(expr, Call) and expr.name in self.structs:
-            t = _literal(expr)
-            self._add(t, self.vals(expr))
-            return {t}
+    def loc(self, e) -> set:
+        """Locations `e`'s storage may reside in."""
+        if isinstance(e, t.Local):
+            return {e.symbol.id}
+        if isinstance(e, t.FieldAccess):
+            return self.vals(e.base) if e.through_pointer else self.loc(e.base)
+        if isinstance(e, t.ArrayIndex):
+            self.vals(e.index)
+            return self.loc(e.base)
+        if isinstance(e, t.SliceIndex):
+            self.vals(e.index)
+            return self.vals(e.base)
+        if isinstance(e, t.DictLookup):
+            # A dict's entries live in its shared heap table, which any copy of the dict reaches.
+            self.vals(e.key)
+            self.vals(e.dict)
+            return {EXT}
+        if isinstance(e, t.Deref):
+            return self.vals(e.pointer)
+        if isinstance(e, t.Payload):
+            return self.loc(e.sum)
+        if isinstance(e, t.StructLiteral):
+            loc = _literal(e)
+            self._add(loc, self.vals(e))
+            return {loc}
         # Rvalue: materialized in fresh, non-promotable storage.
-        t = _heap(expr)
-        self._add(t, self.vals(expr))
-        return {t}
+        loc = _heap(e)
+        self._add(loc, self.vals(e))
+        return {loc}
 
-    def vals(self, expr: Node) -> set:
-        """Locations `expr`'s value may point into. Evaluates every
-        subexpression, so escaping call arguments are always recorded."""
-        if expr is None:
+    def vals(self, e) -> set:
+        """Locations `e`'s value may point into. Evaluates every subexpression, so escaping call
+        arguments are always recorded."""
+        if e is None or isinstance(e, _NO_POINTERS):
             return set()
-        if isinstance(expr, Variable):
-            return self._contents(self.loc(expr))
-        if isinstance(expr, Field):
-            if self._kind(expr.base) == TypeKind.POINTER:
-                return self._contents(self.vals(expr.base))
-            return self.vals(expr.base)
-        if isinstance(expr, Index):
-            self.vals(expr.index)
-            k = self._kind(expr.array)
-            if k == TypeKind.ARRAY:
-                return self.vals(expr.array)
-            if k == TypeKind.STR:
-                self.vals(expr.array)
-                return set()
-            if k == TypeKind.DICT:
-                self.vals(expr.array)
-                return {EXT}
-            return self._contents(self.vals(expr.array))
-        if isinstance(expr, Slice):
-            self.vals(expr.low)
-            self.vals(expr.high)
-            if self._kind(expr.array) == TypeKind.ARRAY:
-                return self.loc(expr.array)
-            return self.vals(expr.array)
-        if isinstance(expr, Unary):
-            if expr.op == UnaryOp.ADDRESS_OF:
-                return self.loc(expr.operand)
-            if expr.op == UnaryOp.DEREFERENCE:
-                return self._contents(self.vals(expr.operand))
-            self.vals(expr.operand)
+        if isinstance(e, t.Local):
+            return self._contents(self.loc(e))
+        if isinstance(e, t.FieldAccess):
+            return self._contents(self.vals(e.base)) if e.through_pointer else self.vals(e.base)
+        if isinstance(e, t.ArrayIndex):
+            self.vals(e.index)
+            return self.vals(e.base)
+        if isinstance(e, t.SliceIndex):
+            self.vals(e.index)
+            return self._contents(self.vals(e.base))
+        if isinstance(e, t.DictLookup):
+            self.vals(e.dict)
+            self.vals(e.key)
+            return {EXT}
+        if isinstance(e, t.SliceOf):
+            self.vals(e.low)
+            self.vals(e.high)
+            return self.loc(e.base) if e.kind == 'array' else self.vals(e.base)
+        if isinstance(e, t.AddressOf):
+            return self.loc(e.place)
+        if isinstance(e, t.BoxVariant):
+            loc = _heap(e)
+            self._add(loc, self.vals(e.value))
+            return {loc}
+        if isinstance(e, t.Deref):
+            return self._contents(self.vals(e.pointer))
+        if isinstance(e, (t.Payload, t.WidenToSum)):
+            return self.vals(e.sum if isinstance(e, t.Payload) else e.value)
+        if isinstance(e, (t.IntCast, t.StrFromByte, t.StrFromBytes)):
+            return self.vals(e.value)
+        if isinstance(e, _OPERATORS):
+            for child in _children(e):
+                self.vals(child)
             return set()
-        if isinstance(expr, Binary):
-            self.vals(expr.left)
-            self.vals(expr.right)
-            return set()
-        if isinstance(expr, Cast):
-            return self.vals(expr.expr)
-        if isinstance(expr, ArrayLiteral):
-            t = _heap(expr)
+        if isinstance(e, t.StructLiteral):
+            return set().union(*(self.vals(f) for f in e.fields)) if e.fields else set()
+        if isinstance(e, (t.ArrayLiteral, t.SliceLiteral)):
+            loc = _heap(e)
             elems = set()
-            for e in expr.elements:
-                elems |= self.vals(e)
-            self._add(t, elems)
-            return {t} | elems
-        if isinstance(expr, DictLiteral):
-            t = _heap(expr)
-            for k, v in expr.entries:
-                self._add(t, self.vals(k) | self.vals(v))
-            return {t}
-        if isinstance(expr, Call):
-            return self._call(expr)
-        if isinstance(expr, IsCheck):
-            self.vals(expr.subject)
-            return set()
-        if isinstance(expr, (Constant, BoolLiteral, NoneLiteral, StringLiteral, ByteLiteral)):
-            return set()
-        raise TypeError(f"escape analysis: unhandled expression {type(expr).__name__}")
+            for x in e.elements:
+                elems |= self.vals(x)
+            self._add(loc, elems)
+            return {loc} | elems
+        if isinstance(e, t.DictLiteral):
+            loc = _heap(e)
+            for k, v in e.entries:
+                self._add(loc, self.vals(k) | self.vals(v))
+            return {loc}
+        if isinstance(e, t.Append):
+            loc = _heap(e)
+            old = self.vals(e.slice)
+            self._add(loc, self._contents(old))
+            self._store(old | {loc}, self.vals(e.value))
+            return old | {loc}
+        if isinstance(e, t.BytesFromStr):  # a runtime call: no summary
+            self._escape(self.vals(e.value))
+            return {EXT}
+        if isinstance(e, t.Call):
+            return self._call(e)
+        raise TypeError(f"escape analysis: unhandled expression {type(e).__name__}")
 
-    def _call(self, expr: Call) -> set:
-        args = list(expr.args) + [v for _, v in (expr.kwargs or [])]
-        arg_vals = [self.vals(a) for a in args]
-        if expr.name in self.structs:
-            return set().union(*arg_vals)
-        if expr.name in ('print', 'len', 'del'):
-            return set()
-        if expr.name == 'append':
-            t = _heap(expr)
-            old = arg_vals[0]
-            self._add(t, self._contents(old))
-            elems = set().union(*arg_vals[1:])
-            self._store(old | {t}, elems)
-            return old | {t}
-        summary = self.summaries.get(expr.name)
-        if summary is None or expr.kwargs or len(summary) != len(arg_vals):
+    def _call(self, e: t.Call) -> set:
+        arg_vals = [self.vals(a) for a in e.args]
+        summary = self.summaries.get(e.name)
+        if summary is None or len(summary) != len(arg_vals):
             for v in arg_vals:
                 self._escape(v)
             return {EXT}
@@ -302,67 +262,57 @@ class EscapeAnalyzer:
 
     # -- statements
 
-    def walk_statements(self, statements: list[Node]) -> None:
-        for stmt in statements:
-            self.walk_statement(stmt)
+    def walk_statements(self, statements) -> None:
+        for s in statements or ():
+            self.walk_statement(s)
 
-    def _block(self, body) -> None:
-        if body is not None:
-            self.walk_statements(body)
-
-    def walk_statement(self, stmt: Node) -> None:
-        if isinstance(stmt, VarDecl):
-            self._add(stmt.symbol.id, self.vals(stmt.init) if stmt.init is not None else set())
-        elif isinstance(stmt, Assign):
-            self._store({stmt.decl_id} if stmt.decl_id is not None else {EXT}, self.vals(stmt.value))
-        elif isinstance(stmt, IndexAssign):
-            self._store(self.loc(Index(array=stmt.array, index=stmt.index)), self.vals(stmt.value))
-        elif isinstance(stmt, FieldAssign):
-            self._store(self.loc(Field(base=stmt.base, name=stmt.name)), self.vals(stmt.value))
-        elif isinstance(stmt, DerefAssign):
-            self._store(self.vals(stmt.pointer), self.vals(stmt.value))
-        elif isinstance(stmt, Return):
-            self._escape(self.vals(stmt.value))
-        elif isinstance(stmt, ExprStmt):
-            self.vals(stmt.expr)
-        elif isinstance(stmt, If):
-            cond = stmt.condition
-            if isinstance(cond, IsCheck) and cond.binding_decl is not None:
-                self.walk_statement(cond.binding_decl)
-            else:
-                self.vals(cond)
-            self._block(stmt.then_body)
-            self._block(stmt.else_body)
-        elif isinstance(stmt, While):
-            self.vals(stmt.condition)
-            self._block(stmt.body)
-        elif isinstance(stmt, For):
-            self.walk_statement(stmt.init)
-            self.vals(stmt.condition)
-            self._block(stmt.body)
-            self.walk_statement(stmt.increment)
-        elif isinstance(stmt, ForIn):
-            k = self._kind(stmt.iterable)
-            it = self.vals(stmt.iterable)
-            elems = it if k == TypeKind.ARRAY else self._contents(it)
-            for i in range(len(stmt.binding_names)):
-                self._add(stmt.symbols[i].id, elems)
-            self.walk_statements(stmt.body)
-        elif isinstance(stmt, (Break, Continue)):
+    def walk_statement(self, s) -> None:
+        if isinstance(s, t.Declare):
+            self._add(s.symbol.id, self.vals(s.init))
+        elif isinstance(s, (t.Assign, t.CompoundAssign)):
+            self._store(self.loc(s.target), self.vals(s.value))
+        elif isinstance(s, t.Return):
+            self._escape(self.vals(s.value))
+        elif isinstance(s, t.ExprStmt):
+            self.vals(s.expr)
+        elif isinstance(s, t.If):
+            self.vals(s.cond)
+            self.walk_statements(s.then_body)
+            self.walk_statements(s.else_body)
+        elif isinstance(s, t.Match):
+            self.vals(s.subject)
+            for _, body in s.arms:
+                self.walk_statements(body)
+            self.walk_statements(s.else_body)
+        elif isinstance(s, t.While):
+            self.vals(s.cond)
+            self.walk_statements(s.body)
+        elif isinstance(s, t.For):
+            if s.init is not None:
+                self.walk_statement(s.init)
+            self.vals(s.cond)
+            self.walk_statements(s.body)
+            self.walk_statement(s.step)
+        elif isinstance(s, t.ForIn):
+            it = self.vals(s.iterable)
+            elems = it if s.kind == 'array' else self._contents(it)
+            for symbol in s.bindings:
+                self._add(symbol.id, elems)
+            self.walk_statements(s.body)
+        elif isinstance(s, (t.Break, t.Continue)):
             pass
         else:
-            self.vals(stmt)
+            raise TypeError(f"escape analysis: unhandled statement {type(s).__name__}")
 
 
 def _children(node) -> list:
     out = []
-    for f in dataclasses.fields(node):
+    for f in fields(node):
         value = getattr(node, f.name)
-        for v in value if isinstance(value, (list, tuple)) else [value]:
-            if isinstance(v, Node):
-                out.append(v)
-            elif isinstance(v, tuple):
-                out.extend(x for x in v if isinstance(x, Node))
+        for v in value if isinstance(value, tuple) else (value,):
+            for x in v if isinstance(v, tuple) else (v,):
+                if isinstance(x, (t.Expr, t.Stmt)):
+                    out.append(x)
     return out
 
 
@@ -372,35 +322,33 @@ def _declared_within(nodes: list) -> set:
     stack = list(nodes)
     while stack:
         node = stack.pop()
-        if isinstance(node, VarDecl):
+        if isinstance(node, t.Declare):
             out.add(node.symbol.id)
-        elif isinstance(node, ForIn):
-            out.update(sym.id for sym in node.symbols)
-        elif isinstance(node, Call):
+        elif isinstance(node, t.ForIn):
+            out.update(symbol.id for symbol in node.bindings)
+        elif isinstance(node, t.StructLiteral):
             out.add(_literal(node))
-        elif isinstance(node, IsCheck) and node.binding_decl is not None:
-            stack.append(node.binding_decl)
         stack.extend(_children(node))
     return out
 
 
-def _loop_scopes(statements: list) -> list:
+def _loop_scopes(statements) -> list:
     """For each loop in `statements`, the set of locations declared inside it (loop variable and
     for-in bindings included)."""
     scopes = []
     stack = list(statements)
     while stack:
         node = stack.pop()
-        if isinstance(node, ForIn):
+        if isinstance(node, t.ForIn):
             # The iterable is evaluated once, before the first iteration.
-            scopes.append(_declared_within(node.body) | {sym.id for sym in node.symbols})
-        elif isinstance(node, (While, For)):
+            scopes.append(_declared_within(list(node.body)) | {symbol.id for symbol in node.bindings})
+        elif isinstance(node, (t.While, t.For)):
             scopes.append(_declared_within(_children(node)))
         stack.extend(_children(node))
     return scopes
 
 
-def compute_escape_summaries(functions: list[Function], structs: dict[str, StructInfo]) -> dict:
+def compute_escape_summaries(functions, structs: dict[str, StructInfo]) -> dict:
     """Function name -> per-parameter escape flags, iterated to a fixed point (handles recursion)."""
     summaries = {fn.name: [False] * len(fn.params) for fn in functions}
     changed = True
@@ -416,7 +364,7 @@ def compute_escape_summaries(functions: list[Function], structs: dict[str, Struc
     return summaries
 
 
-def analyze_array_escapes(fn: Function, structs: dict[str, StructInfo], summaries: Optional[dict] = None) -> set[DeclId]:
-    """DeclIds in `fn` whose storage must be heap-allocated. Requires semantic analysis.
-    Without `summaries`, every call escapes its arguments."""
+def analyze_array_escapes(fn: t.Function, structs: dict[str, StructInfo], summaries: Optional[dict] = None) -> set[DeclId]:
+    """DeclIds in typed function `fn` whose storage must be heap-allocated. Without `summaries`,
+    every call escapes its arguments."""
     return EscapeAnalyzer(fn, structs, summaries).analyze()

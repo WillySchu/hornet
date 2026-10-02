@@ -57,7 +57,7 @@ def test_a_shape_with_no_rule_is_a_compiler_error(monkeypatch):
     from ir.errors import IRError
     from ir.typed_builder import NotYetPorted, TypedFunctionBuilder
 
-    def refuse(self, fn, parser_fn):
+    def refuse(self, fn):
         raise NotYetPorted("for this test")
     monkeypatch.setattr(TypedFunctionBuilder, 'build', refuse)
     with pytest.raises(IRError, match="No IR for main: for this test"):

@@ -4,7 +4,8 @@ import pytest
 
 from desugar import desugar_methods
 from escape_analysis import analyze_array_escapes, compute_escape_summaries
-from parser import VarDecl
+from elaborate import elaborate
+from typed_ast import Declare
 from semantic import analyze
 from tests.test_compiler import GCC_SKIP, _parse, assert_program_stdout
 
@@ -13,10 +14,11 @@ def _escapes(source: str, fn_name: str = 'leak'):
     program = _parse(source)
     desugar_methods(program)
     analyze(program)
-    summaries = compute_escape_summaries(program.functions, program.struct_registry)
-    fn = next(f for f in program.functions if f.name == fn_name)
+    typed = elaborate(program)
+    summaries = compute_escape_summaries(typed.functions, program.struct_registry)
+    fn = next(f for f in typed.functions if f.name == fn_name)
     escaping = analyze_array_escapes(fn, program.struct_registry, summaries)
-    return [s.name for s in fn.body if isinstance(s, VarDecl) and s.symbol.id in escaping], summaries
+    return [s.symbol.name for s in fn.body if isinstance(s, Declare) and s.symbol.id in escaping], summaries
 
 
 # Each leaks `x` (or `n`) out of leak() through a callee; the local must be heap-allocated.

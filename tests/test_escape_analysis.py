@@ -2,7 +2,7 @@
 
 import tempfile
 from pathlib import Path
-from unittest import mock
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,10 +10,12 @@ import desugar
 import escape_analysis as ea
 import parser
 import semantic
+from elaborate import elaborate
 from lexer import lex
 
 
-def parse_and_analyze(source: str) -> parser.Program:
+def parse_and_analyze(source: str):
+    """The typed program (escape analysis runs on the typed tree), plus the registries it needs."""
     with tempfile.TemporaryDirectory() as tmpdir:
         src_path = Path(tmpdir) / 'program.ht'
         src_path.write_text(source)
@@ -21,7 +23,9 @@ def parse_and_analyze(source: str) -> parser.Program:
         ast = parser.Parser(tokens).parse_program()
         desugar.desugar_methods(ast)
         semantic.analyze(ast)
-        return ast
+        typed = elaborate(ast)
+        return SimpleNamespace(functions=list(typed.functions), struct_registry=ast.struct_registry,
+                               symbols=ast.symbols)
 
 
 def parse_expression(source: str) -> parser.Node:
@@ -31,12 +35,6 @@ def parse_expression(source: str) -> parser.Node:
         tokens = lex(str(src_path))
         ast = parser.Parser(tokens).parse_expression()
         return ast
-
-
-def _analyze(fn: parser.Function):
-    program = parser.Program(functions=[fn], structs=[])
-    desugar.desugar_methods(program)
-    semantic.analyze(program)
 
 
 def test_is_heap_allocated_int():
@@ -87,10 +85,8 @@ def test_is_heap_allocated_array_str_heap():
 
 
 def test_analyze_array_escapes_empty():
-    fn = parser.Function(name='f', return_type=None)
-    expected = set()
-    res = ea.analyze_array_escapes(fn, {})
-    assert expected == res
+    ast = parse_and_analyze("def f():\n    return\n")
+    assert ea.analyze_array_escapes(ast.functions[0], {}) == set()
 
 
 def test_analyze_array_escapes_fn_on_uninitialized_slice():
@@ -106,70 +102,14 @@ def test_analyze_array_escapes_fn_on_initialized_slice():
 
 # TODO(will): I feel like this should escape?
 def test_analyze_array_escapes_return_initialized_slice():
-    fn = parser.Function(
-        name='f',
-        return_type=semantic.SliceTypeExpr(element_type='int'),
-        body=[
-            parser.VarDecl(
-                name='sl',
-                var_type=parser.SliceTypeExpr(
-                    element_type='int',
-                ),
-                init=parser.ArrayLiteral(
-                    elements=[parser.Constant(1), parser.Constant(2), parser.Constant(3)]
-                ),
-            ),
-            parser.Return(
-                parser.Variable(name='sl'),
-            ),
-        ],
-    )
-    _analyze(fn)
-    expected = set()
-    res = ea.analyze_array_escapes(fn, {})
-    assert expected == res
+    ast = parse_and_analyze("def []int f():\n    []int sl = [1, 2, 3]\n    return sl\n")
+    assert ea.analyze_array_escapes(ast.functions[0], {}) == set()
 
 
 def test_analyze_array_escapes_return_sliced_array():
-    fn = parser.Function(
-        name='f',
-        return_type=semantic.SliceTypeExpr(element_type='int'),
-        body=[
-            parser.VarDecl(
-                name='arr',
-                var_type=parser.ArrayTypeExpr(
-                    element_type='int',
-                    size=5,
-                ),
-                init=parser.ArrayLiteral(
-                    elements=[
-                        parser.Constant(1),
-                        parser.Constant(2),
-                        parser.Constant(3),
-                        parser.Constant(4),
-                        parser.Constant(5),
-                    ]
-                ),
-            ),
-            parser.VarDecl(
-                name='sl',
-                var_type=parser.SliceTypeExpr(
-                    element_type='int',
-                ),
-                init=parser.Slice(
-                    array=parser.Variable(name='arr'),
-                    low=parser.Index(array=parser.Variable(name='arr'), index=parser.Constant(value=1)),
-                    high=parser.Index(array=parser.Variable(name='arr'), index=parser.Constant(value=3)),
-                )
-            ),
-            parser.Return(
-                parser.Variable(name='sl'),
-            ),
-        ],
-    )
-    _analyze(fn)
-    res = ea.analyze_array_escapes(fn, {})
-    assert len(res) == 1
+    ast = parse_and_analyze("def []int f():\n    [5]int arr = [1, 2, 3, 4, 5]\n    []int sl = arr[arr[1]:arr[3]]\n"
+                            "    return sl\n")
+    assert len(ea.analyze_array_escapes(ast.functions[0], {})) == 1
 
 
 # TODO(will): I feel like this should escape?
@@ -455,7 +395,7 @@ def test_address_of_a_field_through_an_auto_dereferenced_pointer_does_not_escape
         "    return &p.radius\n"
     )
     fn = ast.functions[0]
-    p_decl_id = fn.params[0].symbol.id
+    p_decl_id = fn.params[0].id
     result = ea.analyze_array_escapes(fn, ast.struct_registry)
     assert p_decl_id not in result
 
@@ -513,16 +453,7 @@ def _heap_names(source: str, fn_index: int = 0) -> set:
     ast = parse_and_analyze(source)
     fn = ast.functions[fn_index]
     heap = ea.analyze_array_escapes(fn, {}, ea.compute_escape_summaries(ast.functions, {}))
-    names = set()
-    stack = list(fn.body)
-    while stack:
-        node = stack.pop()
-        if isinstance(node, parser.VarDecl) and node.symbol.id in heap:
-            names.add(node.name)
-        if isinstance(node, parser.ForIn):
-            names.update(n for n, sym in zip(node.binding_names, node.symbols) if sym.id in heap)
-        stack.extend(ea._children(node))
-    return names
+    return {ast.symbols[i].name for i in heap if isinstance(i, int) and ast.symbols[i].kind in ('local', 'binding')}
 
 
 @pytest.mark.parametrize("loop,decl", [

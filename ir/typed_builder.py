@@ -46,12 +46,12 @@ class TypedFunctionBuilder:
         self.ir_program = ir_program
         self.ids = ir_program.ids
 
-    def build(self, fn: t.Function, parser_fn) -> IRFunction:
+    def build(self, fn: t.Function) -> IRFunction:
         if not _ported(fn.return_type):
             raise NotYetPorted(f"returns {fn.return_type}")
         self.ir_fn = ir_fn = IRFunction(name=fn.name)
         ir_fn.return_type = fn.return_type
-        self.heap_ids = analyze_array_escapes(parser_fn, self.ir_program.struct_registry, self.ir_program.escape_summaries)
+        self.heap_ids = analyze_array_escapes(fn, self.ir_program.struct_registry, self.ir_program.escape_summaries)
         self.storage = {}  # symbol id -> (Temp or None, heap)
         self.loops = []  # (continue label, end label)
         self.scratch = {}  # name -> slot, for per-function scratch storage

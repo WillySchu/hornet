@@ -7,6 +7,7 @@ variant, a literal becoming a slice, zero values). Nodes are immutable. dump() r
 deterministically, one node per line.
 """
 
+import itertools
 from dataclasses import dataclass, field, fields
 from typing import Any, Optional
 
@@ -14,13 +15,25 @@ from symbols import Symbol
 from typesys import Type
 
 
+_node_numbers = itertools.count()
+
+
 @dataclass(frozen=True)
-class Expr:
+class _Node:
+    """Every node gets a number when created: passes key per-node facts on it."""
+    nid: int = field(default=-1, kw_only=True, compare=False, repr=False)
+
+    def __post_init__(self):
+        object.__setattr__(self, 'nid', next(_node_numbers))
+
+
+@dataclass(frozen=True)
+class Expr(_Node):
     type: Type
 
 
 @dataclass(frozen=True)
-class Stmt:
+class Stmt(_Node):
     pass
 
 
@@ -377,7 +390,7 @@ def _label(node) -> str:
     attrs = []
     for f in fields(node):
         value = getattr(node, f.name)
-        if f.name == 'type' or value is None or isinstance(value, (Expr, Stmt, tuple)):
+        if f.name in ('type', 'nid') or value is None or isinstance(value, (Expr, Stmt, tuple)):
             continue
         if isinstance(value, (bool, int, str)) and f.name == 'value':
             text = repr(value)

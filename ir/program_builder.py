@@ -43,14 +43,14 @@ def build_ir_program(program: Program) -> IRProgram:
         intrinsic_original_names=getattr(program, 'intrinsic_original_names', {}),
         ids=IdAllocator(),
     )
-    ir_program.escape_summaries = compute_escape_summaries(program.functions, program.struct_registry)
     typed_program = elaborate(program)
+    ir_program.escape_summaries = compute_escape_summaries(typed_program.functions, program.struct_registry)
     ir_program.functions = []
-    for fn, typed_fn in zip(program.functions, typed_program.functions):
+    for typed_fn in typed_program.functions:
         try:
-            ir_program.functions.append(TypedFunctionBuilder(ir_program).build(typed_fn, fn))
+            ir_program.functions.append(TypedFunctionBuilder(ir_program).build(typed_fn))
         except NotYetPorted as e:
-            raise IRError(f"No IR for {fn.name}: {e}") from e
+            raise IRError(f"No IR for {typed_fn.name}: {e}") from e
     for ir_fn in ir_program.functions:
         expand_null_checks(ir_fn, ir_program)
         insert_division_checks(ir_fn, ir_program)
