@@ -1,7 +1,7 @@
 """Structs: fields at sequential unpadded offsets in declaration order; value semantics."""
 
 from ir.errors import IRError
-from ir.ir import IRBinOp, IRConst, IRStore, IRLoad, IRLocalAddress, IRCall
+from ir.ir import IRNullCheck, IRBinOp, IRConst, IRStore, IRLoad, IRLocalAddress, IRCall
 from ir.utils import COMPOSITE_KINDS, type_of
 from typesys import SUM_TYPE_TAG_WIDTH, type_byte_width
 from parser import Node, Variable, Field, Index, Call, Unary
@@ -19,8 +19,9 @@ class StructsMixin:
             offset += type_byte_width(field_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
         raise IRError(f"Struct '{struct_name}' has no field '{field_name}'")
 
-    def _ir_struct_address(self, expr: Node) -> tuple[list, object]:
-        """Address of a struct-typed expression."""
+    def _ir_struct_address(self, expr: Node, payload: bool = False) -> tuple[list, object]:
+        """Address of a struct-typed expression. A variable narrowed to a pointer variant is followed
+        (it is the base of a field access) unless `payload` asks for the address of the variant itself."""
         if isinstance(expr, (Field, Index)) and expr.resolved_type is not None and expr.resolved_type.kind == TypeKind.POINTER:
             # Auto-deref a pointer-typed field base.
             return self._ir_pointer(expr)
@@ -56,6 +57,11 @@ class StructsMixin:
                     dst=payload_addr, op=BinaryOp.ADD,
                     left=base_addr, right=IRConst(SUM_TYPE_TAG_WIDTH, Type.INT64),
                 ))
+                if narrowed_type.kind == TypeKind.POINTER and not payload:
+                    # Narrowed to a pointer variant (`m.x` with `m is *P`): auto-deref the pointer it holds.
+                    pointer = self.ir_program.ids.new_temp(narrowed_type)
+                    ir += [IRLoad(dst=pointer, address=payload_addr), IRNullCheck(pointer)]
+                    return ir, pointer
                 return ir, payload_addr
             return ir, base_addr
         if isinstance(expr, Field):

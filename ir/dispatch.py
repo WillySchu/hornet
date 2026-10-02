@@ -47,7 +47,7 @@ class DispatchMixin:
             slot_type = self._local_type(expr)
             if slot_type.kind == TypeKind.SUM and expr.resolved_type is not None and expr.resolved_type != slot_type:
                 # A narrowed sum variable's Temp holds the whole sum; load the payload through its address.
-                addr_ir, addr_value = self._ir_struct_address(expr)
+                addr_ir, addr_value = self._ir_struct_address(expr, payload=True)
                 return self._ir_load(addr_ir, addr_value, expr.resolved_type)
             if self._is_heap_allocated(self._local_decl_id(expr), slot_type):
                 # Heap-promoted: the Temp holds a pointer.
@@ -148,6 +148,9 @@ class DispatchMixin:
             if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
                 return self._ir_string_compare(expr)
         if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
+            if Type.NONE in (type_of(expr.left), type_of(expr.right)) and TypeKind.SUM in (
+                    type_of(expr.left).kind, type_of(expr.right).kind):
+                return self._ir_sum_none_comparison(expr)
             if type_of(expr.left).kind == TypeKind.SLICE or type_of(expr.right).kind == TypeKind.SLICE:
                 result = self._ir_slice_none_comparison(expr)
                 if result is None:

@@ -235,6 +235,9 @@ static void hornet_stringify(
             hornet_stringify(payload_addr, variant_desc, 1, buf);
             break;
         }
+        case HORNET_TYPEDESC_NONE:
+            hornet_buf_append_cstr(buf, "none");  // a sum type's `none` variant
+            break;
         case HORNET_TYPEDESC_POINTER: {
             // Prints the address, not the pointee.
             void *value = read_ptr(value_addr);

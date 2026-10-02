@@ -4536,7 +4536,7 @@ class TestSumTypes:
             "\n"
             "def int main():\n"
             "    return 0\n",
-            match="isn't a declared struct or a valid scalar/str/array/slice/pointer/dict type",
+            match="isn't a declared struct, `none`, or a valid scalar/str/array/slice/pointer/dict type",
         )
 
     def test_duplicate_variant_is_rejected(self):
@@ -12349,7 +12349,7 @@ class TestContainerVariants:
 
     def test_a_non_type_variant_names_what_is_allowed(self):
         assert_program_semantic_error("type R is nope | int\ndef int main():\n    return 0\n",
-                                      match="valid scalar/str/array/slice/pointer/dict type")
+                                      match="`none`, or a valid scalar/str/array/slice/pointer/dict type")
 
 
 class TestDictReferenceSemantics:
@@ -12420,6 +12420,67 @@ class TestDictReferenceSemantics:
             "def dict[int]*int f():\n    dict[int]*int d\n    int x = 41\n    d[0] = &x\n    return d\n"
             "def int main():\n    dict[int]*int d = f()\n    clobber(1)\n    print(*d[0])\n    return 0\n",
             "41\n")
+
+
+class TestNoneVariant:
+    """`none` as a payload-free sum-type variant, e.g. `int | none` for an optional int."""
+
+    pytestmark = GCC_SKIP
+
+    def test_returning_testing_and_printing_none(self):
+        assert_program_stdout(
+            "type MaybeInt is int | none\n"
+            "def MaybeInt find(int k):\n    if k > 0:\n        return k\n    return none\n"
+            "def int main():\n"
+            "    MaybeInt r = find(0)\n"
+            "    print(r == none)\n    print(find(2) != none)\n"
+            "    if r is none:\n        print('missing')\n"
+            "    match find(3) as v:\n        is int:\n            print(v + 1)\n        is none:\n            print(0)\n"
+            "    print(find(5))\n    print(r)\n"
+            "    r = 7\n    print(r)\n    r = none\n    print(r)\n"
+            "    return 0\n",
+            "true\ntrue\nmissing\n4\n5\nnone\n7\nnone\n")
+
+    def test_none_in_containers(self):
+        assert_program_stdout(
+            "type Opt is str | none\n"
+            "def int main():\n"
+            "    []Opt os = ['a', none]\n    os = append(os, none)\n"
+            "    int missing = 0\n    for o in os:\n        if o == none:\n            missing += 1\n"
+            "    print(missing)\n    print(os)\n"
+            "    dict[str]Opt d\n    d['k'] = none\n    print(d)\n"
+            "    return 0\n",
+            "2\n[]Opt['a', none, none]\ndict[str]Opt{'k': none}\n")
+
+    def test_an_optional_pointer(self):
+        # Also: a field access through a variable narrowed to a pointer variant writes through the pointer.
+        assert_program_stdout(
+            "type P struct:\n    int x\ntype MaybeP is *P | none\n"
+            "def MaybeP find([]P ps, int x):\n    for i, p in ps:\n        if p.x == x:\n            return &ps[i]\n"
+            "    return none\n"
+            "def int main():\n    []P ps = [P(1), P(2)]\n    MaybeP m = find(ps, 2)\n"
+            "    if m is *P:\n        m.x = 20\n    print(ps[1].x)\n    print(find(ps, 9) == none)\n    return 0\n",
+            "20\ntrue\n")
+
+    def test_a_slice_variant_and_none_are_different_values(self):
+        assert_program_stdout(
+            "type S is []int | none\n"
+            "def int main():\n    S a = none\n    S b = []int[]\n    print(a == none)\n    print(b == none)\n"
+            "    return 0\n",
+            "true\nfalse\n")
+
+    @pytest.mark.parametrize("source,match", [
+        ("type R is int | str\ndef int main():\n    R r = none\n    return 0\n", "none"),
+        ("type R is int | str\ndef int main():\n    R r = 1\n    print(r == none)\n    return 0\n",
+         "R has no `none` variant, so it is never none"),
+        ("type R is int | str\ndef int main():\n    R r = 1\n    if r is none:\n        return 1\n    return 0\n",
+         "not one of"),
+        ("type R is none | int | none\ndef int main():\n    return 0\n", "more than once"),
+        ("type R is int | none\ndef int main():\n    R r = 1\n    match r:\n        is int:\n            return 1\n"
+         "    return 0\n", "missing: none"),
+    ])
+    def test_rejected(self, source, match):
+        assert_program_semantic_error(source, match=match)
 
 
 class TestStatementsEndTheirLine:

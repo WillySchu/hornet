@@ -35,6 +35,7 @@ _TYPEDESC_SUM = 9
 _TYPEDESC_POINTER = 10
 _TYPEDESC_DICT = 11
 _TYPEDESC_INT32 = 12
+_TYPEDESC_NONE = 13  # a sum type's `none` variant
 
 
 class StringsMixin:
@@ -91,6 +92,8 @@ class StringsMixin:
                 for variant_type in sum_type_info.variants
             ]
             self.ir_program.type_descriptors.append((label, [_TYPEDESC_SUM, len(variant_desc_labels)] + variant_desc_labels))
+        elif t.kind == TypeKind.NONE:
+            self.ir_program.type_descriptors.append((label, [_TYPEDESC_NONE]))
         elif t.kind == TypeKind.POINTER:
             # [tag]; pointers print as addresses.
             self.ir_program.type_descriptors.append((label, [_TYPEDESC_POINTER]))

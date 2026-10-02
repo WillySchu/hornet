@@ -3540,3 +3540,9 @@ def test_dict_types_as_variants_and_in_is_checks():
     prog = _parse_program("type R is dict[str]int | E\ndef int main():\n    if r is dict[str]int:\n        return 1\n    return 0\n")
     assert prog.sum_types[0].variants[0] == parser.DictTypeExpr(key_type='str', value_type='int')
     assert prog.functions[0].body[0].condition.type_name == parser.DictTypeExpr(key_type='str', value_type='int')
+
+
+def test_none_as_a_variant_and_in_is_checks():
+    prog = _parse_program("type R is int | none\ndef int main():\n    if r is none:\n        return 1\n    return 0\n")
+    assert prog.sum_types[0].variants == ['int', 'none']
+    assert prog.functions[0].body[0].condition.type_name == 'none'

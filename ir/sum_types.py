@@ -6,7 +6,7 @@ from ir.errors import IRError
 from ir.ir import IRBinOp, IRCall, IRConst, IRLoad, IRLocalAddress, IRStore
 from ir.utils import COMPOSITE_KINDS, type_of
 from typesys import SUM_TYPE_TAG_WIDTH, type_byte_width
-from parser import IsCheck, Node, Variable
+from parser import Call, IsCheck, Node, Variable
 from ops import BinaryOp
 from typesys import Type
 
@@ -26,6 +26,8 @@ class SumTypesMixin:
             left=dst_address, right=IRConst(SUM_TYPE_TAG_WIDTH, Type.INT64),
         )]
 
+        if source_type == Type.NONE:
+            return tag_ir  # the `none` variant has no payload
         if source_type.kind in COMPOSITE_KINDS:
             payload_ir = self._ir_write_composite_value_into(payload_addr, value_expr, source_type)
             if payload_ir is None:
@@ -49,6 +51,22 @@ class SumTypesMixin:
         if write_ir is None:
             return None
         return addr_ir + write_ir, addr
+
+    def _ir_sum_none_comparison(self, expr) -> tuple[list, object]:
+        """`x == none` / `x != none` for a sum with a `none` variant: compare the tag."""
+        sum_expr = expr.right if type_of(expr.left) == Type.NONE else expr.left
+        sum_type = type_of(sum_expr)
+        none_tag = self.ir_program.sum_type_registry[sum_type.sum_type_name].variants.index(Type.NONE)
+        if isinstance(sum_expr, Call):
+            result = self._ir_materialize_composite_call(sum_expr, sum_type)
+        else:
+            result = self._ir_struct_address(sum_expr)
+        if result is None:
+            raise IRError(f"No address for a sum compared with none: {sum_expr!r}")
+        addr_ir, address = result
+        tag, cmp = self.ir_program.ids.new_temp(Type.INT32), self.ir_program.ids.new_temp(Type.BOOL)
+        return addr_ir + [IRLoad(dst=tag, address=address),
+                          IRBinOp(dst=cmp, op=expr.op, left=tag, right=IRConst(none_tag, Type.INT32))], cmp
 
     def _ir_is_check(self, expr: IsCheck) -> tuple[list, object]:
         """`x is T`: compare the tag."""

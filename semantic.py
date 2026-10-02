@@ -120,6 +120,8 @@ def type_from_name(
         return Type(TypeKind.DICT, key_type=key_type, element_type=value_type)
     if type_expr in _TYPE_NAMES:
         return _TYPE_NAMES[type_expr]
+    if type_expr == 'none':  # only a sum type's variant, or the type an `is` check narrows to
+        return Type.NONE
     if type_expr in aliases:
         return aliases[type_expr]
     if type_expr in structs:
@@ -586,7 +588,7 @@ class SemanticAnalyzer:
                     raise SemanticError(
                         f"Sum type '{std.name}' names '{variant_name}' as "
                         f"a variant, but '{variant_name}' isn't a declared "
-                        f"struct or a valid scalar/str/array/slice/pointer/dict "
+                        f"struct, `none`, or a valid scalar/str/array/slice/pointer/dict "
                         f"type",
                         std,
                     )
@@ -1963,6 +1965,13 @@ class SemanticAnalyzer:
             )
             if none_vs_nilable:
                 return Type.BOOL
+            # A sum with a `none` variant: `x == none` is shorthand for `x is none`.
+            for side, other in ((left_type, right_type), (right_type, left_type)):
+                if other == Type.NONE and side.kind == TypeKind.SUM:
+                    if Type.NONE not in self.sum_types[side.sum_type_name].variants:
+                        raise SemanticError(
+                            f"{side} has no `none` variant, so it is never none", expr)
+                    return Type.BOOL
             if Type.NONE in (left_type, right_type) and TypeKind.DICT in (left_type.kind, right_type.kind):
                 raise SemanticError("A dict is never none -- check 'len(d) == 0' for an empty one", expr)
 

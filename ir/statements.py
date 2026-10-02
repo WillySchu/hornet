@@ -59,7 +59,7 @@ class StatementsMixin:
             if not is_composite_return:
                 return self._ir_return(stmt.value)
             # `return none` (slice).
-            if isinstance(stmt.value, NoneLiteral):
+            if isinstance(stmt.value, NoneLiteral) and ir_fn.return_type.kind == TypeKind.SLICE:
                 hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr(ir_fn)
                 nil_ir, ptr_value, len_value, cap_value = self._ir_nil_slice()
                 write_ir = self._ir_write_slice_descriptor_into_address(hidden_ptr, ptr_value, len_value, cap_value)

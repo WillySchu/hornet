@@ -103,6 +103,8 @@ def type_byte_width(t: Type, structs: dict[str, StructInfo], sum_types: dict) ->
         return SUM_TYPE_TAG_WIDTH + max(variant_widths)
     if t.kind == TypeKind.POINTER:
         return 8  # pointer
+    if t.kind == TypeKind.NONE:
+        return 0  # a sum type's `none` variant: the tag alone
     if t.kind == TypeKind.DICT:
         return 8  # a pointer to the shared header: copies alias (ir/dicts.py)
     return 4  # INT32, BOOL
