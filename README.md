@@ -63,9 +63,11 @@ python3 compile.py program.ht
 
 A generated program that uses runtime functions such as `print` must also be linked with `runtime/runtime.c`. `build.py` handles this automatically.
 
+`--dump-typed` prints the program's typed tree (see [Compiler Architecture](#compiler-architecture)) instead of assembly.
+
 ### Errors
 
-Compile errors are reported as `file:line:col: error: message` with the source line and a caret; several semantic errors can be reported in one run. Both tools exit with status 1 for errors in the program and 2 for internal compiler errors. `--traceback` shows the Python traceback instead.
+Compile errors are reported as `file:line:col: error: message` with the source line and a caret; several semantic errors can be reported in one run. A program built into an executable must define `main`. Both tools exit with status 1 for errors in the program and 2 for internal compiler errors. `--traceback` shows the Python traceback instead.
 
 ### Testing
 
@@ -97,7 +99,7 @@ python3 build.py tools/hfmt/main.ht -o hfmt
 ./hfmt --tokens file.ht        # dump tokens
 ```
 
-It normalizes whitespace only and keeps line breaks: 4-space indentation (plus 4 per open bracket on continuation lines), canonical spacing around operators, commas, and colons, two spaces before an inline comment and one after `#`, at most one blank line in a row, and exactly one blank line around multi-line top-level definitions (consecutive one-line declarations stay together). The repository's own `.ht` files are kept formatted by the test suite.
+It keeps line breaks and normalizes the rest: 4-space indentation (plus 4 per open bracket on continuation lines), canonical spacing around operators, commas, and colons, two spaces before an inline comment and one after its `#`s (`##header` becomes `## header`), at most one blank line in a row, and exactly one blank line around multi-line top-level definitions (consecutive one-line declarations stay together). A list whose closing bracket is on its own line gets a trailing comma; one closed on the same line loses it. Flags may appear anywhere among the arguments. The repository's own `.ht` files are kept formatted by the test suite.
 
 ### Benchmarks
 
@@ -124,13 +126,13 @@ Hornet currently provides:
 * Nominal structs, methods, and pointer receivers
 * Type aliases and compile-time constants
 * Single-level pointers
-* Tagged sum types
+* Tagged sum types, including a payload-free `none` variant and recursive types
 * `if`, `elif`, `else`, and `match`
 * `while` loops
 * C-style `for` loops
 * `for ... in ...` iteration over arrays, slices, dictionaries, and strings
 * `break` and `continue`
-* Dictionaries with hashing, deletion, membership, and iteration
+* Dictionaries with hashing, deletion, membership, and iteration; copies share one table
 * Explicit integer casts
 * Arithmetic, comparison, logical, bitwise, and membership operators
 * Compound assignment
@@ -208,7 +210,7 @@ Strings use single quotes:
 str message = 'hello'
 ```
 
-Strings are byte-oriented rather than a Unicode text abstraction. String literals support the language's escape syntax, including `\n`, `\t`, `\r`, `\0`, escaped quotes, escaped backslashes, and `\xNN` byte escapes.
+Strings are byte-oriented rather than a Unicode text abstraction. String literals support the language's escape syntax, including `\n`, `\t`, `\r`, `\0`, escaped quotes, escaped backslashes, and `\xNN` byte escapes. A literal ends on the line it starts; write `\n` for a newline.
 
 String concatenation uses `+`:
 
@@ -322,7 +324,25 @@ type Square struct:
 type Shape is Circle | Square
 ```
 
-A variant may be a struct, scalar, `str`, array, slice, dictionary, or pointer type, but not another sum type. A sum-typed variable has no zero value, so it needs an initializer.
+A variant may be a struct, scalar, `str`, array, slice, dictionary, or pointer type, or `none`, a variant with no payload; it can't be another sum type. A sum's zero value is its `none` variant. A sum without one has no zero value, so a variable of it (or a struct or array containing it) needs an initializer, and named construction can't omit such a field.
+
+Struct fields may have sum types, so types can be recursive, through a pointer, slice, or dictionary. Where a pointer to a sum is expected, `&Variant(...)` creates a new value of the sum, on the heap, holding that variant:
+
+```hornet
+type Num struct:
+    int v
+
+type Bin struct:
+    str op
+    *Expr left
+    *Expr right
+
+type Expr is Num | Bin | none
+
+Expr e = Bin('+', &Num(1), &Bin('*', &Num(2), &Num(3)))
+```
+
+A type that contains itself by value has no finite size and is rejected.
 
 The representation uses a discriminant and payload storage for the largest variant.
 
@@ -352,6 +372,8 @@ str
 
 Values may be any otherwise-supported Hornet type.
 
+A dictionary value refers to its table: assigning or passing a dictionary shares it, so a change through any copy is seen through all of them. A dictionary is never `none`.
+
 ---
 
 # Variables and Scope
@@ -372,7 +394,7 @@ bool finished = false
 str message = 'hello'
 ```
 
-Without one, a variable holds its type's zero value: `0`, `false`, `''`, `none` for pointers, slices, and dictionaries, and zeroed arrays and structs. A `none` slice or dictionary behaves as empty, and a `none` dictionary can be written to. Sum types have no zero value.
+Without one, a variable holds its type's zero value: `0`, `false`, `''`, `none` for pointers, an empty slice, a new empty dictionary, the `none` variant for a sum that has one, and arrays and structs of zero values. A sum without a `none` variant has no zero value.
 
 Blocks introduce lexical scopes, and shadowing is allowed in nested scopes:
 
@@ -421,6 +443,8 @@ The return type may be omitted. An omitted return type is the language's no-valu
 def greet(str name):
     print('hello ' + name)
 ```
+
+A trailing comma is allowed after the last parameter or argument, and after the last element or entry of an array, slice, or dictionary literal.
 
 Recursive functions are supported:
 
@@ -531,17 +555,16 @@ Slices can be formed from arrays or slices:
 []int tail = values[2:]
 ```
 
-A slice literal uses an explicit element type:
+A slice literal uses an explicit element type, which may be omitted where a slice type is expected (a declaration, assignment, argument, return value, field, or element):
 
 ```hornet
 []int values = []int[1, 2, 3]
+[]int more = [4, 5]
 ```
 
-The nil/zero slice is written `none`:
+A slice is never `none`. An uninitialized slice is empty, as are `[]` and `[]int[]`; test with `len(values) == 0`.
 
-```hornet
-[]int values = none
-```
+A typed literal whose element type is a pointer to a named type after two or more fixed sizes, such as `[2][1]*P[...]`, has the same tokens as an indexed literal multiplied by an indexed value, and is read as the multiplication. Give the variable that type and use an untyped literal instead.
 
 Indexing is bounds checked at runtime.
 
@@ -624,7 +647,7 @@ for int i = 0; i < 10; i += 1:
     print(i)
 ```
 
-The initialization clause is currently a variable declaration, and the increment clause is currently an assignment.
+The initialization clause is currently a variable declaration, and the increment clause is currently an assignment. A loop variable whose address may outlive an iteration gets new storage each iteration.
 
 ## `for ... in ...`
 
@@ -684,7 +707,7 @@ Each iteration has its own bindings, so taking a binding's address is allowed. R
 <  >  <=  >=  ==  !=
 ```
 
-Ordering applies to integers of the same type. Equality applies to integers, `bool`, `str`, pointers, and arrays and structs of comparable types; slices, pointers, and dictionaries can also be compared with `none`.
+Ordering applies to integers of the same type. Equality applies to integers, `bool`, `str`, pointers, and arrays and structs of comparable types. Pointers can be compared with `none`, and so can a sum with a `none` variant (`x == none` means `x is none`); slices and dictionaries are never `none`.
 
 ### Membership
 
@@ -750,7 +773,9 @@ match shape as s:
         print(s.side)
 ```
 
-`match` must be exhaustive. A `match` whose arms all return counts as returning; an arm ending in a call such as `panic` does not, so a `return` is still needed after it.
+The subject of `... as NAME` can be any sum-typed expression, such as a field, an element, or `*p`; `NAME` is a copy of it, so assigning to its fields doesn't change the subject. A `none` variant is tested with `is none`.
+
+`match` must be exhaustive, or end with `else:`. A `match` whose arms all return counts as returning; an arm ending in a call such as `panic` does not, so a `return` is still needed after it.
 
 More general flow-sensitive narrowing through arbitrary boolean expressions and control-flow paths is still future work.
 
@@ -941,7 +966,7 @@ str c = pad_left('7', 3, "0")   # '007'
 A growable buffer, and searching and splitting helpers:
 
 ```hornet
-Builder b = Builder(none)
+Builder b
 b.write('n=')
 b.write_int(42)
 b.write_byte("!")
@@ -995,12 +1020,14 @@ The native runtime is located in `runtime/runtime.c` and is compiled separately 
 It currently provides language-level services including:
 
 * `print` and recursive value formatting
-* `hornet_panic` for runtime failures
+* `hornet_panic`, which flushes standard output, writes the message to standard error, and aborts
 * `hornet_slice_grow`, which copies a slice into a larger backing store
 * `hornet_bytes` for `bytes(s)`
 * dictionary hash tables, hashed with FNV-1a (`hornet_hash_bytes`)
-* runtime type descriptors (`hornet_typedesc_tags.h` is generated from `ir/strings.py` by `runtime/generate_typedesc_header.py`)
+* runtime type descriptors (`hornet_typedesc_tags.h` is generated from `ir/typedesc.py` by `runtime/generate_typedesc_header.py`)
 * argument access, output, file creation, exit, and OS error messages for `stdlib/os.ht` (`hornet_argv_get`, `hornet_write_fd`, `hornet_open_write`, `hornet_exit`, `hornet_error_message`)
+
+Runtime checks panic with a message: array, slice, and string bounds; division by zero and `MIN / -1`; dereferencing `none`; a missing dictionary key; and reallocating a slice or dictionary being iterated with `for ... in`.
 
 The runtime is deliberately separate from the native backends. The compiler is responsible for semantic operations such as type checking, aggregate layout, address calculation, and bounds-check generation; the runtime implements selected algorithms and services that are better expressed as ordinary native code.
 
@@ -1025,13 +1052,10 @@ Hornet source
 Module discovery and merging ── one AST, names mangled `module$name`
      │
      ▼
- Desugaring ────── methods become free functions
+Semantic analysis ── checks the AST, builds the typed tree
      │
      ▼
-Semantic analysis ── types and symbols annotated on the AST
-     │
-     ▼
-IR construction ── escape analysis, null and division checks
+IR construction ── from the typed tree; escape analysis, null and division checks
      │
      ▼
  IRProgram (verified)
@@ -1060,9 +1084,11 @@ Hornet runtime   external libraries
        native executable
 ```
 
+Semantic analysis never changes the parser's AST: it records what it learns (types, the declaration each name refers to, narrowing) by node number, and from that builds the typed tree (`typed_ast.py`), the only input to later stages. In the typed tree every node has one meaning and a concrete type: names refer to symbols, the parser's overloaded forms are split (calls, struct literals, and builtins; array, slice, string, and dictionary indexing), each implicit operation is a node (widening into a sum, `&Variant(...)`, a literal becoming a slice, zero values), methods are ordinary functions, and `match` is a node of its own. `compile.py --dump-typed` prints it.
+
 The frontend constructs a complete `IRProgram` before a backend begins lowering it. The IR is independent of any target: a function's incoming arguments are an ordered list of word-sized temporaries in Hornet's own calling convention (a composite return value's destination address first, then one word per parameter, except two for `str` and three for slices, with arrays, structs, sum types, and dicts passed by address), and where each word physically arrives is decided by the backend. Lowering never modifies the IR.
 
-Escape analysis decides which locals must live on the heap; heap storage comes from `malloc` and is never freed. It is a flow-insensitive points-to analysis per function, run on the analyzed AST, with per-parameter escape summaries so that passing `&x` to a function that doesn't keep the pointer leaves `x` on the stack.
+Escape analysis decides which locals must live on the heap; heap storage comes from `malloc` and is never freed. It is a flow-insensitive points-to analysis per function, run on the typed tree, with per-parameter escape summaries so that passing `&x` to a function that doesn't keep the pointer leaves `x` on the stack.
 
 The IR optimizer repeats constant folding, identity simplification, constant-branch and unreachable-block removal, copy and constant propagation within blocks, copy coalescing, and dead-code elimination until nothing changes. `ir/cfg.py` provides the shared control-flow and liveness analysis.
 
@@ -1077,18 +1103,19 @@ Some IR operations deliberately lower to runtime calls. A runtime operation does
 ```text
 lexer.py           Lexical analysis
 parser.py          AST construction
-semantic.py        Semantic analysis and type checking
-desugar.py         Methods to free functions
+semantic.py        Semantic analysis: checking, and building the typed tree
+typed_ast.py       The typed tree and its text dump
 modules.py         Module discovery
 merge.py           Module merging and name resolution
-escape_analysis.py Escape analysis
+escape_analysis.py Escape analysis, on the typed tree
 folding.py         Compile-time integer arithmetic (constants and IR folding)
 typesys.py         Types and type layout
 ops.py             Operator enums
 symbols.py         Symbol table (one Symbol per declared variable)
 diagnostics.py     Error types and error reporting
 
-ir/                Intermediate representation and IR construction
+ir/                Intermediate representation, IR construction from the typed tree
+                   (typed_builder.py), type descriptors, checks, and verification
 optimize/          IR optimization passes
 
 target.py          Compilation targets (arch-os)
@@ -1170,7 +1197,8 @@ Hornet is still experimental. Some notable limitations are:
 * `for ... in ...` can't iterate a function-call result or a dereference; assign it to a variable first.
 * `is` is limited to dedicated `if`/`elif` condition shapes rather than being a general boolean expression.
 * Sum-type narrowing does not yet fully propagate through arbitrary control flow or `else` branches.
-* A sum type can't be a variant of another sum type, and a struct field can't have a sum type, even behind a pointer or slice, so recursive data such as an AST can't be expressed.
+* A sum type can't be a variant of another sum type.
+* A typed literal of pointers to a named type with two or more fixed sizes (`[2][1]*P[...]`) can't be written inline; see [Arrays and Slices](#arrays-and-slices).
 * There are no enums; integer constants stand in for them.
 * There is no no-return type, so a `return` is still needed after a call to `panic` or `exit` that ends a function.
 * Sum-type equality is not implemented.
@@ -1196,7 +1224,7 @@ Hornet is still experimental. Some notable limitations are:
 
 A longer-term goal is to rewrite the compiler itself in Hornet.
 
-The current language already has most of the structural features needed by a compiler implementation: structs, arrays, slices, dictionaries, pointers, sum types, pattern matching, modules, FFI, and native compilation. The main gap is recursive data: a struct field can't yet have a sum type, so an AST can't be expressed.
+The current language already has the structural features needed by a compiler implementation: structs, arrays, slices, dictionaries, pointers, recursive sum types (so an AST can be expressed), pattern matching, modules, FFI, and native compilation. The Python compiler's typed tree, printed by `compile.py --dump-typed`, is the intended point of comparison between the two implementations.
 
 The standard library now covers file and stream I/O, process exit, string building and searching, integer formatting, and an error convention. The formatter in `tools/hfmt` is the first substantial tool written in Hornet; it includes a Hornet lexer that is tested token-for-token against the compiler's own. The next step is porting the compiler itself, starting from that lexer.
 
