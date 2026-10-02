@@ -69,7 +69,7 @@ _STACK_ARRAY_LIMIT_BYTES = 16384
 
 
 def is_heap_allocated(t: Type, structs: dict[str, StructInfo], sum_types: dict) -> bool:
-    """Size-based promotion only; see IRFunctionBuilder._is_heap_allocated."""
+    """Size-based promotion only; escape analysis adds the rest (TypedFunctionBuilder.heap)."""
     return t.kind in (TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM) and type_byte_width(t, structs, sum_types) > _STACK_ARRAY_LIMIT_BYTES
 
 

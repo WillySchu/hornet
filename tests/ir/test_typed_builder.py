@@ -1,4 +1,4 @@
-"""ir/typed_builder.py: IR built from the typed tree, for the construct families ported so far."""
+"""ir/typed_builder.py: IR built from the typed tree."""
 
 import pytest
 
@@ -43,44 +43,32 @@ def int main(int argc, *byte argv):
 """
 
 
-def _typed_functions(source: str) -> list:
+def _built_functions(source: str) -> list:
     program = _parse(source)
     analyze(program)
-    return build_ir_program(program, typed=True).typed_functions
+    return [fn.name for fn in build_ir_program(program).functions]
 
 
-def test_scalar_functions_are_built_from_the_typed_tree():
-    assert _typed_functions(SCALARS) == ['fib', 'noisy', 'leak', 'main']
+def test_scalar_functions_are_built():
+    assert _built_functions(SCALARS) == ['fib', 'noisy', 'leak', 'main']
 
 
-def test_functions_using_unported_constructs_fall_back(monkeypatch):
-    """A function the typed builder can't handle is built by the parser-tree builder instead."""
+def test_a_shape_with_no_rule_is_a_compiler_error(monkeypatch):
+    from ir.errors import IRError
     from ir.typed_builder import NotYetPorted, TypedFunctionBuilder
-    build = TypedFunctionBuilder.build
 
-    def refuse_main(self, fn, parser_fn):
-        if fn.name == 'main':
-            raise NotYetPorted("for this test")
-        return build(self, fn, parser_fn)
-    monkeypatch.setattr(TypedFunctionBuilder, 'build', refuse_main)
-    assert _typed_functions("def int f(int n):\n    return n\ndef int main():\n    return f(1)\n") == ['f']
+    def refuse(self, fn, parser_fn):
+        raise NotYetPorted("for this test")
+    monkeypatch.setattr(TypedFunctionBuilder, 'build', refuse)
+    with pytest.raises(IRError, match="No IR for main: for this test"):
+        _built_functions("def int main():\n    return 0\n")
 
 
 @GCC_SKIP
-def test_scalar_programs_run_correctly(monkeypatch):
-    monkeypatch.setenv('HORNET_TYPED_IR', '1')
+def test_scalar_programs_run_correctly():
     assert_program_stdout(SCALARS, "true\n0\nfalse\n3\ntrue\n0\n2\ntrue\n44\n-128\n618\n")
 
 
-@GCC_SKIP
-@pytest.mark.parametrize('seed', range(6))
-def test_typed_and_parser_tree_builders_agree(seed, monkeypatch):
-    """Arithmetic-heavy random functions: both builders must produce the same output."""
-    from tests.test_random_programs import Gen
-    from tests.test_compiler import compile_and_run
-    source, expected = Gen(seed).program()
-    monkeypatch.setenv('HORNET_TYPED_IR', '1')
-    assert compile_and_run(source).stdout == expected
 
 
 COMPOSITES = """\
@@ -134,14 +122,13 @@ def int main():
 """
 
 
-def test_composite_functions_are_built_from_the_typed_tree():
-    assert _typed_functions(COMPOSITES) == ['swap', 'evens', 'greet', 'eval', 'main']
+def test_composite_functions_are_built():
+    assert _built_functions(COMPOSITES) == ['swap', 'evens', 'greet', 'eval', 'main']
 
 
 @GCC_SKIP
-def test_composite_programs_run_correctly(monkeypatch):
+def test_composite_programs_run_correctly():
     # `p = P(p.y, p.x)` reads its own target: the old builder printed P(x: 2, y: 2).
-    monkeypatch.setenv('HORNET_TYPED_IR', '1')
     assert_program_stdout(COMPOSITES, "P(x: 2, y: 1)\nP(x: 1, y: 2)\n[3]P[P(x: 0, y: 0), P(x: 7, y: 0), P(x: 0, y: 0)]\n"
                                       "[]int[0, 2, 4]\n7\nhi bob!\ntrue\n7\n6\ntrue\n1\n")
 
@@ -190,27 +177,24 @@ def int main():
 """
 
 
-def test_container_functions_are_built_from_the_typed_tree():
-    assert _typed_functions(CONTAINERS) == ['count', 'main']
+def test_container_functions_are_built():
+    assert _built_functions(CONTAINERS) == ['count', 'main']
 
 
 @GCC_SKIP
-def test_container_programs_run_correctly(monkeypatch):
-    monkeypatch.setenv('HORNET_TYPED_IR', '1')
+def test_container_programs_run_correctly():
     assert_program_stdout(CONTAINERS, "21\n1\n5\n199\n2\nhey\ntrue\ntrue\ntrue\n296\n")
 
 
 @GCC_SKIP
-def test_iterating_over_a_slice_that_grows_panics(monkeypatch):
+def test_iterating_over_a_slice_that_grows_panics():
     from tests.test_compiler import assert_program_panics
-    monkeypatch.setenv('HORNET_TYPED_IR', '1')
     assert_program_panics("def int main():\n    []int s = [1, 2]\n    for x in s:\n        s = append(s, x)\n    return 0\n",
                           "for ... in: slice was reallocated (e.g. by append) during iteration")
 
 
 @GCC_SKIP
-def test_scalar_zero_values(monkeypatch):
+def test_scalar_zero_values():
     source = "def int main():\n    int x\n    bool b\n    *int p\n    print(x)\n    print(b)\n    print(p == none)\n    return 0\n"
-    assert _typed_functions(source) == ['main']
-    monkeypatch.setenv('HORNET_TYPED_IR', '1')
+    assert _built_functions(source) == ['main']
     assert_program_stdout(source, "0\nfalse\ntrue\n")

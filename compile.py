@@ -46,11 +46,7 @@ def main():
 def generate_asm(program, target=None) -> str:
     """Build IR from an analyzed Program, optimize, and lower to assembly for `target`
     (a Target, an `arch-os` string, or None for the default)."""
-    # The typed tree is built for every program while later stages move over to it, so any program
-    # it can't represent is found now; the IR is still built from the analyzed parser tree.
-    ir_program = build_ir_program(program)
-    elaborate(program)
-    return lower_to_asm(optimize(ir_program), as_target(target))
+    return lower_to_asm(optimize(build_ir_program(program)), as_target(target))
 
 
 def typed_tree(source: str) -> str:

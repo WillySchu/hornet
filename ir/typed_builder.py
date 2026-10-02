@@ -1,10 +1,5 @@
-"""IR from the typed tree (typed_ast.py). Being built one construct family at a time: a function
-using anything not yet ported raises NotYetPorted, and build_ir_program builds that function with
-the parser-tree builder (ir/builder.py) instead.
-
-Ported so far: scalars; strings; structs; arrays; sums (widening, narrowing, `match`, `&Variant`);
-slices except append; composite locals, parameters, arguments, and results; printing; and all
-control flow except for-in. Not yet: dicts, append, for-in, `in`.
+"""IR from the typed tree (typed_ast.py), one function at a time. NotYetPorted marks a tree shape
+with no rule: a compiler bug, since every shape elaboration produces is handled.
 
 Composite values live in memory: `address(e)` gives where one is (materializing a temporary if
 needed) and `write_into(dst, e)` stores one; a str is read as (ptr, len) and a slice as
@@ -13,6 +8,7 @@ needed) and `write_into(dst, e)` stores one; a str is read as (ptr, len) and a s
 
 import typed_ast as t
 from escape_analysis import analyze_array_escapes, is_heap_allocated
+from ir.typedesc import type_descriptor
 from ir.ir import (
     IRBinOp, IRBoundsCheck, IRBranch, IRCall, IRCast, IRConst, IRCopy, IRFunction, IRJump, IRLabel, IRLoad,
     IRLocalAddress, IRMove, IRNullCheck, IRReturn, IRSliceBoundsCheck, IRStaticDataAddress, IRStore, IRUnOp,
@@ -25,7 +21,7 @@ _SCALAR_KINDS = {TypeKind.INT, TypeKind.INT32, TypeKind.INT8, TypeKind.UINT8, Ty
 
 
 class NotYetPorted(Exception):
-    """The function uses a construct this builder doesn't handle yet."""
+    """A typed-tree shape with no IR rule."""
 
 
 def _scalar(type_: Type) -> bool:
@@ -46,10 +42,9 @@ _DICT_HEADER_SIZE = 32  # {buckets, count, tombstones, capacity}
 
 
 class TypedFunctionBuilder:
-    def __init__(self, ir_program, typedesc_source):
+    def __init__(self, ir_program):
         self.ir_program = ir_program
         self.ids = ir_program.ids
-        self.typedesc_source = typedesc_source  # builds type descriptors for print (shared with ir/strings.py)
 
     def build(self, fn: t.Function, parser_fn) -> IRFunction:
         if not _ported(fn.return_type):
@@ -485,6 +480,8 @@ class TypedFunctionBuilder:
         return [IRLoad(dst=ptr, address=address)] + ir + [IRLoad(dst=length, address=len_address)], ptr, length
 
     def str_value(self, e) -> tuple:
+        if isinstance(e, t.ZeroValue):
+            e = t.StrLit(Type.STR, '')
         if isinstance(e, t.StrLit):
             ptr, label = self.temp(), self.ids.new_label("str")
             self.ir_program.string_literals.append((label, e.value))
@@ -794,7 +791,7 @@ class TypedFunctionBuilder:
         else:
             raise NotYetPorted(f"print of {value_type}")
         desc = self.temp()
-        label = self.typedesc_source._get_or_build_type_descriptor(value_type, {})
+        label = type_descriptor(self.ir_program, value_type)
         return ir + [IRStaticDataAddress(dst=desc, label=label), IRCall(dst=None, name='hornet_print', args=[address, desc])]
 
     # -- loops

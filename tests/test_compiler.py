@@ -10982,17 +10982,15 @@ class TestTypedArrayLiterals:
             6,
         )
 
-    def test_non_literal_array_element_in_bare_statement_not_supported(self):
-        source = (
+    @pytest.mark.skipif(not GCC_AVAILABLE, reason="gcc not available")
+    def test_non_literal_array_element_in_bare_statement(self):
+        assert_program_exit_code(
             "def int main():\n"
             "    [3]int arr = [1, 2, 3]\n"
             "    [1][3]int[arr]\n"
-            "    return 0\n"
+            "    return arr[2]\n",
+            3,
         )
-        ast = _parse(source)
-        analyze(ast)
-        with pytest.raises(IRError, match="assign the literal to a variable first"):
-            generate_asm(ast, target=ASM_TARGET)
 
 
 class TestBoundsChecking:
@@ -17333,20 +17331,21 @@ class TestArraysOfStructs:
             match="elements must all be .*to match the declared element type",
         )
 
-    def test_bare_typed_struct_array_literal_statement_side_effect_is_still_rejected(self):
-        source = (
+    @pytest.mark.skipif(not GCC_AVAILABLE, reason="gcc not available")
+    def test_bare_typed_struct_array_literal_statement_evaluates_its_elements(self):
+        assert_program_stdout(
             "type Point struct:\n"
             "    int x\n"
             "    int y\n"
             "\n"
+            "def int f(int v):\n"
+            "    print(v)\n"
+            "    return v\n"
             "def int main():\n"
-            "    [2]Point[Point(1, 2), Point(3, 4)]\n"
-            "    return 0\n"
+            "    [2]Point[Point(f(1), 2), Point(3, f(4))]\n"
+            "    return 0\n",
+            "1\n4\n",
         )
-        ast = _parse(source)
-        analyze(ast)
-        with pytest.raises(IRError, match="assign the literal to a variable first"):
-            generate_asm(ast, target=ASM_TARGET)
 
     def test_single_element_array_literal_still_parses_as_untyped(self):
         assert_program_exit_code(

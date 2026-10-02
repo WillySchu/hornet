@@ -1,13 +1,9 @@
 """Tests for ir/utils.py and the typesys layout helpers."""
 
-import re
 
 import pytest
 
-import parser
 import semantic
-from ir.errors import IRError
-from ir.utils import COMPOSITE_KINDS, type_of
 from typesys import SUM_TYPE_TAG_WIDTH, leaf_type, type_byte_width
 
 
@@ -265,52 +261,3 @@ def test_leaf_type_stops_at_slices():
     t = semantic.Type(kind=semantic.TypeKind.ARRAY, element_type=semantic.Type(kind=semantic.TypeKind.SLICE))
     assert semantic.Type(kind=semantic.TypeKind.SLICE) == leaf_type(t)
 
-
-def test_type_of_no_type():
-    node = parser.Constant(value=1)
-
-    with pytest.raises(
-            IRError,
-            match=re.escape('Constant(value=1, resolved_type=None) has no resolved type -- semantic.analyze() must run'
-                            ' before codegen (see compile_to_asm)')
-    ):
-        type_of(node)
-
-
-def test_type_of_int():
-    node = parser.Constant(value=1, resolved_type=semantic.Type(kind=semantic.TypeKind.INT))
-
-    assert semantic.Type(kind=semantic.TypeKind.INT) == type_of(node)
-
-
-def test_type_of_array():
-    array_type = semantic.Type(
-        kind=semantic.TypeKind.ARRAY,
-        element_type=semantic.Type(
-            kind=semantic.TypeKind.SLICE,
-            element_type=semantic.Type(kind=semantic.TypeKind.INT),
-        ),
-        size=5,
-    )
-    node = parser.ArrayLiteral(
-        resolved_type=array_type
-    )
-    assert array_type == type_of(node)
-
-
-def test_composite_kinds_is_exactly_array_slice_struct_sum_str_dict():
-    """Pinned exactly, not just checked for a subset/superset: every
-    call site that switched to this shared constant (ir/statements.py,
-    ir/arrays_slices.py, ir/builder.py, ir/dispatch.py, ir/structs.py)
-    relies on it meaning precisely "composite, address-based value
-    type" -- no more, no less. str joined this set once it became a
-    16-byte {ptr, len} descriptor rather than a single 8-byte pointer
-    -- see ir/strings.py's own module docstring. dict joined it for
-    the identical reason slice did: a fixed-size {ptr, count, cap}
-    descriptor, address-based like every other member here, even
-    though what it points at (the bucket array) is managed very
-    differently from a slice's own backing array."""
-    assert COMPOSITE_KINDS == {
-        semantic.TypeKind.ARRAY, semantic.TypeKind.SLICE, semantic.TypeKind.STRUCT,
-        semantic.TypeKind.SUM, semantic.TypeKind.STR, semantic.TypeKind.DICT,
-    }

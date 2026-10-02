@@ -8,7 +8,6 @@ import pytest
 
 import desugar
 import escape_analysis as ea
-import ir.utils as ir_utils
 import parser
 import semantic
 from lexer import lex
@@ -85,52 +84,6 @@ def test_is_heap_allocated_array_str_heap():
 
 
 # TODO(will): Test Structs.
-
-
-def test_root_variable_name():
-    tcs = [
-        {
-            'expr': parser.VarDecl(name='name', var_type='str'),
-            'name': None
-        },
-        {
-            'expr': parser.Variable(name='sl'),
-            'name': 'sl'
-        },
-        {
-            'expr': parser.Index(array=parser.Variable(name='sl'), index=parser.Constant(1)),
-            'name': 'sl'
-        },
-        {
-            'expr': parser.Slice(array=parser.Variable(name='arr'), high=parser.Constant(3)),
-            'name': 'arr'
-        },
-        {
-            'expr': parser.Field(base=parser.Variable(name='st'), name='x'),
-            'name': 'st'
-        },
-        {
-            'expr': parser.Index(
-                array=parser.Slice(
-                    array=parser.Field(base=parser.Variable(name='st2'), name='x')
-                ),
-                index=parser.Constant(1),
-            ),
-            'name': 'st2'
-        },
-        {
-            'expr': parser.Index(
-                array=parser.Slice(
-                    array=parser.Field(base=parser.Call(name='st2'), name='x')
-                ),
-                index=parser.Constant(1),
-            ),
-            'name': None
-        },
-    ]
-    for tc in tcs:
-        root = ir_utils.root_variable(tc['expr'])
-        assert tc['name'] == (root.name if root is not None else None)
 
 
 def test_analyze_array_escapes_empty():
