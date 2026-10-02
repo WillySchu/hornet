@@ -19,7 +19,6 @@ from pathlib import Path
 
 import pytest
 
-from desugar import desugar_methods
 from lexer import lex
 from merge import merge_programs, MergeError
 from build import build_executable
@@ -190,7 +189,6 @@ def test_reference_to_unknown_qualifier_falls_through_as_ordinary_field_access()
         )
         entry_program, modules = discover_modules(entry)
         merged = merge_programs(entry_program, modules)
-        desugar_methods(merged)
         with pytest.raises(SemanticError):
             analyze(merged)
 
@@ -349,7 +347,6 @@ def test_method_call_with_named_kwargs_is_rejected():
         )
         entry_program, modules = discover_modules(entry)
         merged = merge_programs(entry_program, modules)
-        desugar_methods(merged)
         with pytest.raises(SemanticError, match="not supported for method calls"):
             analyze(merged)
 
@@ -539,7 +536,6 @@ def test_hidden_struct_in_qualified_narrowing_is_rejected():
         _write(tmpdir, "utils.ht", "def int helper():\n    return 1\n")
         entry_program, modules = discover_modules(entry)
         merged = merge_programs(entry_program, modules)
-        desugar_methods(merged)
         with pytest.raises(SemanticError):
             analyze(merged)
 
@@ -864,7 +860,6 @@ def test_intrinsic_colliding_with_a_struct_of_the_same_name_is_rejected():
         )
         entry_program, modules = discover_modules(entry)
         merged = merge_programs(entry_program, modules)
-        desugar_methods(merged)
         with pytest.raises(SemanticError, match="collides with a struct"):
             analyze(merged)
 
@@ -879,7 +874,6 @@ def test_intrinsic_colliding_with_an_already_declared_function_is_rejected():
         )
         entry_program, modules = discover_modules(entry)
         merged = merge_programs(entry_program, modules)
-        desugar_methods(merged)
         with pytest.raises(SemanticError, match="is already declared"):
             analyze(merged)
 

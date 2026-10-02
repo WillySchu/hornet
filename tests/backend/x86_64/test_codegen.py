@@ -16,7 +16,6 @@ import tempfile
 from pathlib import Path
 from typing import get_args
 
-import desugar
 import parser
 import semantic
 from lexer import lex
@@ -31,7 +30,6 @@ def _parse_and_analyze(source: str):
         src_path.write_text(source)
         tokens = lex(str(src_path))
         ast = parser.Parser(tokens).parse_program()
-        desugar.desugar_methods(ast)
         semantic.analyze(ast)
         return ast
 
@@ -170,7 +168,6 @@ def test_lowering_does_not_modify_the_ir():
     import copy
     from pathlib import Path
     from backend.x86_64.codegen import CodeGenerator
-    from desugar import desugar_methods
     from ir.program_builder import build_ir_program
     from merge import merge_programs
     from modules import discover_modules
@@ -179,7 +176,6 @@ def test_lowering_does_not_modify_the_ir():
     path = Path(__file__).resolve().parents[3] / 'benchmarks' / 'programs' / 'register_pressure.ht'
     entry, modules = discover_modules(str(path))
     program = merge_programs(entry, modules)
-    desugar_methods(program)
     analyze(program)
     ir_program = optimize(build_ir_program(program))
     before = copy.deepcopy([(f.slot_widths, f.slot_labels, f.temp_homes, f.body) for f in ir_program.functions])

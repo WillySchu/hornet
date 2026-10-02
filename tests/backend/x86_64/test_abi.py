@@ -13,7 +13,6 @@ from backend.x86_64.calling_convention import CALLEE_SAVED_REGISTERS
 from backend.x86_64.codegen import CodeGenerator
 from backend.x86_64.utils import as_qword_register
 from compile import compile_to_asm
-from desugar import desugar_methods
 from ir.program_builder import build_ir_program
 from merge import merge_programs
 from modules import discover_modules
@@ -28,7 +27,6 @@ PROGRAMS = sorted((ROOT / 'benchmarks' / 'programs').glob('*.ht')) + sorted((ROO
 def _asm_program(path: Path):
     entry, modules = discover_modules(str(path))
     program = merge_programs(entry, modules)
-    desugar_methods(program)
     analyze(program)
     return CodeGenerator().generate(optimize(build_ir_program(program)))
 

@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 import pytest
 
-import desugar
 import escape_analysis as ea
 import parser
 import semantic
@@ -20,7 +19,6 @@ def parse_and_analyze(source: str):
         src_path.write_text(source)
         tokens = lex(str(src_path))
         ast = parser.Parser(tokens).parse_program()
-        desugar.desugar_methods(ast)
         typed = semantic.analyze(ast)
         return SimpleNamespace(functions=list(typed.functions), struct_registry=ast.struct_registry,
                                symbols=ast.symbols)

@@ -15,7 +15,6 @@ isolated unit test of one function alone would never have caught."""
 import tempfile
 from pathlib import Path
 
-import desugar
 import parser
 import semantic
 from lexer import lex
@@ -30,7 +29,6 @@ def _build(source: str):
         src_path.write_text(source)
         tokens = lex(str(src_path))
         ast = parser.Parser(tokens).parse_program()
-        desugar.desugar_methods(ast)
         semantic.analyze(ast)
         return build_ir_program(ast)
 

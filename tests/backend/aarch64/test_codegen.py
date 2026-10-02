@@ -13,7 +13,6 @@ from backend.aarch64.lowering import Selector
 from backend.common.frame import Frame
 from build import c_compiler, can_run, run_prefix
 from compile import compile_to_asm
-from desugar import desugar_methods
 from ir.ir import IRFunction
 from ir.program_builder import build_ir_program
 from merge import merge_programs
@@ -88,7 +87,6 @@ PROGRAMS = sorted((ROOT / 'benchmarks' / 'programs').glob('*.ht')) + sorted((ROO
 def _asm_program(path: Path):
     entry, modules = discover_modules(str(path))
     program = merge_programs(entry, modules)
-    desugar_methods(program)
     analyze(program)
     return CodeGenerator().generate(optimize(build_ir_program(program)))
 

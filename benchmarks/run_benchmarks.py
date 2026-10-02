@@ -14,7 +14,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from desugar import desugar_methods
 from merge import merge_programs
 from modules import discover_modules
 from semantic import analyze
@@ -90,7 +89,6 @@ def run_one(ht_path: Path, runs: int = TIMING_RUNS, icount: bool = False, target
     with tempfile.TemporaryDirectory() as tmpdir:
         entry, modules = discover_modules(str(ht_path))
         program = merge_programs(entry, modules)
-        desugar_methods(program)
         analyze(program)
 
         asm_text, captured = _instrumented_generate(program, target)

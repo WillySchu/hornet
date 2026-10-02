@@ -1,4 +1,4 @@
-"""Merges discovered modules into the entry Program: mangles module declarations to `module$name` and resolves qualified references and visibility, so later passes see one flat Program. Runs before desugar/analyze."""
+"""Merges discovered modules into the entry Program: mangles module declarations to `module$name` and resolves qualified references and visibility, so later passes see one flat Program. Runs before semantic analysis."""
 
 import re
 from dataclasses import dataclass, fields

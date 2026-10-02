@@ -3021,16 +3021,13 @@ def test_match_with_call_subject_binds_only_the_first_arm():
         lexer.Token(lexer.TokenType.DEDENT, '', 6, 1),
         lexer.Token(lexer.TokenType.EOF, '', 6, 1),
     ]
-    outermost = parser.Parser(tokens).parse_match()
-    assert outermost.condition.variable_name == 's'
-    assert outermost.condition.type_name == 'Circle'
-    assert isinstance(outermost.condition.subject, parser.Call)
-    assert outermost.condition.subject.name == 'makeShape'
-
-    second_arm = outermost.else_body[0]
-    assert second_arm.condition.variable_name == 's'
-    assert second_arm.condition.type_name == 'Square'
-    assert second_arm.condition.subject is None
+    match = parser.Parser(tokens).parse_match()
+    assert match.variable_name == 's' and match.subject.name == 'makeShape'
+    first, _ = match.arms[0]
+    assert (first.variable_name, first.type_name) == ('s', 'Circle')
+    assert isinstance(first.subject, parser.Call)  # evaluated once, before the first arm's test
+    second, _ = match.arms[1]
+    assert (second.variable_name, second.type_name, second.subject) == ('s', 'Square', None)
 
 
 def test_while_condition_does_not_recognize_is_check():
@@ -3052,18 +3049,12 @@ def test_while_condition_does_not_recognize_is_check():
 
 
 # ---------------------------------------------------------------------------
-# `match NAME: (is TypeName: <block>)+ [else: <block>]?` -- exhaustive
-# matching's own grammar. Introduces no new AST node: parse_match
-# desugars entirely into an ordinary nested-If chain, one IsCheck-
-# conditioned If per arm, chained through else_body exactly like an
-# elif chain already is (see If's own docstring) -- these only check
-# that desugaring produces the right SHAPE (is_match set on the
-# outermost If alone, each arm's own condition, correct else_body
-# chaining) and the grammar's own error cases; whether the chain is
-# actually exhaustive is semantic.py's job, not tested here.
+# `match NAME: (is TypeName: <block>)+ [else: <block>]?` -- a Match node with one
+# IsCheck per arm. These check its shape and the grammar's error cases; whether
+# a match is exhaustive is semantic.py's job, not tested here.
 # ---------------------------------------------------------------------------
 
-def test_match_desugars_into_a_nested_if_chain():
+def test_match_is_a_match_node_with_one_check_per_arm():
     tokens = [
         lexer.Token(lexer.TokenType.MATCH, 'match', 1, 1),
         lexer.Token(lexer.TokenType.IDENTIFIER, 's', 1, 7),
@@ -3091,21 +3082,12 @@ def test_match_desugars_into_a_nested_if_chain():
         lexer.Token(lexer.TokenType.DEDENT, '', 6, 1),
         lexer.Token(lexer.TokenType.EOF, '', 6, 1),
     ]
-    outer = parser.Parser(tokens).parse_match()
-    assert outer.is_match is True
-    assert outer.match_arm_count == 2
-    assert isinstance(outer.condition, parser.IsCheck)
-    assert outer.condition.variable_name == 's'
-    assert outer.condition.type_name == 'Circle'
-
-    assert len(outer.else_body) == 1
-    inner = outer.else_body[0]
-    assert isinstance(inner, parser.If)
-    assert inner.is_match is False  # only the OUTERMOST node is marked
-    assert inner.match_arm_count is None
-    assert inner.condition.variable_name == 's'
-    assert inner.condition.type_name == 'Square'
-    assert inner.else_body is None  # no trailing else -- relies on exhaustiveness
+    match = parser.Parser(tokens).parse_match()
+    assert isinstance(match, parser.Match)
+    assert (match.variable_name, match.subject, match.else_body) == ('s', None, None)
+    assert [(check.variable_name, check.type_name) for check, _ in match.arms] == [('s', 'Circle'), ('s', 'Square')]
+    assert all(isinstance(check, parser.IsCheck) for check, _ in match.arms)
+    assert (match.line, match.col) == (2, 5)  # the first arm  # no trailing else -- relies on exhaustiveness
 
 
 def test_match_with_explicit_else():
@@ -3137,11 +3119,9 @@ def test_match_with_explicit_else():
         lexer.Token(lexer.TokenType.DEDENT, '', 6, 1),
         lexer.Token(lexer.TokenType.EOF, '', 6, 1),
     ]
-    outer = parser.Parser(tokens).parse_match()
-    assert outer.is_match is True
-    assert len(outer.else_body) == 1
-    return_stmt = outer.else_body[0]
-    assert isinstance(return_stmt, parser.Return)
+    match = parser.Parser(tokens).parse_match()
+    assert len(match.arms) == 1 and len(match.else_body) == 1
+    assert isinstance(match.else_body[0], parser.Return)
 
 
 def test_match_with_no_arms_raises():
@@ -3225,8 +3205,7 @@ def test_parse_statement_dispatches_to_match():
         lexer.Token(lexer.TokenType.EOF, '', 4, 1),
     ]
     result = parser.Parser(tokens).parse_statement()
-    assert isinstance(result, parser.If)
-    assert result.is_match is True
+    assert isinstance(result, parser.Match)
 
 
 # ---------------------------------------------------------------------------

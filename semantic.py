@@ -15,7 +15,6 @@ from typing import Dict, List, Optional, Set, Tuple
 from diagnostics import CompileError
 from lexer import lex
 from typesys import StructInfo, SumTypeInfo, Type, TypeKind
-from desugar import mangle_method_name
 from folding import fold_binary_op, fold_cast, fold_unary_op
 import parser as syntax
 import typed_ast as typed
@@ -44,11 +43,14 @@ from parser import (
     For,
     ForIn,
     Function,
+    MethodDef,
+    Param,
     If,
     Index,
     IndexAssign,
     IntrinsicDecl,
     IsCheck,
+    Match,
     Node,
     NoneLiteral,
     Parser,
@@ -82,6 +84,11 @@ _TYPE_NAMES = {
 }
 
 
+# The value of each `[EXPR]T` size that isn't a plain number, by the ArrayTypeExpr's node number;
+# recorded by SemanticAnalyzer._resolve_array_sizes before any type is resolved.
+_array_sizes: Dict[int, int] = {}
+
+
 def type_from_name(
     type_expr,
     structs: Dict[str, StructInfo],
@@ -92,7 +99,8 @@ def type_from_name(
     """Resolve a parsed type expression to a Type."""
     if isinstance(type_expr, ArrayTypeExpr):
         element = type_from_name(type_expr.element_type, structs, aliases, node, sum_types)
-        return Type(TypeKind.ARRAY, element_type=element, size=type_expr.size)
+        size = type_expr.size if isinstance(type_expr.size, int) else _array_sizes[type_expr.nid]
+        return Type(TypeKind.ARRAY, element_type=element, size=size)
     if isinstance(type_expr, SliceTypeExpr):
         element = type_from_name(type_expr.element_type, structs, aliases, node, sum_types)
         return Type(TypeKind.SLICE, element_type=element)
@@ -135,10 +143,9 @@ def always_returns(statements: List[Node]) -> bool:
     for stmt in statements:
         if isinstance(stmt, Return):
             return True
+        if isinstance(stmt, Match) and _match_always_returns(stmt):  # exhaustiveness already verified
+            return True
         if isinstance(stmt, If):
-            # Exhaustiveness was already verified by analyze_if.
-            if stmt.is_match and _match_always_returns(stmt):
-                return True
             if stmt.else_body is not None and always_returns(stmt.then_body) and always_returns(stmt.else_body):
                 return True
         if isinstance(stmt, While):
@@ -149,17 +156,11 @@ def always_returns(statements: List[Node]) -> bool:
     return False
 
 
-def _match_always_returns(stmt: If) -> bool:
-    """Whether every arm of a match chain returns."""
-    current = stmt
-    for i in range(stmt.match_arm_count):
-        if not always_returns(current.then_body):
-            return False
-        if i < stmt.match_arm_count - 1:
-            current = current.else_body[0]
-    if current.else_body is None:
-        return True
-    return always_returns(current.else_body)
+def _match_always_returns(stmt: 'Match') -> bool:
+    """Whether every arm of a match returns."""
+    if not all(always_returns(body) for _, body in stmt.arms):
+        return False
+    return stmt.else_body is None or always_returns(stmt.else_body)
 
 
 def contains_reachable_break(statements: List[Node]) -> bool:
@@ -172,7 +173,28 @@ def contains_reachable_break(statements: List[Node]) -> bool:
                 return True
             if stmt.else_body is not None and contains_reachable_break(stmt.else_body):
                 return True
+        if isinstance(stmt, Match):
+            if any(contains_reachable_break(body) for _, body in stmt.arms):
+                return True
+            if stmt.else_body is not None and contains_reachable_break(stmt.else_body):
+                return True
     return False
+
+
+def mangle_method_name(struct_name: str, method_name: str) -> str:
+    """`Struct.method`; '.' can't appear in identifiers, so no collisions."""
+    return f"{struct_name}.{method_name}"
+
+
+def _method_function(sd: StructDef, md: MethodDef) -> Function:
+    """A method as the function it compiles to: its mangled name, and the receiver as the first
+    parameter (`*S` for a pointer receiver). New nodes; the program's own are left as they are."""
+    receiver_type = sd.name
+    if md.receiver_is_pointer:
+        receiver_type = PointerTypeExpr(pointee_type=sd.name, line=md.line, col=md.col, file=md.file)
+    receiver = Param(name=md.receiver_name, type=receiver_type, line=md.line, col=md.col, file=md.file)
+    return Function(name=mangle_method_name(sd.name, md.name), return_type=md.return_type,
+                    params=[receiver] + md.params, body=md.body, line=md.line, col=md.col, file=md.file)
 
 
 # Builtins; see check_call.
@@ -297,6 +319,9 @@ class SemanticAnalyzer:
         self.symbols = SymbolTable()
         program.symbols = self.symbols
         self.facts = Facts()
+        # Each method is checked and compiled as a function of its own (see _method_function).
+        self.all_functions = list(program.functions) + [
+            _method_function(sd, md) for sd in program.structs for md in sd.methods]
         # Order matters: 0. constant array sizes become literals before any type is resolved.
         self._collect_consts(program)
         self._resolve_array_sizes(program)
@@ -324,7 +349,7 @@ class SemanticAnalyzer:
         # 4. All signatures before any body, so order doesn't matter.
         self.functions = {}
         self.intrinsic_original_names = {}  # mangled name -> original_name
-        for fn in program.functions:
+        for fn in self.all_functions:
             if fn.name in _BUILTIN_FUNCTION_NAMES:
                 raise SemanticError(
                     f"'{fn.name}' is a builtin and can't be redefined as "
@@ -378,7 +403,7 @@ class SemanticAnalyzer:
 
         # 5. Check bodies, collecting at most one error per function.
         errors: List[SemanticError] = []
-        for fn in program.functions:
+        for fn in self.all_functions:
             try:
                 self.analyze_function(fn)
                 if fn.name == 'main':
@@ -395,7 +420,7 @@ class SemanticAnalyzer:
             raise SemanticErrors(errors)
 
         # 7. The typed tree: what later stages consume.
-        program.typed_program = _TypedTreeBuilder(program, self.facts, self.consts).program()
+        program.typed_program = _TypedTreeBuilder(program, self.facts, self.consts).program(self.all_functions)
         return program.typed_program
 
     # -- constants
@@ -410,8 +435,8 @@ class SemanticAnalyzer:
             self.const_decls[cd.name] = cd
 
     def _resolve_array_sizes(self, program: Program) -> None:
-        """Replace each `[EXPR]T` size with its value: a positive integer computed from literals and
-        constants only (whose types must therefore be builtin)."""
+        """Record each `[EXPR]T` size's value (in _array_sizes): a positive integer computed from
+        literals and constants only (whose types must therefore be builtin)."""
         seen = set()
         stack = [program]
         while stack:
@@ -420,7 +445,7 @@ class SemanticAnalyzer:
                 continue
             seen.add(node.nid)
             if isinstance(node, ArrayTypeExpr) and not isinstance(node.size, int):
-                node.size = self._array_size_value(node.size)
+                _array_sizes[node.nid] = self._array_size_value(node.size)
             if dataclasses.is_dataclass(node) and not isinstance(node, type):
                 for f in dataclasses.fields(node):
                     value = getattr(node, f.name)
@@ -653,7 +678,8 @@ class SemanticAnalyzer:
         def resolve_target(target, alias_node: TypeAlias) -> Type:
             """`alias_node` is for error positions."""
             if isinstance(target, ArrayTypeExpr):
-                return Type(TypeKind.ARRAY, element_type=resolve_target(target.element_type, alias_node), size=target.size)
+                size = target.size if isinstance(target.size, int) else _array_sizes[target.nid]
+                return Type(TypeKind.ARRAY, element_type=resolve_target(target.element_type, alias_node), size=size)
             if isinstance(target, SliceTypeExpr):
                 return Type(TypeKind.SLICE, element_type=resolve_target(target.element_type, alias_node))
             if target in _TYPE_NAMES:
@@ -916,6 +942,8 @@ class SemanticAnalyzer:
             self.analyze_return(stmt, return_type)
         elif isinstance(stmt, If):
             self.analyze_if(stmt, return_type)
+        elif isinstance(stmt, Match):
+            self.analyze_match(stmt, return_type)
         elif isinstance(stmt, While):
             self.analyze_while(stmt, return_type)
         elif isinstance(stmt, For):
@@ -1197,17 +1225,7 @@ class SemanticAnalyzer:
         has_binding = isinstance(stmt.condition, IsCheck) and stmt.condition.subject is not None
         if has_binding:
             self._push_scope()
-            subject_type = self.check_expr(stmt.condition.subject)
-            # binding_decl is built once here; see IsCheck.
-            sym = self.symbols.new(stmt.condition.variable_name, 'narrowing', subject_type, stmt.condition)
-            if subject_type.kind == TypeKind.SUM:  # otherwise rejected below
-                binding = VarDecl(name=stmt.condition.variable_name, var_type=subject_type.sum_type_name,
-                                  init=stmt.condition.subject, line=stmt.condition.line, col=stmt.condition.col,
-                                  file=stmt.condition.file)
-                self.facts.bindings[stmt.condition.nid] = binding
-                self.facts.types[binding.nid] = subject_type
-                self.facts.symbols[binding.nid] = sym
-            self._declare(stmt.condition.variable_name, subject_type, stmt.condition, sym.id)
+            self._declare_is_binding(stmt.condition)
 
         condition_type = self.check_expr(stmt.condition)
         if condition_type != Type.BOOL:
@@ -1217,9 +1235,6 @@ class SemanticAnalyzer:
                 f"instead of `x`)",
                 stmt.condition,
             )
-
-        if stmt.is_match:
-            self._check_match_exhaustiveness(stmt)
 
         self._push_scope()
         # Narrow the IsCheck variable within then_body only.
@@ -1245,16 +1260,55 @@ class SemanticAnalyzer:
         if has_binding:
             self._pop_scope()
 
-    def _check_match_exhaustiveness(self, stmt: If) -> None:
+    def analyze_match(self, stmt: 'Match', return_type: Type) -> None:
+        """Each arm narrows the subject within its own body, like `if NAME is T:` (the order of checks,
+        and so of errors, is that of the equivalent `if`/`else` chain)."""
+        first_check = stmt.arms[0][0]
+        has_binding = stmt.subject is not None
+        if has_binding:
+            self._push_scope()
+            self._declare_is_binding(first_check)
+        for i, (check, body) in enumerate(stmt.arms):
+            self.check_expr(check)
+            if i == 0:
+                self._check_match_exhaustiveness(stmt)
+            self._push_scope()
+            narrowed_type = type_from_name(check.type_name, self.structs, self.type_aliases, check)
+            self.facts.narrowed[check.nid] = narrowed_type
+            self._declare(check.variable_name, narrowed_type, check, self.facts.decls[check.nid])
+            self._narrowed_names.add(check.variable_name)
+            for s in body:
+                self.analyze_statement(s, return_type)
+            self._narrowed_names.discard(check.variable_name)
+            self._pop_scope()
+        if stmt.else_body is not None:
+            self._push_scope()
+            for s in stmt.else_body:
+                self.analyze_statement(s, return_type)
+            self._pop_scope()
+        if has_binding:
+            self._pop_scope()
+
+    def _declare_is_binding(self, check: IsCheck) -> None:
+        """`EXPR is T as NAME`: check EXPR and declare NAME, a copy of it."""
+        subject_type = self.check_expr(check.subject)
+        sym = self.symbols.new(check.variable_name, 'narrowing', subject_type, check)
+        if subject_type.kind == TypeKind.SUM:  # otherwise rejected when the check itself is checked
+            binding = VarDecl(name=check.variable_name, var_type=subject_type.sum_type_name, init=check.subject,
+                              line=check.line, col=check.col, file=check.file)
+            self.facts.bindings[check.nid] = binding
+            self.facts.types[binding.nid] = subject_type
+            self.facts.symbols[binding.nid] = sym
+        self._declare(check.variable_name, subject_type, check, sym.id)
+
+    def _check_match_exhaustiveness(self, stmt: 'Match') -> None:
         """Reject duplicate arms; require exhaustiveness without an else."""
-        subject_name = stmt.condition.variable_name
-        subject_type = self._lookup(subject_name, stmt.condition)
+        subject_name = stmt.variable_name
+        subject_type = self._lookup(subject_name, stmt.arms[0][0])
         sum_type_info = self.sum_types[subject_type.sum_type_name]
 
         seen: Dict[Type, IsCheck] = {}
-        current = stmt
-        for i in range(stmt.match_arm_count):
-            arm_condition = current.condition
+        for arm_condition, _ in stmt.arms:
             arm_type = type_from_name(arm_condition.type_name, self.structs, self.type_aliases, arm_condition)
             if arm_type in seen:
                 raise SemanticError(
@@ -1263,10 +1317,8 @@ class SemanticAnalyzer:
                     arm_condition,
                 )
             seen[arm_type] = arm_condition
-            if i < stmt.match_arm_count - 1:
-                current = current.else_body[0]
 
-        if current.else_body is not None:
+        if stmt.else_body is not None:
             return
 
         missing = [v for v in sum_type_info.variants if v not in seen]
@@ -2109,35 +2161,6 @@ class SemanticAnalyzer:
         return left_type
 
 
-# Entry points
-
-def analyze(program: Program) -> "typed.Program":
-    """Check `program` and return its typed tree (also kept as program.typed_program)."""
-    return SemanticAnalyzer().analyze(program)
-
-
-def analyze_source(filename: str) -> Program:
-    """Lex, parse, and analyze a file."""
-    tokens = lex(filename)
-    program = Parser(tokens).parse_program()
-    analyze(program)
-    return program
-
-
-def main():
-    arg_parser = argparse.ArgumentParser(description='Semantic analyzer')
-    arg_parser.add_argument('file', type=str, help='File to check.')
-    args = arg_parser.parse_args()
-    analyze_source(args.file)
-    print("OK: no semantic errors found")
-
-
-if __name__ == '__main__':
-    main()
-
-
-
-
 class ElaborationError(Exception):
     """A tree shape with no typed-tree rule: a compiler bug, since analysis accepted it."""
 
@@ -2161,14 +2184,14 @@ class _TypedTreeBuilder:
     def ty(self, e) -> Type:
         return self.facts.types[e.nid]
 
-    def program(self) -> typed.Program:
-        return typed.Program(tuple(self.function(fn) for fn in self.ast.functions), self.structs, self.sum_types,
-                         self.symbols)
+    def program(self, functions) -> typed.Program:
+        return typed.Program(tuple(self.function(fn) for fn in functions), self.structs, self.sum_types,
+                             self.symbols)
 
     def function(self, fn: syntax.Function) -> typed.Function:
         self.return_type = self.facts.returns[fn.nid]
         return typed.Function(fn.name, tuple(self.facts.symbols[param.nid] for param in fn.params), self.return_type,
-                          self.block(fn.body))
+                              self.block(fn.body))
 
     # -- statements
 
@@ -2202,6 +2225,10 @@ class _TypedTreeBuilder:
             return [typed.Return(None if s.value is None else self.convert(s.value, self.return_type))]
         if isinstance(s, syntax.If):
             return self.if_statement(s)
+        if isinstance(s, syntax.Match):
+            before, subject = self.narrowing_subject(s.arms[0][0])
+            arms = tuple((self.facts.narrowed[check.nid], self.block(body)) for check, body in s.arms)
+            return before + [typed.Match(subject, arms, None if s.else_body is None else self.block(s.else_body))]
         if isinstance(s, syntax.While):
             return [typed.While(self.expr(s.condition), self.block(s.body))]
         if isinstance(s, syntax.For):
@@ -2230,14 +2257,6 @@ class _TypedTreeBuilder:
         if not isinstance(s.condition, syntax.IsCheck):
             return [typed.If(self.expr(s.condition), self.block(s.then_body), self.block(s.else_body))]
         before, subject = self.narrowing_subject(s.condition)
-        if s.is_match:
-            arms, current = [], s
-            for i in range(s.match_arm_count):
-                arms.append((self.facts.narrowed[current.condition.nid], self.block(current.then_body)))
-                if i < s.match_arm_count - 1:
-                    current = current.else_body[0]
-            else_body = None if current.else_body is None else self.block(current.else_body)
-            return before + [typed.Match(subject, tuple(arms), else_body)]
         test = typed.TagTest(Type.BOOL, subject, self.facts.narrowed[s.condition.nid])
         return before + [typed.If(test, self.block(s.then_body), self.block(s.else_body))]
 
@@ -2319,7 +2338,7 @@ class _TypedTreeBuilder:
         if isinstance(e, syntax.DictLiteral):
             d = self.ty(e)
             return typed.DictLiteral(d, tuple((self.convert(k, d.key_type), self.convert(v, d.element_type))
-                                          for k, v in e.entries))
+                                              for k, v in e.entries))
         if isinstance(e, syntax.Index):
             return self.index(e)
         if isinstance(e, syntax.Slice) and isinstance(e.array, syntax.ArrayLiteral) and e.low is None and e.high is None:
@@ -2424,3 +2443,30 @@ class _TypedTreeBuilder:
         elif left.type != right.type and isinstance(left, typed.IntLit):
             left = typed.IntLit(right.type, left.value)
         return typed.Binary(self.ty(e), op, left, right)
+
+
+# Entry points
+
+def analyze(program: Program) -> "typed.Program":
+    """Check `program` and return its typed tree (also kept as program.typed_program)."""
+    return SemanticAnalyzer().analyze(program)
+
+
+def analyze_source(filename: str) -> Program:
+    """Lex, parse, and analyze a file."""
+    tokens = lex(filename)
+    program = Parser(tokens).parse_program()
+    analyze(program)
+    return program
+
+
+def main():
+    arg_parser = argparse.ArgumentParser(description='Semantic analyzer')
+    arg_parser.add_argument('file', type=str, help='File to check.')
+    args = arg_parser.parse_args()
+    analyze_source(args.file)
+    print("OK: no semantic errors found")
+
+
+if __name__ == '__main__':
+    main()

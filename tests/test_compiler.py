@@ -22,7 +22,6 @@ from ir.errors import IRError
 from build import c_compiler, runtime_object
 from target import default_target
 from tests.targets import E2E_TARGETS, on_every_target, run_binary
-from desugar import desugar_methods
 from lexer import lex
 from parser import Break, Call, Constant, Continue, For, ForIn, Node, Parser, ParseError
 from semantic import SemanticError, analyze as _semantic_analyze
@@ -30,7 +29,6 @@ from semantic import SemanticError, analyze as _semantic_analyze
 
 def analyze(program):
     """Semantic analysis after desugaring, as compile_to_asm does; returns the typed tree."""
-    desugar_methods(program)
     return _semantic_analyze(program)
 
 
@@ -17929,8 +17927,7 @@ class TestASTPrettyPrinting:
             "    ),\n"
             "    then_body=[Return(value=Constant(value=1))],\n"
             "    else_body=None,\n"
-            "    is_match=False,\n"
-            "    match_arm_count=None,\n"
+
             ")"
         )
 
@@ -17940,10 +17937,25 @@ class TestASTPrettyPrinting:
         assert "params=[]" in fn.pretty()
 
     def test_analysis_leaves_the_parser_tree_unchanged(self):
-        ast = _parse("def int main():\n    int x = 1\n    return x + 2\n")
-        before = ast.functions[0].pretty()
-        assert analyze(ast).functions[0].body  # analysis really did run, producing the typed tree
-        assert ast.functions[0].pretty() == before
+        """Constants, constant array sizes, method calls, `match`, and `bytes()` are all resolved
+        into the typed tree without changing the parser's nodes."""
+        ast = _parse(
+            "const int N = 2\n"
+            "type C struct:\n    int n\n    def int get(self):\n        return self.n\n"
+            "type D struct:\n    int k\n"
+            "type U is C | D\n"
+            "def int main():\n"
+            "    [N]int a = [N, 1]\n"
+            "    C c = C(a[0])\n"
+            "    U u = c\n"
+            "    match u:\n        is C:\n            print(u.get())\n        is D:\n            print(0)\n"
+            "    print(len(bytes('ab')) + N)\n"
+            "    return 0\n")
+        before = [ast.pretty() for ast in ast.functions + ast.structs]
+        typed_program = analyze(ast)
+        assert [fn.name for fn in typed_program.functions] == ['main', 'C.get']
+        assert [ast.pretty() for ast in ast.functions + ast.structs] == before
+        assert len(ast.functions) == 1  # the method's function is the analysis's own
 
     def test_self_referential_struct_field_type_renders_correctly(self):
         ast = _parse(

@@ -308,12 +308,20 @@ class IsCheck(Node):
 
 @dataclass
 class If(Node):
-    """`if`; `elif` nests in else_body. `match` desugars to a chain of IsCheck Ifs with is_match on the outermost."""
+    """`if`; `elif` nests in else_body."""
     condition: Node
     then_body: List[Node]
     else_body: Optional[List[Node]] = None
-    is_match: bool = False
-    match_arm_count: Optional[int] = None
+
+
+@dataclass
+class Match(Node):
+    """`match NAME:` / `match EXPR as NAME:`. Each arm is (`NAME is T` check, body), tried in order;
+    the first arm's check carries the subject expression, if any. Positioned at the first arm."""
+    variable_name: str
+    subject: Optional[Node]
+    arms: List[Tuple[Node, List[Node]]]
+    else_body: Optional[List[Node]] = None
 
 
 @dataclass
@@ -1147,8 +1155,8 @@ class Parser:
                 module=name_tok.val, name=qualified_name_tok.val, line=name_tok.line, col=name_tok.col)
         return name_tok.val
 
-    def parse_match(self) -> If:
-        """`match NAME:` / `match EXPR as NAME:` with `is T:` arms and optional `else:`; desugars to nested Ifs."""
+    def parse_match(self) -> 'Match':
+        """`match NAME:` / `match EXPR as NAME:` with `is T:` arms and optional `else:`."""
         start_tok = self.expect(TokenType.MATCH, "Expected 'match'")
         if self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.COLON:
             name_tok = self.advance()
@@ -1193,21 +1201,11 @@ class Parser:
         if not arms:
             raise self._error(f"Expected at least one 'is' arm in this match", start_tok)
 
-        chained_body = else_body
-        for i, (arm_tok, type_name, arm_body) in reversed(list(enumerate(arms))):
-            condition = IsCheck(
-                variable_name=binding_name,
-                type_name=type_name,
-                subject=subject if i == 0 else None,
-                line=arm_tok.line,
-                col=arm_tok.col,
-            )
-            chained_body = [If(condition=condition, then_body=arm_body, else_body=chained_body, line=arm_tok.line, col=arm_tok.col)]
-
-        outermost = chained_body[0]
-        outermost.is_match = True
-        outermost.match_arm_count = len(arms)
-        return outermost
+        checks = [(IsCheck(variable_name=binding_name, type_name=type_name, subject=subject if i == 0 else None,
+                           line=arm_tok.line, col=arm_tok.col), arm_body)
+                  for i, (arm_tok, type_name, arm_body) in enumerate(arms)]
+        return Match(variable_name=binding_name, subject=subject, arms=checks, else_body=else_body,
+                     line=arms[0][0].line, col=arms[0][0].col)
 
     def parse_var_decl(
         self,
