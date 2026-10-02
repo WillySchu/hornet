@@ -20,7 +20,6 @@ Updates:
 - Struct fields are resolved before sum types, so a sum type used as a field type is unknown at that point.
 - Weight spills by use count and loop depth.
 - Module errors have a line but no column.
-- Dicts as sum types.
 - `in` checking for strings.
 - Sum type equality.
 - Sum type support for nested sum types?
