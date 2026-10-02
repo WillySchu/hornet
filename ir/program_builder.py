@@ -1,6 +1,5 @@
 """Build and verify an IRProgram from an analyzed Program."""
 
-from elaborate import elaborate
 from escape_analysis import compute_escape_summaries
 from ir.errors import IRError
 from ir.id_allocator import IdAllocator
@@ -13,8 +12,8 @@ from parser import Program
 
 
 def build_ir_program(program: Program) -> IRProgram:
-    """IR for an analyzed Program, built from its typed tree (elaborate.py). IRError if `program`
-    hasn't been through semantic.analyze()."""
+    """IR for an analyzed Program, built from its typed tree (program.typed_program). IRError if
+    `program` hasn't been through semantic.analyze()."""
     if not hasattr(program, 'struct_registry'):
         raise IRError(
             "Program has no struct registry -- semantic.analyze() "
@@ -43,7 +42,7 @@ def build_ir_program(program: Program) -> IRProgram:
         intrinsic_original_names=getattr(program, 'intrinsic_original_names', {}),
         ids=IdAllocator(),
     )
-    typed_program = elaborate(program)
+    typed_program = program.typed_program  # built by semantic.analyze()
     ir_program.escape_summaries = compute_escape_summaries(typed_program.functions, program.struct_registry)
     ir_program.functions = []
     for typed_fn in typed_program.functions:

@@ -10,7 +10,6 @@ import desugar
 import escape_analysis as ea
 import parser
 import semantic
-from elaborate import elaborate
 from lexer import lex
 
 
@@ -22,8 +21,7 @@ def parse_and_analyze(source: str):
         tokens = lex(str(src_path))
         ast = parser.Parser(tokens).parse_program()
         desugar.desugar_methods(ast)
-        semantic.analyze(ast)
-        typed = elaborate(ast)
+        typed = semantic.analyze(ast)
         return SimpleNamespace(functions=list(typed.functions), struct_registry=ast.struct_registry,
                                symbols=ast.symbols)
 

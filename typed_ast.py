@@ -1,4 +1,4 @@
-"""The typed tree: what a program means, produced from the parser's tree by elaborate.py.
+"""The typed tree: what a program means, built from the parser's tree by semantic.analyze().
 
 Every expression has a concrete `type`. Each node has one meaning: names refer to Symbols, the
 parser's overloaded forms are split (a call, a struct literal, a builtin; array, slice, str, and

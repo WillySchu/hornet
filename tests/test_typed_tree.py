@@ -1,4 +1,4 @@
-"""elaborate.py and typed_ast.py: the typed tree."""
+"""The typed tree (typed_ast.py) that semantic.analyze() builds."""
 
 import glob
 import subprocess
@@ -10,7 +10,6 @@ import pytest
 import typed_ast as t
 from compile import typed_tree
 from desugar import desugar_methods
-from elaborate import elaborate
 from merge import merge_programs
 from modules import discover_modules
 from semantic import analyze
@@ -68,8 +67,7 @@ def int main():
 
 def _typed(source: str) -> t.Program:
     ast = _parse(source)
-    analyze(ast)
-    return elaborate(ast)
+    return analyze(ast)
 
 
 def _nodes(program: t.Program) -> set:
@@ -121,12 +119,11 @@ def _repository_programs():
 
 
 @pytest.mark.parametrize('path', _repository_programs(), ids=lambda p: Path(p).stem)
-def test_repository_programs_elaborate(path):
+def test_repository_programs_have_typed_trees(path):
     entry, modules = discover_modules(path)
     ast = merge_programs(entry, modules)
     desugar_methods(ast)
-    analyze(ast)
-    assert t.dump(elaborate(ast))
+    assert t.dump(analyze(ast))
 
 
 def test_every_node_kind_occurs_in_the_repository_and_this_file():
@@ -137,8 +134,7 @@ def test_every_node_kind_occurs_in_the_repository_and_this_file():
         entry, modules = discover_modules(path)
         ast = merge_programs(entry, modules)
         desugar_methods(ast)
-        analyze(ast)
-        used |= _nodes(elaborate(ast))
+        used |= _nodes(analyze(ast))
     used |= _nodes(_typed("def int main():\n    [2]int a = [1, 2]\n    print(a[1])\n    int y = 1\n    *int p = &y\n"
                           "    *p = 2\n    while y < 3:\n        y += 1\n        if y == 2:\n            continue\n"
                           "        break\n    for int i = 0; i < 2; i += 1:\n        y = -y\n    print(true)\n"

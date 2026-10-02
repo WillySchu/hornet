@@ -1,13 +1,12 @@
-"""Semantic analysis: name resolution, type checking, and control-flow checks.
+"""Semantic analysis: name resolution, type checking, and control-flow checks; its result is the
+typed tree (typed_ast.py), which every later stage consumes.
 
 Strict typing: no implicit conversions; integer operands must match exactly. Blocks
 scope lexically and may shadow. Non-void functions must return on all paths.
 
-Later passes rely on these annotations instead of re-resolving: resolved_type on expressions,
-VarDecls, and Params; a Symbol (symbols.py) on each VarDecl and Param (`symbol`) and ForIn
-(`symbols`, one per binding), with decl_id on Variable/Assign/IsCheck naming the declaration's
-Symbol.id; resolved_return_type, binding_types, narrowed_type; and the symbol table and
-registries stashed on Program.
+Checking currently annotates the parser's nodes (resolved_type, decl_id, symbol/symbols,
+narrowed_type, binding_types, boxed_sum, resolved_return_type), and _TypedTreeBuilder builds the
+typed tree from those annotations at the end of analyze().
 """
 
 import argparse
@@ -20,6 +19,8 @@ from lexer import lex
 from typesys import StructInfo, SumTypeInfo, Type, TypeKind
 from desugar import mangle_method_name
 from folding import fold_binary_op, fold_cast, fold_unary_op
+import parser as syntax
+import typed_ast as typed
 from symbols import SymbolTable
 from parser import (
     ConstDecl,
@@ -279,7 +280,7 @@ class SemanticAnalyzer:
         self.sum_types: Dict[str, SumTypeInfo] = {}
         self._narrowed_names: set = set()  # currently narrowed variable names
 
-    def analyze(self, program: Program) -> None:
+    def analyze(self, program: Program) -> "typed.Program":
         self.symbols = SymbolTable()
         program.symbols = self.symbols
         # Order matters: 0. constant array sizes become literals before any type is resolved.
@@ -382,6 +383,10 @@ class SemanticAnalyzer:
         # 6. Later passes see literals, never constant references.
         for fn in program.functions:
             self._substitute_consts(fn)
+
+        # 7. The typed tree: what later stages consume.
+        program.typed_program = _TypedTreeBuilder(program).program()
+        return program.typed_program
 
     # -- constants
 
@@ -2130,8 +2135,9 @@ class SemanticAnalyzer:
 
 # Entry points
 
-def analyze(program: Program) -> None:
-    SemanticAnalyzer().analyze(program)
+def analyze(program: Program) -> "typed.Program":
+    """Check `program` and return its typed tree (also kept as program.typed_program)."""
+    return SemanticAnalyzer().analyze(program)
 
 
 def analyze_source(filename: str) -> Program:
@@ -2152,3 +2158,279 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+
+
+class ElaborationError(Exception):
+    """A tree shape with no typed-tree rule: a compiler bug, since analysis accepted it."""
+
+
+class _TypedTreeBuilder:
+    """Builds the typed tree (typed_ast.py) from a checked program: every implicit operation becomes
+    explicit, and values flowing into a slot of a known type go through `convert`."""
+
+    def __init__(self, program: syntax.Program):
+        self.ast = program
+        self.symbols = program.symbols
+        self.structs = program.struct_registry
+        self.sum_types = program.sum_type_registry
+        self.functions = program.function_registry
+        self.externs = {e.name for e in program.extern_functions}
+        self.intrinsics = {i.name for i in program.intrinsics}
+        self.return_type = None
+
+    def program(self) -> typed.Program:
+        return typed.Program(tuple(self.function(fn) for fn in self.ast.functions), self.structs, self.sum_types,
+                         self.symbols)
+
+    def function(self, fn: syntax.Function) -> typed.Function:
+        self.return_type = fn.resolved_return_type
+        return typed.Function(fn.name, tuple(param.symbol for param in fn.params), fn.resolved_return_type,
+                          self.block(fn.body))
+
+    # -- statements
+
+    def block(self, statements) -> tuple:
+        out = []
+        for stmt in statements or ():
+            out.extend(self.statement(stmt))
+        return tuple(out)
+
+    def statement(self, s) -> list:
+        """Typed statements for one parser statement (a narrowing binding adds its declaration)."""
+        if isinstance(s, syntax.VarDecl):
+            return [self.declare(s)]
+        if isinstance(s, syntax.Assign):
+            symbol = self.symbols[s.decl_id]
+            return [typed.Assign(typed.Local(symbol.type, symbol), self.convert(s.value, symbol.type))]
+        if isinstance(s, (syntax.IndexAssign, syntax.FieldAssign, syntax.DerefAssign)):
+            if isinstance(s, syntax.IndexAssign):
+                target = self.index(syntax.Index(array=s.array, index=s.index))
+            elif isinstance(s, syntax.FieldAssign):
+                target = self.field(syntax.Field(base=s.base, name=s.name))
+            else:
+                pointer = self.expr(s.pointer)
+                target = typed.Deref(pointer.type.element_type, pointer)
+            if s.compound_op is not None:
+                return [typed.CompoundAssign(target, s.compound_op, self.convert(s.value, target.type))]
+            return [typed.Assign(target, self.convert(s.value, target.type))]
+        if isinstance(s, syntax.ExprStmt):
+            return [typed.ExprStmt(self.expr(s.expr))]
+        if isinstance(s, syntax.Return):
+            return [typed.Return(None if s.value is None else self.convert(s.value, self.return_type))]
+        if isinstance(s, syntax.If):
+            return self.if_statement(s)
+        if isinstance(s, syntax.While):
+            return [typed.While(self.expr(s.condition), self.block(s.body))]
+        if isinstance(s, syntax.For):
+            init = self.statement(s.init) if s.init is not None else []
+            if len(init) > 1:
+                raise ElaborationError(f"for-loop initializer elaborated to {len(init)} statements")
+            step = self.statement(s.increment)
+            return [typed.For(init[0] if init else None, self.expr(s.condition), step[0], self.block(s.body))]
+        if isinstance(s, syntax.ForIn):
+            iterable = self.expr(s.iterable)
+            kind = {TypeKind.ARRAY: 'array', TypeKind.SLICE: 'slice', TypeKind.STR: 'str',
+                    TypeKind.DICT: 'dict'}[iterable.type.kind]
+            return [typed.ForIn(kind, iterable, tuple(s.symbols), self.block(s.body))]
+        if isinstance(s, syntax.Break):
+            return [typed.Break()]
+        if isinstance(s, syntax.Continue):
+            return [typed.Continue()]
+        raise ElaborationError(f"No elaboration for statement {type(s).__name__}")
+
+    def declare(self, s: syntax.VarDecl) -> typed.Declare:
+        symbol = s.symbol
+        init = self.zero(symbol.type) if s.init is None else self.convert(s.init, symbol.type)
+        return typed.Declare(symbol, init)
+
+    def if_statement(self, s: syntax.If) -> list:
+        if not isinstance(s.condition, syntax.IsCheck):
+            return [typed.If(self.expr(s.condition), self.block(s.then_body), self.block(s.else_body))]
+        before, subject = self.narrowing_subject(s.condition)
+        if s.is_match:
+            arms, current = [], s
+            for i in range(s.match_arm_count):
+                arms.append((current.condition.narrowed_type, self.block(current.then_body)))
+                if i < s.match_arm_count - 1:
+                    current = current.else_body[0]
+            else_body = None if current.else_body is None else self.block(current.else_body)
+            return before + [typed.Match(subject, tuple(arms), else_body)]
+        test = typed.TagTest(Type.BOOL, subject, s.condition.narrowed_type)
+        return before + [typed.If(test, self.block(s.then_body), self.block(s.else_body))]
+
+    def narrowing_subject(self, check: syntax.IsCheck):
+        """(statements to run first, the sum being tested) for `NAME is T` or `EXPR is T as NAME`."""
+        if check.binding_decl is not None:
+            symbol = check.binding_decl.symbol
+            declare = typed.Declare(symbol, self.convert(check.subject, symbol.type))
+            return [declare], typed.Local(symbol.type, symbol)
+        symbol = self.symbols[check.decl_id]
+        return [], typed.Local(symbol.type, symbol)
+
+    # -- conversions
+
+    def zero(self, type_: Type) -> typed.Expr:
+        if type_.kind == TypeKind.DICT:
+            return typed.NewEmptyDict(type_)
+        if type_.kind == TypeKind.SLICE:
+            return typed.EmptySlice(type_)
+        return typed.ZeroValue(type_)
+
+    def convert(self, e, target: Type) -> typed.Expr:
+        """`e` as a value flowing into a slot of type `target`, implicit operations made explicit."""
+        if isinstance(e, syntax.Unary) and e.boxed_sum is not None:
+            return typed.BoxVariant(target, typed.WidenToSum(e.boxed_sum, self.expr(e.operand)))
+        if isinstance(e, syntax.NoneLiteral):
+            if target.kind == TypeKind.POINTER:
+                return typed.NoneLit(target)
+            if target.kind == TypeKind.SUM:
+                return typed.WidenToSum(target, typed.NoneLit(Type.NONE))
+            raise ElaborationError(f"`none` flowing into {target}")
+        if (target.kind == TypeKind.SLICE and isinstance(e, syntax.ArrayLiteral) and e.type_expr is None):
+            elements = tuple(self.convert(x, target.element_type) for x in e.elements)
+            return typed.SliceLiteral(target, elements) if elements else typed.EmptySlice(target)
+        if target.kind == TypeKind.ARRAY and isinstance(e, syntax.ArrayLiteral) and e.type_expr is None:
+            return typed.ArrayLiteral(target, tuple(self.convert(x, target.element_type) for x in e.elements))
+        value = self.expr(e)
+        if value.type == target:
+            return value
+        if target.kind == TypeKind.SUM and value.type in self.sum_types[target.sum_type_name].variants:
+            return typed.WidenToSum(target, value)
+        if value.type.kind == TypeKind.POINTER and value.type.element_type == target:
+            return typed.Deref(target, value)  # a method's value receiver called through a pointer
+        if isinstance(value, typed.IntLit) and target.kind in (TypeKind.INT, TypeKind.INT32, TypeKind.INT8, TypeKind.UINT8):
+            return typed.IntLit(target, value.value)
+        raise ElaborationError(f"No conversion from {value.type} to {target} for {e!r}")
+
+    # -- expressions
+
+    def expr(self, e) -> typed.Expr:
+        if isinstance(e, syntax.Constant):
+            return typed.IntLit(e.resolved_type, e.value)
+        if isinstance(e, syntax.BoolLiteral):
+            return typed.BoolLit(Type.BOOL, e.value)
+        if isinstance(e, syntax.StringLiteral):
+            return typed.StrLit(Type.STR, e.value)
+        if isinstance(e, syntax.ByteLiteral):
+            return typed.IntLit(Type.UINT8, e.value)
+        if isinstance(e, syntax.NoneLiteral):
+            return typed.NoneLit(Type.NONE)
+        if isinstance(e, syntax.Variable):
+            symbol = self.symbols[e.decl_id]
+            local = typed.Local(symbol.type, symbol)
+            if e.resolved_type is not None and e.resolved_type != symbol.type:
+                return typed.Payload(e.resolved_type, local)  # narrowed by an enclosing `is`
+            return local
+        if isinstance(e, syntax.ArrayLiteral):
+            array_type = e.resolved_type
+            return typed.ArrayLiteral(array_type, tuple(self.convert(x, array_type.element_type) for x in e.elements))
+        if isinstance(e, syntax.DictLiteral):
+            d = e.resolved_type
+            return typed.DictLiteral(d, tuple((self.convert(k, d.key_type), self.convert(v, d.element_type))
+                                          for k, v in e.entries))
+        if isinstance(e, syntax.Index):
+            return self.index(e)
+        if isinstance(e, syntax.Slice) and isinstance(e.array, syntax.ArrayLiteral) and e.low is None and e.high is None:
+            # A typed slice literal, `[]T[...]`: new storage holding the elements.
+            elements = tuple(self.convert(x, e.resolved_type.element_type) for x in e.array.elements)
+            return typed.SliceLiteral(e.resolved_type, elements) if elements else typed.EmptySlice(e.resolved_type)
+        if isinstance(e, syntax.Slice):
+            base = self.expr(e.array)
+            kind = {TypeKind.ARRAY: 'array', TypeKind.SLICE: 'slice', TypeKind.STR: 'str'}[base.type.kind]
+            low = None if e.low is None else self.expr(e.low)
+            high = None if e.high is None else self.expr(e.high)
+            return typed.SliceOf(e.resolved_type, kind, base, low, high)
+        if isinstance(e, syntax.Field):
+            return self.field(e)
+        if isinstance(e, syntax.Call):
+            return self.call(e)
+        if isinstance(e, syntax.Unary):
+            if e.op == UnaryOp.ADDRESS_OF:
+                if e.boxed_sum is not None:
+                    return self.convert(e, e.resolved_type)
+                operand = self.expr(e.operand)
+                return typed.AddressOf(e.resolved_type, operand)
+            if e.op == UnaryOp.DEREFERENCE:
+                pointer = self.expr(e.operand)
+                return typed.Deref(pointer.type.element_type, pointer)
+            return typed.Unary(e.resolved_type, e.op, self.expr(e.operand))
+        if isinstance(e, syntax.Cast):
+            value = self.expr(e.expr)
+            if e.resolved_type == Type.STR:
+                return (typed.StrFromByte if value.type == Type.UINT8 else typed.StrFromBytes)(Type.STR, value)
+            return typed.IntCast(e.resolved_type, value)
+        if isinstance(e, syntax.Binary):
+            return self.binary(e)
+        raise ElaborationError(f"No elaboration for expression {type(e).__name__}")
+
+    def index(self, e: syntax.Index) -> typed.Expr:
+        base = self.expr(e.array)
+        kind = base.type.kind
+        if kind == TypeKind.DICT:
+            return typed.DictLookup(base.type.element_type, base, self.convert(e.index, base.type.key_type))
+        index = self.convert(e.index, Type.INT) if not isinstance(e.index, syntax.Constant) else self.expr(e.index)
+        node = {TypeKind.ARRAY: typed.ArrayIndex, TypeKind.SLICE: typed.SliceIndex, TypeKind.STR: typed.StrIndex}[kind]
+        element = Type.UINT8 if kind == TypeKind.STR else base.type.element_type
+        return node(element, base, index)
+
+    def field(self, e: syntax.Field) -> typed.FieldAccess:
+        base = self.expr(e.base)
+        through_pointer = base.type.kind == TypeKind.POINTER
+        struct_type = base.type.element_type if through_pointer else base.type
+        names = list(self.structs[struct_type.struct_name].fields)
+        field_type = self.structs[struct_type.struct_name].fields[e.name]
+        return typed.FieldAccess(field_type, base, e.name, names.index(e.name), through_pointer)
+
+    def call(self, e: syntax.Call) -> typed.Expr:
+        name = e.name
+        if name == 'print':
+            return typed.Print(Type.VOID, self.expr(e.args[0]))
+        if name == 'len':
+            return typed.Len(Type.INT, self.expr(e.args[0]))
+        if name == 'append':
+            s = self.expr(e.args[0])
+            return typed.Append(s.type, s, self.convert(e.args[1], s.type.element_type))
+        if name == 'del':
+            d = self.expr(e.args[0])
+            return typed.DictDelete(Type.VOID, d, self.convert(e.args[1], d.type.key_type))
+        if name in ('bytes', 'hornet_bytes'):  # analysis rewrites bytes(s) to the runtime function
+            return typed.BytesFromStr(_BYTE_SLICE, self.expr(e.args[0]))
+        if name in self.structs:
+            field_types = self.structs[name].fields
+            if e.kwargs is not None:
+                given = dict(e.kwargs)
+                values = tuple(self.convert(given[f], ft) if f in given else self.zero(ft)
+                               for f, ft in field_types.items())
+            else:
+                values = tuple(self.convert(a, ft) for a, ft in zip(e.args, field_types.values()))
+            return typed.StructLiteral(Type(TypeKind.STRUCT, struct_name=name), values)
+        param_types, return_type = self.functions[name]
+        kind = 'extern' if name in self.externs else 'intrinsic' if name in self.intrinsics else 'function'
+        return typed.Call(return_type, name, kind, tuple(self.convert(a, pt) for a, pt in zip(e.args, param_types)))
+
+    def binary(self, e: syntax.Binary) -> typed.Expr:
+        op, left_type, right_type = e.op, e.left.resolved_type, e.right.resolved_type
+        if op == BinaryOp.IN:
+            container = self.expr(e.right)
+            if container.type.kind == TypeKind.DICT:
+                return typed.DictContains(Type.BOOL, self.convert(e.left, container.type.key_type), container)
+            return typed.ElementContains(Type.BOOL, self.convert(e.left, container.type.element_type), container)
+        if op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL) and Type.NONE in (left_type, right_type):
+            other = e.right if left_type == Type.NONE else e.left
+            value = self.expr(other)
+            if value.type.kind == TypeKind.SUM:
+                test = typed.TagTest(Type.BOOL, value, Type.NONE)
+                return test if op == BinaryOp.EQUAL else typed.Unary(Type.BOOL, UnaryOp.NOT, test)
+            return typed.Binary(Type.BOOL, op, value, typed.NoneLit(value.type))
+        if left_type == Type.STR and op == BinaryOp.ADD:
+            return typed.StrConcat(Type.STR, self.expr(e.left), self.expr(e.right))
+        if left_type == Type.STR and op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
+            return typed.StrCompare(Type.BOOL, op, self.expr(e.left), self.expr(e.right))
+        left, right = self.expr(e.left), self.expr(e.right)
+        if left.type != right.type and isinstance(right, typed.IntLit):
+            right = typed.IntLit(left.type, right.value)
+        elif left.type != right.type and isinstance(left, typed.IntLit):
+            left = typed.IntLit(right.type, left.value)
+        return typed.Binary(e.resolved_type, op, left, right)

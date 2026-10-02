@@ -4,7 +4,6 @@ import argparse
 import sys
 
 from desugar import desugar_methods
-from elaborate import elaborate
 from backend import lower_to_asm
 from diagnostics import CompileError, run_cli
 from ir.program_builder import build_ir_program
@@ -54,8 +53,7 @@ def typed_tree(source: str) -> str:
     entry_program, discovered_modules = discover_modules(source)
     ast = merge_programs(entry_program, discovered_modules)
     desugar_methods(ast)
-    analyze(ast)
-    return dump(elaborate(ast))
+    return dump(analyze(ast))
 
 
 def compile_to_asm(source: str, target=None, require_main: bool = False) -> str:
