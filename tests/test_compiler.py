@@ -29,9 +29,9 @@ from semantic import SemanticError, analyze as _semantic_analyze
 
 
 def analyze(program):
-    """Semantic analysis after desugaring, as compile_to_asm does."""
+    """Semantic analysis after desugaring, as compile_to_asm does; returns the typed tree."""
     desugar_methods(program)
-    _semantic_analyze(program)
+    return _semantic_analyze(program)
 
 
 GCC_AVAILABLE = shutil.which("gcc") is not None
@@ -17939,12 +17939,11 @@ class TestASTPrettyPrinting:
         fn = ast.functions[0]
         assert "params=[]" in fn.pretty()
 
-    def test_resolved_type_is_never_shown(self):
-        ast = _parse("def int main():\n    return 1 + 2\n")
-        analyze(ast)
-        return_stmt = ast.functions[0].body[0]
-        assert return_stmt.value.resolved_type is not None  # analysis really did run
-        assert "resolved_type" not in return_stmt.pretty()
+    def test_analysis_leaves_the_parser_tree_unchanged(self):
+        ast = _parse("def int main():\n    int x = 1\n    return x + 2\n")
+        before = ast.functions[0].pretty()
+        assert analyze(ast).functions[0].body  # analysis really did run, producing the typed tree
+        assert ast.functions[0].pretty() == before
 
     def test_self_referential_struct_field_type_renders_correctly(self):
         ast = _parse(

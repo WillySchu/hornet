@@ -15,8 +15,7 @@ from diagnostics import CompileError
 # AST nodes
 
 _PRETTY_MAX_WIDTH = 88
-_HIDDEN_FIELDS = {'resolved_type', 'line', 'col', 'file', 'nid', 'decl_id', 'symbol', 'symbols', 'narrowed_type',
-                  'resolved_return_type', 'binding_types'}
+_HIDDEN_FIELDS = {'line', 'col', 'file', 'nid'}
 _PRETTY_INDENT = "    "
 
 
@@ -89,50 +88,42 @@ class Node:
 class Constant(Node):
     value: Union[int, float]
     # set by semantic analysis
-    resolved_type: Optional[Any] = None
 
 
 @dataclass
 class BoolLiteral(Node):
     """`true` / `false`."""
     value: bool
-    resolved_type: Optional[Any] = None
 
 
 @dataclass
 class NoneLiteral(Node):
     """`none`: zero value for pointers, slices, and dicts. Typed Type.NONE."""
-    resolved_type: Optional[Any] = None
 
 
 @dataclass
 class StringLiteral(Node):
     """`'...'`; `value` is unescaped. Strings are bytes, not Unicode."""
     value: str
-    resolved_type: Optional[Any] = None
 
 
 @dataclass
 class ByteLiteral(Node):
     """`"a"`: a single uint8."""
     value: int
-    resolved_type: Optional[Any] = None
 
 
 @dataclass
 class Variable(Node):
     """Variable reference."""
     name: str
-    resolved_type: Optional[Any] = None
-    decl_id: Any = field(default=None, compare=False, repr=False)
 
 
 @dataclass
 class ArrayLiteral(Node):
-    """`[e1, ...]` or typed `[N]T[...]` / `[]T[...]`. resolved_type is always the literal's array shape."""
+    """`[e1, ...]` or typed `[N]T[...]` / `[]T[...]`."""
     elements: List[Node] = field(default_factory=list)
     type_expr: Optional['ArrayTypeExpr'] = None
-    resolved_type: Optional[Any] = None
 
 
 @dataclass
@@ -141,7 +132,6 @@ class DictLiteral(Node):
     key_type: Union[str, 'ArrayTypeExpr', 'SliceTypeExpr', 'PointerTypeExpr', 'DictTypeExpr']
     value_type: Union[str, 'ArrayTypeExpr', 'SliceTypeExpr', 'PointerTypeExpr', 'DictTypeExpr']
     entries: List[Tuple[Node, Node]] = field(default_factory=list)
-    resolved_type: Optional[Any] = None
 
 
 @dataclass
@@ -149,7 +139,6 @@ class Index(Node):
     """`array[index]`; multi-dimensional indexing nests."""
     array: Node
     index: Node
-    resolved_type: Optional[Any] = None
 
 
 @dataclass
@@ -158,7 +147,6 @@ class Slice(Node):
     array: Node
     low: Optional[Node] = None
     high: Optional[Node] = None
-    resolved_type: Optional[Any] = None
 
 
 @dataclass
@@ -167,7 +155,6 @@ class Call(Node):
     name: str
     args: List[Node] = field(default_factory=list)
     kwargs: Optional[List[Tuple[str, Node]]] = None
-    resolved_type: Optional[Any] = None
     receiver: Optional[Node] = None
 
 
@@ -175,8 +162,6 @@ class Call(Node):
 class Unary(Node):
     op: UnaryOp
     operand: Node
-    resolved_type: Optional[Any] = None
-    boxed_sum: Any = field(default=None, compare=False, repr=False)  # `&Variant(...)` as a pointer to this sum
 
 
 @dataclass
@@ -184,7 +169,6 @@ class Cast(Node):
     """`T(expr)`: explicit scalar cast."""
     target_type: str
     expr: Node
-    resolved_type: Optional[Any] = None
 
 
 @dataclass
@@ -192,7 +176,6 @@ class Binary(Node):
     op: BinaryOp
     left: Node
     right: Node
-    resolved_type: Optional[Any] = None
 
 
 @dataclass
@@ -241,8 +224,6 @@ class VarDecl(Node):
     name: str
     var_type: Union[str, ArrayTypeExpr, SliceTypeExpr]
     init: Optional[Node] = None
-    resolved_type: Any = field(default=None, compare=False, repr=False)
-    symbol: Any = field(default=None, compare=False, repr=False)  # set by semantic analysis
 
 
 @dataclass
@@ -250,7 +231,6 @@ class Assign(Node):
     """`name = value`."""
     name: str
     value: Node
-    decl_id: Any = field(default=None, compare=False, repr=False)
 
 
 @dataclass
@@ -267,7 +247,6 @@ class Field(Node):
     """`base.name`; pointers auto-deref."""
     base: Node
     name: str
-    resolved_type: Optional[Any] = None
 
 
 @dataclass
@@ -321,13 +300,10 @@ class ExprStmt(Node):
 
 @dataclass
 class IsCheck(Node):
-    """If-condition `NAME is T` or `EXPR is T as NAME`. Not a general expression. For the second form semantic analysis sets binding_decl, a VarDecl binding NAME to the subject, whose Symbol IR and escape analysis share."""
+    """If-condition `NAME is T` or `EXPR is T as NAME`. Not a general expression."""
     variable_name: str
     type_name: Union[str, QualifiedTypeExpr, ArrayTypeExpr, SliceTypeExpr, PointerTypeExpr]
     subject: Optional[Node] = None
-    binding_decl: Optional[Node] = None
-    decl_id: Any = field(default=None, compare=False, repr=False)
-    narrowed_type: Any = field(default=None, compare=False, repr=False)
 
 
 @dataclass
@@ -362,8 +338,6 @@ class ForIn(Node):
     binding_names: List[str]
     iterable: Node
     body: List[Node]
-    binding_types: Any = field(default=None, compare=False, repr=False)
-    symbols: Any = field(default=None, compare=False, repr=False)  # per binding; set by semantic analysis
 
 
 @dataclass
@@ -381,8 +355,6 @@ class Param(Node):
     """Parameter `T name`."""
     name: str
     type: Union[str, ArrayTypeExpr, SliceTypeExpr]
-    resolved_type: Any = field(default=None, compare=False, repr=False)
-    symbol: Any = field(default=None, compare=False, repr=False)  # set by semantic analysis
 
 
 @dataclass
@@ -392,7 +364,6 @@ class Function(Node):
     return_type: Optional[Union[str, ArrayTypeExpr, SliceTypeExpr]]
     params: List[Param] = field(default_factory=list)
     body: List[Node] = field(default_factory=list)
-    resolved_return_type: Any = field(default=None, compare=False, repr=False)
 
 
 @dataclass

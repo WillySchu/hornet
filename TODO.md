@@ -15,6 +15,7 @@ Binary Ops:
 
 Updates:
 - Consider adding a semantic AST with type information rather than annotating the existing AST from the parser.
+- Consider moving from two passes to one for building semantic tree.
 - Printing a struct defined in another module shows its internal name: print(write\_file(bad, x)) prints errors$Error(message: …).
 - Nothing warns when a result is ignored, such as a bare write\_stdout(...) statement.
 - Weight spills by use count and loop depth.

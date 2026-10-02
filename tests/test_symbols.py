@@ -48,19 +48,20 @@ SOURCE = (
 
 
 def test_every_declaration_gets_its_own_symbol():
+    import typed_ast as t
     program = _parse(SOURCE)
-    analyze(program)
-    fn = program.functions[0]
+    fn = analyze(program).functions[0]
     kinds = [(str(s), s.kind) for s in program.symbols.symbols]
     assert kinds[:6] == [('n#0', 'param'), ('ab#1', 'param'), ('x#2', 'local'), ('i#3', 'binding'),
                          ('y#4', 'binding'), ('x#5', 'local')]
     assert ('m#6', 'narrowing') in kinds
-    assert fn.params[0].symbol is program.symbols[0]
+    assert fn.params[0] is program.symbols[0]
     outer_x, loop = fn.body[0], fn.body[1]
     inner_x = loop.body[0]
+    assert isinstance(outer_x, t.Declare) and isinstance(loop, t.ForIn)
     assert outer_x.symbol is not inner_x.symbol  # shadowing is a different variable
-    assert loop.symbols[1].name == 'y' and inner_x.init.decl_id == loop.symbols[1].id
-    assert fn.body[-1].value.decl_id == outer_x.symbol.id  # `return x` refers to the outer x
+    assert loop.bindings[1].name == 'y' and inner_x.init.symbol is loop.bindings[1]
+    assert fn.body[-1].value.symbol is outer_x.symbol  # `return x` refers to the outer x
 
 
 def test_node_numbers_are_unique_and_follow_creation_order():

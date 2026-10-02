@@ -1,6 +1,6 @@
 """The symbol table: one Symbol per declared variable (local, parameter, loop binding, narrowing
 binding), created by semantic analysis. Later passes key per-variable facts on Symbol.id, and
-name uses refer to their declaration through it (Variable.decl_id)."""
+name uses refer to their declaration through it (typed_ast.Local.symbol)."""
 
 from dataclasses import dataclass, field
 from typing import Any, Optional

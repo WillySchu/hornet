@@ -223,7 +223,7 @@ def _rewrite_node(node, own_names: Set[str], canonical_module: Optional[str], im
 
     if isinstance(node, Node):
         for f in fields(node):
-            if f.name in ('resolved_type', 'line', 'col'):
+            if f.name in ('line', 'col', 'nid'):
                 continue
             value = getattr(node, f.name)
             if f.name in _TYPE_FIELD_NAMES:

@@ -4,14 +4,12 @@ typed tree (typed_ast.py), which every later stage consumes.
 Strict typing: no implicit conversions; integer operands must match exactly. Blocks
 scope lexically and may shadow. Non-void functions must return on all paths.
 
-Checking currently annotates the parser's nodes (resolved_type, decl_id, symbol/symbols,
-narrowed_type, binding_types, boxed_sum, resolved_return_type), and _TypedTreeBuilder builds the
-typed tree from those annotations at the end of analyze().
+The parser's tree is never changed: checking records what it learns in Facts, keyed by node number,
+and _TypedTreeBuilder builds each function's typed tree from those facts at the end of analyze().
 """
 
 import argparse
 import dataclasses
-from dataclasses import fields
 from typing import Dict, List, Optional, Set, Tuple
 
 from diagnostics import CompileError
@@ -266,6 +264,21 @@ def _check_main_signature(fn, param_types: list, return_type: Type) -> None:
             "'main' takes no parameters, or exactly '(int argc, *byte argv)'", fn.params[0] if fn.params else fn)
 
 
+@dataclasses.dataclass
+class Facts:
+    """What checking learned, keyed by parser-node number (Node.nid); the parser's nodes are never
+    changed. _TypedTreeBuilder builds the typed tree from these."""
+    types: dict = dataclasses.field(default_factory=dict)  # expression, VarDecl, Param -> Type
+    decls: dict = dataclasses.field(default_factory=dict)  # Variable, Assign, IsCheck -> Symbol.id (None: a constant)
+    symbols: dict = dataclasses.field(default_factory=dict)  # VarDecl, Param -> Symbol
+    for_symbols: dict = dataclasses.field(default_factory=dict)  # ForIn -> [Symbol] per binding
+    bindings: dict = dataclasses.field(default_factory=dict)  # IsCheck with `as NAME` -> synthetic VarDecl for NAME
+    narrowed: dict = dataclasses.field(default_factory=dict)  # IsCheck -> the variant it tests for
+    boxed: dict = dataclasses.field(default_factory=dict)  # Unary `&Variant(...)` -> the sum it boxes into
+    returns: dict = dataclasses.field(default_factory=dict)  # Function -> return Type
+    calls: dict = dataclasses.field(default_factory=dict)  # Call -> (callee, args) when it isn't name(args) as written
+
+
 class SemanticAnalyzer:
     """Type- and scope-checks a Program."""
 
@@ -283,6 +296,7 @@ class SemanticAnalyzer:
     def analyze(self, program: Program) -> "typed.Program":
         self.symbols = SymbolTable()
         program.symbols = self.symbols
+        self.facts = Facts()
         # Order matters: 0. constant array sizes become literals before any type is resolved.
         self._collect_consts(program)
         self._resolve_array_sizes(program)
@@ -380,12 +394,8 @@ class SemanticAnalyzer:
         if errors:
             raise SemanticErrors(errors)
 
-        # 6. Later passes see literals, never constant references.
-        for fn in program.functions:
-            self._substitute_consts(fn)
-
         # 7. The typed tree: what later stages consume.
-        program.typed_program = _TypedTreeBuilder(program).program()
+        program.typed_program = _TypedTreeBuilder(program, self.facts, self.consts).program()
         return program.typed_program
 
     # -- constants
@@ -479,7 +489,7 @@ class SemanticAnalyzer:
 
     def _const_eval(self, expr: Node):
         """Value of an already type-checked constant expression."""
-        t = getattr(expr, 'resolved_type', None)
+        t = self.facts.types.get(expr.nid)
         if isinstance(expr, (Constant, ByteLiteral)) and isinstance(expr.value, int):
             return expr.value
         if isinstance(expr, (BoolLiteral, StringLiteral)):
@@ -493,7 +503,7 @@ class SemanticAnalyzer:
         if isinstance(expr, Unary) and expr.op == UnaryOp.NOT:
             return not self._const_eval(expr.operand)
         if isinstance(expr, Binary):
-            left_type = expr.left.resolved_type
+            left_type = self.facts.types.get(expr.left.nid)
             if expr.op in (BinaryOp.AND, BinaryOp.OR):
                 left = self._const_eval(expr.left)
                 right = self._const_eval(expr.right)
@@ -515,40 +525,10 @@ class SemanticAnalyzer:
                     raise SemanticError("Division by zero in a constant expression", expr)
                 return bool(value) if t == Type.BOOL else value
         if isinstance(expr, Cast) and t in _INTEGER_TYPES:
-            return fold_cast(t, self._const_eval(expr.expr), expr.expr.resolved_type)
+            return fold_cast(t, self._const_eval(expr.expr), self.facts.types.get(expr.expr.nid))
         raise SemanticError(
             "A constant's value must be built from literals, other constants, operators, and integer casts", expr)
 
-    def _const_literal(self, name: str, node: Node) -> Node:
-        const_type, value = self.consts[name]
-        where = dict(line=node.line, col=node.col, file=node.file)
-        if const_type == Type.BOOL:
-            return BoolLiteral(value=value, resolved_type=const_type, **where)
-        if const_type == Type.STR:
-            return StringLiteral(value=value, resolved_type=const_type, **where)
-        return Constant(value=value, resolved_type=const_type, **where)
-
-    def _substitute_consts(self, node) -> None:
-        """Replace every constant reference under `node` with its literal, in place."""
-        for f in fields(node):
-            if f.name in ('resolved_type', 'decl_id', 'narrowed_type', 'binding_types', 'resolved_return_type'):
-                continue
-            value = getattr(node, f.name)
-            if isinstance(value, Variable) and value.name in self.consts:
-                setattr(node, f.name, self._const_literal(value.name, value))
-            elif isinstance(value, Node):
-                self._substitute_consts(value)
-            elif isinstance(value, list):
-                for i, item in enumerate(value):
-                    if isinstance(item, Variable) and item.name in self.consts:
-                        value[i] = self._const_literal(item.name, item)
-                    elif isinstance(item, Node):
-                        self._substitute_consts(item)
-                    elif isinstance(item, tuple):
-                        value[i] = tuple(
-                            self._const_literal(x.name, x) if isinstance(x, Variable) and x.name in self.consts
-                            else (self._substitute_consts(x) or x) if isinstance(x, Node) else x
-                            for x in item)
     def _resolve_sum_types(self, sum_type_defs: List[SumTypeDef], structs: Dict[str, StructInfo]) -> Dict[str, SumTypeInfo]:
         """Resolve sum type variants and check name collisions."""
         registry: Dict[str, SumTypeInfo] = {}
@@ -862,11 +842,12 @@ class SemanticAnalyzer:
         self.loop_depth = 0
         # Params are locals; _declare also catches duplicates.
         for p in fn.params:
-            p.resolved_type = type_from_name(p.type, self.structs, self.type_aliases, p, self.sum_types)
-            p.symbol = self.symbols.new(p.name, 'param', p.resolved_type, p)
-            self._declare(p.name, p.resolved_type, p, p.symbol.id)
+            param_type = type_from_name(p.type, self.structs, self.type_aliases, p, self.sum_types)
+            self.facts.types[p.nid] = param_type
+            self.facts.symbols[p.nid] = self.symbols.new(p.name, 'param', param_type, p)
+            self._declare(p.name, param_type, p, self.facts.symbols[p.nid].id)
         return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.structs, self.type_aliases, fn, self.sum_types)
-        fn.resolved_return_type = return_type
+        self.facts.returns[fn.nid] = return_type
         for stmt in fn.body:
             self.analyze_statement(stmt, return_type)
         # Void functions may fall off the end.
@@ -972,7 +953,7 @@ class SemanticAnalyzer:
         """check_expr for a value flowing into a typed slot; handles untyped array literals and literal range checks."""
         if isinstance(expr, ArrayLiteral) and expr.type_expr is None and target_type.kind in (TypeKind.SLICE, TypeKind.ARRAY):
             array_type = self.check_array_literal(expr, expected_element_type=target_type.element_type)
-            expr.resolved_type = array_type
+            self.facts.types[expr.nid] = array_type
             return target_type if target_type.kind == TypeKind.SLICE else array_type
         if (target_type.kind == TypeKind.POINTER and target_type.element_type.kind == TypeKind.SUM
                 and isinstance(expr, Unary) and expr.op == UnaryOp.ADDRESS_OF
@@ -980,8 +961,8 @@ class SemanticAnalyzer:
             # `&Variant(...)` where a pointer to the sum is expected: a new sum value holding that variant.
             variant_type = self.check_struct_literal(expr.operand)
             if variant_type in self.sum_types[target_type.element_type.sum_type_name].variants:
-                expr.boxed_sum = target_type.element_type
-                expr.resolved_type = target_type
+                self.facts.boxed[expr.nid] = target_type.element_type
+                self.facts.types[expr.nid] = target_type
                 return target_type
         value_type = self.check_expr(expr)
         if value_type == Type.NONE and target_type.kind == TypeKind.SLICE:
@@ -1000,19 +981,19 @@ class SemanticAnalyzer:
                         f"{target_type} ({lo} to {hi})",
                         expr,
                     )
-                self._annotate_literal_resolved_type(expr, target_type)
+                self._record_literal_type(expr, target_type)
                 return target_type
         if value_type == Type.INT and target_type == Type.INT64:
             if self._as_folded_int_literal(expr) is not None:
-                self._annotate_literal_resolved_type(expr, target_type)
+                self._record_literal_type(expr, target_type)
                 return target_type
         return value_type
 
-    def _annotate_literal_resolved_type(self, expr: Node, target_type: Type) -> None:
-        """Annotate a literal (and a negated literal's operand) with target_type."""
-        expr.resolved_type = target_type
+    def _record_literal_type(self, expr: Node, target_type: Type) -> None:
+        """Record a literal (and a negated literal's operand) as having target_type."""
+        self.facts.types[expr.nid] = target_type
         if isinstance(expr, Unary) and expr.op == UnaryOp.NEGATE and isinstance(expr.operand, Constant):
-            expr.operand.resolved_type = target_type
+            self.facts.types[expr.operand.nid] = target_type
 
     def _check_expr_allowing_struct_literal(self, expr: Node) -> Type:
         """check_expr, but accepts struct literals."""
@@ -1046,9 +1027,9 @@ class SemanticAnalyzer:
                     f"with a value of type {init_type}",
                     stmt,
                 )
-        stmt.resolved_type = declared_type
-        stmt.symbol = self.symbols.new(stmt.name, 'local', declared_type, stmt)
-        self._declare(stmt.name, declared_type, stmt, stmt.symbol.id)
+        self.facts.types[stmt.nid] = declared_type
+        self.facts.symbols[stmt.nid] = self.symbols.new(stmt.name, 'local', declared_type, stmt)
+        self._declare(stmt.name, declared_type, stmt, self.facts.symbols[stmt.nid].id)
 
     def analyze_assign(self, stmt: Assign) -> None:
         if stmt.name in self._narrowed_names:
@@ -1060,7 +1041,7 @@ class SemanticAnalyzer:
             )
         if stmt.name in self.const_decls and not any(stmt.name in scope for scope in self.scopes):
             raise SemanticError(f"Cannot assign to constant '{stmt.name}'", stmt)
-        declared_type, stmt.decl_id = self._resolve(stmt.name, stmt)
+        declared_type, self.facts.decls[stmt.nid] = self._resolve(stmt.name, stmt)
         value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, declared_type)
         if not self._types_compatible(value_type, declared_type):
             raise SemanticError(
@@ -1218,19 +1199,14 @@ class SemanticAnalyzer:
             self._push_scope()
             subject_type = self.check_expr(stmt.condition.subject)
             # binding_decl is built once here; see IsCheck.
-            if subject_type.kind == TypeKind.SUM:
-                stmt.condition.binding_decl = VarDecl(
-                    name=stmt.condition.variable_name,
-                    var_type=subject_type.sum_type_name,
-                    init=stmt.condition.subject,
-                    line=stmt.condition.line,
-                    col=stmt.condition.col,
-                    file=stmt.condition.file,
-                )
-                stmt.condition.binding_decl.resolved_type = subject_type
             sym = self.symbols.new(stmt.condition.variable_name, 'narrowing', subject_type, stmt.condition)
-            if stmt.condition.binding_decl is not None:  # None when the subject isn't a sum; rejected below
-                stmt.condition.binding_decl.symbol = sym
+            if subject_type.kind == TypeKind.SUM:  # otherwise rejected below
+                binding = VarDecl(name=stmt.condition.variable_name, var_type=subject_type.sum_type_name,
+                                  init=stmt.condition.subject, line=stmt.condition.line, col=stmt.condition.col,
+                                  file=stmt.condition.file)
+                self.facts.bindings[stmt.condition.nid] = binding
+                self.facts.types[binding.nid] = subject_type
+                self.facts.symbols[binding.nid] = sym
             self._declare(stmt.condition.variable_name, subject_type, stmt.condition, sym.id)
 
         condition_type = self.check_expr(stmt.condition)
@@ -1251,8 +1227,8 @@ class SemanticAnalyzer:
         if isinstance(stmt.condition, IsCheck):
             narrowed_name = stmt.condition.variable_name
             narrowed_type = type_from_name(stmt.condition.type_name, self.structs, self.type_aliases, stmt.condition)
-            stmt.condition.narrowed_type = narrowed_type
-            self._declare(narrowed_name, narrowed_type, stmt.condition, stmt.condition.decl_id)
+            self.facts.narrowed[stmt.condition.nid] = narrowed_type
+            self._declare(narrowed_name, narrowed_type, stmt.condition, self.facts.decls[stmt.condition.nid])
             self._narrowed_names.add(narrowed_name)
         for s in stmt.then_body:
             self.analyze_statement(s, return_type)
@@ -1371,10 +1347,10 @@ class SemanticAnalyzer:
             binding_types = [iterable_type.key_type, iterable_type.element_type][:num_bindings]
         else:
             binding_types = [Type.INT, iterable_type.element_type] if num_bindings == 2 else [iterable_type.element_type]
-        stmt.binding_types = binding_types
         self._push_scope()
-        stmt.symbols = [self.symbols.new(name, 'binding', t, stmt) for name, t in zip(stmt.binding_names, binding_types)]
-        for name, binding_type, sym in zip(stmt.binding_names, binding_types, stmt.symbols):
+        symbols = [self.symbols.new(name, 'binding', t, stmt) for name, t in zip(stmt.binding_names, binding_types)]
+        self.facts.for_symbols[stmt.nid] = symbols
+        for name, binding_type, sym in zip(stmt.binding_names, binding_types, symbols):
             self._declare(name, binding_type, stmt, sym.id)
         self.loop_depth += 1
         for s in stmt.body:
@@ -1393,7 +1369,7 @@ class SemanticAnalyzer:
     # Expressions
 
     def check_expr(self, expr: Node) -> Type:
-        """Type-check `expr` and set expr.resolved_type."""
+        """Type-check `expr`, recording its type."""
         if isinstance(expr, Constant):
             result = self.check_constant(expr)
         elif isinstance(expr, BoolLiteral):
@@ -1429,7 +1405,7 @@ class SemanticAnalyzer:
             result = self.check_is_check(expr)
         else:
             raise SemanticError(f"No semantic rule for expression: {expr!r}", expr)
-        expr.resolved_type = result
+        self.facts.types[expr.nid] = result
         return result
 
     def check_dict_literal(self, expr: DictLiteral) -> Type:
@@ -1565,7 +1541,7 @@ class SemanticAnalyzer:
                     arg,
                 )
         result = Type(TypeKind.STRUCT, struct_name=expr.name)
-        expr.resolved_type = result
+        self.facts.types[expr.nid] = result
         return result
 
     def _check_named_struct_literal(self, expr: Call, struct_info: StructInfo, field_items: list) -> Type:
@@ -1604,7 +1580,7 @@ class SemanticAnalyzer:
                         f"zero value (only a sum type with a `none` variant does) -- give the field a value",
                         expr)
         result = Type(TypeKind.STRUCT, struct_name=expr.name)
-        expr.resolved_type = result
+        self.facts.types[expr.nid] = result
         return result
 
     def _without_zero_value(self, t: Type, seen: Optional[set] = None) -> Optional[Type]:
@@ -1624,7 +1600,8 @@ class SemanticAnalyzer:
         return None
 
     def _check_method_call(self, expr: Call) -> Type:
-        """Resolve `receiver.name(args)` and rewrite it in place to a mangled call."""
+        """Resolve `receiver.name(args)` to its method: a call of the mangled function with the receiver
+        (or its address, for a pointer receiver) first."""
         if expr.kwargs is not None:
             raise SemanticError(
                 f"'{expr.name}(...)' uses named arguments, which are not "
@@ -1650,6 +1627,7 @@ class SemanticAnalyzer:
                 expr,
             )
         param_types, return_type, mangled_name = self.methods[key]
+        receiver = expr.receiver
         if key in self.pointer_receivers and not receiver_is_pointer:
             # Pointer receiver: pass the receiver's address.
             if not isinstance(expr.receiver, (Variable, Field, Index)) and not (
@@ -1659,13 +1637,12 @@ class SemanticAnalyzer:
                     f"needs an addressable receiver (a variable, field, index, or dereference), not a temporary",
                     expr.receiver,
                 )
-            if isinstance(expr.receiver, Unary):
-                expr.receiver = expr.receiver.operand  # &(*p) is p
+            if isinstance(receiver, Unary):
+                receiver = receiver.operand  # &(*p) is p
             else:
-                address = Unary(op=UnaryOp.ADDRESS_OF, operand=expr.receiver,
-                                line=expr.receiver.line, col=expr.receiver.col, file=expr.receiver.file)
-                self.check_expr(address)
-                expr.receiver = address
+                receiver = Unary(op=UnaryOp.ADDRESS_OF, operand=receiver,
+                                 line=receiver.line, col=receiver.col, file=receiver.file)
+                self.check_expr(receiver)
         if len(expr.args) != len(param_types):
             raise SemanticError(
                 f"Method '{expr.name}' on '{receiver_type.struct_name}' "
@@ -1682,10 +1659,8 @@ class SemanticAnalyzer:
                     f"{expected_type}, got {actual_type}",
                     arg,
                 )
-        expr.args = [expr.receiver] + expr.args
-        expr.name = mangled_name
-        expr.receiver = None
-        expr.resolved_type = return_type
+        self.facts.calls[expr.nid] = (mangled_name, [receiver] + list(expr.args))
+        self.facts.types[expr.nid] = return_type
         return return_type
 
     def check_call(self, expr: Call) -> Type:
@@ -1814,7 +1789,7 @@ class SemanticAnalyzer:
         arg_type = self.check_expr(expr.args[0])
         if arg_type != Type.STR:
             raise SemanticError(f"bytes() takes a str, got {arg_type}", expr)
-        expr.name = 'hornet_bytes'
+        self.facts.calls[expr.nid] = ('hornet_bytes', list(expr.args))
         self.functions['hornet_bytes'] = ([Type.STR], _BYTE_SLICE)
         return _BYTE_SLICE
 
@@ -1853,12 +1828,12 @@ class SemanticAnalyzer:
         return Type.INT
 
     def check_variable(self, expr: Variable) -> Type:
-        t, expr.decl_id = self._resolve(expr.name, expr)
+        t, self.facts.decls[expr.nid] = self._resolve(expr.name, expr)
         return t
 
     def check_is_check(self, expr: IsCheck) -> Type:
         """`NAME is T` / `EXPR is T as NAME`; T must be a variant."""
-        variable_type, expr.decl_id = self._resolve(expr.variable_name, expr)
+        variable_type, self.facts.decls[expr.nid] = self._resolve(expr.variable_name, expr)
         if variable_type.kind != TypeKind.SUM:
             if expr.subject is not None:
                 raise SemanticError(
@@ -1893,7 +1868,7 @@ class SemanticAnalyzer:
     def check_unary(self, expr: Unary) -> Type:
         if (expr.op == UnaryOp.NEGATE and isinstance(expr.operand, Constant)
                 and expr.operand.value == 2**63):
-            expr.operand.resolved_type = Type.INT  # -2**63 is int's minimum
+            self.facts.types[expr.operand.nid] = Type.INT  # -2**63 is int's minimum
             return Type.INT
         operand_type = self._check_expr_allowing_struct_literal(expr.operand)
         if expr.op in (UnaryOp.NEGATE, UnaryOp.COMPLEMENT):
@@ -1914,7 +1889,8 @@ class SemanticAnalyzer:
                 )
             return Type.BOOL
         if expr.op == UnaryOp.ADDRESS_OF:
-            if isinstance(expr.operand, Variable) and expr.operand.decl_id is None and expr.operand.name in self.const_decls:
+            if (isinstance(expr.operand, Variable) and self.facts.decls.get(expr.operand.nid) is None
+                    and expr.operand.name in self.const_decls):
                 raise SemanticError(f"Cannot take the address of constant '{expr.operand.name}'", expr)
             # Only variables, struct literals, and chains rooted in a variable.
             is_struct_literal = isinstance(expr.operand, Call) and expr.operand.name in self.structs
@@ -1948,7 +1924,7 @@ class SemanticAnalyzer:
                 raise SemanticError(f"str(...) takes a byte or []byte, got {source_type}", expr)
             return Type.STR
         if target_type == Type.INT64 and self._as_folded_int_literal(expr.expr) is not None:
-            self._annotate_literal_resolved_type(expr.expr, Type.INT64)
+            self._record_literal_type(expr.expr, Type.INT64)
             source_type = Type.INT64
         else:
             source_type = self.check_expr(expr.expr)
@@ -2170,8 +2146,10 @@ class _TypedTreeBuilder:
     """Builds the typed tree (typed_ast.py) from a checked program: every implicit operation becomes
     explicit, and values flowing into a slot of a known type go through `convert`."""
 
-    def __init__(self, program: syntax.Program):
+    def __init__(self, program: syntax.Program, facts: Facts, consts: dict):
         self.ast = program
+        self.facts = facts
+        self.consts = consts
         self.symbols = program.symbols
         self.structs = program.struct_registry
         self.sum_types = program.sum_type_registry
@@ -2180,13 +2158,16 @@ class _TypedTreeBuilder:
         self.intrinsics = {i.name for i in program.intrinsics}
         self.return_type = None
 
+    def ty(self, e) -> Type:
+        return self.facts.types[e.nid]
+
     def program(self) -> typed.Program:
         return typed.Program(tuple(self.function(fn) for fn in self.ast.functions), self.structs, self.sum_types,
                          self.symbols)
 
     def function(self, fn: syntax.Function) -> typed.Function:
-        self.return_type = fn.resolved_return_type
-        return typed.Function(fn.name, tuple(param.symbol for param in fn.params), fn.resolved_return_type,
+        self.return_type = self.facts.returns[fn.nid]
+        return typed.Function(fn.name, tuple(self.facts.symbols[param.nid] for param in fn.params), self.return_type,
                           self.block(fn.body))
 
     # -- statements
@@ -2202,7 +2183,7 @@ class _TypedTreeBuilder:
         if isinstance(s, syntax.VarDecl):
             return [self.declare(s)]
         if isinstance(s, syntax.Assign):
-            symbol = self.symbols[s.decl_id]
+            symbol = self.symbols[self.facts.decls[s.nid]]
             return [typed.Assign(typed.Local(symbol.type, symbol), self.convert(s.value, symbol.type))]
         if isinstance(s, (syntax.IndexAssign, syntax.FieldAssign, syntax.DerefAssign)):
             if isinstance(s, syntax.IndexAssign):
@@ -2233,7 +2214,7 @@ class _TypedTreeBuilder:
             iterable = self.expr(s.iterable)
             kind = {TypeKind.ARRAY: 'array', TypeKind.SLICE: 'slice', TypeKind.STR: 'str',
                     TypeKind.DICT: 'dict'}[iterable.type.kind]
-            return [typed.ForIn(kind, iterable, tuple(s.symbols), self.block(s.body))]
+            return [typed.ForIn(kind, iterable, tuple(self.facts.for_symbols[s.nid]), self.block(s.body))]
         if isinstance(s, syntax.Break):
             return [typed.Break()]
         if isinstance(s, syntax.Continue):
@@ -2241,7 +2222,7 @@ class _TypedTreeBuilder:
         raise ElaborationError(f"No elaboration for statement {type(s).__name__}")
 
     def declare(self, s: syntax.VarDecl) -> typed.Declare:
-        symbol = s.symbol
+        symbol = self.facts.symbols[s.nid]
         init = self.zero(symbol.type) if s.init is None else self.convert(s.init, symbol.type)
         return typed.Declare(symbol, init)
 
@@ -2252,21 +2233,22 @@ class _TypedTreeBuilder:
         if s.is_match:
             arms, current = [], s
             for i in range(s.match_arm_count):
-                arms.append((current.condition.narrowed_type, self.block(current.then_body)))
+                arms.append((self.facts.narrowed[current.condition.nid], self.block(current.then_body)))
                 if i < s.match_arm_count - 1:
                     current = current.else_body[0]
             else_body = None if current.else_body is None else self.block(current.else_body)
             return before + [typed.Match(subject, tuple(arms), else_body)]
-        test = typed.TagTest(Type.BOOL, subject, s.condition.narrowed_type)
+        test = typed.TagTest(Type.BOOL, subject, self.facts.narrowed[s.condition.nid])
         return before + [typed.If(test, self.block(s.then_body), self.block(s.else_body))]
 
     def narrowing_subject(self, check: syntax.IsCheck):
         """(statements to run first, the sum being tested) for `NAME is T` or `EXPR is T as NAME`."""
-        if check.binding_decl is not None:
-            symbol = check.binding_decl.symbol
+        binding = self.facts.bindings.get(check.nid)
+        if binding is not None:
+            symbol = self.facts.symbols[binding.nid]
             declare = typed.Declare(symbol, self.convert(check.subject, symbol.type))
             return [declare], typed.Local(symbol.type, symbol)
-        symbol = self.symbols[check.decl_id]
+        symbol = self.symbols[self.facts.decls[check.nid]]
         return [], typed.Local(symbol.type, symbol)
 
     # -- conversions
@@ -2280,8 +2262,8 @@ class _TypedTreeBuilder:
 
     def convert(self, e, target: Type) -> typed.Expr:
         """`e` as a value flowing into a slot of type `target`, implicit operations made explicit."""
-        if isinstance(e, syntax.Unary) and e.boxed_sum is not None:
-            return typed.BoxVariant(target, typed.WidenToSum(e.boxed_sum, self.expr(e.operand)))
+        if isinstance(e, syntax.Unary) and e.nid in self.facts.boxed:
+            return typed.BoxVariant(target, typed.WidenToSum(self.facts.boxed[e.nid], self.expr(e.operand)))
         if isinstance(e, syntax.NoneLiteral):
             if target.kind == TypeKind.POINTER:
                 return typed.NoneLit(target)
@@ -2308,7 +2290,7 @@ class _TypedTreeBuilder:
 
     def expr(self, e) -> typed.Expr:
         if isinstance(e, syntax.Constant):
-            return typed.IntLit(e.resolved_type, e.value)
+            return typed.IntLit(self.ty(e), e.value)
         if isinstance(e, syntax.BoolLiteral):
             return typed.BoolLit(Type.BOOL, e.value)
         if isinstance(e, syntax.StringLiteral):
@@ -2318,49 +2300,57 @@ class _TypedTreeBuilder:
         if isinstance(e, syntax.NoneLiteral):
             return typed.NoneLit(Type.NONE)
         if isinstance(e, syntax.Variable):
-            symbol = self.symbols[e.decl_id]
+            decl = self.facts.decls[e.nid]
+            if decl is None:  # a constant: its value
+                const_type, value = self.consts[e.name]
+                if const_type == Type.BOOL:
+                    return typed.BoolLit(Type.BOOL, value)
+                if const_type == Type.STR:
+                    return typed.StrLit(Type.STR, value)
+                return typed.IntLit(self.ty(e), value)
+            symbol = self.symbols[decl]
             local = typed.Local(symbol.type, symbol)
-            if e.resolved_type is not None and e.resolved_type != symbol.type:
-                return typed.Payload(e.resolved_type, local)  # narrowed by an enclosing `is`
+            if self.ty(e) != symbol.type:
+                return typed.Payload(self.ty(e), local)  # narrowed by an enclosing `is`
             return local
         if isinstance(e, syntax.ArrayLiteral):
-            array_type = e.resolved_type
+            array_type = self.ty(e)
             return typed.ArrayLiteral(array_type, tuple(self.convert(x, array_type.element_type) for x in e.elements))
         if isinstance(e, syntax.DictLiteral):
-            d = e.resolved_type
+            d = self.ty(e)
             return typed.DictLiteral(d, tuple((self.convert(k, d.key_type), self.convert(v, d.element_type))
                                           for k, v in e.entries))
         if isinstance(e, syntax.Index):
             return self.index(e)
         if isinstance(e, syntax.Slice) and isinstance(e.array, syntax.ArrayLiteral) and e.low is None and e.high is None:
             # A typed slice literal, `[]T[...]`: new storage holding the elements.
-            elements = tuple(self.convert(x, e.resolved_type.element_type) for x in e.array.elements)
-            return typed.SliceLiteral(e.resolved_type, elements) if elements else typed.EmptySlice(e.resolved_type)
+            elements = tuple(self.convert(x, self.ty(e).element_type) for x in e.array.elements)
+            return typed.SliceLiteral(self.ty(e), elements) if elements else typed.EmptySlice(self.ty(e))
         if isinstance(e, syntax.Slice):
             base = self.expr(e.array)
             kind = {TypeKind.ARRAY: 'array', TypeKind.SLICE: 'slice', TypeKind.STR: 'str'}[base.type.kind]
             low = None if e.low is None else self.expr(e.low)
             high = None if e.high is None else self.expr(e.high)
-            return typed.SliceOf(e.resolved_type, kind, base, low, high)
+            return typed.SliceOf(self.ty(e), kind, base, low, high)
         if isinstance(e, syntax.Field):
             return self.field(e)
         if isinstance(e, syntax.Call):
             return self.call(e)
         if isinstance(e, syntax.Unary):
             if e.op == UnaryOp.ADDRESS_OF:
-                if e.boxed_sum is not None:
-                    return self.convert(e, e.resolved_type)
+                if e.nid in self.facts.boxed:
+                    return self.convert(e, self.ty(e))
                 operand = self.expr(e.operand)
-                return typed.AddressOf(e.resolved_type, operand)
+                return typed.AddressOf(self.ty(e), operand)
             if e.op == UnaryOp.DEREFERENCE:
                 pointer = self.expr(e.operand)
                 return typed.Deref(pointer.type.element_type, pointer)
-            return typed.Unary(e.resolved_type, e.op, self.expr(e.operand))
+            return typed.Unary(self.ty(e), e.op, self.expr(e.operand))
         if isinstance(e, syntax.Cast):
             value = self.expr(e.expr)
-            if e.resolved_type == Type.STR:
+            if self.ty(e) == Type.STR:
                 return (typed.StrFromByte if value.type == Type.UINT8 else typed.StrFromBytes)(Type.STR, value)
-            return typed.IntCast(e.resolved_type, value)
+            return typed.IntCast(self.ty(e), value)
         if isinstance(e, syntax.Binary):
             return self.binary(e)
         raise ElaborationError(f"No elaboration for expression {type(e).__name__}")
@@ -2384,19 +2374,19 @@ class _TypedTreeBuilder:
         return typed.FieldAccess(field_type, base, e.name, names.index(e.name), through_pointer)
 
     def call(self, e: syntax.Call) -> typed.Expr:
-        name = e.name
+        name, args = self.facts.calls.get(e.nid, (e.name, e.args))
         if name == 'print':
-            return typed.Print(Type.VOID, self.expr(e.args[0]))
+            return typed.Print(Type.VOID, self.expr(args[0]))
         if name == 'len':
-            return typed.Len(Type.INT, self.expr(e.args[0]))
+            return typed.Len(Type.INT, self.expr(args[0]))
         if name == 'append':
-            s = self.expr(e.args[0])
-            return typed.Append(s.type, s, self.convert(e.args[1], s.type.element_type))
+            s = self.expr(args[0])
+            return typed.Append(s.type, s, self.convert(args[1], s.type.element_type))
         if name == 'del':
-            d = self.expr(e.args[0])
-            return typed.DictDelete(Type.VOID, d, self.convert(e.args[1], d.type.key_type))
+            d = self.expr(args[0])
+            return typed.DictDelete(Type.VOID, d, self.convert(args[1], d.type.key_type))
         if name in ('bytes', 'hornet_bytes'):  # analysis rewrites bytes(s) to the runtime function
-            return typed.BytesFromStr(_BYTE_SLICE, self.expr(e.args[0]))
+            return typed.BytesFromStr(_BYTE_SLICE, self.expr(args[0]))
         if name in self.structs:
             field_types = self.structs[name].fields
             if e.kwargs is not None:
@@ -2404,14 +2394,14 @@ class _TypedTreeBuilder:
                 values = tuple(self.convert(given[f], ft) if f in given else self.zero(ft)
                                for f, ft in field_types.items())
             else:
-                values = tuple(self.convert(a, ft) for a, ft in zip(e.args, field_types.values()))
+                values = tuple(self.convert(a, ft) for a, ft in zip(args, field_types.values()))
             return typed.StructLiteral(Type(TypeKind.STRUCT, struct_name=name), values)
         param_types, return_type = self.functions[name]
         kind = 'extern' if name in self.externs else 'intrinsic' if name in self.intrinsics else 'function'
-        return typed.Call(return_type, name, kind, tuple(self.convert(a, pt) for a, pt in zip(e.args, param_types)))
+        return typed.Call(return_type, name, kind, tuple(self.convert(a, pt) for a, pt in zip(args, param_types)))
 
     def binary(self, e: syntax.Binary) -> typed.Expr:
-        op, left_type, right_type = e.op, e.left.resolved_type, e.right.resolved_type
+        op, left_type, right_type = e.op, self.ty(e.left), self.ty(e.right)
         if op == BinaryOp.IN:
             container = self.expr(e.right)
             if container.type.kind == TypeKind.DICT:
@@ -2433,4 +2423,4 @@ class _TypedTreeBuilder:
             right = typed.IntLit(left.type, right.value)
         elif left.type != right.type and isinstance(left, typed.IntLit):
             left = typed.IntLit(right.type, left.value)
-        return typed.Binary(e.resolved_type, op, left, right)
+        return typed.Binary(self.ty(e), op, left, right)
