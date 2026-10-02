@@ -383,7 +383,8 @@ class SemanticAnalyzer:
             if fn.name in self.functions:
                 raise SemanticError(f"Function '{fn.name}' is already declared", fn)
             param_types = [type_from_name(p.type, self.structs, self.type_aliases, p, self.sum_types) for p in fn.params]
-            return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.structs, self.type_aliases, fn, self.sum_types)
+            return_type = Type.VOID if fn.return_type is None else type_from_name(
+                fn.return_type, self.structs, self.type_aliases, fn, self.sum_types)
             self.functions[fn.name] = (param_types, return_type)
 
         # 4.5. Externs share the function registry.
@@ -628,8 +629,11 @@ class SemanticAnalyzer:
                         md,
                     )
                 seen_names.add(md.name)
-                param_types = [type_from_name(p.type, self.structs, self.type_aliases, p, self.sum_types) for p in md.params]
-                return_type = Type.VOID if md.return_type is None else type_from_name(md.return_type, self.structs, self.type_aliases, md, self.sum_types)
+                param_types = [
+                    type_from_name(p.type, self.structs, self.type_aliases, p, self.sum_types) for p in md.params
+                ]
+                return_type = Type.VOID if md.return_type is None else type_from_name(
+                    md.return_type, self.structs, self.type_aliases, md, self.sum_types)
                 methods[(sd.name, md.name)] = (param_types, return_type, mangle_method_name(sd.name, md.name))
                 if md.receiver_is_pointer:
                     self.pointer_receivers.add((sd.name, md.name))
@@ -801,7 +805,8 @@ class SemanticAnalyzer:
             raise SemanticError(f"Function '{ext.name}' is already declared", ext)
 
         param_types = [type_from_name(p.type, self.structs, self.type_aliases, p, self.sum_types) for p in ext.params]
-        return_type = Type.VOID if ext.return_type is None else type_from_name(ext.return_type, self.structs, self.type_aliases, ext, self.sum_types)
+        return_type = Type.VOID if ext.return_type is None else type_from_name(
+            ext.return_type, self.structs, self.type_aliases, ext, self.sum_types)
 
         for p, p_type in zip(ext.params, param_types):
             if p_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT, TypeKind.SUM, TypeKind.STR):
@@ -858,7 +863,8 @@ class SemanticAnalyzer:
             raise SemanticError(f"Function '{ic.name}' is already declared", ic)
 
         param_types = [type_from_name(p.type, self.structs, self.type_aliases, p, self.sum_types) for p in ic.params]
-        return_type = Type.VOID if ic.return_type is None else type_from_name(ic.return_type, self.structs, self.type_aliases, ic, self.sum_types)
+        return_type = Type.VOID if ic.return_type is None else type_from_name(
+            ic.return_type, self.structs, self.type_aliases, ic, self.sum_types)
 
         self.functions[ic.name] = (param_types, return_type)
         self.intrinsic_original_names[ic.name] = ic.original_name
@@ -872,7 +878,8 @@ class SemanticAnalyzer:
             self.facts.types[p.nid] = param_type
             self.facts.symbols[p.nid] = self.symbols.new(p.name, 'param', param_type, p)
             self._declare(p.name, param_type, p, self.facts.symbols[p.nid].id)
-        return_type = Type.VOID if fn.return_type is None else type_from_name(fn.return_type, self.structs, self.type_aliases, fn, self.sum_types)
+        return_type = Type.VOID if fn.return_type is None else type_from_name(
+            fn.return_type, self.structs, self.type_aliases, fn, self.sum_types)
         self.facts.returns[fn.nid] = return_type
         for stmt in fn.body:
             self.analyze_statement(stmt, return_type)
@@ -979,7 +986,11 @@ class SemanticAnalyzer:
 
     def _check_value_flowing_into(self, expr: Node, target_type: Type) -> Type:
         """check_expr for a value flowing into a typed slot; handles untyped array literals and literal range checks."""
-        if isinstance(expr, ArrayLiteral) and expr.type_expr is None and target_type.kind in (TypeKind.SLICE, TypeKind.ARRAY):
+        if (
+                isinstance(expr, ArrayLiteral)
+                and expr.type_expr is None
+                and target_type.kind in (TypeKind.SLICE, TypeKind.ARRAY)
+        ):
             array_type = self.check_array_literal(expr, expected_element_type=target_type.element_type)
             self.facts.types[expr.nid] = array_type
             return target_type if target_type.kind == TypeKind.SLICE else array_type
@@ -1078,7 +1089,13 @@ class SemanticAnalyzer:
                 stmt,
             )
 
-    def _check_compound_assign(self, compound_op: BinaryOp, target_type: Type, target_expr_for_check: Node, value_expr: Node, stmt: Node) -> None:
+    def _check_compound_assign(
+            self,
+            compound_op: BinaryOp,
+            target_type: Type,
+            target_expr_for_check: Node,
+            value_expr: Node,
+            stmt: Node) -> None:
         """Check a compound assignment via a synthetic Binary."""
         if target_type == Type.STR and compound_op == BinaryOp.ADD:
             raise SemanticError(
@@ -1088,7 +1105,8 @@ class SemanticAnalyzer:
                 f"write it as a plain '=' instead",
                 stmt,
             )
-        synthetic = Binary(op=compound_op, left=target_expr_for_check, right=value_expr, line=stmt.line, col=stmt.col, file=stmt.file)
+        synthetic = Binary(
+            op=compound_op, left=target_expr_for_check, right=value_expr, line=stmt.line, col=stmt.col, file=stmt.file)
         self.check_binary(synthetic)
 
     def analyze_index_assign(self, stmt: IndexAssign) -> None:
@@ -1133,7 +1151,8 @@ class SemanticAnalyzer:
             )
         pointee_type = pointer_type.element_type
         if stmt.compound_op is not None:
-            target_expr = Unary(op=UnaryOp.DEREFERENCE, operand=stmt.pointer, line=stmt.line, col=stmt.col, file=stmt.file)
+            target_expr = Unary(
+                op=UnaryOp.DEREFERENCE, operand=stmt.pointer, line=stmt.line, col=stmt.col, file=stmt.file)
             self._check_compound_assign(stmt.compound_op, pointee_type, target_expr, stmt.value, stmt)
             return
         value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, pointee_type)
@@ -1369,7 +1388,8 @@ class SemanticAnalyzer:
 
     def analyze_for_in(self, stmt: ForIn, return_type: Type) -> None:
         """`for a[, b] in iterable:` over arrays, slices, dicts, and strings (bytes)."""
-        if not isinstance(stmt.iterable, (Variable, Field, Index, Slice, ArrayLiteral, DictLiteral, StringLiteral, Call)):
+        if not isinstance(
+                stmt.iterable, (Variable, Field, Index, Slice, ArrayLiteral, DictLiteral, StringLiteral, Call)):
             raise SemanticError(
                 f"'for ... in' requires a variable, field, index, "
                 f"slice, or array/dict/str literal as its own iterable, "
@@ -1398,9 +1418,12 @@ class SemanticAnalyzer:
         elif iterable_type.kind == TypeKind.DICT:
             binding_types = [iterable_type.key_type, iterable_type.element_type][:num_bindings]
         else:
-            binding_types = [Type.INT, iterable_type.element_type] if num_bindings == 2 else [iterable_type.element_type]
+            binding_types = [
+                Type.INT, iterable_type.element_type] if num_bindings == 2 else [iterable_type.element_type]
         self._push_scope()
-        symbols = [self.symbols.new(name, 'binding', t, stmt) for name, t in zip(stmt.binding_names, binding_types)]
+        symbols = [
+            self.symbols.new(name, 'binding', t, stmt) for name, t in zip(stmt.binding_names, binding_types)
+        ]
         self.facts.for_symbols[stmt.nid] = symbols
         for name, binding_type, sym in zip(stmt.binding_names, binding_types, symbols):
             self._declare(name, binding_type, stmt, sym.id)
@@ -1502,7 +1525,8 @@ class SemanticAnalyzer:
                     expr,
                 )
             for i, element in enumerate(expr.elements, start=1):
-                element_type = self._check_value_flowing_into_allowing_struct_literal(element, declared_type.element_type)
+                element_type = self._check_value_flowing_into_allowing_struct_literal(
+                    element, declared_type.element_type)
                 if not self._types_compatible(element_type, declared_type.element_type):
                     raise SemanticError(
                         f"Array literal declares element type "
@@ -1661,7 +1685,8 @@ class SemanticAnalyzer:
                 expr,
             )
         receiver_type = self._check_expr_allowing_struct_literal(expr.receiver)
-        receiver_is_pointer = receiver_type.kind == TypeKind.POINTER and receiver_type.element_type.kind == TypeKind.STRUCT
+        receiver_is_pointer = (receiver_type.kind == TypeKind.POINTER
+                               and receiver_type.element_type.kind == TypeKind.STRUCT)
         if receiver_is_pointer:
             # auto-deref
             receiver_type = receiver_type.element_type
@@ -2301,7 +2326,10 @@ class _TypedTreeBuilder:
             return typed.WidenToSum(target, value)
         if value.type.kind == TypeKind.POINTER and value.type.element_type == target:
             return typed.Deref(target, value)  # a method's value receiver called through a pointer
-        if isinstance(value, typed.IntLit) and target.kind in (TypeKind.INT, TypeKind.INT32, TypeKind.INT8, TypeKind.UINT8):
+        if (
+                isinstance(value, typed.IntLit)
+                and target.kind in (TypeKind.INT, TypeKind.INT32, TypeKind.INT8, TypeKind.UINT8)
+        ):
             return typed.IntLit(target, value.value)
         raise ElaborationError(f"No conversion from {value.type} to {target} for {e!r}")
 
@@ -2341,7 +2369,10 @@ class _TypedTreeBuilder:
                                               for k, v in e.entries))
         if isinstance(e, syntax.Index):
             return self.index(e)
-        if isinstance(e, syntax.Slice) and isinstance(e.array, syntax.ArrayLiteral) and e.low is None and e.high is None:
+        if (
+                isinstance(e, syntax.Slice) and isinstance(e.array, syntax.ArrayLiteral)
+                and e.low is None and e.high is None
+        ):
             # A typed slice literal, `[]T[...]`: new storage holding the elements.
             elements = tuple(self.convert(x, self.ty(e).element_type) for x in e.array.elements)
             return typed.SliceLiteral(self.ty(e), elements) if elements else typed.EmptySlice(self.ty(e))
