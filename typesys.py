@@ -40,10 +40,10 @@ class Type:
             return f"[{self.size}]{self.element_type}"
         if self.kind == TypeKind.SLICE:
             return f"[]{self.element_type}"
-        if self.kind == TypeKind.STRUCT:
-            return self.struct_name
+        if self.kind == TypeKind.STRUCT:  # as declared, without the module prefix of its key
+            return self.struct_name.rsplit('$', 1)[-1]
         if self.kind == TypeKind.SUM:
-            return self.sum_type_name
+            return self.sum_type_name.rsplit('$', 1)[-1]
         if self.kind == TypeKind.POINTER:
             return f"*{self.element_type}"
         if self.kind == TypeKind.DICT:

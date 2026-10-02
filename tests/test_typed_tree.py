@@ -9,7 +9,6 @@ import pytest
 
 import typed_ast as t
 from compile import typed_tree
-from merge import merge_programs
 from modules import discover_modules
 from semantic import analyze
 from tests.test_compiler import _parse
@@ -120,8 +119,7 @@ def _repository_programs():
 @pytest.mark.parametrize('path', _repository_programs(), ids=lambda p: Path(p).stem)
 def test_repository_programs_have_typed_trees(path):
     entry, modules = discover_modules(path)
-    ast = merge_programs(entry, modules)
-    assert t.dump(analyze(ast))
+    assert t.dump(analyze(entry, modules))
 
 
 def test_every_node_kind_occurs_in_the_repository_and_this_file():
@@ -130,8 +128,7 @@ def test_every_node_kind_occurs_in_the_repository_and_this_file():
     used = _nodes(_typed(SOURCE))
     for path in _repository_programs():
         entry, modules = discover_modules(path)
-        ast = merge_programs(entry, modules)
-        used |= _nodes(analyze(ast))
+        used |= _nodes(analyze(entry, modules))
     used |= _nodes(_typed("def int main():\n    [2]int a = [1, 2]\n    print(a[1])\n    int y = 1\n    *int p = &y\n"
                           "    *p = 2\n    while y < 3:\n        y += 1\n        if y == 2:\n            continue\n"
                           "        break\n    for int i = 0; i < 2; i += 1:\n        y = -y\n    print(true)\n"
@@ -148,7 +145,7 @@ def test_dump_typed_command(tmp_path):
     assert r.stdout == typed_tree(str(src))
 
 
-FRONT_END = {'parser', 'semantic', 'lexer', 'modules', 'merge'}
+FRONT_END = {'parser', 'semantic', 'lexer', 'modules', 'scopes'}
 LATER_STAGES = ['ir', 'optimize', 'backend', 'escape_analysis.py']
 
 

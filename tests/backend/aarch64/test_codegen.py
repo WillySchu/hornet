@@ -15,7 +15,6 @@ from build import c_compiler, can_run, run_prefix
 from compile import compile_to_asm
 from ir.ir import IRFunction
 from ir.program_builder import build_ir_program
-from merge import merge_programs
 from modules import discover_modules
 from optimize.optimizer import optimize
 from semantic import analyze
@@ -86,8 +85,7 @@ PROGRAMS = sorted((ROOT / 'benchmarks' / 'programs').glob('*.ht')) + sorted((ROO
 
 def _asm_program(path: Path):
     entry, modules = discover_modules(str(path))
-    program = merge_programs(entry, modules)
-    program = analyze(program)
+    program = analyze(entry, modules)
     return CodeGenerator().generate(optimize(build_ir_program(program)))
 
 

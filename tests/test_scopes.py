@@ -1,14 +1,7 @@
-"""Tests for merge.py's own merge_programs: folding every discovered
-module's own declarations into the entry program, mangled and with
-every qualified reference resolved -- entirely before semantic.py
-ever runs (see merge.py's own module docstring).
+"""Modules: names across files (scopes.py), resolved while each file is checked.
 
-Most of these compile and run an actual multi-file program end to end
-(through discover_modules -> merge_programs -> desugar_methods ->
-analyze -> generate_asm -> gcc), the same way tests elsewhere in this
-suite already do for a single file -- this feature's whole point is
-files interacting correctly, so a merged-AST-shape check alone
-wouldn't cover nearly as much of what actually matters.
+Most of these compile and run an actual multi-file program end to end (discover_modules -> analyze ->
+generate_asm -> gcc): the point is files interacting correctly.
 """
 
 import shutil
@@ -20,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from lexer import lex
-from merge import merge_programs, MergeError
+from scopes import MergeError
 from build import build_executable
 from tests.targets import on_every_target, run_binary
 from modules import discover_modules
@@ -41,7 +34,7 @@ def _write(tmpdir: str, name: str, content: str) -> str:
 
 
 def _compile_and_run(entry_path: str, tmpdir: str, args: list = None, stdin: str = None) -> subprocess.CompletedProcess:
-    """The full pipeline: discover, merge, desugar, analyze, codegen,
+    """The full pipeline: discover, analyze, codegen,
     assemble, link, run -- returning the finished process so callers
     can assert on returncode and/or stdout. `args` (default none) are
     passed through to the compiled binary itself as its own argv[1:]
@@ -149,7 +142,7 @@ def test_hidden_name_is_rejected():
         _write(tmpdir, "utils.ht", "def int _secret():\n    return 42\n")
         entry_program, modules = discover_modules(entry)
         with pytest.raises(MergeError, match="not visible outside the module that defines it"):
-            merge_programs(entry_program, modules)
+            analyze(entry_program, modules)
 
 
 def test_hidden_name_is_accessible_from_within_its_own_module():
@@ -172,7 +165,7 @@ def test_reference_to_undeclared_name_in_module_is_rejected():
         _write(tmpdir, "utils.ht", "def int helper():\n    return 1\n")
         entry_program, modules = discover_modules(entry)
         with pytest.raises(MergeError, match="is not declared in module 'utils'"):
-            merge_programs(entry_program, modules)
+            analyze(entry_program, modules)
 
 
 def test_reference_to_unknown_qualifier_falls_through_as_ordinary_field_access():
@@ -188,9 +181,8 @@ def test_reference_to_unknown_qualifier_falls_through_as_ordinary_field_access()
             "def int main():\n    return nonImportedName.foo()\n",
         )
         entry_program, modules = discover_modules(entry)
-        merged = merge_programs(entry_program, modules)
         with pytest.raises(SemanticError):
-            analyze(merged)
+            analyze(entry_program, modules)
 
 
 def test_diamond_import_shared_module_reachable_from_both_paths():
@@ -283,7 +275,7 @@ def test_unknown_module_in_type_position_is_rejected():
         )
         entry_program, modules = discover_modules(entry)
         with pytest.raises(MergeError, match="doesn't name an imported module"):
-            merge_programs(entry_program, modules)
+            analyze(entry_program, modules)
 
 
 def test_array_of_qualified_struct_type():
@@ -346,9 +338,8 @@ def test_method_call_with_named_kwargs_is_rejected():
             "    return b.area(x=1)\n",
         )
         entry_program, modules = discover_modules(entry)
-        merged = merge_programs(entry_program, modules)
         with pytest.raises(SemanticError, match="not supported for method calls"):
-            analyze(merged)
+            analyze(entry_program, modules)
 
 
 def test_in_module_struct_field_referencing_another_struct_in_the_same_module():
@@ -480,7 +471,7 @@ def test_unknown_module_in_qualified_narrowing_is_rejected():
         )
         entry_program, modules = discover_modules(entry)
         with pytest.raises(MergeError, match="doesn't name an imported module"):
-            merge_programs(entry_program, modules)
+            analyze(entry_program, modules)
 
 
 def test_hidden_struct_in_qualified_narrowing_is_rejected():
@@ -515,7 +506,7 @@ def test_hidden_struct_in_qualified_narrowing_is_rejected():
         )
         entry_program, modules = discover_modules(entry)
         with pytest.raises(MergeError, match="not visible outside the module that defines it"):
-            merge_programs(entry_program, modules)
+            analyze(entry_program, modules)
 
 
 
@@ -535,9 +526,8 @@ def test_hidden_struct_in_qualified_narrowing_is_rejected():
         )
         _write(tmpdir, "utils.ht", "def int helper():\n    return 1\n")
         entry_program, modules = discover_modules(entry)
-        merged = merge_programs(entry_program, modules)
         with pytest.raises(SemanticError):
-            analyze(merged)
+            analyze(entry_program, modules)
 
 
 def test_basic_named_import_function_call():
@@ -584,7 +574,7 @@ def test_named_import_colliding_with_own_declaration_is_rejected():
         _write(tmpdir, "utils.ht", "def int helper():\n    return 2\n")
         entry_program, modules = discover_modules(entry)
         with pytest.raises(MergeError, match="collides with this file's own declaration"):
-            merge_programs(entry_program, modules)
+            analyze(entry_program, modules)
 
 
 def test_unused_invalid_named_import_is_rejected_eagerly():
@@ -601,7 +591,7 @@ def test_unused_invalid_named_import_is_rejected_eagerly():
         _write(tmpdir, "utils.ht", "def int helper():\n    return 1\n")
         entry_program, modules = discover_modules(entry)
         with pytest.raises(MergeError, match="is not declared in module 'utils'"):
-            merge_programs(entry_program, modules)
+            analyze(entry_program, modules)
 
 
 def test_hidden_name_via_named_import_is_rejected():
@@ -613,7 +603,7 @@ def test_hidden_name_via_named_import_is_rejected():
         _write(tmpdir, "utils.ht", "def int _secret():\n    return 1\n")
         entry_program, modules = discover_modules(entry)
         with pytest.raises(MergeError, match="not visible outside the module that defines it"):
-            merge_programs(entry_program, modules)
+            analyze(entry_program, modules)
 
 
 def test_qualified_and_named_import_of_the_same_module_both_work():
@@ -714,7 +704,7 @@ def test_intrinsic_with_unrecognized_name_is_rejected():
         )
         entry_program, modules = discover_modules(entry)
         with pytest.raises(MergeError, match="isn't a recognized intrinsic"):
-            merge_programs(entry_program, modules)
+            analyze(entry_program, modules)
 
 
 def test_intrinsic_with_mismatched_signature_is_rejected():
@@ -727,7 +717,7 @@ def test_intrinsic_with_mismatched_signature_is_rejected():
         )
         entry_program, modules = discover_modules(entry)
         with pytest.raises(MergeError, match="doesn't match its own required signature"):
-            merge_programs(entry_program, modules)
+            analyze(entry_program, modules)
 
 
 def test_intrinsic_signature_accepts_either_byte_or_uint8_spelling():
@@ -743,7 +733,7 @@ def test_intrinsic_signature_accepts_either_byte_or_uint8_spelling():
             "intrinsic *uint8 _raw_ptr(str s)\n\ndef int main():\n    return 0\n",
         )
         entry_program, modules = discover_modules(entry)
-        merge_programs(entry_program, modules)  # should not raise
+        analyze(entry_program, modules)  # should not raise
 
 
 def test_stdlib_c_module_round_trips_a_str_through_a_c_string():
@@ -821,7 +811,7 @@ def test_stdlib_c_modules_raw_intrinsics_are_hidden():
         )
         entry_program, modules = discover_modules(entry)
         with pytest.raises(MergeError, match="not visible outside the module that defines it"):
-            merge_programs(entry_program, modules)
+            analyze(entry_program, modules)
 
 
 def test_intrinsic_with_wrong_return_type_is_rejected():
@@ -834,7 +824,7 @@ def test_intrinsic_with_wrong_return_type_is_rejected():
         )
         entry_program, modules = discover_modules(entry)
         with pytest.raises(MergeError, match="doesn't match its own required signature"):
-            merge_programs(entry_program, modules)
+            analyze(entry_program, modules)
 
 
 def test_intrinsic_with_wrong_parameter_count_is_rejected():
@@ -847,7 +837,7 @@ def test_intrinsic_with_wrong_parameter_count_is_rejected():
         )
         entry_program, modules = discover_modules(entry)
         with pytest.raises(MergeError, match="doesn't match its own required signature"):
-            merge_programs(entry_program, modules)
+            analyze(entry_program, modules)
 
 
 def test_intrinsic_colliding_with_a_struct_of_the_same_name_is_rejected():
@@ -859,9 +849,8 @@ def test_intrinsic_colliding_with_a_struct_of_the_same_name_is_rejected():
             "def int main():\n    return 0\n",
         )
         entry_program, modules = discover_modules(entry)
-        merged = merge_programs(entry_program, modules)
         with pytest.raises(SemanticError, match="collides with a struct"):
-            analyze(merged)
+            analyze(entry_program, modules)
 
 
 def test_intrinsic_colliding_with_an_already_declared_function_is_rejected():
@@ -873,9 +862,8 @@ def test_intrinsic_colliding_with_an_already_declared_function_is_rejected():
             "def int main():\n    return 0\n",
         )
         entry_program, modules = discover_modules(entry)
-        merged = merge_programs(entry_program, modules)
         with pytest.raises(SemanticError, match="is already declared"):
-            analyze(merged)
+            analyze(entry_program, modules)
 
 
 def test_stdlib_hash_module_hash_int64_directly_with_value_exceeding_int32_range():
@@ -1241,3 +1229,85 @@ def test_types_and_names_inside_literals_are_resolved_across_modules():
         )
         result = _compile_and_run(entry, tmpdir)
         assert result.stdout == "9\n16\n", result.stdout + result.stderr
+
+
+def _analyze_files(tmpdir: str, files: dict):
+    for name, content in files.items():
+        _write(tmpdir, name, content)
+    entry_program, modules = discover_modules(str(Path(tmpdir) / 'main.ht'))
+    return entry_program, modules
+
+
+@pytest.mark.parametrize('local', [
+    "    int lib = 1\n",
+    "    for lib in [1, 2]:\n        print(lib)\n",
+])
+def test_a_local_cant_reuse_an_import_alias(local):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry_program, modules = _analyze_files(tmpdir, {
+            'main.ht': "import 'lib'\ndef int main():\n" + local + "    return 0\n",
+            'lib.ht': "def int f():\n    return 1\n",
+        })
+        with pytest.raises(MergeError, match="'lib' at line 3 is an imported module's name here and can't also be a variable name"):
+            analyze(entry_program, modules)
+
+
+def test_a_parameter_cant_reuse_an_import_alias():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry_program, modules = _analyze_files(tmpdir, {
+            'main.ht': "import 'lib' as l\ndef int g(int l):\n    return l\ndef int main():\n    return 0\n",
+            'lib.ht': "def int f():\n    return 1\n",
+        })
+        with pytest.raises(MergeError, match="'l' at line 2 is an imported module's name here"):
+            analyze(entry_program, modules)
+
+
+LIB_WITH_EXTERN = "extern int abs(int value)\ndef int f():\n    return abs(-2)\n"
+
+
+def test_another_modules_extern_needs_an_import():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry_program, modules = _analyze_files(tmpdir, {
+            'main.ht': "import 'lib'\ndef int main():\n    return abs(-3) + lib.f()\n",
+            'lib.ht': LIB_WITH_EXTERN,
+        })
+        with pytest.raises(SemanticError, match="Call to undeclared function 'abs'"):
+            analyze(entry_program, modules)
+
+
+@pytest.mark.parametrize('main', [
+    "from 'lib' import abs\ndef int main():\n    return abs(-3) + lib_f()\n",
+    "import 'lib'\ndef int main():\n    return lib.abs(-3) + lib_f()\n",
+])
+def test_an_imported_extern_is_callable(main):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        main = main.replace("lib_f()", "2")
+        entry = _write(tmpdir, 'main.ht', main)
+        _write(tmpdir, 'lib.ht', LIB_WITH_EXTERN)
+        assert _compile_and_run(entry, tmpdir).returncode == 5
+
+
+def test_types_from_other_modules_print_and_report_by_their_declared_names():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry = _write(tmpdir, 'main.ht', "import 'shapes'\ndef int main():\n    print(shapes.Box(3))\n    return 0\n")
+        _write(tmpdir, 'shapes.ht', "type Box struct:\n    int side\n")
+        assert _compile_and_run(entry, tmpdir).stdout.strip() == "Box(side: 3)"
+        _write(tmpdir, 'main.ht', "import 'shapes'\ndef int main():\n    shapes.Box b = 1\n    return 0\n")
+        entry_program, modules = discover_modules(entry)
+        with pytest.raises(SemanticError, match=r"Cannot initialize 'b' \(declared Box\) with a value of type int"):
+            analyze(entry_program, modules)
+
+
+def test_analysis_leaves_every_modules_tree_unchanged():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        entry_program, modules = _analyze_files(tmpdir, {
+            'main.ht': "import 'lib'\nfrom 'lib' import K\ndef int main():\n    [lib.K]int a\n"
+                       "    lib.Box b = lib.Box(K)\n    return b.get() + lib.f()\n",
+            'lib.ht': "const int K = 2\ntype Box struct:\n    int n\n    def int get(self):\n        return self.n\n"
+                      "def int f():\n    return K\n",
+        })
+        programs = [entry_program] + [m.program for m in modules.values()]
+        before = [[d.pretty() for d in p.functions + p.structs + p.consts] for p in programs]
+        typed_program = analyze(entry_program, modules)
+        assert sorted(fn.name for fn in typed_program.functions) == ['lib$Box.get', 'lib$f', 'main']
+        assert [[d.pretty() for d in p.functions + p.structs + p.consts] for p in programs] == before

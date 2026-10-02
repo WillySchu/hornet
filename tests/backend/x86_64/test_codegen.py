@@ -165,14 +165,12 @@ def test_lowering_does_not_modify_the_ir():
     from pathlib import Path
     from backend.x86_64.codegen import CodeGenerator
     from ir.program_builder import build_ir_program
-    from merge import merge_programs
     from modules import discover_modules
     from optimize.optimizer import optimize
     from semantic import analyze
     path = Path(__file__).resolve().parents[3] / 'benchmarks' / 'programs' / 'register_pressure.ht'
     entry, modules = discover_modules(str(path))
-    program = merge_programs(entry, modules)
-    program = analyze(program)
+    program = analyze(entry, modules)
     ir_program = optimize(build_ir_program(program))
     before = copy.deepcopy([(f.slot_widths, f.slot_labels, f.temp_homes, f.body) for f in ir_program.functions])
     first = CodeGenerator().generate(ir_program)

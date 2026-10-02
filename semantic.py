@@ -18,6 +18,7 @@ from typesys import StructInfo, SumTypeInfo, Type, TypeKind
 from folding import fold_binary_op, fold_cast, fold_unary_op
 import parser as syntax
 import typed_ast as typed
+from scopes import build_module_set, display_name as shown
 from symbols import SymbolTable
 from parser import (
     ConstDecl,
@@ -39,6 +40,7 @@ from parser import (
     ExprStmt,
     ExternFunctionDecl,
     Field,
+    QualifiedTypeExpr,
     FieldAssign,
     For,
     ForIn,
@@ -95,18 +97,20 @@ def type_from_name(
     aliases: Dict[str, Type],
     node: Optional[Node] = None,
     sum_types: Dict[str, SumTypeInfo] = None,
+    resolve=None,
 ) -> Type:
-    """Resolve a parsed type expression to a Type."""
+    """Resolve a parsed type expression to a Type. `resolve` maps a name as written in its file (or an
+    `alias.Name`) to its declaration's key (see scopes.py)."""
     if isinstance(type_expr, ArrayTypeExpr):
-        element = type_from_name(type_expr.element_type, structs, aliases, node, sum_types)
+        element = type_from_name(type_expr.element_type, structs, aliases, node, sum_types, resolve)
         size = type_expr.size if isinstance(type_expr.size, int) else _array_sizes[type_expr.nid]
         return Type(TypeKind.ARRAY, element_type=element, size=size)
     if isinstance(type_expr, SliceTypeExpr):
-        element = type_from_name(type_expr.element_type, structs, aliases, node, sum_types)
+        element = type_from_name(type_expr.element_type, structs, aliases, node, sum_types, resolve)
         return Type(TypeKind.SLICE, element_type=element)
     if isinstance(type_expr, PointerTypeExpr):
         # Pointer-to-pointer is rejected for now.
-        pointee = type_from_name(type_expr.pointee_type, structs, aliases, node, sum_types)
+        pointee = type_from_name(type_expr.pointee_type, structs, aliases, node, sum_types, resolve)
         if pointee.kind == TypeKind.POINTER:
             raise SemanticError(
                 "Pointer-to-pointer types aren't supported yet -- "
@@ -115,8 +119,8 @@ def type_from_name(
             )
         return Type(TypeKind.POINTER, element_type=pointee)
     if isinstance(type_expr, DictTypeExpr):
-        key_type = type_from_name(type_expr.key_type, structs, aliases, node, sum_types)
-        value_type = type_from_name(type_expr.value_type, structs, aliases, node, sum_types)
+        key_type = type_from_name(type_expr.key_type, structs, aliases, node, sum_types, resolve)
+        value_type = type_from_name(type_expr.value_type, structs, aliases, node, sum_types, resolve)
         if key_type not in _VALID_DICT_KEY_TYPES:
             raise SemanticError(
                 f"'{key_type}' can't be a dict's own key type -- only "
@@ -125,10 +129,14 @@ def type_from_name(
                 node,
             )
         return Type(TypeKind.DICT, key_type=key_type, element_type=value_type)
+    if isinstance(type_expr, QualifiedTypeExpr) and resolve is not None:
+        type_expr = resolve(type_expr)
     if type_expr in _TYPE_NAMES:
         return _TYPE_NAMES[type_expr]
     if type_expr == 'none':  # only a sum type's variant, or the type an `is` check narrows to
         return Type.NONE
+    if resolve is not None:
+        type_expr = resolve(type_expr)
     if type_expr in aliases:
         return aliases[type_expr]
     if type_expr in structs:
@@ -298,7 +306,8 @@ class Facts:
     narrowed: dict = dataclasses.field(default_factory=dict)  # IsCheck -> the variant it tests for
     boxed: dict = dataclasses.field(default_factory=dict)  # Unary `&Variant(...)` -> the sum it boxes into
     returns: dict = dataclasses.field(default_factory=dict)  # Function -> return Type
-    calls: dict = dataclasses.field(default_factory=dict)  # Call -> (callee, args) when it isn't name(args) as written
+    calls: dict = dataclasses.field(default_factory=dict)  # Call -> (callee's key, args) unless name(args) as written
+    const_refs: dict = dataclasses.field(default_factory=dict)  # Variable, or `alias.NAME` Field -> constant's key
 
 
 class SemanticAnalyzer:
@@ -315,13 +324,20 @@ class SemanticAnalyzer:
         self.sum_types: Dict[str, SumTypeInfo] = {}
         self._narrowed_names: set = set()  # currently narrowed variable names
 
-    def analyze(self, program: Program) -> "typed.Program":
-        """Check `program` and return its typed tree; `program` itself is left unchanged."""
+    def analyze(self, entry: Program, modules: Optional[dict] = None) -> "typed.Program":
+        """Check the entry file and the modules it imports (discover_modules's result) and return the
+        typed tree; no parser tree is changed."""
         self.symbols = SymbolTable()
         self.facts = Facts()
+        # Each declaration under its key, with its file's scope (see scopes.py).
+        program = build_module_set(entry, modules or {})
+        self.module_set = program
+        self.scope = program.files[0][1]
         # Each method is checked and compiled as a function of its own (see _method_function).
-        self.all_functions = list(program.functions) + [
-            _method_function(sd, md) for sd in program.structs for md in sd.methods]
+        methods = [(_method_function(sd, md), sd) for sd in program.structs for md in sd.methods]
+        for fn, sd in methods:
+            program.scope_of[fn.nid] = program.scope_of[sd.nid]
+        self.all_functions = list(program.functions) + [fn for fn, _ in methods]
         # Order matters: 0. constant array sizes become literals before any type is resolved.
         self._collect_consts(program)
         self._resolve_array_sizes(program)
@@ -347,24 +363,25 @@ class SemanticAnalyzer:
         self.functions = {}
         self.intrinsic_original_names = {}  # mangled name -> original_name
         for fn in self.all_functions:
+            self._enter(fn)
             if fn.name in _BUILTIN_FUNCTION_NAMES:
                 raise SemanticError(
-                    f"'{fn.name}' is a builtin and can't be redefined as "
+                    f"'{shown(fn.name)}' is a builtin and can't be redefined as "
                     f"a function",
                     fn,
                 )
             if fn.name in self.structs:
                 raise SemanticError(
-                    f"Function '{fn.name}' collides with a struct of the "
+                    f"Function '{shown(fn.name)}' collides with a struct of the "
                     f"same name -- struct and function names share one "
                     f"namespace and can never be the same, since "
-                    f"'{fn.name}(...)' would otherwise be ambiguous "
+                    f"'{shown(fn.name)}(...)' would otherwise be ambiguous "
                     f"between a call and a struct literal",
                     fn,
                 )
             if fn.name in self.type_aliases:
                 raise SemanticError(
-                    f"Function '{fn.name}' collides with a type alias "
+                    f"Function '{shown(fn.name)}' collides with a type alias "
                     f"of the same name -- function and type-alias "
                     f"names share one namespace and can never be the "
                     f"same",
@@ -372,25 +389,26 @@ class SemanticAnalyzer:
                 )
             if fn.name in self.sum_types:
                 raise SemanticError(
-                    f"Function '{fn.name}' collides with a sum type "
+                    f"Function '{shown(fn.name)}' collides with a sum type "
                     f"of the same name -- function and sum-type names "
                     f"share one namespace and can never be the same",
                     fn,
                 )
             if fn.name in self.functions:
-                raise SemanticError(f"Function '{fn.name}' is already declared", fn)
-            param_types = [type_from_name(p.type, self.structs, self.type_aliases, p, self.sum_types) for p in fn.params]
-            return_type = Type.VOID if fn.return_type is None else type_from_name(
-                fn.return_type, self.structs, self.type_aliases, fn, self.sum_types)
+                raise SemanticError(f"Function '{shown(fn.name)}' is already declared", fn)
+            param_types = [self._type(p.type, p) for p in fn.params]
+            return_type = Type.VOID if fn.return_type is None else self._type(fn.return_type, fn)
             self.functions[fn.name] = (param_types, return_type)
 
         # 4.5. Externs share the function registry.
         self.extern_names = {ext.name for ext in program.extern_functions}
         for ext in program.extern_functions:
+            self._enter(ext)
             self.check_extern_function_decl(ext)
 
         # 4.6. Intrinsics share the function registry.
         for ic in program.intrinsics:
+            self._enter(ic)
             self.check_intrinsic_decl(ic)
 
         # 4.7. Constant values, in dependency order.
@@ -419,6 +437,45 @@ class SemanticAnalyzer:
         # 7. The typed tree: what later stages consume.
         return _TypedTreeBuilder(self).program(self.all_functions)
 
+    # -- names across modules
+
+    def _enter(self, decl: Node) -> None:
+        """Check `decl` (a top-level declaration, under its key) in its own file's scope."""
+        self.scope = self.module_set.scope_of[decl.nid]
+
+    def _resolve_type_name(self, name):
+        """A type name (or `alias.Name`) as written in the current file -> its declaration's key."""
+        if isinstance(name, QualifiedTypeExpr):
+            return self.module_set.qualified[name.nid]
+        return (self.scope.resolve(name) or name) if isinstance(name, str) else name
+
+    def _type(self, type_expr, node: Node, sums: bool = True) -> Type:
+        return type_from_name(type_expr, self.structs, self.type_aliases, node, self.sum_types if sums else None,
+                              resolve=self._resolve_type_name)
+
+    def _const_key(self, name: str) -> Optional[str]:
+        """The key of the constant a bare name refers to in the current file, if it names one."""
+        key = self.scope.consts.get(name)
+        return key if key in getattr(self, 'const_decls', {}) else None
+
+    def _callee(self, expr: Call) -> Optional[str]:
+        """The key a call's name refers to (a function, struct, extern, or intrinsic), resolving
+        `alias.name(...)`; the name as written if it names nothing at top level (a builtin, or
+        undeclared); None for a method call."""
+        if expr.nid in self.module_set.qualified:
+            return self.module_set.qualified[expr.nid]
+        if expr.receiver is not None:
+            return None
+        return self.scope.resolve(expr.name) or expr.name
+
+    def _struct_literal(self, expr: Node) -> Optional[str]:
+        """The struct's key if `expr` is a struct literal."""
+        if isinstance(expr, Call):
+            name = self._callee(expr)
+            if name in self.structs:
+                return name
+        return None
+
     # -- constants
 
     def _collect_consts(self, program: Program) -> None:
@@ -427,12 +484,18 @@ class SemanticAnalyzer:
         self._const_in_progress: set = set()
         for cd in program.consts:
             if cd.name in self.const_decls:
-                raise SemanticError(f"Constant '{cd.name}' is already declared", cd)
+                raise SemanticError(f"Constant '{shown(cd.name)}' is already declared", cd)
             self.const_decls[cd.name] = cd
 
     def _resolve_array_sizes(self, program: Program) -> None:
         """Record each `[EXPR]T` size's value (in _array_sizes): a positive integer computed from
         literals and constants only (whose types must therefore be builtin)."""
+        for file_program, scope in program.files:
+            self.scope = scope
+            self._resolve_array_sizes_in(file_program)
+        self.scope = program.files[0][1]
+
+    def _resolve_array_sizes_in(self, program: Program) -> None:
         seen = set()
         stack = [program]
         while stack:
@@ -455,9 +518,11 @@ class SemanticAnalyzer:
         stack = [expr]
         while stack:
             node = stack.pop()
+            if node.nid in self.module_set.qualified and isinstance(node, Field):
+                continue  # `alias.NAME`: checked as a constant below
             if isinstance(node, Call):
                 raise SemanticError("Array size must be a constant expression, not a call", node)
-            if isinstance(node, Variable) and node.name not in self.const_decls:
+            if isinstance(node, Variable) and self._const_key(node.name) is None:
                 raise SemanticError(
                     f"Array size must be a constant expression, but '{node.name}' isn't a constant", node)
             if dataclasses.is_dataclass(node):
@@ -479,9 +544,9 @@ class SemanticAnalyzer:
             for kind, table in (('function', self.functions), ('struct', self.structs),
                                 ('type alias', self.type_aliases), ('sum type', self.sum_types)):
                 if name in table:
-                    raise SemanticError(f"Constant '{name}' collides with a {kind} of the same name", cd)
+                    raise SemanticError(f"Constant '{shown(name)}' collides with a {kind} of the same name", cd)
             if name in _BUILTIN_FUNCTION_NAMES:
-                raise SemanticError(f"'{name}' is a builtin and can't be used as a constant name", cd)
+                raise SemanticError(f"'{shown(name)}' is a builtin and can't be used as a constant name", cd)
 
     def _const_value(self, name: str) -> Tuple[Type, object]:
         """(type, value) of constant `name`, evaluating it (and what it depends on) the first time."""
@@ -489,21 +554,24 @@ class SemanticAnalyzer:
             return self.consts[name]
         cd = self.const_decls[name]
         if name in self._const_in_progress:
-            raise SemanticError(f"Constant '{name}' is defined in terms of itself", cd)
+            raise SemanticError(f"Constant '{shown(name)}' is defined in terms of itself", cd)
         self._const_in_progress.add(name)
-        const_type = type_from_name(cd.const_type, self.structs, self.type_aliases, cd, self.sum_types)
+        saved_scope = self.scope
+        self._enter(cd)
+        const_type = self._type(cd.const_type, cd)
         if const_type not in _INTEGER_TYPES and const_type not in (Type.BOOL, Type.STR):
             raise SemanticError(
-                f"Constant '{name}' has type {const_type} -- constants must be an integer type, bool, or str", cd)
+                f"Constant '{shown(name)}' has type {const_type} -- constants must be an integer type, bool, or str", cd)
         saved_scopes, self.scopes = self.scopes, [{}]
         try:
             value_type = self._check_value_flowing_into(cd.value, const_type)
             if not self._types_compatible(value_type, const_type):
                 raise SemanticError(
-                    f"Constant '{name}' is declared {const_type} but its value has type {value_type}", cd)
+                    f"Constant '{shown(name)}' is declared {const_type} but its value has type {value_type}", cd)
             value = self._const_eval(cd.value)
         finally:
             self.scopes = saved_scopes
+            self.scope = saved_scope
         self._const_in_progress.discard(name)
         self.consts[name] = (const_type, value)
         return self.consts[name]
@@ -515,8 +583,10 @@ class SemanticAnalyzer:
             return expr.value
         if isinstance(expr, (BoolLiteral, StringLiteral)):
             return expr.value
-        if isinstance(expr, Variable) and expr.name in self.const_decls:
-            return self._const_value(expr.name)[1]
+        if isinstance(expr, Variable) and self._const_key(expr.name) is not None:
+            return self._const_value(self._const_key(expr.name))[1]
+        if isinstance(expr, Field) and self.module_set.qualified.get(expr.nid) in self.const_decls:
+            return self._const_value(self.module_set.qualified[expr.nid])[1]
         if isinstance(expr, Unary) and expr.op in (UnaryOp.NEGATE, UnaryOp.COMPLEMENT):
             if isinstance(expr.operand, Constant) and expr.operand.value == 2 ** 63:
                 return -2 ** 63
@@ -556,45 +626,47 @@ class SemanticAnalyzer:
         for std in sum_type_defs:
             if std.name in _BUILTIN_FUNCTION_NAMES:
                 raise SemanticError(
-                    f"'{std.name}' is a builtin and can't be used as a "
+                    f"'{shown(std.name)}' is a builtin and can't be used as a "
                     f"sum type name",
                     std,
                 )
             if std.name in structs:
                 raise SemanticError(
-                    f"Sum type '{std.name}' collides with a struct of "
+                    f"Sum type '{shown(std.name)}' collides with a struct of "
                     f"the same name -- struct and sum-type names share "
                     f"one namespace and can never be the same",
                     std,
                 )
             if std.name in self.type_aliases:
                 raise SemanticError(
-                    f"Sum type '{std.name}' collides with a type alias "
+                    f"Sum type '{shown(std.name)}' collides with a type alias "
                     f"of the same name -- type-alias and sum-type names "
                     f"share one namespace and can never be the same",
                     std,
                 )
             if std.name in registry:
-                raise SemanticError(f"Sum type '{std.name}' is already declared", std)
+                raise SemanticError(f"Sum type '{shown(std.name)}' is already declared", std)
 
+            self._enter(std)
             resolved_variants: List[Type] = []
             for variant_name in std.variants:
-                if any(sd.name == variant_name for sd in sum_type_defs):
+                if any(sd.name == self._resolve_type_name(variant_name) for sd in sum_type_defs):
                     raise SemanticError(
-                        f"Sum type '{std.name}' names '{variant_name}' as "
+                        f"Sum type '{shown(std.name)}' names '{variant_name}' as "
                         f"a variant, but '{variant_name}' is itself a sum "
                         f"type -- a sum type's variants can't include "
                         f"another sum type yet",
                         std,
                     )
                 try:
-                    variant_type = type_from_name(variant_name, structs, self.type_aliases, std)
+                    variant_type = type_from_name(
+                        variant_name, structs, self.type_aliases, std, resolve=self._resolve_type_name)
                 except SemanticError:
                     # Name what's allowed for a simple typo.
                     if not isinstance(variant_name, str):
                         raise
                     raise SemanticError(
-                        f"Sum type '{std.name}' names '{variant_name}' as "
+                        f"Sum type '{shown(std.name)}' names '{variant_name}' as "
                         f"a variant, but '{variant_name}' isn't a declared "
                         f"struct, `none`, or a valid scalar/str/array/slice/pointer/dict "
                         f"type",
@@ -602,7 +674,7 @@ class SemanticAnalyzer:
                     )
                 if variant_type in resolved_variants:
                     raise SemanticError(
-                        f"Sum type '{std.name}' lists '{variant_type}' "
+                        f"Sum type '{shown(std.name)}' lists '{variant_type}' "
                         f"as a variant more than once",
                         std,
                     )
@@ -615,20 +687,20 @@ class SemanticAnalyzer:
         """Reject duplicate method names per struct; return the method registry."""
         methods: Dict[Tuple[str, str], Tuple[List[Type], Type, str]] = {}
         for sd in program.structs:
+            self._enter(sd)
             seen_names: Set[str] = set()
             for md in sd.methods:
                 if md.name in seen_names:
                     raise SemanticError(
-                        f"Method '{md.name}' is already declared on "
-                        f"struct '{sd.name}'",
+                        f"Method '{shown(md.name)}' is already declared on "
+                        f"struct '{shown(sd.name)}'",
                         md,
                     )
                 seen_names.add(md.name)
                 param_types = [
-                    type_from_name(p.type, self.structs, self.type_aliases, p, self.sum_types) for p in md.params
+                    self._type(p.type, p) for p in md.params
                 ]
-                return_type = Type.VOID if md.return_type is None else type_from_name(
-                    md.return_type, self.structs, self.type_aliases, md, self.sum_types)
+                return_type = Type.VOID if md.return_type is None else self._type(md.return_type, md)
                 methods[(sd.name, md.name)] = (param_types, return_type, mangle_method_name(sd.name, md.name))
                 if md.receiver_is_pointer:
                     self.pointer_receivers.add((sd.name, md.name))
@@ -641,19 +713,19 @@ class SemanticAnalyzer:
         for ad in alias_defs:
             if ad.name in _BUILTIN_FUNCTION_NAMES:
                 raise SemanticError(
-                    f"'{ad.name}' is a builtin and can't be used as a "
+                    f"'{shown(ad.name)}' is a builtin and can't be used as a "
                     f"type alias name",
                     ad,
                 )
             if ad.name in structs:
                 raise SemanticError(
-                    f"Type alias '{ad.name}' collides with a struct of "
+                    f"Type alias '{shown(ad.name)}' collides with a struct of "
                     f"the same name -- struct and type-alias names "
                     f"share one namespace and can never be the same",
                     ad,
                 )
             if ad.name in seen:
-                raise SemanticError(f"Type alias '{ad.name}' is already declared", ad)
+                raise SemanticError(f"Type alias '{shown(ad.name)}' is already declared", ad)
             seen[ad.name] = ad
 
         resolved: Dict[str, Type] = {}
@@ -664,7 +736,7 @@ class SemanticAnalyzer:
                 return resolved[name]
             if name in resolving:
                 raise SemanticError(
-                    f"Type alias '{name}' is defined in terms of "
+                    f"Type alias '{shown(name)}' is defined in terms of "
                     f"itself (a cycle)",
                     seen[name],
                 )
@@ -681,8 +753,12 @@ class SemanticAnalyzer:
                 return Type(TypeKind.ARRAY, element_type=resolve_target(target.element_type, alias_node), size=size)
             if isinstance(target, SliceTypeExpr):
                 return Type(TypeKind.SLICE, element_type=resolve_target(target.element_type, alias_node))
-            if target in _TYPE_NAMES:
+            if isinstance(target, str) and target in _TYPE_NAMES:
                 return _TYPE_NAMES[target]
+            saved_scope = self.scope
+            self._enter(alias_node)
+            target = self._resolve_type_name(target)
+            self.scope = saved_scope
             if target in seen:
                 return resolve(target)
             if target in structs:
@@ -704,12 +780,12 @@ class SemanticAnalyzer:
         for sd in struct_defs:
             if sd.name in _BUILTIN_FUNCTION_NAMES:
                 raise SemanticError(
-                    f"'{sd.name}' is a builtin and can't be used as a "
+                    f"'{shown(sd.name)}' is a builtin and can't be used as a "
                     f"struct name",
                     sd,
                 )
             if sd.name in registry:
-                raise SemanticError(f"Struct '{sd.name}' is already declared", sd)
+                raise SemanticError(f"Struct '{shown(sd.name)}' is already declared", sd)
             registry[sd.name] = None
         return registry
 
@@ -717,14 +793,16 @@ class SemanticAnalyzer:
                                sum_names: Dict[str, None]) -> Dict[str, StructInfo]:
         """Resolve field types (which may name structs and sum types declared anywhere)."""
         for sd in struct_defs:
+            self._enter(sd)
             fields: Dict[str, Type] = {}
             for f in sd.fields:
                 if f.name in fields:
                     raise SemanticError(
-                        f"Field '{f.name}' is already declared in struct '{sd.name}'",
+                        f"Field '{f.name}' is already declared in struct '{shown(sd.name)}'",
                         f,
                     )
-                fields[f.name] = type_from_name(f.field_type, registry, self.type_aliases, f, sum_names)
+                fields[f.name] = type_from_name(
+                    f.field_type, registry, self.type_aliases, f, sum_names, resolve=self._resolve_type_name)
             registry[sd.name] = StructInfo(name=sd.name, fields=fields)
         return registry
 
@@ -747,9 +825,9 @@ class SemanticAnalyzer:
         def contents(name: str) -> List[Tuple[str, str]]:
             """(member description, embedded type name) for each by-value member."""
             if name in self.structs:
-                pairs = [(f"{name}.{field}", embedded(t)) for field, t in self.structs[name].fields.items()]
+                pairs = [(f"{shown(name)}.{field}", embedded(t)) for field, t in self.structs[name].fields.items()]
             else:
-                pairs = [(f"{name}'s {t} variant", embedded(t)) for t in self.sum_types[name].variants]
+                pairs = [(f"{shown(name)}'s {t} variant", embedded(t)) for t in self.sum_types[name].variants]
             return [(desc, inner) for desc, inner in pairs if inner is not None]
 
         def visit(name: str, path: List[Tuple[str, str]]) -> None:
@@ -769,44 +847,43 @@ class SemanticAnalyzer:
         """Validate an extern signature (scalars and pointers only) and register it."""
         if ext.name in _BUILTIN_FUNCTION_NAMES:
             raise SemanticError(
-                f"'{ext.name}' is a builtin and can't be redefined as "
+                f"'{shown(ext.name)}' is a builtin and can't be redefined as "
                 f"an extern function",
                 ext,
             )
         if ext.name in self.structs:
             raise SemanticError(
-                f"Extern function '{ext.name}' collides with a struct "
+                f"Extern function '{shown(ext.name)}' collides with a struct "
                 f"of the same name -- struct and function names share "
                 f"one namespace and can never be the same, since "
-                f"'{ext.name}(...)' would otherwise be ambiguous "
+                f"'{shown(ext.name)}(...)' would otherwise be ambiguous "
                 f"between a call and a struct literal",
                 ext,
             )
         if ext.name in self.type_aliases:
             raise SemanticError(
-                f"Extern function '{ext.name}' collides with a type "
+                f"Extern function '{shown(ext.name)}' collides with a type "
                 f"alias of the same name -- function and type-alias "
                 f"names share one namespace and can never be the same",
                 ext,
             )
         if ext.name in self.sum_types:
             raise SemanticError(
-                f"Extern function '{ext.name}' collides with a sum "
+                f"Extern function '{shown(ext.name)}' collides with a sum "
                 f"type of the same name -- function and sum-type "
                 f"names share one namespace and can never be the same",
                 ext,
             )
         if ext.name in self.functions:
-            raise SemanticError(f"Function '{ext.name}' is already declared", ext)
+            raise SemanticError(f"Function '{shown(ext.name)}' is already declared", ext)
 
-        param_types = [type_from_name(p.type, self.structs, self.type_aliases, p, self.sum_types) for p in ext.params]
-        return_type = Type.VOID if ext.return_type is None else type_from_name(
-            ext.return_type, self.structs, self.type_aliases, ext, self.sum_types)
+        param_types = [self._type(p.type, p) for p in ext.params]
+        return_type = Type.VOID if ext.return_type is None else self._type(ext.return_type, ext)
 
         for p, p_type in zip(ext.params, param_types):
             if p_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT, TypeKind.SUM, TypeKind.STR):
                 raise SemanticError(
-                    f"Extern function '{ext.name}''s parameter '{p.name}' has "
+                    f"Extern function '{shown(ext.name)}''s parameter '{p.name}' has "
                     f"type {p_type} -- only scalar and pointer types are "
                     f"supported in an extern function's signature for now "
                     f"(array/slice/struct/sum/str-typed parameters aren't yet)",
@@ -814,7 +891,7 @@ class SemanticAnalyzer:
                 )
         if return_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT, TypeKind.SUM, TypeKind.STR):
             raise SemanticError(
-                f"Extern function '{ext.name}' returns {return_type} -- "
+                f"Extern function '{shown(ext.name)}' returns {return_type} -- "
                 f"only scalar and pointer types are supported as an "
                 f"extern function's own return type for now "
                 f"(array/slice/struct/sum/str aren't yet)",
@@ -827,61 +904,60 @@ class SemanticAnalyzer:
         """Validate an intrinsic signature and register it."""
         if ic.name in _BUILTIN_FUNCTION_NAMES:
             raise SemanticError(
-                f"'{ic.name}' is a builtin and can't be redefined as "
+                f"'{shown(ic.name)}' is a builtin and can't be redefined as "
                 f"an intrinsic",
                 ic,
             )
         if ic.name in self.structs:
             raise SemanticError(
-                f"Intrinsic '{ic.name}' collides with a struct "
+                f"Intrinsic '{shown(ic.name)}' collides with a struct "
                 f"of the same name -- struct and function names share "
                 f"one namespace and can never be the same, since "
-                f"'{ic.name}(...)' would otherwise be ambiguous "
+                f"'{shown(ic.name)}(...)' would otherwise be ambiguous "
                 f"between a call and a struct literal",
                 ic,
             )
         if ic.name in self.type_aliases:
             raise SemanticError(
-                f"Intrinsic '{ic.name}' collides with a type "
+                f"Intrinsic '{shown(ic.name)}' collides with a type "
                 f"alias of the same name -- function and type-alias "
                 f"names share one namespace and can never be the same",
                 ic,
             )
         if ic.name in self.sum_types:
             raise SemanticError(
-                f"Intrinsic '{ic.name}' collides with a sum "
+                f"Intrinsic '{shown(ic.name)}' collides with a sum "
                 f"type of the same name -- function and sum-type "
                 f"names share one namespace and can never be the same",
                 ic,
             )
         if ic.name in self.functions:
-            raise SemanticError(f"Function '{ic.name}' is already declared", ic)
+            raise SemanticError(f"Function '{shown(ic.name)}' is already declared", ic)
 
-        param_types = [type_from_name(p.type, self.structs, self.type_aliases, p, self.sum_types) for p in ic.params]
-        return_type = Type.VOID if ic.return_type is None else type_from_name(
-            ic.return_type, self.structs, self.type_aliases, ic, self.sum_types)
+        param_types = [self._type(p.type, p) for p in ic.params]
+        return_type = Type.VOID if ic.return_type is None else self._type(ic.return_type, ic)
 
         self.functions[ic.name] = (param_types, return_type)
         self.intrinsic_original_names[ic.name] = ic.original_name
 
     def analyze_function(self, fn: Function) -> None:
+        self._enter(fn)
         self.scopes = [{}]
         self.loop_depth = 0
         # Params are locals; _declare also catches duplicates.
         for p in fn.params:
-            param_type = type_from_name(p.type, self.structs, self.type_aliases, p, self.sum_types)
+            param_type = self._type(p.type, p)
             self.facts.types[p.nid] = param_type
             self.facts.symbols[p.nid] = self.symbols.new(p.name, 'param', param_type, p)
             self._declare(p.name, param_type, p, self.facts.symbols[p.nid].id)
-        return_type = Type.VOID if fn.return_type is None else type_from_name(
-            fn.return_type, self.structs, self.type_aliases, fn, self.sum_types)
+        return_type = Type.VOID if fn.return_type is None else self._type(fn.return_type, fn)
         self.facts.returns[fn.nid] = return_type
         for stmt in fn.body:
             self.analyze_statement(stmt, return_type)
         # Void functions may fall off the end.
         if return_type != Type.VOID and not always_returns(fn.body):
             raise SemanticError(
-                f"Function '{fn.name}' (declared to return {return_type}) "
+                f"Function '{shown(fn.name)}' (declared to return {return_type}) "
                 f"does not return a value on all code paths",
                 fn,
             )
@@ -897,7 +973,7 @@ class SemanticAnalyzer:
         """Declare in the innermost scope; shadowing outer scopes is allowed.
         decl_id is the declaration's Symbol.id."""
         if name in self.scopes[-1]:
-            raise SemanticError(f"Variable '{name}' is already declared in this scope", node)
+            raise SemanticError(f"Variable '{shown(name)}' is already declared in this scope", node)
         self.scopes[-1][name] = (type_, decl_id)
 
     def _reject_typed_literal_read_as_multiplication(self, expr: Binary) -> None:
@@ -909,7 +985,7 @@ class SemanticAnalyzer:
             return node
         name = root(expr.right)
         if (isinstance(name, Variable) and isinstance(root(expr.left), ArrayLiteral) and isinstance(expr.left, Index)
-                and (name.name in self.structs or name.name in self.sum_types or name.name in self.type_aliases)
+                and self._resolve_type_name(name.name) in {**self.structs, **self.sum_types, **self.type_aliases}
                 and not any(name.name in scope for scope in self.scopes)):
             raise SemanticError(
                 f"'{name.name}' is a type, but this reads as a multiplication: a typed literal of pointers with "
@@ -921,9 +997,9 @@ class SemanticAnalyzer:
         for scope in reversed(self.scopes):
             if name in scope:
                 return scope[name]
-        if name in getattr(self, 'const_decls', {}):
-            return self._const_value(name)[0], None
-        raise SemanticError(f"Reference to undeclared variable '{name}'", node)
+        if self._const_key(name) is not None:
+            return self._const_value(self._const_key(name))[0], None
+        raise SemanticError(f"Reference to undeclared variable '{shown(name)}'", node)
 
     def _lookup(self, name: str, node: Optional[Node] = None) -> Type:
         return self._resolve(name, node)[0]
@@ -991,7 +1067,7 @@ class SemanticAnalyzer:
             return target_type if target_type.kind == TypeKind.SLICE else array_type
         if (target_type.kind == TypeKind.POINTER and target_type.element_type.kind == TypeKind.SUM
                 and isinstance(expr, Unary) and expr.op == UnaryOp.ADDRESS_OF
-                and isinstance(expr.operand, Call) and expr.operand.name in self.structs):
+                and self._struct_literal(expr.operand) is not None):
             # `&Variant(...)` where a pointer to the sum is expected: a new sum value holding that variant.
             variant_type = self.check_struct_literal(expr.operand)
             if variant_type in self.sum_types[target_type.element_type.sum_type_name].variants:
@@ -1031,18 +1107,18 @@ class SemanticAnalyzer:
 
     def _check_expr_allowing_struct_literal(self, expr: Node) -> Type:
         """check_expr, but accepts struct literals."""
-        if isinstance(expr, Call) and expr.name in self.structs:
+        if self._struct_literal(expr) is not None:
             return self.check_struct_literal(expr)
         return self.check_expr(expr)
 
     def _check_value_flowing_into_allowing_struct_literal(self, expr: Node, target_type: Type) -> Type:
         """_check_value_flowing_into, but accepts struct literals."""
-        if isinstance(expr, Call) and expr.name in self.structs:
+        if self._struct_literal(expr) is not None:
             return self.check_struct_literal(expr)
         return self._check_value_flowing_into(expr, target_type)
 
     def analyze_var_decl(self, stmt: VarDecl) -> None:
-        declared_type = type_from_name(stmt.var_type, self.structs, self.type_aliases, stmt, self.sum_types)
+        declared_type = self._type(stmt.var_type, stmt)
         missing = self._without_zero_value(declared_type) if stmt.init is None else None
         if missing is not None:
             # Only a sum with a `none` variant has a zero value (that variant).
@@ -1073,7 +1149,7 @@ class SemanticAnalyzer:
                 f"variable instead",
                 stmt,
             )
-        if stmt.name in self.const_decls and not any(stmt.name in scope for scope in self.scopes):
+        if self._const_key(stmt.name) is not None and not any(stmt.name in scope for scope in self.scopes):
             raise SemanticError(f"Cannot assign to constant '{stmt.name}'", stmt)
         declared_type, self.facts.decls[stmt.nid] = self._resolve(stmt.name, stmt)
         value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, declared_type)
@@ -1255,7 +1331,7 @@ class SemanticAnalyzer:
         narrowed_name = None
         if isinstance(stmt.condition, IsCheck):
             narrowed_name = stmt.condition.variable_name
-            narrowed_type = type_from_name(stmt.condition.type_name, self.structs, self.type_aliases, stmt.condition)
+            narrowed_type = self._type(stmt.condition.type_name, stmt.condition, sums=False)
             self.facts.narrowed[stmt.condition.nid] = narrowed_type
             self._declare(narrowed_name, narrowed_type, stmt.condition, self.facts.decls[stmt.condition.nid])
             self._narrowed_names.add(narrowed_name)
@@ -1287,7 +1363,7 @@ class SemanticAnalyzer:
             if i == 0:
                 self._check_match_exhaustiveness(stmt)
             self._push_scope()
-            narrowed_type = type_from_name(check.type_name, self.structs, self.type_aliases, check)
+            narrowed_type = self._type(check.type_name, check, sums=False)
             self.facts.narrowed[check.nid] = narrowed_type
             self._declare(check.variable_name, narrowed_type, check, self.facts.decls[check.nid])
             self._narrowed_names.add(check.variable_name)
@@ -1323,7 +1399,7 @@ class SemanticAnalyzer:
 
         seen: Dict[Type, IsCheck] = {}
         for arm_condition, _ in stmt.arms:
-            arm_type = type_from_name(arm_condition.type_name, self.structs, self.type_aliases, arm_condition)
+            arm_type = self._type(arm_condition.type_name, arm_condition, sums=False)
             if arm_type in seen:
                 raise SemanticError(
                     f"'{arm_condition.type_name}' is tested more than once in "
@@ -1480,8 +1556,8 @@ class SemanticAnalyzer:
 
     def check_dict_literal(self, expr: DictLiteral) -> Type:
         """`dict[K]V{...}`; keys must be distinct constants."""
-        key_type = type_from_name(expr.key_type, self.structs, self.type_aliases, expr, self.sum_types)
-        value_type = type_from_name(expr.value_type, self.structs, self.type_aliases, expr, self.sum_types)
+        key_type = self._type(expr.key_type, expr)
+        value_type = self._type(expr.value_type, expr)
         seen_constant_keys = set()
         for key_expr, value_expr in expr.entries:
             actual_key_type = self._check_value_flowing_into(key_expr, key_type)
@@ -1511,7 +1587,7 @@ class SemanticAnalyzer:
     def check_array_literal(self, expr: ArrayLiteral, expected_element_type: Optional[Type] = None) -> Type:
         """`[e, ...]` or `[N]T[...]`; homogeneous. Untyped literals need an expected element type."""
         if expr.type_expr is not None:
-            declared_type = type_from_name(expr.type_expr, self.structs, self.type_aliases, expr, self.sum_types)
+            declared_type = self._type(expr.type_expr, expr)
             if len(expr.elements) != declared_type.size:
                 raise SemanticError(
                     f"Array literal declares type {declared_type} (size "
@@ -1568,6 +1644,12 @@ class SemanticAnalyzer:
         return self._check_indexable_and_index(expr.array, expr.index)
 
     def check_field(self, expr: Field) -> Type:
+        key = self.module_set.qualified.get(expr.nid)
+        if key is not None:  # `alias.NAME`: a constant of another module
+            if key not in self.const_decls:
+                raise SemanticError(f"Reference to undeclared variable '{shown(key)}'", expr)
+            self.facts.const_refs[expr.nid] = key
+            return self._const_value(key)[0]
         return self._check_struct_and_field(expr.base, expr.name)
 
     def _check_struct_and_field(self, base_expr: Node, field_name: str) -> Type:
@@ -1583,21 +1665,23 @@ class SemanticAnalyzer:
         struct_info = self.structs[base_type.struct_name]
         if field_name not in struct_info.fields:
             raise SemanticError(
-                f"Struct '{base_type.struct_name}' has no field '{field_name}'",
+                f"Struct '{shown(base_type.struct_name)}' has no field '{field_name}'",
                 base_expr,
             )
         return struct_info.fields[field_name]
 
     def check_struct_literal(self, expr: Call) -> Type:
         """`Name(args)`: positional struct literal; must be exhaustive."""
-        struct_info = self.structs[expr.name]
+        name = self._struct_literal(expr)
+        self._record_call(expr, name)
+        struct_info = self.structs[name]
         field_items = list(struct_info.fields.items())
         if expr.kwargs is not None:
             return self._check_named_struct_literal(expr, struct_info, field_items)
         if len(expr.args) != len(field_items):
             field_names = ', '.join(name for name, _ in field_items)
             raise SemanticError(
-                f"Struct literal for '{expr.name}' expects "
+                f"Struct literal for '{shown(name)}' expects "
                 f"{len(field_items)} argument(s) (one per field, in "
                 f"declaration order: {field_names}), got {len(expr.args)}",
                 expr,
@@ -1606,16 +1690,17 @@ class SemanticAnalyzer:
             arg_type = self._check_value_flowing_into_allowing_struct_literal(arg, field_type)
             if not self._types_compatible(arg_type, field_type):
                 raise SemanticError(
-                    f"Argument {i} to struct literal '{expr.name}' "
+                    f"Argument {i} to struct literal '{shown(name)}' "
                     f"(field '{field_name}') should be {field_type}, "
                     f"got {arg_type}",
                     arg,
                 )
-        result = Type(TypeKind.STRUCT, struct_name=expr.name)
+        result = Type(TypeKind.STRUCT, struct_name=name)
         self.facts.types[expr.nid] = result
         return result
 
     def _check_named_struct_literal(self, expr: Call, struct_info: StructInfo, field_items: list) -> Type:
+        name = struct_info.name
         """`Name(f=v, ...)`: named struct literal; omitted fields are zero."""
         field_types = struct_info.fields
         valid_names = ', '.join(name for name, _ in field_items)
@@ -1623,14 +1708,14 @@ class SemanticAnalyzer:
         for field_name, value in expr.kwargs:
             if field_name not in field_types:
                 raise SemanticError(
-                    f"Struct literal for '{expr.name}' has no field "
+                    f"Struct literal for '{shown(name)}' has no field "
                     f"'{field_name}' -- valid fields are: {valid_names}",
                     expr,
                 )
             if field_name in seen:
                 raise SemanticError(
                     f"Field '{field_name}' specified more than once in "
-                    f"struct literal for '{expr.name}'",
+                    f"struct literal for '{shown(name)}'",
                     expr,
                 )
             seen.add(field_name)
@@ -1638,7 +1723,7 @@ class SemanticAnalyzer:
             expected_type = field_types[field_name]
             if not self._types_compatible(value_type, expected_type):
                 raise SemanticError(
-                    f"Field '{field_name}' of struct literal '{expr.name}' "
+                    f"Field '{field_name}' of struct literal '{shown(name)}' "
                     f"should be {expected_type}, got {value_type}",
                     value,
                 )
@@ -1647,10 +1732,10 @@ class SemanticAnalyzer:
                 missing = self._without_zero_value(field_type)
                 if missing is not None:
                     raise SemanticError(
-                        f"Struct literal for '{expr.name}' omits field '{field_name}', but {missing} has no "
+                        f"Struct literal for '{shown(name)}' omits field '{field_name}', but {missing} has no "
                         f"zero value (only a sum type with a `none` variant does) -- give the field a value",
                         expr)
-        result = Type(TypeKind.STRUCT, struct_name=expr.name)
+        result = Type(TypeKind.STRUCT, struct_name=name)
         self.facts.types[expr.nid] = result
         return result
 
@@ -1694,7 +1779,7 @@ class SemanticAnalyzer:
         key = (receiver_type.struct_name, expr.name)
         if key not in self.methods:
             raise SemanticError(
-                f"Struct '{receiver_type.struct_name}' has no method "
+                f"Struct '{shown(receiver_type.struct_name)}' has no method "
                 f"'{expr.name}'",
                 expr,
             )
@@ -1705,7 +1790,7 @@ class SemanticAnalyzer:
             if not isinstance(expr.receiver, (Variable, Field, Index)) and not (
                     isinstance(expr.receiver, Unary) and expr.receiver.op == UnaryOp.DEREFERENCE):
                 raise SemanticError(
-                    f"Method '{expr.name}' on '{receiver_type.struct_name}' has a pointer receiver, so it "
+                    f"Method '{expr.name}' on '{shown(receiver_type.struct_name)}' has a pointer receiver, so it "
                     f"needs an addressable receiver (a variable, field, index, or dereference), not a temporary",
                     expr.receiver,
                 )
@@ -1717,7 +1802,7 @@ class SemanticAnalyzer:
                 self.check_expr(receiver)
         if len(expr.args) != len(param_types):
             raise SemanticError(
-                f"Method '{expr.name}' on '{receiver_type.struct_name}' "
+                f"Method '{expr.name}' on '{shown(receiver_type.struct_name)}' "
                 f"expects {len(param_types)} argument(s), got "
                 f"{len(expr.args)}",
                 expr,
@@ -1727,7 +1812,7 @@ class SemanticAnalyzer:
             if not self._types_compatible(actual_type, expected_type):
                 raise SemanticError(
                     f"Argument {i} to method '{expr.name}' on "
-                    f"'{receiver_type.struct_name}' should be "
+                    f"'{shown(receiver_type.struct_name)}' should be "
                     f"{expected_type}, got {actual_type}",
                     arg,
                 )
@@ -1735,11 +1820,17 @@ class SemanticAnalyzer:
         self.facts.types[expr.nid] = return_type
         return return_type
 
+    def _record_call(self, expr: Call, name: str) -> None:
+        """Note the key a call refers to, unless it's the name as written."""
+        if name != expr.name or expr.receiver is not None:
+            self.facts.calls[expr.nid] = (name, list(expr.args))
+
     def check_call(self, expr: Call) -> Type:
-        if expr.receiver is not None:
-            # Receiver present means method call, checked first.
+        name = self._callee(expr)
+        if name is None:
+            # Receiver present (and not a module) means method call, checked first.
             return self._check_method_call(expr)
-        if expr.name in self.structs:
+        if name in self.structs:
             raise SemanticError(
                 f"'{expr.name}(...)' is a struct literal, which is only "
                 f"allowed as a variable's initializer, a plain "
@@ -1761,23 +1852,25 @@ class SemanticAnalyzer:
                 f"only supported for struct literals, not function calls",
                 expr,
             )
-        if expr.name == 'print':
+        if name == 'print':
             return self.check_print_call(expr)
-        if expr.name == 'len':
+        if name == 'len':
             return self.check_len_call(expr)
-        if expr.name == 'append':
+        if name == 'append':
             return self.check_append_call(expr)
-        if expr.name == 'del':
+        if name == 'del':
             return self.check_del_call(expr)
-        if expr.name == 'bytes':
+        if name == 'bytes':
             return self.check_bytes_call(expr)
-        if expr.name not in self.functions:
-            raise SemanticError(f"Call to undeclared function '{expr.name}'", expr)
-        param_types, return_type = self.functions[expr.name]
+        visible = expr.nid in self.module_set.qualified or self.scope.resolve(expr.name) is not None
+        if name not in self.functions or not visible:  # another module's extern needs an import too
+            raise SemanticError(f"Call to undeclared function '{shown(name)}'", expr)
+        param_types, return_type = self.functions[name]
+        self._record_call(expr, name)
 
         if len(expr.args) != len(param_types):
             raise SemanticError(
-                f"Function '{expr.name}' expects {len(param_types)} "
+                f"Function '{shown(name)}' expects {len(param_types)} "
                 f"argument(s), got {len(expr.args)}",
                 expr,
             )
@@ -1785,7 +1878,7 @@ class SemanticAnalyzer:
             actual_type = self._check_value_flowing_into_allowing_struct_literal(arg, expected_type)
             if not self._types_compatible(actual_type, expected_type):
                 raise SemanticError(
-                    f"Argument {i} to '{expr.name}' should be "
+                    f"Argument {i} to '{shown(name)}' should be "
                     f"{expected_type}, got {actual_type}",
                     arg,
                 )
@@ -1901,6 +1994,8 @@ class SemanticAnalyzer:
 
     def check_variable(self, expr: Variable) -> Type:
         t, self.facts.decls[expr.nid] = self._resolve(expr.name, expr)
+        if self.facts.decls[expr.nid] is None:
+            self.facts.const_refs[expr.nid] = self._const_key(expr.name)
         return t
 
     def check_is_check(self, expr: IsCheck) -> Type:
@@ -1921,7 +2016,7 @@ class SemanticAnalyzer:
                 f"variable to one of its own declared variants",
                 expr,
             )
-        narrowed_type = type_from_name(expr.type_name, self.structs, self.type_aliases, expr)
+        narrowed_type = self._type(expr.type_name, expr, sums=False)
         sum_type_info = self.sum_types[variable_type.sum_type_name]
         if narrowed_type not in sum_type_info.variants:
             raise SemanticError(
@@ -1962,10 +2057,13 @@ class SemanticAnalyzer:
             return Type.BOOL
         if expr.op == UnaryOp.ADDRESS_OF:
             if (isinstance(expr.operand, Variable) and self.facts.decls.get(expr.operand.nid) is None
-                    and expr.operand.name in self.const_decls):
+                    and self._const_key(expr.operand.name) is not None):
                 raise SemanticError(f"Cannot take the address of constant '{expr.operand.name}'", expr)
+            if expr.operand.nid in self.facts.const_refs:
+                raise SemanticError(
+                    f"Cannot take the address of constant '{shown(self.facts.const_refs[expr.operand.nid])}'", expr)
             # Only variables, struct literals, and chains rooted in a variable.
-            is_struct_literal = isinstance(expr.operand, Call) and expr.operand.name in self.structs
+            is_struct_literal = self._struct_literal(expr.operand) is not None
             root_variable = self._root_variable_of(expr.operand) if isinstance(expr.operand, (Field, Index)) else None
             is_rooted_field_or_index = isinstance(expr.operand, (Field, Index)) and root_variable is not None
             if not (isinstance(expr.operand, Variable) or is_struct_literal or is_rooted_field_or_index):
@@ -1989,7 +2087,7 @@ class SemanticAnalyzer:
 
     def check_cast(self, expr: Cast) -> Type:
         """`T(expr)` between integer types; literals range-checked against T."""
-        target_type = type_from_name(expr.target_type, self.structs, self.type_aliases, expr, self.sum_types)
+        target_type = self._type(expr.target_type, expr)
         if target_type == Type.STR:
             source_type = self.check_expr(expr.expr)
             if source_type not in (Type.UINT8, _BYTE_SLICE):
@@ -2203,6 +2301,15 @@ class _TypedTreeBuilder:
     def ty(self, e) -> Type:
         return self.facts.types[e.nid]
 
+    def constant(self, e) -> typed.Expr:
+        """A reference to a constant (`NAME` or `alias.NAME`): its value."""
+        const_type, value = self.consts[self.facts.const_refs[e.nid]]
+        if const_type == Type.BOOL:
+            return typed.BoolLit(Type.BOOL, value)
+        if const_type == Type.STR:
+            return typed.StrLit(Type.STR, value)
+        return typed.IntLit(self.ty(e), value)
+
     def program(self, functions) -> typed.Program:
         return typed.Program(tuple(self.function(fn) for fn in functions), self.structs, self.sum_types,
                              self.symbols)
@@ -2342,13 +2449,8 @@ class _TypedTreeBuilder:
             return typed.NoneLit(Type.NONE)
         if isinstance(e, syntax.Variable):
             decl = self.facts.decls[e.nid]
-            if decl is None:  # a constant: its value
-                const_type, value = self.consts[e.name]
-                if const_type == Type.BOOL:
-                    return typed.BoolLit(Type.BOOL, value)
-                if const_type == Type.STR:
-                    return typed.StrLit(Type.STR, value)
-                return typed.IntLit(self.ty(e), value)
+            if decl is None:
+                return self.constant(e)
             symbol = self.symbols[decl]
             local = typed.Local(symbol.type, symbol)
             if self.ty(e) != symbol.type:
@@ -2377,7 +2479,7 @@ class _TypedTreeBuilder:
             high = None if e.high is None else self.expr(e.high)
             return typed.SliceOf(self.ty(e), kind, base, low, high)
         if isinstance(e, syntax.Field):
-            return self.field(e)
+            return self.constant(e) if e.nid in self.facts.const_refs else self.field(e)
         if isinstance(e, syntax.Call):
             return self.call(e)
         if isinstance(e, syntax.Unary):
@@ -2476,9 +2578,10 @@ class _TypedTreeBuilder:
 
 # Entry points
 
-def analyze(program: Program) -> "typed.Program":
-    """Check `program` and return its typed tree, everything later stages need."""
-    return SemanticAnalyzer().analyze(program)
+def analyze(program: Program, modules: Optional[dict] = None) -> "typed.Program":
+    """Check `program` (an entry file) and the modules it imports (discover_modules's result), and
+    return the typed tree: everything later stages need."""
+    return SemanticAnalyzer().analyze(program, modules)
 
 
 def analyze_source(filename: str) -> Program:

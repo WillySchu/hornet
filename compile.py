@@ -6,7 +6,6 @@ import sys
 from backend import lower_to_asm
 from diagnostics import CompileError, run_cli
 from ir.program_builder import build_ir_program
-from merge import merge_programs
 from modules import discover_modules
 from optimize.optimizer import optimize
 from semantic import analyze
@@ -50,16 +49,14 @@ def generate_asm(program, target=None) -> str:
 def typed_tree(source: str) -> str:
     """The typed tree of `source` (typed_ast.dump)."""
     entry_program, discovered_modules = discover_modules(source)
-    ast = merge_programs(entry_program, discovered_modules)
-    return dump(analyze(ast))
+    return dump(analyze(entry_program, discovered_modules))
 
 
 def compile_to_asm(source: str, target=None, require_main: bool = False) -> str:
-    """Discover, merge, analyze, and lower `source` to assembly. An executable needs
+    """Discover modules, analyze, and lower `source` to assembly. An executable needs
     `require_main`; without it the assembly may be code for another program to link."""
     entry_program, discovered_modules = discover_modules(source)
-    ast = merge_programs(entry_program, discovered_modules)
-    program = analyze(ast)
+    program = analyze(entry_program, discovered_modules)
     if require_main and not any(fn.name == 'main' for fn in program.functions):
         raise CompileError("no 'main' function: a program starts at 'def int main()'", source)
     return generate_asm(program, target)
