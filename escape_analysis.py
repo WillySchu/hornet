@@ -192,6 +192,10 @@ class EscapeAnalyzer:
             self.vals(expr.index)
             if self._kind(expr.array) == TypeKind.ARRAY:
                 return self.loc(expr.array)
+            if self._kind(expr.array) == TypeKind.DICT:
+                # A dict's entries live in its shared heap table, which any copy of the dict reaches.
+                self.vals(expr.array)
+                return {EXT}
             return self.vals(expr.array)
         if isinstance(expr, Unary) and expr.op == UnaryOp.DEREFERENCE:
             return self.vals(expr.operand)
@@ -223,6 +227,9 @@ class EscapeAnalyzer:
             if k == TypeKind.STR:
                 self.vals(expr.array)
                 return set()
+            if k == TypeKind.DICT:
+                self.vals(expr.array)
+                return {EXT}
             return self._contents(self.vals(expr.array))
         if isinstance(expr, Slice):
             self.vals(expr.low)

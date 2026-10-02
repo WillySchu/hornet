@@ -314,29 +314,14 @@ class StatementsMixin:
                 zero_ptr = IRConst(0, Type.INT64)
                 zero_int = IRConst(0, Type.INT)
                 return box_ir + self._ir_write_slice_descriptor(self._var_ref(stmt), zero_ptr, zero_int, zero_int)
-            # Nil dict.
+            # No initializer: a new empty dict.
             if var_type.kind == TypeKind.DICT and stmt.init is None:
                 slot = self._bind_local(stmt, ir_fn)
                 ir = []
                 if self._is_heap_allocated(stmt.symbol.id, var_type):
                     ir.extend(self._ir_malloc_and_store(var_type, slot))
                 dst_ir, dst_address = self._ir_dict_address(self._var_ref(stmt))
-                ir.extend(dst_ir)
-                zero64 = IRConst(0, Type.INT64)
-                zero_int = IRConst(0, Type.INT)
-                count_addr = self.ir_program.ids.new_temp(Type.INT64)
-                tombstones_addr = self.ir_program.ids.new_temp(Type.INT64)
-                capacity_addr = self.ir_program.ids.new_temp(Type.INT64)
-                ir.extend([
-                    IRStore(address=dst_address, value=zero64, value_type=Type.INT64),
-                    IRBinOp(dst=count_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(8, Type.INT64)),
-                    IRStore(address=count_addr, value=zero_int, value_type=Type.INT),
-                    IRBinOp(dst=tombstones_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(16, Type.INT64)),
-                    IRStore(address=tombstones_addr, value=zero_int, value_type=Type.INT),
-                    IRBinOp(dst=capacity_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(24, Type.INT64)),
-                    IRStore(address=capacity_addr, value=zero64, value_type=Type.INT64),
-                ])
-                return ir
+                return ir + dst_ir + self._ir_new_empty_dict_into(dst_address)
             # Zero array or struct.
             if var_type.kind in (TypeKind.ARRAY, TypeKind.STRUCT) and stmt.init is None:
                 slot = self._bind_local(stmt, ir_fn)

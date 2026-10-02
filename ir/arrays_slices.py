@@ -350,12 +350,7 @@ class ArraysSlicesMixin:
             zero_ir, ptr_value, len_value = self._ir_zero_str_value()
             return zero_ir + self._ir_write_str_descriptor_into_address(dst_address, ptr_value, len_value)
         if value_type.kind == TypeKind.DICT:
-            ir = [IRStore(address=dst_address, value=IRConst(0, Type.INT64), value_type=Type.INT64)]
-            for offset in (8, 16, 24):
-                addr = self.ir_program.ids.new_temp(Type.INT64)
-                ir.append(IRBinOp(dst=addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(offset, Type.INT64)))
-                ir.append(IRStore(address=addr, value=IRConst(0, Type.INT64), value_type=Type.INT64))
-            return ir
+            return self._ir_new_empty_dict_into(dst_address)
         return [IRStore(address=dst_address, value=IRConst(0, value_type), value_type=value_type)]
 
     def _ir_zero_array_loop(self, dst_address, element_type: Type, count: int) -> list:
@@ -892,7 +887,7 @@ class ArraysSlicesMixin:
         """len(x)."""
         arg = expr.args[0]
         if type_of(arg).kind == TypeKind.DICT:
-            result = self._ir_dict_address(arg)
+            result = self._ir_dict_header(arg)
             if result is None:
                 return None
             dict_ir, descriptor_addr = result

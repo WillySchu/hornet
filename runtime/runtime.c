@@ -179,8 +179,9 @@ static void hornet_stringify(
             int64_t value_width = (int64_t)read_desc_word(type_desc, 5);
             int64_t bucket_stride = 1 + key_width + value_width;
 
-            void *buckets = read_ptr(value_addr);
-            int64_t capacity = read_i64((char *)value_addr + 24);
+            void *header = read_ptr(value_addr);  // a dict value points to its shared header
+            void *buckets = read_ptr(header);
+            int64_t capacity = read_i64((char *)header + 24);
 
             hornet_buf_append_cstr(buf, name);
             hornet_buf_append_byte(buf, '{');

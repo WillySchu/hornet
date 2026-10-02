@@ -80,7 +80,7 @@ class IRFunctionBuilder(
         # Per-function scratch slots for print/dict arguments.
         self._unnamed_slice_temp_slot = self.ir_program.ids.new_slot(24, "unnamed_slice_temp", ir_fn)
 
-        self._unnamed_dict_temp_slot = self.ir_program.ids.new_slot(32, "unnamed_dict_temp", ir_fn)
+        self._unnamed_dict_temp_slot = self.ir_program.ids.new_slot(8, "unnamed_dict_temp", ir_fn)
 
         self._dict_key_scratch_slot = self.ir_program.ids.new_slot(8, "dict_key_scratch", ir_fn)
 

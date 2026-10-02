@@ -7468,29 +7468,19 @@ class TestDicts:
         )
 
 
-    def test_nil_dict_equals_none(self):
-        assert_program_stdout(
-            "def int main():\n"
-            "    dict[str]int d\n"
-            "    if d == none:\n"
-            "        print('equal')\n"
-            "    if d != none:\n"
-            "        print('not equal (WRONG)')\n"
-            "    return 0\n",
-            "equal\n",
-        )
+    @pytest.mark.parametrize("comparison", ["d == none", "none != d"])
+    def test_a_dict_is_never_none(self, comparison):
+        assert_semantic_error(f"    dict[str]int d\n    print({comparison})\n    return 0",
+                              match="A dict is never none -- check 'len\\(d\\) == 0' for an empty one")
 
-    def test_non_nil_dict_does_not_equal_none(self):
-        assert_program_stdout(
-            "def int main():\n"
-            "    dict[str]int d = dict[str]int{'a': 1}\n"
-            "    if d == none:\n"
-            "        print('equal (WRONG)')\n"
-            "    if d != none:\n"
-            "        print('not equal')\n"
-            "    return 0\n",
-            "not equal\n",
-        )
+    @pytest.mark.parametrize("statement", ["dict[str]int d = none", "dict[str]int d\n    d = none"])
+    def test_none_is_not_a_dict(self, statement):
+        assert_semantic_error(f"    {statement}\n    return 0", match="none")
+
+    def test_an_uninitialized_dict_is_a_new_empty_dict(self):
+        assert_stdout(
+            "    dict[str]int d\n    print(len(d))\n    d['a'] = 1\n    print(d)\n    return 0",
+            "0\ndict[str]int{'a': 1}\n")
 
     def test_dict_vs_dict_equality_is_rejected(self):
         assert_semantic_error(
@@ -12360,6 +12350,76 @@ class TestContainerVariants:
     def test_a_non_type_variant_names_what_is_allowed(self):
         assert_program_semantic_error("type R is nope | int\ndef int main():\n    return 0\n",
                                       match="valid scalar/str/array/slice/pointer/dict type")
+
+
+class TestDictReferenceSemantics:
+    """A dict value refers to one shared table: every copy is the same dict."""
+
+    pytestmark = GCC_SKIP
+
+    def test_every_copy_is_the_same_dict(self):
+        assert_program_stdout(
+            "type H struct:\n    dict[str]int m\n"
+            "type E struct:\n    int c\ntype R is dict[str]int | E\n"
+            "def fill(dict[str]int d):\n    d['f'] = 1\n"
+            "def dict[str]int keep(dict[str]int d):\n    return d\n"
+            "def int main():\n"
+            "    dict[str]int d = dict[str]int{'x': 5}\n"
+            "    dict[str]int e = d\n"  # assignment
+            "    e['y'] = 6\n"
+            "    fill(d)\n"  # argument
+            "    keep(d)['r'] = 2\n"  # return value
+            "    H h = H(d)\n"  # struct field
+            "    h.m['h'] = 3\n"
+            "    []dict[str]int ds = [d]\n"  # slice element
+            "    ds[0]['s'] = 4\n"
+            "    R r = d\n"  # sum variant
+            "    if r is dict[str]int:\n"
+            "        r['v'] = 5\n"
+            "    dict[str]dict[str]int nest\n"  # dict value
+            "    nest['n'] = d\n"
+            "    nest['n']['n'] = 6\n"
+            "    print(len(d))\n"
+            "    print(len(e) == len(d) and len(h.m) == len(d) and len(ds[0]) == len(d))\n"
+            "    return 0\n",
+            "8\ntrue\n")
+
+    def test_growth_through_one_copy_is_seen_by_all(self):
+        assert_program_stdout(
+            "def int main():\n    dict[int]int d\n    dict[int]int e = d\n"
+            "    for int i = 0; i < 1000; i += 1:\n        e[i] = i\n"
+            "    int s = 0\n    for k, v in d:\n        s += v\n"
+            "    print(len(d))\n    print(s)\n    return 0\n",
+            "1000\n499500\n")
+
+    def test_an_empty_dict_passed_to_a_function_is_filled_in_place(self):
+        assert_program_stdout(
+            "def fill(dict[int]int d, int n):\n    for int i = 0; i < n; i += 1:\n        d[i] = i * i\n"
+            "def int main():\n    dict[int]int d\n    fill(d, 4)\n    print(d[3] + len(d))\n    return 0\n",
+            "13\n")
+
+    def test_zero_valued_dicts_in_composites_are_distinct_and_usable(self):
+        assert_program_stdout(
+            "type H struct:\n    int n\n    dict[str]int m\n"
+            "def int main():\n"
+            "    [3]dict[int]int arr\n    arr[2][1] = 9\n    print(len(arr[0]) + len(arr[2]))\n"
+            "    H h = H(n=1)\n    h.m['a'] = 1\n    H g\n    print(len(g.m))\n"
+            "    return 0\n",
+            "1\n0\n")
+
+    def test_reassigning_a_copy_breaks_the_alias(self):
+        assert_program_stdout(
+            "def int main():\n    dict[str]int d = dict[str]int{'a': 1}\n    dict[str]int e = d\n"
+            "    e = dict[str]int{}\n    e['b'] = 2\n    print(len(d))\n    return 0\n",
+            "1\n")
+
+    def test_pointers_stored_in_a_dict_outlive_their_function(self):
+        assert_program_stdout(
+            "def int clobber(int a):\n    [64]int big\n    for int i = 0; i < 64; i += 1:\n        big[i] = a + i\n"
+            "    return big[63]\n"
+            "def dict[int]*int f():\n    dict[int]*int d\n    int x = 41\n    d[0] = &x\n    return d\n"
+            "def int main():\n    dict[int]*int d = f()\n    clobber(1)\n    print(*d[0])\n    return 0\n",
+            "41\n")
 
 
 class TestStatementsEndTheirLine:

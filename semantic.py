@@ -938,7 +938,7 @@ class SemanticAnalyzer:
             raise SemanticError(f"No semantic rule for statement: {stmt!r}", stmt)
 
     def _types_compatible(self, value_type: Type, target_type: Type) -> bool:
-        """Equality, or NONE into slice/pointer/dict, or a variant into its sum type."""
+        """Equality, or NONE into slice/pointer (a dict is never none), or a variant into its sum type."""
         if value_type == target_type:
             return True
         if value_type == Type.NONE and target_type.kind in (TypeKind.SLICE, TypeKind.POINTER):
@@ -1956,13 +1956,15 @@ class SemanticAnalyzer:
             return Type.BOOL
 
         if op in _EQUALITY_OPS:
-            # Slices, pointers, and dicts compare to `none`.
+            # Slices and pointers compare to `none`.
             none_vs_nilable = (
-                (left_type == Type.NONE and right_type.kind in (TypeKind.SLICE, TypeKind.POINTER, TypeKind.DICT)) or
-                (right_type == Type.NONE and left_type.kind in (TypeKind.SLICE, TypeKind.POINTER, TypeKind.DICT))
+                (left_type == Type.NONE and right_type.kind in (TypeKind.SLICE, TypeKind.POINTER)) or
+                (right_type == Type.NONE and left_type.kind in (TypeKind.SLICE, TypeKind.POINTER))
             )
             if none_vs_nilable:
                 return Type.BOOL
+            if Type.NONE in (left_type, right_type) and TypeKind.DICT in (left_type.kind, right_type.kind):
+                raise SemanticError("A dict is never none -- check 'len(d) == 0' for an empty one", expr)
 
             if left_type.kind == TypeKind.ARRAY and right_type.kind == TypeKind.ARRAY:
                 if left_type != right_type:

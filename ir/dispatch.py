@@ -156,14 +156,6 @@ class DispatchMixin:
                         f"none comparison ({expr.left!r} {expr.op} {expr.right!r}) "
                         f"-- expected to always succeed for a reachable slice-typed base")
                 return result
-            if type_of(expr.left).kind == TypeKind.DICT or type_of(expr.right).kind == TypeKind.DICT:
-                result = self._ir_dict_none_comparison(expr)
-                if result is None:
-                    raise IRError(
-                        f"_ir_dict_none_comparison returned None for a dict-vs-"
-                        f"none comparison ({expr.left!r} {expr.op} {expr.right!r}) "
-                        f"-- expected to always succeed for a reachable dict-typed base")
-                return result
             if type_of(expr.left).kind in (TypeKind.ARRAY, TypeKind.STRUCT):
                 value_type = type_of(expr.left)
                 left_result = self._ir_composite_operand_address(expr.left, value_type)

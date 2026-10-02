@@ -104,7 +104,7 @@ def type_byte_width(t: Type, structs: dict[str, StructInfo], sum_types: dict) ->
     if t.kind == TypeKind.POINTER:
         return 8  # pointer
     if t.kind == TypeKind.DICT:
-        return 32  # {buckets_ptr, count, tombstones, capacity}
+        return 8  # a pointer to the shared header: copies alias (ir/dicts.py)
     return 4  # INT32, BOOL
 
 

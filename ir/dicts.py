@@ -1,7 +1,11 @@
-"""Dicts: 32-byte {buckets_ptr, count, tombstones, capacity} descriptor over a calloc'd open-addressed table.
-Bucket = state byte (0 empty, 1 occupied, 2 tombstone) + key + value, unpadded. Capacity is a power of two.
-Hashing, probing, and growth live in runtime.c.
+"""Dicts have reference semantics: a dict value is a pointer to a heap header {buckets_ptr, count,
+tombstones, capacity} (8 bytes each), so every copy of a dict is the same dict. A dict is never none:
+its zero value is a new empty dict. The header points to a calloc'd open-addressed table: bucket =
+state byte (0 empty, 1 occupied, 2 tombstone) + key + value, unpadded; capacity is a power of two.
+Hashing, probing, and growth live in runtime.c and work on the header.
 """
+
+HEADER_SIZE = 32
 
 from ir.errors import IRError
 from ir.ir import IRBinOp, IRBranch, IRCall, IRConst, IRJump, IRLabel, IRLoad, IRLocalAddress, IRMove, IRStaticDataAddress, IRStore
@@ -56,7 +60,25 @@ class DictsMixin:
         if isinstance(expr, Unary) and expr.op == UnaryOp.DEREFERENCE:
             # `*p` as a whole dict.
             return self._ir_pointer(expr.operand)
+        if isinstance(expr, Call):
+            # A returned dict, e.g. `make()['k'] = v`: the same dict the callee holds.
+            return self._ir_materialize_composite_call(expr, type_of(expr))
         return None
+
+    def _ir_dict_header(self, expr: Node):
+        """The dict's header pointer (its value), or None for an unsupported shape."""
+        result = self._ir_dict_address(expr)
+        if result is None:
+            return None
+        ir, address = result
+        header = self.ir_program.ids.new_temp(Type.INT64)
+        return ir + [IRLoad(dst=header, address=address)], header
+
+    def _ir_new_empty_dict_into(self, dst_address) -> list:
+        """A new empty dict (a zeroed header: no buckets yet), stored through dst_address."""
+        header = self.ir_program.ids.new_temp(Type.INT64)
+        return [IRCall(dst=header, name='calloc', args=[IRConst(1, Type.INT64), IRConst(HEADER_SIZE, Type.INT64)]),
+                IRStore(address=dst_address, value=header, value_type=Type.INT64)]
 
     def _ir_materialize_value_into_scratch(self, expr: Node, value_type: Type, ir_fn, label: str):
         """Store expr's value in a scratch slot; returns (ir, address)."""
@@ -99,7 +121,7 @@ class DictsMixin:
         return addr_ir + write_ir, addr
 
     def _ir_write_dict_literal_into(self, dst_address, expr: DictLiteral, dict_type: Type, ir_fn) -> list:
-        """Write a dict literal's descriptor through dst_address."""
+        """Build a dict literal's header and store the dict (its header pointer) through dst_address."""
         key_type = dict_type.key_type
         value_type = dict_type.element_type
         key_width = type_byte_width(key_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
@@ -141,17 +163,20 @@ class DictsMixin:
             ir.append(IRBinOp(dst=new_count, op=BinaryOp.ADD, left=count_value, right=insert_result))
             count_value = new_count
 
+        header = self.ir_program.ids.new_temp(Type.INT64)
         count_addr = self.ir_program.ids.new_temp(Type.INT64)
         tombstones_addr = self.ir_program.ids.new_temp(Type.INT64)
         capacity_addr = self.ir_program.ids.new_temp(Type.INT64)
         ir.extend([
-            IRStore(address=dst_address, value=buckets_addr, value_type=Type.INT64),
-            IRBinOp(dst=count_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(8, Type.INT64)),
+            IRCall(dst=header, name='malloc', args=[IRConst(HEADER_SIZE, Type.INT64)]),
+            IRStore(address=header, value=buckets_addr, value_type=Type.INT64),
+            IRBinOp(dst=count_addr, op=BinaryOp.ADD, left=header, right=IRConst(8, Type.INT64)),
             IRStore(address=count_addr, value=count_value, value_type=Type.INT),
-            IRBinOp(dst=tombstones_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(16, Type.INT64)),
+            IRBinOp(dst=tombstones_addr, op=BinaryOp.ADD, left=header, right=IRConst(16, Type.INT64)),
             IRStore(address=tombstones_addr, value=IRConst(0, Type.INT), value_type=Type.INT),
-            IRBinOp(dst=capacity_addr, op=BinaryOp.ADD, left=dst_address, right=IRConst(24, Type.INT64)),
+            IRBinOp(dst=capacity_addr, op=BinaryOp.ADD, left=header, right=IRConst(24, Type.INT64)),
             IRStore(address=capacity_addr, value=IRConst(capacity, Type.INT64), value_type=Type.INT64),
+            IRStore(address=dst_address, value=header, value_type=Type.INT64),
         ])
         return ir
 
@@ -160,7 +185,7 @@ class DictsMixin:
         key_type = dict_type.key_type
         value_type = dict_type.element_type
         value_width = type_byte_width(value_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
-        result = self._ir_dict_address(dict_expr)
+        result = self._ir_dict_header(dict_expr)
         if result is None:
             raise IRError(
                 f"_ir_dict_address returned None for a dict lookup's own base "
@@ -193,7 +218,7 @@ class DictsMixin:
         key_type = dict_type.key_type
         value_width = type_byte_width(
             dict_type.element_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
-        result = self._ir_dict_address(dict_expr)
+        result = self._ir_dict_header(dict_expr)
         if result is None:
             raise IRError(
                 f"_ir_dict_address returned None for 'in's own dict operand "
@@ -228,7 +253,7 @@ class DictsMixin:
         key_type = dict_type.key_type
         value_type = dict_type.element_type
         value_width = type_byte_width(value_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
-        result = self._ir_dict_address(dict_expr)
+        result = self._ir_dict_header(dict_expr)
         if result is None:
             raise IRError(
                 f"_ir_dict_address returned None for a dict assignment's own base "
@@ -274,7 +299,7 @@ class DictsMixin:
             IRStore(address=result_addr, value=combined, value_type=value_type),
         ]
 
-        addr_result = self._ir_dict_address(dict_expr)
+        addr_result = self._ir_dict_header(dict_expr)
         if addr_result is None:
             raise IRError(
                 f"_ir_dict_address returned None for a dict compound assignment's "
@@ -306,7 +331,7 @@ class DictsMixin:
         key_type = dict_type.key_type
         value_width = type_byte_width(
             dict_type.element_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
-        result = self._ir_dict_address(dict_expr)
+        result = self._ir_dict_header(dict_expr)
         if result is None:
             raise IRError(
                 f"_ir_dict_address returned None for del()'s own dict argument "
@@ -333,19 +358,6 @@ class DictsMixin:
         )]
         return dict_ir + key_ir + call_ir, None
 
-    def _ir_dict_none_comparison(self, expr):
-        """`d == none` / `!= none`."""
-        dict_expr = expr.left if type_of(expr.left).kind == TypeKind.DICT else expr.right
-        result = self._ir_dict_address(dict_expr)
-        if result is None:
-            return None
-        addr_ir, addr = result
-        ptr_value = self.ir_program.ids.new_temp(Type.INT64)
-        load_ir = [IRLoad(dst=ptr_value, address=addr)]
-        t_result = self.ir_program.ids.new_temp(Type.BOOL)
-        check = IRBinOp(dst=t_result, op=expr.op, left=ptr_value, right=IRConst(0, Type.INT64))
-        return addr_ir + load_ir + [check], t_result
-
     def _ir_for_in_dict(self, stmt: ForIn, ir_fn) -> list:
         """`for k[, v] in d`: scan every bucket."""
         dict_type = type_of(stmt.iterable)
@@ -356,7 +368,7 @@ class DictsMixin:
         bucket_stride = 1 + key_width + value_width
         needs_recheck = not isinstance(stmt.iterable, DictLiteral)
 
-        result = self._ir_dict_address(stmt.iterable)
+        result = self._ir_dict_header(stmt.iterable)
         if result is None:
             raise IRError(
                 f"_ir_dict_address returned None for a DICT-typed 'for ... "
