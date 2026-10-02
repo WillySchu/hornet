@@ -11,49 +11,49 @@
     "executed_instructions": null,
     "instruction_count": 76,
     "name": "arithmetic_heavy",
-    "runtime_seconds": 0.095078292011749
+    "runtime_seconds": 0.09360037499573082
   },
   "array_heavy": {
     "allocation": {
       "address_taken_excluded": 0,
       "allocated": 93,
       "eligible": 93,
-      "live_across_call": 6,
+      "live_across_call": 0,
       "spilled": 0,
       "total_temps": 93
     },
     "executed_instructions": null,
-    "instruction_count": 267,
+    "instruction_count": 258,
     "name": "array_heavy",
-    "runtime_seconds": 0.10778766695875674
+    "runtime_seconds": 0.03493458405137062
   },
   "branchy": {
     "allocation": {
       "address_taken_excluded": 0,
-      "allocated": 34,
-      "eligible": 34,
+      "allocated": 31,
+      "eligible": 31,
       "live_across_call": 4,
       "spilled": 0,
-      "total_temps": 34
+      "total_temps": 31
     },
     "executed_instructions": null,
-    "instruction_count": 161,
+    "instruction_count": 156,
     "name": "branchy",
-    "runtime_seconds": 0.07162187498761341
+    "runtime_seconds": 0.07568566699046642
   },
   "calling_convention_heavy": {
     "allocation": {
       "address_taken_excluded": 0,
-      "allocated": 236,
-      "eligible": 242,
-      "live_across_call": 19,
+      "allocated": 237,
+      "eligible": 243,
+      "live_across_call": 20,
       "spilled": 6,
-      "total_temps": 242
+      "total_temps": 243
     },
     "executed_instructions": null,
-    "instruction_count": 744,
+    "instruction_count": 749,
     "name": "calling_convention_heavy",
-    "runtime_seconds": 0.11503812501905486
+    "runtime_seconds": 0.11206637509167194
   },
   "calls_in_loop": {
     "allocation": {
@@ -65,37 +65,37 @@
       "total_temps": 32
     },
     "executed_instructions": null,
-    "instruction_count": 88,
+    "instruction_count": 87,
     "name": "calls_in_loop",
-    "runtime_seconds": 0.08002920798026025
+    "runtime_seconds": 0.0740922080585733
   },
   "copy_heavy": {
     "allocation": {
       "address_taken_excluded": 0,
-      "allocated": 302,
-      "eligible": 303,
-      "live_across_call": 22,
-      "spilled": 1,
-      "total_temps": 303
+      "allocated": 311,
+      "eligible": 314,
+      "live_across_call": 29,
+      "spilled": 3,
+      "total_temps": 314
     },
     "executed_instructions": null,
-    "instruction_count": 822,
+    "instruction_count": 894,
     "name": "copy_heavy",
-    "runtime_seconds": 0.13721670903032646
+    "runtime_seconds": 0.13657133397646248
   },
   "dict_heavy": {
     "allocation": {
       "address_taken_excluded": 0,
-      "allocated": 407,
-      "eligible": 411,
-      "live_across_call": 79,
-      "spilled": 4,
-      "total_temps": 411
+      "allocated": 442,
+      "eligible": 448,
+      "live_across_call": 91,
+      "spilled": 6,
+      "total_temps": 448
     },
     "executed_instructions": null,
-    "instruction_count": 972,
+    "instruction_count": 1045,
     "name": "dict_heavy",
-    "runtime_seconds": 0.176551999989897
+    "runtime_seconds": 0.17096529190894216
   },
   "loop_accumulator": {
     "allocation": {
@@ -107,9 +107,9 @@
       "total_temps": 6
     },
     "executed_instructions": null,
-    "instruction_count": 47,
+    "instruction_count": 46,
     "name": "loop_accumulator",
-    "runtime_seconds": 0.18173516599927098
+    "runtime_seconds": 0.17592437495477498
   },
   "recursive_fibonacci": {
     "allocation": {
@@ -121,9 +121,9 @@
       "total_temps": 9
     },
     "executed_instructions": null,
-    "instruction_count": 43,
+    "instruction_count": 42,
     "name": "recursive_fibonacci",
-    "runtime_seconds": 0.024500500003341585
+    "runtime_seconds": 0.023104332969523966
   },
   "register_pressure": {
     "allocation": {
@@ -135,64 +135,64 @@
       "total_temps": 53
     },
     "executed_instructions": null,
-    "instruction_count": 127,
+    "instruction_count": 122,
     "name": "register_pressure",
-    "runtime_seconds": 0.06840687501244247
+    "runtime_seconds": 0.06202824995853007
   },
   "string_heavy": {
     "allocation": {
       "address_taken_excluded": 0,
-      "allocated": 53,
-      "eligible": 53,
-      "live_across_call": 10,
+      "allocated": 58,
+      "eligible": 58,
+      "live_across_call": 13,
       "spilled": 0,
-      "total_temps": 53
+      "total_temps": 58
     },
     "executed_instructions": null,
-    "instruction_count": 134,
+    "instruction_count": 139,
     "name": "string_heavy",
-    "runtime_seconds": 0.01086524996208027
+    "runtime_seconds": 0.01070454204455018
   },
   "struct_heavy": {
     "allocation": {
       "address_taken_excluded": 0,
       "allocated": 82,
       "eligible": 82,
-      "live_across_call": 8,
+      "live_across_call": 7,
       "spilled": 0,
       "total_temps": 82
     },
     "executed_instructions": null,
-    "instruction_count": 184,
+    "instruction_count": 182,
     "name": "struct_heavy",
-    "runtime_seconds": 0.028976208006497473
+    "runtime_seconds": 0.013971041887998581
   },
   "sum_type_walk": {
     "allocation": {
       "address_taken_excluded": 0,
-      "allocated": 367,
-      "eligible": 367,
-      "live_across_call": 33,
+      "allocated": 372,
+      "eligible": 372,
+      "live_across_call": 44,
       "spilled": 0,
-      "total_temps": 367
+      "total_temps": 372
     },
     "executed_instructions": null,
-    "instruction_count": 697,
+    "instruction_count": 736,
     "name": "sum_type_walk",
-    "runtime_seconds": 0.06647266703657806
+    "runtime_seconds": 0.06232124997768551
   },
   "tokenize": {
     "allocation": {
       "address_taken_excluded": 0,
-      "allocated": 133,
-      "eligible": 133,
-      "live_across_call": 18,
+      "allocated": 125,
+      "eligible": 125,
+      "live_across_call": 19,
       "spilled": 0,
-      "total_temps": 133
+      "total_temps": 125
     },
     "executed_instructions": null,
-    "instruction_count": 323,
+    "instruction_count": 311,
     "name": "tokenize",
-    "runtime_seconds": 0.08606775000225753
+    "runtime_seconds": 0.0852870000526309
   }
 }
