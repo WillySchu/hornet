@@ -27,7 +27,7 @@ _COUNTER = (
     "    Counter c\n"
     "\n"
     "def Counter mk():\n"
-    "    return Counter(0, none)\n"
+    "    return Counter(0, [])\n"
 )
 
 
@@ -38,14 +38,14 @@ def test_pointer_receivers_mutate_every_addressable_receiver_shape():
         "def bump(*Counter p):\n"
         "    p.inc(10)\n"
         "def int main():\n"
-        "    Counter a = Counter(0, none)\n"
+        "    Counter a = Counter(0, [])\n"
         "    a.inc(5)\n"
         "    a.twice()\n"
         "    print(a.get())\n"
         "    print(a.log)\n"
         "    a.bump_copy()\n"
         "    print(a.n)\n"
-        "    Holder h = Holder(Counter(1, none))\n"
+        "    Holder h = Holder(Counter(1, []))\n"
         "    h.c.inc(2)\n"
         "    print(h.c.n)\n"
         "    [2]Counter arr = [mk(), mk()]\n"
@@ -65,7 +65,7 @@ def test_pointer_receivers_mutate_every_addressable_receiver_shape():
     )
 
 
-@pytest.mark.parametrize('receiver', ["mk()", "Counter(0, none)"])
+@pytest.mark.parametrize('receiver', ["mk()", "Counter(0, [])"])
 def test_pointer_receiver_on_a_temporary_is_rejected(receiver):
     assert_program_semantic_error(
         _COUNTER + f"def int main():\n    {receiver}.inc(1)\n    return 0\n",

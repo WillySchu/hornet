@@ -66,7 +66,7 @@ def shapes(k: str):
     out = [x for x in out if x is not None]
     if k == 's':
         out.append(('slice', ["[3]int a3 = [1, 2, 9]"], 'a3[0:2]', canon))
-        out.append(('none', [], 'none', '[]int[]'))
+        out.append(('empty', [], '[]', '[]int[]'))
     if k == 't':
         out.append(('slice', ["str t3 = 'abX'"], 't3[0:2]', canon))
         out.append(('from_bytes', ["[]byte bsrc = bytes('ab')"], 'str(bsrc)', canon))
@@ -90,7 +90,7 @@ def contexts(k: str, expr: str):
         ('deref_assign', [f"{ty} dst = {lit}", f"*{ty} pd = &dst"], [f"*pd = {expr}", "print(dst)"], ['{v}']),
         ('call_arg', [], [f"sink({expr})"], ['{v}']),
         ('print', [], [f"print({expr})"], ['{v}']),
-        ('append', [f"[]{ty} ap = none"], [f"ap = append(ap, {expr})", "print(ap[0])"], ['{v}']),
+        ('append', [f"[]{ty} ap"], [f"ap = append(ap, {expr})", "print(ap[0])"], ['{v}']),
         ('dict_value', [f"dict[int]{ty} m = dict[int]{ty}{{}}"], [f"m[0] = {expr}", "print(m[0])"], ['{v}']),
         ('return', [], ["print(ret())"], ['{v}']),
         ('statement', [], [expr, "print(1)"], ['1']),

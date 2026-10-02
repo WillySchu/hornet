@@ -1,9 +1,10 @@
 """Scalar values: int, int8, uint8, int64, bool."""
 
 from ir.errors import IRError
-from ir.ir import IRBranch, IRJump, IRLabel, IRMove, IRConst, IRCall
+from ir.ir import IRBinOp, IRBranch, IRJump, IRLabel, IRLoad, IRMove, IRConst, IRCall
+from ops import BinaryOp
 from ir.utils import is_composite_addressable, type_of
-from parser import Call, Binary, Variable, Field, Index, NoneLiteral, ArrayLiteral, DictLiteral
+from parser import Call, Binary, Variable, Field, Index, ArrayLiteral, DictLiteral
 from typesys import Type, TypeKind
 
 
@@ -15,6 +16,19 @@ class ScalarsMixin:
         arg_values = []
         for i, arg in enumerate(args):
             arg_type = type_of(arg)
+            if (param_types is not None and param_types[i].kind == TypeKind.SLICE
+                    and isinstance(arg, ArrayLiteral) and arg.type_expr is None):
+                # An untyped literal for a slice parameter (`f([1, 2])`, `f([])`): build that slice and
+                # pass its three words, like any slice.
+                ir, descriptor = self._ir_materialize_value_into_scratch(arg, param_types[i], self.ir_fn, "slice_literal_arg")
+                arg_ir.extend(ir)
+                for offset in (0, 8, 16):
+                    field_addr, word = self.ir_program.ids.new_temp(Type.INT64), self.ir_program.ids.new_temp(
+                        Type.INT64 if offset == 0 else Type.INT)
+                    arg_ir += [IRBinOp(dst=field_addr, op=BinaryOp.ADD, left=descriptor, right=IRConst(offset, Type.INT64)),
+                               IRLoad(dst=word, address=field_addr)]
+                    arg_values.append(word)
+                continue
             is_widening = (
                 param_types is not None
                 and param_types[i].kind == TypeKind.SUM
@@ -129,8 +143,7 @@ class ScalarsMixin:
                 ir, ptr_value, len_value = result
                 arg_ir.extend(ir)
                 arg_values.extend([ptr_value, len_value])
-            elif arg_type.kind == TypeKind.SLICE or (isinstance(arg, NoneLiteral) and param_types is not None and param_types[i].kind == TypeKind.SLICE):
-                # `none`'s shape depends on the parameter type.
+            elif arg_type.kind == TypeKind.SLICE:
                 result = self._ir_slice_arg(arg)
                 if result is None:
                     raise IRError(

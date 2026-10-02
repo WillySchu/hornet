@@ -305,7 +305,7 @@ def test_append_element_escapes_with_result():
     fn, res = _escapes(
         "def [][]int f():\n"
         "    [3]int a = [1, 2, 3]\n"
-        "    [][]int s = none\n"
+        "    [][]int s\n"
         "    s = append(s, a[:])\n"
         "    return s\n"
     )
@@ -328,7 +328,7 @@ def test_store_into_local_via_pointer_then_return_escapes():
         "    []int s\n"
         "def S f():\n"
         "    [3]int a = [1, 2, 3]\n"
-        "    S v = S(none)\n"
+        "    S v = S([])\n"
         "    *S q = &v\n"
         "    q.s = a[:]\n"
         "    return v\n"

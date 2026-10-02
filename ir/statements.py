@@ -50,20 +50,10 @@ class StatementsMixin:
     def gen_statement_ir(self, stmt: Node, ir_fn: IRFunction) -> list:
         """Build IR for one statement."""
         if isinstance(stmt, Return):
-            is_composite_return = (isinstance(stmt.value, NoneLiteral) and ir_fn.return_type.kind == TypeKind.SLICE) or (
-                stmt.value is not None and (
-                    type_of(stmt.value).kind in COMPOSITE_KINDS
-                    or ir_fn.return_type.kind == TypeKind.SUM
-                )
-            )
+            is_composite_return = stmt.value is not None and (
+                type_of(stmt.value).kind in COMPOSITE_KINDS or ir_fn.return_type.kind == TypeKind.SUM)
             if not is_composite_return:
                 return self._ir_return(stmt.value)
-            # `return none` (slice).
-            if isinstance(stmt.value, NoneLiteral) and ir_fn.return_type.kind == TypeKind.SLICE:
-                hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr(ir_fn)
-                nil_ir, ptr_value, len_value, cap_value = self._ir_nil_slice()
-                write_ir = self._ir_write_slice_descriptor_into_address(hidden_ptr, ptr_value, len_value, cap_value)
-                return hidden_ptr_ir + nil_ir + write_ir + [IRReturn(value=None)]
             # Widen a variant into a sum return.
             if ir_fn.return_type.kind == TypeKind.SUM and type_of(stmt.value).kind != TypeKind.SUM:
                 hidden_ptr_ir, hidden_ptr = self._ir_hidden_return_ptr(ir_fn)
@@ -230,12 +220,6 @@ class StatementsMixin:
                 else:
                     value_ir, ptr_value, len_value = self._ir_zero_str_value()
                 return ir + value_ir + self._ir_write_str_descriptor(self._var_ref(stmt), ptr_value, len_value)
-            # `none` slice.
-            if var_type.kind == TypeKind.SLICE and isinstance(stmt.init, NoneLiteral):
-                nil_ir, ptr_value, len_value, cap_value = self._ir_nil_slice()
-                nil_ir += self._ir_box_local(stmt, var_type, self._bind_local(stmt, ir_fn))
-                return nil_ir + self._ir_write_slice_descriptor(
-                    self._var_ref(stmt), ptr_value, len_value, cap_value)
             # Slice production.
             if var_type.kind == TypeKind.SLICE and isinstance(stmt.init, Slice):
                 production = self._ir_slice_into(stmt.init)
@@ -357,11 +341,6 @@ class StatementsMixin:
             if var_type.kind == TypeKind.STR:
                 value_ir, ptr_value, len_value = self._ir_str_value(stmt.value)
                 return value_ir + self._ir_write_str_descriptor(self._var_ref(stmt), ptr_value, len_value)
-            # `none` slice.
-            if var_type.kind == TypeKind.SLICE and isinstance(stmt.value, NoneLiteral):
-                nil_ir, ptr_value, len_value, cap_value = self._ir_nil_slice()
-                return nil_ir + self._ir_write_slice_descriptor(
-                    self._var_ref(stmt), ptr_value, len_value, cap_value)
             # Slice production.
             if var_type.kind == TypeKind.SLICE and isinstance(stmt.value, Slice):
                 production = self._ir_slice_into(stmt.value)
@@ -442,10 +421,6 @@ class StatementsMixin:
             ):
                 dst_expr = Index(array=stmt.array, index=stmt.index)
                 return self._ir_copy_assign(dst_expr, stmt.value, element_type)
-            if element_type.kind == TypeKind.SLICE and isinstance(stmt.value, NoneLiteral):
-                nil_ir, ptr_value, len_value, cap_value = self._ir_nil_slice()
-                dst_expr = Index(array=stmt.array, index=stmt.index)
-                return nil_ir + self._ir_write_slice_descriptor(dst_expr, ptr_value, len_value, cap_value)
             if element_type.kind == TypeKind.SLICE and isinstance(stmt.value, Slice):
                 production = self._ir_slice_into(stmt.value)
                 if production is not None:
@@ -507,11 +482,6 @@ class StatementsMixin:
             ):
                 dst_expr = Field(base=stmt.base, name=stmt.name)
                 return self._ir_copy_assign(dst_expr, stmt.value, field_type)
-            # `none` slice.
-            if field_type.kind == TypeKind.SLICE and isinstance(stmt.value, NoneLiteral):
-                nil_ir, ptr_value, len_value, cap_value = self._ir_nil_slice()
-                dst_expr = Field(base=stmt.base, name=stmt.name)
-                return nil_ir + self._ir_write_slice_descriptor(dst_expr, ptr_value, len_value, cap_value)
             if field_type.kind == TypeKind.SLICE and isinstance(stmt.value, Slice):
                 production = self._ir_slice_into(stmt.value)
                 if production is not None:

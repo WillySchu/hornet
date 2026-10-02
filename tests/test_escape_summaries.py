@@ -86,7 +86,7 @@ LEAKS = {
         '        r.items = append(r.items, p)\n'
         'def *int leak():\n'
         '    int x = 42\n'
-        '    Reg reg = Reg(none)\n'
+        '    Reg reg = Reg([])\n'
         '    reg.add(&x)\n'
         '    return reg.items[0]\n'
         , 'Reg.add', [False, True]),

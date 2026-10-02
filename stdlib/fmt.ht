@@ -17,7 +17,7 @@ def str _format(int n, int base):
     if n == 0:
         return '0'
     str digits = '0123456789abcdef'
-    []byte out = none
+    []byte out
     int m = n
     while m != 0:
         int d = m % base
@@ -41,7 +41,7 @@ def str pad_left(str s, int width, byte fill):
     int missing = width - len(s)
     if missing <= 0:
         return s
-    []byte out = none
+    []byte out
     for int i = 0; i < missing; i += 1:
         out = append(out, fill)
     return str(out) + s

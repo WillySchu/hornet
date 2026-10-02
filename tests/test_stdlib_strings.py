@@ -40,7 +40,7 @@ def test_pad_left():
 @GCC_SKIP
 def test_builder():
     out = _run(
-        "Builder b = Builder(none)\n"
+        "Builder b\n"
         "b.write('n=')\n"
         "b.write_int(-42)\n"
         "b.write_byte(\"!\")\n"

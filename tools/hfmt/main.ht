@@ -41,7 +41,7 @@ def str dump_tokens(str path, str src):
             write_stderr(_located(path, r.line, r.col, r.message) + '\n')
             exit(1)
         is Tokens:
-            Builder b = Builder(none)
+            Builder b
             for t in r.items:
                 b.write(kind_name(t.kind))
                 b.write(' ')
@@ -117,7 +117,7 @@ def int main(int argc, *byte argv):
     bool tokens = false
     bool check = false
     bool stdin_named = false
-    []str files = none
+    []str files
     for i, a in args:
         if i == 0:
             continue

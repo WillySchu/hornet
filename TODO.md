@@ -38,8 +38,6 @@ Updates:
 - Consider enabling struct literal syntax for aliases.
 - `function` type.
 - User defined types built off other types.
-- Change slice's zero type to an empty slice rather than `none`?
-- Change dict's zero type to an empty slice rather than `none`?
 - Disallow untyped array literals from anything except assignment to a typed variable / parameter / return.
 - `assert`
 - `cap` builtin?

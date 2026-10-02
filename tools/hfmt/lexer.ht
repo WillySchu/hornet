@@ -93,10 +93,10 @@ def byte _closer(byte open):
 
 def LexResult lex(str src):
     dict[str]bool keywords = _keywords()
-    []Token toks = none
-    []byte opens = none
-    []int open_lines = none
-    []int open_cols = none
+    []Token toks
+    []byte opens
+    []int open_lines
+    []int open_cols
     int n = len(src)
     int i = 0
     int line = 1

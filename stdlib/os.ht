@@ -6,7 +6,7 @@ from 'errors' import Error, StrResult, IntResult
 extern *byte hornet_argv_get(*byte argv, int index)
 
 def []str get_args(int argc, *byte argv):
-    []str args = none
+    []str args
     for int i = 0; i < argc; i += 1:
         args = append(args, from_cstring(hornet_argv_get(argv, i)))
     return args
@@ -27,7 +27,7 @@ def str _os_reason():
 
 # Read fd to EOF.
 def StrResult read_all_from_fd(int32 fd):
-    Builder b = Builder(none)
+    Builder b
     *byte chunk = calloc(65536, 1)
     int n = read(fd, chunk, 65536)
     while n != 0:

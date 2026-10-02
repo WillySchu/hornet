@@ -18,7 +18,7 @@ def int main():
         for k, v in d:
             s = (s + k * 3 + v) & 1048575
         checksum = (checksum + hits + s + len(d)) & 1048575
-    []str keys = none
+    []str keys
     for int i = 0; i < 2000; i += 1:
         keys = append(keys, 'k' + int_to_str(i * 37))
     dict[str]int sd = dict[str]int{}

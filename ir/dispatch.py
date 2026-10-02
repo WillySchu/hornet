@@ -151,14 +151,6 @@ class DispatchMixin:
             if Type.NONE in (type_of(expr.left), type_of(expr.right)) and TypeKind.SUM in (
                     type_of(expr.left).kind, type_of(expr.right).kind):
                 return self._ir_sum_none_comparison(expr)
-            if type_of(expr.left).kind == TypeKind.SLICE or type_of(expr.right).kind == TypeKind.SLICE:
-                result = self._ir_slice_none_comparison(expr)
-                if result is None:
-                    raise IRError(
-                        f"_ir_slice_none_comparison returned None for a slice-vs-"
-                        f"none comparison ({expr.left!r} {expr.op} {expr.right!r}) "
-                        f"-- expected to always succeed for a reachable slice-typed base")
-                return result
             if type_of(expr.left).kind in (TypeKind.ARRAY, TypeKind.STRUCT):
                 value_type = type_of(expr.left)
                 left_result = self._ir_composite_operand_address(expr.left, value_type)

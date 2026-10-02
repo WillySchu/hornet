@@ -26,8 +26,8 @@ type LayoutError struct:
 type LayoutResult is str | LayoutError
 
 def []Line _split_lines([]Token toks):
-    []Line lines = none
-    []Token cur = none
+    []Line lines
+    []Token cur
     for t in toks:
         if t.kind == TK_NEWLINE or t.kind == TK_EOF:
             if t.kind == TK_EOF and len(cur) == 0:
@@ -39,7 +39,7 @@ def []Line _split_lines([]Token toks):
                 l.comment_only = cur[0].kind == TK_COMMENT
                 l.continuation = cur[0].depth > 0 or _is_closer(cur[0])
             lines = append(lines, l)
-            cur = none
+            cur = []
         else:
             cur = append(cur, t)
     return lines
@@ -104,8 +104,8 @@ type State struct:
         s.has_prev = false
         s.prev_value = false
         s.prev_unary = false
-        s.brackets = none
-        s.type_brackets = none
+        s.brackets = []
+        s.type_brackets = []
         s.closed_type_bracket = false
         s.count = 0
         s.type_decl = false
@@ -232,7 +232,7 @@ def _advance(*State s, Token cur, bool cur_unary):
         s.prev_value = false  # `type Name []int`: a type follows the name
 
 def str _spaces(int n):
-    Builder b = Builder(none)
+    Builder b
     for int i = 0; i < n; i += 1:
         b.write_byte(" ")
     return b.to_str()
@@ -256,8 +256,8 @@ type Out struct:
     bool opener  # ends with a block-opening ':'
 
 def []Out _format_lines([]Line lines):
-    []Out outs = none
-    State s = State(false, Token(0, '', 0, 0, 0), false, false, none, none, false, 0, false, false, 0, false, false)
+    []Out outs
+    State s = State(false, Token(0, '', 0, 0, 0), false, false, [], [], false, 0, false, false, 0, false, false)
     int statement_level = 0
     for l in lines:
         if l.blank:
@@ -270,7 +270,7 @@ def []Out _format_lines([]Line lines):
         int indent = l.level * INDENT
         if l.continuation:
             indent = (statement_level + l.depth) * INDENT
-        Builder b = Builder(none)
+        Builder b
         b.write(_spaces(indent))
         bool first = true
         bool opener = false
@@ -295,7 +295,7 @@ def []Out _format_lines([]Line lines):
 
 # Collapse blank runs to one; drop blanks at the start, the end, and right after a block opener.
 def []Out _collapse_blanks([]Out outs):
-    []Out r = none
+    []Out r
     for o in outs:
         if o.blank:
             if len(r) == 0 or r[len(r) - 1].blank or r[len(r) - 1].opener:
@@ -316,7 +316,7 @@ type Unit struct:
 # Exactly one blank line around multi-line top-level definitions (and the comments directly
 # above them); consecutive one-line declarations keep whatever the input had (0 or 1).
 def []Out _space_top_level([]Out r):
-    []Unit units = none
+    []Unit units
     for i, o in r:
         bool comment_start = o.top_comment and (i == 0 or not r[i - 1].top_comment)
         if o.top_statement or comment_start or (i == 0 and not o.blank):
@@ -332,7 +332,7 @@ def []Out _space_top_level([]Out r):
         units[k].end = end
         units[k].multi = not u.comment and end - u.start > 1
     # A comment block directly above a definition takes the definition's side of the rule.
-    []bool wide = none
+    []bool wide
     for u in units:
         wide = append(wide, u.multi)
     int k = len(units) - 2
@@ -340,7 +340,7 @@ def []Out _space_top_level([]Out r):
         if units[k].comment and not units[k].blank_after:
             wide[k] = wide[k + 1]
         k -= 1
-    []Out out = none
+    []Out out
     for k2, u in units:
         for int i = u.start; i < u.end; i += 1:
             out = append(out, r[i])
@@ -423,8 +423,8 @@ def bool _opens_list([]Token out, Token opener):
 # Trailing commas: dropped when the closing bracket follows on the same line (`[1, 2,]` -> `[1, 2]`),
 # added to a list whose closing bracket is on its own line.
 def []Token _trailing_commas([]Token toks):
-    []Token out = none
-    []bool lists = none  # per open bracket: whether it is a list
+    []Token out
+    []bool lists  # per open bracket: whether it is a list
     for t in toks:
         if _is_opener(t):
             lists = append(lists, _opens_list(out, t))
@@ -438,7 +438,7 @@ def []Token _trailing_commas([]Token toks):
                 int last = _last_significant(out)
                 Token e = out[last]
                 if not (e.kind == TK_OP and (e.text == ',' or _is_opener(e))):
-                    []Token spliced = none
+                    []Token spliced
                     for i, x in out:
                         spliced = append(spliced, x)
                         if i == last:
@@ -453,7 +453,7 @@ def LayoutResult layout([]Token toks):
     if bad >= 0:
         return LayoutError('unindent does not match any outer indentation level', lines[bad].toks[0].line, 1)
     []Out outs = _space_top_level(_collapse_blanks(_format_lines(lines)))
-    Builder b = Builder(none)
+    Builder b
     for o in outs:
         b.write(o.text)
         b.write('\n')

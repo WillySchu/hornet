@@ -2,7 +2,7 @@
 from 'c' import panic
 from 'fmt' import int_to_str
 
-# Growable byte buffer: Builder b = Builder(none); b.write('text'); b.to_str().
+# Growable byte buffer: Builder b; b.write('text'); b.to_str().
 type Builder struct:
     []byte buf
 
@@ -24,7 +24,7 @@ type Builder struct:
         return str(b.buf)
 
     def reset(*b):
-        b.buf = none
+        b.buf = []
 
 def bool starts_with(str s, str prefix):
     return len(prefix) <= len(s) and s[0:len(prefix)] == prefix
@@ -53,7 +53,7 @@ def int index_of_byte(str s, byte x):
 def []str split(str s, str sep):
     if len(sep) == 0:
         panic('split: empty separator')
-    []str parts = none
+    []str parts
     int start = 0
     int at = index_from(s, sep, 0)
     while at >= 0:
@@ -64,7 +64,7 @@ def []str split(str s, str sep):
     return parts
 
 def str join([]str parts, str sep):
-    Builder b = Builder(none)
+    Builder b
     for i, p in parts:
         if i > 0:
             b.write(sep)
@@ -85,7 +85,7 @@ def str trim(str s):
     return s[i:j]
 
 def str repeat(str s, int n):
-    Builder b = Builder(none)
+    Builder b
     for int i = 0; i < n; i += 1:
         b.write(s)
     return b.to_str()

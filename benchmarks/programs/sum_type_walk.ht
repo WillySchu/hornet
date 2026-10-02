@@ -22,14 +22,14 @@ def int eval([]Node nodes, int i):
             return (eval(nodes, n.l) * eval(nodes, n.r)) & 1048575
 
 def int main():
-    []Node nodes = none
-    []int level = none
+    []Node nodes
+    []int level
     for int i = 0; i < 4096; i += 1:
         nodes = append(nodes, Num(i % 10 + 1))
         level = append(level, i)
     int depth = 0
     while len(level) > 1:
-        []int next = none
+        []int next
         for int j = 0; j + 1 < len(level); j += 2:
             if (j / 2 + depth) % 3 == 0:
                 nodes = append(nodes, Mul(level[j], level[j + 1]))

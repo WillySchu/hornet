@@ -33,7 +33,7 @@ def test_conversions_and_copy_semantics():
 def test_every_byte_value_round_trips():
     assert_program_stdout(
         "def int main():\n"
-        "    []byte all = none\n"
+        "    []byte all\n"
         "    for int i = 0; i < 256; i += 1:\n"
         "        all = append(all, uint8(i))\n"
         "    str s = str(all)\n"

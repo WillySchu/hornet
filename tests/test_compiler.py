@@ -11841,7 +11841,7 @@ class TestAppend:
 
     def test_append_to_none(self):
         assert_exit_code(
-            "    []int x = none\n"
+            "    []int x\n"
             "    []int y = append(x, 42)\n"
             "    return y[0]",
             42,
@@ -11875,7 +11875,7 @@ class TestAppend:
     def test_many_appends_in_a_loop_retain_every_value(self):
         assert_program_exit_code(
             "def int main():\n"
-            "    []int x = none\n"
+            "    []int x\n"
             "    int i = 0\n"
             "    while i < 300:\n"
             "        x = append(x, i)\n"
@@ -11892,7 +11892,7 @@ class TestAppend:
     def test_growth_policy_boundary_at_256(self):
         assert_program_exit_code(
             "def int main():\n"
-            "    []int x = none\n"
+            "    []int x\n"
             "    int i = 0\n"
             "    while i < 257:\n"
             "        x = append(x, 1)\n"
@@ -12002,7 +12002,7 @@ class TestAppend:
             "    Point p2\n"
             "    p2.x = 3\n"
             "    p2.y = 4\n"
-            "    []Point s = none\n"
+            "    []Point s\n"
             "    s = append(s, p1)\n"
             "    s = append(s, p2)\n"
             "    return s[0].x + s[1].y\n",
@@ -12016,7 +12016,7 @@ class TestAppend:
             "    int y\n"
             "\n"
             "def int main():\n"
-            "    []Point s = none\n"
+            "    []Point s\n"
             "    s = append(s, Point(1, 2))\n"
             "    s = append(s, Point(3, 4))\n"
             "    return s[0].x + s[1].y\n",
@@ -12086,7 +12086,7 @@ class TestAppend:
     def test_nested_append_as_slice_argument(self):
         assert_program_exit_code(
             "def int main():\n"
-            "    []int s = none\n"
+            "    []int s\n"
             "    s = append(append(s, 1), 2)\n"
             "    return s[0] + s[1]\n",
             3,
@@ -12273,8 +12273,8 @@ class TestNoneDereference:
         ("    *P p = none\n", "p.d['a'] = 1"),
         ("    *P p = none\n", "print(len(p.s))"),
         ("    *str p = none\n", "print(*p)"),
-        ("    *[]int p = none\n", "print(len(*p))"),
-        ("    P c = P(3, none, none, dict[str]int{})\n    *P p = &c\n", "print(p.next.x)"),
+        ("    *[]int p\n", "print(len(*p))"),
+        ("    P c = P(3, none, [], dict[str]int{})\n    *P p = &c\n", "print(p.next.x)"),
     ])
     def test_dereferencing_none_panics(self, setup, statement):
         result = compile_and_run(f"{self.P}def int main():\n{setup}    {statement}\n    return 0\n")
@@ -12287,7 +12287,7 @@ class TestNoneDereference:
 
     def test_valid_pointers_still_work(self):
         assert_program_stdout(
-            self.P + "def int main():\n    P c = P(3, none, []int[1], dict[str]int{})\n    P b = P(2, &c, none, dict[str]int{})\n"
+            self.P + "def int main():\n    P c = P(3, none, []int[1], dict[str]int{})\n    P b = P(2, &c, [], dict[str]int{})\n"
             "    *P h = &b\n    int s = 0\n    while h != none:\n        s += h.x + h.x\n        h = h.next\n"
             "    print(s + len(c.s))\n    return 0\n",
             "11\n")
@@ -12483,6 +12483,52 @@ class TestNoneVariant:
         assert_program_semantic_error(source, match=match)
 
 
+class TestSlicesAreNeverNone:
+    """A slice's zero value is the empty slice; `none` is only a pointer (or a sum's `none` variant)."""
+
+    PRELUDE = "type P struct:\n    []int s\ndef f([]int s):\n    print(len(s))\n"
+
+    @pytest.mark.parametrize("body", [
+        "    []int s = none",
+        "    []int s\n    s = none",
+        "    [][]int rows = [[1]]\n    rows[0] = none",
+        "    P p\n    p.s = none",
+        "    P p = P(none)",
+        "    f(none)",
+    ])
+    def test_none_where_a_slice_is_expected_is_rejected(self, body):
+        assert_program_semantic_error(self.PRELUDE + f"def int main():\n{body}\n    return 0\n",
+                                      match="A slice is never none -- write `\\[\\]`")
+
+    def test_returning_none_for_a_slice_is_rejected(self):
+        assert_program_semantic_error("def []int f():\n    return none\ndef int main():\n    return 0\n",
+                                      match="A slice is never none")
+
+    @pytest.mark.parametrize("comparison", ["s == none", "none != s"])
+    def test_comparing_a_slice_with_none_is_rejected(self, comparison):
+        assert_semantic_error(f"    []int s\n    print({comparison})\n    return 0",
+                              match="A slice is never none -- check 'len\\(s\\) == 0' for an empty one")
+
+    @pytest.mark.skipif(not GCC_AVAILABLE, reason="gcc not available")
+    def test_the_empty_slice_spellings_are_the_same_value(self):
+        assert_program_stdout(
+            self.PRELUDE + "def int main():\n"
+            "    []int a\n    []int b = []\n    []int c = []int[]\n    P p\n"
+            "    print(len(a) + len(b) + len(c) + len(p.s))\n    print(a)\n    print(b)\n"
+            "    a = append(a, 1)\n    print(a)\n    return 0\n",
+            "0\n[]int[]\n[]int[]\n[]int[1]\n")
+
+    @pytest.mark.skipif(not GCC_AVAILABLE, reason="gcc not available")
+    def test_untyped_literals_as_slice_arguments(self):
+        # These passed the wrong words before: the callee saw garbage lengths.
+        assert_program_stdout(
+            "type P struct:\n    []int s\n    int n\n"
+            "def int total([]int s, int k):\n    int t = k\n    for v in s:\n        t += v\n    return t\n"
+            "def int main():\n    print(total([], 1))\n    print(total([1, 2, 3], 1))\n"
+            "    P p = P([], 5)\n    print(len(p.s) + p.n)\n    return 0\n",
+            "1\n7\n5\n")
+
+
 class TestStatementsEndTheirLine:
     @pytest.mark.parametrize("line", ["print(1) 2 3", "int y = 1 2", "x = 2 x = 3", "return 0 1", "x 5"])
     def test_trailing_tokens_are_rejected(self, line):
@@ -12619,17 +12665,17 @@ class TestSliceParametersAndReturns:
             70,
         )
 
-    def test_returning_none_from_a_slice_returning_function(self):
+    def test_returning_an_empty_slice_from_a_slice_returning_function(self):
         assert_program_exit_code(
             "def []int maybe(bool give):\n"
             "    if give:\n"
             "        [2]int arr = [1, 2]\n"
             "        return arr[0:2]\n"
-            "    return none\n"
+            "    return []\n"
             "\n"
             "def bool main():\n"
             "    []int s = maybe(false)\n"
-            "    return s == none\n",
+            "    return len(s) == 0\n",
             1,
         )
 
@@ -12661,15 +12707,15 @@ class TestSliceParametersAndReturns:
             103,
         )
 
-    def test_mix_of_real_slice_and_none_arguments(self):
+    def test_mix_of_real_and_empty_slice_arguments(self):
         assert_program_exit_code(
             "def bool f([]int a, []int b):\n"
-            "    return a != none and b == none\n"
+            "    return len(a) != 0 and len(b) == 0\n"
             "\n"
             "def bool main():\n"
             "    [3]int arr = [1, 2, 3]\n"
             "    []int s = arr[0:3]\n"
-            "    return f(s, none)\n",
+            "    return f(s, [])\n",
             1,
         )
 
@@ -13192,15 +13238,6 @@ class TestSliceLiterals:
             match="Cannot initialize",
         )
 
-    def test_empty_slice_literal_is_not_nil(self):
-        assert_exit_code(
-            "    []int s = []int[1, 2, 3]\n"
-            "    s = []int[]\n"
-            "    return s == none",
-            0,
-            return_type="bool",
-        )
-
     def test_mutation_through_a_slice_literal_backed_slice(self):
         assert_exit_code(
             "    []int s = []int[1, 2, 3]\n"
@@ -13325,14 +13362,6 @@ class TestNestedSlices:
             "    rows = [2][]int[[1, 2], [3, 4]]\n"
             "    return rows[0][0] + rows[0][1] + rows[1][0] + rows[1][1]",
             10,
-        )
-
-    def test_empty_nested_slice_literal_is_not_nil(self):
-        assert_exit_code(
-            "    [][]int x = [][]int[[]int[], []int[]]\n"
-            "    return x[0] == none",
-            0,
-            return_type="bool",
         )
 
     def test_printing_array_of_slices(self):
@@ -13484,55 +13513,55 @@ class TestNone:
 
     def test_slice_vardecl_with_none(self):
         assert_stdout(
-            "    []int s = none\n"
+            "    []int s\n"
             "    print(s)\n"
             "    return 0",
             "[]int[]\n",
         )
 
-    def test_slice_assign_with_none(self):
+    def test_slice_assign_with_empty(self):
         assert_stdout(
             "    [3]int arr = [1, 2, 3]\n"
             "    []int s = arr[0:3]\n"
-            "    s = none\n"
+            "    s = []\n"
             "    print(s)\n"
             "    return 0",
             "[]int[]\n",
         )
 
-    def test_slice_index_assign_with_none(self):
+    def test_slice_index_assign_with_empty(self):
         assert_program_exit_code(
             "def int main():\n"
             "    [1][]int rows\n"
-            "    rows[0] = none\n"
-            "    if rows[0] == none:\n"
+            "    rows[0] = []\n"
+            "    if len(rows[0]) == 0:\n"
             "        return 1\n"
             "    return 0\n",
             1,
         )
 
-    def test_slice_field_assign_with_none(self):
+    def test_slice_field_assign_with_empty(self):
         assert_program_exit_code(
             "type Box struct:\n"
             "    []int values\n"
             "\n"
             "def int main():\n"
             "    Box b\n"
-            "    b.values = none\n"
-            "    if b.values == none:\n"
+            "    b.values = []\n"
+            "    if len(b.values) == 0:\n"
             "        return 1\n"
             "    return 0\n",
             1,
         )
 
-    def test_return_bare_none_from_slice_returning_function(self):
+    def test_return_bare_empty_literal_from_slice_returning_function(self):
         assert_program_exit_code(
             "def []int makeNone():\n"
-            "    return none\n"
+            "    return []\n"
             "\n"
             "def int main():\n"
             "    []int s = makeNone()\n"
-            "    if s == none:\n"
+            "    if len(s) == 0:\n"
             "        return 1\n"
             "    return 0\n",
             1,
@@ -13572,68 +13601,33 @@ class TestNone:
             "5\n",
         )
 
-    def test_none_valued_slice_equals_none(self):
+    def test_uninitialized_slice_is_empty(self):
         assert_exit_code(
-            "    []int s = none\n"
-            "    return s == none",
+            "    []int s\n"
+            "    return len(s) == 0",
             1,
             return_type="bool",
         )
 
-    def test_real_empty_slice_is_not_equal_to_none(self):
-        assert_exit_code(
-            "    [5]int arr = [1, 2, 3, 4, 5]\n"
-            "    []int s = arr[5:5]\n"
-            "    return s == none",
-            0,
-            return_type="bool",
-        )
-
-    def test_real_nonempty_slice_is_not_equal_to_none(self):
-        assert_exit_code(
-            "    [3]int arr = [1, 2, 3]\n"
-            "    []int s = arr[0:3]\n"
-            "    return s == none",
-            0,
-            return_type="bool",
-        )
-
-    def test_none_on_the_left_side(self):
-        assert_exit_code(
-            "    []int s = none\n"
-            "    return none == s",
-            1,
-            return_type="bool",
-        )
-
-    def test_not_equal_with_none(self):
-        assert_exit_code(
-            "    [3]int arr = [1, 2, 3]\n"
-            "    []int s = arr[0:3]\n"
-            "    return s != none",
-            1,
-            return_type="bool",
-        )
-
-    def test_indexing_a_none_valued_slice_aborts(self):
+    def test_indexing_an_empty_slice_aborts(self):
         assert_crashes_with_sigabrt(
-            "    []int s = none\n"
+            "    []int s\n"
             "    return s[0]"
         )
 
-    def test_printing_a_none_valued_slice(self):
+    def test_printing_an_empty_slice(self):
         assert_stdout(
-            "    []int s = none\n"
+            "    []int s\n"
             "    print(s)\n"
             "    return 0",
             "[]int[]\n",
         )
 
-    def test_reslicing_a_none_valued_slice_at_zero_zero(self):
+    def test_reslicing_an_empty_slice_at_zero_zero(self):
         assert_exit_code(
-            "    []int s = none\n"
+            "    []int s\n"
             "    []int s2 = s[0:0]\n"
-            "    return s2 == none",
+            "    return len(s2) == 0",
             1,
             return_type="bool",
         )
@@ -13680,13 +13674,13 @@ class TestNone:
             return_type="bool",
         )
 
-    def test_none_as_a_slice_argument(self):
+    def test_empty_slice_argument(self):
         result = compile_and_run(
             "def int first([]int s):\n"
             "    return s[0]\n"
             "\n"
             "def int main():\n"
-            "    return first(none)\n"
+            "    return first([])\n"
         )
         assert result.returncode == -signal.SIGABRT
 
@@ -13715,16 +13709,16 @@ class TestNone:
             "yes null\n",
         )
 
-    def test_none_as_mixed_slice_and_pointer_arguments_in_one_call(self):
+    def test_empty_slice_and_none_pointer_arguments_in_one_call(self):
         assert_program_stdout(
             "def bool takesBoth([]int s, *int p):\n"
-            "    return s == none and p == none\n"
+            "    return len(s) == 0 and p == none\n"
             "\n"
             "def int main():\n"
-            "    if takesBoth(none, none):\n"
-            "        print('both none')\n"
+            "    if takesBoth([], none):\n"
+            "        print('both empty')\n"
             "    return 0\n",
-            "both none\n",
+            "both empty\n",
         )
 
 
@@ -15048,14 +15042,14 @@ class TestStructs:
             42,
         )
 
-    def test_none_flows_into_a_slice_typed_field(self):
+    def test_empty_literal_flows_into_a_slice_typed_field(self):
         assert_program_exit_code(
             "type Row struct:\n"
             "    []int values\n"
             "\n"
             "def int main():\n"
             "    Row r\n"
-            "    r.values = none\n"
+            "    r.values = []\n"
             "    return len(r.values)\n",
             0,
         )
@@ -15320,14 +15314,14 @@ class TestStructLiterals:
             6,
         )
 
-    def test_slice_typed_field_with_none(self):
+    def test_slice_typed_field_with_empty_literal(self):
         assert_program_exit_code(
             "type Holder struct:\n"
             "    []int xs\n"
             "\n"
             "def int main():\n"
-            "    Holder h = Holder(none)\n"
-            "    if h.xs == none:\n"
+            "    Holder h = Holder([])\n"
+            "    if len(h.xs) == 0:\n"
             "        return 42\n"
             "    return -1\n",
             42,
@@ -16747,10 +16741,10 @@ class TestImplicitZeroValue:
         )
         assert_stdout("    []int s\n    print(s)\n    return 0", "[]int[]\n")
 
-    def test_slice_zero_value_equals_none(self):
+    def test_slice_zero_value_is_empty(self):
         assert_exit_code(
             "    []int s\n"
-            "    if s == none:\n"
+            "    if len(s) == 0:\n"
             "        return 1\n"
             "    return 0",
             1,
@@ -17328,7 +17322,7 @@ class TestPrintStructs:
             "\n"
             "def int main():\n"
             "    Row r\n"
-            "    r.values = none\n"
+            "    r.values = []\n"
             "    print(r)\n"
             "    return 0\n",
             "Row(values: []int[])\n",
@@ -17411,9 +17405,9 @@ class TestPrintStructs:
             "def int main():\n"
             "    [2]Node kids\n"
             "    kids[0].value = 2\n"
-            "    kids[0].children = none\n"
+            "    kids[0].children = []\n"
             "    kids[1].value = 3\n"
-            "    kids[1].children = none\n"
+            "    kids[1].children = []\n"
             "    Node root\n"
             "    root.value = 1\n"
             "    root.children = kids[0:2]\n"
@@ -18718,7 +18712,7 @@ _ESCAPE_CASES = {
         "    [3]int a = [1,2,3]\n"
         "    out.s = a[:]\n"
         "def int main():\n"
-        "    S v = S(none)\n"
+        "    S v = S([])\n"
         "    fill(&v)\n"
         "    noise(9)\n"
         "    print(v.s)\n"
@@ -18740,7 +18734,7 @@ _ESCAPE_CASES = {
         "    [3]int b = [1,2,3]\n"
         "    rows[0] = b[:]\n"
         "def int main():\n"
-        "    [][]int r = [][]int[none]\n"
+        "    [][]int r = [][]int[[]]\n"
         "    put(r)\n"
         "    noise(9)\n"
         "    print(r[0])\n"
@@ -18749,7 +18743,7 @@ _ESCAPE_CASES = {
     'append_element': (
         "def [][]int f():\n"
         "    [3]int a = [1,2,3]\n"
-        "    [][]int s = none\n"
+        "    [][]int s\n"
         "    s = append(s, a[:])\n"
         "    return s\n"
         "def int main():\n"
@@ -18782,7 +18776,7 @@ _ESCAPE_CASES = {
     'sum_variable': (
         "def U f():\n"
         "    [3]int a = [1,2,3]\n"
-        "    C c = C(none)\n"
+        "    C c = C([])\n"
         "    c.s = a[:]\n"
         "    U u = c\n"
         "    return u\n"
@@ -18795,12 +18789,12 @@ _ESCAPE_CASES = {
     'narrowing_binding': (
         "def []int f():\n"
         "    [3]int a = [1,2,3]\n"
-        "    C c0 = C(none)\n"
+        "    C c0 = C([])\n"
         "    c0.s = a[:]\n"
         "    [1]U us = [c0]\n"
         "    if us[0] is C as c:\n"
         "        return c.s\n"
-        "    return none\n"
+        "    return []\n"
         "def int main():\n"
         "    []int r = f()\n"
         "    noise(9)\n"
@@ -18810,12 +18804,12 @@ _ESCAPE_CASES = {
     'narrowed_variable': (
         "def []int f():\n"
         "    [3]int a = [1,2,3]\n"
-        "    C c0 = C(none)\n"
+        "    C c0 = C([])\n"
         "    c0.s = a[:]\n"
         "    U u = c0\n"
         "    if u is C:\n"
         "        return u.s\n"
-        "    return none\n"
+        "    return []\n"
         "def int main():\n"
         "    []int r = f()\n"
         "    noise(9)\n"
@@ -18825,7 +18819,7 @@ _ESCAPE_CASES = {
     'local_pointer_store': (
         "def S f():\n"
         "    [3]int a = [1,2,3]\n"
-        "    S v = S(none)\n"
+        "    S v = S([])\n"
         "    *S q = &v\n"
         "    q.s = a[:]\n"
         "    return v\n"
@@ -18850,7 +18844,7 @@ _ESCAPE_CASES = {
         "    [3]int b = [1,2,3]\n"
         "    (*p)[0] = b[:]\n"
         "def int main():\n"
-        "    [1][]int r = [none]\n"
+        "    [1][]int r = [[]]\n"
         "    put(&r)\n"
         "    noise(9)\n"
         "    print(r)\n"
@@ -18859,8 +18853,8 @@ _ESCAPE_CASES = {
     'for_in_binding': (
         "def [][]int f():\n"
         "    [3]int a = [1,2,3]\n"
-        "    [2][]int rows = [none, none]\n"
-        "    [][]int out = none\n"
+        "    [2][]int rows = [[], []]\n"
+        "    [][]int out\n"
         "    rows[0] = a[:]\n"
         "    for row in rows:\n"
         "        out = append(out, row)\n"
@@ -18879,7 +18873,7 @@ _ESCAPE_CASES = {
         "    [3]int a = [1,2,3]\n"
         "    return int(int64(keep(a[:], w)))\n"
         "def int main():\n"
-        "    S w = S(none)\n"
+        "    S w = S([])\n"
         "    int k = g(&w)\n"
         "    noise(9)\n"
         "    print(w.s)\n"
@@ -18892,7 +18886,7 @@ _ESCAPE_CASES = {
         "def N f():\n"
         "    [3]int a = [1,2,3]\n"
         "    N inner = N(none, a[:])\n"
-        "    N outer = N(&inner, none)\n"
+        "    N outer = N(&inner, [])\n"
         "    return outer\n"
         "def int main():\n"
         "    N r = f()\n"

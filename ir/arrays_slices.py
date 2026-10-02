@@ -31,8 +31,6 @@ from parser import (
     Index,
     Slice,
     Variable,
-    NoneLiteral,
-    Binary,
     Unary,
 )
 from ops import BinaryOp, UnaryOp
@@ -208,23 +206,8 @@ class ArraysSlicesMixin:
             return None
         return None
 
-    def _ir_nil_slice(self):
-        """All-zero {ptr, len, cap}."""
-        ptr = self.ir_program.ids.new_temp(Type.INT64)
-        length = self.ir_program.ids.new_temp(Type.INT)
-        cap = self.ir_program.ids.new_temp(Type.INT)
-        ir = [
-            IRMove(dst=ptr, src=IRConst(0, Type.INT64)),
-            IRMove(dst=length, src=IRConst(0, Type.INT)),
-            IRMove(dst=cap, src=IRConst(0, Type.INT)),
-        ]
-        return ir, ptr, length, cap
-
     def _ir_slice_arg(self, expr: Node):
         """Slice call argument as {ptr, len, cap}."""
-        if isinstance(expr, NoneLiteral):
-            return self._ir_nil_slice()
-
         return self._ir_indexable_base(expr)
 
     def _ir_index_address(self, expr: Index):
@@ -666,8 +649,6 @@ class ArraysSlicesMixin:
             return self._ir_write_sum_type_value_into(dst_address, value_expr, value_type)
         if is_composite_addressable(value_expr):
             return self._ir_copy_into_address(dst_address, value_expr, value_type)
-        if isinstance(value_expr, NoneLiteral):
-            return self._ir_write_zero_value_into(dst_address, value_type)
         if value_type.kind == TypeKind.SLICE and isinstance(value_expr, Slice):
             production = self._ir_slice_into(value_expr)
             if production is None:
@@ -762,17 +743,6 @@ class ArraysSlicesMixin:
             ir.extend(elem_ir)
         return ir
 
-    def _ir_slice_none_comparison(self, expr: Binary):
-        """`slice == none` / `!= none`."""
-        slice_expr = expr.left if type_of(expr.left).kind == TypeKind.SLICE else expr.right
-        base = self._ir_indexable_base(slice_expr)
-        if base is None:
-            return None
-        base_ir, ptr, length, cap = base
-        t_result = self.ir_program.ids.new_temp(Type.BOOL)
-        check = IRBinOp(dst=t_result, op=expr.op, left=ptr, right=IRConst(0, Type.INT64))
-        return base_ir + [check], t_result
-
     def _ir_write_append_value_at(self, target_addr, value_arg: Node, element_type: Type):
         """Write append's value at target_addr."""
         if element_type.kind in COMPOSITE_KINDS:
@@ -787,20 +757,10 @@ class ArraysSlicesMixin:
         element_type = slice_type.element_type
         element_width = type_byte_width(element_type, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
 
-        if isinstance(slice_arg, NoneLiteral):
-            ptr = self.ir_program.ids.new_temp(Type.INT64)
-            length = self.ir_program.ids.new_temp(Type.INT)
-            cap = self.ir_program.ids.new_temp(Type.INT)
-            base_ir = [
-                IRMove(dst=ptr, src=IRConst(0, Type.INT64)),
-                IRMove(dst=length, src=IRConst(0, Type.INT)),
-                IRMove(dst=cap, src=IRConst(0, Type.INT)),
-            ]
-        else:
-            base = self._ir_indexable_base(slice_arg)
-            if base is None:
-                return None
-            base_ir, ptr, length, cap = base
+        base = self._ir_indexable_base(slice_arg)
+        if base is None:
+            return None
+        base_ir, ptr, length, cap = base
 
         result_ptr = self.ir_program.ids.new_temp(Type.INT64)
         result_len = self.ir_program.ids.new_temp(Type.INT)

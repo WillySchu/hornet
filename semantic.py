@@ -940,10 +940,10 @@ class SemanticAnalyzer:
             raise SemanticError(f"No semantic rule for statement: {stmt!r}", stmt)
 
     def _types_compatible(self, value_type: Type, target_type: Type) -> bool:
-        """Equality, or NONE into slice/pointer (a dict is never none), or a variant into its sum type."""
+        """Equality, or NONE into a pointer (slices and dicts are never none), or a variant into its sum type."""
         if value_type == target_type:
             return True
-        if value_type == Type.NONE and target_type.kind in (TypeKind.SLICE, TypeKind.POINTER):
+        if value_type == Type.NONE and target_type.kind == TypeKind.POINTER:
             return True
         if target_type.kind == TypeKind.SUM and value_type.kind != TypeKind.SUM:
             return value_type in self.sum_types[target_type.sum_type_name].variants
@@ -964,6 +964,12 @@ class SemanticAnalyzer:
             expr.resolved_type = array_type
             return target_type if target_type.kind == TypeKind.SLICE else array_type
         value_type = self.check_expr(expr)
+        if value_type == Type.NONE and target_type.kind == TypeKind.SLICE:
+            raise SemanticError(f"A slice is never none -- write `[]` (or leave the {target_type} uninitialized) "
+                                f"for an empty one", expr)
+        if value_type == Type.NONE and target_type.kind == TypeKind.DICT:
+            raise SemanticError(f"A dict is never none -- write `{target_type}{{}}` (or leave it uninitialized) "
+                                f"for an empty one", expr)
         if value_type == Type.INT and target_type in _NARROW_INT_RANGES:
             literal_value = self._as_folded_int_literal(expr)
             if literal_value is not None:
@@ -1710,7 +1716,7 @@ class SemanticAnalyzer:
         if arg_type == Type.NONE:
             raise SemanticError(
                 "'print' cannot be called with a bare 'none' -- store it "
-                "in a slice-typed variable first (e.g. `[]int s = none`), "
+                "in a pointer-typed variable first (e.g. `*int p = none`), "
                 "then print that",
                 expr.args[0],
             )
@@ -1958,10 +1964,10 @@ class SemanticAnalyzer:
             return Type.BOOL
 
         if op in _EQUALITY_OPS:
-            # Slices and pointers compare to `none`.
+            # Pointers compare to `none`.
             none_vs_nilable = (
-                (left_type == Type.NONE and right_type.kind in (TypeKind.SLICE, TypeKind.POINTER)) or
-                (right_type == Type.NONE and left_type.kind in (TypeKind.SLICE, TypeKind.POINTER))
+                (left_type == Type.NONE and right_type.kind == TypeKind.POINTER) or
+                (right_type == Type.NONE and left_type.kind == TypeKind.POINTER)
             )
             if none_vs_nilable:
                 return Type.BOOL
@@ -1974,6 +1980,8 @@ class SemanticAnalyzer:
                     return Type.BOOL
             if Type.NONE in (left_type, right_type) and TypeKind.DICT in (left_type.kind, right_type.kind):
                 raise SemanticError("A dict is never none -- check 'len(d) == 0' for an empty one", expr)
+            if Type.NONE in (left_type, right_type) and TypeKind.SLICE in (left_type.kind, right_type.kind):
+                raise SemanticError("A slice is never none -- check 'len(s) == 0' for an empty one", expr)
 
             if left_type.kind == TypeKind.ARRAY and right_type.kind == TypeKind.ARRAY:
                 if left_type != right_type:
