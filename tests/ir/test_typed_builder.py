@@ -45,7 +45,7 @@ def int main(int argc, *byte argv):
 
 def _built_functions(source: str) -> list:
     program = _parse(source)
-    analyze(program)
+    program = analyze(program)
     return [fn.name for fn in build_ir_program(program).functions]
 
 

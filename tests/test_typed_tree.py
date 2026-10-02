@@ -146,3 +146,33 @@ def test_dump_typed_command(tmp_path):
     r = subprocess.run([sys.executable, str(ROOT / 'compile.py'), str(src), '--dump-typed'], capture_output=True, text=True)
     assert r.returncode == 0 and r.stdout.startswith("function main() -> int\n  Return\n")
     assert r.stdout == typed_tree(str(src))
+
+
+FRONT_END = {'parser', 'semantic', 'lexer', 'modules', 'merge'}
+LATER_STAGES = ['ir', 'optimize', 'backend', 'escape_analysis.py']
+
+
+def test_later_stages_never_import_the_front_end():
+    """The typed program is the only thing that crosses from the front end: ir/, optimize/,
+    backend/, and escape analysis use typed_ast, typesys, and symbols, never the parser's tree."""
+    import ast as python_ast
+    offenders = []
+    for root in LATER_STAGES:
+        path = ROOT / root
+        for source in sorted([path] if path.is_file() else path.rglob('*.py')):
+            for node in python_ast.walk(python_ast.parse(source.read_text())):
+                names = []
+                if isinstance(node, python_ast.Import):
+                    names = [alias.name for alias in node.names]
+                elif isinstance(node, python_ast.ImportFrom) and node.module:
+                    names = [node.module]
+                offenders += [f"{source.relative_to(ROOT)}: {name}" for name in names
+                              if name.split('.')[0] in FRONT_END]
+    assert offenders == []
+
+
+def test_intrinsics_are_their_own_nodes():
+    program = _typed("intrinsic *byte _raw_ptr(str s)\nintrinsic int _raw_len(str s)\n"
+                     "intrinsic str _from_raw_parts(*byte p, int n)\n"
+                     "def int main():\n    str s = 'hi'\n    print(_from_raw_parts(_raw_ptr(s), _raw_len(s)))\n    return 0\n")
+    assert {'StrRawPtr', 'StrRawLen', 'StrFromRawParts'} <= _nodes(program)

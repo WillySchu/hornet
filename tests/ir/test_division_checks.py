@@ -9,7 +9,7 @@ from tests.test_compiler import _parse, analyze
 def _main_body(expr: str, type_: str = 'int'):
     source = f"def {type_} f({type_} n, {type_} d):\n    return {expr}\ndef int main():\n    return 0\n"
     program = _parse(source)
-    analyze(program)
+    program = analyze(program)
     fn = next(f for f in build_ir_program(program).functions if f.name == 'f')
     return fn.body
 

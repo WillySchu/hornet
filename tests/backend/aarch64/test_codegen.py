@@ -87,7 +87,7 @@ PROGRAMS = sorted((ROOT / 'benchmarks' / 'programs').glob('*.ht')) + sorted((ROO
 def _asm_program(path: Path):
     entry, modules = discover_modules(str(path))
     program = merge_programs(entry, modules)
-    analyze(program)
+    program = analyze(program)
     return CodeGenerator().generate(optimize(build_ir_program(program)))
 
 

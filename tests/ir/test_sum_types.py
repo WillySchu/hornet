@@ -29,8 +29,7 @@ def _build(source: str):
         src_path.write_text(source)
         tokens = lex(str(src_path))
         ast = parser.Parser(tokens).parse_program()
-        semantic.analyze(ast)
-        return build_ir_program(ast)
+        return build_ir_program(semantic.analyze(ast))
 
 
 def _fn(ir_program, name):

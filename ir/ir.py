@@ -203,10 +203,7 @@ class IRProgram:
     string_literals: list = field(default_factory=list)
     type_descriptors: list = field(default_factory=list)
     struct_registry: dict = field(default_factory=dict)
-    type_alias_registry: dict = field(default_factory=dict)
     sum_type_registry: dict = field(default_factory=dict)
-    function_registry: dict = field(default_factory=dict)
-    intrinsic_original_names: dict = field(default_factory=dict)
     escape_summaries: dict = field(default_factory=dict)  # function name -> per-param escape flags
     ids: object = None
     _empty_str_label: object = None

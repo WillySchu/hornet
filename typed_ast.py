@@ -245,8 +245,27 @@ class ElementContains(Expr):
 
 
 @dataclass(frozen=True)
+class StrRawPtr(Expr):
+    """The `_raw_ptr(s)` intrinsic: a str's data pointer."""
+    value: Expr
+
+
+@dataclass(frozen=True)
+class StrRawLen(Expr):
+    """The `_raw_len(s)` intrinsic: a str's length."""
+    value: Expr
+
+
+@dataclass(frozen=True)
+class StrFromRawParts(Expr):
+    """The `_from_raw_parts(p, n)` intrinsic: a str over `n` bytes at `p`, not copied."""
+    ptr: Expr
+    length: Expr
+
+
+@dataclass(frozen=True)
 class Call(Expr):
-    """A call of a Hornet function (`kind` 'function'), extern, or intrinsic."""
+    """A call of a Hornet function (`kind` 'function') or an extern."""
     name: str
     kind: str
     args: tuple
@@ -366,6 +385,7 @@ class Function:
 
 @dataclass(frozen=True)
 class Program:
+    """Everything later stages use: they never see the parser's tree."""
     functions: tuple
     structs: Any  # name -> StructInfo
     sum_types: Any  # name -> SumTypeInfo

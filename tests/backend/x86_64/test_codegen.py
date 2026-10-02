@@ -30,7 +30,7 @@ def _parse_and_analyze(source: str):
         src_path.write_text(source)
         tokens = lex(str(src_path))
         ast = parser.Parser(tokens).parse_program()
-        semantic.analyze(ast)
+        ast = semantic.analyze(ast)
         return ast
 
 
@@ -130,12 +130,10 @@ def test_ir_program_shares_string_and_typedesc_data_with_asm_program():
     assert len(gen.ir_program.string_literals) > 0
 
 
-def test_ir_program_carries_struct_and_type_alias_registries():
-    """struct_registry/type_alias_registry are copied onto IRProgram
-    too (see its own docstring for why a self-contained artifact needs
-    them, not just string_literals/type_descriptors), matching
-    Program's own registries exactly."""
-    ast = _parse_and_analyze(
+def test_ir_program_carries_the_layout_registries():
+    """IRProgram keeps the struct and sum-type registries (layout for the backends), taken from the
+    typed program; aliases are resolved away before IR, so there's no alias registry."""
+    program = _parse_and_analyze(
         "type Point struct:\n"
         "    int x\n"
         "    int y\n"
@@ -143,14 +141,12 @@ def test_ir_program_carries_struct_and_type_alias_registries():
         "type Coord = Point\n"
         "\n"
         "def int main():\n"
-        "    Point p = Point(1, 2)\n"
+        "    Coord p = Point(1, 2)\n"
         "    return p.x\n"
     )
-    ir_program = build_ir_program(ast)
-    assert ir_program.struct_registry == ast.struct_registry
-    assert ir_program.type_alias_registry == ast.type_alias_registry
-    assert 'Point' in ir_program.struct_registry
-    assert 'Coord' in ir_program.type_alias_registry
+    ir_program = build_ir_program(program)
+    assert ir_program.struct_registry is program.structs and ir_program.sum_type_registry is program.sum_types
+    assert 'Point' in ir_program.struct_registry and not hasattr(ir_program, 'type_alias_registry')
 
 
 def test_ir_program_carries_its_own_ids():
@@ -176,7 +172,7 @@ def test_lowering_does_not_modify_the_ir():
     path = Path(__file__).resolve().parents[3] / 'benchmarks' / 'programs' / 'register_pressure.ht'
     entry, modules = discover_modules(str(path))
     program = merge_programs(entry, modules)
-    analyze(program)
+    program = analyze(program)
     ir_program = optimize(build_ir_program(program))
     before = copy.deepcopy([(f.slot_widths, f.slot_labels, f.temp_homes, f.body) for f in ir_program.functions])
     first = CodeGenerator().generate(ir_program)

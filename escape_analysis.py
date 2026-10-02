@@ -236,8 +236,10 @@ class EscapeAnalyzer:
             self._add(loc, self._contents(old))
             self._store(old | {loc}, self.vals(e.value))
             return old | {loc}
-        if isinstance(e, t.BytesFromStr):  # a runtime call: no summary
-            self._escape(self.vals(e.value))
+        if isinstance(e, (t.BytesFromStr, t.StrRawPtr, t.StrRawLen, t.StrFromRawParts)):
+            # Runtime and intrinsic operations: treated as calls without a summary.
+            for child in _children(e):
+                self._escape(self.vals(child))
             return {EXT}
         if isinstance(e, t.Call):
             return self._call(e)

@@ -374,7 +374,7 @@ class TypedFunctionBuilder:
         """The address of a str or slice held in memory: a place, or a call's result."""
         if isinstance(e, _PLACE_NODES):
             return self.place_address(e)
-        if isinstance(e, t.Call) and e.kind != 'intrinsic':
+        if isinstance(e, t.Call):
             ir, address = self.scratch_address(e.type)
             return ir + self.call(e, False, destination=address)[0], address
         raise NotYetPorted(f"a {e.type} from {type(e).__name__}")
@@ -519,9 +519,9 @@ class TypedFunctionBuilder:
                 IRBinOp(dst=size, op=BinaryOp.BITWISE_OR, left=length, right=IRConst(1, Type.INT)),  # never malloc(0)
                 IRCall(dst=ptr, name='malloc', args=[size]),
                 IRCall(dst=None, name='memcpy', args=[ptr, src, length])], ptr, length
-        if isinstance(e, t.Call) and self.intrinsic(e) == '_from_raw_parts':
-            ptr_ir, ptr = self.value(e.args[0])
-            len_ir, length = self.value(e.args[1])
+        if isinstance(e, t.StrFromRawParts):
+            ptr_ir, ptr = self.value(e.ptr)
+            len_ir, length = self.value(e.length)
             return ptr_ir + len_ir, ptr, length
         ir, address = self.stored(e)
         read_ir, ptr, length = self.read_str(address)
@@ -544,9 +544,6 @@ class TypedFunctionBuilder:
             low = IRConst(0, Type.INT)
         return ir + [IRSliceBoundsCheck(value=low, bound=limit), IRSliceBoundsCheck(value=high, bound=limit),
                      IRSliceBoundsCheck(value=low, bound=high)], low, high
-
-    def intrinsic(self, e) -> str:
-        return self.ir_program.intrinsic_original_names.get(e.name) if e.kind == 'intrinsic' else None
 
     # -- slices: (ptr, len, cap)
 
@@ -613,10 +610,10 @@ class TypedFunctionBuilder:
 
     def value(self, e, discard: bool = False) -> tuple:
         """(IR, value) for a scalar expression (or a void call when `discard`)."""
+        if isinstance(e, (t.StrRawPtr, t.StrRawLen)):
+            ir, ptr, length = self.str_value(e.value)
+            return ir, ptr if isinstance(e, t.StrRawPtr) else length
         if isinstance(e, t.Call):
-            if self.intrinsic(e) in ('_raw_ptr', '_raw_len'):
-                ir, ptr, length = self.str_value(e.args[0])
-                return ir, ptr if self.intrinsic(e) == '_raw_ptr' else length
             return self.call(e, discard)
         if isinstance(e, t.Print):
             return self.print_(e), None
@@ -747,8 +744,6 @@ class TypedFunctionBuilder:
         """A call; a composite result is written to `destination` (or a new temporary)."""
         if not _ported(e.type):
             raise NotYetPorted(f"call returning {e.type}")
-        if e.kind == 'intrinsic':
-            raise NotYetPorted(f"intrinsic {self.intrinsic(e)}")
         ir, args = [], []
         composite_result = e.type != Type.VOID and not _scalar(e.type)
         if composite_result:

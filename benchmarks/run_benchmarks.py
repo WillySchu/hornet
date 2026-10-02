@@ -89,7 +89,7 @@ def run_one(ht_path: Path, runs: int = TIMING_RUNS, icount: bool = False, target
     with tempfile.TemporaryDirectory() as tmpdir:
         entry, modules = discover_modules(str(ht_path))
         program = merge_programs(entry, modules)
-        analyze(program)
+        program = analyze(program)
 
         asm_text, captured = _instrumented_generate(program, target)
 

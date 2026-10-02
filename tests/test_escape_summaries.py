@@ -11,9 +11,9 @@ from tests.test_compiler import GCC_SKIP, _parse, assert_program_stdout
 def _escapes(source: str, fn_name: str = 'leak'):
     program = _parse(source)
     typed = analyze(program)
-    summaries = compute_escape_summaries(typed.functions, program.struct_registry)
+    summaries = compute_escape_summaries(typed.functions, typed.structs)
     fn = next(f for f in typed.functions if f.name == fn_name)
-    escaping = analyze_array_escapes(fn, program.struct_registry, summaries)
+    escaping = analyze_array_escapes(fn, typed.structs, summaries)
     return [s.symbol.name for s in fn.body if isinstance(s, Declare) and s.symbol.id in escaping], summaries
 
 

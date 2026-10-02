@@ -50,12 +50,13 @@ SOURCE = (
 def test_every_declaration_gets_its_own_symbol():
     import typed_ast as t
     program = _parse(SOURCE)
-    fn = analyze(program).functions[0]
-    kinds = [(str(s), s.kind) for s in program.symbols.symbols]
+    typed_program = analyze(program)
+    fn = typed_program.functions[0]
+    kinds = [(str(s), s.kind) for s in typed_program.symbols.symbols]
     assert kinds[:6] == [('n#0', 'param'), ('ab#1', 'param'), ('x#2', 'local'), ('i#3', 'binding'),
                          ('y#4', 'binding'), ('x#5', 'local')]
     assert ('m#6', 'narrowing') in kinds
-    assert fn.params[0] is program.symbols[0]
+    assert fn.params[0] is typed_program.symbols[0]
     outer_x, loop = fn.body[0], fn.body[1]
     inner_x = loop.body[0]
     assert isinstance(outer_x, t.Declare) and isinstance(loop, t.ForIn)
@@ -83,6 +84,6 @@ def test_node_numbers_are_unique_and_follow_creation_order():
 
 def test_slot_labels_name_their_symbol():
     program = _parse(SOURCE)
-    analyze(program)
+    program = analyze(program)
     labels = list(next(f for f in build_ir_program(program).functions if f.name == 'f').slot_labels.values())
     assert 'param:n#0' in labels and 'local:x#2' in labels and 'for_in:y#4' in labels

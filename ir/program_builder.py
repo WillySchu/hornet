@@ -8,44 +8,17 @@ from ir.division_checks import insert_division_checks
 from ir.null_checks import expand_null_checks
 from ir.typed_builder import NotYetPorted, TypedFunctionBuilder
 from ir.verify import verify_program
-from parser import Program
+import typed_ast as typed
 
 
-def build_ir_program(program: Program) -> IRProgram:
-    """IR for an analyzed Program, built from its typed tree (program.typed_program). IRError if
-    `program` hasn't been through semantic.analyze()."""
-    if not hasattr(program, 'struct_registry'):
-        raise IRError(
-            "Program has no struct registry -- semantic.analyze() "
-            "must run before codegen (see compile_to_asm)"
-        )
-    if not hasattr(program, 'type_alias_registry'):
-        raise IRError(
-            "Program has no type alias registry -- semantic.analyze() "
-            "must run before codegen (see compile_to_asm)"
-        )
-    if not hasattr(program, 'sum_type_registry'):
-        raise IRError(
-            "Program has no sum type registry -- semantic.analyze() "
-            "must run before codegen (see compile_to_asm)"
-        )
-    if not hasattr(program, 'function_registry'):
-        raise IRError(
-            "Program has no function registry -- semantic.analyze() "
-            "must run before codegen (see compile_to_asm)"
-        )
-    ir_program = IRProgram(
-        struct_registry=program.struct_registry,
-        type_alias_registry=program.type_alias_registry,
-        sum_type_registry=program.sum_type_registry,
-        function_registry=program.function_registry,
-        intrinsic_original_names=getattr(program, 'intrinsic_original_names', {}),
-        ids=IdAllocator(),
-    )
-    typed_program = program.typed_program  # built by semantic.analyze()
-    ir_program.escape_summaries = compute_escape_summaries(typed_program.functions, program.struct_registry)
+def build_ir_program(program: typed.Program) -> IRProgram:
+    """IR for a typed program (what semantic.analyze() returns); nothing from the parser's tree."""
+    if not isinstance(program, typed.Program):
+        raise IRError(f"build_ir_program takes semantic.analyze()'s typed program, not a {type(program).__name__}")
+    ir_program = IRProgram(struct_registry=program.structs, sum_type_registry=program.sum_types, ids=IdAllocator())
+    ir_program.escape_summaries = compute_escape_summaries(program.functions, program.structs)
     ir_program.functions = []
-    for typed_fn in typed_program.functions:
+    for typed_fn in program.functions:
         try:
             ir_program.functions.append(TypedFunctionBuilder(ir_program).build(typed_fn))
         except NotYetPorted as e:

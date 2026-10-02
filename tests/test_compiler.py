@@ -59,13 +59,12 @@ def _parse(source: str):
 
 def _compile_to_binary(source: str, tmp: Path, target=ASM_TARGET) -> tuple[Path, str]:
     """Compile `source` for `target` and link it with the runtime in `tmp`; returns (binary, assembly)."""
-    ast = _parse(source)
-    analyze(ast)
+    program = analyze(_parse(source))
 
     asm_path = tmp / "program.s"
     bin_path = tmp / "program"
 
-    asm = generate_asm(ast, target=target)
+    asm = generate_asm(program, target=target)
     asm_path.write_text(asm, encoding="latin-1")
 
     gcc_cmd = c_compiler(target) + [str(asm_path), str(runtime_object(target)), "-o", str(bin_path)]
@@ -105,11 +104,11 @@ def _run_binary(bin_path: Path, asm: str, target=ASM_TARGET) -> subprocess.Compl
         raise
 
 
-def _ir_program(ast):
-    """The optimized IR for an analyzed AST."""
+def _ir_program(program):
+    """The optimized IR for a typed program."""
     from ir.program_builder import build_ir_program
     from optimize.optimizer import optimize
-    return optimize(build_ir_program(ast))
+    return optimize(build_ir_program(program))
 
 
 def _heap_allocations(ast) -> list:
@@ -182,10 +181,9 @@ def assert_program_semantic_error(source: str, match: str = None) -> None:
 
 def assert_program_codegen_error(source: str, match: str = None) -> None:
     """A well-typed program that the IR builder or backend rejects."""
-    ast = _parse(source)
-    analyze(ast)
+    program = analyze(_parse(source))
     with pytest.raises(CodegenError, match=match):
-        generate_asm(ast, target=ASM_TARGET)
+        generate_asm(program, target=ASM_TARGET)
 
 
 def assert_stdout(body: str, expected_stdout: str, return_type: str = "int") -> None:
@@ -2229,7 +2227,7 @@ class TestTypeAnnotation:
 
     def test_codegen_without_semantic_analysis_raises_clear_error(self):
         ast = _parse("def int main():\n    return 1 + 2\n")
-        with pytest.raises(IRError, match="no struct registry"):
+        with pytest.raises(IRError, match="takes semantic.analyze\\(\\)'s typed program"):
             generate_asm(ast, target=ASM_TARGET)
 
 
@@ -8713,8 +8711,7 @@ class TestExternFunctions:
             "def int main():\n"
             "    return sum7(1, 2, 3, 4, 5, 6, 7)\n"
         )
-        analyze(ast)
-        generate_asm(ast, target=ASM_TARGET)  # should not raise
+        generate_asm(analyze(ast), target=ASM_TARGET)  # should not raise
 
 
 class TestExternFunctionsCodegen:
@@ -11051,7 +11048,7 @@ class TestHeapAllocatedArrays:
             f"    return arr[0]\n"
         )
         ast = _parse(source)
-        analyze(ast)
+        ast = analyze(ast)
         mallocs = _heap_allocations(ast)
         assert not mallocs
 
@@ -11064,7 +11061,7 @@ class TestHeapAllocatedArrays:
             f"    return arr[0]\n"
         )
         ast = _parse(source)
-        analyze(ast)
+        ast = analyze(ast)
         mallocs = _heap_allocations(ast)
         assert mallocs
         assert 16392 in mallocs
@@ -11247,7 +11244,7 @@ class TestArrayEscapeAnalysis:
             "    return sl[0]\n"
         )
         ast = _parse(source)
-        analyze(ast)
+        ast = analyze(ast)
         mallocs = _heap_allocations(ast)
         assert mallocs
         assert 40 in mallocs  # 5 ints * 8 bytes
@@ -11260,7 +11257,7 @@ class TestArrayEscapeAnalysis:
             "    return s[0] + s[1]\n"
         )
         ast = _parse(source)
-        analyze(ast)
+        ast = analyze(ast)
         mallocs = _heap_allocations(ast)
         assert not mallocs
 
@@ -11274,7 +11271,7 @@ class TestArrayEscapeAnalysis:
             "    return helper(arr)\n"
         )
         ast = _parse(source)
-        analyze(ast)
+        ast = analyze(ast)
         mallocs = _heap_allocations(ast)
         assert not mallocs
 
@@ -11348,7 +11345,7 @@ class TestArrayEscapeAnalysis:
             "    return sumFirstTwo(s)\n"
         )
         ast = _parse(source)
-        analyze(ast)
+        ast = analyze(ast)
         mallocs = _heap_allocations(ast)
         assert not mallocs
 
@@ -11363,7 +11360,7 @@ class TestArrayEscapeAnalysis:
             "    return s[0]\n"
         )
         ast = _parse(source)
-        analyze(ast)
+        ast = analyze(ast)
         mallocs = _heap_allocations(ast)
         assert mallocs
 
@@ -11403,7 +11400,7 @@ class TestArrayEscapeAnalysis:
             "    return r[0][0]\n"
         )
         ast = _parse(source)
-        analyze(ast)
+        ast = analyze(ast)
         mallocs = _heap_allocations(ast)
         assert mallocs
 
@@ -11449,7 +11446,7 @@ class TestArrayEscapeAnalysis:
             "    return sumFirstTwo(e)\n"
         )
         ast = _parse(source)
-        analyze(ast)
+        ast = analyze(ast)
         mallocs = _heap_allocations(ast)
         assert not mallocs
 
@@ -11462,7 +11459,7 @@ class TestArrayEscapeAnalysis:
             "    return rows[0][0]\n"
         )
         ast = _parse(source)
-        analyze(ast)
+        ast = analyze(ast)
         mallocs = _heap_allocations(ast)
         assert not mallocs
 
@@ -11544,7 +11541,7 @@ class TestArrayEscapeAnalysis:
             "    return m[0][0][0]\n"
         )
         ast = _parse(source)
-        analyze(ast)
+        ast = analyze(ast)
         mallocs = _heap_allocations(ast)
         assert mallocs
 
@@ -11583,7 +11580,7 @@ class TestArrayEscapeAnalysis:
             "    return s[0]\n"
         )
         ast = _parse(source)
-        analyze(ast)
+        ast = analyze(ast)
         mallocs = _heap_allocations(ast)
         assert mallocs
 
@@ -11596,7 +11593,7 @@ class TestArrayEscapeAnalysis:
             "    return rows[0][0]\n"
         )
         ast = _parse(source)
-        analyze(ast)
+        ast = analyze(ast)
         mallocs = _heap_allocations(ast)
         assert not mallocs
 
@@ -14956,7 +14953,7 @@ class TestStructs:
             "    return b.data[0]\n"
         )
         ast = _parse(source)
-        analyze(ast)
+        ast = analyze(ast)
         mallocs = _heap_allocations(ast)
         assert mallocs
 
@@ -15276,7 +15273,7 @@ class TestStructs:
             "    return r.values[0]\n"
         )
         ast = _parse(source)
-        analyze(ast)
+        ast = analyze(ast)
         mallocs = _heap_allocations(ast)
         assert not mallocs
 
@@ -15528,7 +15525,7 @@ class TestStructLiterals:
             "    return big.tag\n"
         )
         ast = _parse(source)
-        analyze(ast)
+        ast = analyze(ast)
         assert len(_heap_allocations(ast)) == 1
 
     def test_small_struct_literal_does_not_use_malloc(self):
@@ -15542,7 +15539,7 @@ class TestStructLiterals:
             "    return p.x + p.y\n"
         )
         ast = _parse(source)
-        analyze(ast)
+        ast = analyze(ast)
         mallocs = _heap_allocations(ast)
         assert not mallocs
 
@@ -16096,7 +16093,7 @@ class TestArgumentMaterialization:
             f"    return sumFirstTwo([{elements}])\n"
         )
         ast = _parse(source)
-        analyze(ast)
+        ast = analyze(ast)
         assert _heap_allocations(ast)
         main = next(f for f in _ir_program(ast).functions if f.name == 'main')
         main_frame_size = sum(main.slot_widths.values())
@@ -16134,7 +16131,7 @@ class TestArgumentMaterialization:
             "    return useBig(Big(filler, 42))\n"
         )
         ast = _parse(source)
-        analyze(ast)
+        ast = analyze(ast)
         assert _heap_allocations(ast)
 
     def test_small_literal_argument_does_not_use_malloc(self):
@@ -16146,7 +16143,7 @@ class TestArgumentMaterialization:
             "    return sum3([1, 2, 3])\n"
         )
         ast = _parse(source)
-        analyze(ast)
+        ast = analyze(ast)
         mallocs = _heap_allocations(ast)
         assert not mallocs
 
@@ -16280,7 +16277,7 @@ class TestCompositeCallAsAddressableBase:
             "    return makeSmall()[0]\n"
         )
         ast = _parse(source)
-        analyze(ast)
+        ast = analyze(ast)
         mallocs = _heap_allocations(ast)
         assert not mallocs
 
@@ -16297,7 +16294,7 @@ class TestCompositeCallAsAddressableBase:
             f"    return makeBig()[0]\n"
         )
         ast = _parse(source)
-        analyze(ast)
+        ast = analyze(ast)
         mallocs = _heap_allocations(ast)
         assert mallocs
 
@@ -16311,7 +16308,7 @@ class TestCompositeCallAsAddressableBase:
             "    return s[0]\n"
         )
         ast = _parse(source)
-        analyze(ast)
+        ast = analyze(ast)
         mallocs = _heap_allocations(ast)
         assert mallocs
 
@@ -17285,7 +17282,7 @@ class TestArraysOfStructs:
             "    return pts[2499].x % 256\n"
         )
         ast = _parse(source)
-        analyze(ast)
+        ast = analyze(ast)
         assert _heap_allocations(ast)
 
     def test_small_array_of_structs_literal_does_not_use_malloc(self):
@@ -17299,7 +17296,7 @@ class TestArraysOfStructs:
             "    return pts[0].x + pts[1].y\n"
         )
         ast = _parse(source)
-        analyze(ast)
+        ast = analyze(ast)
         mallocs = _heap_allocations(ast)
         assert not mallocs
 

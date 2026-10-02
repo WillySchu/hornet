@@ -20,8 +20,7 @@ def parse_and_analyze(source: str):
         tokens = lex(str(src_path))
         ast = parser.Parser(tokens).parse_program()
         typed = semantic.analyze(ast)
-        return SimpleNamespace(functions=list(typed.functions), struct_registry=ast.struct_registry,
-                               symbols=ast.symbols)
+        return SimpleNamespace(functions=list(typed.functions), struct_registry=typed.structs, symbols=typed.symbols)
 
 
 def parse_expression(source: str) -> parser.Node:

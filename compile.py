@@ -42,8 +42,8 @@ def main():
 
 
 def generate_asm(program, target=None) -> str:
-    """Build IR from an analyzed Program, optimize, and lower to assembly for `target`
-    (a Target, an `arch-os` string, or None for the default)."""
+    """Build IR from a typed program (semantic.analyze()'s result), optimize, and lower to assembly
+    for `target` (a Target, an `arch-os` string, or None for the default)."""
     return lower_to_asm(optimize(build_ir_program(program)), as_target(target))
 
 
@@ -59,10 +59,10 @@ def compile_to_asm(source: str, target=None, require_main: bool = False) -> str:
     `require_main`; without it the assembly may be code for another program to link."""
     entry_program, discovered_modules = discover_modules(source)
     ast = merge_programs(entry_program, discovered_modules)
-    analyze(ast)
-    if require_main and not any(fn.name == 'main' for fn in ast.functions):
+    program = analyze(ast)
+    if require_main and not any(fn.name == 'main' for fn in program.functions):
         raise CompileError("no 'main' function: a program starts at 'def int main()'", source)
-    return generate_asm(ast, target)
+    return generate_asm(program, target)
 
 
 if __name__ == '__main__':

@@ -316,8 +316,8 @@ class SemanticAnalyzer:
         self._narrowed_names: set = set()  # currently narrowed variable names
 
     def analyze(self, program: Program) -> "typed.Program":
+        """Check `program` and return its typed tree; `program` itself is left unchanged."""
         self.symbols = SymbolTable()
-        program.symbols = self.symbols
         self.facts = Facts()
         # Each method is checked and compiled as a function of its own (see _method_function).
         self.all_functions = list(program.functions) + [
@@ -331,16 +331,13 @@ class SemanticAnalyzer:
 
         # 2. Resolve aliases before struct fields, which may use them.
         self.type_aliases = self._collect_type_aliases(program.type_aliases, struct_registry)
-        program.type_alias_registry = self.type_aliases
 
         # 3. Resolve struct fields; sum-type names are reserved first so fields can name them.
         reserved_sums = {std.name: None for std in program.sum_types}
         self.structs = self._resolve_struct_fields(program.structs, struct_registry, reserved_sums)
-        program.struct_registry = self.structs
 
         # 3.5. Sum types need resolved structs. Then no type may contain itself by value.
         self.sum_types = self._resolve_sum_types(program.sum_types, self.structs)
-        program.sum_type_registry = self.sum_types
         self._check_value_containment(program)
 
         # 3.6. Methods, after struct resolution.
@@ -388,14 +385,13 @@ class SemanticAnalyzer:
             self.functions[fn.name] = (param_types, return_type)
 
         # 4.5. Externs share the function registry.
+        self.extern_names = {ext.name for ext in program.extern_functions}
         for ext in program.extern_functions:
             self.check_extern_function_decl(ext)
 
         # 4.6. Intrinsics share the function registry.
         for ic in program.intrinsics:
             self.check_intrinsic_decl(ic)
-        program.intrinsic_original_names = self.intrinsic_original_names
-        program.function_registry = self.functions
 
         # 4.7. Constant values, in dependency order.
         for name in self.const_decls:
@@ -421,8 +417,7 @@ class SemanticAnalyzer:
             raise SemanticErrors(errors)
 
         # 7. The typed tree: what later stages consume.
-        program.typed_program = _TypedTreeBuilder(program, self.facts, self.consts).program(self.all_functions)
-        return program.typed_program
+        return _TypedTreeBuilder(self).program(self.all_functions)
 
     # -- constants
 
@@ -2194,16 +2189,15 @@ class _TypedTreeBuilder:
     """Builds the typed tree (typed_ast.py) from a checked program: every implicit operation becomes
     explicit, and values flowing into a slot of a known type go through `convert`."""
 
-    def __init__(self, program: syntax.Program, facts: Facts, consts: dict):
-        self.ast = program
-        self.facts = facts
-        self.consts = consts
-        self.symbols = program.symbols
-        self.structs = program.struct_registry
-        self.sum_types = program.sum_type_registry
-        self.functions = program.function_registry
-        self.externs = {e.name for e in program.extern_functions}
-        self.intrinsics = {i.name for i in program.intrinsics}
+    def __init__(self, analyzer: 'SemanticAnalyzer'):
+        self.facts = analyzer.facts
+        self.consts = analyzer.consts
+        self.symbols = analyzer.symbols
+        self.structs = analyzer.structs
+        self.sum_types = analyzer.sum_types
+        self.functions = analyzer.functions
+        self.intrinsics = analyzer.intrinsic_original_names  # name -> the intrinsic's own name
+        self.externs = analyzer.extern_names
         self.return_type = None
 
     def ty(self, e) -> Type:
@@ -2447,8 +2441,12 @@ class _TypedTreeBuilder:
                 values = tuple(self.convert(a, ft) for a, ft in zip(args, field_types.values()))
             return typed.StructLiteral(Type(TypeKind.STRUCT, struct_name=name), values)
         param_types, return_type = self.functions[name]
-        kind = 'extern' if name in self.externs else 'intrinsic' if name in self.intrinsics else 'function'
-        return typed.Call(return_type, name, kind, tuple(self.convert(a, pt) for a, pt in zip(args, param_types)))
+        converted = tuple(self.convert(a, pt) for a, pt in zip(args, param_types))
+        if name in self.intrinsics:
+            intrinsic = {'_raw_ptr': typed.StrRawPtr, '_raw_len': typed.StrRawLen,
+                         '_from_raw_parts': typed.StrFromRawParts}[self.intrinsics[name]]
+            return intrinsic(return_type, *converted)
+        return typed.Call(return_type, name, 'extern' if name in self.externs else 'function', converted)
 
     def binary(self, e: syntax.Binary) -> typed.Expr:
         op, left_type, right_type = e.op, self.ty(e.left), self.ty(e.right)
@@ -2479,7 +2477,7 @@ class _TypedTreeBuilder:
 # Entry points
 
 def analyze(program: Program) -> "typed.Program":
-    """Check `program` and return its typed tree (also kept as program.typed_program)."""
+    """Check `program` and return its typed tree, everything later stages need."""
     return SemanticAnalyzer().analyze(program)
 
 
