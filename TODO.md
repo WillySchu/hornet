@@ -14,7 +14,6 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- The 0.2–3.5% benchmark regressions from the new IR builder.
 - Nothing warns when a result is ignored, such as a bare write\_stdout(...) statement.
 - Weight spills by use count and loop depth.
 - Module errors have a line but no column.
