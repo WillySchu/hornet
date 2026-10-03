@@ -9,7 +9,7 @@ from 'os' import get_args, read_file, read_stdin, write_file, write_stdout, writ
 from 'errors' import Error, StrResult, IntResult
 from 'fmt' import int_to_str
 from 'strings' import Builder, starts_with
-from 'lexer' import lex, kind_name, LexError, Tokens, TK_NEWLINE
+from 'lexer' import lex, kind_name, LexError, Tokens, TokenKind
 from 'layout' import layout, LayoutError
 
 const str USAGE = 'usage: hfmt [--check] [file | - ...]\n       hfmt --tokens [file | -]\n'
@@ -49,7 +49,7 @@ def str dump_tokens(str path, str src):
                 b.write(' ')
                 b.write_int(t.col)
                 b.write(' ')
-                if t.kind == TK_NEWLINE:
+                if t.kind == TokenKind.Newline:
                     b.write_int(t.depth)
                 else:
                     b.write(t.text)

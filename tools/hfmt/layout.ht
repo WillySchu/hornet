@@ -1,7 +1,7 @@
 # Indentation and spacing. Line breaks stay where they are; tokens are
 # re-joined with canonical spacing and each line is re-indented.
 from 'strings' import Builder, trim
-from 'lexer' import Token, TK_IDENT, TK_KEYWORD, TK_NUMBER, TK_STRING, TK_BYTE, TK_OP, TK_COMMENT, TK_NEWLINE, TK_EOF
+from 'lexer' import Token, TokenKind
 
 const int INDENT = 4
 
@@ -29,14 +29,14 @@ def []Line _split_lines([]Token toks):
     []Line lines
     []Token cur
     for t in toks:
-        if t.kind == TK_NEWLINE or t.kind == TK_EOF:
-            if t.kind == TK_EOF and len(cur) == 0:
+        if t.kind == TokenKind.Newline or t.kind == TokenKind.Eof:
+            if t.kind == TokenKind.Eof and len(cur) == 0:
                 break
             Line l = Line(cur, t.depth, 0, 0, len(cur) == 0, false, false)
             if len(cur) > 0:
                 l.depth = cur[0].depth
                 l.width = cur[0].col - 1
-                l.comment_only = cur[0].kind == TK_COMMENT
+                l.comment_only = cur[0].kind == TokenKind.Comment
                 l.continuation = cur[0].depth > 0 or _is_closer(cur[0])
             lines = append(lines, l)
             cur = []
@@ -76,13 +76,13 @@ def bool _is_type_keyword(str w):
     return w == 'int' or w == 'int8' or w == 'uint8' or w == 'int32' or w == 'int64' or w == 'byte' or w == 'str' or w == 'bool' or w == 'dict'
 
 def bool _is_opener(Token t):
-    return t.kind == TK_OP and (t.text == '(' or t.text == '[' or t.text == '{')
+    return t.kind == TokenKind.Op and (t.text == '(' or t.text == '[' or t.text == '{')
 
 def bool _is_closer(Token t):
-    return t.kind == TK_OP and (t.text == ')' or t.text == ']' or t.text == '}')
+    return t.kind == TokenKind.Op and (t.text == ')' or t.text == ']' or t.text == '}')
 
 def bool _is_word(Token t):
-    return t.kind == TK_IDENT or t.kind == TK_KEYWORD or t.kind == TK_NUMBER or t.kind == TK_STRING or t.kind == TK_BYTE
+    return t.kind in [TokenKind.Ident, TokenKind.Keyword, TokenKind.Number, TokenKind.String, TokenKind.Byte]
 
 # Spacing state within one statement.
 type State struct:
@@ -120,17 +120,17 @@ type State struct:
         return s.brackets[len(s.brackets) - 1]
 
 def bool _ends_value(Token t, bool closed_type_bracket):
-    if t.kind == TK_IDENT or t.kind == TK_NUMBER or t.kind == TK_STRING or t.kind == TK_BYTE:
+    if t.kind == TokenKind.Ident or t.kind == TokenKind.Number or t.kind == TokenKind.String or t.kind == TokenKind.Byte:
         return true
-    if t.kind == TK_KEYWORD:
+    if t.kind == TokenKind.Keyword:
         return t.text == 'true' or t.text == 'false' or t.text == 'none'
-    if t.kind == TK_OP:
+    if t.kind == TokenKind.Op:
         return t.text == ')' or t.text == '}' or (t.text == ']' and not closed_type_bracket)
     return false
 
 # Whether cur is a unary operator given the previous token's state.
 def bool _is_unary(Token cur, State s):
-    if cur.kind != TK_OP:
+    if cur.kind != TokenKind.Op:
         return false
     if cur.text == '~':
         return true
@@ -145,49 +145,49 @@ def bool _star_multiplies([]Token toks, int i, State s):
     if i + 1 >= len(toks):
         return false
     Token n = toks[i + 1]
-    if n.kind == TK_NUMBER or n.kind == TK_STRING or n.kind == TK_BYTE:
+    if n.kind == TokenKind.Number or n.kind == TokenKind.String or n.kind == TokenKind.Byte:
         return true
-    if n.kind == TK_KEYWORD and (n.text == 'not' or n.text == 'true' or n.text == 'false' or n.text == 'none'):
+    if n.kind == TokenKind.Keyword and (n.text == 'not' or n.text == 'true' or n.text == 'false' or n.text == 'none'):
         return true
-    if n.kind == TK_OP and n.text != '[':
+    if n.kind == TokenKind.Op and n.text != '[':
         return true  # `(`, `-`, `&`, `*`: no type starts that way
-    if s.chain_decl or n.kind != TK_IDENT:
+    if s.chain_decl or n.kind != TokenKind.Ident:
         return false
     if s.chain_groups >= 2 and not s.chain_empty:
         return true
     int k = i + 2
-    if k + 1 < len(toks) and toks[k].kind == TK_OP and toks[k].text == '.' and toks[k + 1].kind == TK_IDENT:
+    if k + 1 < len(toks) and toks[k].kind == TokenKind.Op and toks[k].text == '.' and toks[k + 1].kind == TokenKind.Ident:
         k += 2
-    return not (k < len(toks) and toks[k].kind == TK_OP and toks[k].text == '[')  # a literal's elements
+    return not (k < len(toks) and toks[k].kind == TokenKind.Op and toks[k].text == '[')  # a literal's elements
 
 # A single space between s.prev and cur (both on the same line)?
 def bool _space_before(Token cur, bool cur_unary, State s):
     Token p = s.prev
     str pt = p.text
     str ct = cur.text
-    if _is_opener(p) and p.kind == TK_OP:
+    if _is_opener(p) and p.kind == TokenKind.Op:
         return false
     if _is_closer(cur):
         return false
-    if cur.kind == TK_OP and (ct == ',' or ct == ';'):
+    if cur.kind == TokenKind.Op and (ct == ',' or ct == ';'):
         return false
-    if p.kind == TK_OP and (pt == ',' or pt == ';'):
+    if p.kind == TokenKind.Op and (pt == ',' or pt == ';'):
         return true
-    if cur.kind == TK_OP and ct == ':':
+    if cur.kind == TokenKind.Op and ct == ':':
         return false
-    if p.kind == TK_OP and pt == ':':
+    if p.kind == TokenKind.Op and pt == ':':
         return s.top() == "{"
-    if (cur.kind == TK_OP and ct == '.') or (p.kind == TK_OP and pt == '.'):
+    if (cur.kind == TokenKind.Op and ct == '.') or (p.kind == TokenKind.Op and pt == '.'):
         return false
     if s.prev_unary:
         return false
-    if cur.kind == TK_OP and (ct == '(' or ct == '[' or ct == '{'):
+    if cur.kind == TokenKind.Op and (ct == '(' or ct == '[' or ct == '{'):
         if s.type_decl and s.count == 2:
             return true  # `type Name [3]int`
-        if p.kind == TK_IDENT or p.kind == TK_STRING or (p.kind == TK_OP and (pt == ')' or pt == ']')):
+        if p.kind == TokenKind.Ident or p.kind == TokenKind.String or (p.kind == TokenKind.Op and (pt == ')' or pt == ']')):
             return false
-        return not (p.kind == TK_KEYWORD and _is_type_keyword(pt))
-    if p.kind == TK_OP and pt == ']' and s.closed_type_bracket and (_is_word(cur) or cur_unary):
+        return not (p.kind == TokenKind.Keyword and _is_type_keyword(pt))
+    if p.kind == TokenKind.Op and pt == ']' and s.closed_type_bracket and (_is_word(cur) or cur_unary):
         return false  # [3]int, []*int
     return true
 
@@ -197,14 +197,14 @@ def bool _declaration_position(State s):
     if s.count == 0 or s.type_decl:
         return true
     Token p = s.prev
-    if p.kind == TK_KEYWORD and (p.text == 'def' or p.text == 'extern' or p.text == 'intrinsic' or p.text == 'for'):
+    if p.kind == TokenKind.Keyword and (p.text == 'def' or p.text == 'extern' or p.text == 'intrinsic' or p.text == 'for'):
         return true
-    return s.decl_header and len(s.brackets) == 1 and p.kind == TK_OP and (p.text == '(' or p.text == ',')
+    return s.decl_header and len(s.brackets) == 1 and p.kind == TokenKind.Op and (p.text == '(' or p.text == ',')
 
 def _advance(*State s, Token cur, bool cur_unary):
     bool continues_chain = s.closed_type_bracket
     s.closed_type_bracket = false
-    if cur.kind == TK_OP and (cur.text == '(' or cur.text == '[' or cur.text == '{'):
+    if cur.kind == TokenKind.Op and (cur.text == '(' or cur.text == '[' or cur.text == '{'):
         bool type_bracket = cur.text == '[' and not s.prev_value
         if type_bracket and continues_chain:
             s.chain_groups += 1
@@ -216,7 +216,7 @@ def _advance(*State s, Token cur, bool cur_unary):
         s.type_brackets = append(s.type_brackets, type_bracket)
     elif _is_closer(cur) and len(s.brackets) > 0:
         s.closed_type_bracket = cur.text == ']' and s.type_brackets[len(s.type_brackets) - 1]
-        if s.closed_type_bracket and s.prev.kind == TK_OP and s.prev.text == '[':
+        if s.closed_type_bracket and s.prev.kind == TokenKind.Op and s.prev.text == '[':
             s.chain_empty = true
         s.brackets = s.brackets[0:len(s.brackets) - 1]
         s.type_brackets = s.type_brackets[0:len(s.type_brackets) - 1]
@@ -226,8 +226,8 @@ def _advance(*State s, Token cur, bool cur_unary):
     s.has_prev = true
     s.count += 1
     if s.count == 1:
-        s.decl_header = cur.kind == TK_KEYWORD and (cur.text == 'def' or cur.text == 'extern' or cur.text == 'intrinsic')
-        s.type_decl = cur.kind == TK_KEYWORD and cur.text == 'type'
+        s.decl_header = cur.kind == TokenKind.Keyword and (cur.text == 'def' or cur.text == 'extern' or cur.text == 'intrinsic')
+        s.type_decl = cur.kind == TokenKind.Keyword and cur.text == 'type'
     elif s.count == 2 and s.type_decl:
         s.prev_value = false  # `type Name []int`: a type follows the name
 
@@ -257,7 +257,7 @@ type Out struct:
 
 def []Out _format_lines([]Line lines):
     []Out outs
-    State s = State(false, Token(0, '', 0, 0, 0), false, false, [], [], false, 0, false, false, 0, false, false)
+    State s = State(false, Token(TokenKind.Eof, '', 0, 0, 0), false, false, [], [], false, 0, false, false, 0, false, false)
     int statement_level = 0
     for l in lines:
         if l.blank:
@@ -275,7 +275,7 @@ def []Out _format_lines([]Line lines):
         bool first = true
         bool opener = false
         for i, t in l.toks:
-            if t.kind == TK_COMMENT:
+            if t.kind == TokenKind.Comment:
                 if not first:
                     b.write('  ')
                 b.write(_comment(t.text))
@@ -287,7 +287,7 @@ def []Out _format_lines([]Line lines):
                 b.write(' ')
             b.write(t.text)
             _advance(&s, t, unary)
-            opener = t.kind == TK_OP and t.text == ':' and len(s.brackets) == 0
+            opener = t.kind == TokenKind.Op and t.text == ':' and len(s.brackets) == 0
             first = false
         bool top_comment = l.comment_only and not l.continuation and l.level == 0
         outs = append(outs, Out(b.to_str(), false, starts and l.level == 0, top_comment, opener))
@@ -353,7 +353,7 @@ def []Out _space_top_level([]Out r):
 # The last token in toks that isn't a newline or comment, or -1.
 def int _last_significant([]Token toks):
     int k = len(toks) - 1
-    while k >= 0 and (toks[k].kind == TK_NEWLINE or toks[k].kind == TK_COMMENT):
+    while k >= 0 and (toks[k].kind == TokenKind.Newline or toks[k].kind == TokenKind.Comment):
         k -= 1
     return k
 
@@ -379,15 +379,15 @@ def int _matching_open([]Token out, int k):
 # as a list: hfmt then leaves the commas alone, which is always safe.
 def bool _follows_element_type([]Token out, int k):
     int i = _last_significant(out[0:k])
-    if i >= 1 and out[i].kind == TK_OP and out[i].text == '.' and out[i - 1].kind == TK_IDENT:
+    if i >= 1 and out[i].kind == TokenKind.Op and out[i].text == '.' and out[i - 1].kind == TokenKind.Ident:
         i = _last_significant(out[0:i - 1])  # qualified name: step over `lib.`
     int stars = 0
-    while i >= 0 and out[i].kind == TK_OP and out[i].text == '*':
+    while i >= 0 and out[i].kind == TokenKind.Op and out[i].text == '*':
         stars += 1
         i = _last_significant(out[0:i])
     int groups = 0
     bool empty_group = false
-    while i >= 0 and out[i].kind == TK_OP and out[i].text == ']':
+    while i >= 0 and out[i].kind == TokenKind.Op and out[i].text == ']':
         int open = _matching_open(out, i)
         if open < 0 or out[open].text != '[':
             return false
@@ -409,14 +409,14 @@ def bool _opens_list([]Token out, Token opener):
         return opener.text == '['
     Token prev = out[k]
     if opener.text == '(':
-        return prev.kind == TK_IDENT
-    if prev.kind == TK_KEYWORD:
+        return prev.kind == TokenKind.Ident
+    if prev.kind == TokenKind.Keyword:
         if prev.text == 'dict' or prev.text == 'true' or prev.text == 'false' or prev.text == 'none':
             return false
         return true  # an element type (`[]int[`) or a keyword like `return`/`in` before a literal
-    if prev.kind == TK_IDENT:
+    if prev.kind == TokenKind.Ident:
         return _follows_element_type(out, k)
-    if prev.kind == TK_OP:
+    if prev.kind == TokenKind.Op:
         return prev.text != ')' and prev.text != ']' and prev.text != '}'
     return false
 
@@ -432,17 +432,17 @@ def []Token _trailing_commas([]Token toks):
             bool is_list = lists[len(lists) - 1]
             lists = lists[0:len(lists) - 1]
             int n = len(out)
-            if n > 0 and out[n - 1].kind == TK_OP and out[n - 1].text == ',':
+            if n > 0 and out[n - 1].kind == TokenKind.Op and out[n - 1].text == ',':
                 out = out[0:n - 1]
-            elif n > 0 and out[n - 1].kind == TK_NEWLINE and is_list:
+            elif n > 0 and out[n - 1].kind == TokenKind.Newline and is_list:
                 int last = _last_significant(out)
                 Token e = out[last]
-                if not (e.kind == TK_OP and (e.text == ',' or _is_opener(e))):
+                if not (e.kind == TokenKind.Op and (e.text == ',' or _is_opener(e))):
                     []Token spliced
                     for i, x in out:
                         spliced = append(spliced, x)
                         if i == last:
-                            spliced = append(spliced, Token(TK_OP, ',', e.line, e.col + len(e.text), e.depth))
+                            spliced = append(spliced, Token(TokenKind.Op, ',', e.line, e.col + len(e.text), e.depth))
                     out = spliced
         out = append(out, t)
     return out

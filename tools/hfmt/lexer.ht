@@ -1,18 +1,19 @@
 # Lexer for hfmt. Unlike the compiler's lexer it keeps comments and every
 # physical newline, and records the bracket depth at each newline.
 
-const int TK_IDENT = 1
-const int TK_KEYWORD = 2
-const int TK_NUMBER = 3
-const int TK_STRING = 4
-const int TK_BYTE = 5
-const int TK_OP = 6
-const int TK_COMMENT = 7
-const int TK_NEWLINE = 8
-const int TK_EOF = 9
+type TokenKind enum:
+    Ident
+    Keyword
+    Number
+    String
+    Byte
+    Op
+    Comment
+    Newline
+    Eof
 
 type Token struct:
-    int kind
+    TokenKind kind
     str text
     int line
     int col
@@ -28,24 +29,27 @@ type LexError struct:
 
 type LexResult is Tokens | LexError
 
-def str kind_name(int kind):
-    if kind == TK_IDENT:
-        return 'IDENT'
-    if kind == TK_KEYWORD:
-        return 'KEYWORD'
-    if kind == TK_NUMBER:
-        return 'NUMBER'
-    if kind == TK_STRING:
-        return 'STRING'
-    if kind == TK_BYTE:
-        return 'BYTE'
-    if kind == TK_OP:
-        return 'OP'
-    if kind == TK_COMMENT:
-        return 'COMMENT'
-    if kind == TK_NEWLINE:
-        return 'NEWLINE'
-    return 'EOF'
+# The kind as `hfmt --tokens` prints it.
+def str kind_name(TokenKind kind):
+    match kind:
+        is Ident:
+            return 'IDENT'
+        is Keyword:
+            return 'KEYWORD'
+        is Number:
+            return 'NUMBER'
+        is String:
+            return 'STRING'
+        is Byte:
+            return 'BYTE'
+        is Op:
+            return 'OP'
+        is Comment:
+            return 'COMMENT'
+        is Newline:
+            return 'NEWLINE'
+        is Eof:
+            return 'EOF'
 
 def dict[str]bool _keywords():
     dict[str]bool kw = dict[str]bool{}
@@ -108,7 +112,7 @@ def LexResult lex(str src):
         if c == " " or c == "\t" or c == "\r":
             i += 1
         elif c == "\n":
-            toks = append(toks, Token(TK_NEWLINE, '', line, col, depth))
+            toks = append(toks, Token(TokenKind.Newline, '', line, col, depth))
             i += 1
             line += 1
             line_start = i
@@ -116,7 +120,7 @@ def LexResult lex(str src):
             int j = i
             while j < n and src[j] != "\n":
                 j += 1
-            toks = append(toks, Token(TK_COMMENT, src[i:j], line, col, depth))
+            toks = append(toks, Token(TokenKind.Comment, src[i:j], line, col, depth))
             i = j
         elif is_digit(c):
             int j = i
@@ -126,16 +130,16 @@ def LexResult lex(str src):
                 j += 1
                 while j < n and is_digit(src[j]):
                     j += 1
-            toks = append(toks, Token(TK_NUMBER, src[i:j], line, col, depth))
+            toks = append(toks, Token(TokenKind.Number, src[i:j], line, col, depth))
             i = j
         elif is_ident_start(c):
             int j = i
             while j < n and is_ident_char(src[j]):
                 j += 1
             str word = src[i:j]
-            int kind = TK_IDENT
+            TokenKind kind = TokenKind.Ident
             if word in keywords:
-                kind = TK_KEYWORD
+                kind = TokenKind.Keyword
             toks = append(toks, Token(kind, word, line, col, depth))
             i = j
         elif c == "'" or c == "\"":
@@ -150,9 +154,9 @@ def LexResult lex(str src):
                 j += 1
             if j >= n:
                 return LexError('unterminated literal', start_line, col)
-            int kind = TK_STRING
+            TokenKind kind = TokenKind.String
             if c == "\"":
-                kind = TK_BYTE
+                kind = TokenKind.Byte
             toks = append(toks, Token(kind, src[i:j + 1], start_line, col, depth))
             i = j + 1
         else:
@@ -170,10 +174,10 @@ def LexResult lex(str src):
                 open_lines = open_lines[0:len(open_lines) - 1]
                 open_cols = open_cols[0:len(open_cols) - 1]
                 depth = len(opens)
-            toks = append(toks, Token(TK_OP, op, line, col, depth))
+            toks = append(toks, Token(TokenKind.Op, op, line, col, depth))
             i += len(op)
     if len(opens) > 0:
         int k = len(opens) - 1
         return LexError('unclosed \'' + str(opens[k]) + '\'', open_lines[k], open_cols[k])
-    toks = append(toks, Token(TK_EOF, '', line, i - line_start + 1, 0))
+    toks = append(toks, Token(TokenKind.Eof, '', line, i - line_start + 1, 0))
     return Tokens(toks)
