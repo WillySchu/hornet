@@ -12,7 +12,7 @@ from parser import ParseError, Parser
 from target import default_target
 from tests.targets import run_binary
 from tests.test_compiler import (
-    GCC_SKIP, _parse, analyze, assert_program_semantic_error, assert_program_stdout,
+    GCC_SKIP, _parse, analyze, assert_program_panics, assert_program_semantic_error, assert_program_stdout,
 )
 from typed_ast import dump
 from typesys import Type, TypeKind
@@ -108,6 +108,53 @@ def test_enum_values():
     )
 
 
+CONVERSIONS = (
+    DECLS +
+    "const int COUNT = len(Color)\n"
+    "def int main():\n"
+    "    int n = 1\n"
+    "    byte b = byte(2)\n"
+    "    print(Color(n))\n"
+    "    print(Color(b))\n"
+    "    print(Color(0) == Color.Red)\n"
+    "    print(len(Color) + COUNT)\n"
+    "    print(n in Color)\n"
+    "    print(b in Color)\n"
+    "    print(n + 2 in Color)\n"
+    "    print(-1 in Color)\n"
+    "    print(n - 5 not in Color)\n"
+    "    [len(Color)]int seen\n"                       # one slot per member
+    "    for int i = 0; i < len(Color); i += 1:\n"
+    "        seen[int(Color(i))] += i + 1\n"
+    "    print(seen)\n"
+)
+
+
+@GCC_SKIP
+def test_converting_an_integer_to_an_enum():
+    assert_program_stdout(
+        CONVERSIONS + "    return 0\n",
+        "Color.Green\nColor.Blue\ntrue\n6\ntrue\ntrue\nfalse\nfalse\ntrue\n[3]int[1, 2, 3]\n",
+    )
+
+
+@GCC_SKIP
+@pytest.mark.parametrize("value", ["n + 2", "n - 2"])
+def test_converting_an_integer_that_is_no_member_panics(value):
+    assert_program_panics(
+        DECLS + f"def int main():\n    int n = 1\n    print('before')\n    print(Color({value}))\n    return 0\n",
+        "not a member of Color", expected_stdout="before\n",
+    )
+
+
+def test_a_literal_converts_at_compile_time():
+    tree = dump(analyze(_parse(DECLS + "def int main():\n    int n = 1\n    Color a = Color(2)\n    Color b = Color(n)\n"
+                               "    return len(Color)\n")))
+    assert "EnumMember name=Blue index=2 : Color" in tree  # Color(2)
+    assert tree.count("EnumFromInt") == 1  # Color(n)
+    assert "IntLit value=3 : int" in tree  # len(Color)
+
+
 MAIN = "def int main():\n    Color c = Color.Red\n"
 
 
@@ -125,7 +172,13 @@ MAIN = "def int main():\n    Color c = Color.Red\n"
     ("", "bool b = c == Shade.Dark", "Cannot compare Color to Shade"),
     ("", "bool b = c < Color.Blue", "requires two operands of the same integer type"),
     ("", "Color d = c + c", "requires two operands of the same integer type"),
-    ("", "c = Color(1)", "would convert a value to the enum Color, which isn't supported yet"),
+    # Converting an integer: one integer, and a literal must be a member's value.
+    ("", "c = Color(7)", r"7 is not a member of Color \(its members' values are 0 to 2\)"),
+    ("", "c = Color(-1)", "-1 is not a member of Color"),
+    ("", "c = Color('a')", r"converts an integer to the enum Color, got str"),
+    ("", "c = Color(c)", r"converts an integer to the enum Color, got Color"),
+    ("", "c = Color(1, 2)", "converts one integer to the enum Color, got 2 arguments"),
+    ("", "bool b = c in Color", "'in' with the enum Color on its right tests an integer, got Color"),
     ("", "str s = str(c)", r"str\(...\) takes a byte or \[\]byte, got Color"),
     # The enum's name is a type, and a member is not one.
     ("", "print(Color)", "'Color' is an enum, not a value"),

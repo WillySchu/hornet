@@ -762,6 +762,8 @@ class TypedFunctionBuilder:
             return [], IRConst(e.value, e.type)
         if isinstance(e, t.EnumMember):
             return [], IRConst(e.index, Type.INT32)
+        if isinstance(e, (t.EnumFromInt, t.EnumContains)):
+            return self.enum_from_int(e) if isinstance(e, t.EnumFromInt) else self.enum_contains(e)
         if isinstance(e, t.BoolLit):
             return [], IRConst(1 if e.value else 0, Type.BOOL)
         if isinstance(e, t.NoneLit):
@@ -927,6 +929,30 @@ class TypedFunctionBuilder:
         if e.type == Type.NEVER:
             ir.append(self.never_returned(e))
         return ir, destination if composite_result else result
+
+    def enum_range(self, value_expr, enum: Type) -> tuple:
+        """(IR, the integer as an int, below zero?, past the last member?) for a value tested against
+        `enum`'s members, whose values are 0 up to their count."""
+        ir, value = self.value(value_expr)
+        wide, negative, too_big = self.temp(Type.INT), self.temp(Type.BOOL), self.temp(Type.BOOL)
+        count = len(self.ir_program.enum_registry[enum.enum_name].members)
+        return ir + [IRCast(dst=wide, src=value)], wide, \
+            IRBinOp(dst=negative, op=BinaryOp.LESS_THAN, left=wide, right=IRConst(0, Type.INT)), \
+            IRBinOp(dst=too_big, op=BinaryOp.GREATER_THAN_OR_EQUAL, left=wide, right=IRConst(count, Type.INT))
+
+    def enum_from_int(self, e: t.EnumFromInt) -> tuple:
+        ir, wide, negative, too_big = self.enum_range(e.value, e.type)
+        message, result = f"not a member of {e.type}", self.temp(e.type)
+        return ir + [negative] + self.panic_when(negative.dst, message, e) + [too_big] + \
+            self.panic_when(too_big.dst, message, e) + [IRCast(dst=result, src=wide)], result
+
+    def enum_contains(self, e: t.EnumContains) -> tuple:
+        ir, _, negative, too_big = self.enum_range(e.value, e.enum)
+        result, check_top, end = self.temp(Type.BOOL), self.ids.new_label("in_enum_top"), self.ids.new_label("in_enum_end")
+        return ir + [negative, IRMove(dst=result, src=IRConst(0, Type.BOOL)),
+                     IRBranch(cond=negative.dst, true_label=end, false_label=check_top), IRLabel(check_top), too_big,
+                     IRBinOp(dst=result, op=BinaryOp.EQUAL, left=too_big.dst, right=IRConst(0, Type.BOOL)),
+                     IRJump(end), IRLabel(end)], result
 
     def never_returned(self, at) -> IRJump:
         """What follows a call that doesn't return: a panic, should it return after all."""

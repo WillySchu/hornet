@@ -65,6 +65,20 @@ class EnumMember(Expr):
 
 
 @dataclass(frozen=True)
+class EnumFromInt(Expr):
+    """`Enum(n)`: the member (type is the enum) whose value is the integer `value`; panics if there
+    is none."""
+    value: Expr
+
+
+@dataclass(frozen=True)
+class EnumContains(Expr):
+    """`n in Enum`: whether the integer `value` is a member's value of `enum`."""
+    value: Expr
+    enum: Type
+
+
+@dataclass(frozen=True)
 class BoolLit(Expr):
     value: bool
 

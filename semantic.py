@@ -340,6 +340,8 @@ class Facts:
     const_refs: dict = dataclasses.field(default_factory=dict)  # Variable, or `alias.NAME` Field -> constant's key
     enum_members: dict = dataclasses.field(default_factory=dict)  # `Enum.Member` Field -> (enum's key, index)
     enum_checks: dict = dataclasses.field(default_factory=dict)  # IsCheck on an enum -> (member's index, the enum)
+    enum_lens: dict = dataclasses.field(default_factory=dict)  # `len(Enum)` Call -> the number of members
+    enum_ins: dict = dataclasses.field(default_factory=dict)  # `n in Enum` Binary -> the enum's key
 
 
 class SemanticAnalyzer:
@@ -561,6 +563,9 @@ class SemanticAnalyzer:
             node = stack.pop()
             if node.nid in self.module_set.qualified and isinstance(node, Field):
                 continue  # `alias.NAME`: checked as a constant below
+            if isinstance(node, Call) and node.name == 'len' and len(node.args) == 1 and node.receiver is None \
+                    and self._enum_named_by(node.args[0]) is not None:
+                continue  # `len(Enum)`: a constant
             if isinstance(node, Call):
                 raise SemanticError("Array size must be a constant expression, not a call", node)
             if isinstance(node, Variable) and self._const_key(node.name) is None:
@@ -649,6 +654,8 @@ class SemanticAnalyzer:
             return expr.value
         if isinstance(expr, (BoolLiteral, StringLiteral)):
             return expr.value
+        if isinstance(expr, Call) and expr.nid in self.facts.enum_lens:
+            return self.facts.enum_lens[expr.nid]
         if isinstance(expr, Variable) and self._const_key(expr.name) is not None:
             return self._const_value(self._const_key(expr.name))[1]
         if isinstance(expr, Field) and self.module_set.qualified.get(expr.nid) in self.const_decls:
@@ -2020,9 +2027,7 @@ class SemanticAnalyzer:
         if name == 'panic':
             return self.check_panic_call(expr)
         if name in self.enums:
-            raise SemanticError(
-                f"'{expr.name}(...)' would convert a value to the enum {shown(name)}, which isn't supported yet "
-                f"-- write one of its members, such as {shown(name)}.{self.enums[name].members[0]}", expr)
+            return self.check_enum_conversion(expr, name)
         visible = expr.nid in self.module_set.qualified or self.scope.resolve(expr.name) is not None
         if name not in self.functions or not visible:  # another module's extern needs an import too
             raise SemanticError(f"Call to undeclared function '{shown(name)}'", expr)
@@ -2077,13 +2082,36 @@ class SemanticAnalyzer:
             raise SemanticError(f"'panic' expects a str, got {arg_type}", expr.args[0])
         return Type.NEVER
 
+    def check_enum_conversion(self, expr: Call, enum: str) -> Type:
+        """`Enum(n)`: the member whose value is the integer `n`. Checked when it runs (a panic if there
+        is none), or here when `n` is a literal."""
+        members = self.enums[enum].members
+        if len(expr.args) != 1:
+            raise SemanticError(
+                f"'{expr.name}(...)' converts one integer to the enum {shown(enum)}, got {len(expr.args)} arguments",
+                expr)
+        arg_type = self.check_expr(expr.args[0])
+        if arg_type not in _INTEGER_TYPES:
+            raise SemanticError(
+                f"'{expr.name}(...)' converts an integer to the enum {shown(enum)}, got {arg_type}", expr.args[0])
+        literal = self._as_folded_int_literal(expr.args[0])
+        if literal is not None and not 0 <= literal < len(members):
+            raise SemanticError(
+                f"{literal} is not a member of {shown(enum)} (its members' values are 0 to {len(members) - 1})", expr.args[0])
+        self._record_call(expr, enum)
+        return Type(TypeKind.ENUM, enum_name=enum)
+
     def check_len_call(self, expr: Call) -> Type:
-        """`len(x)` for arrays, slices, str, and dicts."""
+        """`len(x)` for arrays, slices, str, and dicts; `len(Enum)` is an enum's number of members."""
         if len(expr.args) != 1:
             raise SemanticError(
                 f"'len' expects exactly 1 argument, got {len(expr.args)}",
                 expr,
             )
+        enum = self._enum_named_by(expr.args[0])
+        if enum is not None:
+            self.facts.enum_lens[expr.nid] = len(self.enums[enum].members)
+            return Type.INT
         arg_type = self.check_expr(expr.args[0])
         if arg_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STR, TypeKind.DICT):
             raise SemanticError(
@@ -2307,6 +2335,15 @@ class SemanticAnalyzer:
     def check_binary(self, expr: Binary) -> Type:
         if expr.op == BinaryOp.MULTIPLY:
             self._reject_typed_literal_read_as_multiplication(expr)
+        if expr.op == BinaryOp.IN and self._enum_named_by(expr.right) is not None:
+            # `n in Enum`: whether the integer `n` is a member's value (so `Enum(n)` wouldn't panic).
+            enum = self._enum_named_by(expr.right)
+            left_type = self.check_expr(expr.left)
+            if left_type not in _INTEGER_TYPES:
+                raise SemanticError(
+                    f"'in' with the enum {shown(enum)} on its right tests an integer, got {left_type}", expr.left)
+            self.facts.enum_ins[expr.nid] = enum
+            return Type.BOOL
         left_type = self._check_expr_allowing_struct_literal(expr.left)
         right_type = self._check_expr_allowing_struct_literal(expr.right)
         op = expr.op
@@ -2761,6 +2798,8 @@ class _TypedTreeBuilder:
         if name == 'print':
             return typed.Print(Type.VOID, self.expr(args[0]))
         if name == 'len':
+            if e.nid in self.facts.enum_lens:
+                return typed.IntLit(Type.INT, self.facts.enum_lens[e.nid])
             return typed.Len(Type.INT, self.expr(args[0]))
         if name == 'append':
             s = self.expr(args[0])
@@ -2772,6 +2811,11 @@ class _TypedTreeBuilder:
             return typed.BytesFromStr(_BYTE_SLICE, self.expr(args[0]))
         if name == 'panic':
             return typed.Panic(Type.NEVER, self.expr(args[0]))
+        if name in self.enums:  # `Enum(n)`
+            value = self.expr(args[0])
+            if isinstance(value, typed.IntLit):  # checked to be a member
+                return typed.EnumMember(self.ty(e), self.enums[name].members[value.value], value.value)
+            return typed.EnumFromInt(self.ty(e), value)
         if name in self.structs:
             field_types = self.structs[name].fields
             if e.kwargs is not None:
@@ -2790,6 +2834,9 @@ class _TypedTreeBuilder:
         return typed.Call(return_type, name, 'extern' if name in self.externs else 'function', converted)
 
     def binary(self, e: syntax.Binary) -> typed.Expr:
+        if e.nid in self.facts.enum_ins:
+            enum = self.facts.enum_ins[e.nid]
+            return typed.EnumContains(Type.BOOL, self.expr(e.left), Type(TypeKind.ENUM, enum_name=enum))
         op, left_type, right_type = e.op, self.ty(e.left), self.ty(e.right)
         if op == BinaryOp.IN:
             container = self.expr(e.right)

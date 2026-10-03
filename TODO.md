@@ -14,7 +14,6 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- Conversion from int to enum.
 - Pointers into a sum's payload.
 - &d[k] after a rehash.
 - Nothing warns when a result is ignored, such as a bare write\_stdout(...) statement.
