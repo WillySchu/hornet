@@ -364,7 +364,7 @@ class InstructionSelector:
         if width is None or self._width(instr.value.type) != width or not is_wide_type(instr.address.type):
             return None
         out: list = []
-        mem = self._address_operand(instr.address, 'r9d', out, instr.offset)
+        mem = self._address_operand(instr.address, 'edx', out, instr.offset)
         v = self._as_source(self._loc(instr.value, width), mem, width, 'eax', out)
         return out + self._mov(v, mem, width)
 
@@ -451,10 +451,44 @@ class InstructionSelector:
         """Move each incoming argument word (SysV: 6 registers, then the caller's stack) into its Temp.
         Words the body never reads are skipped."""
         read = uses(body)
-        out: list = []
+        to_memory, register_moves, from_stack = [], [], []
         for index, temp in enumerate(params):
-            if temp.id in read:
-                out.extend(self._read_argument(temp, index))
+            if temp.id not in read:
+                continue
+            home = self._loc(temp, 8)
+            if index >= 6:
+                from_stack.append((temp, index))
+            elif isinstance(home, Register):
+                register_moves.append((ARG_REGISTERS_64[index], home.name))
+            else:
+                to_memory.append((temp, index))
+        # Argument registers can be homes too: read them into memory first, then move among registers
+        # as one parallel move, and only then load stack arguments into their (now free) registers.
+        out: list = []
+        for temp, index in to_memory:
+            out.extend(self._read_argument(temp, index))
+        out.extend(self._parallel_moves(register_moves))
+        for temp, index in from_stack:
+            out.extend(self._read_argument(temp, index))
+        return out
+
+    @staticmethod
+    def _parallel_moves(moves: list) -> list:
+        """Register-to-register moves (64-bit names) that all happen at once: each destination gets its
+        source's value from before any of them. Ordered so nothing is overwritten before it's read;
+        a cycle goes through %rax."""
+        pending = [(src, dst) for src, dst in moves if src != dst]
+        out = []
+        while pending:
+            sources = {src for src, _ in pending}
+            ready = next(((src, dst) for src, dst in pending if dst not in sources), None)
+            if ready is None:  # every destination is still needed as a source: a cycle
+                src, dst = pending[0]
+                out.append(MovQ(src=Register(src), dst=Register('rax')))
+                pending = [('rax' if s == src else s, d) for s, d in pending]
+                continue
+            out.append(MovQ(src=Register(ready[0]), dst=Register(ready[1])))
+            pending.remove(ready)
         return out
 
     def _read_argument(self, dst: Temp, index: int) -> list:
@@ -515,15 +549,27 @@ class InstructionSelector:
                 out.append(Je(instr.false_label))
                 out.append(Jmp(instr.true_label))
             elif isinstance(instr, IRCall):
+                # Stack arguments first, while every source is intact; then the argument registers,
+                # which may also hold arguments' values: register sources as one parallel move, and
+                # the rest (slots, constants) afterwards.
+                register_moves, others = [], []
+                for i, arg_value in enumerate(instr.args[:6]):
+                    loc = self._loc(arg_value, 8)
+                    if isinstance(loc, Register):
+                        register_moves.append((loc.name, ARG_REGISTERS_64[i]))
+                    else:
+                        others.append((i, arg_value))
                 for i, arg_value in enumerate(instr.args):
                     if i < 6:
-                        out.extend(self._gen_load_value(arg_value, Register(ARG_REGISTERS_32[i])))
                         continue
                     wide = is_wide_type(arg_value.type)
                     scratch = as_qword_register(Register('eax')) if wide else Register('eax')
                     out.extend(self._gen_load_value(arg_value, Register('eax')))
                     dst = FrameSlot(self.host.frame.outgoing, 8 * (i - 6))
                     out.append(MovQ(src=scratch, dst=dst) if wide else Mov(src=scratch, dst=dst))
+                out.extend(self._parallel_moves(register_moves))
+                for i, arg_value in others:
+                    out.extend(self._gen_load_value(arg_value, Register(ARG_REGISTERS_32[i])))
                 out.append(CallInstr(instr.name))
                 if instr.dst is not None:
                     out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
@@ -540,14 +586,14 @@ class InstructionSelector:
                         Memory('rax', instr.offset), instr.dst.type, Register('eax')))
                 out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
             elif isinstance(instr, IRStore):
-                # address in %r9, value in %eax: both live at the store
-                out.extend(self._gen_load_value(instr.address, Register('r9d')))
+                # address in %rdx, value in %eax: both live at the store
+                out.extend(self._gen_load_value(instr.address, Register('edx')))
                 out.extend(self._gen_load_value(instr.value, Register('eax')))
                 if instr.value_type == Type.STR:
-                    out.append(MovQ(src=Register('rax'), dst=Memory('r9', instr.offset)))
+                    out.append(MovQ(src=Register('rax'), dst=Memory('rdx', instr.offset)))
                 else:
                     out.extend(self.host._gen_write_scalar_from(
-                        Register('eax'), instr.value_type, Memory('r9', instr.offset)))
+                        Register('eax'), instr.value_type, Memory('rdx', instr.offset)))
             elif isinstance(instr, IRLocalAddress):
                 out.append(LeaQFrameSlot(slot=instr.slot, dst=Register('rax')))
                 out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
@@ -555,11 +601,11 @@ class InstructionSelector:
                 out.append(LeaQ(label=instr.label, dst=Register('rax')))
                 out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
             elif isinstance(instr, IRCopy):
-                # %r9/%r8: both addresses live at once
-                out.extend(self._gen_load_value(instr.dst_address, Register('r9d')))
-                out.extend(self._gen_load_value(instr.src_address, Register('r8d')))
+                # %rdx/%rcx: both addresses live at once (the copy itself uses %rax)
+                out.extend(self._gen_load_value(instr.dst_address, Register('edx')))
+                out.extend(self._gen_load_value(instr.src_address, Register('ecx')))
                 out.extend(self.host.gen_array_copy(
-                    Memory('r9', instr.dst_offset), Memory('r8', instr.src_offset), instr.value_type))
+                    Memory('rdx', instr.dst_offset), Memory('rcx', instr.src_offset), instr.value_type))
             elif isinstance(instr, IRBoundsCheck):
                 # Cmp is unsigned; signedness lives in the jump.
                 out.extend(self._gen_load_value(instr.length, Register('ecx')))

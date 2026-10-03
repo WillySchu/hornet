@@ -285,11 +285,12 @@ def test_crossing_intervals_get_only_callee_saved_registers():
 
 
 def test_crossing_interval_evicts_a_non_crossing_one_holding_a_callee_saved_register():
-    intervals = {i: LiveInterval(temp=t(i), start=i, end=20 - i) for i in range(7)}
-    intervals[7] = LiveInterval(temp=t(7), start=7, end=8)
-    result = linear_scan(intervals, ALLOCATABLE_REGISTERS, frozenset({7}), CALLEE_SAVED_POOL)
-    assert result[7] in CALLEE_SAVED_POOL
-    assert len(result) == 7 and len(set(result.values())) == 7
+    n = len(ALLOCATABLE_REGISTERS)  # every register taken when the crossing interval starts
+    intervals = {i: LiveInterval(temp=t(i), start=i, end=40 - i) for i in range(n)}
+    intervals[n] = LiveInterval(temp=t(n), start=n, end=n + 1)
+    result = linear_scan(intervals, ALLOCATABLE_REGISTERS, frozenset({n}), CALLEE_SAVED_POOL)
+    assert result[n] in CALLEE_SAVED_POOL
+    assert len(result) == n and len(set(result.values())) == n
 
 
 def test_crossing_intervals_beyond_callee_saved_pool_spill():
