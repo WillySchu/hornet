@@ -6,6 +6,7 @@ from pathlib import Path
 
 import parser
 from ir.program_builder import build_ir_program
+from ir.typed_builder import link_name
 from tests.test_compiler import _parse, analyze
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -85,5 +86,5 @@ def test_node_numbers_are_unique_and_follow_creation_order():
 def test_slot_labels_name_their_symbol():
     program = _parse(SOURCE)
     program = analyze(program)
-    labels = list(next(f for f in build_ir_program(program).functions if f.name == 'f').slot_labels.values())
+    labels = list(next(f for f in build_ir_program(program).functions if f.name == link_name('f')).slot_labels.values())
     assert 'param:n#0' in labels and 'local:x#2' in labels and 'for_in:y#4' in labels

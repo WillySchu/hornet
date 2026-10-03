@@ -43,6 +43,13 @@ _DICT_BUCKET_OCCUPIED = 1  # runtime.c's HORNET_DICT_BUCKET_OCCUPIED
 _DICT_HEADER_SIZE = 32  # {buckets, count, tombstones, capacity}
 
 
+def link_name(name: str) -> str:
+    """A Hornet function's linker symbol. A key with a module or struct prefix (`m$f`, `S.f`) can't
+    be a C identifier; an entry-file function's bare name gets a trailing `$`, so it never stands
+    in for a libc or runtime symbol. `main` is the C entry point."""
+    return name if name == 'main' or '$' in name or '.' in name else name + '$'
+
+
 def _calls_anything(e) -> bool:
     """Whether evaluating `e` may call a function: the only way an expression can change a dictionary."""
     stack = [e]
@@ -65,7 +72,7 @@ class TypedFunctionBuilder:
     def build(self, fn: t.Function) -> IRFunction:
         if not _ported(fn.return_type):
             raise NotYetPorted(f"returns {fn.return_type}")
-        self.ir_fn = ir_fn = IRFunction(name=fn.name)
+        self.ir_fn = ir_fn = IRFunction(name=link_name(fn.name))
         ir_fn.return_type = fn.return_type
         self.heap_ids = analyze_array_escapes(fn, self.ir_program.struct_registry, self.ir_program.escape_summaries)
         self.storage = {}  # symbol id -> (Temp or None, heap)
@@ -570,16 +577,16 @@ class TypedFunctionBuilder:
         length, and the limit (a slice's capacity) to the length."""
         limit = length if limit is None else limit
         ir = []
-        if e.high is not None:
-            high_ir, high = self.value(e.high)
-            ir += high_ir
-        else:
-            high = length
         if e.low is not None:
             low_ir, low = self.value(e.low)
             ir += low_ir
         else:
             low = IRConst(0, Type.INT)
+        if e.high is not None:
+            high_ir, high = self.value(e.high)
+            ir += high_ir
+        else:
+            high = length
         return ir + [IRSliceBoundsCheck(value=low, bound=limit), IRSliceBoundsCheck(value=high, bound=limit),
                      IRSliceBoundsCheck(value=low, bound=high)], low, high
 
@@ -823,7 +830,7 @@ class TypedFunctionBuilder:
             else:
                 raise NotYetPorted(f"argument of type {a.type}")
         result = self.temp(e.type) if e.type != Type.VOID and _scalar(e.type) else None
-        ir.append(IRCall(dst=result, name=e.name, args=args))
+        ir.append(IRCall(dst=result, name=e.name if e.kind == 'extern' else link_name(e.name), args=args))
         return ir, destination if composite_result else result
 
     def print_(self, e: t.Print) -> list:

@@ -3,6 +3,7 @@
 import pytest
 
 from ir.program_builder import build_ir_program
+from ir.typed_builder import link_name
 from tests.test_compiler import GCC_SKIP, _parse, analyze, assert_program_stdout
 from typesys import Type
 
@@ -51,7 +52,7 @@ def _built_functions(source: str) -> list:
 
 
 def test_scalar_functions_are_built():
-    assert _built_functions(SCALARS) == ['fib', 'noisy', 'leak', 'main']
+    assert _built_functions(SCALARS) == [link_name(n) for n in ('fib', 'noisy', 'leak', 'main')]
 
 
 def test_a_shape_with_no_rule_is_a_compiler_error(monkeypatch):
@@ -124,7 +125,7 @@ def int main():
 
 
 def test_composite_functions_are_built():
-    assert _built_functions(COMPOSITES) == ['swap', 'evens', 'greet', 'eval', 'main']
+    assert _built_functions(COMPOSITES) == [link_name(n) for n in ('swap', 'evens', 'greet', 'eval', 'main')]
 
 
 @GCC_SKIP
@@ -179,7 +180,7 @@ def int main():
 
 
 def test_container_functions_are_built():
-    assert _built_functions(CONTAINERS) == ['count', 'main']
+    assert _built_functions(CONTAINERS) == [link_name(n) for n in ('count', 'main')]
 
 
 @GCC_SKIP
@@ -233,5 +234,5 @@ def test_a_condition_made_of_and_or_not_branches_without_computing_bools():
     from ir.ir import IRMove
     program = _parse("def int f(int a, int b):\n    if (a < b and b < 10) or not (a == 3):\n"
                      "        return 1\n    return 0\n")
-    fn = next(f for f in build_ir_program(analyze(program)).functions if f.name == 'f')
+    fn = next(f for f in build_ir_program(analyze(program)).functions if f.name == link_name('f'))
     assert not [i for i in fn.body if isinstance(i, IRMove) and i.dst.type == Type.BOOL]

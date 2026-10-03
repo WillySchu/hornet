@@ -2,6 +2,7 @@
 
 from ir.ir import IRBinOp, IRCall, IRConst
 from ir.program_builder import build_ir_program
+from ir.typed_builder import link_name
 from ops import BinaryOp
 from tests.test_compiler import _parse, analyze
 
@@ -10,7 +11,7 @@ def _main_body(expr: str, type_: str = 'int'):
     source = f"def {type_} f({type_} n, {type_} d):\n    return {expr}\ndef int main():\n    return 0\n"
     program = _parse(source)
     program = analyze(program)
-    fn = next(f for f in build_ir_program(program).functions if f.name == 'f')
+    fn = next(f for f in build_ir_program(program).functions if f.name == link_name('f'))
     return fn.body
 
 

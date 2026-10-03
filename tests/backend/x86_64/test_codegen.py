@@ -22,6 +22,7 @@ from lexer import lex
 from backend.x86_64.codegen import CodeGenerator
 from ir.ir import IRFunction, IRInstr, IRProgram
 from ir.program_builder import build_ir_program
+from ir.typed_builder import link_name
 
 
 def _parse_and_analyze(source: str):
@@ -49,7 +50,7 @@ def test_generate_populates_ir_program():
     gen = CodeGenerator()
     gen.generate(ir_program)
     assert isinstance(gen.ir_program, IRProgram)
-    assert [fn.name for fn in gen.ir_program.functions] == ['add', 'main']
+    assert [fn.name for fn in gen.ir_program.functions] == [link_name('add'), 'main']
     assert all(isinstance(fn, IRFunction) for fn in gen.ir_program.functions)
 
 

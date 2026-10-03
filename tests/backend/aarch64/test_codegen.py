@@ -122,7 +122,7 @@ main:
     stp x27, x28, [sp, #80]
 """ + ''.join(f"    mov x{r}, #{r * 100}\n" for r in range(19, 29)) + """
     mov x0, #50
-    bl work
+    bl work$
     mov x1, x0
 """ + ''.join(f"    cmp x{r}, #{r * 100}\n    b.ne .Lfail\n" for r in range(19, 29)) + """
     mov x0, x1

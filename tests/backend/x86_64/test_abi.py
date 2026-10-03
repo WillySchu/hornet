@@ -101,7 +101,7 @@ main:
     movabsq $0x4444444444444444, %r14
     movabsq $0x5555555555555555, %r15
     movq    $50, %rdi
-    call    work
+    call    work$
     movq    %rax, %rsi
     movabsq $0x1111111111111111, %rax
     cmpq    %rax, %rbx

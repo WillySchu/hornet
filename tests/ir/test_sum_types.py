@@ -20,6 +20,7 @@ import semantic
 from lexer import lex
 from ir.ir import IRBinOp, IRBranch, IRCall, IRConst, IRCopy, IRLoad, IRStore
 from ir.program_builder import build_ir_program
+from ir.typed_builder import link_name
 from semantic import Type, TypeKind
 
 
@@ -33,7 +34,7 @@ def _build(source: str):
 
 
 def _fn(ir_program, name):
-    return [f for f in ir_program.functions if f.name == name][0]
+    return [f for f in ir_program.functions if f.name == link_name(name)][0]
 
 
 def _discriminant_writes(body):

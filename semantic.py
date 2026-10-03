@@ -1902,14 +1902,12 @@ class SemanticAnalyzer:
         return slice_type
 
     def check_bytes_call(self, expr: Call) -> Type:
-        """`bytes(s)`: a new []byte copy of str s. Lowered to a runtime call."""
+        """`bytes(s)`: a new []byte copy of str s."""
         if len(expr.args) != 1 or expr.kwargs:
             raise SemanticError(f"bytes() takes exactly one argument, got {len(expr.args)}", expr)
         arg_type = self.check_expr(expr.args[0])
         if arg_type != Type.STR:
             raise SemanticError(f"bytes() takes a str, got {arg_type}", expr)
-        self.facts.calls[expr.nid] = ('hornet_bytes', list(expr.args))
-        self.functions['hornet_bytes'] = ([Type.STR], _BYTE_SLICE)
         return _BYTE_SLICE
 
     def check_del_call(self, expr: Call) -> Type:
@@ -2482,7 +2480,7 @@ class _TypedTreeBuilder:
         if name == 'del':
             d = self.expr(args[0])
             return typed.DictDelete(Type.VOID, d, self.convert(args[1], d.type.key_type))
-        if name in ('bytes', 'hornet_bytes'):  # analysis rewrites bytes(s) to the runtime function
+        if name == 'bytes':
             return typed.BytesFromStr(_BYTE_SLICE, self.expr(args[0]))
         if name in self.structs:
             field_types = self.structs[name].fields
