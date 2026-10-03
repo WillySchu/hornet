@@ -17897,6 +17897,41 @@ class TestCompoundAssignmentThroughAddresses:
         )
 
     @pytest.mark.skipif(not GCC_AVAILABLE, reason="gcc not available")
+    def test_composite_assignment_from_another_place(self):
+        """Copied directly from the source place: a place assigned to itself is unchanged; a source
+        the target's evaluation changes is read first; a dict entry copied into a new entry of the
+        same dict survives the insertion moving the table; slices still share their elements."""
+        assert_program_stdout(
+            "type P struct:\n"
+            "    int x\n"
+            "    int y\n"
+            "\n"
+            "def int bump(*P p):\n"
+            "    p.x = 100\n"
+            "    return 0\n"
+            "\n"
+            "def int main():\n"
+            "    P p = P(1, 2)\n"
+            "    p = p\n"
+            "    [2]P arr = [P(0, 0), P(0, 0)]\n"
+            "    arr[0] = arr[0]\n"
+            "    arr[bump(&p)] = p\n"
+            "    print(arr[0].x + p.x)\n"
+            "    dict[int]P d = dict[int]P{0: P(7, 8)}\n"
+            "    for int i = 1; i < 50; i += 1:\n"
+            "        d[i] = d[0]\n"
+            "    print(d[49].x + d[49].y)\n"
+            "    []int s = [1, 2]\n"
+            "    []int t = s\n"
+            "    t[0] = 9\n"
+            "    str a = 'ab'\n"
+            "    str b = a\n"
+            "    print(s[0] + len(b))\n"
+            "    return 0\n",
+            "101\n15\n11\n",
+        )
+
+    @pytest.mark.skipif(not GCC_AVAILABLE, reason="gcc not available")
     def test_for_in_over_a_typed_slice_literal(self):
         """Once rejected as if it were a call result, since `[]T[...]` was parsed as a slice of an array."""
         assert_program_stdout(

@@ -327,9 +327,14 @@ class TypedFunctionBuilder:
                     self.dict_set(target, address)
             ir, address = self.place_address(target)
             return value_ir + ir + [IRStore(address=address, value=value, value_type=target.type)]
-        # A composite: the new value may read the target (`p = P(p.y, p.x)`), so it is built
-        # completely before the target changes.
-        value_ir, value_address = self.address(value_expr, fresh=True)
+        # A composite. Copied directly from another place: two places of one type are the same
+        # storage or disjoint (a type can't contain itself by value), so copying never reads what it
+        # has already written. Unless evaluating the target can run code that changes the source,
+        # or the source is a dict entry the target's insertion could move. Any other value may read
+        # the target (`p = P(p.y, p.x)`), so it is built completely before the target changes.
+        direct = (isinstance(value_expr, _PLACE_NODES) and not _calls_anything(target)
+                  and not (isinstance(value_expr, t.DictLookup) and isinstance(target, t.DictLookup)))
+        value_ir, value_address = self.address(value_expr, fresh=not direct)
         if isinstance(target, t.DictLookup):
             return value_ir + self.dict_set(target, value_address)
         ir, address = self.place_address(target)
@@ -410,8 +415,11 @@ class TypedFunctionBuilder:
         raise NotYetPorted(f"a {e.type} from {type(e).__name__}")
 
     def write_into(self, dst, e) -> list:
-        """Store composite value `e` at `dst`."""
+        """Store composite value `e` at `dst` (new storage, or a place `e` can't be part of)."""
         kind = e.type.kind
+        if isinstance(e, _PLACE_NODES) and kind in (TypeKind.STR, TypeKind.SLICE):  # the descriptor, as a block
+            ir, source = self.place_address(e)
+            return ir + [IRCopy(dst_address=dst, src_address=source, value_type=e.type)]
         if kind == TypeKind.STR:
             ir, ptr, length = self.str_value(e)
             return ir + self.write_str(dst, ptr, length)

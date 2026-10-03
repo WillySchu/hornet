@@ -368,6 +368,14 @@ class InstructionSelector:
         v = self._as_source(self._loc(instr.value, width), mem, width, 'eax', out)
         return out + self._mov(v, mem, width)
 
+    def _direct_copy(self, instr: IRCopy) -> Optional[list]:
+        """A copy between addresses already in registers, addressed through them directly."""
+        dst, src = self._loc(instr.dst_address, 8), self._loc(instr.src_address, 8)
+        if not isinstance(dst, Register) or not isinstance(src, Register):
+            return None
+        return self.host.gen_array_copy(
+            Memory(dst.name, instr.dst_offset), Memory(src.name, instr.src_offset), instr.value_type)
+
     def _direct_branch(self, instr: IRBranch) -> Optional[list]:
         if self._width(instr.cond.type) != 4 or isinstance(instr.cond, IRConst):
             return None
@@ -385,6 +393,8 @@ class InstructionSelector:
             return self._direct_load(instr)
         if isinstance(instr, IRStore):
             return self._direct_store(instr)
+        if isinstance(instr, IRCopy):
+            return self._direct_copy(instr)
         if isinstance(instr, IRBranch):
             return self._direct_branch(instr)
         if isinstance(instr, IRBoundsCheck):
