@@ -2163,6 +2163,8 @@ class SemanticAnalyzer:
         left_type = self._check_expr_allowing_struct_literal(expr.left)
         right_type = self._check_expr_allowing_struct_literal(expr.right)
         op = expr.op
+        if op not in _LOGICAL_OPS and op != BinaryOp.IN:
+            left_type, right_type = self._literal_operand_types(expr.left, left_type, expr.right, right_type)
 
         if op == BinaryOp.ADD:
             # Same-type integers add; str + str concatenates.
@@ -2260,7 +2262,16 @@ class SemanticAnalyzer:
             return Type.BOOL
 
         if op == BinaryOp.IN:
-            # `key in dict`, or `value in array/slice`.
+            # `key in dict`, or `value in array/slice`. A literal takes its type from the other side:
+            # `1 in xs` from the keys or elements, the elements of `a in [1, 2]` from `a`.
+            if right_type.kind in (TypeKind.DICT, TypeKind.ARRAY, TypeKind.SLICE):
+                wanted = right_type.key_type if right_type.kind == TypeKind.DICT else right_type.element_type
+                if isinstance(expr.right, ArrayLiteral) and expr.right.type_expr is None \
+                        and left_type in _NARROW_INT_RANGES:
+                    right_type = self.check_array_literal(expr.right, expected_element_type=left_type)
+                    self.facts.types[expr.right.nid] = right_type
+                elif self._as_folded_int_literal(expr.left) is not None:
+                    left_type = self._check_value_flowing_into(expr.left, wanted)
             if right_type.kind == TypeKind.DICT:
                 if not self._types_compatible(left_type, right_type.key_type):
                     raise SemanticError(
@@ -2305,6 +2316,15 @@ class SemanticAnalyzer:
                 f"'{op.symbol()}' requires {expected} operands, got {actual}",
                 node,
             )
+
+    def _literal_operand_types(self, left: Node, left_type: Type, right: Node, right_type: Type) -> tuple:
+        """Both operand types, once an integer literal (or its negation) beside an operand of a
+        narrower integer type has taken that type: `fd < 0`, `1 + a`. It must be in range."""
+        if right_type in _NARROW_INT_RANGES and self._as_folded_int_literal(left) is not None:
+            left_type = self._check_value_flowing_into(left, right_type)
+        elif left_type in _NARROW_INT_RANGES and self._as_folded_int_literal(right) is not None:
+            right_type = self._check_value_flowing_into(right, left_type)
+        return left_type, right_type
 
     def _require_same_integer_type(self, left_type: Type, right_type: Type, op, node: Optional[Node] = None) -> Type:
         """Require identical integer types."""
@@ -2620,12 +2640,7 @@ class _TypedTreeBuilder:
             return typed.StrConcat(Type.STR, self.expr(e.left), self.expr(e.right))
         if left_type == Type.STR and op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
             return typed.StrCompare(Type.BOOL, op, self.expr(e.left), self.expr(e.right))
-        left, right = self.expr(e.left), self.expr(e.right)
-        if left.type != right.type and isinstance(right, typed.IntLit):
-            right = typed.IntLit(left.type, right.value)
-        elif left.type != right.type and isinstance(left, typed.IntLit):
-            left = typed.IntLit(right.type, left.value)
-        return typed.Binary(self.ty(e), op, left, right)
+        return typed.Binary(self.ty(e), op, self.expr(e.left), self.expr(e.right))
 
 
 # Entry points
