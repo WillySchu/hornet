@@ -1844,7 +1844,17 @@ class SemanticAnalyzer:
                 f"Struct '{shown(base_type.struct_name)}' has no field '{field_name}'",
                 base_expr,
             )
+        if self._hidden(base_type.struct_name, field_name):
+            raise SemanticError(
+                f"Field '{field_name}' of '{shown(base_type.struct_name)}' is not visible outside the module that "
+                f"defines the struct -- names starting with '_' are private to their own module", base_expr)
         return struct_info.fields[field_name]
+
+    def _hidden(self, struct: str, name: str) -> bool:
+        """Whether `name`, a field or method of `struct`, is private to another module: it starts with
+        `_`, and the struct is declared in a different file from the one being checked."""
+        declared_in = struct.rsplit('$', 1)[0] if '$' in struct else None
+        return name.startswith('_') and declared_in != self.scope.module
 
     def check_struct_literal(self, expr: Call) -> Type:
         """`Name(args)`: positional struct literal; must be exhaustive."""
@@ -1854,6 +1864,12 @@ class SemanticAnalyzer:
         field_items = list(struct_info.fields.items())
         if expr.kwargs is not None:
             return self._check_named_struct_literal(expr, struct_info, field_items)
+        private = [field for field, _ in field_items if self._hidden(name, field)]
+        if private:  # it would have to give them values
+            raise SemanticError(
+                f"'{shown(name)}(...)' gives every field by position, but {', '.join(private)} "
+                f"{'is' if len(private) == 1 else 'are'} private to the module that defines '{shown(name)}' -- "
+                f"name the public fields instead (`{shown(name)}(field=value)`); private ones start as zero", expr)
         if len(expr.args) != len(field_items):
             field_names = ', '.join(name for name, _ in field_items)
             raise SemanticError(
@@ -1876,8 +1892,8 @@ class SemanticAnalyzer:
         return result
 
     def _check_named_struct_literal(self, expr: Call, struct_info: StructInfo, field_items: list) -> Type:
-        name = struct_info.name
         """`Name(f=v, ...)`: named struct literal; omitted fields are zero."""
+        name = struct_info.name
         field_types = struct_info.fields
         valid_names = ', '.join(name for name, _ in field_items)
         seen = set()
@@ -1888,6 +1904,10 @@ class SemanticAnalyzer:
                     f"'{field_name}' -- valid fields are: {valid_names}",
                     expr,
                 )
+            if self._hidden(name, field_name):
+                raise SemanticError(
+                    f"Field '{field_name}' of '{shown(name)}' is not visible outside the module that defines the "
+                    f"struct -- names starting with '_' are private to their own module", expr)
             if field_name in seen:
                 raise SemanticError(
                     f"Field '{field_name}' specified more than once in "
@@ -1959,6 +1979,10 @@ class SemanticAnalyzer:
                 f"'{expr.name}'",
                 expr,
             )
+        if self._hidden(receiver_type.struct_name, expr.name):
+            raise SemanticError(
+                f"Method '{expr.name}' of '{shown(receiver_type.struct_name)}' is not visible outside the module "
+                f"that defines the struct -- names starting with '_' are private to their own module", expr)
         param_types, return_type, mangled_name = self.methods[key]
         receiver = expr.receiver
         if key in self.pointer_receivers and not receiver_is_pointer:
