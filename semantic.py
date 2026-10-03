@@ -2248,8 +2248,7 @@ class SemanticAnalyzer:
                         f"'{op.symbol()}' does not support {left_type} "
                         f"operands -- array equality isn't defined yet "
                         f"when the elements are (or contain) a slice, "
-                        f"sum type, or dict, none of which has '==' "
-                        f"defined for it yet outside comparing to none",
+                        f"sum type, or dict, none of which has '==' defined yet",
                         expr,
                     )
                 return Type.BOOL
@@ -2268,8 +2267,7 @@ class SemanticAnalyzer:
                         f"operands -- struct equality isn't defined yet "
                         f"when a field (directly, or nested inside "
                         f"another struct or an array field) is a slice, "
-                        f"sum type, or dict, none of which has '==' "
-                        f"defined for it yet outside comparing to none",
+                        f"sum type, or dict, none of which has '==' defined yet",
                         expr,
                     )
                 return Type.BOOL
@@ -2279,7 +2277,7 @@ class SemanticAnalyzer:
                 raise SemanticError(
                     f"'{op.symbol()}' does not support slice, void, sum "
                     f"type, dict, or none operands, except comparing a "
-                    f"slice, pointer, or dict to none",
+                    f"pointer, or a sum type with a `none` variant, to none",
                     expr,
                 )
             if left_type != right_type:
