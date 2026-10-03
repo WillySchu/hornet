@@ -23,7 +23,6 @@ Updates:
 - Spreading one package across multiple files.
 - A package-style in-file declaration decoupling the module's name from its filename.
 - Any import-path resolution strategy beyond "relative to the importing file" (a stdlib search path, a project manifest/root, etc.).
-- Narrowing inside a while condition. Excluded by construction in v1 (only if is recognized), but worth its own tracked item since loop bodies raise questions v1 never has to answer — what does narrowing across iterations even mean once reassignment is disallowed anyway.
 - A pointer into a payload that outlives the variant is untouched.
 - Pass structs to FFI calls.
 - Separate the runtime code from codegen.

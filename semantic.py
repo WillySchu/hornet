@@ -223,6 +223,21 @@ def _conditions_after(stmt: If, types: dict) -> Tuple[List[Node], Optional[Node]
     return [condition for condition, _ in branches[:staying[0]]], branches[staying[0]][0]
 
 
+def _assigned_names(node) -> Set[str]:
+    """The names of the variables assigned anywhere under `node` (a statement, or a list of them)."""
+    names: Set[str] = set()
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if isinstance(n, (list, tuple)):
+            stack.extend(n)
+        elif isinstance(n, Node):
+            if isinstance(n, Assign) and isinstance(n.target, Variable):
+                names.add(n.target.name)
+            stack.extend(getattr(n, f.name) for f in dataclasses.fields(n))
+    return names
+
+
 def _conjuncts(condition: Node) -> List[Node]:
     """The checks a condition's top-level `and`s join, in order (the condition itself if it has none)."""
     if isinstance(condition, Binary) and condition.op == BinaryOp.AND:
@@ -1067,6 +1082,7 @@ class SemanticAnalyzer:
         self.scopes, self._declared = [{}], [set()]
         self._possible, self._undo = {}, []
         self._bindable, self._bound = set(), set()  # `as NAME` checks that may bind here; those that have
+        self._assignments = []  # decl ids, as variables are assigned on paths that reach what follows
         self.loop_depth = 0
         # Params are locals; _declare also catches duplicates.
         for p in fn.params:
@@ -1123,7 +1139,7 @@ class SemanticAnalyzer:
     def _restrict(self, name: str, decl_id, possible: frozenset) -> None:
         """From here to the end of the region (_end_region), sum variable `name` holds one of
         `possible`: with one variant left it has that variant's type (`none` has nothing to read,
-        so the variable stays its sum). It can't be reassigned meanwhile (analyze_assign)."""
+        so the variable stays its sum). Assigning to it ends that (_forget)."""
         narrowed = len(possible) == 1 and Type.NONE not in possible
         entry = (next(iter(possible)) if narrowed else self.symbols[decl_id].type, decl_id)
         scope = self.scopes[-1]
@@ -1182,28 +1198,52 @@ class SemanticAnalyzer:
             if entry is not None and entry[1] == decl_id:
                 self._restrict(name, decl_id, self._possible_variants(decl_id) & variants)
 
+    def _forget(self, decl_id) -> None:
+        """The variable declared as `decl_id` has been assigned: nothing is known about it from here
+        to the end of the region, whatever was known before."""
+        name = self.symbols[decl_id].name
+        entry = next((scope[name] for scope in reversed(self.scopes) if name in scope), None)
+        if decl_id in self._possible and entry is not None and entry[1] == decl_id:
+            self._restrict(name, decl_id, frozenset(self.sum_types[self.symbols[decl_id].type.sum_type_name].variants))
+
+    def _forget_assigned_in(self, loop_syntax) -> None:
+        """Before a loop: forget what is known about every variable its body assigns, since the body
+        may already have run when its condition and its statements are reached."""
+        for name in _assigned_names(loop_syntax):
+            entry = next((scope[name] for scope in reversed(self.scopes) if name in scope), None)
+            if entry is not None and entry[1] is not None:
+                self._forget(entry[1])
+
     def _analyze_block(self, statements: List[Node], return_type: Type) -> None:
-        """Check a block's statements in the current scope. What an `if` establishes for the code
-        after it (_conditions_after) narrows the rest of the block."""
+        """Check a block's statements in the current scope. What an `if` or a `while` establishes for
+        the code after it narrows the rest of the block; what a statement assigns is forgotten."""
         mark = len(self._undo)
         for stmt in statements:
+            first = len(self._assignments)
             self.analyze_statement(stmt, return_type)
+            assigned = set(self._assignments[first:])  # here, or in nested blocks that reach what follows
             if isinstance(stmt, If):
                 known_false, known_true = _conditions_after(stmt, self.facts.types)
                 for condition in known_false:
                     self._apply(self._when(condition)[1])
                 if known_true is not None:
                     self._apply(self._when(known_true)[0])
+            for decl_id in assigned:
+                self._forget(decl_id)
+            if isinstance(stmt, While) and not contains_reachable_break(stmt.body):
+                self._apply(self._when(stmt.condition)[1])  # the loop ended because its condition was false
         self._end_region(mark)
 
     def _analyze_body(self, statements: List[Node], return_type: Type, known: Optional[dict] = None) -> None:
         """A block in a scope of its own, narrowed by `known` (one of _when's results)."""
-        mark = len(self._undo)
+        mark, first = len(self._undo), len(self._assignments)
         self._push_scope()
         self._apply(known)
         self._analyze_block(statements, return_type)
         self._pop_scope()
         self._end_region(mark)
+        if always_leaves(statements, self.facts.types):
+            del self._assignments[first:]  # what follows the enclosing statement isn't reached from here
 
     def _reject_typed_literal_read_as_multiplication(self, expr: Binary) -> None:
         """`[2][1]*P[...]` parses as `[2][1] * P[...]` (an indexed literal times an index): explain when
@@ -1374,13 +1414,9 @@ class SemanticAnalyzer:
         if isinstance(target, Variable):
             if self._const_key(target.name) is not None and not any(target.name in scope for scope in self.scopes):
                 raise SemanticError(f"Cannot assign to constant '{target.name}'", stmt)
-            target_type, self.facts.decls[target.nid] = self._resolve(target.name, stmt)
-            if self.facts.decls[target.nid] in self._possible:
-                raise SemanticError(
-                    f"Cannot reassign '{target.name}' while it's narrowed by an 'is' check -- assign to "
-                    f"a different variable instead",
-                    stmt,
-                )
+            _, decl_id = self._resolve(target.name, stmt)
+            self.facts.decls[target.nid] = decl_id
+            target_type = self.symbols[decl_id].type if decl_id is not None else self._lookup(target.name, stmt)
             what = f"to '{target.name}' (declared {target_type})"
         elif isinstance(target, Index):
             target_type = self._check_indexable_and_index(target.array, target.index)
@@ -1409,6 +1445,9 @@ class SemanticAnalyzer:
         value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, target_type)
         if not self._types_compatible(value_type, target_type):
             raise SemanticError(f"Cannot assign a value of type {value_type} {what}", stmt)
+        if isinstance(target, Variable) and self.facts.decls[target.nid] is not None:
+            self._assignments.append(self.facts.decls[target.nid])  # the value was read as narrowed; no longer
+            self._forget(self.facts.decls[target.nid])
 
     def _check_indexable_and_index(self, base_expr: Node, index_expr: Node) -> Type:
         """Check an array/slice/dict base and its index; return the element type."""
@@ -1618,6 +1657,9 @@ class SemanticAnalyzer:
             )
 
     def analyze_while(self, stmt: While, return_type: Type) -> None:
+        """The condition narrows the body, like an `if`'s (and, when it is false, what follows a loop
+        with no `break`: _analyze_block)."""
+        self._forget_assigned_in(stmt.body)
         condition_type = self.check_expr(stmt.condition)
         if condition_type != Type.BOOL:
             raise SemanticError(
@@ -1628,13 +1670,14 @@ class SemanticAnalyzer:
             )
 
         self.loop_depth += 1
-        self._analyze_body(stmt.body, return_type)
+        self._analyze_body(stmt.body, return_type, self._when(stmt.condition)[0])
         self.loop_depth -= 1
 
     def analyze_for(self, stmt: For, return_type: Type) -> None:
         """`for init; cond; increment:`; one scope spans all clauses."""
         self._push_scope()
         self.analyze_statement(stmt.init, return_type)
+        self._forget_assigned_in([stmt.body, stmt.increment])
         condition_type = self.check_expr(stmt.condition)
         if condition_type != Type.BOOL:
             raise SemanticError(
@@ -1644,7 +1687,10 @@ class SemanticAnalyzer:
                 stmt.condition,
             )
         self.loop_depth += 1
+        mark = len(self._undo)
+        self._apply(self._when(stmt.condition)[0])  # the condition narrows the body, as a `while`'s does
         self._analyze_block(stmt.body, return_type)
+        self._end_region(mark)
         self.loop_depth -= 1
         self.analyze_statement(stmt.increment, return_type)
         self._pop_scope()
@@ -1691,6 +1737,7 @@ class SemanticAnalyzer:
         self.facts.for_symbols[stmt.nid] = symbols
         for name, binding_type, sym in zip(stmt.binding_names, binding_types, symbols):
             self._declare(name, binding_type, stmt, sym.id)
+        self._forget_assigned_in(stmt.body)
         self.loop_depth += 1
         self._analyze_block(stmt.body, return_type)
         self.loop_depth -= 1

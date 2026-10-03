@@ -116,13 +116,20 @@ F = "def int f(U u, bool ok, *U p):\n"
     ("    if not u is A:\n        return u.x\n    return 0\n", "Cannot access field 'x' on non-struct type U"),
     ("    if u is A or u is B:\n        return u.x\n    return 0\n", "Cannot access field 'x' on non-struct type U"),
     ("    bool a = u is A\n    if a:\n        return u.x\n    return 0\n", "Cannot access field 'x'"),
-    ("    while u is A:\n        return u.x\n    return 0\n", "Cannot access field 'x' on non-struct type U"),
     ("    if ok or u is A:\n        return 0\n    return u.y\n", "Cannot access field 'y'"),  # none remains too
     # Only a variable is narrowed; a tested expression is not.
     ("    if *p is A:\n        return (*p).x\n    return 0\n", "Cannot access field 'x' on non-struct type U"),
-    # A narrowed variable still can't be reassigned.
-    ("    if u is A and ok:\n        u = B(1)\n    return 0\n", "Cannot reassign 'u' while it's narrowed"),
-    ("    if u is A:\n        return 0\n    u = B(1)\n    return 0\n", "Cannot reassign 'u' while it's narrowed"),
+    # Assigning to a narrowed variable ends the narrowing.
+    ("    if u is A and ok:\n        u = A(1)\n        return u.x\n    return 0\n", "Cannot access field 'x'"),
+    ("    if u is A:\n        if ok:\n            u = B(1)\n        return u.x\n    return 0\n", "Cannot access field 'x'"),
+    ("    if u is A:\n        u = B(1)\n    else:\n        return 0\n    return u.x\n", "Cannot access field 'x'"),
+    # A loop's body may already have run: what it assigns is not known on the way in.
+    ("    if u is A:\n        while ok:\n            int x = u.x\n            u = B(x)\n    return 0\n", "Cannot access field 'x'"),
+    ("    if u is A:\n        for int i = 0; i < 2; i += 1:\n            int x = u.x\n            u = B(x)\n    return 0\n",
+     "Cannot access field 'x'"),
+    ("    if u is A:\n        for b in 'ab':\n            int x = u.x\n            u = B(x)\n    return 0\n", "Cannot access field 'x'"),
+    # A loop left by `break` says nothing about its condition.
+    ("    while u is not A:\n        if ok:\n            break\n        u = A(1)\n    return u.x\n", "Cannot access field 'x'"),
     # What `is` takes.
     ("    return 5 is A\n", "'is' tests a sum type's variant or an enum's member, but this value is int"),
     ("    if ok is A:\n        return 1\n    return 0\n", "'ok' \\(declared bool\\) is not a sum type"),
@@ -244,3 +251,103 @@ def test_as_cannot_follow_is_not():
     source = DECLS + F + "    if u is not A as a:\n        return 1\n    return 0\n"
     with pytest.raises(ParseError, match="'as NAME' can't follow 'is not'"):
         Parser(Lexer(source).tokenize()).parse_program()
+
+
+LOOPS = """type Cons struct:
+    int value
+    *List next
+
+type List is Cons | none
+
+type A struct:
+    int x
+
+type B struct:
+    int y
+
+type U is A | B | none
+
+def List build(int n):
+    List list = none
+    for int i = n; i > 0; i -= 1:
+        List rest = list               # each element points to its own copy of the rest
+        list = Cons(i, &rest)
+    return list
+
+def int sum(List list):
+    int total = 0
+    List node = list
+    while node is Cons:
+        total += node.value            # narrowed by the condition
+        node = *node.next              # the assignment ends the narrowing
+    return total
+
+def int length(List list):
+    int n = 0
+    List node = list
+    while node != none:
+        n += 1
+        if node is Cons:
+            node = *node.next
+    return n
+
+def int last(List list):
+    List node = list
+    int value = -1
+    while node is Cons:
+        value = node.value
+        node = *node.next
+    if node is none:                    # after the loop: its condition was false
+        return value
+    return -2
+
+def U step(U u):
+    if u is A:
+        return B(u.x + 1)
+    if u is B:
+        return none
+    return A(1)
+
+def int reassigned(U u):
+    if u is A:
+        int before = u.x
+        u = step(u)                    # u is a U again
+        if u is B:
+            return before * 10 + u.y
+        return -1
+    return 0
+
+def int in_branch(U u, bool change):
+    if u is A:
+        if change:
+            u = B(7)
+        if u is A:                     # must be tested again: it may have been reassigned
+            return u.x
+        if u is B:
+            return u.y
+    return 0
+
+def int leaving_branch(U u, bool stop):
+    if u is A:
+        if stop:
+            u = B(7)
+            return -1
+        return u.x                     # the reassigning branch never gets here
+    return 0
+
+def int main():
+    List list = build(4)
+    print(sum(list))
+    print(length(list))
+    print(last(list))
+    print(last(none))
+    print(reassigned(A(3)))
+    print(in_branch(A(5), false) + in_branch(A(5), true))
+    print(leaving_branch(A(9), false) + leaving_branch(A(9), true))
+    return 0
+"""
+
+
+@GCC_SKIP
+def test_while_narrows_and_assignment_ends_narrowing():
+    assert_program_stdout(LOOPS, "10\n4\n4\n-1\n34\n12\n8\n")

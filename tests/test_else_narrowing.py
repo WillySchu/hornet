@@ -193,16 +193,11 @@ def test_bindings_none_and_checks_of_a_narrowed_variable():
     # An `as NAME` binding ends with its `if`.
     ("def int f([]Shape shapes):\n    if shapes[0] is Circle as c:\n        return 1\n    return c.side\n",
      "Reference to undeclared variable 'c'"),
-    # A narrowed variable can't be reassigned, whether or not one variant is left.
-    ("def int f(Shape s):\n    if s is Circle:\n        return 1\n    s = Circle(2)\n    return 0\n",
-     "Cannot reassign 's'"),
-    ("def int f(Shape s):\n    if s is Circle:\n        return 1\n    else:\n        s = Circle(2)\n    return 0\n",
-     "Cannot reassign 's'"),
-    ("def int f(Shape3 s):\n    if s is Circle:\n        return 1\n    s = Circle(2)\n    return 0\n",
-     "Cannot reassign 's'"),
-    ("def int f([]Shape shapes):\n    Shape s = shapes[0]\n    int i = 0\n    while true:\n        if s is Circle:\n"
-     "            break\n        i += 1\n        s = shapes[i]\n    return i\n",
-     "Cannot reassign 's'"),
+    # Assigning to a narrowed variable ends the narrowing.
+    ("def int f(Shape s):\n    if s is Circle:\n        return 1\n    s = Square(2)\n    return s.side\n",
+     "Cannot access field 'side' on non-struct type Shape"),
+    ("def int f(Shape s):\n    if s is Circle:\n        return 1\n    else:\n        s = Square(2)\n    return s.side\n",
+     "Cannot access field 'side' on non-struct type Shape"),
     # A guard doesn't make room for a second declaration in the same scope.
     ("def int f():\n    Shape s = Circle(1)\n    if s is Circle:\n        return 1\n    Shape s = Square(2)\n    return 0\n",
      "Variable 's' is already declared in this scope"),

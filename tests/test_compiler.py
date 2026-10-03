@@ -5042,18 +5042,19 @@ class TestNarrowing:
         analyze(ast)  # should not raise
 
 
-    def test_reassigning_the_narrowed_variable_is_rejected(self):
+    def test_reassigning_the_narrowed_variable_ends_the_narrowing(self):
         assert_program_semantic_error(
             self._SHAPE_DECLS +
             "def int main():\n"
             "    Shape s = Circle(5)\n"
             "    if s is Circle:\n"
             "        s = Square(9)\n"
+            "        return s.radius\n"
             "    return 0\n",
-            match="Cannot reassign 's'",
+            match="Cannot access field 'radius' on non-struct type Shape",
         )
 
-    def test_reassigning_the_narrowed_variable_in_a_nested_block_is_also_rejected(self):
+    def test_reassigning_the_narrowed_variable_in_a_nested_block_ends_it_too(self):
         assert_program_semantic_error(
             self._SHAPE_DECLS +
             "def int main():\n"
@@ -5061,8 +5062,9 @@ class TestNarrowing:
             "    if s is Circle:\n"
             "        if true:\n"
             "            s = Square(9)\n"
+            "        return s.radius\n"
             "    return 0\n",
-            match="Cannot reassign 's'",
+            match="Cannot access field 'radius' on non-struct type Shape",
         )
 
     def test_unrelated_struct_is_rejected(self):
