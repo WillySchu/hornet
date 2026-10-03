@@ -184,6 +184,10 @@ class EscapeAnalyzer:
             return set()
         if isinstance(e, t.Local):
             return self._contents(self.loc(e))
+        if isinstance(e, t.Bind):  # a declaration, then a test
+            self._add(e.symbol.id, self.vals(e.value))
+            self.vals(e.test)
+            return set()
         if isinstance(e, t.FieldAccess):
             return self._contents(self.vals(e.base)) if e.through_pointer else self.vals(e.base)
         if isinstance(e, t.ArrayIndex):
@@ -324,7 +328,7 @@ def _declared_within(nodes: list) -> set:
     stack = list(nodes)
     while stack:
         node = stack.pop()
-        if isinstance(node, t.Declare):
+        if isinstance(node, (t.Declare, t.Bind)):
             out.add(node.symbol.id)
         elif isinstance(node, t.ForIn):
             out.update(symbol.id for symbol in node.bindings)

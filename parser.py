@@ -285,8 +285,8 @@ class ExprStmt(Node):
 @dataclass
 class IsCheck(Node):
     """`SUBJECT is T`: whether a sum holds variant T, or an enum is member T. Three shapes: `NAME is T`
-    (variable_name; the one that can narrow NAME), `EXPR is T` (subject), and, as a whole `if`
-    condition or a `match` arm, `EXPR is T as NAME` (both: NAME is declared as a copy of EXPR)."""
+    (variable_name; the one that can narrow NAME), `EXPR is T` (subject), and `EXPR is T as NAME`
+    (both: NAME is declared as a copy of EXPR), which is for an `if` condition or a `match`."""
     variable_name: Optional[str]
     type_name: Union[str, QualifiedTypeExpr, ArrayTypeExpr, SliceTypeExpr, PointerTypeExpr]
     subject: Optional[Node] = None
@@ -1147,25 +1147,10 @@ class Parser:
         return If(condition=condition, then_body=then_body, else_body=else_body, line=start_tok.line, col=start_tok.col)
 
     def _parse_if_condition(self) -> Node:
-        """A boolean expression; when it is one `is` check, `as NAME` may follow to bind the subject."""
+        """A boolean expression (an `is` check in it may bind its subject with `as NAME`)."""
         expr = self.parse_expression()
         if self.check(TokenType.AS):
-            if not isinstance(expr, IsCheck):
-                raise self._error(
-                    "'as NAME' binds the subject of an 'is' check that is the whole condition "
-                    "(`EXPR is T as NAME`); it can't follow 'is not', or a check inside a larger condition",
-                    self.current())
-            self.advance()
-            binding_tok = self.expect(TokenType.IDENTIFIER, "Expected a binding name after 'as'")
-            if self.check(TokenType.AND, TokenType.OR):
-                raise self._error(
-                    "'as NAME' binds the subject of an 'is' check that is the whole condition "
-                    "(`EXPR is T as NAME`); it can't be combined with 'and' or 'or' yet", self.current())
-            subject = expr.subject
-            if subject is None:
-                subject = Variable(name=expr.variable_name, line=expr.line, col=expr.col)
-            return IsCheck(variable_name=binding_tok.val, type_name=expr.type_name, subject=subject,
-                           line=expr.line, col=expr.col)
+            raise self._error("'as NAME' follows an 'is' check (`EXPR is T as NAME`)", self.current())
         return expr
 
     def _parse_qualifiable_type_name(self, expected_message: str) -> Union[str, QualifiedTypeExpr, ArrayTypeExpr, SliceTypeExpr, PointerTypeExpr]:
@@ -1298,11 +1283,19 @@ class Parser:
                 is_tok = self.advance()
                 negated = self.match(TokenType.NOT)
                 type_name = self._parse_qualifiable_type_name("a type name after 'is'")
-                if isinstance(left, Variable):
-                    left = IsCheck(variable_name=left.name, type_name=type_name, line=left.line, col=left.col)
+                at = left if isinstance(left, Variable) else is_tok
+                if self.check(TokenType.AS):  # `left is T as NAME`: NAME is a copy of left
+                    if negated:
+                        raise self._error("'as NAME' can't follow 'is not': there would be nothing of that type "
+                                          "to bind", self.current())
+                    self.advance()
+                    binding_tok = self.expect(TokenType.IDENTIFIER, "Expected a binding name after 'as'")
+                    left = IsCheck(variable_name=binding_tok.val, type_name=type_name, subject=left,
+                                   line=at.line, col=at.col)
+                elif isinstance(left, Variable):
+                    left = IsCheck(variable_name=left.name, type_name=type_name, line=at.line, col=at.col)
                 else:
-                    left = IsCheck(variable_name=None, type_name=type_name, subject=left,
-                                   line=is_tok.line, col=is_tok.col)
+                    left = IsCheck(variable_name=None, type_name=type_name, subject=left, line=at.line, col=at.col)
                 if negated:
                     left = Unary(op=UnaryOp.NOT, operand=left, line=left.line, col=left.col)
                 continue

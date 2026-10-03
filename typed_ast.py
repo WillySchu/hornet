@@ -162,6 +162,15 @@ class Payload(Expr):
 
 
 @dataclass(frozen=True)
+class Bind(Expr):
+    """`EXPR is T as NAME` inside a condition: when it is evaluated, declares `symbol` as a copy of
+    `value`; its own value is `test`'s, a test of the new variable."""
+    symbol: Any
+    value: Expr
+    test: Expr
+
+
+@dataclass(frozen=True)
 class TagTest(Expr):
     """Whether a sum holds `variant`."""
     sum: Expr

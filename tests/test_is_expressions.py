@@ -133,8 +133,114 @@ def test_what_is_not_narrowed_and_what_is_an_error(body, match):
     assert_program_semantic_error(DECLS + F + body + "def int main():\n    return 0\n", match=match)
 
 
-@pytest.mark.parametrize("condition", ["u is A as a and ok", "u is not A as a", "ok and u is A as a"])
-def test_as_binds_only_a_whole_condition(condition):
-    source = DECLS + F + f"    if {condition}:\n        return 1\n    return 0\n"
-    with pytest.raises(ParseError, match="'as NAME' binds the subject of an 'is' check that is the whole condition"):
+BINDINGS = """type Num struct:
+    int v
+
+type Neg struct:
+    *Expr operand
+
+type Add struct:
+    *Expr left
+    *Expr right
+
+type Expr is Num | Neg | Add | none
+
+type Holder struct:
+    Expr e
+    int limit
+
+
+def Expr make(int n):
+    if n == 0:
+        return none
+    return Num(n)
+
+# -(-x) is x; -(number) folds.
+def str describe(Expr e):
+    if e is Neg as neg and *neg.operand is Neg as inner:
+        return 'double negation'
+    if e is Neg as neg and *neg.operand is Num as n and n.v > 0:
+        return 'negative literal'
+    if e is Add as a and *a.left is Num as l and *a.right is Num as r:
+        if l.v + r.v == 0:
+            return 'zero sum'
+        return 'constant sum'
+    return 'other'
+
+def int first_big(Holder h):
+    if h.limit > 0 and h.e is Num as n and n.v > h.limit:
+        return n.v
+    else:
+        return -1
+
+def int main():
+    Expr one = Num(1)
+    Expr neg = Neg(&Num(5))
+    Expr dneg = Neg(&Neg(&Num(2)))
+    Expr sum = Add(&Num(2), &Num(-2))
+    Expr sum2 = Add(&Num(2), &Num(3))
+    Expr mixed = Add(&Num(2), &Neg(&Num(3)))
+    print(describe(one))
+    print(describe(neg))
+    print(describe(dneg))
+    print(describe(sum))
+    print(describe(sum2))
+    print(describe(mixed))
+    print(first_big(Holder(Num(9), 5)) + first_big(Holder(Num(3), 5)) + first_big(Holder(Num(9), 0)))
+    int n = 7
+    if make(n) is Num as m and m.v == n and make(0) is none:
+        print(m.v)
+    return 0
+"""
+
+
+@GCC_SKIP
+def test_as_bindings_joined_by_and():
+    assert_program_stdout(
+        BINDINGS,
+        "other\nnegative literal\ndouble negation\nzero sum\nconstant sum\nother\n7\n7\n",
+    )
+
+
+@GCC_SKIP
+def test_a_binding_is_made_only_when_the_checks_before_it_hold():
+    assert_program_stdout(
+        DECLS +
+        "def U noisy(int n):\n"
+        "    print(n)\n"
+        "    return A(n)\n"
+        "def int main():\n"
+        "    bool no = false\n"
+        "    if no and noisy(1) is A as a:\n"       # noisy(1) is never called
+        "        print(a.x)\n"
+        "    for int i = 0; i < 3; i += 1:\n"        # a new binding each time round
+        "        if i != 1 and noisy(i * 10) is A as a and a.x > 5:\n"
+        "            print(a.x + 1)\n"
+        "    return 0\n",
+        "0\n20\n21\n",
+    )
+
+
+@pytest.mark.parametrize("body,match", [
+    # A binding is for an `if`/`elif` condition: alone, or one of the checks its `and`s join.
+    ("    if ok or u is A as a:\n        return 1\n    return 0\n", "'as NAME' can bind only in an `if` or `elif`"),
+    ("    if not (u is A as a):\n        return 1\n    return 0\n", "'as NAME' can bind only in an `if` or `elif`"),
+    ("    if ok and (ok or u is A as a):\n        return 1\n    return 0\n", "'as NAME' can bind only"),
+    ("    while u is A as a:\n        return 1\n    return 0\n", "'as NAME' can bind only in an `if` or `elif`"),
+    ("    bool b = u is A as a\n    return 0\n", "'as NAME' can bind only in an `if` or `elif`"),
+    # The name lasts for the rest of the condition and the body; not the `else`, nor afterwards.
+    ("    if ok and u is A as a:\n        return a.x\n    else:\n        return a.x\n", "undeclared variable 'a'"),
+    ("    if ok and u is A as a:\n        return a.x\n    return a.x\n", "undeclared variable 'a'"),
+    ("    if a.x > 0 and u is A as a:\n        return 1\n    return 0\n", "undeclared variable 'a'"),
+    ("    if u is A as a and u is B as a:\n        return 1\n    return 0\n", "'a' is already declared"),
+    # It is a copy: narrowing it says nothing about the subject.
+    ("    if u is A as a and ok:\n        return u.x\n    return 0\n", "Cannot access field 'x' on non-struct type U"),
+])
+def test_where_as_may_bind(body, match):
+    assert_program_semantic_error(DECLS + F + body + "def int main():\n    return 0\n", match=match)
+
+
+def test_as_cannot_follow_is_not():
+    source = DECLS + F + "    if u is not A as a:\n        return 1\n    return 0\n"
+    with pytest.raises(ParseError, match="'as NAME' can't follow 'is not'"):
         Parser(Lexer(source).tokenize()).parse_program()

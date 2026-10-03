@@ -781,6 +781,9 @@ class TypedFunctionBuilder:
             return [], IRConst(e.value, e.type)
         if isinstance(e, t.EnumMember):
             return [], IRConst(e.index, Type.INT32)
+        if isinstance(e, t.Bind):
+            test_ir, test = self.value(e.test)
+            return self.initialize(e.symbol, e.value) + test_ir, test
         if isinstance(e, (t.EnumFromInt, t.EnumContains)):
             return self.enum_from_int(e) if isinstance(e, t.EnumFromInt) else self.enum_contains(e)
         if isinstance(e, t.BoolLit):
@@ -907,6 +910,8 @@ class TypedFunctionBuilder:
             return self.branch(e.operand, if_false, if_true)
         if isinstance(e, t.BoolLit):
             return [IRJump(if_true if e.value else if_false)]
+        if isinstance(e, t.Bind):
+            return self.initialize(e.symbol, e.value) + self.branch(e.test, if_true, if_false)
         ir, cond = self.value(e)
         return ir + [IRBranch(cond=cond, true_label=if_true, false_label=if_false)]
 

@@ -223,6 +223,13 @@ def _conditions_after(stmt: If, types: dict) -> Tuple[List[Node], Optional[Node]
     return [condition for condition, _ in branches[:staying[0]]], branches[staying[0]][0]
 
 
+def _conjuncts(condition: Node) -> List[Node]:
+    """The checks a condition's top-level `and`s join, in order (the condition itself if it has none)."""
+    if isinstance(condition, Binary) and condition.op == BinaryOp.AND:
+        return _conjuncts(condition.left) + _conjuncts(condition.right)
+    return [condition]
+
+
 def _both(a: dict, b: dict) -> dict:
     """What is known when both of two sets of narrowing facts hold (SemanticAnalyzer._when)."""
     out = dict(a)
@@ -1059,6 +1066,7 @@ class SemanticAnalyzer:
         self._enter(fn)
         self.scopes, self._declared = [{}], [set()]
         self._possible, self._undo = {}, []
+        self._bindable, self._bound = set(), set()  # `as NAME` checks that may bind here; those that have
         self.loop_depth = 0
         # Params are locals; _declare also catches duplicates.
         for p in fn.params:
@@ -1481,11 +1489,13 @@ class SemanticAnalyzer:
             )
 
     def analyze_if(self, stmt: If, return_type: Type) -> None:
-        # Declare an `EXPR is T as NAME` binding before checking the condition.
-        has_binding = isinstance(stmt.condition, IsCheck) and stmt.condition.binds
-        if has_binding:
+        # `EXPR is T as NAME` binds NAME when it is the condition, or one of the checks its `and`s join
+        # (check_is_check declares it, in evaluation order). A scope of their own holds the names.
+        binders = [c for c in _conjuncts(stmt.condition) if isinstance(c, IsCheck) and c.binds]
+        whole = isinstance(stmt.condition, IsCheck) and stmt.condition.binds
+        if binders:
             self._push_scope()
-            self._declare_is_binding(stmt.condition)
+            self._bindable.update(c.nid for c in binders)
 
         condition_type = self.check_expr(stmt.condition)
         if condition_type != Type.BOOL:
@@ -1500,10 +1510,11 @@ class SemanticAnalyzer:
         # else_body (and what follows the `if`, when its other branches always leave: _analyze_block).
         when_true, when_false = self._when(stmt.condition)
         self._analyze_body(stmt.then_body, return_type, when_true)
+        if binders and not whole:
+            self._pop_scope()  # in the `else`, a check after an `and` may never have run: its name is unset
         if stmt.else_body is not None:
             self._analyze_body(stmt.else_body, return_type, when_false)
-
-        if has_binding:
+        if whole:
             self._pop_scope()
 
     def analyze_match(self, stmt: 'Match', return_type: Type) -> None:
@@ -1565,6 +1576,7 @@ class SemanticAnalyzer:
         subject_type = self.check_expr(check.subject)
         if isinstance(check.subject, Variable) and self.facts.decls[check.subject.nid] in self._possible:
             subject_type = self.symbols[self.facts.decls[check.subject.nid]].type  # a narrowed variable: its sum
+        self._bound.add(check.nid)
         sym = self.symbols.new(check.variable_name, 'narrowing', subject_type, check)
         if subject_type.kind in (TypeKind.SUM, TypeKind.ENUM):  # otherwise rejected when the check is checked
             binding = VarDecl(name=check.variable_name, var_type=subject_type.sum_type_name or subject_type.enum_name,
@@ -2273,6 +2285,12 @@ class SemanticAnalyzer:
     def check_is_check(self, expr: IsCheck) -> Type:
         """`NAME is T`, `EXPR is T`, or `EXPR is T as NAME` (NAME already declared, by the statement):
         T is a variant of the subject's sum, or a member of its enum. Only a NAME can be narrowed."""
+        if expr.binds and expr.nid not in self._bound:
+            if expr.nid not in self._bindable:
+                raise SemanticError(
+                    "'as NAME' can bind only in an `if` or `elif` condition, where the check is the whole "
+                    "condition or one of the checks joined by 'and'", expr)
+            self._declare_is_binding(expr)
         if expr.variable_name is None:  # `EXPR is T`: a test of the expression's value
             variable_type, narrowed = self.check_expr(expr.subject), False
         else:
@@ -2876,6 +2894,10 @@ class _TypedTreeBuilder:
         if isinstance(e, syntax.IsCheck):
             if e.variable_name is None:
                 return self.is_test(self.expr(e.subject), e)
+            if e.binds:  # one of a condition's checks joined by `and` (a whole condition is if_statement's)
+                symbol = self.facts.symbols[self.facts.bindings[e.nid].nid]
+                return typed.Bind(Type.BOOL, symbol, self.convert(e.subject, symbol.type),
+                                  self.is_test(typed.Local(symbol.type, symbol), e))
             symbol = self.symbols[self.facts.decls[e.nid]]
             return self.is_test(typed.Local(symbol.type, symbol), e)
         raise ElaborationError(f"No elaboration for expression {type(e).__name__}")
