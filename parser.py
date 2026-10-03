@@ -488,10 +488,10 @@ def _default_import_qualifier(path: str) -> str:
     return last_component
 
 
+# Prefix operators that bind tighter than every binary operator; `not` is handled in parse_unary.
 _UNARY_OPS = {
     TokenType.MINUS: UnaryOp.NEGATE,
     TokenType.TILDE: UnaryOp.COMPLEMENT,
-    TokenType.NOT: UnaryOp.NOT,
     TokenType.AMPERSAND: UnaryOp.ADDRESS_OF,
     TokenType.STAR: UnaryOp.DEREFERENCE,
 }
@@ -538,6 +538,10 @@ _BINARY_OPS = {
 
     TokenType.OR: OperatorInfo(BinaryOp.OR, precedence=1, associativity=Associativity.LEFT),
 }
+
+
+# `not` binds looser than every binary operator except `and` and `or`: `not a < b` is `not (a < b)`.
+_NOT_OPERAND_PRECEDENCE = _BINARY_OPS[TokenType.AND].precedence + 1
 
 
 # TokenType -> BinaryOp for compound assignment.
@@ -1259,6 +1263,10 @@ class Parser:
         return left
 
     def parse_unary(self) -> Node:
+        if self.check(TokenType.NOT):
+            op_tok = self.advance()
+            operand = self.parse_binary(_NOT_OPERAND_PRECEDENCE)
+            return Unary(op=UnaryOp.NOT, operand=operand, line=op_tok.line, col=op_tok.col)
         if self.check(*_UNARY_OPS):
             op_tok = self.advance()
             # Recurse on parse_unary so prefix operators chain.

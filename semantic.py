@@ -2003,7 +2003,7 @@ class SemanticAnalyzer:
                 raise SemanticError(
                     f"'not' requires a bool operand, got {operand_type} "
                     f"(no implicit int-to-bool conversion -- try "
-                    f"`not (x == 0)` instead of `not x`)",
+                    f"`x == 0` instead of `not x`)",
                     expr,
                 )
             return Type.BOOL
