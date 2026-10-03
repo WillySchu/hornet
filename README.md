@@ -79,7 +79,7 @@ pytest --quick   # unit tests only; nothing is built or run
 pytest --full    # every runnable target, plus slow tests (benchmark reruns, formatter fuzzing, sanitizers)
 ```
 
-The tests cover the lexer, parser, semantic analysis, module discovery and merging, IR construction and verification, optimization, the native backend, escape analysis, runtime behavior, and end-to-end compiled programs, including seeded random programs checked against a Python model.
+The tests cover the lexer, parser, semantic analysis, modules, IR construction and verification, optimization, the native backend, escape analysis, runtime behavior, and end-to-end compiled programs, including seeded random programs checked against a Python model.
 
 Backend-specific tests live in `tests/backend/<arch>/` and shared backend tests in `tests/backend/common/`. With `--full`, end-to-end programs are built and run for every target that can run on the machine (natively, under Rosetta 2, or under qemu-user), and every such target must produce the same output. `HORNET_E2E_TARGETS` overrides the targets in any tier:
 
@@ -109,7 +109,7 @@ python3 benchmarks/run_benchmarks.py --icount   # also count executed instructio
 python3 benchmarks/run_benchmarks.py --json out.json --compare benchmarks/baseline.json
 ```
 
-See `benchmarks/README.md`.
+Each run prints a table of results, then a table of changes against `benchmarks/baseline.json` (or the `--compare` file). See `benchmarks/README.md`.
 
 ---
 
@@ -647,7 +647,7 @@ for int i = 0; i < 10; i += 1:
     print(i)
 ```
 
-The initialization clause is currently a variable declaration, and the increment clause is currently an assignment. A loop variable whose address may outlive an iteration gets new storage each iteration.
+The initialization clause is currently a variable declaration, and the increment clause is any assignment. A loop variable whose address may outlive an iteration gets new storage each iteration.
 
 ## `for ... in ...`
 
@@ -743,7 +743,7 @@ and  or  not
 <<= >>=
 ```
 
-A compound assignment evaluates its target once.
+A compound assignment works for any assignable target (a variable, field, element, dictionary entry, or `*p`), including `+=` on a `str`, which appends. It evaluates its target once, reads it, evaluates the value, and then writes.
 
 ---
 
@@ -884,7 +884,9 @@ Module discovery follows imports transitively. Local modules are resolved relati
 
 Top-level names beginning with `_` are private to their module.
 
-Modules are merged into a single semantic program before IR construction. Imported declarations are internally renamed to avoid collisions, while `extern` symbols retain their foreign names for the linker.
+Every declaration is reached this way, including `extern` functions: a module that uses another module's `extern` imports it (`from 'os' import write_fd`) or qualifies it (`os.write_fd(...)`). A local variable, parameter, or loop binding can't have the name of an import alias or a constant in scope.
+
+Each file's names are resolved in that file's own scope. Internally every declaration of an imported module gets a program-wide unique name, while `extern` symbols keep their foreign names for the linker; errors and printed values use names as declared.
 
 The current module system intentionally has a narrow filesystem-based model. Project-level package roots, package declarations decoupled from filenames, and distributing one package across multiple files are future work.
 
@@ -1049,10 +1051,10 @@ Hornet source
    Parser ──────── one AST per module
      │
      ▼
-Module discovery and merging ── one AST, names mangled `module$name`
+Module discovery ── one AST per file
      │
      ▼
-Semantic analysis ── checks the AST, builds the typed tree
+Semantic analysis ── resolves names per file, checks, builds the typed tree
      │
      ▼
 IR construction ── from the typed tree; escape analysis, null and division checks
@@ -1084,15 +1086,17 @@ Hornet runtime   external libraries
        native executable
 ```
 
-Semantic analysis never changes the parser's AST: it records what it learns (types, the declaration each name refers to, narrowing) by node number, and from that builds the typed tree (`typed_ast.py`), the only input to later stages. In the typed tree every node has one meaning and a concrete type: names refer to symbols, the parser's overloaded forms are split (calls, struct literals, and builtins; array, slice, string, and dictionary indexing), each implicit operation is a node (widening into a sum, `&Variant(...)`, a literal becoming a slice, zero values), methods are ordinary functions, and `match` is a node of its own. `compile.py --dump-typed` prints it.
+Semantic analysis never changes the parser's ASTs: it resolves each file's names in that file's scope (`scopes.py`), records what it learns (types, the declaration each name refers to, narrowing) by node number, and from that builds the typed tree (`typed_ast.py`). The typed program `semantic.analyze()` returns is the only input to later stages: a test checks that nothing in `ir/`, `optimize/`, `backend/`, or escape analysis imports the front end. In the typed tree every node has one meaning and a concrete type: names refer to symbols, the parser's overloaded forms are split (calls, struct literals, and builtins; array, slice, string, and dictionary indexing), each implicit operation is a node (widening into a sum, `&Variant(...)`, a literal becoming a slice, zero values), methods are ordinary functions, and `match` and compound assignment are nodes of their own. `compile.py --dump-typed` prints it.
 
 The frontend constructs a complete `IRProgram` before a backend begins lowering it. The IR is independent of any target: a function's incoming arguments are an ordered list of word-sized temporaries in Hornet's own calling convention (a composite return value's destination address first, then one word per parameter, except two for `str` and three for slices, with arrays, structs, sum types, and dicts passed by address), and where each word physically arrives is decided by the backend. Lowering never modifies the IR.
 
 Escape analysis decides which locals must live on the heap; heap storage comes from `malloc` and is never freed. It is a flow-insensitive points-to analysis per function, run on the typed tree, with per-parameter escape summaries so that passing `&x` to a function that doesn't keep the pointer leaves `x` on the stack.
 
-The IR optimizer repeats constant folding, identity simplification, constant-branch and unreachable-block removal, copy and constant propagation within blocks, copy coalescing, and dead-code elimination until nothing changes. `ir/cfg.py` provides the shared control-flow and liveness analysis.
+IR construction compiles conditions made of `and`, `or`, and `not` straight to branches, and copies a composite value directly between places (two places of one type are the same storage or disjoint). Loads, stores, and copies address memory as a base plus a constant offset.
 
-`backend/` holds one package per architecture, chosen by the target, plus `backend/common/` for what they share: linear-scan register allocation over the target's register lists (values live across calls get callee-saved registers), stack-frame slot layout, the magic numbers for division by constants, and jump cleanups. Each backend adds its calling convention (SysV for `backend/x86_64/`, AAPCS64 for `backend/aarch64/`), prologues that save only the registers a function uses, instruction selection that works directly on registers, stack slots, and immediates, a peephole pass, and assembly emission for Linux and macOS (AT&T syntax on x86-64). The AArch64 backend also rewrites accesses to stack slots beyond the reach of a load or store's offset after the frame is laid out.
+The IR optimizer repeats constant folding, identity simplification, constant-branch and unreachable-block removal, copy and constant propagation within blocks, copy coalescing, address folding (an address computed as a base plus a constant becomes the access's offset), and dead-code elimination until nothing changes. `ir/cfg.py` provides the shared control-flow and liveness analysis.
+
+`backend/` holds one package per architecture, chosen by the target, plus `backend/common/` for what they share: linear-scan register allocation over the target's register lists (values live across calls get callee-saved registers), stack-frame slot layout, the magic numbers for division by constants, and jump cleanups. Each backend adds its calling convention (SysV for `backend/x86_64/`, where four of the argument registers are also allocatable, so incoming parameters and outgoing arguments move as parallel moves; AAPCS64 for `backend/aarch64/`), prologues that save only the registers a function uses, instruction selection that works directly on registers, stack slots, and immediates, a peephole pass, and assembly emission for Linux and macOS (AT&T syntax on x86-64). The AArch64 backend also rewrites accesses to stack slots beyond the reach of a load or store's offset after the frame is laid out.
 
 Some IR operations deliberately lower to runtime calls. A runtime operation does not require a special calling mechanism; runtime functions participate in the same native call machinery as other external functions.
 
@@ -1106,7 +1110,7 @@ parser.py          AST construction
 semantic.py        Semantic analysis: checking, and building the typed tree
 typed_ast.py       The typed tree and its text dump
 modules.py         Module discovery
-merge.py           Module merging and name resolution
+scopes.py          Names across modules: each file's scope and the import checks
 escape_analysis.py Escape analysis, on the typed tree
 folding.py         Compile-time integer arithmetic (constants and IR folding)
 typesys.py         Types and type layout
@@ -1215,8 +1219,6 @@ Hornet is still experimental. Some notable limitations are:
 * Multithreading is not implemented.
 * Without generics, each result type is a separate named sum type. There is no operator for propagating errors, and ignoring a result is not diagnosed.
 * Panics print a message but no source location, and stack overflow is an unreported `SIGSEGV`.
-* `extern` declarations are visible to every module after merging, even without an import.
-* Printing a struct defined in another module shows its internal name, such as `errors$Error(...)`.
 
 ---
 
