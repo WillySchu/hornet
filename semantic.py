@@ -630,9 +630,11 @@ class SemanticAnalyzer:
         saved_scope = self.scope
         self._enter(cd)
         const_type = self._type(cd.const_type, cd)
-        if const_type not in _INTEGER_TYPES and const_type not in (Type.BOOL, Type.STR):
+        if const_type not in _INTEGER_TYPES and const_type not in (Type.BOOL, Type.STR) \
+                and const_type.kind != TypeKind.ENUM:
             raise SemanticError(
-                f"Constant '{shown(name)}' has type {const_type} -- constants must be an integer type, bool, or str", cd)
+                f"Constant '{shown(name)}' has type {const_type} -- constants must be an integer type, bool, str, "
+                f"or an enum", cd)
         saved_scopes, self.scopes = self.scopes, [{}]
         try:
             value_type = self._check_value_flowing_into(cd.value, const_type)
@@ -648,8 +650,16 @@ class SemanticAnalyzer:
         return self.consts[name]
 
     def _const_eval(self, expr: Node):
-        """Value of an already type-checked constant expression."""
+        """Value of an already type-checked constant expression; an enum's is its member's index."""
         t = self.facts.types.get(expr.nid)
+        if expr.nid in self.facts.enum_members:  # `Enum.Member`
+            return self.facts.enum_members[expr.nid][1]
+        if isinstance(expr, Call) and self._callee(expr) in self.enums:  # `Enum(n)`
+            value, members = self._const_eval(expr.args[0]), self.enums[t.enum_name].members
+            if not 0 <= value < len(members):
+                raise SemanticError(
+                    f"{value} is not a member of {t} (its members' values are 0 to {len(members) - 1})", expr)
+            return value
         if isinstance(expr, (Constant, ByteLiteral)) and isinstance(expr.value, int):
             return expr.value
         if isinstance(expr, (BoolLiteral, StringLiteral)):
@@ -678,7 +688,8 @@ class SemanticAnalyzer:
                     return left + right
                 if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
                     return (left == right) == (expr.op == BinaryOp.EQUAL)
-            elif left_type == Type.BOOL and expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
+            elif (left_type == Type.BOOL or left_type.kind == TypeKind.ENUM) \
+                    and expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
                 return (left == right) == (expr.op == BinaryOp.EQUAL)
             else:
                 if (expr.op in (BinaryOp.DIVIDE, BinaryOp.MODULO) and right == -1
@@ -690,6 +701,9 @@ class SemanticAnalyzer:
                 return bool(value) if t == Type.BOOL else value
         if isinstance(expr, Cast) and t in _INTEGER_TYPES:
             return fold_cast(t, self._const_eval(expr.expr), self.facts.types.get(expr.expr.nid))
+        source_type = self.facts.types.get(expr.expr.nid) if isinstance(expr, Cast) else None
+        if t == Type.STR and source_type is not None and source_type.kind == TypeKind.ENUM:  # `str(Enum.Member)`
+            return self.enums[source_type.enum_name].members[self._const_eval(expr.expr)]
         raise SemanticError(
             "A constant's value must be built from literals, other constants, operators, and integer casts", expr)
 
@@ -2299,12 +2313,14 @@ class SemanticAnalyzer:
         raise SemanticError(f"No semantic rule for unary operator: {expr.op}", expr)
 
     def check_cast(self, expr: Cast) -> Type:
-        """`T(expr)` between integer types; literals range-checked against T."""
+        """`T(expr)` between integer types (literals range-checked against T) and from an enum; `str(...)`
+        of a byte, a []byte, or an enum."""
         target_type = self._type(expr.target_type, expr)
         if target_type == Type.STR:
             source_type = self.check_expr(expr.expr)
-            if source_type not in (Type.UINT8, _BYTE_SLICE):
-                raise SemanticError(f"str(...) takes a byte or []byte, got {source_type}", expr)
+            if source_type not in (Type.UINT8, _BYTE_SLICE) and source_type.kind != TypeKind.ENUM:
+                raise SemanticError(f"str(...) takes a byte, a []byte, or an enum (its member's name), "
+                                    f"got {source_type}", expr)
             return Type.STR
         if target_type == Type.INT64 and self._as_folded_int_literal(expr.expr) is not None:
             self._record_literal_type(expr.expr, Type.INT64)
@@ -2550,6 +2566,8 @@ class _TypedTreeBuilder:
             return typed.BoolLit(Type.BOOL, value)
         if const_type == Type.STR:
             return typed.StrLit(Type.STR, value)
+        if const_type.kind == TypeKind.ENUM:
+            return typed.EnumMember(const_type, self.enums[const_type.enum_name].members[value], value)
         return typed.IntLit(self.ty(e), value)
 
     def program(self, functions) -> typed.Program:
@@ -2768,6 +2786,10 @@ class _TypedTreeBuilder:
             return typed.Unary(self.ty(e), e.op, self.expr(e.operand))
         if isinstance(e, syntax.Cast):
             value = self.expr(e.expr)
+            if self.ty(e) == Type.STR and value.type.kind == TypeKind.ENUM:
+                if isinstance(value, typed.EnumMember):  # a member or a constant: its name is known here
+                    return typed.StrLit(Type.STR, value.name)
+                return typed.EnumName(Type.STR, value)
             if self.ty(e) == Type.STR:
                 return (typed.StrFromByte if value.type == Type.UINT8 else typed.StrFromBytes)(Type.STR, value)
             return typed.IntCast(self.ty(e), value)

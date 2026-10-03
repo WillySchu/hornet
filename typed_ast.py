@@ -72,6 +72,12 @@ class EnumFromInt(Expr):
 
 
 @dataclass(frozen=True)
+class EnumName(Expr):
+    """`str(c)` of an enum value: its member's name."""
+    value: Expr
+
+
+@dataclass(frozen=True)
 class EnumContains(Expr):
     """`n in Enum`: whether the integer `value` is a member's value of `enum`."""
     value: Expr

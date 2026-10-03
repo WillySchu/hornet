@@ -95,7 +95,7 @@ def compile_and_run_expect_error(tmp_path, source: str) -> str:
     ("const int A = 1 / 0\ndef int main():\n    return 0\n", "Division by zero"),
     ("const int A = (-9223372036854775807 - 1) / -1\ndef int main():\n    return 0\n", "overflow in division"),
     ("const int f = 1\ndef int f():\n    return 0\ndef int main():\n    return 0\n", "collides with a function"),
-    ("const [2]int A = [1, 2]\ndef int main():\n    return 0\n", "must be an integer type, bool, or str"),
+    ("const [2]int A = [1, 2]\ndef int main():\n    return 0\n", "must be an integer type, bool, str, or an enum"),
     ("const int8 A = 300\ndef int main():\n    return 0\n", "out of range for int8"),
     ("const int A = 1\nconst int A = 2\ndef int main():\n    return 0\n", "already declared"),
 ])

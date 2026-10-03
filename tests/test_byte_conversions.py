@@ -86,7 +86,7 @@ def test_bytes_in_argument_return_append_index_and_dict_positions():
 
 
 @pytest.mark.parametrize('expr,match', [
-    ("str(5)", "str\\(...\\) takes a byte or \\[\\]byte, got int"),
+    ("str(5)", "str\\(...\\) takes a byte, a \\[\\]byte, or an enum .*got int"),
     ("str(int8(5))", "got int8"),
     ("str([]int[1])", "got \\[\\]int"),
     ("bytes(5)", "bytes\\(\\) takes a str, got int"),

@@ -155,6 +155,46 @@ def test_a_literal_converts_at_compile_time():
     assert "IntLit value=3 : int" in tree  # len(Color)
 
 
+@GCC_SKIP
+def test_member_names_and_enum_constants():
+    assert_program_stdout(
+        DECLS +
+        "const Color DEFAULT = Color.Green\n"
+        "const Color LAST = Color(2)\n"
+        "const Color ALSO = DEFAULT\n"
+        "const str DEFAULT_NAME = str(DEFAULT)\n"
+        "const bool SAME = DEFAULT == Color.Green\n"
+        "const int AFTER = int(DEFAULT) + 1\n"
+        "def str describe(Color c):\n"
+        "    return 'colour ' + str(c)\n"
+        "def int main():\n"
+        "    int n = 1\n"
+        "    Color c = Color(n)\n"
+        "    print(str(c))\n"                       # found when the program runs
+        "    print(describe(Color.Blue))\n"
+        "    print(str(Color.Red) + '/' + str(ALSO) + '/' + DEFAULT_NAME)\n"
+        "    print(len(str(c)))\n"
+        "    print(DEFAULT)\n"
+        "    print(LAST)\n"
+        "    print(c == DEFAULT)\n"
+        "    print(SAME)\n"
+        "    print(AFTER)\n"
+        "    [int(LAST) + 1]int slots\n"
+        "    print(len(slots))\n"
+        "    for int i = 0; i < len(Color); i += 1:\n"
+        "        print(str(Color(i)))\n"
+        "    return 0\n",
+        "Green\ncolour Blue\nRed/Green/Green\n5\nColor.Green\nColor.Blue\ntrue\ntrue\n2\n3\nRed\nGreen\nBlue\n",
+    )
+
+
+def test_a_known_members_name_is_a_literal():
+    tree = dump(analyze(_parse(DECLS + "const Color DEFAULT = Color.Green\ndef int main():\n    int n = 1\n"
+                               "    print(str(Color.Red) + str(DEFAULT))\n    print(str(Color(n)))\n    return 0\n")))
+    assert "StrLit value='Red'" in tree and "StrLit value='Green'" in tree
+    assert tree.count("EnumName") == 1  # str(Color(n))
+
+
 MAIN = "def int main():\n    Color c = Color.Red\n"
 
 
@@ -179,13 +219,18 @@ MAIN = "def int main():\n    Color c = Color.Red\n"
     ("", "c = Color(c)", r"converts an integer to the enum Color, got Color"),
     ("", "c = Color(1, 2)", "converts one integer to the enum Color, got 2 arguments"),
     ("", "bool b = c in Color", "'in' with the enum Color on its right tests an integer, got Color"),
-    ("", "str s = str(c)", r"str\(...\) takes a byte or \[\]byte, got Color"),
     # The enum's name is a type, and a member is not one.
     ("", "print(Color)", "'Color' is an enum, not a value"),
     ("", "Color.Red r = c", "'Color.Red' is an enum's member, not a type"),
     ("", "print(Color.Red.x)", "Cannot access field 'x' on non-struct type Color"),
     ("", "dict[Color]int d = dict[Color]int{Color.Red: 1, Color.Red: 2}", "lists the key 'Color.Red' more than once"),
-    ("const Color DEFAULT = Color.Red\n", "return 0", "constants must be an integer type, bool, or str"),
+    # A constant's value is a member, a member's value, or another constant.
+    ("const Color BAD = Color(7)\n", "return 0", "7 is not a member of Color"),
+    ("const int N = 9\nconst Color BAD = Color(N)\n", "return 0", "9 is not a member of Color"),
+    ("const Color BAD = 1\n", "return 0", "Constant 'BAD' is declared Color but its value has type int"),
+    ("def Color f():\n    return Color.Red\nconst Color BAD = f()\n", "return 0",
+     "A constant's value must be built from literals"),
+    ("", "str s = str(5)", r"str\(...\) takes a byte, a \[\]byte, or an enum"),
     ("type E enum:\n    A\n    A\n", "return 0", "Member 'A' is already declared in enum 'E'"),
     ("type Pixel enum:\n    A\n", "return 0", "Enum 'Pixel' collides with a struct of the same name"),
     ("type print enum:\n    A\n", "return 0", "'print' is a builtin and can't be used as an enum name"),

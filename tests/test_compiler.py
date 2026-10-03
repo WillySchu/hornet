@@ -41,7 +41,7 @@ GCC_SKIP = pytest.mark.skipif(
 HOST_IS_MACOS = sys.platform == "darwin"
 ASM_TARGET = default_target()
 
-EXECUTION_TIMEOUT = 10
+EXECUTION_TIMEOUT = 5
 
 
 # ---------------------------------------------------------------------------
@@ -9882,7 +9882,7 @@ class TestCasting:
             "    str s = str(x)\n"
             "    return 0\n"
         )
-        with pytest.raises(SemanticError, match="takes a byte or"):
+        with pytest.raises(SemanticError, match="takes a byte, a .*byte, or an enum"):
             analyze(ast)
 
     def test_cast_from_bool_is_rejected(self):

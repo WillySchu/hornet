@@ -639,6 +639,25 @@ class TypedFunctionBuilder:
             base, offset, ptr = self.temp(), self.temp(), self.temp()
             return value_ir + [IRStaticDataAddress(dst=base, label=label), IRCast(dst=offset, src=value),
                                IRBinOp(dst=ptr, op=BinaryOp.ADD, left=base, right=offset)], ptr, IRConst(1, Type.INT)
+        if isinstance(e, t.EnumName):
+            # A static table of the members' names, each a str's (ptr, len), indexed by the value.
+            members = self.ir_program.enum_registry[e.value.type.enum_name].members
+            tables = self.ir_program.__dict__.setdefault('_enum_name_tables', {})
+            if e.value.type not in tables:
+                words = []
+                for member in members:
+                    name_label = self.ids.new_label("enum_name")
+                    self.ir_program.string_literals.append((name_label, member))
+                    words += [name_label, len(member)]
+                tables[e.value.type] = self.ids.new_label("enum_names")
+                self.ir_program.type_descriptors.append((tables[e.value.type], words))
+            value_ir, value = self.value(e.value)
+            base, index, offset, entry = self.temp(), self.temp(Type.INT), self.temp(Type.INT), self.temp()
+            read_ir, ptr, length = self.read_str(entry)
+            return value_ir + [
+                IRStaticDataAddress(dst=base, label=tables[e.value.type]), IRCast(dst=index, src=value),
+                IRBinOp(dst=offset, op=BinaryOp.MULTIPLY, left=index, right=IRConst(16, Type.INT)),
+                IRBinOp(dst=entry, op=BinaryOp.ADD, left=base, right=offset)] + read_ir, ptr, length
         if isinstance(e, t.StrFromBytes):
             slice_ir, src, length, _ = self.slice_value(e.value)
             size, ptr = self.temp(Type.INT), self.temp()
