@@ -38,6 +38,7 @@ Updates:
 - Disallow untyped array literals from anything except assignment to a typed variable / parameter / return.
 - `assert`
 - `cap` builtin?
+- Enums.
 - Ternary.
 - Sets.
 - Generics.
