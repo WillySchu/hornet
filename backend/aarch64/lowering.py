@@ -7,7 +7,8 @@ kept sign/zero-extended to 32 bits, as on x86-64.
 """
 
 from backend.aarch64.assembly import AddrOf, Call, Cond, FrameSlot, Imm, Instr, LabelDef, LabelRef, Mem, Reg, Shift, SymPage, SymPageOffset, FP
-from backend.aarch64.calling_convention import ARG_REGISTERS, MAX_REGISTER_ARGS, SCRATCH_A, SCRATCH_B, SCRATCH_RESULT
+from backend.aarch64.calling_convention import (
+    ARG_REGISTERS, MAX_REGISTER_ARGS, SCRATCH_A, SCRATCH_ADDRESS, SCRATCH_B, SCRATCH_RESULT)
 from backend.common.division import is_power_of_two, magic
 from backend.errors import CodegenError
 from ir.cfg import uses
@@ -98,6 +99,25 @@ class Selector:
             self.emit('ldrsb' if t == Type.INT8 else 'ldrb', dst.w, mem)
         else:
             raise CodegenError(f"aarch64: no scalar load of {t} ({size} bytes)")
+
+    def address(self, base: Reg, offset: int, scratch: Reg) -> Mem:
+        """[base, #offset] when a load or store reaches it directly, else through `scratch`."""
+        if -256 <= offset <= 255:
+            return Mem(base.x, offset)
+        return Mem(self.offset_base(base.x, offset, scratch))
+
+    def offset_base(self, base: Reg, offset: int, scratch: Reg) -> Reg:
+        """A register holding base + offset (`base` itself when the offset is 0)."""
+        if offset == 0:
+            return base
+        if 0 < offset <= 4095:
+            self.emit('add', scratch.x, base, Imm(offset))
+        elif -4095 <= offset < 0:
+            self.emit('sub', scratch.x, base, Imm(-offset))
+        else:  # beyond an immediate: materialize it (in x17, which holds nothing between instructions)
+            self.mov_imm(SCRATCH_ADDRESS, offset)
+            self.emit('add', scratch.x, base, SCRATCH_ADDRESS)
+        return scratch.x
 
     def store_mem(self, t: Type, src: Reg, mem) -> None:
         size = self._mem_size(t)
@@ -234,12 +254,12 @@ class Selector:
         elif isinstance(instr, IRLoad):
             addr = self.value_in(instr.address, SCRATCH_A)
             d = self.dest(instr.dst)
-            self.load_mem(instr.dst.type, d, Mem(addr.x))
+            self.load_mem(instr.dst.type, d, self.address(addr, instr.offset, SCRATCH_A))
             self.finish(instr.dst, d)
         elif isinstance(instr, IRStore):
             addr = self.value_in(instr.address, SCRATCH_A)
             v = self.value_in(instr.value, SCRATCH_RESULT)
-            self.store_mem(instr.value_type, v, Mem(addr.x))
+            self.store_mem(instr.value_type, v, self.address(addr, instr.offset, SCRATCH_A))
         elif isinstance(instr, IRLocalAddress):
             d = self.dest(instr.dst).x
             self.out.append(AddrOf(d, FrameSlot(instr.slot)))
@@ -358,8 +378,8 @@ class Selector:
         """Copy value_type's bytes: unrolled 16/8/4/2/1-byte moves when small, else an 8-byte loop."""
         size = type_byte_width(instr.value_type, self.host.ir_program.struct_registry,
                                self.host.ir_program.sum_type_registry)
-        src = self.value_in(instr.src_address, SCRATCH_A).x
-        dst = self.value_in(instr.dst_address, SCRATCH_Q).x
+        src = self.offset_base(self.value_in(instr.src_address, SCRATCH_A).x, instr.src_offset, SCRATCH_A)
+        dst = self.offset_base(self.value_in(instr.dst_address, SCRATCH_Q).x, instr.dst_offset, SCRATCH_Q)
         if size <= UNROLLED_COPY_LIMIT:
             self._copy_tail(dst, src, 0, size)
             return

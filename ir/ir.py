@@ -79,17 +79,19 @@ class IRReturn:
 
 @dataclass
 class IRLoad:
-    """dst = *address at dst.type's width."""
+    """dst = *(address + offset) at dst.type's width; `offset` is a constant byte count."""
     dst: Temp
     address: IRValue
+    offset: int = 0
 
 
 @dataclass
 class IRStore:
-    """*address = value at value_type's width (the destination's declared type)."""
+    """*(address + offset) = value at value_type's width (the destination's declared type)."""
     address: IRValue
     value: IRValue
     value_type: Type
+    offset: int = 0
 
 
 @dataclass
@@ -108,10 +110,12 @@ class IRStaticDataAddress:
 
 @dataclass
 class IRCopy:
-    """Copy value_type's width from src_address to dst_address."""
+    """Copy value_type's width from src_address + src_offset to dst_address + dst_offset."""
     dst_address: IRValue
     src_address: IRValue
     value_type: Type
+    dst_offset: int = 0
+    src_offset: int = 0
 
 
 @dataclass

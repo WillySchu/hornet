@@ -1,13 +1,14 @@
 """Structural IR invariants, checked after building and after optimization:
 non-empty body; unique labels; every block ends in one terminator; jump targets exist;
-slots exist; every Temp fits in a register; every read Temp is written somewhere in the function.
+slots exist; every Temp fits in a register; every read Temp is written somewhere in the function;
+memory-access offsets are integers.
 Not checked: operand type consistency, call target existence.
 """
 
 from diagnostics import InternalCompilerError
 
 from ir.cfg import TERMINATORS, reads, writes
-from ir.ir import IRBranch, IRFunction, IRJump, IRLabel, IRLocalAddress, IRProgram
+from ir.ir import IRBranch, IRCopy, IRFunction, IRJump, IRLabel, IRLoad, IRLocalAddress, IRProgram, IRStore
 from typesys import TypeKind
 
 
@@ -51,6 +52,10 @@ def verify_function(ir_fn: IRFunction) -> None:
                     raise IRVerificationError(f"{ir_fn.name}: IRBranch targets undefined label {label!r}")
 
     for op in ir_fn.body:
+        offsets = ((op.offset,) if isinstance(op, (IRLoad, IRStore))
+                   else (op.dst_offset, op.src_offset) if isinstance(op, IRCopy) else ())
+        if any(not isinstance(o, int) or isinstance(o, bool) for o in offsets):
+            raise IRVerificationError(f"{ir_fn.name}: memory-access offset isn't an integer in {op!r}")
         if isinstance(op, IRLocalAddress) and op.slot not in ir_fn.slot_widths:
             raise IRVerificationError(f"{ir_fn.name}: IRLocalAddress references unknown slot {op.slot}")
     if ir_fn.hidden_return_ptr_slot is not None and ir_fn.hidden_return_ptr_slot not in ir_fn.slot_widths:

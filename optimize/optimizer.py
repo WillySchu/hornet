@@ -2,6 +2,7 @@
 
 from ir.ir import IRFunction, IRLocalAddress, IRProgram
 from ir.verify import verify_program
+from optimize.address_folding import fold_addresses
 from optimize.branch_simplification import simplify_branches
 from optimize.constant_folding import fold_constants
 from optimize.copy_coalescing import coalesce_copies
@@ -27,6 +28,7 @@ def optimize_function(ir_fn: IRFunction) -> None:
         fold_constants(ir_fn)
         reduce_identities(ir_fn)
         coalesce_copies(ir_fn, pinned)
+        fold_addresses(ir_fn, pinned)
         remove_dead_code(ir_fn, pinned)
         if ir_fn.body == before:
             break

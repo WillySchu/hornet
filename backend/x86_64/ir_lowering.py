@@ -338,21 +338,21 @@ class InstructionSelector:
             out.extend(self._mov(a, d, width))
         return out + [cls(d)]
 
-    def _address_operand(self, address: IRValue, scratch: str, out: list) -> Memory:
-        """Memory operand for the address held in `address` (register if allocated, else via `scratch`)."""
+    def _address_operand(self, address: IRValue, scratch: str, out: list, offset: int = 0) -> Memory:
+        """Memory operand for `address + offset` (the base in its register if allocated, else via `scratch`)."""
         loc = self._loc(address, 8)
         if isinstance(loc, Register):
-            return Memory(loc.name, 0)
+            return Memory(loc.name, offset)
         reg = self._scratch(scratch, 8)
         out.extend(self._mov(loc, reg, 8))
-        return Memory(reg.name, 0)
+        return Memory(reg.name, offset)
 
     def _direct_load(self, instr: IRLoad) -> Optional[list]:
         width = self._width(instr.dst.type)
         if width is None or not is_wide_type(instr.address.type):
             return None
         out: list = []
-        mem = self._address_operand(instr.address, 'eax', out)
+        mem = self._address_operand(instr.address, 'eax', out, instr.offset)
         d = self._loc(instr.dst, width)
         if isinstance(d, Register):
             return out + self._mov(mem, d, width)
@@ -364,7 +364,7 @@ class InstructionSelector:
         if width is None or self._width(instr.value.type) != width or not is_wide_type(instr.address.type):
             return None
         out: list = []
-        mem = self._address_operand(instr.address, 'r9d', out)
+        mem = self._address_operand(instr.address, 'r9d', out, instr.offset)
         v = self._as_source(self._loc(instr.value, width), mem, width, 'eax', out)
         return out + self._mov(v, mem, width)
 
@@ -524,18 +524,20 @@ class InstructionSelector:
             elif isinstance(instr, IRLoad):
                 out.extend(self._gen_load_value(instr.address, Register('eax')))
                 if instr.dst.type == Type.STR:
-                    out.append(MovQ(src=Memory('rax', 0), dst=Register('rax')))
+                    out.append(MovQ(src=Memory('rax', instr.offset), dst=Register('rax')))
                 else:
-                    out.extend(self.host._gen_read_scalar_into(Memory('rax', 0), instr.dst.type, Register('eax')))
+                    out.extend(self.host._gen_read_scalar_into(
+                        Memory('rax', instr.offset), instr.dst.type, Register('eax')))
                 out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
             elif isinstance(instr, IRStore):
                 # address in %r9, value in %eax: both live at the store
                 out.extend(self._gen_load_value(instr.address, Register('r9d')))
                 out.extend(self._gen_load_value(instr.value, Register('eax')))
                 if instr.value_type == Type.STR:
-                    out.append(MovQ(src=Register('rax'), dst=Memory('r9', 0)))
+                    out.append(MovQ(src=Register('rax'), dst=Memory('r9', instr.offset)))
                 else:
-                    out.extend(self.host._gen_write_scalar_from(Register('eax'), instr.value_type, Memory('r9', 0)))
+                    out.extend(self.host._gen_write_scalar_from(
+                        Register('eax'), instr.value_type, Memory('r9', instr.offset)))
             elif isinstance(instr, IRLocalAddress):
                 out.append(LeaQFrameSlot(slot=instr.slot, dst=Register('rax')))
                 out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
@@ -546,7 +548,8 @@ class InstructionSelector:
                 # %r9/%r8: both addresses live at once
                 out.extend(self._gen_load_value(instr.dst_address, Register('r9d')))
                 out.extend(self._gen_load_value(instr.src_address, Register('r8d')))
-                out.extend(self.host.gen_array_copy(Memory('r9', 0), Memory('r8', 0), instr.value_type))
+                out.extend(self.host.gen_array_copy(
+                    Memory('r9', instr.dst_offset), Memory('r8', instr.src_offset), instr.value_type))
             elif isinstance(instr, IRBoundsCheck):
                 # Cmp is unsigned; signedness lives in the jump.
                 out.extend(self._gen_load_value(instr.length, Register('ecx')))
