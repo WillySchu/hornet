@@ -2,7 +2,6 @@
 
 import argparse
 import itertools
-import re
 from dataclasses import dataclass, field, fields
 from enum import auto, Enum
 from typing import Any, List, Optional, Tuple, Union
@@ -688,14 +687,7 @@ class Parser:
             alias_tok = self.expect(TokenType.IDENTIFIER, "Expected a module name after 'as'")
             qualifier = alias_tok.val
         else:
-            qualifier = _default_import_qualifier(path)
-            if not re.fullmatch(r'[a-zA-Z_]\w*', qualifier):
-                raise self._error(
-                    f"Import path {path!r} doesn't produce a valid module name "
-                    f"({qualifier!r}) on its own -- rename the file, or give this import an "
-                    f"explicit qualifier with 'as'",
-                    start_tok,
-                )
+            qualifier = _default_import_qualifier(path)  # an identifier, or modules.py rejects the file
         return ImportDecl(path=path, qualifier=qualifier, line=start_tok.line, col=start_tok.col)
 
     def parse_from_import(self) -> FromImportDecl:

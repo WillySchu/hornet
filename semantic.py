@@ -10,6 +10,7 @@ and _TypedTreeBuilder builds each function's typed tree from those facts at the 
 
 import argparse
 import dataclasses
+import os
 from typing import Dict, List, Optional, Set, Tuple
 
 from diagnostics import CompileError
@@ -186,6 +187,11 @@ def contains_reachable_break(statements: List[Node]) -> bool:
             if stmt.else_body is not None and contains_reachable_break(stmt.else_body):
                 return True
     return False
+
+
+def _file_and_line(node: Node) -> str:
+    """`file (line N)` of a declaration, for an error reported somewhere else."""
+    return f"{os.path.basename(node.file) if node.file else '<input>'} (line {node.line})"
 
 
 def always_leaves(statements: List[Node], types: dict) -> bool:
@@ -425,6 +431,7 @@ class SemanticAnalyzer:
 
         # 4.5. Externs share the function registry.
         self.extern_names = {ext.name for ext in program.extern_functions}
+        self._extern_decls = {}  # name -> its declaration, for the duplicate's error
         for ext in program.extern_functions:
             self._enter(ext)
             self.check_extern_function_decl(ext)
@@ -897,8 +904,17 @@ class SemanticAnalyzer:
                 f"names share one namespace and can never be the same",
                 ext,
             )
+        if ext.name in self._extern_decls:
+            raise SemanticError(
+                f"Extern '{shown(ext.name)}' is already declared in {_file_and_line(self._extern_decls[ext.name])} "
+                f"-- declare an extern once and import it where else it is needed", ext)
         if ext.name in self.functions:
-            raise SemanticError(f"Function '{shown(ext.name)}' is already declared", ext)
+            # A function of the entry file: only there is a function's key its bare name, like an extern's.
+            function = next((fn for fn in self.all_functions if fn.name == ext.name), None)
+            raise SemanticError(
+                f"Function '{shown(ext.name)}' has the same name as an extern declared in {_file_and_line(ext)} "
+                f"-- rename the function", function if function is not None else ext)
+        self._extern_decls[ext.name] = ext
 
         param_types = [self._type(p.type, p) for p in ext.params]
         return_type = self._return_type(ext)

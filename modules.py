@@ -10,6 +10,9 @@ from lexer import lex
 from parser import Parser, Program
 
 
+_MODULE_NAME = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')  # an identifier, as the lexer reads one
+
+
 class ModuleError(CompileError):
     """Import resolution failure."""
 
@@ -61,7 +64,8 @@ def discover_modules(entry_path: str) -> Tuple[Program, Dict[str, DiscoveredModu
         aliases: Dict[str, str] = {}
         named: Dict[str, Tuple[str, str]] = {}
 
-        def _resolve_and_discover(path: str, at_line: int) -> str:
+        def _resolve_and_discover(decl) -> str:
+            path, at_line = decl.path, decl.line
             resolved = _resolve_import_path(importer_dir, path)
             if resolved is None:
                 raise ModuleError(
@@ -74,6 +78,13 @@ def discover_modules(entry_path: str) -> Tuple[Program, Dict[str, DiscoveredModu
             if resolved in by_path:
                 return by_path[resolved]
             canonical_name = resolved.stem
+            if not _MODULE_NAME.fullmatch(canonical_name):  # it becomes part of every symbol of the module
+                raise ModuleError(
+                    f"Import {path!r} is the file {resolved.name!r}, and a module is named by its file: "
+                    f"{canonical_name!r} must be an identifier (letters, digits, and underscores, not starting "
+                    f"with a digit) -- rename the file",
+                    file=program.file, line=decl.line, col=decl.col,
+                )
             if canonical_name in modules or canonical_name in by_path.values():
                 raise ModuleError(
                     f"Two different files both resolve to module name "
@@ -92,7 +103,7 @@ def discover_modules(entry_path: str) -> Tuple[Program, Dict[str, DiscoveredModu
             return canonical_name
 
         for decl in program.imports:
-            canonical_name = _resolve_and_discover(decl.path, decl.line)
+            canonical_name = _resolve_and_discover(decl)
             if decl.qualifier in aliases and aliases[decl.qualifier] != canonical_name:
                 raise ModuleError(
                     f"Two imports at line {decl.line} both use the name "
@@ -103,7 +114,7 @@ def discover_modules(entry_path: str) -> Tuple[Program, Dict[str, DiscoveredModu
             aliases[decl.qualifier] = canonical_name
 
         for from_decl in program.from_imports:
-            canonical_name = _resolve_and_discover(from_decl.path, from_decl.line)
+            canonical_name = _resolve_and_discover(from_decl)
             for original_name, local_alias in from_decl.names:
                 if local_alias in aliases:
                     raise ModuleError(

@@ -8647,7 +8647,7 @@ class TestExternFunctions:
             "extern int abs(int n)\n"
             "def int abs():\n"
             "    return 0\n",
-            match="'abs' is already declared",
+            match=r"Function 'abs' has the same name as an extern declared in program.lang \(line 1\) -- rename",
         )
 
     def test_two_externs_with_the_same_name_are_rejected(self):
@@ -8656,7 +8656,7 @@ class TestExternFunctions:
             "extern int abs(int n)\n"
             "def int main():\n"
             "    return 0\n",
-            match="'abs' is already declared",
+            match=r"Extern 'abs' is already declared in program.lang \(line 1\)",
         )
 
     def test_struct_typed_extern_parameter_is_rejected(self):
