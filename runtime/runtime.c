@@ -434,7 +434,16 @@ static void dict_bump_tombstones(void *descriptor, int64_t delta) {
     dict_set_tombstones(descriptor, dict_tombstones(descriptor) + delta);
 }
 
-// Double capacity once (count + tombstones + 1) exceeds 75%; rehash live buckets only.
+// A rehash's capacity: 8 for a dict's first write; unchanged when at most half the buckets would
+// be live (tombstones filled the table); otherwise doubled.
+static int64_t dict_rehash_capacity(int64_t capacity, int64_t count) {
+    if (capacity == 0) {
+        return 8;
+    }
+    return (count + 1) * 2 <= capacity ? capacity : capacity * 2;
+}
+
+// Rehash the live buckets into a new table once (count + tombstones + 1) exceeds 75%.
 static void dict_grow_scalar_key_if_needed(void *descriptor, int64_t key_width, int64_t value_width) {
     int64_t capacity = dict_capacity(descriptor);
     int64_t count = read_i64((char *)descriptor + 8);
@@ -443,8 +452,7 @@ static void dict_grow_scalar_key_if_needed(void *descriptor, int64_t key_width, 
         return;
     }
     int64_t bucket_stride = 1 + key_width + value_width;
-    // nil dict's first write
-    int64_t new_capacity = capacity == 0 ? 8 : capacity * 2;
+    int64_t new_capacity = dict_rehash_capacity(capacity, count);
     void *new_buckets = calloc((size_t)new_capacity, (size_t)bucket_stride);
     void *old_buckets = dict_buckets(descriptor);
     for (int64_t i = 0; i < capacity; i++) {
@@ -470,8 +478,7 @@ static void dict_grow_str_key_if_needed(void *descriptor, int64_t value_width) {
         return;
     }
     int64_t bucket_stride = 1 + key_region_width + value_width;
-    // nil dict's first write
-    int64_t new_capacity = capacity == 0 ? 8 : capacity * 2;
+    int64_t new_capacity = dict_rehash_capacity(capacity, count);
     void *new_buckets = calloc((size_t)new_capacity, (size_t)bucket_stride);
     void *old_buckets = dict_buckets(descriptor);
     for (int64_t i = 0; i < capacity; i++) {
