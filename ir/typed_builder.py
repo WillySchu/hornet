@@ -10,6 +10,7 @@ from dataclasses import fields
 
 import typed_ast as t
 from escape_analysis import analyze_array_escapes, is_heap_allocated
+from ir.panics import PanicBlocks
 from ir.typedesc import type_descriptor
 from ir.ir import (
     IRBinOp, IRBoundsCheck, IRBranch, IRCall, IRCast, IRConst, IRCopy, IRFunction, IRJump, IRLabel, IRLoad,
@@ -50,18 +51,29 @@ def link_name(name: str) -> str:
     return name if name == 'main' or '$' in name or '.' in name else name + '$'
 
 
-def _calls_anything(e) -> bool:
-    """Whether evaluating `e` may call a function: the only way an expression can change a dictionary."""
-    stack = [e]
+def _nodes(root):
+    """`root` (a node, or a tuple of them) and every expression and statement under it."""
+    stack = list(root) if isinstance(root, tuple) else [root]
     while stack:
         node = stack.pop()
-        if isinstance(node, t.Call):
-            return True
+        yield node
         for f in fields(node):
             value = getattr(node, f.name)
             for v in value if isinstance(value, tuple) else (value,):
                 stack.extend(x for x in (v if isinstance(v, tuple) else (v,)) if isinstance(x, (t.Expr, t.Stmt)))
-    return False
+
+
+def _calls_anything(e) -> bool:
+    """Whether evaluating `e` may call a function: the only way an expression can change a dictionary."""
+    return any(isinstance(node, t.Call) for node in _nodes(e))
+
+
+def _aliased_sums(fn: t.Function) -> set:
+    """Ids of the sum variables whose address is taken as a pointer to the sum (`&u`, not `&u.field`
+    of a narrowed `u`): the only way one changes variant where an `is` check has narrowed it."""
+    return {node.place.symbol.id for node in _nodes(fn.body)
+            if isinstance(node, t.AddressOf) and isinstance(node.place, t.Local)
+            and node.place.type.kind == TypeKind.SUM}
 
 
 class TypedFunctionBuilder:
@@ -75,6 +87,8 @@ class TypedFunctionBuilder:
         self.ir_fn = ir_fn = IRFunction(name=link_name(fn.name))
         ir_fn.return_type = fn.return_type
         self.heap_ids = analyze_array_escapes(fn, self.ir_program.struct_registry, self.ir_program.escape_summaries)
+        self.aliased_sums = _aliased_sums(fn)  # their narrowed reads and writes re-check the variant
+        self.panics = PanicBlocks(self.ir_program, "variant_panic")
         self.storage = {}  # symbol id -> (Temp or None, heap)
         self.loops = []  # (continue label, end label)
         self.scratch = {}  # name -> slot, for per-function scratch storage
@@ -82,7 +96,7 @@ class TypedFunctionBuilder:
         ir += self.block(fn.body)
         if not ir or not isinstance(ir[-1], (IRBranch, IRJump, IRReturn)):
             ir.append(IRReturn(value=None))
-        ir_fn.body = ir
+        ir_fn.body = ir + self.panics.blocks()
         return ir_fn
 
     # -- layout and scratch
@@ -386,11 +400,23 @@ class TypedFunctionBuilder:
             return ir + index_ir + [IRBoundsCheck(index=index, length=length)] + element_ir, address
         if isinstance(e, t.Payload):
             ir, base = self.address(e.sum)
+            if isinstance(e.sum, t.Local) and e.sum.symbol.id in self.aliased_sums:
+                ir = ir + self.variant_check(base, e)
             offset_ir, address = self.offset(base, SUM_TYPE_TAG_WIDTH)
             return ir + offset_ir, address
         if isinstance(e, t.DictLookup):
             return self.dict_call(e.dict, e.key, 'lookup', result_type=Type.INT64)
         raise NotYetPorted(f"place {type(e).__name__}")
+
+    def variant_check(self, base, e: t.Payload) -> list:
+        """Panic unless the sum at `base` still holds the variant `e` was narrowed to: a pointer to
+        the variable may have changed it since the `is` check."""
+        variants = self.ir_program.sum_type_registry[e.sum.type.sum_type_name].variants
+        tag, changed, ok = self.temp(Type.INT32), self.temp(Type.BOOL), self.ids.new_label("variant_ok")
+        message = f"'{e.sum.symbol.name}' changed variant while narrowed"
+        return [IRLoad(dst=tag, address=base),
+                IRBinOp(dst=changed, op=BinaryOp.NOT_EQUAL, left=tag, right=IRConst(variants.index(e.type), Type.INT32)),
+                IRBranch(cond=changed, true_label=self.panics.label(message), false_label=ok), IRLabel(ok)]
 
     def field_offset(self, e: t.FieldAccess) -> int:
         struct_type = e.base.type.element_type if e.through_pointer else e.base.type

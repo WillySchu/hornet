@@ -25,6 +25,8 @@ Updates:
 - Any import-path resolution strategy beyond "relative to the importing file" (a stdlib search path, a project manifest/root, etc.).
 - is as a general, composable boolean expression — usable with and/or/not, assignable to bool, usable in while conditions or as a function argument. This is the biggest deferred item; it needs real control-flow-sensitive narrowing (what does if shape is Circle and x > 0: narrow? what survives an early return guard?), not just a special if-condition shape.
 - Narrowing inside a while condition. Excluded by construction in v1 (only if is recognized), but worth its own tracked item since loop bodies raise questions v1 never has to answer — what does narrowing across iterations even mean once reassignment is disallowed anyway.
+- Late argument reads. The check runs when the payload's address is computed. A composite argument is copied by the callee later, so foo(u, change(p)) can still pass a payload of the wrong variant. This is the late-read bug I reported with the first fixes; fixing that closes this window.
+- Hole B. A pointer into a payload that outlives the variant is untouched, as agreed.
 - Pass structs to FFI calls.
 - Separate the runtime code from codegen.
 - CSE pass optimization for array addresses and thus indexes.
