@@ -73,12 +73,35 @@ def _calls_anything(e) -> bool:
     return any(isinstance(node, t.Call) for node in _nodes(e))
 
 
-def _aliased_sums(fn: t.Function) -> set:
-    """Ids of the sum variables whose address is taken as a pointer to the sum (`&u`, not `&u.field`
-    of a narrowed `u`): the only way one changes variant where an `is` check has narrowed it."""
+def _addressed(fn: t.Function) -> set:
+    """Ids of the variables whose own address is taken (`&x`; not `&x.field`, nor `&u` of a narrowed
+    `u`): the only way a whole variable changes without being assigned. So a scalar one is copied
+    when read, and a sum one re-checked where an `is` check has narrowed it."""
     return {node.place.symbol.id for node in _nodes(fn.body)
-            if isinstance(node, t.AddressOf) and isinstance(node.place, t.Local)
-            and node.place.type.kind == TypeKind.SUM}
+            if isinstance(node, t.AddressOf) and isinstance(node.place, t.Local)}
+
+
+def _variable(place):
+    """The variable `place` is part of by value (through fields, elements, and a narrowed sum's
+    payload), or None if it is reached through a pointer, a slice, or a dict."""
+    while not isinstance(place, t.Local):
+        if isinstance(place, t.FieldAccess) and not place.through_pointer:
+            place = place.base
+        elif isinstance(place, t.ArrayIndex):
+            place = place.base
+        elif isinstance(place, t.Payload):
+            place = place.sum
+        else:
+            return None
+    return place.symbol
+
+
+def _exposed(fn: t.Function) -> set:
+    """Ids of the variables a pointer or a slice may reach: `&x`, `&x.field`, `&x[i]`, or a slice of
+    an array `x[a:b]`, anywhere in the function. Only these can change while a call runs."""
+    places = [node.place if isinstance(node, t.AddressOf) else node.base for node in _nodes(fn.body)
+              if isinstance(node, t.AddressOf) or (isinstance(node, t.SliceOf) and node.kind == 'array')]
+    return {symbol.id for symbol in map(_variable, places) if symbol is not None}
 
 
 class TypedFunctionBuilder:
@@ -92,7 +115,7 @@ class TypedFunctionBuilder:
         self.ir_fn = ir_fn = IRFunction(name=link_name(fn.name))
         ir_fn.return_type = fn.return_type
         self.heap_ids = analyze_array_escapes(fn, self.ir_program.struct_registry, self.ir_program.escape_summaries)
-        self.aliased_sums = _aliased_sums(fn)  # their narrowed reads and writes re-check the variant
+        self.addressed, self.exposed = _addressed(fn), _exposed(fn)
         self.panics = PanicBlocks(self.ir_program, "check_failed")  # for panic_when
         self.storage = {}  # symbol id -> (Temp or None, heap)
         self.loops = []  # (continue label, end label)
@@ -406,7 +429,7 @@ class TypedFunctionBuilder:
             return ir + index_ir + [IRBoundsCheck(index=index, length=length, where=e.where)] + element_ir, address
         if isinstance(e, t.Payload):
             ir, base = self.address(e.sum)
-            if isinstance(e.sum, t.Local) and e.sum.symbol.id in self.aliased_sums:
+            if isinstance(e.sum, t.Local) and e.sum.symbol.id in self.addressed:
                 ir = ir + self.variant_check(base, e)
             offset_ir, address = self.offset(base, SUM_TYPE_TAG_WIDTH)
             return ir + offset_ir, address
@@ -448,6 +471,15 @@ class TypedFunctionBuilder:
             return self.place_address(e)
         ir, address = self.scratch_address(e.type)
         return ir + self.write_into(address, e), address
+
+    def changed_by(self, e, later) -> bool:
+        """Whether evaluating `later` could change composite `e`, evaluated before it: `later` calls
+        something, and `e` is a place a call can reach (through a pointer, slice, or dict, or in a
+        variable one may reach). Its value was fixed when it was evaluated, so it is copied then."""
+        if not isinstance(e, _PLACE_NODES) or not _calls_anything(later):
+            return False
+        symbol = _variable(e)
+        return symbol is None or symbol.id in self.exposed
 
     def stored(self, e) -> tuple:
         """The address of a str or slice held in memory: a place, or a call's result."""
@@ -718,10 +750,13 @@ class TypedFunctionBuilder:
             return [], IRConst(0, Type.INT64 if e.type.kind == TypeKind.POINTER else e.type)
         if isinstance(e, t.Local):
             temp, heap = self.bind(e.symbol)
-            if not heap:
-                return [], temp
-            loaded = self.temp(e.type)
-            return [IRLoad(dst=loaded, address=temp)], loaded
+            if heap:
+                loaded = self.temp(e.type)
+                return [IRLoad(dst=loaded, address=temp)], loaded
+            if e.symbol.id in self.addressed:  # what is evaluated later may change it through a pointer
+                copy = self.temp(e.type)
+                return [IRMove(dst=copy, src=temp)], copy
+            return [], temp
         if isinstance(e, (t.Deref, t.FieldAccess, t.ArrayIndex, t.SliceIndex, t.Payload, t.DictLookup)):
             ir, address = self.place_address(e)
             loaded = self.temp(e.type)
@@ -845,7 +880,7 @@ class TypedFunctionBuilder:
                 scratch_ir, destination = self.scratch_address(e.type)
                 ir += scratch_ir
             args.append(destination)
-        for a in e.args:
+        for i, a in enumerate(e.args):
             kind = a.type.kind
             if _scalar(a.type):
                 arg_ir, value = self.value(a)
@@ -860,7 +895,9 @@ class TypedFunctionBuilder:
                 ir += arg_ir
                 args += [ptr, length, cap]
             elif kind in _COMPOSITE_BY_ADDRESS:
-                arg_ir, address = self.address(a)  # the callee copies it
+                # The callee copies it, on entry. A later argument that calls could change it
+                # before then, so in that case its value is copied here.
+                arg_ir, address = self.address(a, fresh=self.changed_by(a, e.args[i + 1:]))
                 ir += arg_ir
                 args.append(address)
             else:
@@ -1137,7 +1174,7 @@ class TypedFunctionBuilder:
     def composite_equality(self, e: t.Binary) -> tuple:
         if e.op not in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
             raise NotYetPorted(f"{e.op.name} on {e.left.type}")
-        left_ir, left = self.address(e.left)
+        left_ir, left = self.address(e.left, fresh=self.changed_by(e.left, e.right))
         right_ir, right = self.address(e.right)
         mismatch, end = self.ids.new_label("eq_mismatch"), self.ids.new_label("eq_end")
         result = self.temp(Type.BOOL)
