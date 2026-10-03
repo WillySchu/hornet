@@ -284,11 +284,17 @@ class ExprStmt(Node):
 
 @dataclass
 class IsCheck(Node):
-    """If-condition `NAME is T` or `EXPR is T as NAME` (T a sum's variant, or an enum's member). Not a
-    general expression."""
-    variable_name: str
+    """`SUBJECT is T`: whether a sum holds variant T, or an enum is member T. Three shapes: `NAME is T`
+    (variable_name; the one that can narrow NAME), `EXPR is T` (subject), and, as a whole `if`
+    condition or a `match` arm, `EXPR is T as NAME` (both: NAME is declared as a copy of EXPR)."""
+    variable_name: Optional[str]
     type_name: Union[str, QualifiedTypeExpr, ArrayTypeExpr, SliceTypeExpr, PointerTypeExpr]
     subject: Optional[Node] = None
+
+    @property
+    def binds(self) -> bool:
+        """Whether this is the `EXPR is T as NAME` shape."""
+        return self.variable_name is not None and self.subject is not None
 
 
 @dataclass
@@ -555,6 +561,9 @@ _BINARY_OPS = {
     TokenType.OR: OperatorInfo(BinaryOp.OR, precedence=1, associativity=Associativity.LEFT),
 }
 
+
+# `is` binds like `==` and `in`.
+_IS_PRECEDENCE = _BINARY_OPS[TokenType.EQUAL].precedence
 
 # `not` binds looser than every binary operator except `and` and `or`: `not a < b` is `not (a < b)`.
 _NOT_OPERAND_PRECEDENCE = _BINARY_OPS[TokenType.AND].precedence + 1
@@ -1138,29 +1147,25 @@ class Parser:
         return If(condition=condition, then_body=then_body, else_body=else_body, line=start_tok.line, col=start_tok.col)
 
     def _parse_if_condition(self) -> Node:
-        """IsCheck form, or an ordinary boolean expression."""
-        if self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.IS:
-            name_tok = self.advance()
-            self.advance()
-            type_name = self._parse_qualifiable_type_name("a type name after 'is'")
-            if self.check(TokenType.AS):
-                self.advance()
-                binding_tok = self.expect(TokenType.IDENTIFIER, "Expected a binding name after 'as'")
-                subject = Variable(name=name_tok.val, line=name_tok.line, col=name_tok.col)
-                return IsCheck(variable_name=binding_tok.val, type_name=type_name, subject=subject, line=name_tok.line, col=name_tok.col)
-            return IsCheck(variable_name=name_tok.val, type_name=type_name, line=name_tok.line, col=name_tok.col)
+        """A boolean expression; when it is one `is` check, `as NAME` may follow to bind the subject."""
         expr = self.parse_expression()
-        if self.check(TokenType.IS):
-            is_tok = self.advance()
-            type_name = self._parse_qualifiable_type_name("a type name after 'is'")
-            self.expect(
-                TokenType.AS,
-                "Expected 'as NAME' after the type name -- a non-bare-variable "
-                "subject (an Index, a Call, ...) needs an explicit binding name "
-                "to narrow, since it has no existing name of its own",
-            )
+        if self.check(TokenType.AS):
+            if not isinstance(expr, IsCheck):
+                raise self._error(
+                    "'as NAME' binds the subject of an 'is' check that is the whole condition "
+                    "(`EXPR is T as NAME`); it can't follow 'is not', or a check inside a larger condition",
+                    self.current())
+            self.advance()
             binding_tok = self.expect(TokenType.IDENTIFIER, "Expected a binding name after 'as'")
-            return IsCheck(variable_name=binding_tok.val, type_name=type_name, subject=expr, line=is_tok.line, col=is_tok.col)
+            if self.check(TokenType.AND, TokenType.OR):
+                raise self._error(
+                    "'as NAME' binds the subject of an 'is' check that is the whole condition "
+                    "(`EXPR is T as NAME`); it can't be combined with 'and' or 'or' yet", self.current())
+            subject = expr.subject
+            if subject is None:
+                subject = Variable(name=expr.variable_name, line=expr.line, col=expr.col)
+            return IsCheck(variable_name=binding_tok.val, type_name=expr.type_name, subject=subject,
+                           line=expr.line, col=expr.col)
         return expr
 
     def _parse_qualifiable_type_name(self, expected_message: str) -> Union[str, QualifiedTypeExpr, ArrayTypeExpr, SliceTypeExpr, PointerTypeExpr]:
@@ -1286,6 +1291,20 @@ class Parser:
                 right = self.parse_binary(in_info.precedence + 1)
                 membership = Binary(op=BinaryOp.IN, left=left, right=right, line=left.line, col=left.col)
                 left = Unary(op=UnaryOp.NOT, operand=membership, line=not_tok.line, col=not_tok.col)
+                continue
+            if self.check(TokenType.IS):  # `left is T`, `left is not T`: T is a type, not an expression
+                if _IS_PRECEDENCE < min_prec:
+                    break
+                is_tok = self.advance()
+                negated = self.match(TokenType.NOT)
+                type_name = self._parse_qualifiable_type_name("a type name after 'is'")
+                if isinstance(left, Variable):
+                    left = IsCheck(variable_name=left.name, type_name=type_name, line=left.line, col=left.col)
+                else:
+                    left = IsCheck(variable_name=None, type_name=type_name, subject=left,
+                                   line=is_tok.line, col=is_tok.col)
+                if negated:
+                    left = Unary(op=UnaryOp.NOT, operand=left, line=left.line, col=left.col)
                 continue
             op_info = _BINARY_OPS.get(self.current().type)
             if op_info is None or op_info.precedence < min_prec:

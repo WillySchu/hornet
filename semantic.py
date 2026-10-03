@@ -205,20 +205,35 @@ def always_leaves(statements: List[Node], types: dict) -> bool:
     return _always_ends(statements, types, (Return, Break, Continue))
 
 
-def _guard_checks(stmt: If, types: dict) -> List[IsCheck]:
-    """The `is` checks known to be false after `stmt`: those of an `if`/`elif` chain with no `else`
-    whose bodies all leave, so the code after it runs only when every condition was false."""
-    checks = []
+def _conditions_after(stmt: If, types: dict) -> Tuple[List[Node], Optional[Node]]:
+    """(the conditions known false, the condition known true) once control passes the `if`/`elif`/
+    `else` chain `stmt`. When every branch but one always leaves, that one ran: the conditions before
+    it were false, and its own was true (it has none if it is the `else`, written or not)."""
+    branches = []  # (condition, body); the `else` last, with no condition
     while True:
-        if not always_leaves(stmt.then_body, types):
-            return []
-        if isinstance(stmt.condition, IsCheck):
-            checks.append(stmt.condition)
-        if stmt.else_body is None:
-            return checks
-        if len(stmt.else_body) != 1 or not isinstance(stmt.else_body[0], If):
-            return []
-        stmt = stmt.else_body[0]
+        branches.append((stmt.condition, stmt.then_body))
+        if stmt.else_body is not None and len(stmt.else_body) == 1 and isinstance(stmt.else_body[0], If):
+            stmt = stmt.else_body[0]
+            continue
+        branches.append((None, stmt.else_body or []))
+        break
+    staying = [i for i, (_, body) in enumerate(branches) if not always_leaves(body, types)]
+    if len(staying) != 1:
+        return [], None
+    return [condition for condition, _ in branches[:staying[0]]], branches[staying[0]][0]
+
+
+def _both(a: dict, b: dict) -> dict:
+    """What is known when both of two sets of narrowing facts hold (SemanticAnalyzer._when)."""
+    out = dict(a)
+    for decl_id, (name, variants) in b.items():
+        out[decl_id] = (name, variants & out[decl_id][1]) if decl_id in out else (name, variants)
+    return out
+
+
+def _either(a: dict, b: dict) -> dict:
+    """What is known when one of two sets of narrowing facts holds, but not which."""
+    return {decl_id: (name, variants | b[decl_id][1]) for decl_id, (name, variants) in a.items() if decl_id in b}
 
 
 def mangle_method_name(struct_name: str, method_name: str) -> str:
@@ -1122,31 +1137,62 @@ class SemanticAnalyzer:
             else:
                 self._possible[decl_id] = possible
 
+    def _when(self, condition: Node) -> Tuple[dict, dict]:
+        """What `condition` (already checked) says about sum variables when it is true, and when it is
+        false: each a dict, decl id -> (name, the variants the variable may then hold). `x is T` (and
+        `x == none`) says so directly; `and`, `or`, and `not` combine what their operands say."""
+        if isinstance(condition, Unary) and condition.op == UnaryOp.NOT:
+            when_true, when_false = self._when(condition.operand)
+            return when_false, when_true
+        if isinstance(condition, Binary) and condition.op in _LOGICAL_OPS:
+            left_true, left_false = self._when(condition.left)
+            right_true, right_false = self._when(condition.right)
+            if condition.op == BinaryOp.AND:
+                return _both(left_true, right_true), _either(left_false, right_false)
+            return _either(left_true, right_true), _both(left_false, right_false)
+        name = decl_id = variant = None
+        if isinstance(condition, IsCheck) and condition.nid in self.facts.narrowed:
+            name, decl_id, variant = condition.variable_name, self.facts.decls.get(condition.nid), \
+                self.facts.narrowed[condition.nid]
+        elif isinstance(condition, Binary) and condition.op in _EQUALITY_OPS:
+            for side, other in ((condition.left, condition.right), (condition.right, condition.left)):
+                if isinstance(side, Variable) and isinstance(other, NoneLiteral):  # `x == none` is `x is none`
+                    name, decl_id, variant = side.name, self.facts.decls.get(side.nid), Type.NONE
+        if decl_id is None or self.symbols[decl_id].type.kind != TypeKind.SUM:
+            return {}, {}
+        variants = frozenset(self.sum_types[self.symbols[decl_id].type.sum_type_name].variants)
+        holds, excluded = {decl_id: (name, frozenset({variant}))}, {decl_id: (name, variants - {variant})}
+        if isinstance(condition, Binary) and condition.op == BinaryOp.NOT_EQUAL:
+            return excluded, holds
+        return holds, excluded
+
+    def _apply(self, known: Optional[dict]) -> None:
+        """Narrow by `known` (one of _when's results) until the end of the region."""
+        for decl_id, (name, variants) in (known or {}).items():
+            # An `as NAME` binding ends with its `if`, so the name may be gone, or another variable's.
+            entry = next((scope[name] for scope in reversed(self.scopes) if name in scope), None)
+            if entry is not None and entry[1] == decl_id:
+                self._restrict(name, decl_id, self._possible_variants(decl_id) & variants)
+
     def _analyze_block(self, statements: List[Node], return_type: Type) -> None:
-        """Check a block's statements in the current scope. After an `if` whose `is` check fails
-        on every path that reaches the next statement (_guard_checks), the rest of the block is
-        its `else`: the variable isn't that variant there."""
+        """Check a block's statements in the current scope. What an `if` establishes for the code
+        after it (_conditions_after) narrows the rest of the block."""
         mark = len(self._undo)
         for stmt in statements:
             self.analyze_statement(stmt, return_type)
-            for check in _guard_checks(stmt, self.facts.types) if isinstance(stmt, If) else ():
-                if check.nid in self.facts.enum_checks:
-                    continue
-                decl_id = self.facts.decls[check.nid]
-                # An `as NAME` binding ends with its `if`, so the name may be gone, or another variable's.
-                entry = next((scope[check.variable_name] for scope in reversed(self.scopes)
-                              if check.variable_name in scope), None)
-                if entry is not None and entry[1] == decl_id:
-                    self._restrict(check.variable_name, decl_id,
-                                   self._possible_variants(decl_id) - {self.facts.narrowed[check.nid]})
+            if isinstance(stmt, If):
+                known_false, known_true = _conditions_after(stmt, self.facts.types)
+                for condition in known_false:
+                    self._apply(self._when(condition)[1])
+                if known_true is not None:
+                    self._apply(self._when(known_true)[0])
         self._end_region(mark)
 
-    def _analyze_body(self, statements: List[Node], return_type: Type, restrict: Optional[tuple] = None) -> None:
-        """A block in a scope of its own; `restrict` (_restrict's arguments) narrows a variable in it."""
+    def _analyze_body(self, statements: List[Node], return_type: Type, known: Optional[dict] = None) -> None:
+        """A block in a scope of its own, narrowed by `known` (one of _when's results)."""
         mark = len(self._undo)
         self._push_scope()
-        if restrict is not None:
-            self._restrict(*restrict)
+        self._apply(known)
         self._analyze_block(statements, return_type)
         self._pop_scope()
         self._end_region(mark)
@@ -1436,7 +1482,7 @@ class SemanticAnalyzer:
 
     def analyze_if(self, stmt: If, return_type: Type) -> None:
         # Declare an `EXPR is T as NAME` binding before checking the condition.
-        has_binding = isinstance(stmt.condition, IsCheck) and stmt.condition.subject is not None
+        has_binding = isinstance(stmt.condition, IsCheck) and stmt.condition.binds
         if has_binding:
             self._push_scope()
             self._declare_is_binding(stmt.condition)
@@ -1450,18 +1496,12 @@ class SemanticAnalyzer:
                 stmt.condition,
             )
 
-        # An `is` check narrows its variable to the variant in then_body, and excludes the variant in
-        # else_body (and, when then_body always leaves, in what follows the `if`: _analyze_block).
-        then_restrict = else_restrict = None
-        if isinstance(stmt.condition, IsCheck) and stmt.condition.nid not in self.facts.enum_checks:
-            name, decl_id = stmt.condition.variable_name, self.facts.decls[stmt.condition.nid]
-            variant = self._type(stmt.condition.type_name, stmt.condition, sums=False)
-            self.facts.narrowed[stmt.condition.nid] = variant
-            then_restrict = (name, decl_id, frozenset({variant}))
-            else_restrict = (name, decl_id, self._possible_variants(decl_id) - {variant})
-        self._analyze_body(stmt.then_body, return_type, then_restrict)
+        # What the condition says when true narrows then_body, and what it says when false narrows
+        # else_body (and what follows the `if`, when its other branches always leave: _analyze_block).
+        when_true, when_false = self._when(stmt.condition)
+        self._analyze_body(stmt.then_body, return_type, when_true)
         if stmt.else_body is not None:
-            self._analyze_body(stmt.else_body, return_type, else_restrict)
+            self._analyze_body(stmt.else_body, return_type, when_false)
 
         if has_binding:
             self._pop_scope()
@@ -1485,15 +1525,13 @@ class SemanticAnalyzer:
             self.check_expr(check)
             if i == 0:
                 self._check_match_exhaustiveness(stmt)
-            variant = self._type(check.type_name, check, sums=False)
-            self.facts.narrowed[check.nid] = variant
+            variant = self.facts.narrowed[check.nid]
             tested.add(variant)
-            self._analyze_body(body, return_type, (check.variable_name, self.facts.decls[check.nid],
-                                                   frozenset({variant})))
+            self._analyze_body(body, return_type, self._when(check)[0])
         if stmt.else_body is not None:  # the subject is none of the arms' variants
             decl_id = self.facts.decls[first_check.nid]
             self._analyze_body(stmt.else_body, return_type,
-                               (stmt.variable_name, decl_id, self._possible_variants(decl_id) - tested))
+                               {decl_id: (stmt.variable_name, self._possible_variants(decl_id) - tested)})
         if has_binding:
             self._pop_scope()
 
@@ -2233,9 +2271,13 @@ class SemanticAnalyzer:
         return t
 
     def check_is_check(self, expr: IsCheck) -> Type:
-        """`NAME is T` / `EXPR is T as NAME`: T is a variant of the sum, or a member of the enum."""
-        variable_type, self.facts.decls[expr.nid] = self._resolve(expr.variable_name, expr)
-        narrowed = self.facts.decls[expr.nid] in self._possible
+        """`NAME is T`, `EXPR is T`, or `EXPR is T as NAME` (NAME already declared, by the statement):
+        T is a variant of the subject's sum, or a member of its enum. Only a NAME can be narrowed."""
+        if expr.variable_name is None:  # `EXPR is T`: a test of the expression's value
+            variable_type, narrowed = self.check_expr(expr.subject), False
+        else:
+            variable_type, self.facts.decls[expr.nid] = self._resolve(expr.variable_name, expr)
+            narrowed = self.facts.decls[expr.nid] in self._possible
         if variable_type.kind == TypeKind.ENUM:  # `NAME is Member`: an equality test; nothing is narrowed
             members = self.enums[variable_type.enum_name].members
             member = expr.type_name
@@ -2253,6 +2295,10 @@ class SemanticAnalyzer:
         if narrowed:  # tested as the sum it is declared as
             variable_type = self.symbols[self.facts.decls[expr.nid]].type
         if variable_type.kind != TypeKind.SUM:
+            if expr.variable_name is None:
+                raise SemanticError(
+                    f"'is' tests a sum type's variant or an enum's member, but this value is {variable_type}",
+                    expr.subject)
             if expr.subject is not None:
                 raise SemanticError(
                     f"The expression bound to '{expr.variable_name}' "
@@ -2275,6 +2321,7 @@ class SemanticAnalyzer:
                 f"declared variants ({', '.join(str(v) for v in sum_type_info.variants)})",
                 expr,
             )
+        self.facts.narrowed[expr.nid] = narrowed_type
         return Type.BOOL
 
     def _root_variable_of(self, expr: Node) -> Optional[Variable]:
@@ -2385,7 +2432,11 @@ class SemanticAnalyzer:
             self.facts.enum_ins[expr.nid] = enum
             return Type.BOOL
         left_type = self._check_expr_allowing_struct_literal(expr.left)
+        mark = len(self._undo)
+        if expr.op in _LOGICAL_OPS:  # the right side runs only when the left was true (`and`) or false (`or`)
+            self._apply(self._when(expr.left)[0 if expr.op == BinaryOp.AND else 1])
         right_type = self._check_expr_allowing_struct_literal(expr.right)
+        self._end_region(mark)
         op = expr.op
         if op not in _LOGICAL_OPS and op != BinaryOp.IN:
             left_type, right_type = self._literal_operand_types(expr.left, left_type, expr.right, right_type)
@@ -2673,14 +2724,17 @@ class _TypedTreeBuilder:
         return typed.Declare(symbol, init)
 
     def if_statement(self, s: syntax.If) -> list:
-        if not isinstance(s.condition, syntax.IsCheck):
+        if not (isinstance(s.condition, syntax.IsCheck) and s.condition.binds):
             return [typed.If(self.expr(s.condition), self.block(s.then_body), self.block(s.else_body))]
-        before, subject = self.narrowing_subject(s.condition)
-        if s.condition.nid in self.facts.enum_checks:
-            test = self.enum_test(subject, s.condition)
-        else:
-            test = typed.TagTest(Type.BOOL, subject, self.facts.narrowed[s.condition.nid])
-        return before + [typed.If(test, self.block(s.then_body), self.block(s.else_body))]
+        before, subject = self.narrowing_subject(s.condition)  # declares the `as NAME` binding
+        return before + [typed.If(self.is_test(subject, s.condition), self.block(s.then_body),
+                                  self.block(s.else_body))]
+
+    def is_test(self, subject: typed.Expr, check: syntax.IsCheck) -> typed.Expr:
+        """`subject is T`: a tag test on a sum, an equality test on an enum."""
+        if check.nid in self.facts.enum_checks:
+            return self.enum_test(subject, check)
+        return typed.TagTest(Type.BOOL, subject, self.facts.narrowed[check.nid])
 
     def enum_test(self, subject: typed.Local, check: syntax.IsCheck) -> typed.Binary:
         """`subject is Member` on an enum: `subject == Enum.Member`. The subject may be a sum's variable
@@ -2819,6 +2873,11 @@ class _TypedTreeBuilder:
             return typed.IntCast(self.ty(e), value)
         if isinstance(e, syntax.Binary):
             return self.binary(e)
+        if isinstance(e, syntax.IsCheck):
+            if e.variable_name is None:
+                return self.is_test(self.expr(e.subject), e)
+            symbol = self.symbols[self.facts.decls[e.nid]]
+            return self.is_test(typed.Local(symbol.type, symbol), e)
         raise ElaborationError(f"No elaboration for expression {type(e).__name__}")
 
     def index(self, e: syntax.Index) -> typed.Expr:

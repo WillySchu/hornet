@@ -2925,9 +2925,8 @@ def test_is_check_with_index_subject_requires_as_binding():
     assert condition.subject.index.value == 0
 
 
-def test_is_check_with_non_bare_subject_requires_as():
-    """`shapes[0] is Circle` with no trailing `as` -- rejected with a
-    message naming the actual gap, not a generic parse failure."""
+def test_is_check_with_non_bare_subject_is_a_plain_test():
+    """`shapes[0] is Circle` with no trailing `as`: a test of the value, with nothing to narrow."""
     tokens = [
         lexer.Token(lexer.TokenType.IF, 'if', 1, 1),
         lexer.Token(lexer.TokenType.IDENTIFIER, 'shapes', 1, 4),
@@ -2939,8 +2938,9 @@ def test_is_check_with_non_bare_subject_requires_as():
         lexer.Token(lexer.TokenType.COLON, ':', 1, 23),
         lexer.Token(lexer.TokenType.EOF, '', 1, 24),
     ]
-    with pytest.raises(parser.ParseError, match="Expected 'as NAME' after the type name"):
-        parser.Parser(tokens).parse_if()
+    condition = parser.Parser(tokens[1:7] + [tokens[-1]]).parse_expression()
+    assert isinstance(condition, parser.IsCheck) and condition.variable_name is None
+    assert isinstance(condition.subject, parser.Index) and condition.type_name == 'Circle' and not condition.binds
 
 
 def test_is_check_bare_variable_can_still_take_an_optional_as_rename():
@@ -3024,12 +3024,8 @@ def test_match_with_call_subject_binds_only_the_first_arm():
     assert (second.variable_name, second.type_name, second.subject) == ('s', 'Square', None)
 
 
-def test_while_condition_does_not_recognize_is_check():
-    """Deliberately restricted to if/elif for this first cut (see
-    IsCheck's own docstring) -- a while condition falls through to
-    parse_expression, which stops at the bare name and leaves 'is'
-    unconsumed, so this fails at the next expect(COLON) instead of
-    ever producing an IsCheck."""
+def test_while_condition_may_be_an_is_check():
+    """`is` is an ordinary expression, so a while condition can test with it (it narrows nothing there)."""
     tokens = [
         lexer.Token(lexer.TokenType.WHILE, 'while', 1, 1),
         lexer.Token(lexer.TokenType.IDENTIFIER, 's', 1, 7),
@@ -3038,8 +3034,9 @@ def test_while_condition_does_not_recognize_is_check():
         lexer.Token(lexer.TokenType.COLON, ':', 1, 18),
         lexer.Token(lexer.TokenType.EOF, '', 1, 19),
     ]
-    with pytest.raises(parser.ParseError, match="Expected ':' to start the while body"):
-        parser.Parser(tokens).parse_while()
+    condition = parser.Parser(tokens[1:4] + [tokens[-1]]).parse_expression()
+    assert isinstance(condition, parser.IsCheck) and not condition.binds
+    assert (condition.variable_name, condition.type_name, condition.subject) == ('s', 'Circle', None)
 
 
 # ---------------------------------------------------------------------------

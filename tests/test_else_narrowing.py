@@ -183,8 +183,8 @@ def test_bindings_none_and_checks_of_a_narrowed_variable():
     # The body may fall through: nothing is known afterwards.
     ("def int f(Shape s):\n    if s is Circle:\n        print(1)\n    return s.side\n",
      "Cannot access field 'side' on non-struct type Shape"),
-    # Only an `if` without an `else` guards what follows it.
-    ("def int f(Shape s):\n    if s is Circle:\n        return 1\n    else:\n        print(2)\n    return s.side\n",
+    # Both branches may fall through: nothing is known afterwards.
+    ("def int f(Shape s):\n    if s is Circle:\n        print(1)\n    else:\n        print(2)\n    return s.side\n",
      "Cannot access field 'side' on non-struct type Shape"),
     # The rest of the block, and no further.
     ("def int f(Shape s, bool b):\n    if b:\n        if s is Circle:\n            return 1\n        print(s.side)\n"
