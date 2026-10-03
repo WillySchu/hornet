@@ -578,6 +578,8 @@ print(c.n)      # 5
 
 The receiver must be addressable (a variable, field, index, or dereference) or already a pointer; calling a pointer method on a temporary such as a call result is an error. Methods of either kind can be called through a pointer.
 
+A field or method whose name begins with `_` is private to the module that declares the struct: other modules can't read or write the field, call the method, or give the field a value in a struct literal (so they can't use a positional literal for that struct). They can still declare one, name its public fields in a literal, copy it, compare it, and print it.
+
 ---
 
 # Arrays and Slices
@@ -744,7 +746,7 @@ Each iteration has its own bindings, so taking a binding's address is allowed. R
 <  >  <=  >=  ==  !=
 ```
 
-Ordering applies to integers of the same type. Equality applies to integers, `bool`, `str`, enums, pointers, and arrays and structs of comparable types. Pointers can be compared with `none`, and so can a sum with a `none` variant (`x == none` means `x is none`); slices and dictionaries are never `none`.
+`is` and `is not` bind like `==`; see [Pattern Matching](#pattern-matching). Ordering applies to integers of the same type. Equality applies to integers, `bool`, `str`, enums, pointers, and arrays and structs of comparable types. Pointers can be compared with `none`, and so can a sum with a `none` variant (`x == none` means `x is none`); slices and dictionaries are never `none`.
 
 ### Membership
 
@@ -790,14 +792,14 @@ Operands and arguments are evaluated left to right, and each one's value is fixe
 
 # Pattern Matching
 
-`is` can test the active variant of a sum type in an `if`/`elif` condition:
+`x is T` tests whether a sum holds variant `T`, and `x is not T` that it doesn't. It is an ordinary `bool` expression, and on a variable it also narrows:
 
 ```hornet
 if shape is Circle:
     print(shape.radius)
 ```
 
-In the `else` branch the variable isn't that variant. Neither is it after an `if` (or `if`/`elif` chain) with no `else` whose bodies always `return`, `break`, `continue`, or call a `never` function. With one variant left, the variable has that variant's type:
+Where a check is known to be true the variable is that variant, and where it is known to be false it isn't. With one variant left, the variable has that variant's type:
 
 ```hornet
 if shape is Circle:
@@ -805,14 +807,28 @@ if shape is Circle:
 return shape.side       # shape is a Square here
 ```
 
-While narrowed, a variable can't be reassigned. Nothing narrows to `none`: with only `none` left, the variable keeps its sum type. If a pointer to the variable (`&shape`) changes its variant meanwhile, its next use panics.
+What is known follows `and`, `or`, and `not`; the `else` branch; the code after an `if` chain in which every branch but one always leaves (by `return`, `break`, `continue`, or a `never` call); the body of a `while` or `for`, from its condition; and the code after a `while` with no `break`. `x == none` and `x != none` narrow like `x is none`:
 
-A narrowed binding can be introduced explicitly:
+```hornet
+if node != none and node.value > 0:     # the right side sees a Cons
+    print(node.value)
+while node is Cons:
+    total += node.value
+    node = *node.next                   # assigning ends the narrowing
+```
+
+Assigning to a narrowed variable ends its narrowing, and a loop assumes nothing about a variable its body assigns. Only variables narrow: `h.shape is Circle` is a plain test. Nothing narrows to `none`: with only `none` left, the variable keeps its sum type. If a pointer to the variable (`&shape`) changes its variant meanwhile, its next use panics.
+
+`as NAME` binds a narrowed copy of the subject, which is how a field, an element, or a call's result is narrowed:
 
 ```hornet
 if shape is Circle as circle:
     print(circle.radius)
+if e is Neg as neg and *neg.operand is Num as n:
+    return n.v
 ```
+
+A binding belongs to an `if` or `elif` condition, as the whole condition or one of the checks joined by `and`. A whole-condition binding lasts for the `if` and its `else`, where it is narrowed the same way; one joined by `and` is made only when the checks before it hold, and lasts for the rest of the condition and the body. `NAME` is a copy, so assigning to its fields doesn't change the subject.
 
 `match` provides multiple variant arms:
 
@@ -824,11 +840,11 @@ match shape as s:
         print(s.side)
 ```
 
-The subject of `... as NAME` can be any sum-typed expression, such as a field, an element, or `*p`; `NAME` is a copy of it, so assigning to its fields doesn't change the subject. It lasts for the `if` and its `else`, where it is narrowed the same way. A `none` variant is tested with `is none`.
+The subject of `match ... as NAME` can be any sum-typed expression, such as a field, an element, or `*p`; `NAME` is a copy of it. A `none` variant is tested with `is none`.
 
 `match` must be exhaustive, or end with `else:`, where the subject is none of the arms' variants. A `match` whose arms all return, or end in a `never` call such as `panic`, counts as returning.
 
-`is` and `match` also apply to an enum, with its members as the arms. Nothing is narrowed, and a `match` must cover every member or end with `else:`:
+`is` and `match` also apply to an enum, with its members in place of variants (`colour is Red`). Nothing is narrowed, and a `match` must cover every member or end with `else:`:
 
 ```hornet
 match colour:
@@ -839,8 +855,6 @@ match colour:
     else:
         print('wait')
 ```
-
-`is` is not yet a general boolean expression: nothing narrows through `and`, `or`, `not`, `x == none`, or a loop condition.
 
 ---
 
@@ -952,7 +966,7 @@ from 'utils' import add, other as renamed
 
 Module discovery follows imports transitively. Local modules are resolved relative to the importing file, and the compiler can fall back to the bundled `stdlib/` directory.
 
-Top-level names beginning with `_` are private to their module.
+Top-level names beginning with `_` are private to their module, as are a struct's fields and methods (see [Structs and Methods](#structs-and-methods)).
 
 Every declaration is reached this way, including `extern` functions: a module that uses another module's `extern` imports it (`from 'os' import write_fd`) or qualifies it (`os.write_fd(...)`). A local variable, parameter, or loop binding can't have the name of an import alias or a constant in scope.
 
@@ -1267,8 +1281,7 @@ Hornet is still experimental. Some notable limitations are:
 * Pointer-to-pointer types are parsed but rejected semantically.
 * Some advanced pointer/address-taking cases remain unsupported.
 * `for ... in ...` can't iterate a function-call result or a dereference; assign it to a variable first.
-* `is` is limited to dedicated `if`/`elif` condition shapes rather than being a general boolean expression.
-* Narrowing doesn't follow `and`/`or`/`not`, `x == none`, loop conditions, or an `if`/`else` in which only one branch leaves, and a narrowed variable can't be reassigned.
+* Only variables narrow; a field, element, or call result needs an `as` binding, which is for an `if` or `elif` condition and can't sit under `or` or `not`.
 * A sum type can't be a variant of another sum type.
 * A typed literal of pointers to a named type with two or more fixed sizes (`[2][1]*P[...]`) can't be written inline; see [Arrays and Slices](#arrays-and-slices).
 * Enums have no explicit member values, ordering, or methods, and `for ... in` doesn't iterate one.
@@ -1333,7 +1346,7 @@ Current and future work includes:
 * Error-propagation syntax for result types
 * More complete pointer and address-taking support
 * More precise escape analysis for iterators, aliases, and data more than one pointer away from a call argument
-* More general sum-type narrowing
+* Narrowing of fields and elements, and `as` bindings in loop conditions
 * Additional sum-type composition and equality support
 * Generic types and functions
 * First-class function types and closures
