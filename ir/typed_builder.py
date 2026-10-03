@@ -15,7 +15,7 @@ from ir.ir import (
     IRBinOp, IRBoundsCheck, IRBranch, IRCall, IRCast, IRConst, IRCopy, IRFunction, IRJump, IRLabel, IRLoad,
     IRLocalAddress, IRMove, IRNullCheck, IRReturn, IRSliceBoundsCheck, IRStaticDataAddress, IRStore, IRUnOp,
 )
-from ops import BinaryOp
+from ops import BinaryOp, UnaryOp
 from typesys import SUM_TYPE_TAG_WIDTH, Type, TypeKind, type_byte_width
 
 _SCALAR_KINDS = {TypeKind.INT, TypeKind.INT32, TypeKind.INT8, TypeKind.UINT8, TypeKind.BOOL,
@@ -266,29 +266,25 @@ class TypedFunctionBuilder:
                     IRLoad(dst=hidden, address=address)] + self.write_into(hidden, s.value) + [IRReturn(value=None)]
         if isinstance(s, t.If):
             then_label, else_label, end_label = (self.ids.new_label(x) for x in ("if_then", "if_else", "if_end"))
-            ir, cond = self.value(s.cond)
-            ir += [IRBranch(cond=cond, true_label=then_label, false_label=else_label), IRLabel(then_label)]
+            ir = self.branch(s.cond, then_label, else_label) + [IRLabel(then_label)]
             ir += self.block(s.then_body) + [IRJump(end_label), IRLabel(else_label)]
             return ir + self.block(s.else_body) + [IRJump(end_label), IRLabel(end_label)]
         if isinstance(s, t.Match):
             return self.match(s)
         if isinstance(s, t.While):
             start, body, end = (self.ids.new_label(x) for x in ("while_start", "while_body", "while_end"))
-            cond_ir, cond = self.value(s.cond)
             self.loops.append((start, end))
             body_ir = self.block(s.body)
             self.loops.pop()
-            return [IRJump(start), IRLabel(start)] + cond_ir + [IRBranch(cond=cond, true_label=body, false_label=end),
-                                                               IRLabel(body)] + body_ir + [IRJump(start), IRLabel(end)]
+            return [IRJump(start), IRLabel(start)] + self.branch(s.cond, body, end) + [IRLabel(body)] + body_ir + [
+                IRJump(start), IRLabel(end)]
         if isinstance(s, t.For):
             start, body, step, end = (self.ids.new_label(x) for x in ("for_start", "for_body", "for_step", "for_end"))
             ir = self.statement(s.init) if s.init is not None else []
-            cond_ir, cond = self.value(s.cond)
             self.loops.append((step, end))
             body_ir = self.block(s.body)
             self.loops.pop()
-            return ir + [IRJump(start), IRLabel(start)] + cond_ir + [
-                IRBranch(cond=cond, true_label=body, false_label=end), IRLabel(body)] + body_ir + [
+            return ir + [IRJump(start), IRLabel(start)] + self.branch(s.cond, body, end) + [IRLabel(body)] + body_ir + [
                 IRJump(step), IRLabel(step)] + self.fresh_loop_variable(s) + self.statement(s.step) + [
                 IRJump(start), IRLabel(end)]
         if isinstance(s, t.ForIn):
@@ -334,6 +330,15 @@ class TypedFunctionBuilder:
         # the target (`p = P(p.y, p.x)`), so it is built completely before the target changes.
         direct = (isinstance(value_expr, _PLACE_NODES) and not _calls_anything(target)
                   and not (isinstance(value_expr, t.DictLookup) and isinstance(target, t.DictLookup)))
+        if not direct and target.type.kind in (TypeKind.STR, TypeKind.SLICE) and not isinstance(target, t.DictLookup):
+            # A str or slice is computed as its words, in temps, before anything is written: no temporary.
+            if target.type.kind == TypeKind.STR:
+                value_ir, ptr, length = self.str_value(value_expr)
+                ir, address = self.place_address(target)
+                return value_ir + ir + self.write_str(address, ptr, length)
+            value_ir, ptr, length, cap = self.slice_value(value_expr)
+            ir, address = self.place_address(target)
+            return value_ir + ir + self.write_slice(address, ptr, length, cap)
         value_ir, value_address = self.address(value_expr, fresh=not direct)
         if isinstance(target, t.DictLookup):
             return value_ir + self.dict_set(target, value_address)
@@ -761,17 +766,30 @@ class TypedFunctionBuilder:
             IRJump(end), IRLabel(end)], result
 
     def short_circuit(self, e: t.Binary) -> tuple:
-        """`and`/`or`: the right operand runs only when the left doesn't decide."""
-        is_and = e.op == BinaryOp.AND
-        rhs, done, end = (self.ids.new_label(x) for x in ("logic_rhs", "logic_short", "logic_end"))
+        """`and`/`or` as a value: branch on it (see `branch`), then set the result to 1 or 0."""
+        yes, no, end = (self.ids.new_label(x) for x in ("logic_true", "logic_false", "logic_end"))
         result = self.temp(Type.BOOL)
-        left_ir, left = self.value(e.left)
-        right_ir, right = self.value(e.right)
-        return left_ir + [
-            IRBranch(cond=left, true_label=rhs if is_and else done, false_label=done if is_and else rhs),
-            IRLabel(rhs), *right_ir, IRMove(dst=result, src=right), IRJump(end),
-            IRLabel(done), IRMove(dst=result, src=IRConst(0 if is_and else 1, Type.BOOL)), IRJump(end),
-            IRLabel(end)], result
+        return self.branch(e, yes, no) + [
+            IRLabel(yes), IRMove(dst=result, src=IRConst(1, Type.BOOL)), IRJump(end),
+            IRLabel(no), IRMove(dst=result, src=IRConst(0, Type.BOOL)), IRJump(end), IRLabel(end)], result
+
+    def branch(self, e, if_true: str, if_false: str) -> list:
+        """Jump to `if_true` or `if_false` on bool `e`, without computing its value where it's made of
+        `and`, `or`, `not`, and literals: those become jumps (short-circuiting), and a comparison
+        feeding the final branch is fused with it by the backends."""
+        if isinstance(e, t.Binary) and e.op in (BinaryOp.AND, BinaryOp.OR):
+            rhs = self.ids.new_label("logic_rhs")
+            if e.op == BinaryOp.AND:
+                left = self.branch(e.left, rhs, if_false)
+            else:
+                left = self.branch(e.left, if_true, rhs)
+            return left + [IRLabel(rhs)] + self.branch(e.right, if_true, if_false)
+        if isinstance(e, t.Unary) and e.op == UnaryOp.NOT:
+            return self.branch(e.operand, if_false, if_true)
+        if isinstance(e, t.BoolLit):
+            return [IRJump(if_true if e.value else if_false)]
+        ir, cond = self.value(e)
+        return ir + [IRBranch(cond=cond, true_label=if_true, false_label=if_false)]
 
     def call(self, e: t.Call, discard: bool, destination=None) -> tuple:
         """A call; a composite result is written to `destination` (or a new temporary)."""

@@ -4,6 +4,7 @@ import pytest
 
 from ir.program_builder import build_ir_program
 from tests.test_compiler import GCC_SKIP, _parse, analyze, assert_program_stdout
+from typesys import Type
 
 SCALARS = """\
 def int fib(int n):
@@ -198,3 +199,39 @@ def test_scalar_zero_values():
     source = "def int main():\n    int x\n    bool b\n    *int p\n    print(x)\n    print(b)\n    print(p == none)\n    return 0\n"
     assert _built_functions(source) == ['main']
     assert_program_stdout(source, "0\nfalse\ntrue\n")
+
+
+CONDITIONS = """\
+def bool noisy(int n, bool v):
+    print(n)
+    return v
+def int main():
+    int a = 1
+    if (a < 2 and noisy(1, false)) or not (a == 1 or noisy(2, true)):
+        print(10)
+    elif not noisy(3, false) and (true or noisy(4, true)):
+        print(20)
+    bool x = a > 0 and not (a > 5)
+    bool y = false or noisy(5, false)
+    int i = 0
+    while not (i >= 3 or false):
+        i += 1
+    print(x)
+    print(y)
+    print(i)
+    return 0
+"""
+
+
+@GCC_SKIP
+def test_conditions_short_circuit_and_negate():
+    assert_program_stdout(CONDITIONS, "1\n3\n20\n5\ntrue\nfalse\n3\n")
+
+
+def test_a_condition_made_of_and_or_not_branches_without_computing_bools():
+    """Comparisons inside `and`/`or`/`not` each feed a branch; no bool is computed and then tested."""
+    from ir.ir import IRMove
+    program = _parse("def int f(int a, int b):\n    if (a < b and b < 10) or not (a == 3):\n"
+                     "        return 1\n    return 0\n")
+    fn = next(f for f in build_ir_program(analyze(program)).functions if f.name == 'f')
+    assert not [i for i in fn.body if isinstance(i, IRMove) and i.dst.type == Type.BOOL]
