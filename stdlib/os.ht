@@ -39,7 +39,7 @@ def StrResult read_all_from_fd(int32 fd):
 
 def StrResult read_file(str path):
     int32 fd = open(to_cstring(path), 0)
-    if fd < int32(0):
+    if fd < 0:
         return Error('could not open \'' + path + '\': ' + _os_reason())
     StrResult contents = read_all_from_fd(fd)
     close(fd)
