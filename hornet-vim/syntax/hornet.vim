@@ -1,7 +1,7 @@
 " Vim syntax file
 " Language: Hornet
 " Filenames: *.ht
-" Last Change: 2026-09-29
+" Last Change: 2026-10-02
 
 if exists("b:current_syntax")
   finish
@@ -15,9 +15,10 @@ syn keyword hornetBoolean true false
 syn keyword hornetConstant none
 
 syn match   hornetEscape /\\x\x\x\|\\./ contained
-syn region  hornetString start=/'/ skip=/\\./ end=/'/ contains=hornetEscape
+" Literals end on the line they start on.
+syn region  hornetString start=/'/ skip=/\\./ end=/'/ oneline contains=hornetEscape
 " Byte literals: one byte in double quotes.
-syn region  hornetByte   start=/"/ skip=/\\./ end=/"/ contains=hornetEscape
+syn region  hornetByte   start=/"/ skip=/\\./ end=/"/ oneline contains=hornetEscape
 
 " Types. byte is uint8 and int64 is int.
 syn keyword hornetType int int8 uint8 int32 int64 byte bool str dict

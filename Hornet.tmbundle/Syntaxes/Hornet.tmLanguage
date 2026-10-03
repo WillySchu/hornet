@@ -105,7 +105,7 @@
 					<key>begin</key>
 					<string>'</string>
 					<key>end</key>
-					<string>'</string>
+					<string>'|$</string>
 					<key>beginCaptures</key>
 					<dict>
 						<key>0</key>
@@ -144,7 +144,7 @@
 					<key>begin</key>
 					<string>"</string>
 					<key>end</key>
-					<string>"</string>
+					<string>"|$</string>
 					<key>beginCaptures</key>
 					<dict>
 						<key>0</key>
@@ -285,6 +285,63 @@
 			<key>patterns</key>
 			<array>
 				<dict>
+					<key>comment</key>
+					<string>A sum type: `type NAME is A | B | none`, to the end of the line.</string>
+					<key>begin</key>
+					<string>\b(type)\s+([A-Za-z_]\w*)\s+(is)\b</string>
+					<key>beginCaptures</key>
+					<dict>
+						<key>1</key>
+						<dict>
+							<key>name</key>
+							<string>keyword.declaration.type.hornet</string>
+						</dict>
+						<key>2</key>
+						<dict>
+							<key>name</key>
+							<string>entity.name.type.hornet</string>
+						</dict>
+						<key>3</key>
+						<dict>
+							<key>name</key>
+							<string>keyword.declaration.type.hornet</string>
+						</dict>
+					</dict>
+					<key>end</key>
+					<string>$</string>
+					<key>patterns</key>
+					<array>
+						<dict>
+							<key>include</key>
+							<string>#comments</string>
+						</dict>
+						<dict>
+							<key>include</key>
+							<string>#none</string>
+						</dict>
+						<dict>
+							<key>include</key>
+							<string>#types</string>
+						</dict>
+						<dict>
+							<key>name</key>
+							<string>entity.name.type.variant.hornet</string>
+							<key>match</key>
+							<string>(?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*</string>
+						</dict>
+						<dict>
+							<key>name</key>
+							<string>punctuation.separator.variant.hornet</string>
+							<key>match</key>
+							<string>\|</string>
+						</dict>
+						<dict>
+							<key>include</key>
+							<string>#punctuation</string>
+						</dict>
+					</array>
+				</dict>
+				<dict>
 					<key>match</key>
 					<string>\b(type)\s+([A-Za-z_]\w*)</string>
 					<key>captures</key>
@@ -308,16 +365,12 @@
 					<string>keyword.declaration.type.hornet</string>
 				</dict>
 				<dict>
+					<key>comment</key>
+					<string>The variant an `is` check tests; `none` and builtin types keep their own scopes.</string>
 					<key>name</key>
 					<string>entity.name.type.variant.hornet</string>
 					<key>match</key>
-					<string>(?&lt;=\bis\s)(?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*</string>
-				</dict>
-				<dict>
-					<key>name</key>
-					<string>entity.name.type.variant.hornet</string>
-					<key>match</key>
-					<string>(?&lt;=\|\s)(?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*</string>
+					<string>(?&lt;=\bis\s)(?!(?:none|int|int8|uint8|int32|int64|bool|str|byte|dict)\b)(?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*</string>
 				</dict>
 			</array>
 		</dict>
@@ -490,13 +543,13 @@
 					<key>name</key>
 					<string>keyword.operator.comparison.hornet</string>
 					<key>match</key>
-					<string>(?:==|!=|&lt;=|&gt;=|&lt;&lt;|&gt;&gt;)</string>
+					<string>(?:==|!=|&lt;=|&gt;=)</string>
 				</dict>
 				<dict>
 					<key>name</key>
 					<string>keyword.operator.arithmetic.hornet</string>
 					<key>match</key>
-					<string>[+\-*/%~&amp;|^&lt;&gt;]</string>
+					<string>&lt;&lt;|&gt;&gt;|[+\-*/%~&amp;|^&lt;&gt;]</string>
 				</dict>
 			</array>
 		</dict>
