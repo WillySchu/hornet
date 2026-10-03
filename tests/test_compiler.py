@@ -17863,6 +17863,40 @@ class TestCompoundAssignmentThroughAddresses:
         )
 
     @pytest.mark.skipif(not GCC_AVAILABLE, reason="gcc not available")
+    def test_compound_assignment_to_a_dict_entry_survives_the_value_changing_the_dict(self):
+        """`d[k] op= f()` where f grows the table (so the entry moves) or removes k: the result is
+        stored by key after f runs, so it isn't lost in the abandoned table."""
+        assert_program_stdout(
+            "def int grow(dict[int]int d):\n"
+            "    for int i = 100; i < 300; i += 1:\n"
+            "        d[i] = i\n"
+            "    return 5\n"
+            "\n"
+            "def str grow_s(dict[int]str d):\n"
+            "    for int i = 100; i < 300; i += 1:\n"
+            "        d[i] = 'x'\n"
+            "    return 'b'\n"
+            "\n"
+            "def int drop(dict[int]int d):\n"
+            "    del(d, 1)\n"
+            "    return 1\n"
+            "\n"
+            "def int main():\n"
+            "    dict[int]int d = dict[int]int{1: 10}\n"
+            "    d[1] += grow(d)\n"
+            "    dict[int]str ds = dict[int]str{1: 'a'}\n"
+            "    ds[1] += grow_s(ds)\n"
+            "    dict[int]int e = dict[int]int{1: 10}\n"
+            "    e[1] += drop(e)\n"
+            "    print(d[1])\n"
+            "    print(ds[1])\n"
+            "    print(e[1])\n"
+            "    print(len(d))\n"
+            "    return 0\n",
+            "15\nab\n11\n201\n",
+        )
+
+    @pytest.mark.skipif(not GCC_AVAILABLE, reason="gcc not available")
     def test_for_in_over_a_typed_slice_literal(self):
         """Once rejected as if it were a call result, since `[]T[...]` was parsed as a slice of an array."""
         assert_program_stdout(

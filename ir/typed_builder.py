@@ -6,6 +6,8 @@ needed) and `write_into(dst, e)` stores one; a str is read as (ptr, len) and a s
 (ptr, len, cap).
 """
 
+from dataclasses import fields
+
 import typed_ast as t
 from escape_analysis import analyze_array_escapes, is_heap_allocated
 from ir.typedesc import type_descriptor
@@ -39,6 +41,20 @@ def _ported(type_: Type) -> bool:
 _PLACE_NODES = (t.Local, t.Deref, t.FieldAccess, t.ArrayIndex, t.SliceIndex, t.Payload, t.DictLookup)
 _DICT_BUCKET_OCCUPIED = 1  # runtime.c's HORNET_DICT_BUCKET_OCCUPIED
 _DICT_HEADER_SIZE = 32  # {buckets, count, tombstones, capacity}
+
+
+def _calls_anything(e) -> bool:
+    """Whether evaluating `e` may call a function: the only way an expression can change a dictionary."""
+    stack = [e]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, t.Call):
+            return True
+        for f in fields(node):
+            value = getattr(node, f.name)
+            for v in value if isinstance(value, tuple) else (value,):
+                stack.extend(x for x in (v if isinstance(v, tuple) else (v,)) if isinstance(x, (t.Expr, t.Stmt)))
+    return False
 
 
 class TypedFunctionBuilder:
@@ -209,6 +225,8 @@ class TypedFunctionBuilder:
         if isinstance(s, t.Assign):
             return self.assign(s.target, s.value)
         if isinstance(s, t.CompoundAssign):
+            if isinstance(s.target, t.DictLookup) and _calls_anything(s.value):
+                return self.compound_assign_dict_entry(s)
             if isinstance(s.target, t.Local):  # read and written in place: `x = x op v`
                 kind = t.StrConcat if s.target.type == Type.STR else lambda type_, l, r: t.Binary(type_, s.op, l, r)
                 return self.assign(s.target, kind(s.target.type, s.target, s.value))
@@ -920,21 +938,29 @@ class TypedFunctionBuilder:
 
     def dict_call(self, dict_expr, key, operation: str, result_type=None, extra=()) -> tuple:
         """hornet_dict_<operation>_{str,scalar}_key on `dict_expr` and `key`."""
+        ir, entry = self.dict_entry(dict_expr, key)
+        call_ir, result = self.dict_op(entry, operation, result_type, extra)
+        return ir + call_ir, result
+
+    def dict_entry(self, dict_expr, key) -> tuple:
+        """Evaluate a dictionary and a key once, for one or more operations: (ir, entry)."""
         dict_type = dict_expr.type
         value_width = IRConst(self.width(dict_type.element_type), Type.INT64)
         ir, header = self.dict_header(dict_expr)
         if dict_type.key_type.kind == TypeKind.STR:
             key_ir, ptr, length = self.str_value(key)
-            args = [header, value_width, ptr, length, *extra]
-            name = f'hornet_dict_{operation}_str_key'
-        else:
-            key_ir, value = self.value(key)
-            scratch_ir, key_address = self.scratch_address(dict_type.key_type)
-            key_ir += scratch_ir + [IRStore(address=key_address, value=value, value_type=dict_type.key_type)]
-            args = [header, IRConst(self.width(dict_type.key_type), Type.INT64), value_width, key_address, *extra]
-            name = f'hornet_dict_{operation}_scalar_key'
+            return ir + key_ir, (header, [value_width, ptr, length], 'str')
+        key_ir, value = self.value(key)
+        scratch_ir, key_address = self.scratch_address(dict_type.key_type)
+        key_ir += scratch_ir + [IRStore(address=key_address, value=value, value_type=dict_type.key_type)]
+        return ir + key_ir, (header, [IRConst(self.width(dict_type.key_type), Type.INT64), value_width, key_address],
+                             'scalar')
+
+    def dict_op(self, entry, operation: str, result_type=None, extra=()) -> tuple:
+        header, key_args, kind = entry
         result = None if result_type is None else self.temp(result_type)
-        return ir + key_ir + [IRCall(dst=result, name=name, args=args)], result
+        call = IRCall(dst=result, name=f'hornet_dict_{operation}_{kind}_key', args=[header, *key_args, *extra])
+        return [call], result
 
     def dict_set(self, target: t.DictLookup, value_address) -> list:
         return self.dict_call(target.dict, target.key, 'set', extra=(value_address,))[0]
@@ -1100,3 +1126,27 @@ class TypedFunctionBuilder:
                 IRCall(dst=None, name='memcpy', args=[buffer, left_ptr, left_len]),
                 IRBinOp(dst=right_dst, op=BinaryOp.ADD, left=buffer, right=left_len),
                 IRCall(dst=None, name='memcpy', args=[right_dst, right_ptr, right_len])], buffer, total
+
+    def compound_assign_dict_entry(self, s: t.CompoundAssign) -> list:
+        """`d[k] op= v` where evaluating `v` may change `d`: `d` and `k` once, read the entry, evaluate
+        `v`, then store by key (a fresh lookup), since `v` may have grown the table or removed `k`."""
+        target = s.target
+        ir, entry = self.dict_entry(target.dict, target.key)
+        lookup_ir, address = self.dict_op(entry, 'lookup', Type.INT64)
+        scratch_ir, result_address = self.scratch_address(target.type)
+        ir += lookup_ir + scratch_ir
+        if target.type == Type.STR:
+            read_ir, left_ptr, left_len = self.read_str(address)
+            value_ir, right_ptr, right_len = self.str_value(s.value)
+            concat_ir, ptr, length = self.concat(left_ptr, left_len, right_ptr, right_len)
+            len_ir, len_address = self.offset(result_address, 8)
+            ir += read_ir + value_ir + concat_ir + len_ir + [
+                IRStore(address=result_address, value=ptr, value_type=Type.INT64),
+                IRStore(address=len_address, value=length, value_type=Type.INT)]
+        else:
+            current, result = self.temp(target.type), self.temp(target.type)
+            value_ir, value = self.value(s.value)
+            ir += [IRLoad(dst=current, address=address)] + value_ir + [
+                IRBinOp(dst=result, op=s.op, left=current, right=value),
+                IRStore(address=result_address, value=result, value_type=target.type)]
+        return ir + self.dict_op(entry, 'set', extra=(result_address,))[0]
