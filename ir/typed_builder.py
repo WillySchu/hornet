@@ -10,7 +10,7 @@ from dataclasses import fields
 
 import typed_ast as t
 from escape_analysis import analyze_array_escapes, is_heap_allocated
-from ir.panics import PanicBlocks, located
+from ir.panics import PanicBlocks, located, message_label
 from ir.typedesc import type_descriptor
 from ir.ir import (
     IRBinOp, IRBoundsCheck, IRBranch, IRCall, IRCast, IRConst, IRCopy, IRFunction, IRJump, IRLabel, IRLoad,
@@ -35,8 +35,13 @@ _COMPOSITE_BY_ADDRESS = {TypeKind.ARRAY, TypeKind.STRUCT, TypeKind.SUM, TypeKind
 _PORTED_KINDS = _SCALAR_KINDS | _COMPOSITE_BY_ADDRESS | {TypeKind.STR, TypeKind.SLICE}
 
 
+def _valueless(type_: Type) -> bool:
+    """Whether a call of this type yields nothing: no declared return type, or `never`."""
+    return type_ in (Type.VOID, Type.NEVER)
+
+
 def _ported(type_: Type) -> bool:
-    return type_ == Type.VOID or type_.kind in _PORTED_KINDS
+    return _valueless(type_) or type_.kind in _PORTED_KINDS
 
 
 _PLACE_NODES = (t.Local, t.Deref, t.FieldAccess, t.ArrayIndex, t.SliceIndex, t.Payload, t.DictLookup)
@@ -184,7 +189,7 @@ class TypedFunctionBuilder:
 
     def params(self, fn: t.Function) -> list:
         ir, incoming = [], []
-        if not _scalar(fn.return_type) and fn.return_type != Type.VOID:
+        if not _scalar(fn.return_type) and not _valueless(fn.return_type):
             self.hidden_return = self.temp()
             self.ir_fn.params.append(self.hidden_return)
             self.ir_fn.hidden_return_ptr_slot = self.ids.new_slot(8, "hidden_return_ptr", self.ir_fn)
@@ -272,7 +277,7 @@ class TypedFunctionBuilder:
         if isinstance(s, t.ExprStmt):
             if s.expr.type == Type.NONE:  # a bare `none` does nothing
                 return []
-            if _scalar(s.expr.type) or s.expr.type == Type.VOID:
+            if _scalar(s.expr.type) or _valueless(s.expr.type):
                 ir, _ = self.value(s.expr, discard=True)
                 return ir
             ir, _ = self.address(s.expr)  # evaluated for its effects (calls, checks)
@@ -690,6 +695,8 @@ class TypedFunctionBuilder:
             return self.call(e, discard)
         if isinstance(e, t.Print):
             return self.print_(e), None
+        if isinstance(e, t.Panic):
+            return self.panic(e), None
         if isinstance(e, t.DictDelete):
             ir, removed = self.dict_call(e.dict, e.key, 'delete', result_type=Type.INT)
             return ir + self.panic_when_zero(removed, "dict delete: key not found", e), None
@@ -832,7 +839,7 @@ class TypedFunctionBuilder:
         if not _ported(e.type):
             raise NotYetPorted(f"call returning {e.type}")
         ir, args = [], []
-        composite_result = e.type != Type.VOID and not _scalar(e.type)
+        composite_result = not _valueless(e.type) and not _scalar(e.type)
         if composite_result:
             if destination is None:
                 scratch_ir, destination = self.scratch_address(e.type)
@@ -858,9 +865,22 @@ class TypedFunctionBuilder:
                 args.append(address)
             else:
                 raise NotYetPorted(f"argument of type {a.type}")
-        result = self.temp(e.type) if e.type != Type.VOID and _scalar(e.type) else None
+        result = self.temp(e.type) if _scalar(e.type) else None
         ir.append(IRCall(dst=result, name=e.name if e.kind == 'extern' else link_name(e.name), args=args))
+        if e.type == Type.NEVER:
+            ir.append(self.never_returned(e))
         return ir, destination if composite_result else result
+
+    def never_returned(self, at) -> IRJump:
+        """What follows a call that doesn't return: a panic, should it return after all."""
+        return IRJump(self.panics.label(located("a never function returned", at.where)))
+
+    def panic(self, e: t.Panic) -> list:
+        """`panic(message)`: the runtime prints this call's position and the message, and aborts."""
+        ir, ptr, length = self.str_value(e.message)
+        where = self.temp()
+        return ir + [IRStaticDataAddress(dst=where, label=message_label(self.ir_program, e.where or "")),
+                     IRCall(dst=None, name='hornet_panic_at', args=[where, ptr, length]), self.never_returned(e)]
 
     def print_(self, e: t.Print) -> list:
         value_type = e.value.type

@@ -1,5 +1,4 @@
 # String building and searching.
-from 'c' import panic
 from 'fmt' import int_to_str
 
 # Growable byte buffer: Builder b; b.write('text'); b.to_str().

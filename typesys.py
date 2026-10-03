@@ -19,6 +19,7 @@ class TypeKind(Enum):
     POINTER = auto()
     DICT = auto()
     VOID = auto()
+    NEVER = auto()
     NONE = auto()
 
 
@@ -58,8 +59,10 @@ Type.INT64 = Type.INT  # `int64` is another spelling of `int`
 Type.INT32 = Type(TypeKind.INT32)
 Type.BOOL = Type(TypeKind.BOOL)
 Type.STR = Type(TypeKind.STR)
-# VOID (no declared return) and NONE (`none`) have no source spelling.
+# VOID (no declared return) and NONE (`none`) have no source spelling. NEVER is the return type
+# `never`: the function doesn't return, so a call to it has no value and ends its path.
 Type.VOID = Type(TypeKind.VOID)
+Type.NEVER = Type(TypeKind.NEVER)
 Type.NONE = Type(TypeKind.NONE)
 
 

@@ -322,6 +322,21 @@ void hornet_panic(const char *msg) {
     abort();
 }
 
+// `panic(message)`: print `where: panic: message` and abort. `where` is the call's position, empty
+// if it has none; the message is a str, so not NUL-terminated.
+void hornet_panic_at(const char *where, const char *msg, int64_t len) {
+    fflush(stdout);  // the program's own output first
+    if (where[0] != '\0') {
+        fputs(where, stderr);
+        fputs(": ", stderr);
+    }
+    fputs("panic: ", stderr);
+    fwrite(msg, 1, (size_t)len, stderr);
+    fputc('\n', stderr);
+    fflush(stderr);
+    abort();
+}
+
 // malloc new_cap * element_width bytes and copy `len` elements.
 void *hornet_slice_grow(const void *old_ptr, int64_t len, int64_t new_cap, int64_t element_width) {
     void *new_ptr = malloc((size_t)new_cap * (size_t)element_width);

@@ -21,7 +21,7 @@ syn region  hornetString start=/'/ skip=/\\./ end=/'/ oneline contains=hornetEsc
 syn region  hornetByte   start=/"/ skip=/\\./ end=/"/ oneline contains=hornetEscape
 
 " Types. byte is uint8 and int64 is int.
-syn keyword hornetType int int8 uint8 int32 int64 byte bool str dict
+syn keyword hornetType int int8 uint8 int32 int64 byte bool str dict never
 
 " Declarations
 syn keyword hornetKeyword def return
@@ -43,7 +43,7 @@ syn keyword hornetLogicalOperator and or not
 
 " Calls. Builtins have their own group.
 syn match   hornetFunction /\h\w*\ze\s*(/
-syn keyword hornetBuiltin print len append del bytes
+syn keyword hornetBuiltin print len append del bytes panic
 
 " Declared names (after the operator and call matches, so they win).
 syn match   hornetTypeName /\%(\<type\s\+\)\@<=\h\w*/

@@ -17,7 +17,7 @@ extern int read(int32 fd, *byte buf, int count)
 extern int32 close(int32 fd)
 extern int hornet_write_fd(int fd, *byte buf, int n)
 extern int hornet_open_write(*byte path)
-extern hornet_exit(int code)
+extern never hornet_exit(int code)
 extern *byte hornet_error_message()
 intrinsic *byte _raw_ptr(str s)
 intrinsic int _raw_len(str s)
@@ -75,5 +75,5 @@ def IntResult write_file(str path, str content):
     return written
 
 # Flush pending output and exit with `code`.
-def exit(int code):
+def never exit(int code):
     hornet_exit(code)

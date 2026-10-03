@@ -35,7 +35,6 @@ def str contents_or_exit(StrResult r):
         is Error:
             write_stderr('wc: ' + v.message + '\n')
             exit(1)
-    return ''
 
 def str format_counts(int lines, int words, int byte_count, str label):
     str result = int_to_str(lines) + ' ' + int_to_str(words) + ' ' + int_to_str(byte_count)

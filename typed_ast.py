@@ -301,6 +301,12 @@ class Print(Expr):
 
 
 @dataclass(frozen=True)
+class Panic(Expr):
+    """`panic(message)`: report the message with this node's position and abort."""
+    message: Expr
+
+
+@dataclass(frozen=True)
 class DictDelete(Expr):
     dict: Expr
     key: Expr

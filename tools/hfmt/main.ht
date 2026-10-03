@@ -69,7 +69,6 @@ def str _source_or_exit(str path):
         is Error:
             write_stderr('hfmt: ' + v.message + '\n')
             exit(1)
-    return ''
 
 # Format (or check) one file; false on any error or, when checking, a needed change.
 def bool _process_file(str path, bool check):

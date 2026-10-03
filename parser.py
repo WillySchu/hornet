@@ -784,9 +784,15 @@ class Parser:
             and self.peek(2).type == TokenType.IDENTIFIER and self.peek(3).type == TokenType.IDENTIFIER
         )
 
+    def _parse_return_type(self):
+        """What precedes a def's or extern's name: a type, `never` (it doesn't return), or nothing."""
+        if self.match(TokenType.NEVER):
+            return 'never'
+        return self.parse_type() if self._check_starts_with_return_type() else None
+
     def parse_function(self) -> Function:
         start_tok = self.expect(TokenType.DEF, "Expected 'def' to start a function definition")
-        return_type = self.parse_type() if self._check_starts_with_return_type() else None
+        return_type = self._parse_return_type()
         name_tok = self.expect(TokenType.IDENTIFIER, "Expected a function name")
         self.expect(TokenType.OPEN_PAREN, "Expected '(' after function name")
         params = self.parse_params()
@@ -803,7 +809,7 @@ class Parser:
     def parse_extern_function(self) -> ExternFunctionDecl:
         """`extern [T] name(params)`."""
         start_tok = self.expect(TokenType.EXTERN, "Expected 'extern' to start an external function declaration")
-        return_type = self.parse_type() if self._check_starts_with_return_type() else None
+        return_type = self._parse_return_type()
         name_tok = self.expect(TokenType.IDENTIFIER, "Expected a function name")
         self.expect(TokenType.OPEN_PAREN, "Expected '(' after function name")
         params = self.parse_params()
@@ -816,7 +822,7 @@ class Parser:
     def parse_method_def(self) -> MethodDef:
         """`def [T] name(receiver, ...):` or `def [T] name(*receiver, ...):`."""
         start_tok = self.expect(TokenType.DEF, "Expected 'def' to start a method definition")
-        return_type = self.parse_type() if self._check_starts_with_return_type() else None
+        return_type = self._parse_return_type()
         name_tok = self.expect(TokenType.IDENTIFIER, "Expected a method name")
         self.expect(TokenType.OPEN_PAREN, "Expected '(' after method name")
         receiver_is_pointer = self.match(TokenType.STAR)

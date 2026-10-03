@@ -89,6 +89,7 @@ class TokenType(Enum):
     INTRINSIC = auto()
     DICT = auto()
     CONST = auto()
+    NEVER = auto()
 
     NEWLINE = auto()
     INDENT = auto()
@@ -171,6 +172,7 @@ class Lexer:
             'intrinsic': TokenType.INTRINSIC,
             'dict': TokenType.DICT,
             'const': TokenType.CONST,
+            'never': TokenType.NEVER,
         }
 
         self.rules = [

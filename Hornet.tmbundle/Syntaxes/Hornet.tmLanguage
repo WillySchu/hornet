@@ -411,7 +411,7 @@
 					<key>name</key>
 					<string>support.function.builtin.hornet</string>
 					<key>match</key>
-					<string>\b(?:print|len|append|del|bytes)\b</string>
+					<string>\b(?:print|len|append|del|bytes|panic)\b</string>
 				</dict>
 			</array>
 		</dict>
@@ -453,7 +453,7 @@
 					<key>name</key>
 					<string>storage.type.primitive.hornet</string>
 					<key>match</key>
-					<string>\b(?:int|int8|uint8|int32|int64|bool|str|byte)\b</string>
+					<string>\b(?:int|int8|uint8|int32|int64|bool|str|byte|never)\b</string>
 				</dict>
 				<dict>
 					<key>name</key>

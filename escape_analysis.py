@@ -66,7 +66,7 @@ def _literal(node) -> tuple:
 
 _NO_POINTERS = (t.IntLit, t.BoolLit, t.StrLit, t.NoneLit, t.ZeroValue, t.NewEmptyDict, t.EmptySlice)
 _OPERATORS = (t.Unary, t.Binary, t.StrConcat, t.StrCompare, t.TagTest, t.Len, t.DictContains, t.ElementContains,
-              t.StrIndex, t.Print, t.DictDelete)
+              t.StrIndex, t.Print, t.Panic, t.DictDelete)
 
 
 class EscapeAnalyzer:

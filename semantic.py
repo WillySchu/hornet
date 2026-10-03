@@ -144,29 +144,30 @@ def type_from_name(
     raise SemanticError(f"Unknown type '{type_expr}'", node)
 
 
-def always_returns(statements: List[Node]) -> bool:
-    """Whether every path through `statements` returns."""
+def _always_ends(statements: List[Node], types: dict, ends: tuple) -> bool:
+    """Whether control never runs off the end of `statements`: every path reaches a statement of
+    one of the classes `ends`, a call to a `never` function (by `types`, the checked types by node
+    number), or a `while true` without a reachable break."""
     for stmt in statements:
-        if isinstance(stmt, Return):
+        if isinstance(stmt, ends):
             return True
-        if isinstance(stmt, Match) and _match_always_returns(stmt):  # exhaustiveness already verified
+        if isinstance(stmt, ExprStmt) and types.get(stmt.expr.nid) == Type.NEVER:
             return True
-        if isinstance(stmt, If):
-            if stmt.else_body is not None and always_returns(stmt.then_body) and always_returns(stmt.else_body):
-                return True
-        if isinstance(stmt, While):
-            # `while true` without a reachable break never falls through.
-            is_infinite = isinstance(stmt.condition, BoolLiteral) and stmt.condition.value is True
-            if is_infinite and not contains_reachable_break(stmt.body):
-                return True
+        if isinstance(stmt, Match) and all(_always_ends(body, types, ends) for _, body in stmt.arms) and (
+                stmt.else_body is None or _always_ends(stmt.else_body, types, ends)):  # exhaustive without an else
+            return True
+        if isinstance(stmt, If) and stmt.else_body is not None and _always_ends(stmt.then_body, types, ends) and \
+                _always_ends(stmt.else_body, types, ends):
+            return True
+        if isinstance(stmt, While) and isinstance(stmt.condition, BoolLiteral) and stmt.condition.value is True \
+                and not contains_reachable_break(stmt.body):
+            return True
     return False
 
 
-def _match_always_returns(stmt: 'Match') -> bool:
-    """Whether every arm of a match returns."""
-    if not all(always_returns(body) for _, body in stmt.arms):
-        return False
-    return stmt.else_body is None or always_returns(stmt.else_body)
+def always_returns(statements: List[Node], types: dict) -> bool:
+    """Whether every path through `statements` returns (or never finishes)."""
+    return _always_ends(statements, types, (Return,))
 
 
 def contains_reachable_break(statements: List[Node]) -> bool:
@@ -187,30 +188,18 @@ def contains_reachable_break(statements: List[Node]) -> bool:
     return False
 
 
-def always_leaves(statements: List[Node]) -> bool:
-    """Whether control never runs off the end of `statements`: every path returns, or breaks out of
-    or continues the enclosing loop."""
-    for stmt in statements:
-        if isinstance(stmt, (Return, Break, Continue)):
-            return True
-        if isinstance(stmt, Match) and all(always_leaves(body) for _, body in stmt.arms) and (
-                stmt.else_body is None or always_leaves(stmt.else_body)):  # exhaustive without an else
-            return True
-        if isinstance(stmt, If) and stmt.else_body is not None and always_leaves(stmt.then_body) and \
-                always_leaves(stmt.else_body):
-            return True
-        if isinstance(stmt, While) and isinstance(stmt.condition, BoolLiteral) and stmt.condition.value is True \
-                and not contains_reachable_break(stmt.body):
-            return True
-    return False
+def always_leaves(statements: List[Node], types: dict) -> bool:
+    """Whether every path through `statements` returns, breaks out of or continues the enclosing
+    loop, or never finishes."""
+    return _always_ends(statements, types, (Return, Break, Continue))
 
 
-def _guard_checks(stmt: If) -> List[IsCheck]:
+def _guard_checks(stmt: If, types: dict) -> List[IsCheck]:
     """The `is` checks known to be false after `stmt`: those of an `if`/`elif` chain with no `else`
     whose bodies all leave, so the code after it runs only when every condition was false."""
     checks = []
     while True:
-        if not always_leaves(stmt.then_body):
+        if not always_leaves(stmt.then_body, types):
             return []
         if isinstance(stmt.condition, IsCheck):
             checks.append(stmt.condition)
@@ -238,7 +227,7 @@ def _method_function(sd: StructDef, md: MethodDef) -> Function:
 
 
 # Builtins; see check_call.
-_BUILTIN_FUNCTION_NAMES = {'print', 'len', 'append', 'del', 'bytes'}
+_BUILTIN_FUNCTION_NAMES = {'print', 'len', 'append', 'del', 'bytes', 'panic'}
 _BYTE_SLICE = Type(TypeKind.SLICE, element_type=Type.UINT8)
 
 
@@ -432,8 +421,7 @@ class SemanticAnalyzer:
             if fn.name in self.functions:
                 raise SemanticError(f"Function '{shown(fn.name)}' is already declared", fn)
             param_types = [self._type(p.type, p) for p in fn.params]
-            return_type = Type.VOID if fn.return_type is None else self._type(fn.return_type, fn)
-            self.functions[fn.name] = (param_types, return_type)
+            self.functions[fn.name] = (param_types, self._return_type(fn))
 
         # 4.5. Externs share the function registry.
         self.extern_names = {ext.name for ext in program.extern_functions}
@@ -735,7 +723,7 @@ class SemanticAnalyzer:
                 param_types = [
                     self._type(p.type, p) for p in md.params
                 ]
-                return_type = Type.VOID if md.return_type is None else self._type(md.return_type, md)
+                return_type = self._return_type(md)
                 methods[(sd.name, md.name)] = (param_types, return_type, mangle_method_name(sd.name, md.name))
                 if md.receiver_is_pointer:
                     self.pointer_receivers.add((sd.name, md.name))
@@ -913,7 +901,7 @@ class SemanticAnalyzer:
             raise SemanticError(f"Function '{shown(ext.name)}' is already declared", ext)
 
         param_types = [self._type(p.type, p) for p in ext.params]
-        return_type = Type.VOID if ext.return_type is None else self._type(ext.return_type, ext)
+        return_type = self._return_type(ext)
 
         for p, p_type in zip(ext.params, param_types):
             if p_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT, TypeKind.SUM, TypeKind.STR):
@@ -986,17 +974,27 @@ class SemanticAnalyzer:
             self.facts.types[p.nid] = param_type
             self.facts.symbols[p.nid] = self.symbols.new(p.name, 'param', param_type, p)
             self._declare(p.name, param_type, p, self.facts.symbols[p.nid].id)
-        return_type = Type.VOID if fn.return_type is None else self._type(fn.return_type, fn)
+        return_type = self._return_type(fn)
         self.facts.returns[fn.nid] = return_type
         self._analyze_block(fn.body, return_type)
+        if return_type == Type.NEVER and not _always_ends(fn.body, self.facts.types, ()):
+            raise SemanticError(
+                f"Function '{shown(fn.name)}' is declared never, but can finish -- every path must end in a call "
+                f"to a never function (such as panic) or in a `while true` it doesn't break out of", fn)
         # Void functions may fall off the end.
-        if return_type != Type.VOID and not always_returns(fn.body):
+        if return_type not in (Type.VOID, Type.NEVER) and not always_returns(fn.body, self.facts.types):
             raise SemanticError(
                 f"Function '{shown(fn.name)}' (declared to return {return_type}) "
                 f"does not return a value on all code paths",
                 fn,
             )
 
+
+    def _return_type(self, decl) -> Type:
+        """A def's or extern's return type: VOID when it declares none, NEVER for `never`."""
+        if decl.return_type is None:
+            return Type.VOID
+        return Type.NEVER if decl.return_type == 'never' else self._type(decl.return_type, decl)
 
     def _push_scope(self) -> None:
         self.scopes.append({})
@@ -1054,7 +1052,7 @@ class SemanticAnalyzer:
         mark = len(self._undo)
         for stmt in statements:
             self.analyze_statement(stmt, return_type)
-            for check in _guard_checks(stmt) if isinstance(stmt, If) else ():
+            for check in _guard_checks(stmt, self.facts.types) if isinstance(stmt, If) else ():
                 decl_id = self.facts.decls[check.nid]
                 # An `as NAME` binding ends with its `if`, so the name may be gone, or another variable's.
                 entry = next((scope[check.variable_name] for scope in reversed(self.scopes)
@@ -1328,6 +1326,8 @@ class SemanticAnalyzer:
 
     def analyze_return(self, stmt: Return, return_type: Type) -> None:
         """`return [expr]`; bare return only in void functions."""
+        if return_type == Type.NEVER:
+            raise SemanticError("Function is declared never, so it can't return", stmt)
         if stmt.value is None:
             if return_type != Type.VOID:
                 raise SemanticError(
@@ -1901,6 +1901,8 @@ class SemanticAnalyzer:
             return self.check_del_call(expr)
         if name == 'bytes':
             return self.check_bytes_call(expr)
+        if name == 'panic':
+            return self.check_panic_call(expr)
         visible = expr.nid in self.module_set.qualified or self.scope.resolve(expr.name) is not None
         if name not in self.functions or not visible:  # another module's extern needs an import too
             raise SemanticError(f"Call to undeclared function '{shown(name)}'", expr)
@@ -1931,7 +1933,7 @@ class SemanticAnalyzer:
                 expr,
             )
         arg_type = self._check_expr_allowing_struct_literal(expr.args[0])
-        if arg_type == Type.VOID:
+        if arg_type in (Type.VOID, Type.NEVER):
             raise SemanticError(
                 "'print' cannot be called with the result of a function "
                 "that has no declared return type -- there's no value there to print",
@@ -1945,6 +1947,15 @@ class SemanticAnalyzer:
                 expr.args[0],
             )
         return Type.VOID
+
+    def check_panic_call(self, expr: Call) -> Type:
+        """`panic(message)`: report a str with the call's position and abort."""
+        if len(expr.args) != 1:
+            raise SemanticError(f"'panic' expects exactly 1 argument, got {len(expr.args)}", expr)
+        arg_type = self.check_expr(expr.args[0])
+        if arg_type != Type.STR:
+            raise SemanticError(f"'panic' expects a str, got {arg_type}", expr.args[0])
+        return Type.NEVER
 
     def check_len_call(self, expr: Call) -> Type:
         """`len(x)` for arrays, slices, str, and dicts."""
@@ -2605,6 +2616,8 @@ class _TypedTreeBuilder:
             return typed.DictDelete(Type.VOID, d, self.convert(args[1], d.type.key_type))
         if name == 'bytes':
             return typed.BytesFromStr(_BYTE_SLICE, self.expr(args[0]))
+        if name == 'panic':
+            return typed.Panic(Type.NEVER, self.expr(args[0]))
         if name in self.structs:
             field_types = self.structs[name].fields
             if e.kwargs is not None:
