@@ -6,7 +6,7 @@ from dataclasses import replace
 from folding import fold_cast, fold_unary_op
 from ir.cfg import writes
 from ir.ir import IRBinOp, IRBranch, IRCast, IRConst, IRLabel, IRMove, IRUnOp, Temp
-from ir.panics import PanicBlocks
+from ir.panics import PanicBlocks, located
 from ops import BinaryOp
 from typesys import Type
 
@@ -57,7 +57,8 @@ def insert_division_checks(ir_fn, ir_program) -> None:
         if known is None or known == 0:
             is_zero, ok = ids.new_temp(Type.BOOL), ids.new_label("divisor_nonzero")
             out += [IRBinOp(dst=is_zero, op=BinaryOp.EQUAL, left=divisor, right=IRConst(0, divisor.type)),
-                    IRBranch(cond=is_zero, true_label=panics.label(ZERO_MESSAGE), false_label=ok),
+                    IRBranch(cond=is_zero, true_label=panics.label(located(ZERO_MESSAGE, instr.where)),
+                             false_label=ok),
                     IRLabel(ok)]
         if t in _MINIMUM and (known is None or known == -1):
             is_minus_one, is_min = ids.new_temp(Type.BOOL), ids.new_temp(Type.BOOL)
@@ -66,7 +67,8 @@ def insert_division_checks(ir_fn, ir_program) -> None:
                     IRBranch(cond=is_minus_one, true_label=check_min, false_label=ok),
                     IRLabel(check_min),
                     IRBinOp(dst=is_min, op=BinaryOp.EQUAL, left=instr.left, right=IRConst(_MINIMUM[t], t)),
-                    IRBranch(cond=is_min, true_label=panics.label(OVERFLOW_MESSAGE), false_label=ok),
+                    IRBranch(cond=is_min, true_label=panics.label(located(OVERFLOW_MESSAGE, instr.where)),
+                             false_label=ok),
                     IRLabel(ok)]
         out.append(instr)
     ir_fn.body = out + panics.blocks()

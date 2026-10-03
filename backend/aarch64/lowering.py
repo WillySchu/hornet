@@ -12,6 +12,7 @@ from backend.aarch64.calling_convention import (
 from backend.common.division import is_power_of_two, magic
 from backend.errors import CodegenError
 from ir.cfg import uses
+from ir.panics import located
 from ir.ir import (
     IRBinOp, IRBoundsCheck, IRBranch, IRCall, IRCast, IRCopy, IRConst, IRJump, IRLabel, IRLoad, IRLocalAddress, IRMove, IRReturn,
     IRSliceBoundsCheck, IRStaticDataAddress, IRStore, IRUnOp, Temp,
@@ -275,10 +276,10 @@ class Selector:
             self._copy(instr)
         elif isinstance(instr, IRBoundsCheck):
             self._compare(instr.index, instr.length)  # unsigned: a negative index is huge
-            self.emit('b.hs', LabelRef(self.host.fail_label("array index out of bounds")))
+            self.emit('b.hs', LabelRef(self.host.fail_label(located("array index out of bounds", instr.where))))
         elif isinstance(instr, IRSliceBoundsCheck):
             self._compare(instr.value, instr.bound)
-            self.emit('b.hi', LabelRef(self.host.fail_label("slice bounds out of range")))
+            self.emit('b.hi', LabelRef(self.host.fail_label(located("slice bounds out of range", instr.where))))
         elif isinstance(instr, IRReturn):
             if instr.value is not None:
                 reg = sized(ARG_REGISTERS[0], instr.value.type)

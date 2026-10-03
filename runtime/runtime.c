@@ -533,20 +533,21 @@ void hornet_dict_set_str_key(
     }
 }
 
-// `d[k]`: address of the value; panics if missing. Probes past tombstones.
+// `d[k]`: address of the value, or NULL if the key is missing (the compiled code panics, with the
+// source position). Probes past tombstones.
 void *hornet_dict_lookup_scalar_key(void *descriptor, int64_t key_width, int64_t value_width, const void *key_ptr) {
     void *buckets = dict_buckets(descriptor);
     int64_t capacity = dict_capacity(descriptor);
     if (capacity == 0) {
         // nil dict: capacity 0 would break the mask.
-        hornet_panic("dict lookup: key not found");
+        return NULL;
     }
     int64_t bucket_stride = 1 + key_width + value_width;
     int64_t index = hornet_hash_bytes(key_ptr, key_width) & (capacity - 1);
     while (1) {
         unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
         if (bucket[0] == HORNET_DICT_BUCKET_EMPTY) {
-            hornet_panic("dict lookup: key not found");
+            return NULL;
         }
         if (bucket[0] == HORNET_DICT_BUCKET_OCCUPIED && memcmp(bucket + 1, key_ptr, (size_t)key_width) == 0) {
             return bucket + 1 + key_width;
@@ -561,14 +562,14 @@ void *hornet_dict_lookup_str_key(void *descriptor, int64_t value_width, const vo
     int64_t capacity = dict_capacity(descriptor);
     if (capacity == 0) {
         // nil dict
-        hornet_panic("dict lookup: key not found");
+        return NULL;
     }
     int64_t bucket_stride = 1 + key_region_width + value_width;
     int64_t index = hornet_hash_bytes(key_ptr, key_len) & (capacity - 1);
     while (1) {
         unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
         if (bucket[0] == HORNET_DICT_BUCKET_EMPTY) {
-            hornet_panic("dict lookup: key not found");
+            return NULL;
         }
         if (bucket[0] == HORNET_DICT_BUCKET_OCCUPIED) {
             void *stored_ptr = *(void **)(bucket + 1);
@@ -629,46 +630,47 @@ int64_t hornet_dict_contains_str_key(void *descriptor, int64_t value_width, cons
     }
 }
 
-// `del(d, k)`: mark a tombstone; panics if missing.
-void hornet_dict_delete_scalar_key(void *descriptor, int64_t key_width, int64_t value_width, const void *key_ptr) {
+// `del(d, k)`: mark a tombstone and return 1, or return 0 if the key is missing (the compiled code
+// panics, with the source position).
+int64_t hornet_dict_delete_scalar_key(void *descriptor, int64_t key_width, int64_t value_width, const void *key_ptr) {
     void *buckets = dict_buckets(descriptor);
     int64_t capacity = dict_capacity(descriptor);
     if (capacity == 0) {
         // nil dict
-        hornet_panic("dict delete: key not found");
+        return 0;
     }
     int64_t bucket_stride = 1 + key_width + value_width;
     int64_t index = hornet_hash_bytes(key_ptr, key_width) & (capacity - 1);
     while (1) {
         unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
         if (bucket[0] == HORNET_DICT_BUCKET_EMPTY) {
-            hornet_panic("dict delete: key not found");
+            return 0;
         }
         if (bucket[0] == HORNET_DICT_BUCKET_OCCUPIED && memcmp(bucket + 1, key_ptr, (size_t)key_width) == 0) {
             bucket[0] = HORNET_DICT_BUCKET_TOMBSTONE;
             int64_t *count = (int64_t *)((char *)descriptor + 8);
             *count -= 1;
             dict_bump_tombstones(descriptor, 1);
-            return;
+            return 1;
         }
         index = (index + 1) & (capacity - 1);
     }
 }
 
-void hornet_dict_delete_str_key(void *descriptor, int64_t value_width, const void *key_ptr, int64_t key_len) {
+int64_t hornet_dict_delete_str_key(void *descriptor, int64_t value_width, const void *key_ptr, int64_t key_len) {
     const int64_t key_region_width = 16;
     void *buckets = dict_buckets(descriptor);
     int64_t capacity = dict_capacity(descriptor);
     if (capacity == 0) {
         // nil dict
-        hornet_panic("dict delete: key not found");
+        return 0;
     }
     int64_t bucket_stride = 1 + key_region_width + value_width;
     int64_t index = hornet_hash_bytes(key_ptr, key_len) & (capacity - 1);
     while (1) {
         unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
         if (bucket[0] == HORNET_DICT_BUCKET_EMPTY) {
-            hornet_panic("dict delete: key not found");
+            return 0;
         }
         if (bucket[0] == HORNET_DICT_BUCKET_OCCUPIED) {
             void *stored_ptr = *(void **)(bucket + 1);
@@ -678,7 +680,7 @@ void hornet_dict_delete_str_key(void *descriptor, int64_t value_width, const voi
                 int64_t *count = (int64_t *)((char *)descriptor + 8);
                 *count -= 1;
                 dict_bump_tombstones(descriptor, 1);
-                return;
+                return 1;
             }
         }
         index = (index + 1) & (capacity - 1);

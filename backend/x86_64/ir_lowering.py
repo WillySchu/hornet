@@ -82,6 +82,7 @@ from ir.ir import (
 )
 from typesys import is_wide_type
 from ir.cfg import uses
+from ir.panics import located
 from backend.common.frame import Frame
 from backend.x86_64.peephole import INVERSE_CC
 from backend.common.division import is_power_of_two, magic
@@ -402,13 +403,13 @@ class InstructionSelector:
             if width is None:
                 return None
             return self._direct_cmp(instr.index, instr.length, width) + [
-                Jae(self.host._get_bounds_check_fail_label("array index out of bounds"))]
+                Jae(self.host._get_bounds_check_fail_label(located("array index out of bounds", instr.where)))]
         if isinstance(instr, IRSliceBoundsCheck):
             width = self._same_width(instr.value, instr.bound)
             if width is None:
                 return None
             return self._direct_cmp(instr.value, instr.bound, width) + [
-                Ja(self.host._get_bounds_check_fail_label("slice bounds out of range"))]
+                Ja(self.host._get_bounds_check_fail_label(located("slice bounds out of range", instr.where)))]
         if isinstance(instr, IRLocalAddress):
             d = self._loc(instr.dst, 8)
             if isinstance(d, Register):
@@ -611,12 +612,14 @@ class InstructionSelector:
                 out.extend(self._gen_load_value(instr.length, Register('ecx')))
                 out.extend(self._gen_load_value(instr.index, Register('eax')))
                 out.append(self._cmp(instr.length, instr.index))
-                out.append(Jae(self.host._get_bounds_check_fail_label("array index out of bounds")))
+                out.append(Jae(self.host._get_bounds_check_fail_label(
+                    located("array index out of bounds", instr.where))))
             elif isinstance(instr, IRSliceBoundsCheck):
                 out.extend(self._gen_load_value(instr.bound, Register('ecx')))
                 out.extend(self._gen_load_value(instr.value, Register('eax')))
                 out.append(self._cmp(instr.bound, instr.value))
-                out.append(Ja(self.host._get_bounds_check_fail_label("slice bounds out of range")))
+                out.append(Ja(self.host._get_bounds_check_fail_label(
+                    located("slice bounds out of range", instr.where))))
             else:
                 raise NotImplementedError(f"lower_ir has no rule for: {instr!r}")
         return out

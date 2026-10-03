@@ -138,11 +138,20 @@ def assert_exit_code(body: str, expected: int, return_type: str = "int") -> None
     )
 
 
+_PANIC_POSITION = re.compile(r'\A[^:\n]+:\d+:\d+: panic: ')
+
+
+def panic_message(stderr: str) -> str:
+    """A panic's stderr without its `file:line:col: panic: ` position (tests/test_panic_locations.py
+    checks the positions themselves)."""
+    return _PANIC_POSITION.sub('', stderr)
+
+
 def assert_panics(body: str, message: str, return_type: str = "int") -> None:
     """Like assert_exit_code, but the program must panic (SIGABRT) with `message`."""
     source = f"def {return_type} main():\n{body}\n"
     result = compile_and_run(source)
-    assert (result.returncode, result.stderr) == (-signal.SIGABRT, message + "\n"), (
+    assert (result.returncode, panic_message(result.stderr)) == (-signal.SIGABRT, message + "\n"), (
         f"body:\n{body}\nexpected a panic with {message!r}, got exit {result.returncode}: {result.stderr!r}"
     )
 
@@ -198,7 +207,8 @@ def assert_stdout(body: str, expected_stdout: str, return_type: str = "int") -> 
 def assert_program_panics(source: str, message: str, expected_stdout: str = "") -> None:
     """A complete program that prints `expected_stdout`, then panics with `message` on stderr."""
     result = compile_and_run(source)
-    assert (result.returncode, result.stdout, result.stderr) == (-signal.SIGABRT, expected_stdout, message + "\n"), (
+    assert (result.returncode, result.stdout, panic_message(result.stderr)) == (
+        -signal.SIGABRT, expected_stdout, message + "\n"), (
         f"program:\n{source}\nexpected a panic with {message!r}, got exit {result.returncode}: "
         f"{result.stdout!r} {result.stderr!r}")
 
@@ -11021,7 +11031,7 @@ class TestBoundsChecking:
             "    int i = 5\n"
             "    return arr[i]\n"
         )
-        assert (result.returncode, result.stderr) == (-signal.SIGABRT, "array index out of bounds\n")
+        assert (result.returncode, panic_message(result.stderr)) == (-signal.SIGABRT, "array index out of bounds\n")
 
     def test_panic_goes_to_stderr_after_the_programs_own_output(self):
         source = "def int main():\n    print('before')\n    [3]int arr = [1, 2, 3]\n    int i = 5\n    return arr[i]\n"
@@ -11029,7 +11039,7 @@ class TestBoundsChecking:
         with tempfile.TemporaryDirectory() as tmpdir:  # one stream: buffered output comes out first
             bin_path, _ = _compile_to_binary(source, Path(tmpdir))
             merged = subprocess.run([str(bin_path)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        assert merged.stdout == "before\narray index out of bounds\n"
+        assert merged.stdout == "before\nprogram.lang:5:12: panic: array index out of bounds\n"
 
 
 # ---------------------------------------------------------------------------
@@ -11754,7 +11764,7 @@ class TestSliceBoundsChecking:
             "    []int s = arr[0:hi]\n"
             "    return s[0]\n"
         )
-        assert (result.returncode, result.stderr) == (-signal.SIGABRT, "slice bounds out of range\n")
+        assert (result.returncode, panic_message(result.stderr)) == (-signal.SIGABRT, "slice bounds out of range\n")
 
 
 # ---------------------------------------------------------------------------
@@ -12148,7 +12158,7 @@ class TestBareExpressionStatements:
     ])
     def test_bare_composite_value_statement_keeps_its_checks(self, setup, expr, message):
         result = compile_and_run(f"def int main():\n{setup}    {expr}\n    print(1)\n    return 0\n")
-        assert (result.returncode, result.stderr) == (-signal.SIGABRT, message + "\n")
+        assert (result.returncode, panic_message(result.stderr)) == (-signal.SIGABRT, message + "\n")
 
 
 class TestStackUse:
@@ -12285,12 +12295,14 @@ class TestNoneDereference:
     ])
     def test_dereferencing_none_panics(self, setup, statement):
         result = compile_and_run(f"{self.P}def int main():\n{setup}    {statement}\n    return 0\n")
-        assert (result.returncode, result.stdout, result.stderr) == (-signal.SIGABRT, "", "dereference of none\n")
+        assert (result.returncode, result.stdout, panic_message(result.stderr)) == (
+            -signal.SIGABRT, "", "dereference of none\n")
 
     def test_pointer_receiver_method_on_none_panics(self):
         result = compile_and_run("type C struct:\n    int n\n    def inc(*self):\n        self.n += 1\n"
                                  "def int main():\n    *C p = none\n    p.inc()\n    return 0\n")
-        assert (result.returncode, result.stdout, result.stderr) == (-signal.SIGABRT, "", "dereference of none\n")
+        assert (result.returncode, result.stdout, panic_message(result.stderr)) == (
+            -signal.SIGABRT, "", "dereference of none\n")
 
     def test_valid_pointers_still_work(self):
         assert_program_stdout(

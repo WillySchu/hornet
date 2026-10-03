@@ -1,5 +1,6 @@
 """Architecture-agnostic IR. Values live in typed Temps (virtual registers).
 Every block ends in exactly one terminator (IRJump, IRBranch, IRReturn); no fallthrough.
+An instruction that can panic has `where`, the `file:line:col` its panic reports (None: no position).
 """
 
 from dataclasses import dataclass, field
@@ -41,11 +42,12 @@ class IRMove:
 
 @dataclass
 class IRBinOp:
-    """dst = left OP right."""
+    """dst = left OP right. `where` is for a division's panics."""
     dst: Temp
     op: BinaryOp
     left: IRValue
     right: IRValue
+    where: Optional[str] = field(default=None, compare=False, repr=False)
 
 
 @dataclass
@@ -124,6 +126,7 @@ class IRNullCheck:
     branch to a panic block right after the function is built (ir/null_checks.py), so passes and
     backends never see it."""
     pointer: IRValue
+    where: Optional[str] = field(default=None, compare=False, repr=False)
 
 
 @dataclass
@@ -131,6 +134,7 @@ class IRBoundsCheck:
     """Panic if unsigned index >= length."""
     index: IRValue
     length: IRValue
+    where: Optional[str] = field(default=None, compare=False, repr=False)
 
 
 @dataclass
@@ -138,6 +142,7 @@ class IRSliceBoundsCheck:
     """Panic if unsigned value > bound."""
     value: IRValue
     bound: IRValue
+    where: Optional[str] = field(default=None, compare=False, repr=False)
 
 
 @dataclass

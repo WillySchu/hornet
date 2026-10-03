@@ -120,4 +120,4 @@ def test_an_aliased_variable_that_keeps_its_variant_runs_normally():
 ])
 def test_only_variables_with_their_address_taken_are_checked(body, checked):
     program = build_ir_program(analyze(_parse(DECLS + body + "def int main():\n    return 0\n")))
-    assert (MESSAGE in [text for _, text in program.string_literals]) == checked
+    assert any(text.endswith(MESSAGE) for _, text in program.string_literals) == checked

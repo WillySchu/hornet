@@ -8,6 +8,7 @@ deterministically, one node per line.
 """
 
 import itertools
+import os
 from dataclasses import dataclass, field, fields
 from typing import Any, Optional
 
@@ -20,11 +21,23 @@ _node_numbers = itertools.count()
 
 @dataclass(frozen=True)
 class _Node:
-    """Every node gets a number when created: passes key per-node facts on it."""
+    """Every node gets a number when created: passes key per-node facts on it. `line`, `col`, and
+    `file` are where the source it came from starts (0 and None if it has none); dump() omits them."""
     nid: int = field(default=-1, kw_only=True, compare=False, repr=False)
+    line: int = field(default=0, kw_only=True, compare=False, repr=False)
+    col: int = field(default=0, kw_only=True, compare=False, repr=False)
+    file: Optional[str] = field(default=None, kw_only=True, compare=False, repr=False)
 
     def __post_init__(self):
         object.__setattr__(self, 'nid', next(_node_numbers))
+
+    @property
+    def where(self) -> Optional[str]:
+        """`file:line:col` for runtime messages, or None. The file is named without its directory:
+        module names are unique program-wide, and the text doesn't depend on where it was compiled."""
+        if not self.line:
+            return None
+        return f"{os.path.basename(self.file) if self.file else '<input>'}:{self.line}:{self.col}"
 
 
 @dataclass(frozen=True)
@@ -410,7 +423,7 @@ def _label(node) -> str:
     attrs = []
     for f in fields(node):
         value = getattr(node, f.name)
-        if f.name in ('type', 'nid') or value is None or isinstance(value, (Expr, Stmt, tuple)):
+        if f.name in ('type', 'nid', 'line', 'col', 'file') or value is None or isinstance(value, (Expr, Stmt, tuple)):
             continue
         if isinstance(value, (bool, int, str)) and f.name == 'value':
             text = repr(value)

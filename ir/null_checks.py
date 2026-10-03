@@ -4,7 +4,7 @@ same block (the common `p.a + p.b`), then expands the rest into a compare and br
 
 from ir.cfg import TERMINATORS, writes
 from ir.ir import IRBinOp, IRBranch, IRConst, IRLabel, IRNullCheck, Temp
-from ir.panics import PanicBlocks
+from ir.panics import PanicBlocks, located
 from ops import BinaryOp
 from typesys import Type
 
@@ -29,7 +29,7 @@ def expand_null_checks(ir_fn, ir_program) -> None:
             continue
         is_none, ok = ids.new_temp(Type.BOOL), ids.new_label("not_none")
         out += [IRBinOp(dst=is_none, op=BinaryOp.EQUAL, left=p, right=IRConst(0, p.type)),
-                IRBranch(cond=is_none, true_label=panics.label(MESSAGE), false_label=ok),
+                IRBranch(cond=is_none, true_label=panics.label(located(MESSAGE, instr.where)), false_label=ok),
                 IRLabel(ok)]
         if isinstance(p, Temp):
             checked.add(p.id)

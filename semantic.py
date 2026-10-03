@@ -2366,8 +2366,18 @@ class _TypedTreeBuilder:
             out.extend(self.statement(stmt))
         return tuple(out)
 
+    def _at(self, node, source):
+        """Give typed `node` the position of parser node `source`, unless it already has one."""
+        if isinstance(node, (typed.Expr, typed.Stmt)) and not node.line:
+            for name in ('line', 'col', 'file'):
+                object.__setattr__(node, name, getattr(source, name))
+        return node
+
     def statement(self, s) -> list:
         """Typed statements for one parser statement (a narrowing binding adds its declaration)."""
+        return [self._at(node, s) for node in self._statement(s)]
+
+    def _statement(self, s) -> list:
         if isinstance(s, syntax.VarDecl):
             return [self.declare(s)]
         if isinstance(s, syntax.Assign):
@@ -2440,6 +2450,9 @@ class _TypedTreeBuilder:
 
     def convert(self, e, target: Type) -> typed.Expr:
         """`e` as a value flowing into a slot of type `target`, implicit operations made explicit."""
+        return self._at(self._convert(e, target), e)
+
+    def _convert(self, e, target: Type) -> typed.Expr:
         if isinstance(e, syntax.Unary) and e.nid in self.facts.boxed:
             return typed.BoxVariant(target, typed.WidenToSum(self.facts.boxed[e.nid], self.expr(e.operand)))
         if isinstance(e, syntax.NoneLiteral):
@@ -2470,6 +2483,9 @@ class _TypedTreeBuilder:
     # -- expressions
 
     def expr(self, e) -> typed.Expr:
+        return self._at(self._expr(e), e)
+
+    def _expr(self, e) -> typed.Expr:
         if isinstance(e, syntax.Constant):
             return typed.IntLit(self.ty(e), e.value)
         if isinstance(e, syntax.BoolLiteral):

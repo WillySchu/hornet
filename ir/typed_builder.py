@@ -10,7 +10,7 @@ from dataclasses import fields
 
 import typed_ast as t
 from escape_analysis import analyze_array_escapes, is_heap_allocated
-from ir.panics import PanicBlocks
+from ir.panics import PanicBlocks, located
 from ir.typedesc import type_descriptor
 from ir.ir import (
     IRBinOp, IRBoundsCheck, IRBranch, IRCall, IRCast, IRConst, IRCopy, IRFunction, IRJump, IRLabel, IRLoad,
@@ -88,7 +88,7 @@ class TypedFunctionBuilder:
         ir_fn.return_type = fn.return_type
         self.heap_ids = analyze_array_escapes(fn, self.ir_program.struct_registry, self.ir_program.escape_summaries)
         self.aliased_sums = _aliased_sums(fn)  # their narrowed reads and writes re-check the variant
-        self.panics = PanicBlocks(self.ir_program, "variant_panic")
+        self.panics = PanicBlocks(self.ir_program, "check_failed")  # for panic_when
         self.storage = {}  # symbol id -> (Temp or None, heap)
         self.loops = []  # (continue label, end label)
         self.scratch = {}  # name -> slot, for per-function scratch storage
@@ -249,7 +249,8 @@ class TypedFunctionBuilder:
             if isinstance(s.target, t.DictLookup) and _calls_anything(s.value):
                 return self.compound_assign_dict_entry(s)
             if isinstance(s.target, t.Local):  # read and written in place: `x = x op v`
-                kind = t.StrConcat if s.target.type == Type.STR else lambda type_, l, r: t.Binary(type_, s.op, l, r)
+                kind = t.StrConcat if s.target.type == Type.STR else lambda type_, l, r: t.Binary(
+                    type_, s.op, l, r, line=s.line, col=s.col, file=s.file)
                 return self.assign(s.target, kind(s.target.type, s.target, s.value))
             if s.target.type == Type.STR:  # `+=`: the place's address once, then concatenate
                 ir, address = self.place_address(s.target)
@@ -266,7 +267,7 @@ class TypedFunctionBuilder:
             current, result = self.temp(s.target.type), self.temp(s.target.type)
             value_ir, value = self.value(s.value)
             return ir + [IRLoad(dst=current, address=address)] + value_ir + [
-                IRBinOp(dst=result, op=s.op, left=current, right=value),
+                IRBinOp(dst=result, op=s.op, left=current, right=value, where=s.where),
                 IRStore(address=address, value=result, value_type=s.target.type)]
         if isinstance(s, t.ExprStmt):
             if s.expr.type == Type.NONE:  # a bare `none` does nothing
@@ -379,10 +380,10 @@ class TypedFunctionBuilder:
                 return [IRLocalAddress(dst=address, slot=self.ir_fn.var_slots[e.symbol.id])], address
             return self.local_address(e.symbol)
         if isinstance(e, t.Deref):
-            return self.pointer(e.pointer)
+            return self.pointer(e.pointer, e)
         if isinstance(e, t.FieldAccess):
             if e.through_pointer:
-                ir, base = self.pointer(e.base)
+                ir, base = self.pointer(e.base, e)
             else:
                 ir, base = self.address(e.base)
             offset_ir, address = self.offset(base, self.field_offset(e))
@@ -391,13 +392,13 @@ class TypedFunctionBuilder:
             ir, base = self.address(e.base)
             index_ir, index = self.value(e.index)
             element_ir, address = self.element(base, index, e.type)
-            return ir + index_ir + [IRBoundsCheck(index=index, length=IRConst(e.base.type.size, Type.INT))] + \
-                element_ir, address
+            return ir + index_ir + [IRBoundsCheck(index=index, length=IRConst(e.base.type.size, Type.INT),
+                                                  where=e.where)] + element_ir, address
         if isinstance(e, t.SliceIndex):
             ir, ptr, length, _ = self.slice_value(e.base)
             index_ir, index = self.value(e.index)
             element_ir, address = self.element(ptr, index, e.type)
-            return ir + index_ir + [IRBoundsCheck(index=index, length=length)] + element_ir, address
+            return ir + index_ir + [IRBoundsCheck(index=index, length=length, where=e.where)] + element_ir, address
         if isinstance(e, t.Payload):
             ir, base = self.address(e.sum)
             if isinstance(e.sum, t.Local) and e.sum.symbol.id in self.aliased_sums:
@@ -405,18 +406,18 @@ class TypedFunctionBuilder:
             offset_ir, address = self.offset(base, SUM_TYPE_TAG_WIDTH)
             return ir + offset_ir, address
         if isinstance(e, t.DictLookup):
-            return self.dict_call(e.dict, e.key, 'lookup', result_type=Type.INT64)
+            ir, address = self.dict_call(e.dict, e.key, 'lookup', result_type=Type.INT64)
+            return ir + self.panic_when_zero(address, "dict lookup: key not found", e), address
         raise NotYetPorted(f"place {type(e).__name__}")
 
     def variant_check(self, base, e: t.Payload) -> list:
         """Panic unless the sum at `base` still holds the variant `e` was narrowed to: a pointer to
         the variable may have changed it since the `is` check."""
         variants = self.ir_program.sum_type_registry[e.sum.type.sum_type_name].variants
-        tag, changed, ok = self.temp(Type.INT32), self.temp(Type.BOOL), self.ids.new_label("variant_ok")
-        message = f"'{e.sum.symbol.name}' changed variant while narrowed"
+        tag, changed = self.temp(Type.INT32), self.temp(Type.BOOL)
         return [IRLoad(dst=tag, address=base),
-                IRBinOp(dst=changed, op=BinaryOp.NOT_EQUAL, left=tag, right=IRConst(variants.index(e.type), Type.INT32)),
-                IRBranch(cond=changed, true_label=self.panics.label(message), false_label=ok), IRLabel(ok)]
+                IRBinOp(dst=changed, op=BinaryOp.NOT_EQUAL, left=tag, right=IRConst(variants.index(e.type), Type.INT32))
+                ] + self.panic_when(changed, f"'{e.sum.symbol.name}' changed variant while narrowed", e)
 
     def field_offset(self, e: t.FieldAccess) -> int:
         struct_type = e.base.type.element_type if e.through_pointer else e.base.type
@@ -613,8 +614,9 @@ class TypedFunctionBuilder:
             ir += high_ir
         else:
             high = length
-        return ir + [IRSliceBoundsCheck(value=low, bound=limit), IRSliceBoundsCheck(value=high, bound=limit),
-                     IRSliceBoundsCheck(value=low, bound=high)], low, high
+        return ir + [IRSliceBoundsCheck(value=low, bound=limit, where=e.where),
+                     IRSliceBoundsCheck(value=high, bound=limit, where=e.where),
+                     IRSliceBoundsCheck(value=low, bound=high, where=e.where)], low, high
 
     # -- slices: (ptr, len, cap)
 
@@ -674,10 +676,10 @@ class TypedFunctionBuilder:
 
     # -- scalar values
 
-    def pointer(self, expr) -> tuple:
-        """A pointer about to be dereferenced: checked not to be none."""
+    def pointer(self, expr, at) -> tuple:
+        """A pointer about to be dereferenced by typed node `at`: checked not to be none."""
         ir, value = self.value(expr)
-        return ir + [IRNullCheck(value)], value
+        return ir + [IRNullCheck(value, where=at.where)], value
 
     def value(self, e, discard: bool = False) -> tuple:
         """(IR, value) for a scalar expression (or a void call when `discard`)."""
@@ -689,7 +691,8 @@ class TypedFunctionBuilder:
         if isinstance(e, t.Print):
             return self.print_(e), None
         if isinstance(e, t.DictDelete):
-            return self.dict_call(e.dict, e.key, 'delete')[0], None
+            ir, removed = self.dict_call(e.dict, e.key, 'delete', result_type=Type.INT)
+            return ir + self.panic_when_zero(removed, "dict delete: key not found", e), None
         if isinstance(e, t.DictContains):
             ir, found = self.dict_call(e.dict, e.key, 'contains', result_type=Type.INT)
             result = self.temp(Type.BOOL)
@@ -720,7 +723,7 @@ class TypedFunctionBuilder:
             ir, ptr, length = self.str_value(e.base)
             index_ir, index = self.value(e.index)
             address, loaded = self.temp(), self.temp(Type.UINT8)
-            return ir + index_ir + [IRBoundsCheck(index=index, length=length),
+            return ir + index_ir + [IRBoundsCheck(index=index, length=length, where=e.where),
                                     IRBinOp(dst=address, op=BinaryOp.ADD, left=ptr, right=index),
                                     IRLoad(dst=loaded, address=address)], loaded
         if isinstance(e, t.Len):
@@ -768,7 +771,7 @@ class TypedFunctionBuilder:
             left_ir, left = self.value(e.left)
             right_ir, right = self.value(e.right)
             result = self.temp(e.type)
-            return left_ir + right_ir + [IRBinOp(dst=result, op=e.op, left=left, right=right)], result
+            return left_ir + right_ir + [IRBinOp(dst=result, op=e.op, left=left, right=right, where=e.where)], result
         raise NotYetPorted(type(e).__name__)
 
     def address_of(self, e: t.AddressOf) -> tuple:
@@ -905,14 +908,17 @@ class TypedFunctionBuilder:
         dst_ir, dst = self.local_address(symbol)
         return ir + dst_ir + [IRCopy(dst_address=dst, src_address=address, value_type=symbol.type)]
 
-    def panic_if(self, cond, message: str) -> list:
-        """Panic with `message` when `cond` holds."""
-        bad, ok = self.ids.new_label("check_failed"), self.ids.new_label("check_ok")
-        label, text = self.ids.new_label("panic_msg"), self.temp()
-        self.ir_program.string_literals.append((label, message))
-        return [IRBranch(cond=cond, true_label=bad, false_label=ok), IRLabel(bad),
-                IRStaticDataAddress(dst=text, label=label), IRCall(dst=None, name='hornet_panic', args=[text]),
-                IRJump(ok), IRLabel(ok)]
+    def panic_when(self, cond, message: str, at) -> list:
+        """Panic with `message`, reported at typed node `at`, when `cond` holds."""
+        ok = self.ids.new_label("check_ok")
+        return [IRBranch(cond=cond, true_label=self.panics.label(located(message, at.where)), false_label=ok),
+                IRLabel(ok)]
+
+    def panic_when_zero(self, value, message: str, at) -> list:
+        """panic_when for a runtime call's result: a null address or a zero count."""
+        is_zero = self.temp(Type.BOOL)
+        return [IRBinOp(dst=is_zero, op=BinaryOp.EQUAL, left=value, right=IRConst(0, value.type))
+                ] + self.panic_when(is_zero, message, at)
 
     def for_in(self, s: t.ForIn) -> list:
         if s.kind == 'dict':
@@ -941,7 +947,7 @@ class TypedFunctionBuilder:
         if recheck is not None:
             now, moved = self.temp(), self.temp(Type.BOOL)
             ir += [IRLoad(dst=now, address=recheck[0]), IRBinOp(dst=moved, op=BinaryOp.NOT_EQUAL, left=now, right=recheck[1])]
-            ir += self.panic_if(moved, "for ... in: slice was reallocated (e.g. by append) during iteration")
+            ir += self.panic_when(moved, "for ... in: slice was reallocated (e.g. by append) during iteration", s)
         element_ir, element = self.element(base, i, element_type)
         ir += element_ir
         bindings = list(s.bindings)
@@ -970,8 +976,8 @@ class TypedFunctionBuilder:
                IRBinOp(dst=more, op=BinaryOp.LESS_THAN, left=i, right=capacity),
                IRBranch(cond=more, true_label=body, false_label=end), IRLabel(body),
                IRLoad(dst=now, address=header), IRBinOp(dst=moved, op=BinaryOp.NOT_EQUAL, left=now, right=buckets)]
-        ir += self.panic_if(moved, "for ... in: dict's own buckets were reallocated (e.g. by an insert that "
-                                   "triggered growth) during iteration")
+        ir += self.panic_when(moved, "for ... in: dict's own buckets were reallocated (e.g. by an insert that "
+                                     "triggered growth) during iteration", s)
         ir += [IRBinOp(dst=scaled, op=BinaryOp.MULTIPLY, left=i, right=IRConst(1 + key_width + value_width, Type.INT64)),
                IRBinOp(dst=bucket, op=BinaryOp.ADD, left=buckets, right=scaled),
                IRLoad(dst=state, address=bucket),
@@ -1193,7 +1199,7 @@ class TypedFunctionBuilder:
         ir, entry = self.dict_entry(target.dict, target.key)
         lookup_ir, address = self.dict_op(entry, 'lookup', Type.INT64)
         scratch_ir, result_address = self.scratch_address(target.type)
-        ir += lookup_ir + scratch_ir
+        ir += lookup_ir + self.panic_when_zero(address, "dict lookup: key not found", target) + scratch_ir
         if target.type == Type.STR:
             read_ir, left_ptr, left_len = self.read_str(address)
             value_ir, right_ptr, right_len = self.str_value(s.value)
@@ -1206,6 +1212,6 @@ class TypedFunctionBuilder:
             current, result = self.temp(target.type), self.temp(target.type)
             value_ir, value = self.value(s.value)
             ir += [IRLoad(dst=current, address=address)] + value_ir + [
-                IRBinOp(dst=result, op=s.op, left=current, right=value),
+                IRBinOp(dst=result, op=s.op, left=current, right=value, where=s.where),
                 IRStore(address=result_address, value=result, value_type=target.type)]
         return ir + self.dict_op(entry, 'set', extra=(result_address,))[0]

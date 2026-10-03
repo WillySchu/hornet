@@ -1,7 +1,15 @@
-"""Panic blocks: a labelled call to hornet_panic with a fixed message, one per message per function."""
+"""Panic blocks: a labelled call to hornet_panic with a fixed message, one per message per function.
+A message carries the source position of what failed (`located`), so each failing site has its own."""
+
+from typing import Optional
 
 from ir.ir import IRCall, IRJump, IRLabel, IRStaticDataAddress
 from typesys import Type
+
+
+def located(message: str, where: Optional[str]) -> str:
+    """`file:line:col: panic: message`; the message alone where there is no position."""
+    return f"{where}: panic: {message}" if where else message
 
 
 def message_label(ir_program, message: str) -> str:

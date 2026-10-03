@@ -1,5 +1,6 @@
 """tools/hfmt, the Hornet formatter written in Hornet."""
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -153,18 +154,24 @@ def test_inconsistent_dedent_is_an_error(hfmt):
     assert (r.returncode, r.stderr) == (1, "<stdin>:4:1: error: unindent does not match any outer indentation level\n")
 
 
+def _meaning(path) -> str:
+    """The program at `path` as assembly, without the source positions in its panic messages:
+    formatting moves those and nothing else."""
+    from compile import compile_to_asm
+    return re.sub(r'(\.asciz ")[^":\n]+:\d+:\d+: (panic: )', r'\1\2', compile_to_asm(str(path), 'x86_64-linux'))
+
+
 @GCC_SKIP
 @pytest.mark.parametrize('path', SOURCES, ids=lambda p: f"{p.parent.name}/{p.name}")
 def test_formatting_repo_files_is_stable_and_keeps_meaning(hfmt, path, tmp_path):
     """Formatting twice changes nothing, and the formatted file compiles to identical assembly."""
-    from compile import compile_to_asm
     formatted = _run(hfmt, stdin=path.read_text())
     assert formatted.returncode == 0, formatted.stderr
     assert _run(hfmt, stdin=formatted.stdout).stdout == formatted.stdout
     # Sibling modules are formatted too, so relative imports resolve to formatted code.
     for sibling in path.parent.glob('*.ht'):
         (tmp_path / sibling.name).write_text(_run(hfmt, stdin=sibling.read_text()).stdout)
-    assert compile_to_asm(str(tmp_path / path.name), 'x86_64-linux') == compile_to_asm(str(path), 'x86_64-linux')
+    assert _meaning(tmp_path / path.name) == _meaning(path)
 
 
 # -- command line ---------------------------------------------------------------
@@ -272,25 +279,24 @@ GENERATED = _generated_programs()
 @GCC_SKIP
 @pytest.mark.parametrize('name,source', GENERATED, ids=[g[0] for g in GENERATED])
 def test_formatting_scrambled_programs_keeps_meaning(hfmt, name, source, tmp_path):
-    from compile import compile_to_asm
     from diagnostics import CompileError
     original = tmp_path / 'original.ht'
     original.write_text(source)
     try:
-        expected = compile_to_asm(str(original), 'x86_64-linux')
+        expected = _meaning(original)
     except CompileError:
         pytest.skip('rejected by semantic analysis')
     import zlib
     scrambled = scramble(source, zlib.crc32(name.encode()))
     assert scrambled != source
     (tmp_path / 'scrambled.ht').write_text(scrambled)
-    assert compile_to_asm(str(tmp_path / 'scrambled.ht'), 'x86_64-linux') == expected  # the scrambler itself is sound
+    assert _meaning(tmp_path / 'scrambled.ht') == expected  # the scrambler itself is sound
     r = _run(hfmt, stdin=scrambled)
     assert r.returncode == 0, r.stderr + scrambled
     assert _run(hfmt, stdin=r.stdout).stdout == r.stdout
     formatted = tmp_path / 'formatted.ht'
     formatted.write_text(r.stdout)
-    assert compile_to_asm(str(formatted), 'x86_64-linux') == expected
+    assert _meaning(formatted) == expected
 
 
 @GCC_SKIP
@@ -300,17 +306,15 @@ def test_repository_sources_are_formatted(hfmt):
 
 
 def test_trailing_comma_changes_keep_meaning(hfmt, tmp_path):
-    from compile import compile_to_asm
     source = "type P struct:\n    int x\n" + (ROOT / 'tests' / 'formatter' / 'trailing_commas.in.ht').read_text()
     formatted = _run(hfmt, stdin=source).stdout
     assert formatted != source
     (tmp_path / 'a.ht').write_text(source)
     (tmp_path / 'b.ht').write_text(formatted)
-    assert compile_to_asm(str(tmp_path / 'a.ht'), 'x86_64-linux') == compile_to_asm(str(tmp_path / 'b.ht'), 'x86_64-linux')
+    assert _meaning(tmp_path / 'a.ht') == _meaning(tmp_path / 'b.ht')
 
 
 def test_pointer_element_type_commas_keep_meaning(hfmt, tmp_path):
-    from compile import compile_to_asm
     source = (
         "type P struct:\n    int x\n"
         "def int main():\n"
@@ -327,13 +331,12 @@ def test_pointer_element_type_commas_keep_meaning(hfmt, tmp_path):
     assert "        &p,\n" in formatted and "        1\n    ]" in formatted and "[1]*P[&p],\n    ]" in formatted
     (tmp_path / 'a.ht').write_text(source)
     (tmp_path / 'b.ht').write_text(formatted)
-    assert compile_to_asm(str(tmp_path / 'a.ht'), 'x86_64-linux') == compile_to_asm(str(tmp_path / 'b.ht'), 'x86_64-linux')
+    assert _meaning(tmp_path / 'a.ht') == _meaning(tmp_path / 'b.ht')
 
 
 def test_star_spacing_follows_the_compilers_reading(hfmt, tmp_path):
     """Where hfmt spaces a `*` (a multiplication) or keeps it tight (a pointer type), the compiler
     reads it the same way: both spellings compile to the same program."""
-    from compile import compile_to_asm
     source = (
         "type P struct:\n    int x\n"
         "def [1]*P keep([1]*P a):\n    return a\n"
@@ -349,4 +352,4 @@ def test_star_spacing_follows_the_compilers_reading(hfmt, tmp_path):
     assert "[x][0] * 2" in formatted and "[x][0] * ys[1]" in formatted and "keep([1]*P[&p])" in formatted
     (tmp_path / 'a.ht').write_text(source)
     (tmp_path / 'b.ht').write_text(formatted)
-    assert compile_to_asm(str(tmp_path / 'a.ht'), 'x86_64-linux') == compile_to_asm(str(tmp_path / 'b.ht'), 'x86_64-linux')
+    assert _meaning(tmp_path / 'a.ht') == _meaning(tmp_path / 'b.ht')
