@@ -1,18 +1,20 @@
-"""Dead code elimination: drop pure instructions whose result is never read.
+"""Dead code elimination: drop instructions that only compute a result nothing reads.
 
-Division and modulo stay, though their panics now come from the checks ir/division_checks.py
-puts before them; calls, loads, stores, and checks always stay; writes to pinned temps always stay. Run after unreachable blocks are removed.
+Pure instructions and loads go. That includes a division: its panics come from the checks
+ir/division_checks.py puts before it, which stay, as the none and bounds checks before a load do
+(so this pass expects IR that has been through build_ir_program). Calls, stores, copies, and checks
+always stay; writes to pinned temps always stay. Run after unreachable blocks are removed.
 """
 
 from ir.cfg import PURE, build_blocks, liveness, reads, writes
-from ir.ir import IRBinOp, IRFunction
-from ops import BinaryOp
+from ir.ir import IRFunction, IRLoad
+
+# Instructions with no effect but writing `dst`. A load isn't in PURE: its result depends on memory.
+_ONLY_WRITES_DST = PURE + (IRLoad,)
 
 
 def _removable(instr, live: set, pinned: set) -> bool:
-    if not isinstance(instr, PURE):
-        return False
-    if isinstance(instr, IRBinOp) and instr.op in (BinaryOp.DIVIDE, BinaryOp.MODULO):
+    if not isinstance(instr, _ONLY_WRITES_DST):
         return False
     ws = writes(instr)
     return bool(ws) and all(w.id not in live and w.id not in pinned for w in ws)

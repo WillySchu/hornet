@@ -38,7 +38,7 @@ READ_FIELDS = {
     IRBoundsCheck: ('index', 'length'), IRSliceBoundsCheck: ('value', 'bound'), IRNullCheck: ('pointer',),
 }
 
-# Instructions whose only effect is writing `dst`.
+# Instructions whose only effect is writing `dst`, computed from their operands alone.
 PURE = (IRMove, IRBinOp, IRUnOp, IRCast, IRLocalAddress, IRStaticDataAddress)
 
 

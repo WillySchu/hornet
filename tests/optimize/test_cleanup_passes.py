@@ -1,7 +1,8 @@
 """Tests for copy coalescing, copy propagation, dead code elimination, and branch simplification."""
 
 from ir.ir import (
-    IRBinOp, IRBranch, IRCall, IRConst, IRFunction, IRJump, IRLabel, IRLocalAddress, IRMove, IRReturn, IRStore, Temp,
+    IRBinOp, IRBoundsCheck, IRBranch, IRCall, IRConst, IRFunction, IRJump, IRLabel, IRLoad, IRLocalAddress, IRMove,
+    IRReturn, IRStore, Temp,
 )
 from ir.verify import verify_function
 from ops import BinaryOp
@@ -110,17 +111,41 @@ def test_removes_unused_pure_instructions():
     assert f.body == [IRReturn(value=t(0))]
 
 
-def test_keeps_division_calls_stores_and_pinned_writes():
-    body = [
+def test_removes_unused_divisions_and_loads():
+    # Their panics come from the checks put before them, which are branches and stay.
+    f = fn(
         IRBinOp(dst=t(1), op=BinaryOp.DIVIDE, left=t(0), right=t(0)),
         IRBinOp(dst=t(2), op=BinaryOp.MODULO, left=t(0), right=t(0)),
+        IRLoad(dst=t(3), address=t(0)),
+        IRReturn(value=None),
+    )
+    remove_dead_code(f, set())
+    assert f.body == [IRReturn(value=None)]
+
+
+def test_keeps_used_divisions_and_loads():
+    body = [
+        IRBinOp(dst=t(1), op=BinaryOp.DIVIDE, left=t(0), right=t(0)),
+        IRLoad(dst=t(2), address=t(0)),
+        add(t(3), t(1), t(2)),
+        IRReturn(value=t(3)),
+    ]
+    f = fn(*body)
+    remove_dead_code(f, set())
+    assert f.body == body
+
+
+def test_keeps_calls_stores_checks_and_pinned_writes():
+    body = [
         IRCall(dst=t(3), name='g', args=[]),
         IRStore(address=t(0), value=t(0), value_type=Type.INT),
+        IRBoundsCheck(index=t(0), length=t(0)),
         IRMove(dst=t(4), src=c(1)),
+        IRLoad(dst=t(5), address=t(0)),
         IRReturn(value=None),
     ]
     f = fn(*body)
-    remove_dead_code(f, {4})
+    remove_dead_code(f, {4, 5})
     assert f.body == body
 
 
