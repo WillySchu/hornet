@@ -112,16 +112,21 @@ def run_one(ht_path: Path, runs: int = TIMING_RUNS, icount: bool = False, target
     }
 
 
+def _name_width(names) -> int:
+    return max([len('benchmark'), *map(len, names)])
+
+
 def format_report(results: dict) -> str:
+    w = _name_width(results)
     header = (
-        f"{'benchmark':<22} {'instrs':>8} {'time(ms)':>10} "
+        f"{'benchmark':<{w}} {'instrs':>8} {'time(ms)':>10} "
         f"{'temps':>7} {'elig':>6} {'alloc':>6} {'spill':>6} {'x-call':>7} {'addr':>5} {'exec(M)':>9}"
     )
     lines = [header, '-' * len(header)]
     for name, r in sorted(results.items()):
         a = r['allocation']
         lines.append(
-            f"{name:<22} {r['instruction_count']:>8} {r['runtime_seconds'] * 1000:>10.1f} "
+            f"{name:<{w}} {r['instruction_count']:>8} {r['runtime_seconds'] * 1000:>10.1f} "
             f"{a['total_temps']:>7} {a['eligible']:>6} {a['allocated']:>6} {a['spilled']:>6} "
             f"{a['live_across_call']:>7} {a['address_taken_excluded']:>5} "
             f"{_fmt_exec(r.get('executed_instructions')):>9}"
@@ -140,26 +145,35 @@ def _fmt_exec(n) -> str:
 
 
 def format_diff(results: dict, baseline: dict, label: str) -> str:
-    lines = ['', f'=== vs {label} ===']
+    """Changes from `baseline`, one row per benchmark, laid out like format_report."""
+    w = _name_width(results)
+    header = f"{'benchmark':<{w}} {'instrs':>8} {'time':>8} {'alloc':>6} {'spill':>6} {'exec':>9}"
+    lines = ['', f'vs {label}', header, '-' * len(header)]
     for name, r in sorted(results.items()):
         if name not in baseline:
-            lines.append(f"{name}: NEW (no baseline entry)")
+            lines.append(f"{name:<{w}}  (new: no baseline entry)")
             continue
         b = baseline[name]
-        instr_delta = r['instruction_count'] - b['instruction_count']
-        timed = r['runtime_seconds'] and b['runtime_seconds']
-        time_delta = f"{(r['runtime_seconds'] - b['runtime_seconds']) / b['runtime_seconds'] * 100:+.1f}%" if timed else 'n/a'
-
-        alloc_delta = r['allocation']['allocated'] - b['allocation']['allocated']
-        line = (
-            f"{name}: instructions {instr_delta:+d}, time {time_delta}, "
-            f"allocated temps {alloc_delta:+d}"
+        a, ba = r['allocation'], b['allocation']
+        lines.append(
+            f"{name:<{w}} {r['instruction_count'] - b['instruction_count']:>+8d} "
+            f"{_percent(r['runtime_seconds'], b['runtime_seconds'], 1):>8} "
+            f"{a['allocated'] - ba['allocated']:>+6d} {a['spilled'] - ba['spilled']:>+6d} "
+            f"{_percent(r.get('executed_instructions'), b.get('executed_instructions'), 2):>9}"
         )
-        if r.get('executed_instructions') and b.get('executed_instructions'):
-            exec_pct = (r['executed_instructions'] - b['executed_instructions']) / b['executed_instructions'] * 100
-            line += f", executed {exec_pct:+.2f}%"
-        lines.append(line)
+    lines.append('')
+    lines.append(
+        "instrs, alloc, spill: change in count. time, exec: change in percent ('-' where either run "
+        "didn't measure it). Columns as in the table above."
+    )
     return '\n'.join(lines)
+
+
+def _percent(now, before, decimals: int) -> str:
+    if not now or not before:
+        return '-'
+    change = round((now - before) / before * 100, decimals) or 0.0  # no "-0.00%"
+    return f"{change:+.{decimals}f}%"
 
 
 def main():
