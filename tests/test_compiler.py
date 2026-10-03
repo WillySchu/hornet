@@ -5107,12 +5107,13 @@ class TestNarrowing:
             "def int main():\n"
             "    Shape s = Circle(5)\n"
             "    if s is Circle:\n"
-            "        return s.radius\n"
+            "        print(s.radius)\n"
             "    return s.radius\n",
             match="Cannot access field 'radius' on non-struct type Shape",
         )
 
-    def test_else_body_does_not_narrow(self):
+    def test_else_body_narrows_to_the_other_variant(self):
+        # See tests/test_else_narrowing.py.
         assert_program_semantic_error(
             self._SHAPE_DECLS +
             "def int main():\n"
@@ -5121,7 +5122,7 @@ class TestNarrowing:
             "        return 0\n"
             "    else:\n"
             "        return s.radius\n",
-            match="Cannot access field 'radius' on non-struct type Shape",
+            match="Struct 'Square' has no field 'radius'",
         )
 
 
@@ -5593,7 +5594,7 @@ class TestNarrowingNonBareVariable:
             expected=11,
         )
 
-    def test_binding_stays_in_scope_and_un_narrowed_in_else(self):
+    def test_binding_stays_in_scope_in_else_and_can_be_tested_again(self):
         assert_program_exit_code(
             self._SHAPE_DECLS +
             "def int main():\n"

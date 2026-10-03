@@ -187,6 +187,40 @@ def contains_reachable_break(statements: List[Node]) -> bool:
     return False
 
 
+def always_leaves(statements: List[Node]) -> bool:
+    """Whether control never runs off the end of `statements`: every path returns, or breaks out of
+    or continues the enclosing loop."""
+    for stmt in statements:
+        if isinstance(stmt, (Return, Break, Continue)):
+            return True
+        if isinstance(stmt, Match) and all(always_leaves(body) for _, body in stmt.arms) and (
+                stmt.else_body is None or always_leaves(stmt.else_body)):  # exhaustive without an else
+            return True
+        if isinstance(stmt, If) and stmt.else_body is not None and always_leaves(stmt.then_body) and \
+                always_leaves(stmt.else_body):
+            return True
+        if isinstance(stmt, While) and isinstance(stmt.condition, BoolLiteral) and stmt.condition.value is True \
+                and not contains_reachable_break(stmt.body):
+            return True
+    return False
+
+
+def _guard_checks(stmt: If) -> List[IsCheck]:
+    """The `is` checks known to be false after `stmt`: those of an `if`/`elif` chain with no `else`
+    whose bodies all leave, so the code after it runs only when every condition was false."""
+    checks = []
+    while True:
+        if not always_leaves(stmt.then_body):
+            return []
+        if isinstance(stmt.condition, IsCheck):
+            checks.append(stmt.condition)
+        if stmt.else_body is None:
+            return checks
+        if len(stmt.else_body) != 1 or not isinstance(stmt.else_body[0], If):
+            return []
+        stmt = stmt.else_body[0]
+
+
 def mangle_method_name(struct_name: str, method_name: str) -> str:
     """`Struct.method`; '.' can't appear in identifiers, so no collisions."""
     return f"{struct_name}.{method_name}"
@@ -320,7 +354,10 @@ class SemanticAnalyzer:
         self.pointer_receivers: set = set()  # (struct, method) with a `*receiver`
         self.type_aliases: Dict[str, Type] = {}
         self.sum_types: Dict[str, SumTypeInfo] = {}
-        self._narrowed_names: set = set()  # currently narrowed variable names
+        self._declared: List[Set[str]] = []  # per scope: the names declared in it (not merely narrowed)
+        # Sum variables an `is` check has narrowed here: decl id -> the variants it may still hold.
+        self._possible: Dict[int, frozenset] = {}
+        self._undo: list = []  # what _restrict changed, undone by _end_region
 
     def analyze(self, entry: Program, modules: Optional[dict] = None) -> "typed.Program":
         """Check the entry file and the modules it imports (discover_modules's result) and return the
@@ -940,7 +977,8 @@ class SemanticAnalyzer:
 
     def analyze_function(self, fn: Function) -> None:
         self._enter(fn)
-        self.scopes = [{}]
+        self.scopes, self._declared = [{}], [set()]
+        self._possible, self._undo = {}, []
         self.loop_depth = 0
         # Params are locals; _declare also catches duplicates.
         for p in fn.params:
@@ -950,8 +988,7 @@ class SemanticAnalyzer:
             self._declare(p.name, param_type, p, self.facts.symbols[p.nid].id)
         return_type = Type.VOID if fn.return_type is None else self._type(fn.return_type, fn)
         self.facts.returns[fn.nid] = return_type
-        for stmt in fn.body:
-            self.analyze_statement(stmt, return_type)
+        self._analyze_block(fn.body, return_type)
         # Void functions may fall off the end.
         if return_type != Type.VOID and not always_returns(fn.body):
             raise SemanticError(
@@ -963,16 +1000,79 @@ class SemanticAnalyzer:
 
     def _push_scope(self) -> None:
         self.scopes.append({})
+        self._declared.append(set())
 
     def _pop_scope(self) -> None:
         self.scopes.pop()
+        self._declared.pop()
 
     def _declare(self, name: str, type_: Type, node: Optional[Node], decl_id) -> None:
         """Declare in the innermost scope; shadowing outer scopes is allowed.
         decl_id is the declaration's Symbol.id."""
-        if name in self.scopes[-1]:
+        if name in self._declared[-1]:
             raise SemanticError(f"Variable '{shown(name)}' is already declared in this scope", node)
+        self._declared[-1].add(name)
         self.scopes[-1][name] = (type_, decl_id)
+
+    # -- narrowing: what `is` checks have established about a sum variable, within a region
+
+    def _possible_variants(self, decl_id) -> frozenset:
+        """The variants the sum variable declared as `decl_id` may hold here."""
+        if decl_id in self._possible:
+            return self._possible[decl_id]
+        return frozenset(self.sum_types[self.symbols[decl_id].type.sum_type_name].variants)
+
+    def _restrict(self, name: str, decl_id, possible: frozenset) -> None:
+        """From here to the end of the region (_end_region), sum variable `name` holds one of
+        `possible`: with one variant left it has that variant's type (`none` has nothing to read,
+        so the variable stays its sum). It can't be reassigned meanwhile (analyze_assign)."""
+        narrowed = len(possible) == 1 and Type.NONE not in possible
+        entry = (next(iter(possible)) if narrowed else self.symbols[decl_id].type, decl_id)
+        scope = self.scopes[-1]
+        self._undo.append((scope, name, scope.get(name), entry, decl_id, self._possible.get(decl_id)))
+        scope[name] = entry
+        self._possible[decl_id] = possible
+
+    def _end_region(self, mark: int) -> None:
+        """Undo every _restrict since `mark` (a length of self._undo)."""
+        while len(self._undo) > mark:
+            scope, name, previous, entry, decl_id, possible = self._undo.pop()
+            if scope.get(name) is entry:  # not since replaced by a declaration of the same name
+                if previous is None:
+                    del scope[name]
+                else:
+                    scope[name] = previous
+            if possible is None:
+                del self._possible[decl_id]
+            else:
+                self._possible[decl_id] = possible
+
+    def _analyze_block(self, statements: List[Node], return_type: Type) -> None:
+        """Check a block's statements in the current scope. After an `if` whose `is` check fails
+        on every path that reaches the next statement (_guard_checks), the rest of the block is
+        its `else`: the variable isn't that variant there."""
+        mark = len(self._undo)
+        for stmt in statements:
+            self.analyze_statement(stmt, return_type)
+            for check in _guard_checks(stmt) if isinstance(stmt, If) else ():
+                decl_id = self.facts.decls[check.nid]
+                # An `as NAME` binding ends with its `if`, so the name may be gone, or another variable's.
+                entry = next((scope[check.variable_name] for scope in reversed(self.scopes)
+                              if check.variable_name in scope), None)
+                if entry is not None and entry[1] == decl_id:
+                    self._restrict(check.variable_name, decl_id,
+                                   self._possible_variants(decl_id) - {self.facts.narrowed[check.nid]})
+        self._end_region(mark)
+
+    def _analyze_body(self, statements: List[Node], return_type: Type, restrict: Optional[tuple] = None) -> None:
+        """A block in a scope of its own; `restrict` (_restrict's arguments) narrows a variable in it."""
+        mark = len(self._undo)
+        self._push_scope()
+        if restrict is not None:
+            self._restrict(*restrict)
+        self._analyze_block(statements, return_type)
+        self._pop_scope()
+        self._end_region(mark)
 
     def _reject_typed_literal_read_as_multiplication(self, expr: Binary) -> None:
         """`[2][1]*P[...]` parses as `[2][1] * P[...]` (an indexed literal times an index): explain when
@@ -1137,15 +1237,15 @@ class SemanticAnalyzer:
         """`target = value` or `target op= value`, to a name, field, element, or pointee."""
         target = stmt.target
         if isinstance(target, Variable):
-            if target.name in self._narrowed_names:
-                raise SemanticError(
-                    f"Cannot reassign '{target.name}' while it's narrowed by an enclosing 'is' check -- assign to "
-                    f"a different variable instead",
-                    stmt,
-                )
             if self._const_key(target.name) is not None and not any(target.name in scope for scope in self.scopes):
                 raise SemanticError(f"Cannot assign to constant '{target.name}'", stmt)
             target_type, self.facts.decls[target.nid] = self._resolve(target.name, stmt)
+            if self.facts.decls[target.nid] in self._possible:
+                raise SemanticError(
+                    f"Cannot reassign '{target.name}' while it's narrowed by an 'is' check -- assign to "
+                    f"a different variable instead",
+                    stmt,
+                )
             what = f"to '{target.name}' (declared {target_type})"
         elif isinstance(target, Index):
             target_type = self._check_indexable_and_index(target.array, target.index)
@@ -1267,26 +1367,18 @@ class SemanticAnalyzer:
                 stmt.condition,
             )
 
-        self._push_scope()
-        # Narrow the IsCheck variable within then_body only.
-        narrowed_name = None
+        # An `is` check narrows its variable to the variant in then_body, and excludes the variant in
+        # else_body (and, when then_body always leaves, in what follows the `if`: _analyze_block).
+        then_restrict = else_restrict = None
         if isinstance(stmt.condition, IsCheck):
-            narrowed_name = stmt.condition.variable_name
-            narrowed_type = self._type(stmt.condition.type_name, stmt.condition, sums=False)
-            self.facts.narrowed[stmt.condition.nid] = narrowed_type
-            self._declare(narrowed_name, narrowed_type, stmt.condition, self.facts.decls[stmt.condition.nid])
-            self._narrowed_names.add(narrowed_name)
-        for s in stmt.then_body:
-            self.analyze_statement(s, return_type)
-        if narrowed_name is not None:
-            self._narrowed_names.discard(narrowed_name)
-        self._pop_scope()
-
+            name, decl_id = stmt.condition.variable_name, self.facts.decls[stmt.condition.nid]
+            variant = self._type(stmt.condition.type_name, stmt.condition, sums=False)
+            self.facts.narrowed[stmt.condition.nid] = variant
+            then_restrict = (name, decl_id, frozenset({variant}))
+            else_restrict = (name, decl_id, self._possible_variants(decl_id) - {variant})
+        self._analyze_body(stmt.then_body, return_type, then_restrict)
         if stmt.else_body is not None:
-            self._push_scope()
-            for s in stmt.else_body:
-                self.analyze_statement(s, return_type)
-            self._pop_scope()
+            self._analyze_body(stmt.else_body, return_type, else_restrict)
 
         if has_binding:
             self._pop_scope()
@@ -1299,30 +1391,28 @@ class SemanticAnalyzer:
         if has_binding:
             self._push_scope()
             self._declare_is_binding(first_check)
+        tested = set()
         for i, (check, body) in enumerate(stmt.arms):
             self.check_expr(check)
             if i == 0:
                 self._check_match_exhaustiveness(stmt)
-            self._push_scope()
-            narrowed_type = self._type(check.type_name, check, sums=False)
-            self.facts.narrowed[check.nid] = narrowed_type
-            self._declare(check.variable_name, narrowed_type, check, self.facts.decls[check.nid])
-            self._narrowed_names.add(check.variable_name)
-            for s in body:
-                self.analyze_statement(s, return_type)
-            self._narrowed_names.discard(check.variable_name)
-            self._pop_scope()
-        if stmt.else_body is not None:
-            self._push_scope()
-            for s in stmt.else_body:
-                self.analyze_statement(s, return_type)
-            self._pop_scope()
+            variant = self._type(check.type_name, check, sums=False)
+            self.facts.narrowed[check.nid] = variant
+            tested.add(variant)
+            self._analyze_body(body, return_type, (check.variable_name, self.facts.decls[check.nid],
+                                                   frozenset({variant})))
+        if stmt.else_body is not None:  # the subject is none of the arms' variants
+            decl_id = self.facts.decls[first_check.nid]
+            self._analyze_body(stmt.else_body, return_type,
+                               (stmt.variable_name, decl_id, self._possible_variants(decl_id) - tested))
         if has_binding:
             self._pop_scope()
 
     def _declare_is_binding(self, check: IsCheck) -> None:
         """`EXPR is T as NAME`: check EXPR and declare NAME, a copy of it."""
         subject_type = self.check_expr(check.subject)
+        if isinstance(check.subject, Variable) and self.facts.decls[check.subject.nid] in self._possible:
+            subject_type = self.symbols[self.facts.decls[check.subject.nid]].type  # a narrowed variable: its sum
         sym = self.symbols.new(check.variable_name, 'narrowing', subject_type, check)
         if subject_type.kind == TypeKind.SUM:  # otherwise rejected when the check itself is checked
             binding = VarDecl(name=check.variable_name, var_type=subject_type.sum_type_name, init=check.subject,
@@ -1335,7 +1425,7 @@ class SemanticAnalyzer:
     def _check_match_exhaustiveness(self, stmt: 'Match') -> None:
         """Reject duplicate arms; require exhaustiveness without an else."""
         subject_name = stmt.variable_name
-        subject_type = self._lookup(subject_name, stmt.arms[0][0])
+        subject_type = self.symbols[self.facts.decls[stmt.arms[0][0].nid]].type  # as declared, not as narrowed
         sum_type_info = self.sum_types[subject_type.sum_type_name]
 
         seen: Dict[Type, IsCheck] = {}
@@ -1373,10 +1463,7 @@ class SemanticAnalyzer:
             )
 
         self.loop_depth += 1
-        self._push_scope()
-        for s in stmt.body:
-            self.analyze_statement(s, return_type)
-        self._pop_scope()
+        self._analyze_body(stmt.body, return_type)
         self.loop_depth -= 1
 
     def analyze_for(self, stmt: For, return_type: Type) -> None:
@@ -1392,8 +1479,7 @@ class SemanticAnalyzer:
                 stmt.condition,
             )
         self.loop_depth += 1
-        for s in stmt.body:
-            self.analyze_statement(s, return_type)
+        self._analyze_block(stmt.body, return_type)
         self.loop_depth -= 1
         self.analyze_statement(stmt.increment, return_type)
         self._pop_scope()
@@ -1441,8 +1527,7 @@ class SemanticAnalyzer:
         for name, binding_type, sym in zip(stmt.binding_names, binding_types, symbols):
             self._declare(name, binding_type, stmt, sym.id)
         self.loop_depth += 1
-        for s in stmt.body:
-            self.analyze_statement(s, return_type)
+        self._analyze_block(stmt.body, return_type)
         self.loop_depth -= 1
         self._pop_scope()
 
@@ -1953,6 +2038,8 @@ class SemanticAnalyzer:
     def check_is_check(self, expr: IsCheck) -> Type:
         """`NAME is T` / `EXPR is T as NAME`; T must be a variant."""
         variable_type, self.facts.decls[expr.nid] = self._resolve(expr.variable_name, expr)
+        if self.facts.decls[expr.nid] in self._possible:  # narrowed here: tested as the sum it is declared as
+            variable_type = self.symbols[self.facts.decls[expr.nid]].type
         if variable_type.kind != TypeKind.SUM:
             if expr.subject is not None:
                 raise SemanticError(
