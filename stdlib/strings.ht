@@ -3,27 +3,27 @@ from 'fmt' import int_to_str
 
 # Growable byte buffer: Builder b; b.write('text'); b.to_str().
 type Builder struct:
-    []byte buf
+    []byte _buf
 
     def write(*b, str s):
         for int i = 0; i < len(s); i += 1:
-            b.buf = append(b.buf, s[i])
+            b._buf = append(b._buf, s[i])
 
     def write_byte(*b, byte x):
-        b.buf = append(b.buf, x)
+        b._buf = append(b._buf, x)
 
     def write_int(*b, int n):
         b.write(int_to_str(n))
 
     def int length(b):
-        return len(b.buf)
+        return len(b._buf)
 
     # A copy of the contents; the builder can keep growing.
     def str to_str(b):
-        return str(b.buf)
+        return str(b._buf)
 
     def reset(*b):
-        b.buf = []
+        b._buf = []
 
 def bool starts_with(str s, str prefix):
     return len(prefix) <= len(s) and s[0:len(prefix)] == prefix
