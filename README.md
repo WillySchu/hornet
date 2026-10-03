@@ -127,6 +127,7 @@ Hornet currently provides:
 * Type aliases and compile-time constants
 * Single-level pointers
 * Tagged sum types, including a payload-free `none` variant and recursive types
+* Enums, compared, matched exhaustively, and printed by name
 * `if`, `elif`, `else`, and `match`
 * `while` loops
 * C-style `for` loops
@@ -137,7 +138,7 @@ Hornet currently provides:
 * Arithmetic, comparison, logical, bitwise, and membership operators
 * Compound assignment
 * Runtime bounds checking
-* Built-ins such as `print`, `len`, `append`, `del`, and `bytes`, and `str(...)` conversions
+* Built-ins such as `print`, `len`, `append`, `del`, `bytes`, and `panic`, and `str(...)` conversions
 * Modules and imports
 * External C functions through `extern`
 * A small fixed set of compiler-defined `intrinsic` functions
@@ -324,7 +325,7 @@ type Square struct:
 type Shape is Circle | Square
 ```
 
-A variant may be a struct, scalar, `str`, array, slice, dictionary, or pointer type, or `none`, a variant with no payload; it can't be another sum type. A sum's zero value is its `none` variant. A sum without one has no zero value, so a variable of it (or a struct or array containing it) needs an initializer, and named construction can't omit such a field.
+A variant may be a struct, scalar, enum, `str`, array, slice, dictionary, or pointer type, or `none`, a variant with no payload; it can't be another sum type. A sum's zero value is its `none` variant. A sum without one has no zero value, so a variable of it (or a struct or array containing it) needs an initializer, and named construction can't omit such a field.
 
 Struct fields may have sum types, so types can be recursive, through a pointer, slice, or dictionary. Where a pointer to a sum is expected, `&Variant(...)` creates a new value of the sum, on the heap, holding that variant:
 
@@ -345,6 +346,33 @@ Expr e = Bin('+', &Num(1), &Bin('*', &Num(2), &Num(3)))
 A type that contains itself by value has no finite size and is rejected.
 
 The representation uses a discriminant and payload storage for the largest variant.
+
+## Enums
+
+An enum is a type with a fixed set of named members, one per line:
+
+```hornet
+type Color enum:
+    Red
+    Green
+    Blue
+
+Color c = Color.Green
+```
+
+A member is written `Color.Green` (`palette.Color.Green` through a module qualifier). Enums compare with `==` and `!=`, key dictionaries, and print as written (`Color.Green`); they have no ordering or arithmetic. `is` tests one, and `match` covers one exhaustively (see [Pattern Matching](#pattern-matching)). An enum's zero value is its first member.
+
+A member's value is its position, from 0. Conversions are explicit:
+
+```hornet
+int n = int(c)            # 1
+Color d = Color(n)        # panics if no member has that value
+bool ok = n in Color      # whether one does
+str name = str(c)         # 'Green'
+int count = len(Color)    # 3
+```
+
+`Color(2)` with a literal is checked at compile time. `len(Color)` is a constant, so `[len(Color)]int` has one element per member.
 
 ## Dictionaries
 
@@ -368,6 +396,7 @@ int8
 uint8
 bool
 str
+an enum
 ```
 
 Values may be any otherwise-supported Hornet type.
@@ -414,17 +443,18 @@ A name cannot be redeclared in the same scope.
 
 ## Constants
 
-`const` declares a top-level constant of an integer type, `bool`, or `str`:
+`const` declares a top-level constant of an integer type, `bool`, `str`, or an enum:
 
 ```hornet
-const int TK_IDENT = 1
-const int TK_NUMBER = TK_IDENT + 1
+const int BASE = 1
+const int NEXT = BASE + 1
 const int LIMIT = 1 << 16
 const str GREETING = 'hello ' + 'world'
 const bool DEBUG = LIMIT > 1000 and not false
+const Color DEFAULT = Color.Green
 ```
 
-The value is computed at compile time from literals, other constants (in any order), operators, string concatenation, and integer casts, with the same wraparound as at runtime. Integer constants can size arrays. Constants are imported and qualified like other top-level names (`from 'lexer' import TK_IDENT`, `lexer.TK_IDENT`), and a leading `_` makes one private. They can't be assigned or have their address taken, and a local variable, parameter, or loop binding can't reuse the name of a constant visible in its file.
+The value is computed at compile time from literals, other constants (in any order), operators, string concatenation, integer casts, and an enum's members and conversions, with the same wraparound as at runtime. Integer constants can size arrays. Constants are imported and qualified like other top-level names (`from 'limits' import LIMIT`, `limits.LIMIT`), and a leading `_` makes one private. They can't be assigned or have their address taken, and a local variable, parameter, or loop binding can't reuse the name of a constant visible in its file.
 
 ---
 
@@ -714,7 +744,7 @@ Each iteration has its own bindings, so taking a binding's address is allowed. R
 <  >  <=  >=  ==  !=
 ```
 
-Ordering applies to integers of the same type. Equality applies to integers, `bool`, `str`, pointers, and arrays and structs of comparable types. Pointers can be compared with `none`, and so can a sum with a `none` variant (`x == none` means `x is none`); slices and dictionaries are never `none`.
+Ordering applies to integers of the same type. Equality applies to integers, `bool`, `str`, enums, pointers, and arrays and structs of comparable types. Pointers can be compared with `none`, and so can a sum with a `none` variant (`x == none` means `x is none`); slices and dictionaries are never `none`.
 
 ### Membership
 
@@ -723,7 +753,7 @@ in
 not in
 ```
 
-Membership applies to dictionary keys and array or slice elements.
+Membership applies to dictionary keys and array or slice elements. With an enum on the right, `n in Color` tests whether an integer is a member's value.
 
 ### Logical
 
@@ -751,6 +781,10 @@ and  or  not
 ```
 
 A compound assignment works for any assignable target (a variable, field, element, dictionary entry, or `*p`), including `+=` on a `str`, which appends. It evaluates its target once, reads it, evaluates the value, and then writes.
+
+### Evaluation Order
+
+Operands and arguments are evaluated left to right, and each one's value is fixed when it is evaluated: in `f(s, change(&s))`, `f` receives `s` as it was before `change` ran. A plain assignment evaluates its value before its target.
 
 ---
 
@@ -794,6 +828,18 @@ The subject of `... as NAME` can be any sum-typed expression, such as a field, a
 
 `match` must be exhaustive, or end with `else:`, where the subject is none of the arms' variants. A `match` whose arms all return, or end in a `never` call such as `panic`, counts as returning.
 
+`is` and `match` also apply to an enum, with its members as the arms. Nothing is narrowed, and a `match` must cover every member or end with `else:`:
+
+```hornet
+match colour:
+    is Red:
+        print('stop')
+    is Color.Green:
+        print('go')
+    else:
+        print('wait')
+```
+
 `is` is not yet a general boolean expression: nothing narrows through `and`, `or`, `not`, `x == none`, or a loop condition.
 
 ---
@@ -811,7 +857,7 @@ bytes
 panic
 ```
 
-`str(...)` conversions are described under [Strings](#strings).
+`str(...)` conversions are described under [Strings](#strings) and [Enums](#enums). A builtin's name can't be declared, or given to an import, in any file; a method or a variable may share one.
 
 ## `print`
 
@@ -836,6 +882,8 @@ print(len(view))
 print(len(counts))
 print(len('hello'))
 ```
+
+`len(Color)` is an enum's number of members.
 
 ## `append`
 
@@ -868,7 +916,7 @@ A missing key is a runtime error.
 
 # Modules and Imports
 
-A module is currently one `.ht` source file, named by that file: the name (without `.ht`) must be an identifier, and unique among the program's modules.
+A module is currently one `.ht` source file, named by that file: the name (without `.ht`) must be an identifier, and unique among the program's modules. The entry file can't be imported.
 
 Import a module and access its exported declarations through a qualifier:
 
@@ -1109,7 +1157,7 @@ Hornet runtime   external libraries
 
 Semantic analysis never changes the parser's ASTs: it resolves each file's names in that file's scope (`scopes.py`), records what it learns (types, the declaration each name refers to, narrowing) by node number, and from that builds the typed tree (`typed_ast.py`). The typed program `semantic.analyze()` returns is the only input to later stages: a test checks that nothing in `ir/`, `optimize/`, `backend/`, or escape analysis imports the front end. In the typed tree every node has one meaning and a concrete type: names refer to symbols, the parser's overloaded forms are split (calls, struct literals, and builtins; array, slice, string, and dictionary indexing), each implicit operation is a node (widening into a sum, `&Variant(...)`, a literal becoming a slice, zero values), methods are ordinary functions, and `match` and compound assignment are nodes of their own. `compile.py --dump-typed` prints it.
 
-The frontend constructs a complete `IRProgram` before a backend begins lowering it. The IR is independent of any target: a function's incoming arguments are an ordered list of word-sized temporaries in Hornet's own calling convention (a composite return value's destination address first, then one word per parameter, except two for `str` and three for slices, with arrays, structs, sum types, and dicts passed by address), and where each word physically arrives is decided by the backend. Lowering never modifies the IR.
+The frontend constructs a complete `IRProgram` before a backend begins lowering it. The IR is independent of any target: a function's incoming arguments are an ordered list of word-sized temporaries in Hornet's own calling convention (a composite return value's destination address first, then one word per parameter, except two for `str` and three for slices, with arrays, structs, sum types, and dicts passed by address), and where each word physically arrives is decided by the backend. Lowering never modifies the IR. An enum value reaches the IR as an `int32`.
 
 Escape analysis decides which locals must live on the heap; heap storage comes from `malloc` and is never freed. It is a flow-insensitive points-to analysis per function, run on the typed tree, with per-parameter escape summaries so that passing `&x` to a function that doesn't keep the pointer leaves `x` on the stack.
 
@@ -1223,7 +1271,7 @@ Hornet is still experimental. Some notable limitations are:
 * Narrowing doesn't follow `and`/`or`/`not`, `x == none`, loop conditions, or an `if`/`else` in which only one branch leaves, and a narrowed variable can't be reassigned.
 * A sum type can't be a variant of another sum type.
 * A typed literal of pointers to a named type with two or more fixed sizes (`[2][1]*P[...]`) can't be written inline; see [Arrays and Slices](#arrays-and-slices).
-* There are no enums; integer constants stand in for them.
+* Enums have no explicit member values, ordering, or methods, and `for ... in` doesn't iterate one.
 * Sum-type equality is not implemented.
 * Slice equality and dictionary equality are not implemented.
 * `in` does not apply to strings.
