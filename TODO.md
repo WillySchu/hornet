@@ -49,7 +49,6 @@ Updates:
 - Import \*?
 - Borrow checker for modifying dicts / slices in for ... in ... loops?
 - `for in` loops on function calls.
-- Deduplicate emitted type descriptors when we call print()
 - Variadic functions.
 - Variadic FFI calls?
 - Make `append` variadic.
