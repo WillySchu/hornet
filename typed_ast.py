@@ -58,6 +58,13 @@ class IntLit(Expr):
 
 
 @dataclass(frozen=True)
+class EnumMember(Expr):
+    """`Enum.Member` (type is the enum); `index` is its position among the members, and its value."""
+    name: str
+    index: int
+
+
+@dataclass(frozen=True)
 class BoolLit(Expr):
     value: bool
 
@@ -409,6 +416,7 @@ class Program:
     structs: Any  # name -> StructInfo
     sum_types: Any  # name -> SumTypeInfo
     symbols: Any = field(compare=False)  # SymbolTable
+    enums: Any = field(default_factory=dict)  # name -> EnumInfo
 
 
 # -- dump

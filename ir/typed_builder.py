@@ -6,7 +6,7 @@ needed) and `write_into(dst, e)` stores one; a str is read as (ptr, len) and a s
 (ptr, len, cap).
 """
 
-from dataclasses import fields
+from dataclasses import fields, replace
 
 import typed_ast as t
 from escape_analysis import analyze_array_escapes, is_heap_allocated
@@ -14,13 +14,13 @@ from ir.panics import PanicBlocks, located, message_label
 from ir.typedesc import type_descriptor
 from ir.ir import (
     IRBinOp, IRBoundsCheck, IRBranch, IRCall, IRCast, IRConst, IRCopy, IRFunction, IRJump, IRLabel, IRLoad,
-    IRLocalAddress, IRMove, IRNullCheck, IRReturn, IRSliceBoundsCheck, IRStaticDataAddress, IRStore, IRUnOp,
+    IRLocalAddress, IRMove, IRNullCheck, IRReturn, IRSliceBoundsCheck, IRStaticDataAddress, IRStore, IRUnOp, Temp,
 )
 from ops import BinaryOp, UnaryOp
 from typesys import SUM_TYPE_TAG_WIDTH, Type, TypeKind, type_byte_width
 
 _SCALAR_KINDS = {TypeKind.INT, TypeKind.INT32, TypeKind.INT8, TypeKind.UINT8, TypeKind.BOOL,
-                 TypeKind.POINTER}
+                 TypeKind.POINTER, TypeKind.ENUM}
 
 
 class NotYetPorted(Exception):
@@ -47,6 +47,23 @@ def _ported(type_: Type) -> bool:
 _PLACE_NODES = (t.Local, t.Deref, t.FieldAccess, t.ArrayIndex, t.SliceIndex, t.Payload, t.DictLookup)
 _DICT_BUCKET_OCCUPIED = 1  # runtime.c's HORNET_DICT_BUCKET_OCCUPIED
 _DICT_HEADER_SIZE = 32  # {buckets, count, tombstones, capacity}
+
+
+def _as_int32(value):
+    """`value` with an enum's type replaced by int32: an enum value is its member's index, and the
+    IR and backends know it only as that integer."""
+    if isinstance(value, (Temp, IRConst)) and value.type.kind == TypeKind.ENUM:
+        return replace(value, type=Type.INT32)
+    if isinstance(value, Type) and value.kind == TypeKind.ENUM:
+        return Type.INT32
+    if isinstance(value, list):
+        return [_as_int32(item) for item in value]
+    return value
+
+
+def _without_enum_types(instr):
+    """`instr` with every enum-typed operand and value type as int32 (_as_int32)."""
+    return replace(instr, **{f.name: _as_int32(getattr(instr, f.name)) for f in fields(instr)})
 
 
 def link_name(name: str) -> str:
@@ -123,7 +140,9 @@ class TypedFunctionBuilder:
         ir += self.block(fn.body)
         if not ir or not isinstance(ir[-1], (IRBranch, IRJump, IRReturn)):
             ir.append(IRReturn(value=None))
-        ir_fn.body = ir + self.panics.blocks()
+        ir_fn.body = [_without_enum_types(instr) for instr in ir + self.panics.blocks()]
+        ir_fn.params = _as_int32(ir_fn.params)
+        ir_fn.return_type = _as_int32(ir_fn.return_type)
         return ir_fn
 
     # -- layout and scratch
@@ -741,6 +760,8 @@ class TypedFunctionBuilder:
             raise NotYetPorted(f"a {e.type} value ({type(e).__name__})")
         if isinstance(e, t.IntLit):
             return [], IRConst(e.value, e.type)
+        if isinstance(e, t.EnumMember):
+            return [], IRConst(e.index, Type.INT32)
         if isinstance(e, t.BoolLit):
             return [], IRConst(1 if e.value else 0, Type.BOOL)
         if isinstance(e, t.NoneLit):

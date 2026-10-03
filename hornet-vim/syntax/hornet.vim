@@ -1,7 +1,7 @@
 " Vim syntax file
 " Language: Hornet
 " Filenames: *.ht
-" Last Change: 2026-10-02
+" Last Change: 2026-10-03
 
 if exists("b:current_syntax")
   finish
@@ -25,7 +25,7 @@ syn keyword hornetType int int8 uint8 int32 int64 byte bool str dict never
 
 " Declarations
 syn keyword hornetKeyword def return
-syn keyword hornetStructure type struct
+syn keyword hornetStructure type struct enum
 syn keyword hornetInclude import from as
 syn keyword hornetStorageClass extern intrinsic const
 

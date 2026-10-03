@@ -84,12 +84,14 @@ class ModuleSet:
     extern_functions: List[Node] = field(default_factory=list)
     intrinsics: List[Node] = field(default_factory=list)
     consts: List[Node] = field(default_factory=list)
+    enums: List[Node] = field(default_factory=list)
     files: List[Tuple[Program, Scope]] = field(default_factory=list)  # entry first
     scope_of: Dict[int, Scope] = field(default_factory=dict)  # declaration copy's nid -> its file's scope
     qualified: Dict[int, str] = field(default_factory=dict)  # `alias.name` node's nid -> key
 
 
-_DECLARATION_KINDS = ('consts', 'functions', 'structs', 'type_aliases', 'sum_types', 'extern_functions', 'intrinsics')
+_DECLARATION_KINDS = ('consts', 'functions', 'structs', 'type_aliases', 'sum_types', 'enums', 'extern_functions',
+                      'intrinsics')
 
 
 def _own_names(program: Program) -> Set[str]:
@@ -103,6 +105,8 @@ def build_module_set(entry: Program, modules: Dict[str, DiscoveredModule]) -> Mo
     own = {module: _own_names(program) for program, module, _, _ in files}
     externs = {module: {ext.name for ext in program.extern_functions} for program, module, _, _ in files}
     const_names = {module: {cd.name for cd in program.consts} for program, module, _, _ in files}
+    enum_keys = {ed.name if module is None else mangle(module, ed.name)
+                 for program, module, _, _ in files for ed in program.enums}
     result = ModuleSet()
     current = [entry.file]
 
@@ -146,7 +150,7 @@ def build_module_set(entry: Program, modules: Dict[str, DiscoveredModule]) -> Mo
             for kind in _DECLARATION_KINDS:
                 for decl in getattr(program, kind):
                     _walk(decl, scope, result.qualified, lambda a, n, at, s=scope: resolve_in(
-                        s.aliases[a], n, s.module, at) if a in s.aliases else None)
+                        s.aliases[a], n, s.module, at) if a in s.aliases else None, enum_keys)
             result.files.append((program, scope))
             for kind in _DECLARATION_KINDS:
                 for decl in getattr(program, kind):
@@ -160,8 +164,9 @@ def build_module_set(entry: Program, modules: Dict[str, DiscoveredModule]) -> Mo
     return result
 
 
-def _walk(node, scope: Scope, qualified: Dict[int, str], resolve_qualified) -> None:
-    """Resolve every `alias.name` under `node`, and check the names locals declare."""
+def _walk(node, scope: Scope, qualified: Dict[int, str], resolve_qualified, enum_keys: Set[str]) -> None:
+    """Resolve every `alias.name` under `node`, and check the names locals declare. `enum_keys` are
+    the program's enums."""
     stack = [node]
     while stack:
         n = stack.pop()
@@ -172,6 +177,8 @@ def _walk(node, scope: Scope, qualified: Dict[int, str], resolve_qualified) -> N
             continue
         if isinstance(n, QualifiedTypeExpr):
             key = resolve_qualified(n.module, n.name, n)
+            if key is None and scope.resolve(n.module) in enum_keys:
+                continue  # `Enum.Member` where a type is read (`x is Color.Red`): semantic.py's to check
             if key is None:
                 raise MergeError(f"'{n.module}' at line {n.line} doesn't name an imported module",
                                  line=n.line, col=n.col)

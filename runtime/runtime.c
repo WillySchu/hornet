@@ -238,6 +238,21 @@ static void hornet_stringify(
         case HORNET_TYPEDESC_NONE:
             hornet_buf_append_cstr(buf, "none");  // a sum type's `none` variant
             break;
+        case HORNET_TYPEDESC_ENUM: {
+            // [tag, name, member_count, member_name...]; the value is its member's index. Prints
+            // `Enum.Member`, as it is written.
+            int32_t index = read_i32(value_addr);
+            hornet_buf_append_cstr(buf, (const char *)read_desc_word(type_desc, 1));
+            hornet_buf_append_byte(buf, '.');
+            if (index >= 0 && (uint64_t)index < read_desc_word(type_desc, 2)) {
+                hornet_buf_append_cstr(buf, (const char *)read_desc_word(type_desc, 3 + index));
+            } else {  // not a member: only memory the program didn't write holds one
+                char digits[16];
+                int n = snprintf(digits, sizeof(digits), "%d", index);
+                hornet_buf_append_bytes(buf, digits, n);
+            }
+            break;
+        }
         case HORNET_TYPEDESC_POINTER: {
             // Prints the address, not the pointee.
             void *value = read_ptr(value_addr);

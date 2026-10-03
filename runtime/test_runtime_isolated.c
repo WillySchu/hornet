@@ -116,6 +116,20 @@ static void test_bool(void) {
     free(s);
 }
 
+static void test_enum(void) {
+    // [tag, name, member_count, member_name...]; the value is a member's index, 4 bytes.
+    uint64_t desc[] = {HORNET_TYPEDESC_ENUM, (uint64_t)"Color", 2, (uint64_t)"Red", (uint64_t)"Green"};
+    int32_t v = 1;
+    char *s = stringify_to_cstr(&v, desc, 0);
+    CHECK_STR(s, "Color.Green");
+    free(s);
+
+    v = 7;  // not a member
+    s = stringify_to_cstr(&v, desc, 0);
+    CHECK_STR(s, "Color.7");
+    free(s);
+}
+
 static void test_str(void) {
     // str: 16-byte {ptr, int64 len}; no NUL terminator.
     uint64_t desc[] = {HORNET_TYPEDESC_STR};
@@ -386,6 +400,7 @@ int main(void) {
     test_int8_uint8();
     test_int32();
     test_bool();
+    test_enum();
     test_str();
     test_array();
     test_slice();

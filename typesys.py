@@ -18,6 +18,7 @@ class TypeKind(Enum):
     SUM = auto()
     POINTER = auto()
     DICT = auto()
+    ENUM = auto()
     VOID = auto()
     NEVER = auto()
     NONE = auto()
@@ -26,7 +27,7 @@ class TypeKind(Enum):
 @dataclass(frozen=True)
 class Type:
     """A type. Scalars use kind alone; ARRAY/SLICE/POINTER use element_type (ARRAY also size);
-    DICT uses key_type and element_type (value); STRUCT/SUM are nominal by name.
+    DICT uses key_type and element_type (value); STRUCT/SUM/ENUM are nominal by name.
     Frozen for structural equality and hashing.
     """
     kind: TypeKind
@@ -35,6 +36,7 @@ class Type:
     struct_name: Optional[str] = None  # STRUCT only
     sum_type_name: Optional[str] = None  # SUM only
     key_type: Optional['Type'] = None  # DICT only
+    enum_name: Optional[str] = None  # ENUM only
 
     def __str__(self) -> str:
         if self.kind == TypeKind.ARRAY:
@@ -45,6 +47,8 @@ class Type:
             return self.struct_name.rsplit('$', 1)[-1]
         if self.kind == TypeKind.SUM:
             return self.sum_type_name.rsplit('$', 1)[-1]
+        if self.kind == TypeKind.ENUM:
+            return self.enum_name.rsplit('$', 1)[-1]
         if self.kind == TypeKind.POINTER:
             return f"*{self.element_type}"
         if self.kind == TypeKind.DICT:
@@ -81,6 +85,13 @@ class SumTypeInfo:
     variants: List[Type]
 
 
+@dataclass
+class EnumInfo:
+    """An enum's name and ordered members; a value is its member's index, held like an int32."""
+    name: str
+    members: List[str]
+
+
 # Sum layout: 4-byte tag, then the largest variant's payload.
 SUM_TYPE_TAG_WIDTH = 4
 
@@ -111,7 +122,7 @@ def type_byte_width(t: Type, structs: dict[str, StructInfo], sum_types: dict) ->
         return 0  # a sum type's `none` variant: the tag alone
     if t.kind == TypeKind.DICT:
         return 8  # a pointer to the shared header: copies alias
-    return 4  # INT32, BOOL
+    return 4  # INT32, BOOL, ENUM
 
 
 def is_wide_type(t: Type) -> bool:

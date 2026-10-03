@@ -1375,6 +1375,9 @@ def test_parse_statement_assign():
     assert expected == p.parse_statement()
 
 
+# TODO(will): Test parse_expr_stmt_or_index_assign() path.
+
+
 def test_parse_while_empty():
     tokens = [
         lexer.Token(lexer.TokenType.EOF, '', 1, 1),
@@ -2328,6 +2331,24 @@ def test_parse_assign_compound_shift_right():
     assert expected == p.parse_expr_stmt_or_assign()
 
 
+# TODO(will): Test parse_expr_stmt_or_index_assign
+
+# TODO(will): Test parse_expression
+
+# TODO(will): Test parse_binary
+
+# TODO(will): Test parse_unary
+
+# TODO(will): Test parse_postfix
+
+# TODO(will): Test parse_index_of_slice
+
+# TODO(will): Test parse_primary
+
+# TODO(will): Test parse_array_literal
+
+# TODO(will): Test parse_call
+
 # ---------------------------------------------------------------------------
 # Source positions (Node.line/col) -- one test per position-derivation
 # strategy parser.py uses, not per node type (many node types share the
@@ -2650,7 +2671,7 @@ def test_parse_type_declaration_none_of_assign_struct_is_raises():
         parser.ParseError,
         match=re.escape(
             "Expected '=' (for a type alias), 'struct' (for a struct declaration), "
-            "or 'is' (for a sum type) at line 1, column 10"
+            "'enum' (for an enum), or 'is' (for a sum type) at line 1, column 10"
         )
     ):
         parser.Parser(tokens).parse_type_declaration()

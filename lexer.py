@@ -78,6 +78,7 @@ class TokenType(Enum):
     CONTINUE = auto()
     NONE = auto()
     STRUCT = auto()
+    ENUM = auto()
     TYPE = auto()
     IS = auto()
     IN = auto()
@@ -161,6 +162,7 @@ class Lexer:
             'continue': TokenType.CONTINUE,
             'none': TokenType.NONE,
             'struct': TokenType.STRUCT,
+            'enum': TokenType.ENUM,
             'type': TokenType.TYPE,
             'is': TokenType.IS,
             'in': TokenType.IN,

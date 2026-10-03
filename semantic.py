@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from diagnostics import CompileError
 from lexer import lex
-from typesys import StructInfo, SumTypeInfo, Type, TypeKind
+from typesys import EnumInfo, StructInfo, SumTypeInfo, Type, TypeKind
 from folding import fold_binary_op, fold_cast, fold_unary_op
 import parser as syntax
 import typed_ast as typed
@@ -62,6 +62,7 @@ from parser import (
     SliceLiteral,
     SliceTypeExpr,
     StringLiteral,
+    EnumDef,
     StructDef,
     SumTypeDef,
     TypeAlias,
@@ -98,19 +99,20 @@ def type_from_name(
     node: Optional[Node] = None,
     sum_types: Dict[str, SumTypeInfo] = None,
     resolve=None,
+    enums: Dict[str, EnumInfo] = None,
 ) -> Type:
     """Resolve a parsed type expression to a Type. `resolve` maps a name as written in its file (or an
     `alias.Name`) to its declaration's key (see scopes.py)."""
     if isinstance(type_expr, ArrayTypeExpr):
-        element = type_from_name(type_expr.element_type, structs, aliases, node, sum_types, resolve)
+        element = type_from_name(type_expr.element_type, structs, aliases, node, sum_types, resolve, enums)
         size = type_expr.size if isinstance(type_expr.size, int) else _array_sizes[type_expr.nid]
         return Type(TypeKind.ARRAY, element_type=element, size=size)
     if isinstance(type_expr, SliceTypeExpr):
-        element = type_from_name(type_expr.element_type, structs, aliases, node, sum_types, resolve)
+        element = type_from_name(type_expr.element_type, structs, aliases, node, sum_types, resolve, enums)
         return Type(TypeKind.SLICE, element_type=element)
     if isinstance(type_expr, PointerTypeExpr):
         # Pointer-to-pointer is rejected for now.
-        pointee = type_from_name(type_expr.pointee_type, structs, aliases, node, sum_types, resolve)
+        pointee = type_from_name(type_expr.pointee_type, structs, aliases, node, sum_types, resolve, enums)
         if pointee.kind == TypeKind.POINTER:
             raise SemanticError(
                 "Pointer-to-pointer types aren't supported yet -- "
@@ -119,12 +121,12 @@ def type_from_name(
             )
         return Type(TypeKind.POINTER, element_type=pointee)
     if isinstance(type_expr, DictTypeExpr):
-        key_type = type_from_name(type_expr.key_type, structs, aliases, node, sum_types, resolve)
-        value_type = type_from_name(type_expr.value_type, structs, aliases, node, sum_types, resolve)
-        if key_type not in _VALID_DICT_KEY_TYPES:
+        key_type = type_from_name(type_expr.key_type, structs, aliases, node, sum_types, resolve, enums)
+        value_type = type_from_name(type_expr.value_type, structs, aliases, node, sum_types, resolve, enums)
+        if key_type not in _VALID_DICT_KEY_TYPES and key_type.kind != TypeKind.ENUM:
             raise SemanticError(
                 f"'{key_type}' can't be a dict's own key type -- only "
-                f"int, int8, uint8, int32, bool, and str are supported "
+                f"int, int8, uint8, int32, bool, str, and enums are supported "
                 f"as dict keys right now",
                 node,
             )
@@ -143,6 +145,8 @@ def type_from_name(
         return Type(TypeKind.STRUCT, struct_name=type_expr)
     if sum_types is not None and type_expr in sum_types:
         return Type(TypeKind.SUM, sum_type_name=type_expr)
+    if enums is not None and type_expr in enums:
+        return Type(TypeKind.ENUM, enum_name=type_expr)
     raise SemanticError(f"Unknown type '{type_expr}'", node)
 
 
@@ -334,6 +338,8 @@ class Facts:
     returns: dict = dataclasses.field(default_factory=dict)  # Function -> return Type
     calls: dict = dataclasses.field(default_factory=dict)  # Call -> (callee's key, args) unless name(args) as written
     const_refs: dict = dataclasses.field(default_factory=dict)  # Variable, or `alias.NAME` Field -> constant's key
+    enum_members: dict = dataclasses.field(default_factory=dict)  # `Enum.Member` Field -> (enum's key, index)
+    enum_checks: dict = dataclasses.field(default_factory=dict)  # IsCheck on an enum -> (member's index, the enum)
 
 
 class SemanticAnalyzer:
@@ -367,7 +373,9 @@ class SemanticAnalyzer:
         for fn, sd in methods:
             program.scope_of[fn.nid] = program.scope_of[sd.nid]
         self.all_functions = list(program.functions) + [fn for fn, _ in methods]
-        # Order matters: 0. constant array sizes are evaluated before any type is resolved.
+        # Order matters: 0. enums depend on nothing, and constant array sizes are evaluated before any
+        # type is resolved.
+        self.enums = self._collect_enums(program.enums)
         self._collect_consts(program)
         self._resolve_array_sizes(program)
 
@@ -440,6 +448,8 @@ class SemanticAnalyzer:
             self._enter(ic)
             self.check_intrinsic_decl(ic)
 
+        self._check_enum_name_collisions(program)
+
         # 4.7. Constant values, in dependency order.
         for name in self.const_decls:
             self._const_value(name)
@@ -475,12 +485,14 @@ class SemanticAnalyzer:
     def _resolve_type_name(self, name):
         """A type name (or `alias.Name`) as written in the current file -> its declaration's key."""
         if isinstance(name, QualifiedTypeExpr):
+            if name.nid not in self.module_set.qualified:  # scopes.py left it: `Enum.Member`
+                raise SemanticError(f"'{name.module}.{name.name}' is an enum's member, not a type", name)
             return self.module_set.qualified[name.nid]
         return (self.scope.resolve(name) or name) if isinstance(name, str) else name
 
     def _type(self, type_expr, node: Node, sums: bool = True) -> Type:
         return type_from_name(type_expr, self.structs, self.type_aliases, node, self.sum_types if sums else None,
-                              resolve=self._resolve_type_name)
+                              resolve=self._resolve_type_name, enums=self.enums)
 
     def _const_key(self, name: str) -> Optional[str]:
         """The key of the constant a bare name refers to in the current file, if it names one."""
@@ -567,6 +579,31 @@ class SemanticAnalyzer:
         if value <= 0:
             raise SemanticError(f"Array size must be positive, got {value}", expr)
         return value
+
+    def _collect_enums(self, enum_defs: List[EnumDef]) -> Dict[str, EnumInfo]:
+        """The enum registry: each enum's members, distinct and at least one."""
+        registry: Dict[str, EnumInfo] = {}
+        for ed in enum_defs:
+            self._enter(ed)
+            if shown(ed.name) in BUILTIN_FUNCTION_NAMES:
+                raise SemanticError(f"'{shown(ed.name)}' is a builtin and can't be used as an enum name", ed)
+            if ed.name in registry:
+                raise SemanticError(f"Enum '{shown(ed.name)}' is already declared", ed)
+            names: List[str] = []
+            for member in ed.members:
+                if member.name in names:
+                    raise SemanticError(f"Member '{member.name}' is already declared in enum '{shown(ed.name)}'", member)
+                names.append(member.name)
+            registry[ed.name] = EnumInfo(name=ed.name, members=names)
+        return registry
+
+    def _check_enum_name_collisions(self, program: Program) -> None:
+        for ed in program.enums:
+            for kind, table in (('function', self.functions), ('struct', self.structs), ('constant', self.const_decls),
+                                ('type alias', self.type_aliases), ('sum type', self.sum_types)):
+                if ed.name in table:
+                    self._enter(ed)
+                    raise SemanticError(f"Enum '{shown(ed.name)}' collides with a {kind} of the same name", ed)
 
     def _check_const_name_collisions(self, program: Program) -> None:
         for name, cd in self.const_decls.items():
@@ -689,7 +726,8 @@ class SemanticAnalyzer:
                     )
                 try:
                     variant_type = type_from_name(
-                        variant_name, structs, self.type_aliases, std, resolve=self._resolve_type_name)
+                        variant_name, structs, self.type_aliases, std, resolve=self._resolve_type_name,
+                        enums=self.enums)
                 except SemanticError:
                     # Name what's allowed for a simple typo.
                     if not isinstance(variant_name, str):
@@ -792,9 +830,11 @@ class SemanticAnalyzer:
                 return resolve(target)
             if target in structs:
                 return Type(TypeKind.STRUCT, struct_name=target)
+            if target in self.enums:
+                return Type(TypeKind.ENUM, enum_name=target)
             raise SemanticError(
                 f"Unknown type '{target}' in a type alias's own target "
-                f"-- expected int, bool, str, a struct name, or "
+                f"-- expected int, bool, str, a struct or enum name, or "
                 f"another type alias",
                 alias_node,
             )
@@ -831,7 +871,8 @@ class SemanticAnalyzer:
                         f,
                     )
                 fields[f.name] = type_from_name(
-                    f.field_type, registry, self.type_aliases, f, sum_names, resolve=self._resolve_type_name)
+                    f.field_type, registry, self.type_aliases, f, sum_names, resolve=self._resolve_type_name,
+                    enums=self.enums)
             registry[sd.name] = StructInfo(name=sd.name, fields=fields)
         return registry
 
@@ -1068,6 +1109,8 @@ class SemanticAnalyzer:
         for stmt in statements:
             self.analyze_statement(stmt, return_type)
             for check in _guard_checks(stmt, self.facts.types) if isinstance(stmt, If) else ():
+                if check.nid in self.facts.enum_checks:
+                    continue
                 decl_id = self.facts.decls[check.nid]
                 # An `as NAME` binding ends with its `if`, so the name may be gone, or another variable's.
                 entry = next((scope[check.variable_name] for scope in reversed(self.scopes)
@@ -1110,6 +1153,10 @@ class SemanticAnalyzer:
                 return scope[name]
         if self._const_key(name) is not None:
             return self._const_value(self._const_key(name))[0], None
+        enum = self.enums.get(self.scope.resolve(name))
+        if enum is not None:
+            raise SemanticError(f"'{name}' is an enum, not a value -- write one of its members, such as "
+                                f"{name}.{enum.members[0]}", node)
         raise SemanticError(f"Reference to undeclared variable '{shown(name)}'", node)
 
     def _lookup(self, name: str, node: Optional[Node] = None) -> Type:
@@ -1385,7 +1432,7 @@ class SemanticAnalyzer:
         # An `is` check narrows its variable to the variant in then_body, and excludes the variant in
         # else_body (and, when then_body always leaves, in what follows the `if`: _analyze_block).
         then_restrict = else_restrict = None
-        if isinstance(stmt.condition, IsCheck):
+        if isinstance(stmt.condition, IsCheck) and stmt.condition.nid not in self.facts.enum_checks:
             name, decl_id = stmt.condition.variable_name, self.facts.decls[stmt.condition.nid]
             variant = self._type(stmt.condition.type_name, stmt.condition, sums=False)
             self.facts.narrowed[stmt.condition.nid] = variant
@@ -1406,6 +1453,12 @@ class SemanticAnalyzer:
         if has_binding:
             self._push_scope()
             self._declare_is_binding(first_check)
+        self.check_expr(first_check)
+        if first_check.nid in self.facts.enum_checks:
+            self._analyze_enum_match(stmt, return_type)
+            if has_binding:
+                self._pop_scope()
+            return
         tested = set()
         for i, (check, body) in enumerate(stmt.arms):
             self.check_expr(check)
@@ -1423,14 +1476,40 @@ class SemanticAnalyzer:
         if has_binding:
             self._pop_scope()
 
+    def _analyze_enum_match(self, stmt: 'Match', return_type: Type) -> None:
+        """`match` on an enum: each arm names a member, and the arms cover every member unless there is
+        an `else`. Nothing is narrowed."""
+        subject_type = self.facts.enum_checks[stmt.arms[0][0].nid][1]
+        members = self.enums[subject_type.enum_name].members
+        seen = set()
+        for check, _ in stmt.arms:
+            self.check_expr(check)
+            if check.nid not in self.facts.enum_checks:
+                raise SemanticError(f"'{check.type_name}' is not a member of {subject_type}", check)
+            index = self.facts.enum_checks[check.nid][0]
+            if index in seen:
+                raise SemanticError(
+                    f"'{members[index]}' is tested more than once in this match on '{stmt.variable_name}'", check)
+            seen.add(index)
+        missing = [member for index, member in enumerate(members) if index not in seen]
+        if missing and stmt.else_body is None:
+            raise SemanticError(
+                f"This match on '{stmt.variable_name}' (declared {subject_type}) doesn't cover every member -- "
+                f"missing: {', '.join(missing)} (add an arm for each, or an 'else:' to cover the rest)", stmt)
+        for _, body in stmt.arms:
+            self._analyze_body(body, return_type)
+        if stmt.else_body is not None:
+            self._analyze_body(stmt.else_body, return_type)
+
     def _declare_is_binding(self, check: IsCheck) -> None:
         """`EXPR is T as NAME`: check EXPR and declare NAME, a copy of it."""
         subject_type = self.check_expr(check.subject)
         if isinstance(check.subject, Variable) and self.facts.decls[check.subject.nid] in self._possible:
             subject_type = self.symbols[self.facts.decls[check.subject.nid]].type  # a narrowed variable: its sum
         sym = self.symbols.new(check.variable_name, 'narrowing', subject_type, check)
-        if subject_type.kind == TypeKind.SUM:  # otherwise rejected when the check itself is checked
-            binding = VarDecl(name=check.variable_name, var_type=subject_type.sum_type_name, init=check.subject,
+        if subject_type.kind in (TypeKind.SUM, TypeKind.ENUM):  # otherwise rejected when the check is checked
+            binding = VarDecl(name=check.variable_name, var_type=subject_type.sum_type_name or subject_type.enum_name,
+                              init=check.subject,
                               line=check.line, col=check.col, file=check.file)
             self.facts.bindings[check.nid] = binding
             self.facts.types[binding.nid] = subject_type
@@ -1619,6 +1698,9 @@ class SemanticAnalyzer:
                     value_expr,
                 )
             constant_key = _constant_key_value(key_expr)
+            if key_expr.nid in self.facts.enum_members:
+                enum, index = self.facts.enum_members[key_expr.nid]
+                constant_key = ('enum', f"{shown(enum)}.{self.enums[enum].members[index]}")
             if constant_key is not None:
                 if constant_key in seen_constant_keys:
                     raise SemanticError(
@@ -1705,7 +1787,25 @@ class SemanticAnalyzer:
                 raise SemanticError(f"Reference to undeclared variable '{shown(key)}'", expr)
             self.facts.const_refs[expr.nid] = key
             return self._const_value(key)[0]
+        enum = self._enum_named_by(expr.base)
+        if enum is not None:  # `Enum.Member`
+            members = self.enums[enum].members
+            if expr.name not in members:
+                raise SemanticError(
+                    f"Enum '{shown(enum)}' has no member '{expr.name}' (its members: {', '.join(members)})", expr)
+            self.facts.enum_members[expr.nid] = (enum, members.index(expr.name))
+            return Type(TypeKind.ENUM, enum_name=enum)
         return self._check_struct_and_field(expr.base, expr.name)
+
+    def _enum_named_by(self, expr: Node) -> Optional[str]:
+        """The key of the enum that `expr` names (`Enum`, or `alias.Enum`), unless a variable has the name."""
+        if isinstance(expr, Variable) and not any(expr.name in scope for scope in self.scopes):
+            key = self.scope.resolve(expr.name)
+        elif isinstance(expr, Field):
+            key = self.module_set.qualified.get(expr.nid)
+        else:
+            return None
+        return key if key in self.enums else None
 
     def _check_struct_and_field(self, base_expr: Node, field_name: str) -> Type:
         """Check base is a struct (auto-deref pointers) with field `field_name`."""
@@ -1919,6 +2019,10 @@ class SemanticAnalyzer:
             return self.check_bytes_call(expr)
         if name == 'panic':
             return self.check_panic_call(expr)
+        if name in self.enums:
+            raise SemanticError(
+                f"'{expr.name}(...)' would convert a value to the enum {shown(name)}, which isn't supported yet "
+                f"-- write one of its members, such as {shown(name)}.{self.enums[name].members[0]}", expr)
         visible = expr.nid in self.module_set.qualified or self.scope.resolve(expr.name) is not None
         if name not in self.functions or not visible:  # another module's extern needs an import too
             raise SemanticError(f"Call to undeclared function '{shown(name)}'", expr)
@@ -2063,9 +2167,24 @@ class SemanticAnalyzer:
         return t
 
     def check_is_check(self, expr: IsCheck) -> Type:
-        """`NAME is T` / `EXPR is T as NAME`; T must be a variant."""
+        """`NAME is T` / `EXPR is T as NAME`: T is a variant of the sum, or a member of the enum."""
         variable_type, self.facts.decls[expr.nid] = self._resolve(expr.variable_name, expr)
-        if self.facts.decls[expr.nid] in self._possible:  # narrowed here: tested as the sum it is declared as
+        narrowed = self.facts.decls[expr.nid] in self._possible
+        if variable_type.kind == TypeKind.ENUM:  # `NAME is Member`: an equality test; nothing is narrowed
+            members = self.enums[variable_type.enum_name].members
+            member = expr.type_name
+            if isinstance(member, QualifiedTypeExpr) and self.scope.resolve(member.module) == variable_type.enum_name:
+                member = member.name  # `NAME is Enum.Member`
+            if isinstance(member, str) and member in members:
+                self.facts.enum_checks[expr.nid] = (members.index(member), variable_type)
+                return Type.BOOL
+            if not narrowed:  # (a sum's variable narrowed to an enum may be tested as the sum again, below)
+                written = f"{member.module}.{member.name}" if isinstance(member, QualifiedTypeExpr) else member
+                raise SemanticError(
+                    f"'{written}' is not a member of {variable_type} (its members: {', '.join(members)})"
+                    if isinstance(written, str) else
+                    f"'is' on an enum takes one of its members ({', '.join(members)})", expr)
+        if narrowed:  # tested as the sum it is declared as
             variable_type = self.symbols[self.facts.decls[expr.nid]].type
         if variable_type.kind != TypeKind.SUM:
             if expr.subject is not None:
@@ -2164,11 +2283,12 @@ class SemanticAnalyzer:
             source_type = Type.INT64
         else:
             source_type = self.check_expr(expr.expr)
-        if target_type not in _INTEGER_TYPES or source_type not in _INTEGER_TYPES:
+        if target_type not in _INTEGER_TYPES or (source_type not in _INTEGER_TYPES
+                                                 and source_type.kind != TypeKind.ENUM):
             raise SemanticError(
                 f"Cannot cast {source_type} to {target_type} -- casting "
-                f"is only supported between int, int8, uint8, and int32 "
-                f"right now",
+                f"is only supported between int, int8, uint8, and int32, "
+                f"and from an enum to one of them, right now",
                 expr,
             )
         return target_type
@@ -2377,6 +2497,7 @@ class _TypedTreeBuilder:
         self.symbols = analyzer.symbols
         self.structs = analyzer.structs
         self.sum_types = analyzer.sum_types
+        self.enums = analyzer.enums
         self.functions = analyzer.functions
         self.intrinsics = analyzer.intrinsic_original_names  # name -> the intrinsic's own name
         self.externs = analyzer.extern_names
@@ -2396,7 +2517,7 @@ class _TypedTreeBuilder:
 
     def program(self, functions) -> typed.Program:
         return typed.Program(tuple(self.function(fn) for fn in functions), self.structs, self.sum_types,
-                             self.symbols)
+                             self.symbols, self.enums)
 
     def function(self, fn: syntax.Function) -> typed.Function:
         self.return_type = self.facts.returns[fn.nid]
@@ -2441,6 +2562,11 @@ class _TypedTreeBuilder:
             return self.if_statement(s)
         if isinstance(s, syntax.Match):
             before, subject = self.narrowing_subject(s.arms[0][0])
+            if s.arms[0][0].nid in self.facts.enum_checks:  # an `if`/`elif` chain of equality tests
+                chain = self.block(s.else_body)
+                for check, body in reversed(s.arms):
+                    chain = (self._at(typed.If(self.enum_test(subject, check), self.block(body), chain), check),)
+                return before + list(chain)
             arms = tuple((self.facts.narrowed[check.nid], self.block(body)) for check, body in s.arms)
             return before + [typed.Match(subject, arms, None if s.else_body is None else self.block(s.else_body))]
         if isinstance(s, syntax.While):
@@ -2471,8 +2597,19 @@ class _TypedTreeBuilder:
         if not isinstance(s.condition, syntax.IsCheck):
             return [typed.If(self.expr(s.condition), self.block(s.then_body), self.block(s.else_body))]
         before, subject = self.narrowing_subject(s.condition)
-        test = typed.TagTest(Type.BOOL, subject, self.facts.narrowed[s.condition.nid])
+        if s.condition.nid in self.facts.enum_checks:
+            test = self.enum_test(subject, s.condition)
+        else:
+            test = typed.TagTest(Type.BOOL, subject, self.facts.narrowed[s.condition.nid])
         return before + [typed.If(test, self.block(s.then_body), self.block(s.else_body))]
+
+    def enum_test(self, subject: typed.Local, check: syntax.IsCheck) -> typed.Binary:
+        """`subject is Member` on an enum: `subject == Enum.Member`. The subject may be a sum's variable
+        narrowed to the enum."""
+        index, enum = self.facts.enum_checks[check.nid]
+        value = subject if subject.type == enum else typed.Payload(enum, subject)
+        member = typed.EnumMember(enum, self.enums[enum.enum_name].members[index], index)
+        return typed.Binary(Type.BOOL, BinaryOp.EQUAL, value, member)
 
     def narrowing_subject(self, check: syntax.IsCheck):
         """(statements to run first, the sum being tested) for `NAME is T` or `EXPR is T as NAME`."""
@@ -2576,6 +2713,9 @@ class _TypedTreeBuilder:
             high = None if e.high is None else self.expr(e.high)
             return typed.SliceOf(self.ty(e), kind, base, low, high)
         if isinstance(e, syntax.Field):
+            if e.nid in self.facts.enum_members:
+                enum, index = self.facts.enum_members[e.nid]
+                return typed.EnumMember(self.ty(e), self.enums[enum].members[index], index)
             return self.constant(e) if e.nid in self.facts.const_refs else self.field(e)
         if isinstance(e, syntax.Call):
             return self.call(e)

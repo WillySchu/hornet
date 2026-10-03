@@ -1,0 +1,14 @@
+type Color enum:
+    Red
+    Green
+
+    Blue
+
+type Shade enum:
+    Dark
+
+def Color pick(Shade s):
+    Color c = Color.Red
+    match s:
+        is Dark:
+            return Color.Blue

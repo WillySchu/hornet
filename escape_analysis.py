@@ -64,7 +64,7 @@ def _literal(node) -> tuple:
     return ('literal', node.nid)
 
 
-_NO_POINTERS = (t.IntLit, t.BoolLit, t.StrLit, t.NoneLit, t.ZeroValue, t.NewEmptyDict, t.EmptySlice)
+_NO_POINTERS = (t.IntLit, t.EnumMember, t.BoolLit, t.StrLit, t.NoneLit, t.ZeroValue, t.NewEmptyDict, t.EmptySlice)
 _OPERATORS = (t.Unary, t.Binary, t.StrConcat, t.StrCompare, t.TagTest, t.Len, t.DictContains, t.ElementContains,
               t.StrIndex, t.Print, t.Panic, t.DictDelete)
 

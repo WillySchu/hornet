@@ -15,7 +15,8 @@ def build_ir_program(program: typed.Program) -> IRProgram:
     """IR for a typed program (what semantic.analyze() returns); nothing from the parser's tree."""
     if not isinstance(program, typed.Program):
         raise IRError(f"build_ir_program takes semantic.analyze()'s typed program, not a {type(program).__name__}")
-    ir_program = IRProgram(struct_registry=program.structs, sum_type_registry=program.sum_types, ids=IdAllocator())
+    ir_program = IRProgram(struct_registry=program.structs, sum_type_registry=program.sum_types,
+                           enum_registry=program.enums, ids=IdAllocator())
     ir_program.escape_summaries = compute_escape_summaries(program.functions, program.structs)
     ir_program.functions = []
     for typed_fn in program.functions:

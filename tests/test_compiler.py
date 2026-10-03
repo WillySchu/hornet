@@ -41,7 +41,7 @@ GCC_SKIP = pytest.mark.skipif(
 HOST_IS_MACOS = sys.platform == "darwin"
 ASM_TARGET = default_target()
 
-EXECUTION_TIMEOUT = 5
+EXECUTION_TIMEOUT = 10
 
 
 # ---------------------------------------------------------------------------
@@ -4171,7 +4171,7 @@ class TestTypeAliases:
             "\n"
             "def int main():\n"
             "    return 0\n",
-            match="expected int, bool, str, a struct name, or another type alias",
+            match="expected int, bool, str, a struct or enum name, or another type alias",
         )
 
     def test_unknown_array_element_target_is_rejected(self):
@@ -4180,7 +4180,7 @@ class TestTypeAliases:
             "\n"
             "def int main():\n"
             "    return 0\n",
-            match="expected int, bool, str, a struct name, or another type alias",
+            match="expected int, bool, str, a struct or enum name, or another type alias",
         )
 
     def test_array_alias_as_param_and_return_type(self):

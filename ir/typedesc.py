@@ -17,6 +17,7 @@ _TYPEDESC_POINTER = 10
 _TYPEDESC_DICT = 11
 _TYPEDESC_INT32 = 12
 _TYPEDESC_NONE = 13  # a sum type's `none` variant
+_TYPEDESC_ENUM = 14
 
 
 def type_descriptor(ir_program, t: Type, in_progress: dict = None) -> str:
@@ -65,6 +66,13 @@ def type_descriptor(ir_program, t: Type, in_progress: dict = None) -> str:
         words = [_TYPEDESC_SUM, len(variants)] + [type_descriptor(ir_program, v, in_progress) for v in variants]
     elif t.kind == TypeKind.NONE:
         words = [_TYPEDESC_NONE]
+    elif t.kind == TypeKind.ENUM:  # [tag, name, member count, member names...]
+        members = ir_program.enum_registry[t.enum_name].members
+        words = [_TYPEDESC_ENUM, name(), len(members)]
+        for member in members:
+            member_label = ids.new_label("typedesc_member")
+            ir_program.string_literals.append((member_label, member))
+            words.append(member_label)
     elif t.kind == TypeKind.POINTER:  # printed as an address
         words = [_TYPEDESC_POINTER]
     elif t.kind == TypeKind.DICT:  # [tag, name, key descriptor, key width, value descriptor, value width]

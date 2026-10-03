@@ -129,7 +129,8 @@ def test_every_node_kind_occurs_in_the_repository_and_this_file():
     for path in _repository_programs():
         entry, modules = discover_modules(path)
         used |= _nodes(analyze(entry, modules))
-    used |= _nodes(_typed("def int main():\n    [2]int a = [1, 2]\n    print(a[1])\n    int y = 1\n    *int p = &y\n"
+    used |= _nodes(_typed("type Color enum:\n    Red\n\ndef int main():\n    print(Color.Red)\n"
+                          "    [2]int a = [1, 2]\n    print(a[1])\n    int y = 1\n    *int p = &y\n"
                           "    *p = 2\n    while y < 3:\n        y += 1\n        if y == 2:\n            continue\n"
                           "        break\n    for int i = 0; i < 2; i += 1:\n        y = -y\n    print(true)\n"
                           "    dict[int]int d\n    d[1] = 1\n    del(d, 1)\n    *int q = none\n    print(q == none)\n"

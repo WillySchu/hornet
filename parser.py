@@ -284,7 +284,8 @@ class ExprStmt(Node):
 
 @dataclass
 class IsCheck(Node):
-    """If-condition `NAME is T` or `EXPR is T as NAME`. Not a general expression."""
+    """If-condition `NAME is T` or `EXPR is T as NAME` (T a sum's variant, or an enum's member). Not a
+    general expression."""
     variable_name: str
     type_name: Union[str, QualifiedTypeExpr, ArrayTypeExpr, SliceTypeExpr, PointerTypeExpr]
     subject: Optional[Node] = None
@@ -384,6 +385,19 @@ class ConstDecl(Node):
 
 
 @dataclass
+class EnumMember(Node):
+    """One member's name in an enum declaration."""
+    name: str
+
+
+@dataclass
+class EnumDef(Node):
+    """`type Name enum:` and its members, one per line; a member's value is its position."""
+    name: str
+    members: List[EnumMember]
+
+
+@dataclass
 class TypeAlias(Node):
     """`type Name = T`: an interchangeable alias."""
     name: str
@@ -422,6 +436,7 @@ class Program(Node):
     from_imports: List[FromImportDecl] = field(default_factory=list)
     intrinsics: List[IntrinsicDecl] = field(default_factory=list)
     consts: List[ConstDecl] = field(default_factory=list)
+    enums: List[EnumDef] = field(default_factory=list)
 
     def __repr__(self) -> str:
         return self.pretty()
@@ -627,6 +642,7 @@ class Parser:
         from_imports = []
         intrinsics = []
         consts = []
+        enums = []
         self.skip_newlines()
         while not self.at_end():
             if self.check(TokenType.STRUCT):
@@ -640,6 +656,8 @@ class Parser:
                 declaration = self.parse_type_declaration()
                 if isinstance(declaration, StructDef):
                     structs.append(declaration)
+                elif isinstance(declaration, EnumDef):
+                    enums.append(declaration)
                 elif isinstance(declaration, SumTypeDef):
                     sum_types.append(declaration)
                 else:
@@ -660,7 +678,7 @@ class Parser:
         program = Program(
             functions=functions, structs=structs, type_aliases=type_aliases, sum_types=sum_types,
             extern_functions=extern_functions, imports=imports, from_imports=from_imports,
-            intrinsics=intrinsics, consts=consts,
+            intrinsics=intrinsics, consts=consts, enums=enums,
             line=start_tok.line, col=start_tok.col,
         )
         if start_tok.file:
@@ -710,17 +728,21 @@ class Parser:
                 break
         return FromImportDecl(path=path, names=names, line=start_tok.line, col=start_tok.col)
 
-    def parse_type_declaration(self) -> Union[TypeAlias, StructDef, SumTypeDef]:
-        """`type Name = T`, `type Name struct:`, or `type Name is A | B`."""
+    def parse_type_declaration(self) -> Union[TypeAlias, StructDef, SumTypeDef, EnumDef]:
+        """`type Name = T`, `type Name struct:`, `type Name enum:`, or `type Name is A | B`."""
         start_tok = self.expect(TokenType.TYPE, "Expected 'type' to start a type declaration")
         name_tok = self.expect(TokenType.IDENTIFIER, "Expected a name for this type declaration")
         if self.check(TokenType.STRUCT):
             self.advance()
             return self._parse_struct_body(start_tok, name_tok)
+        if self.check(TokenType.ENUM):
+            self.advance()
+            return self._parse_enum_body(start_tok, name_tok)
         if self.check(TokenType.IS):
             self.advance()
             return self._parse_sum_type_body(start_tok, name_tok)
-        self.expect(TokenType.ASSIGN, "Expected '=' (for a type alias), 'struct' (for a struct declaration), or 'is' (for a sum type)")
+        self.expect(TokenType.ASSIGN, "Expected '=' (for a type alias), 'struct' (for a struct declaration), "
+                                      "'enum' (for an enum), or 'is' (for a sum type)")
         target_type = self.parse_type()
         self.expect(TokenType.NEWLINE, "Expected a newline after a type alias declaration")
         return TypeAlias(name=name_tok.val, target_type=target_type, line=start_tok.line, col=start_tok.col)
@@ -741,6 +763,22 @@ class Parser:
             )
         self.expect(TokenType.NEWLINE, "Expected a newline after a sum type declaration")
         return SumTypeDef(name=name_tok.val, variants=variants, line=start_tok.line, col=start_tok.col)
+
+    def _parse_enum_body(self, start_tok: Token, name_tok: Token) -> EnumDef:
+        """Enum body after `type Name enum`: one member name per line."""
+        self.expect(TokenType.COLON, "Expected ':' to start the enum body")
+        self.expect(TokenType.NEWLINE, "Expected a newline after ':'")
+        self.skip_newlines()
+        self.expect(TokenType.INDENT, "Expected an indented enum body")
+        self.skip_newlines()
+        members: List[EnumMember] = []
+        while not self.check(TokenType.DEDENT) and not self.at_end():
+            member_tok = self.expect(TokenType.IDENTIFIER, "Expected a member name")
+            self.expect(TokenType.NEWLINE, "Expected a newline after a member name -- an enum lists one member per line")
+            members.append(EnumMember(name=member_tok.val, line=member_tok.line, col=member_tok.col))
+            self.skip_newlines()
+        self.expect(TokenType.DEDENT, "Expected a dedent to end the enum body")
+        return EnumDef(name=name_tok.val, members=members, line=start_tok.line, col=start_tok.col)
 
     def _parse_struct_body(self, start_tok: Token, name_tok: Token) -> StructDef:
         """Struct body after `type Name struct`."""

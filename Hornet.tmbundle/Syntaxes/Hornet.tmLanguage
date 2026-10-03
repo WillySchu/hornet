@@ -360,7 +360,7 @@
 				</dict>
 				<dict>
 					<key>match</key>
-					<string>\bstruct\b</string>
+					<string>\b(?:struct|enum)\b</string>
 					<key>name</key>
 					<string>keyword.declaration.type.hornet</string>
 				</dict>
