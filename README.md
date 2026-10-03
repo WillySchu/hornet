@@ -612,7 +612,7 @@ del(counts, 'green')
 
 `len` returns the number of live entries.
 
-The runtime uses open addressing with linear probing, tombstones, and rehashing on growth.
+The runtime uses open addressing with linear probing and tombstones. A table that fills up is rehashed: into one twice the size, or one of the same size when deletions have left it mostly tombstones.
 
 ---
 
@@ -687,7 +687,7 @@ for key, value in counts:
 
 The iterable must be an array, slice, dictionary, or string given as a variable, field, index, slice expression, or array/dictionary/string literal. Iterating over a function-call result or a dereference is not yet supported.
 
-Each iteration has its own bindings, so taking a binding's address is allowed. Reallocating the iterated slice (e.g. by `append`) or growing the iterated dictionary inside the loop panics.
+Each iteration has its own bindings, so taking a binding's address is allowed. Reallocating the iterated slice (e.g. by `append`), or inserting into the iterated dictionary so that it is rehashed, panics.
 
 `break` and `continue` apply to the innermost enclosing loop.
 
@@ -724,7 +724,7 @@ Membership applies to dictionary keys and array or slice elements.
 and  or  not
 ```
 
-`and` and `or` use short-circuit evaluation.
+`and` and `or` use short-circuit evaluation. `not` binds looser than comparisons and `in`, and tighter than `and` and `or`: `not a < b` is `not (a < b)`.
 
 ### Bitwise
 
@@ -756,6 +756,16 @@ if shape is Circle:
     print(shape.radius)
 ```
 
+In the `else` branch the variable isn't that variant. Neither is it after an `if` (or `if`/`elif` chain) with no `else` whose bodies always `return`, `break`, or `continue`. With one variant left, the variable has that variant's type:
+
+```hornet
+if shape is Circle:
+    return shape.radius
+return shape.side       # shape is a Square here
+```
+
+While narrowed, a variable can't be reassigned. Nothing narrows to `none`: with only `none` left, the variable keeps its sum type. If a pointer to the variable (`&shape`) changes its variant meanwhile, its next use panics.
+
 A narrowed binding can be introduced explicitly:
 
 ```hornet
@@ -773,11 +783,11 @@ match shape as s:
         print(s.side)
 ```
 
-The subject of `... as NAME` can be any sum-typed expression, such as a field, an element, or `*p`; `NAME` is a copy of it, so assigning to its fields doesn't change the subject. A `none` variant is tested with `is none`.
+The subject of `... as NAME` can be any sum-typed expression, such as a field, an element, or `*p`; `NAME` is a copy of it, so assigning to its fields doesn't change the subject. It lasts for the `if` and its `else`, where it is narrowed the same way. A `none` variant is tested with `is none`.
 
-`match` must be exhaustive, or end with `else:`. A `match` whose arms all return counts as returning; an arm ending in a call such as `panic` does not, so a `return` is still needed after it.
+`match` must be exhaustive, or end with `else:`, where the subject is none of the arms' variants. A `match` whose arms all return counts as returning; an arm ending in a call such as `panic` does not, so a `return` is still needed after it.
 
-More general flow-sensitive narrowing through arbitrary boolean expressions and control-flow paths is still future work.
+`is` is not yet a general boolean expression: nothing narrows through `and`, `or`, `not`, `x == none`, or a loop condition.
 
 ---
 
@@ -886,7 +896,7 @@ Top-level names beginning with `_` are private to their module.
 
 Every declaration is reached this way, including `extern` functions: a module that uses another module's `extern` imports it (`from 'os' import write_fd`) or qualifies it (`os.write_fd(...)`). A local variable, parameter, or loop binding can't have the name of an import alias or a constant in scope.
 
-Each file's names are resolved in that file's own scope. Internally every declaration of an imported module gets a program-wide unique name, while `extern` symbols keep their foreign names for the linker; errors and printed values use names as declared.
+Each file's names are resolved in that file's own scope. Internally every declaration of an imported module gets a program-wide unique name, while `extern` symbols keep their foreign names for the linker; errors and printed values use names as declared. A function in the entry file is linked as `name$` (`main` keeps its name), so it never collides with a libc or runtime symbol.
 
 The current module system intentionally has a narrow filesystem-based model. Project-level package roots, package declarations decoupled from filenames, and distributing one package across multiple files are future work.
 
@@ -1029,7 +1039,7 @@ It currently provides language-level services including:
 * runtime type descriptors (`hornet_typedesc_tags.h` is generated from `ir/typedesc.py` by `runtime/generate_typedesc_header.py`)
 * argument access, output, file creation, exit, and OS error messages for `stdlib/os.ht` (`hornet_argv_get`, `hornet_write_fd`, `hornet_open_write`, `hornet_exit`, `hornet_error_message`)
 
-Runtime checks panic with a message: array, slice, and string bounds; division by zero and `MIN / -1`; dereferencing `none`; a missing dictionary key; and reallocating a slice or dictionary being iterated with `for ... in`.
+Runtime checks panic with `file:line:col: panic: message`, the position being where the checked expression or statement starts and the file named without its directory: array, slice, and string bounds; division by zero and `MIN / -1`; dereferencing `none`; a missing dictionary key; reallocating a slice or dictionary being iterated with `for ... in`; and a narrowed variable whose variant was changed through a pointer. The checks are in the compiled code, which calls `hornet_panic`.
 
 The runtime is deliberately separate from the native backends. The compiler is responsible for semantic operations such as type checking, aggregate layout, address calculation, and bounds-check generation; the runtime implements selected algorithms and services that are better expressed as ordinary native code.
 
@@ -1200,11 +1210,11 @@ Hornet is still experimental. Some notable limitations are:
 * Some advanced pointer/address-taking cases remain unsupported.
 * `for ... in ...` can't iterate a function-call result or a dereference; assign it to a variable first.
 * `is` is limited to dedicated `if`/`elif` condition shapes rather than being a general boolean expression.
-* Sum-type narrowing does not yet fully propagate through arbitrary control flow or `else` branches.
+* Narrowing doesn't follow `and`/`or`/`not`, `x == none`, loop conditions, or an `if`/`else` in which only one branch leaves, and a narrowed variable can't be reassigned.
 * A sum type can't be a variant of another sum type.
 * A typed literal of pointers to a named type with two or more fixed sizes (`[2][1]*P[...]`) can't be written inline; see [Arrays and Slices](#arrays-and-slices).
 * There are no enums; integer constants stand in for them.
-* There is no no-return type, so a `return` is still needed after a call to `panic` or `exit` that ends a function.
+* There is no no-return type, so a `return` is still needed after a call to `panic` or `exit` that ends a function, and an `if` whose body ends in such a call doesn't narrow what follows it.
 * Sum-type equality is not implemented.
 * Slice equality and dictionary equality are not implemented.
 * `in` does not apply to strings.
@@ -1218,7 +1228,7 @@ Hornet is still experimental. Some notable limitations are:
 * There are no floating-point types yet.
 * Multithreading is not implemented.
 * Without generics, each result type is a separate named sum type. There is no operator for propagating errors, and ignoring a result is not diagnosed.
-* Panics print a message but no source location, and stack overflow is an unreported `SIGSEGV`.
+* `panic(...)` from `stdlib/c.ht` reports no source position, and stack overflow is an unreported `SIGSEGV`.
 
 ---
 
