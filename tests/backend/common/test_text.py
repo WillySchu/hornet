@@ -12,7 +12,7 @@ def test_escape_for_asciz():
         },
         {
             'name': 'Escape backslashes.',
-            'in': 'as\df',
+            'in': 'as\\df',
             'expected': 'as\\\\df',
         },
         {

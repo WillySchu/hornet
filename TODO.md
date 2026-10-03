@@ -14,9 +14,10 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
+- Pointers into a sum's payload.
+- &d[k] after a rehash.
 - Nothing warns when a result is ignored, such as a bare write\_stdout(...) statement.
 - Weight spills by use count and loop depth.
-- Module errors have a line but no column.
 - `in` checking for strings.
 - Sum type equality.
 - Spreading one package across multiple files.

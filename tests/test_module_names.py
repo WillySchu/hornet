@@ -6,6 +6,7 @@ import pytest
 
 from build import build_executable
 from modules import ModuleError, discover_modules
+from scopes import MergeError
 from semantic import SemanticError, analyze
 from target import default_target
 from tests.targets import run_binary
@@ -77,3 +78,23 @@ def test_two_modules_declaring_one_extern(tmp_path):
                                             r"extern once and import it") as e:
         _analyze(entry)
     assert (e.value.file, e.value.line) == (str(tmp_path / "b.ht"), 2)
+
+
+@pytest.mark.parametrize("main,match", [
+    ("\nimport 'missing'\n", "doesn't resolve to a real file"),
+    ("\nimport 'lib'\nimport 'other/lib' as lib2\n", "Two different files both resolve to module name 'lib'"),
+    ("import 'lib'\nimport 'second' as lib\n", "both use the name 'lib'"),
+    ("import 'lib'\nfrom 'second' import g as lib\n", "collides with an 'import ... as lib'"),
+    ("from 'lib' import f\nfrom 'second' import g as f\n", "imported more than once"),
+    ("\nfrom 'lib' import missing\n", "'missing' .*is not declared in module 'lib'"),
+    ("\nfrom 'lib' import _hidden\n", "not visible outside the module"),
+    ("import 'lib'\n\ndef int g():\n    return lib.missing()\n", "'missing' .*is not declared in module 'lib'"),
+])
+def test_import_errors_report_a_line_and_a_column(tmp_path, main, match):
+    (tmp_path / "other").mkdir()
+    (tmp_path / "other" / "lib.ht").write_text("def int h():\n    return 3\n")
+    entry = _files(tmp_path, lib="def int f():\n    return 1\ndef int _hidden():\n    return 2\n",
+                   second="def int g():\n    return 2\n", main=main + "\n" + MAIN)
+    with pytest.raises((ModuleError, MergeError), match=match) as e:
+        _analyze(entry)
+    assert e.value.file == entry and e.value.line >= 2 and e.value.col >= 1

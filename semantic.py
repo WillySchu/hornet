@@ -20,7 +20,7 @@ from typesys import StructInfo, SumTypeInfo, Type, TypeKind
 from folding import fold_binary_op, fold_cast, fold_unary_op
 import parser as syntax
 import typed_ast as typed
-from scopes import build_module_set, display_name as shown
+from scopes import BUILTIN_FUNCTION_NAMES, build_module_set, display_name as shown
 from symbols import SymbolTable
 from parser import (
     ConstDecl,
@@ -233,8 +233,6 @@ def _method_function(sd: StructDef, md: MethodDef) -> Function:
                     params=[receiver] + md.params, body=md.body, line=md.line, col=md.col, file=md.file)
 
 
-# Builtins; see check_call.
-_BUILTIN_FUNCTION_NAMES = {'print', 'len', 'append', 'del', 'bytes', 'panic'}
 _BYTE_SLICE = Type(TypeKind.SLICE, element_type=Type.UINT8)
 
 
@@ -395,7 +393,7 @@ class SemanticAnalyzer:
         self.intrinsic_original_names = {}  # mangled name -> original_name
         for fn in self.all_functions:
             self._enter(fn)
-            if fn.name in _BUILTIN_FUNCTION_NAMES:
+            if shown(fn.name) in BUILTIN_FUNCTION_NAMES:
                 raise SemanticError(
                     f"'{shown(fn.name)}' is a builtin and can't be redefined as "
                     f"a function",
@@ -576,7 +574,7 @@ class SemanticAnalyzer:
                                 ('type alias', self.type_aliases), ('sum type', self.sum_types)):
                 if name in table:
                     raise SemanticError(f"Constant '{shown(name)}' collides with a {kind} of the same name", cd)
-            if name in _BUILTIN_FUNCTION_NAMES:
+            if shown(name) in BUILTIN_FUNCTION_NAMES:
                 raise SemanticError(f"'{shown(name)}' is a builtin and can't be used as a constant name", cd)
 
     def _const_value(self, name: str) -> Tuple[Type, object]:
@@ -655,7 +653,7 @@ class SemanticAnalyzer:
         """Resolve sum type variants and check name collisions."""
         registry: Dict[str, SumTypeInfo] = {}
         for std in sum_type_defs:
-            if std.name in _BUILTIN_FUNCTION_NAMES:
+            if shown(std.name) in BUILTIN_FUNCTION_NAMES:
                 raise SemanticError(
                     f"'{shown(std.name)}' is a builtin and can't be used as a "
                     f"sum type name",
@@ -742,7 +740,7 @@ class SemanticAnalyzer:
         # Pass 1: reserve names, rejecting duplicates and collisions.
         seen: Dict[str, TypeAlias] = {}
         for ad in alias_defs:
-            if ad.name in _BUILTIN_FUNCTION_NAMES:
+            if shown(ad.name) in BUILTIN_FUNCTION_NAMES:
                 raise SemanticError(
                     f"'{shown(ad.name)}' is a builtin and can't be used as a "
                     f"type alias name",
@@ -809,7 +807,7 @@ class SemanticAnalyzer:
         """Reserve struct names (None placeholders) so fields can forward-reference."""
         registry: Dict[str, StructInfo] = {}
         for sd in struct_defs:
-            if sd.name in _BUILTIN_FUNCTION_NAMES:
+            if shown(sd.name) in BUILTIN_FUNCTION_NAMES:
                 raise SemanticError(
                     f"'{shown(sd.name)}' is a builtin and can't be used as a "
                     f"struct name",
@@ -876,7 +874,7 @@ class SemanticAnalyzer:
 
     def check_extern_function_decl(self, ext: ExternFunctionDecl) -> None:
         """Validate an extern signature (scalars and pointers only) and register it."""
-        if ext.name in _BUILTIN_FUNCTION_NAMES:
+        if shown(ext.name) in BUILTIN_FUNCTION_NAMES:
             raise SemanticError(
                 f"'{shown(ext.name)}' is a builtin and can't be redefined as "
                 f"an extern function",
@@ -942,7 +940,7 @@ class SemanticAnalyzer:
 
     def check_intrinsic_decl(self, ic: IntrinsicDecl) -> None:
         """Validate an intrinsic signature and register it."""
-        if ic.name in _BUILTIN_FUNCTION_NAMES:
+        if shown(ic.name) in BUILTIN_FUNCTION_NAMES:
             raise SemanticError(
                 f"'{shown(ic.name)}' is a builtin and can't be redefined as "
                 f"an intrinsic",

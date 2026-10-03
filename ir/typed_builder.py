@@ -119,7 +119,6 @@ class TypedFunctionBuilder:
         self.panics = PanicBlocks(self.ir_program, "check_failed")  # for panic_when
         self.storage = {}  # symbol id -> (Temp or None, heap)
         self.loops = []  # (continue label, end label)
-        self.scratch = {}  # name -> slot, for per-function scratch storage
         ir = self.params(fn)
         ir += self.block(fn.body)
         if not ir or not isinstance(ir[-1], (IRBranch, IRJump, IRReturn)):

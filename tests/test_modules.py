@@ -1,6 +1,6 @@
 """Tests for modules.py's own discover_modules: resolving and parsing
-every file an entry .ht file transitively imports, before any merging
-or semantic analysis happens.
+every file an entry .ht file transitively imports, before semantic
+analysis happens.
 """
 
 import tempfile
@@ -93,13 +93,27 @@ def test_circular_import_terminates_and_both_sides_resolve():
         assert modules["b"].import_aliases == {"a": "a"}
 
 
-def test_self_import_terminates():
-    """A file importing itself -- the degenerate one-node cycle."""
+def test_a_module_importing_itself_terminates():
+    """The degenerate one-node cycle."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        entry = _write(tmpdir, "main.ht", "import 'main'\n\ndef int main():\n    return 0\n")
+        entry = _write(tmpdir, "main.ht", "import 'a'\n\ndef int main():\n    return 0\n")
+        _write(tmpdir, "a.ht", "import 'a'\n\ndef int f():\n    return 1\n")
         entry_program, modules = discover_modules(entry)
-        assert set(modules.keys()) == {"main"}
-        assert entry_program.import_aliases == {"main": "main"}
+        assert set(modules.keys()) == {"a"}
+        assert modules["a"].import_aliases == {"a": "a"}
+
+
+@pytest.mark.parametrize("importer", ["main", "a"])
+def test_the_entry_file_cannot_be_imported(importer):
+    """By itself or by a module it imports: it would be compiled a second time, as a module."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sources = {"main": "import 'a'\n\ndef int main():\n    return 0\n", "a": "def int f():\n    return 1\n"}
+        sources[importer] = "\nimport 'main'\n" + sources[importer]
+        entry = _write(tmpdir, "main.ht", sources["main"])
+        _write(tmpdir, "a.ht", sources["a"])
+        with pytest.raises(ModuleError, match="is the program's entry file, which can't be imported") as e:
+            discover_modules(entry)
+        assert (Path(e.value.file).name, e.value.line, e.value.col) == (f"{importer}.ht", 2, 1)
 
 
 def test_nested_path_import():

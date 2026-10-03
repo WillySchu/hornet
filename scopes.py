@@ -30,6 +30,11 @@ from parser import (
 )
 
 
+# The builtin functions (semantic.py's check_call). No declaration or named import may take one of
+# these names, in any file: it would stand in for the builtin there.
+BUILTIN_FUNCTION_NAMES = {'print', 'len', 'append', 'del', 'bytes', 'panic'}
+
+
 class MergeError(CompileError):
     """An unresolvable or private qualified reference, or a name a local may not reuse."""
 
@@ -101,16 +106,18 @@ def build_module_set(entry: Program, modules: Dict[str, DiscoveredModule]) -> Mo
     result = ModuleSet()
     current = [entry.file]
 
-    def resolve_in(module: str, name: str, referencing: Optional[str], at_line: int) -> str:
+    def resolve_in(module: str, name: str, referencing: Optional[str], at: Node) -> str:
+        """The key of `name` in `module`, referred to from module `referencing` at node `at`."""
         target = modules[module]
         if name in externs[module]:
             return name
         if name not in own[module]:
-            raise MergeError(f"'{name}' at line {at_line} is not declared in module "
-                             f"{target.canonical_name!r} ({target.file_path})", line=at_line)
+            raise MergeError(f"'{name}' at line {at.line} is not declared in module "
+                             f"{target.canonical_name!r} ({target.file_path})", line=at.line, col=at.col)
         if name.startswith('_') and referencing != module:
-            raise MergeError(f"'{module}.{name}' at line {at_line} is not visible outside the module that "
-                             f"defines it -- names starting with '_' are private to their own module", line=at_line)
+            raise MergeError(f"'{module}.{name}' at line {at.line} is not visible outside the module that "
+                             f"defines it -- names starting with '_' are private to their own module",
+                             line=at.line, col=at.col)
         return mangle(module, name)
 
     try:
@@ -126,15 +133,20 @@ def build_module_set(entry: Program, modules: Dict[str, DiscoveredModule]) -> Mo
             _validate_intrinsics(program)
             for from_decl in program.from_imports:
                 for original, local in from_decl.names:
+                    if local in BUILTIN_FUNCTION_NAMES:
+                        raise MergeError(
+                            f"'{local}' at line {from_decl.line} is a builtin and can't name an import -- choose "
+                            f"another name after 'as'", line=from_decl.line, col=from_decl.col)
                     if local in own[module]:
                         raise MergeError(
                             f"'{local}' at line {from_decl.line} collides with this file's own declaration of that "
-                            f"name -- rename the import with 'as', or rename the declaration", line=from_decl.line)
-                    scope.resolved[local] = resolve_in(named[local][0], original, module, from_decl.line)
+                            f"name -- rename the import with 'as', or rename the declaration",
+                            line=from_decl.line, col=from_decl.col)
+                    scope.resolved[local] = resolve_in(named[local][0], original, module, from_decl)
             for kind in _DECLARATION_KINDS:
                 for decl in getattr(program, kind):
-                    _walk(decl, scope, result.qualified, lambda a, n, line, s=scope: resolve_in(
-                        s.aliases[a], n, s.module, line) if a in s.aliases else None)
+                    _walk(decl, scope, result.qualified, lambda a, n, at, s=scope: resolve_in(
+                        s.aliases[a], n, s.module, at) if a in s.aliases else None)
             result.files.append((program, scope))
             for kind in _DECLARATION_KINDS:
                 for decl in getattr(program, kind):
@@ -159,19 +171,20 @@ def _walk(node, scope: Scope, qualified: Dict[int, str], resolve_qualified) -> N
         if not isinstance(n, Node):
             continue
         if isinstance(n, QualifiedTypeExpr):
-            key = resolve_qualified(n.module, n.name, n.line)
+            key = resolve_qualified(n.module, n.name, n)
             if key is None:
-                raise MergeError(f"'{n.module}' at line {n.line} doesn't name an imported module", line=n.line)
+                raise MergeError(f"'{n.module}' at line {n.line} doesn't name an imported module",
+                                 line=n.line, col=n.col)
             qualified[n.nid] = key
             continue
         if isinstance(n, Call) and isinstance(n.receiver, Variable):
-            key = resolve_qualified(n.receiver.name, n.name, n.line)
+            key = resolve_qualified(n.receiver.name, n.name, n)
             if key is not None:
                 qualified[n.nid] = key
                 stack.extend(reversed([n.args, n.kwargs or []]))
                 continue
         if isinstance(n, Field) and isinstance(n.base, Variable):
-            key = resolve_qualified(n.base.name, n.name, n.line)
+            key = resolve_qualified(n.base.name, n.name, n)
             if key is not None:
                 qualified[n.nid] = key
                 continue
@@ -233,9 +246,9 @@ def _validate_intrinsics(program: Program) -> None:
             raise MergeError(
                 f"'{ic.original_name}' at line {ic.line} isn't a recognized intrinsic -- the compiler only "
                 f"implements a fixed set of these ({', '.join(sorted(_RECOGNIZED_INTRINSICS))}), not a general "
-                f"extensibility mechanism", line=ic.line)
+                f"extensibility mechanism", line=ic.line, col=ic.col)
         if not _signatures_match(ic, expected):
             expected_return, expected_params = expected
             params_str = ', '.join(str(p) for p in expected_params)
             raise MergeError(f"'{ic.original_name}' at line {ic.line} doesn't match its own required signature -- "
-                             f"expected ({params_str}) -> {expected_return}", line=ic.line)
+                             f"expected ({params_str}) -> {expected_return}", line=ic.line, col=ic.col)
