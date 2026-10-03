@@ -1,16 +1,6 @@
-"""Tests for sum-type IR construction (ir/sum_types.py, and every
-other place a struct value widening into a sum type had to be taught
-about -- ir/statements.py's VarDecl/Return handling, ir/builder.py's
-argument-temp reservation, ir/scalars.py's argument marshaling).
-
-These are deliberately INTEGRATION-level, building a real Program
-through the full lex -> parse -> desugar -> analyze -> build_ir_
-program pipeline, not unit tests of _ir_write_sum_type_value_into in
-isolation -- every bug actually found while building this feature was
-about how separate parts of the pipeline disagreed about a value's own
-type (the argument's own type vs. the parameter's declared type, the
-value's own type vs. the function's declared return type), which an
-isolated unit test of one function alone would never have caught."""
+"""Sum types in the IR: a variant widening into its sum (declarations, returns, arguments,
+elements), and narrowed access. Built through the whole pipeline (parse, analyze,
+build_ir_program): the bugs found here were stages disagreeing about a value's type."""
 
 import tempfile
 from pathlib import Path
@@ -151,11 +141,8 @@ def test_return_widening_writes_discriminant():
 
 
 def test_function_argument_widening_reserves_target_sized_slot():
-    """takesShape(Circle(5)) -- the reserved argument-temp slot must
-    be sized for Shape (12 bytes), not Circle (4 bytes): the actual
-    bug found, since argument-temp reservation had no way to see the
-    callee's own declared parameter type at all before function_
-    registry existed."""
+    """takesShape(Circle(5)): the temporary holding the argument is sized for Shape (12 bytes),
+    not Circle (4)."""
     ir_program = _build(
         _SHAPE_DECLS +
         "def int takesShape(Shape s):\n"
@@ -184,11 +171,8 @@ def test_function_argument_widening_writes_discriminant():
 
 
 def test_already_sum_typed_argument_needs_no_widening_but_still_a_real_address():
-    """takesShape(s), s already Shape-typed -- no widening involved at
-    all, but still needs SOME real address-based argument passing, not
-    the scalar gen_expr_ir path a 12-byte value can't fit through (the
-    other bug this same investigation found: arg_type.kind == SUM had
-    no case at all in _ir_call_arguments before this)."""
+    """takesShape(s), s already a Shape: nothing widens, and the 12-byte value is passed by
+    address."""
     ir_program = _build(
         _SHAPE_DECLS +
         "def int takesShape(Shape s):\n"
@@ -199,10 +183,7 @@ def test_already_sum_typed_argument_needs_no_widening_but_still_a_real_address()
         "    return takesShape(s)\n"
     )
     fn = _fn(ir_program, 'main')
-    # Doesn't crash building the IR at all -- that's the actual bug
-    # being guarded against here; build_ir_program's own verify_
-    # program call (see ir/program_builder.py) already re-confirms
-    # the result is structurally well-formed.
+    # Building (and so verifying) the IR is the test.
     assert fn is not None
 
 
@@ -227,14 +208,7 @@ def test_append_into_sum_typed_slice_uses_shapes_own_element_width():
 
 
 def test_array_literal_of_shapes_widens_each_element():
-    """[Circle(5), Square(9)] into a [2]Shape -- each element widens
-    independently through _ir_write_composite_value_into's own SUM
-    check, which already covers array-literal elements (no separate
-    fix needed for THIS case specifically) since _ir_write_array_
-    literal_into recurses through that same dispatcher for each of its
-    own composite elements. The already-sum-typed sibling case right
-    below DID need its own fix, though -- see that test's own
-    docstring."""
+    """[Circle(5), Square(9)] into a [2]Shape: each element widens on its own."""
     ir_program = _build(
         _SHAPE_DECLS +
         "def int main():\n"
@@ -252,17 +226,7 @@ def test_array_literal_of_shapes_widens_each_element():
 
 
 def test_array_literal_of_already_sum_typed_elements_does_not_crash():
-    """[a, b] into a [2]Shape, a and b ALREADY Shape-typed variables --
-    NOT widening at all (both sides already the same type). The actual
-    bug: _ir_write_composite_value_into's own SUM check originally
-    fired unconditionally on value_type.kind == SUM alone, without
-    checking whether value_expr itself was genuinely narrower --
-    crashing here with "None is not in list" (source_struct_type.
-    struct_name is None for an already-sum-typed source, not a real
-    struct name to look up). Found only by testing this exact
-    combination -- element widening (tested above) and an already-
-    typed source (tested elsewhere for VarDecl/Assign) had each been
-    tested separately, but not together, inside an array literal."""
+    """[a, b] into a [2]Shape, a and b already Shapes: copied, not widened."""
     ir_program = _build(
         _SHAPE_DECLS +
         "def int main():\n"
@@ -276,12 +240,7 @@ def test_array_literal_of_already_sum_typed_elements_does_not_crash():
 
 
 def test_index_assign_into_sum_typed_array_element_writes_discriminant():
-    """shapes[0] = Square(3) -- the actual bug found: element_type.
-    kind not in (SLICE, STRUCT) is true for SUM too (SUM is neither),
-    so this fell into the scalar element-assignment path, which tried to
-    gen_expr_ir a struct-literal Call -- not even a wrong-width bug
-    like the others, straight to IRError with no real IR produced at
-    all."""
+    """shapes[0] = Square(3): the element is written as a Shape, tag included."""
     ir_program = _build(
         _SHAPE_DECLS +
         "def int main():\n"
@@ -291,21 +250,13 @@ def test_index_assign_into_sum_typed_array_element_writes_discriminant():
     )
     fn = _fn(ir_program, 'main')
     tag_writes = [w for w in _discriminant_writes(fn.body) if w.value.value == 1]
-    # Two Square tags now: the array literal's own second element,
-    # and the element assignment's -- just confirming its own
-    # write happened at all (it wouldn't have, before the fix) rather
-    # than trying to disentangle which of the two is which.
+    # Two Square tags: the literal's second element, and the assignment's.
     assert len(tag_writes) == 2
 
 
 def test_widening_argument_too_large_for_a_stack_slot_mallocs_instead():
-    """A sum type wide enough to cross is_heap_allocated's own
-    threshold gets malloc'd fresh at the call site, exactly like an
-    oversized struct argument already does -- _reserve_argument_temp
-    skips reservation (no "argument_temp" slot at all, unlike the
-    small-Shape case above), and _ir_materialize_sum_type_value's own
-    malloc branch sizes the allocation for THE SUM TYPE (tag + Big's
-    own [5000]int -- 4 + 40000 = 40004), not Circle's own tiny size."""
+    """A sum too large for the stack (is_heap_allocated) is built in malloc'd storage sized for the
+    sum (4 + 40000), not for Circle."""
     ir_program = _build(
         "type Circle struct:\n"
         "    int radius\n"
@@ -332,18 +283,9 @@ def test_widening_argument_too_large_for_a_stack_slot_mallocs_instead():
 
 
 # ---------------------------------------------------------------------------
-# Narrowing (`if NAME is TypeName:`), stage 3: the IsCheck condition
-# itself (an ordinary tag-vs-discriminant comparison, no different in
-# kind from `x == 5`), and narrowed field access -- the harder piece:
-# a narrowed name's own address needs SUM_TYPE_TAG_WIDTH added before
-# any field offset, since its slot is still Shape-shaped (tag then
-# payload), not Circle-shaped, regardless of what the branch narrows
-# it to. _ir_struct_address's own Variable case decides this by
-# comparing the REFERENCE's own resolved_type (Circle, set by
-# semantic.py's analyze_if) against the SLOT's own, unchanging
-# declared type (Shape, from _local_type) -- equal means a genuinely
-# sum-typed reference (print, widening, ...) and no offset; different
-# means narrowed.
+# Narrowing (`if NAME is TypeName:`): the check compares the tag with the variant's index, and a
+# narrowed name's fields are read past the tag (SUM_TYPE_TAG_WIDTH), since the variable's storage
+# is still the sum's.
 # ---------------------------------------------------------------------------
 
 def test_is_check_compares_tag_against_the_right_discriminant():
@@ -425,12 +367,7 @@ def test_narrowed_field_access_at_a_nonzero_field_offset():
 
 
 def test_narrowing_through_a_function_parameter():
-    """The identical mechanism, exercised on a PARAMETER rather than a
-    local -- narrowing's own address computation (_local_slot/_local_
-    type) doesn't distinguish where the slot's own data came from, but
-    every other stage of this feature has had a parameter-specific
-    blind spot at least once, so this is checked directly rather than
-    assumed to follow from the local-variable case."""
+    """The same, on a parameter instead of a local."""
     ir_program = _build(
         _SHAPE_DECLS +
         "def int describe(Shape s):\n"

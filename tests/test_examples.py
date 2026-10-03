@@ -2,7 +2,7 @@
 program (no -l/-w/-c flags, no column-aligned output) exercising
 get_args/read_file/read_stdin/int_to_str together, end to end.
 
-Unlike tests/test_merge.py's own tests (which each write a fresh,
+Unlike tests/test_scopes.py's own tests (which each write a fresh,
 synthetic .ht file into a tmpdir), these compile the actual, checked-
 in examples/wc.ht directly -- the whole point is proving the real
 example program works, not a stand-in for it.
@@ -37,7 +37,7 @@ def _write(tmpdir: str, name: str, content: str) -> str:
 def _run_wc(tmpdir: str, args: list = None, stdin: str = None) -> subprocess.CompletedProcess:
     """Compiles the real examples/wc.ht (not a synthetic copy),
     links, and runs it with the given argv[1:]/stdin -- mirrors
-    tests/test_merge.py's own _compile_and_run, but always against
+    tests/test_scopes.py's own _compile_and_run, but always against
     this one, fixed entry file."""
     def build_and_run(target):
         binary = Path(tmpdir) / f"program-{target}"

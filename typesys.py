@@ -75,7 +75,8 @@ class StructInfo:
 
 @dataclass
 class SumTypeInfo:
-    """A sum type's name and ordered variants; index is the discriminant. Variants are structs, scalars, or str."""
+    """A sum type's name and ordered variants (any types but sums; NONE for `none`); index is the
+    discriminant."""
     name: str
     variants: List[Type]
 
@@ -109,7 +110,7 @@ def type_byte_width(t: Type, structs: dict[str, StructInfo], sum_types: dict) ->
     if t.kind == TypeKind.NONE:
         return 0  # a sum type's `none` variant: the tag alone
     if t.kind == TypeKind.DICT:
-        return 8  # a pointer to the shared header: copies alias (ir/dicts.py)
+        return 8  # a pointer to the shared header: copies alias
     return 4  # INT32, BOOL
 
 

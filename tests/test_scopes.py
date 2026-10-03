@@ -87,9 +87,7 @@ def test_import_alias_used_for_qualification():
 
 
 def test_in_module_bare_references_still_resolve_after_mangling():
-    """utils.ht's own `outer` calls its own `inner` by bare name --
-    both get mangled, but the reference between them must be rewritten
-    to match, not left pointing at the now-nonexistent bare name."""
+    """utils.ht's `outer` calls its own `inner` by bare name, which resolves within the module."""
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(tmpdir, "main.ht", "import 'utils'\n\ndef int main():\n    return utils.outer()\n")
         _write(
@@ -123,12 +121,9 @@ def test_ordinary_struct_method_call_unaffected_by_modules():
 
 
 def test_circular_import_compiles_and_runs():
-    """The concrete claim this feature's whole design rests on: a
-    genuine cycle (a imports b, b imports a right back) is safe under
-    the merge model, for the same reason mutual recursion between two
-    functions in one file already works -- every signature is
-    collected before any body is checked. Verified end to end, not
-    just "discovery doesn't hang" (already covered in test_modules.py)."""
+    """A cycle (a imports b, b imports a) works, for the reason mutual recursion in one file does:
+    every signature is collected before any body is checked. Run end to end; discovery alone is
+    covered in test_modules.py."""
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(tmpdir, "main.ht", "import 'a'\n\ndef int main():\n    return a.fromA()\n")
         _write(tmpdir, "a.ht", "import 'b'\n\ndef int fromA():\n    return b.fromB() + 1\n")
@@ -170,12 +165,8 @@ def test_reference_to_undeclared_name_in_module_is_rejected():
 
 
 def test_reference_to_unknown_qualifier_falls_through_as_ordinary_field_access():
-    """`nonImportedName.foo` -- nonImportedName isn't an import alias
-    at all, so _resolve_qualified correctly returns None and this
-    falls through to ordinary struct-field-access resolution, which
-    then correctly rejects it as semantic.py's own, pre-existing
-    "undeclared variable" error -- not a MergeError at all, since this
-    was never a qualified reference in the first place."""
+    """`nonImportedName.foo`, where nonImportedName is no import alias: an ordinary field access,
+    rejected as an undeclared variable, not a MergeError."""
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
@@ -200,18 +191,8 @@ def test_diamond_import_shared_module_reachable_from_both_paths():
 
 
 def test_sum_type_variants_rewritten_correctly_within_an_imported_module():
-    """A sum type AND its own variant structs, all declared together
-    within one imported module -- confirms SumTypeDef.variants' own
-    bare-name rewriting keeps each variant pointing at its own,
-    correctly-mangled struct, not the pre-mangling bare name (which
-    no longer exists as a declaration once merged, and would fail
-    semantic analysis outright as an unrecognized variant if the
-    rewrite were wrong). Narrowing (`is`) against a QUALIFIED variant
-    name isn't tested here -- neither IsCheck.type_name nor
-    SumTypeDef's own variant list is parseable as a qualified name at
-    all yet (_parse_if_condition and _parse_sum_type_body each only
-    ever consume a single IDENTIFIER token) -- this is scoped to what
-    the grammar actually accepts today."""
+    """A sum type and its variant structs, all declared in one imported module: each variant
+    resolves to that module's struct."""
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
@@ -245,15 +226,8 @@ def test_type_alias_declared_in_an_imported_module():
 
 
 def test_extern_function_declared_in_an_imported_module_is_never_mangled():
-    """The real, load-bearing case _own_extern_names exists for: an
-    extern function's own name IS the real C symbol the linker
-    resolves against -- mangling it would make the generated assembly
-    call a symbol ("utils$abs") that doesn't exist at all. abs is
-    already linked in by default (libc). Deliberately scalar-only
-    (int in, int out) -- extern FFI interop with str is explicitly
-    out of scope (see ir/strings.py's own module docstring), so this
-    avoids that entanglement entirely rather than accidentally
-    exercising it."""
+    """An extern's name is the C symbol the linker resolves, so it keeps that name in an imported
+    module (`utils$abs` wouldn't exist). abs comes from libc."""
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
@@ -280,9 +254,7 @@ def test_unknown_module_in_type_position_is_rejected():
 
 
 def test_array_of_qualified_struct_type():
-    """Exercises ArrayTypeExpr's own nested-type rewriting -- a
-    QualifiedTypeExpr wrapped inside an array type, not just a bare
-    one."""
+    """A qualified type inside an array type."""
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
@@ -297,13 +269,8 @@ def test_array_of_qualified_struct_type():
 
 
 def test_qualified_struct_construction_with_named_kwargs():
-    """Exercises the kwargs-rewriting branch of a qualified Call --
-    struct construction using named fields, not positional args. See
-    _check_method_call_with_named_kwargs_is_rejected for the OTHER
-    half of this feature: an ordinary method call still can't use
-    named arguments, even though the grammar accepts them generically
-    for every receiver-based call (parse_receiver_call_args' own
-    docstring explains why it has to)."""
+    """A qualified struct literal with named fields. test_method_call_with_named_kwargs_is_rejected
+    is the other half: the grammar accepts named arguments after any `receiver.name(`."""
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
@@ -318,15 +285,9 @@ def test_qualified_struct_construction_with_named_kwargs():
 
 
 def test_method_call_with_named_kwargs_is_rejected():
-    """The other half of the fix: parse_receiver_call_args has to
-    accept named kwargs generically (no symbol table at parse time to
-    tell a qualified struct construction apart from an ordinary
-    method call), so this is caught downstream instead, by _check_
-    method_call's own explicit rejection -- confirmed here as a clear
-    SemanticError naming named arguments specifically, not the
-    confusing argument-count mismatch it would otherwise silently
-    fall through to (0 positional args vs. 1 expected, with the
-    named one nowhere mentioned)."""
+    """The parser can't tell a qualified struct literal from a method call, so it accepts named
+    arguments for both; analysis rejects them on a method call, naming named arguments (not an
+    argument-count mismatch)."""
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
@@ -344,10 +305,8 @@ def test_method_call_with_named_kwargs_is_rejected():
 
 
 def test_in_module_struct_field_referencing_another_struct_in_the_same_module():
-    """A struct field whose own type is ANOTHER struct declared in
-    the SAME imported module -- a bare (unqualified, in-module) type
-    reference, exercising _rewrite_type_expr's own bare-string branch
-    rather than QualifiedTypeExpr's."""
+    """A struct field whose type is another struct of the same imported module, written without a
+    qualifier."""
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
@@ -409,10 +368,8 @@ def test_qualified_narrowing_non_bare_subject():
 
 
 def test_sum_type_with_qualified_variants_declared_in_the_entry_file():
-    """The sum type ITSELF declared in the entry file, with its own
-    variants qualified references into an imported module -- the
-    mirror image of test_sum_type_variants_rewritten_correctly_
-    within_an_imported_module, which keeps everything in one module."""
+    """The sum type declared in the entry file, its variants qualified references into an imported
+    module."""
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
@@ -435,10 +392,8 @@ def test_sum_type_with_qualified_variants_declared_in_the_entry_file():
 
 
 def test_qualified_match_arm_selects_the_other_variant():
-    """The same program as above, but constructing the OTHER variant
-    -- confirms both qualified match arms resolve to their own,
-    correctly distinct mangled struct, not both accidentally matching
-    the same one."""
+    """The same program constructing the other variant: each qualified arm resolves to its own
+    struct."""
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
@@ -476,17 +431,9 @@ def test_unknown_module_in_qualified_narrowing_is_rejected():
 
 
 def test_hidden_struct_in_qualified_narrowing_is_rejected():
-    """Visibility applies to a qualified `is` target exactly like any
-    other qualified reference -- _rewrite_type_expr's own Qualified
-    TypeExpr case delegates to the SAME _resolve_qualified/_check_
-    visible machinery every other position already uses, so this
-    isn't a separate check to maintain, just a consequence of reusing
-    it. shapes.ht itself constructs the hidden variant (visible from
-    within its own module) and hands it back already boxed as a
-    Thing, so the ENTRY file's only qualified reference to the hidden
-    name at all is the `is` check itself -- isolating that one path,
-    rather than also tripping over a second violation at the
-    construction site."""
+    """Visibility applies to a qualified `is` target like any other qualified reference. shapes.ht
+    builds the hidden variant itself and returns it as a Thing, so the entry file's only reference
+    to the hidden name is the `is` check."""
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
@@ -510,14 +457,9 @@ def test_hidden_struct_in_qualified_narrowing_is_rejected():
             analyze(entry_program, modules)
 
 
-
-    """`utils.helper` with no call -- parses as a qualified Field
-    access (see Field's own docstring), correctly rewritten to a bare
-    Variable("utils$helper") by merge.py, and THEN correctly rejected
-    by semantic.py's own, pre-existing "undeclared variable" check --
-    since a function name used as a bare value isn't a variable at
-    all. Confirms this falls through to an ordinary, existing error
-    rather than crashing anywhere in the merge/rewrite pipeline."""
+def test_bare_uncalled_qualified_function_reference_is_a_semantic_error_not_a_crash():
+    """`utils.helper` with no call: a function's name isn't a value, so it is an ordinary semantic
+    error."""
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
@@ -540,11 +482,7 @@ def test_basic_named_import_function_call():
 
 
 def test_named_import_with_as_renaming_for_a_struct_type_and_a_function():
-    """A renamed named import used both in TYPE position (as a
-    VarDecl's own type and as a construction call) and in ordinary
-    CALL position -- confirms _resolve_named is reached correctly from
-    both _rewrite_type_expr's own bare-string branch and _rewrite_
-    node's own bare-Call branch."""
+    """A renamed named import used as a type, as a struct literal, and as a call."""
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
@@ -579,11 +517,8 @@ def test_named_import_colliding_with_own_declaration_is_rejected():
 
 
 def test_unused_invalid_named_import_is_rejected_eagerly():
-    """The concrete case that motivates validating named imports up
-    front rather than only when a reference happens to use them:
-    'nonexistent' is never referenced anywhere in main.ht's own body
-    at all -- a purely lazy, rewrite-time-only check would never
-    encounter it, and would silently let this compile."""
+    """Named imports are validated up front: 'nonexistent' is never used in main.ht, and is still
+    an error."""
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
@@ -647,10 +582,7 @@ def test_named_import_from_a_module_also_involved_in_a_circular_import():
 
 
 def test_intrinsic_round_trips_a_str_through_raw_parts():
-    """The three intrinsics called directly, in the entry file (never
-    mangled) -- confirms both ir-building hook points (_raw_ptr/_raw_
-    len in the scalar-Call dispatch, _from_raw_parts inside _ir_str_
-    value's own dispatcher) work correctly together."""
+    """The three intrinsics called directly, in the entry file."""
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
@@ -671,15 +603,8 @@ def test_intrinsic_round_trips_a_str_through_raw_parts():
 
 
 def test_intrinsic_via_a_return_statement_directly():
-    """The specific bug found and fixed this arc: Return's own IR-
-    building has a separate fast path for 'a composite return whose
-    own value is an ordinary function call', forwarding the current
-    function's own hidden return pointer straight through -- which,
-    left unexcluded, would treat an intrinsic call exactly like an
-    ordinary one and try to emit a real call to a symbol that has no
-    compiled body anywhere, failing at LINK time, not compile time.
-    This is the direct regression test for that fix: a function whose
-    entire body is `return _from_raw_parts(...)`."""
+    """A function whose whole body is `return _from_raw_parts(...)`: an intrinsic has no symbol to
+    call, including where a composite call's result would be returned in place."""
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
@@ -1200,7 +1125,7 @@ def test_stdlib_fmt_module_int_to_str_formats_a_negative_number():
 
 def test_types_and_names_inside_literals_are_resolved_across_modules():
     """Typed array literals, dict types and literals, dict entries, and named arguments all name
-    module types and constants that merging must rename."""
+    module types and constants, resolved in the module they are written in."""
     with tempfile.TemporaryDirectory() as tmpdir:
         _write(
             tmpdir, "lib.ht",

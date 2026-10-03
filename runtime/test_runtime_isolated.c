@@ -1,15 +1,6 @@
-// Standalone isolation test for runtime.c -- hand-builds type
-// descriptors matching EXACTLY what codegen/strings.py's own
-// _get_or_build_type_descriptor would emit for each shape, then
-// exercises hornet_stringify/hornet_print directly and checks the
-// resulting bytes. Not wired into the Hornet compiler at all -- pure
-// C, verifying this file in isolation before it's ever linked into a
-// compiled Hornet program.
-//
-// #include's runtime.c directly (rather than linking against it) so
-// this can call the static, internal hornet_stringify/hornet_buf_*
-// functions directly for precise, white-box checks, not just
-// hornet_print's own external, end-to-end behavior.
+// White-box tests of runtime.c: hand-built type descriptors, shaped as ir/typedesc.py emits them,
+// formatted through hornet_stringify and hornet_print. runtime.c is #included, not linked, to
+// reach its static functions.
 #include "runtime.c"
 
 #include <assert.h>
@@ -73,7 +64,7 @@ static void test_int(void) {
 static void test_int8_uint8(void) {
     int8_t v8;
     uint64_t desc8[] = {HORNET_TYPEDESC_INT8};
-    v8 = -56;  // 0xC8, the sign-extension case already reasoned through in the old assembly
+    v8 = -56;  // 0xC8: the sign must be extended
     char *s = stringify_to_cstr(&v8, desc8, 0);
     CHECK_STR(s, "-56");
     free(s);
@@ -338,23 +329,12 @@ static void test_hornet_print_end_to_end(void) {
 }
 
 static void test_self_referential_struct(void) {
-    // struct Node: int value; []Node children -- the type descriptor
-    // itself contains a pointer CYCLE here (node_desc's own
-    // "children" field points back at node_desc), matching exactly
-    // what _get_or_build_type_descriptor builds for a genuinely
-    // self-referential struct type (see its own docstring for why
-    // reserving the label before recursing is what makes this
-    // representable as a finite amount of static data at all). This
-    // is the specific case build_stringify_function's own docstring
-    // names as the reason real recursion, not per-call-site inlining,
-    // was needed in the first place -- worth confirming the C port
-    // walks a cyclic descriptor correctly, not just a tree-shaped one.
+    // struct Node: int value; []Node children. Its descriptor contains a cycle (the slice's element
+    // descriptor is the struct's own), as type_descriptor (ir/typedesc.py) emits for a
+    // self-referential type; the printer has to follow it by recursion.
     uint64_t int_desc[] = {HORNET_TYPEDESC_INT};
 
-    // children_slice_desc's own elem_desc field (index 2) is filled
-    // in below, once node_desc exists to point back at -- mirroring
-    // the compile-time order _get_or_build_type_descriptor builds
-    // these in (reserve the label, THEN recurse).
+    // children_slice_desc's element descriptor (index 2) is filled in below, once node_desc exists.
     static uint64_t children_slice_desc[4];
     static uint64_t node_desc[6];
     children_slice_desc[0] = HORNET_TYPEDESC_SLICE;
@@ -379,14 +359,7 @@ static void test_self_referential_struct(void) {
     node_desc_full[8] = 8;  // "children" offset, after the int
     children_slice_desc[2] = (uint64_t)node_desc_full;  // complete the cycle
 
-    // __attribute__((packed)): Hornet's own struct layout is tightly
-    // packed with no alignment padding at all (see _field_offset's
-    // own docstring) -- an ordinary C struct would insert 4 bytes of
-    // padding before children_ptr to align it, landing it at offset 8
-    // rather than the offset 4 this test's own descriptor says, which
-    // is exactly the mismatch that crashed here before this fix (not
-    // a bug in runtime.c -- a bug in this test not reproducing
-    // Hornet's own layout faithfully).
+    // Packed, as Hornet lays structs out (these fields need no padding either way).
     struct __attribute__((packed)) node_value {
         int64_t value;
         void *children_ptr;

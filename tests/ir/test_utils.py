@@ -23,7 +23,7 @@ def test_type_byte_width_bool():
 
 def test_type_byte_width_str():
     t = semantic.Type(kind=semantic.TypeKind.STR)
-    assert 16 == type_byte_width(t, {}, {})  # {ptr, len} -- see ir/strings.py's own module docstring
+    assert 16 == type_byte_width(t, {}, {})  # {ptr, len}
 
 
 def test_type_byte_width_array_int():

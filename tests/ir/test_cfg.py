@@ -44,8 +44,7 @@ def test_build_blocks_straight_line_is_one_block():
 
 
 def test_build_blocks_if_else_shape():
-    """Mirrors _ir_if_head/gen_statement_ir's own If shape exactly:
-    branch, then-body, jump to end, else-label, else-body, end-label."""
+    """The IR of an `if`/`else`: branch, then-body, jump to end, else-label, else-body, end-label."""
     ir = [
         IRBranch(cond=t(0), true_label='.then', false_label='.else'),
         IRLabel('.then'),
@@ -75,8 +74,7 @@ def test_build_blocks_if_else_shape():
 
 
 def test_build_blocks_while_loop_back_edge():
-    """Mirrors _ir_while_head/gen_statement_ir's own While shape:
-    start label, condition+branch, body label, body, jump back to
+    """The IR of a `while`: start label, condition and branch, body label, body, jump back to
     start, end label."""
     ir = [
         IRLabel('.start'),
@@ -111,7 +109,7 @@ def test_build_blocks_unreachable_code_after_return_gets_its_own_block():
     blocks = build_blocks(ir)
     assert [b.start for b in blocks] == [0, 1, 3]
     assert blocks[1].successors == []  # the return leaves the function
-    assert blocks[2].successors == []  # falls off the end -- gen_function's own epilogue is appended outside this list
+    assert blocks[2].successors == []  # falls off the end
 
 
 # -- liveness ---------------------------------------------------------
@@ -146,10 +144,8 @@ def test_liveness_dead_store_never_shows_live():
 
 
 def test_liveness_if_else_join_point():
-    """Mirrors _ir_short_circuit's own real shape: a Temp defined in
-    TWO different blocks (once per branch), read once after they join
-    -- exactly the case a naive single-pass scan (rather than real
-    per-block liveness) would get wrong."""
+    """A Temp defined in two blocks (once per branch) and read after they join, as a short-circuit
+    `and`/`or` value is: a single pass over the list, without per-block liveness, gets it wrong."""
     ir = [
         IRBranch(cond=t(0), true_label='.then', false_label='.else'),
         IRLabel('.then'),

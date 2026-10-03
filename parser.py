@@ -85,8 +85,9 @@ class Node:
 
 @dataclass
 class Constant(Node):
+    """A number literal. One with a fraction (`1.5`) parses and is rejected by semantic analysis:
+    there is no floating-point type."""
     value: Union[int, float]
-    # set by semantic analysis
 
 
 @dataclass
@@ -97,7 +98,7 @@ class BoolLiteral(Node):
 
 @dataclass
 class NoneLiteral(Node):
-    """`none`: zero value for pointers, slices, and dicts. Typed Type.NONE."""
+    """`none`: a pointer to nothing, or a sum type's `none` variant. Typed Type.NONE."""
 
 
 @dataclass
@@ -157,7 +158,8 @@ class Slice(Node):
 
 @dataclass
 class Call(Node):
-    """`name(args)` or `name(f=v, ...)`. Struct literals share this shape. Semantic analysis rewrites method calls in place to mangled free calls."""
+    """`name(args)` or `name(f=v, ...)`; with a `receiver`, a method call or a module-qualified one.
+    Struct literals share this shape."""
     name: str
     args: List[Node] = field(default_factory=list)
     kwargs: Optional[List[Tuple[str, Node]]] = None
@@ -192,8 +194,8 @@ class Return(Node):
 
 @dataclass
 class ArrayTypeExpr(Node):
-    """`[N]T`; nests row-major. `size` is an int, or a constant expression until semantic
-    analysis replaces it with its value."""
+    """`[N]T`; nests row-major. `size` is an int, or a constant expression that semantic analysis
+    evaluates."""
     size: Union[int, 'Node']
     element_type: Union[str, 'ArrayTypeExpr', 'SliceTypeExpr']
 
@@ -219,7 +221,7 @@ class DictTypeExpr(Node):
 
 @dataclass
 class QualifiedTypeExpr(Node):
-    """`module.Name`; resolved to a mangled name by merge.py."""
+    """`module.Name`; semantic analysis resolves it to the declaration's key (scopes.py)."""
     module: str
     name: str
 
@@ -349,7 +351,7 @@ class Param(Node):
 
 @dataclass
 class Function(Node):
-    """`def [T] name(params):`; return_type None means no value."""
+    """`def [T] name(params):`; return_type None means no value, 'never' that it doesn't return."""
     name: str
     return_type: Optional[Union[str, ArrayTypeExpr, SliceTypeExpr]]
     params: List[Param] = field(default_factory=list)

@@ -2,8 +2,8 @@
 emitted as a FrameSlot placeholder and resolved after lowering.
 
 Full-register types are selected directly on their registers, slots, and immediates; other
-types, and instructions without a direct rule, go through %rax/%rcx. %rax, %rcx, %rdx, %r8
-and %r9 are never allocated, so they are always free as scratch.
+types, and instructions without a direct rule, go through %rax/%rcx. %rax, %rcx, and %rdx are
+never allocated, so they are always free as scratch.
 """
 
 from typing import Optional

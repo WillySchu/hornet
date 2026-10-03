@@ -23,7 +23,8 @@ class ModuleError(CompileError):
 
 @dataclass
 class DiscoveredModule:
-    """One imported file, parsed but not merged. canonical_name is the file stem and must be globally unique."""
+    """One imported file, parsed. canonical_name is the file's name without `.ht`: an identifier, unique
+    among the program's modules."""
     canonical_name: str
     file_path: Path
     program: Program

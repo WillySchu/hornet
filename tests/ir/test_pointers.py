@@ -1,18 +1,5 @@
-"""Tests for pointer IR construction (ir/pointers.py, and every other
-place teaching the IR builder about pointers touched -- ir/structs.py's
-auto-deref in _ir_struct_address/_ir_field_address/_check_struct_and_
-field_type, ir/dispatch.py's NoneLiteral fallback, ir/statements.py's
-VarDecl no-longer-excluding-NoneLiteral-for-pointers case).
-
-Deliberately INTEGRATION-level, building a real Program through the
-full lex -> parse -> desugar -> analyze -> build_ir_program pipeline,
-matching test_sum_types.py's own reasoning for why: every one of the
-real bugs found while building this feature was about how separate
-parts of the pipeline disagreed about a pointer-typed value's own
-address vs. its own value (auto-deref for a bare Variable vs. a Field/
-Index base being two SEPARATE fixes, a synthesized Field node with no
-resolved_type breaking the second one), which an isolated unit test of
-one function alone would never have caught."""
+"""Pointers in the IR: address-of, automatic dereference in field access, `none`, and comparison.
+Built through the whole pipeline (parse, analyze, build_ir_program), like test_sum_types.py."""
 
 import tempfile
 from pathlib import Path
@@ -69,11 +56,8 @@ def test_dereference_of_a_scalar_pointee_is_an_ordinary_load():
 
 
 def test_auto_deref_field_read_on_a_bare_pointer_variable():
-    """p.field (p a bare Variable) -- _ir_struct_address's own Variable
-    case auto-dereferences, never computing p's own slot address at
-    all. Both IRLocalAddress instructions present target c's own slot
-    (one for constructing c itself, one for &c) -- neither is p's own
-    slot, which auto-deref must never address."""
+    """p.field, p a pointer variable: the field is read through p's value, and p's own slot is
+    never addressed. Both IRLocalAddress instructions are for c (building it, and &c)."""
     ir_program = _build(
         _CIRCLE_DECL +
         "def int main():\n"
@@ -89,11 +73,7 @@ def test_auto_deref_field_read_on_a_bare_pointer_variable():
 
 
 def test_auto_deref_field_read_through_a_chained_field_access():
-    """b.next.value -- the case that actually found a real bug: b.next
-    is ITSELF a pointer-typed Field access (not a bare Variable), and
-    needs the identical auto-deref treatment _ir_struct_address's own
-    Field/Index case provides, separately from the Variable case just
-    above."""
+    """b.next.value: b.next is itself a pointer-typed field, dereferenced the same way."""
     ir_program = _build(
         "type Node struct:\n"
         "    int value\n"
@@ -111,12 +91,7 @@ def test_auto_deref_field_read_through_a_chained_field_access():
 
 
 def test_none_literal_produces_a_plain_zero_constant():
-    """gen_expr_ir's own NoneLiteral fallback (ir/dispatch.py) -- a
-    null pointer is just the address 0, no descriptor to build the
-    way a nil slice needs. Written via a plain IRMove into p's own
-    Temp (an ordinary scalar VarDecl, no address involved at all),
-    not IRStore -- p is a pointer, not a composite value addressed
-    through a slot."""
+    """A null pointer is the address 0, moved into p's Temp: no store, since p is a scalar."""
     ir_program = _build(
         _CIRCLE_DECL +
         "def int main():\n"
@@ -134,10 +109,7 @@ def test_none_literal_produces_a_plain_zero_constant():
 
 
 def test_pointer_equality_is_an_ordinary_binop():
-    """p == q -- falls all the way through to the generic scalar
-    equality path (_ir_binary), no dedicated pointer-comparison IR
-    concept needed at all, exactly like the design discussion
-    predicted."""
+    """p == q is an ordinary scalar comparison."""
     ir_program = _build(
         _CIRCLE_DECL +
         "def int main():\n"

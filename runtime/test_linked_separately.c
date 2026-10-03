@@ -1,10 +1,6 @@
-// Verifies hornet_print works correctly when runtime.c is compiled
-// and linked as a genuinely SEPARATE object file, called via an
-// ordinary extern declaration -- unlike test_runtime_isolated.c,
-// which #includes runtime.c directly to reach its static internals
-// for white-box testing. This is closer to how the real compiler
-// will eventually call it: an external `call hornet_print`, nothing
-// about runtime.c's own internal implementation visible or assumed.
+// hornet_print called the way compiled programs call it: runtime.c compiled and linked as a
+// separate object, behind an extern declaration. (test_runtime_isolated.c #includes runtime.c
+// instead, to reach its static functions.)
 #include <stdint.h>
 #include <string.h>
 

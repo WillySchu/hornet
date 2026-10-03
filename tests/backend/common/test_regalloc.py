@@ -87,13 +87,8 @@ def test_call_crossing_includes_span_across_ircall():
 
 
 def test_call_crossing_excludes_temp_surviving_across_an_ircopy():
-    """Unlike IRCall, IRCopy is deliberately NOT in unsafe_
-    positions at all: its own lowering is pinned to %r9/%r8 (the
-    address registers) plus whatever gen_array_copy's own scratch pick
-    resolves to given those two bases -- never one of register_
-    allocator.py's own pool registers (%r10d/%r11d/%r15d) -- so a Temp
-    allocated to the pool can safely survive across it. t(0) here has
-    nothing to do with the copy at all, and must remain eligible."""
+    """IRCopy isn't a call, so a Temp live across one doesn't cross a call. t(0) has nothing to do
+    with the copy, and stays eligible for any register."""
     ir = [
         IRMove(dst=t(0), src=IRConst(1, Type.INT)),
         IRCopy(dst_address=t(1), src_address=t(2), value_type=Type.INT),
@@ -104,9 +99,7 @@ def test_call_crossing_excludes_temp_surviving_across_an_ircopy():
 
 
 def test_call_crossing_excludes_temp_surviving_across_an_irboundscheck():
-    """Same reasoning as IRCopy just above: IRBoundsCheck's own
-    lowering only ever touches %eax/%ecx (never the pool), so a Temp
-    allocated to the pool safely survives across it too."""
+    """Nor is IRBoundsCheck."""
     ir = [
         IRMove(dst=t(0), src=IRConst(1, Type.INT)),
         IRBoundsCheck(index=t(1), length=t(2)),
@@ -191,12 +184,8 @@ def test_call_crossing_excludes_pure_temp_arithmetic():
 
 
 def test_call_crossing_excludes_temp_defined_by_its_own_ircall():
-    """A Temp's OWN defining IRCall isn't a hazard to itself -- only
-    surviving THROUGH one it doesn't own is (see call_crossing's
-    own docstring). This is exactly the address-Temp pattern
-    _ir_index_assign/_ir_load rely on: capture an address, consume it
-    immediately with the very next instruction. Regression test for a
-    real off-by-one this module shipped with initially."""
+    """A Temp's own defining IRCall isn't a hazard to itself; only surviving through another call is
+    (see call_crossing). The usual shape: a call's result used by the very next instruction."""
     ir = [
         IRCall(dst=t(0), name='foo', args=[]),  # 0: t(0) defined BY this call
         IRBinOp(dst=t(1), op=BinaryOp.ADD, left=t(0), right=IRConst(1, Type.INT)),  # 1: used right after
@@ -269,13 +258,6 @@ def test_linear_scan_never_assigns_the_same_register_to_two_live_intervals():
                 if a is not b:
                     assert a.end < b.start or b.end < a.start
 
-
-# Regression coverage for the full pool: 3 -> 4 (adding r14d) -> 7
-# (adding ebx/r12d/r13d back once the real bug they exposed -- see
-# this module's own comment above ALLOCATABLE_REGISTERS, and tests/
-# codegen/test_ir_lowering.py for the fix itself -- was found and
-# fixed rather than just avoided. Pins the exact set, not just the
-# count, so an accidental reorder or duplicate is caught too.
 
 def test_crossing_intervals_get_only_callee_saved_registers():
     intervals = {i: LiveInterval(temp=t(i), start=i, end=10) for i in range(4)}

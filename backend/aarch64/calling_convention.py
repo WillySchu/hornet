@@ -9,7 +9,7 @@ ARG_REGISTERS = [Reg(f'x{i}') for i in range(8)]  # also the result register (x0
 SCRATCH_A, SCRATCH_B, SCRATCH_RESULT, SCRATCH_ADDRESS = Reg('x16'), Reg('x17'), Reg('x9'), Reg('x17')
 
 # Allocatable: caller-saved first, so values not live across a call leave callee-saved ones free.
-# x8 (C's struct-return register) and x18 (reserved on macOS) are never used.
+# x18 (reserved on macOS) is never used; x8 (C's struct-return register) is scratch in lowering.py.
 CALLER_SAVED_POOL = [f'x{i}' for i in range(10, 16)]
 CALLEE_SAVED_POOL = [f'x{i}' for i in range(19, 29)]
 ALLOCATABLE_REGISTERS = CALLER_SAVED_POOL + CALLEE_SAVED_POOL

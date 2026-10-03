@@ -225,29 +225,9 @@ def test_store_into_local_via_pointer_then_return_escapes():
     assert fn.body[1].symbol.id not in res
 
 # ---------------------------------------------------------------------------
-# Pointers: `&x` as a second way to produce a direct_backing edge,
-# alongside array-slicing -- the generalization discussed at length before
-# any of this was written. Two real bugs were found and fixed while
-# building it, both by actually running programs rather than trusting the
-# analysis alone:
-#   1. _ir_address_of never had any concept of a heap-allocated variable
-#      at all -- it always computed &x as the slot's own address, but a
-#      heap-allocated variable's slot holds a POINTER to the real data,
-#      not the data itself. Fixed by mirroring _ir_struct_address's own
-#      "if heap-allocated, load through one more indirection" pattern.
-#   2. A scalar whose address escapes now gets real heap-promotion
-#      machinery too (see _ir_finish_scalar_var_decl, ir/statements.py):
-#      is_heap_allocated's own escape check was already written
-#      generically for any type, but nothing in a scalar VarDecl's own
-#      construction mallocs one until now. Silently treating an escaping
-#      scalar like any other escaping declaration WITHOUT that machinery
-#      would have read its raw VALUE as if it were a pointer, corrupting
-#      it -- rejected outright at first (a deliberate, narrower v1 scope
-#      decision, not a soundness gap left open by accident), with the
-#      heap-promotion machinery itself following as its own, later stage.
-# See tests/test_compiler.py's own TestPointerEscapeAnalysis for the
-# compile-and-run counterparts, including the dangling-pointer program
-# that motivated this whole stage.
+# Pointers: `&x` points into x's storage, as slicing an array does. When the pointer escapes, x
+# moves to the heap, scalars included. tests/test_compiler.py's TestPointerEscapeAnalysis has the
+# compile-and-run counterparts.
 # ---------------------------------------------------------------------------
 
 def test_address_of_a_struct_local_returned_directly_escapes():
@@ -297,14 +277,7 @@ def test_address_of_a_scalar_local_returned_directly_is_now_heap_promoted():
 
 
 def test_address_of_a_scalar_local_wrapped_in_a_returned_struct_is_now_heap_promoted():
-    """Confirms the same holds when &x is passed as a struct
-    CONSTRUCTOR argument (Holder(&x)) rather than returned bare --
-    reached via scan_expr_for_escaping_calls's own conservative "any
-    call's arguments might escape" treatment, which a struct
-    constructor call falls under too (contribution() has no dedicated
-    case for a struct literal itself, a separate, pre-existing gap for
-    slices too -- deliberately out of scope here), not via
-    contribution() being given the whole struct literal directly."""
+    """The same when &x is a struct literal's argument (Holder(&x)) and the struct is returned."""
     ast = parse_and_analyze(
         "type Holder struct:\n"
         "    *int p\n"
@@ -418,10 +391,8 @@ def test_address_of_via_reassignment_not_just_var_decl_init():
 
 
 def test_pointer_aliasing_through_a_struct_field_assign_propagates():
-    """s.field = someOtherPointer (a field assignment, a pointer-VALUED RHS
-    that's itself a Variable, not a bare &x) needs to propagate the
-    aliasing through slice_deps -- if the whole struct later escapes,
-    whatever someOtherPointer itself pointed at must be found too."""
+    """s.field = p, with p a pointer variable (not a bare &x): if the struct later escapes, so does
+    what p points at."""
     ast = parse_and_analyze(
         "type Circle struct:\n"
         "    int radius\n"

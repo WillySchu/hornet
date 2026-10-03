@@ -189,7 +189,7 @@ int x = 10
 int8 y = int8(x)
 ```
 
-Integer literals are range-checked against their destination type.
+An integer literal takes its type from where it is used, and must fit it: the slot it flows into, or the other operand (`fd < 0`, `a + 1`, `1 in xs`).
 
 ## Boolean
 
@@ -442,6 +442,13 @@ The return type may be omitted. An omitted return type is the language's no-valu
 ```hornet
 def greet(str name):
     print('hello ' + name)
+```
+
+A function declared `never` doesn't return: every path through it ends in a call to another `never` function (such as `panic`) or in a `while true` it doesn't break out of. A call to one ends its path, so no `return` is needed after it. An `extern` can be `never` too; if it returns after all, the program panics.
+
+```hornet
+def never fail(str what):
+    panic('failed: ' + what)
 ```
 
 A trailing comma is allowed after the last parameter or argument, and after the last element or entry of an array, slice, or dictionary literal.
@@ -756,7 +763,7 @@ if shape is Circle:
     print(shape.radius)
 ```
 
-In the `else` branch the variable isn't that variant. Neither is it after an `if` (or `if`/`elif` chain) with no `else` whose bodies always `return`, `break`, or `continue`. With one variant left, the variable has that variant's type:
+In the `else` branch the variable isn't that variant. Neither is it after an `if` (or `if`/`elif` chain) with no `else` whose bodies always `return`, `break`, `continue`, or call a `never` function. With one variant left, the variable has that variant's type:
 
 ```hornet
 if shape is Circle:
@@ -785,7 +792,7 @@ match shape as s:
 
 The subject of `... as NAME` can be any sum-typed expression, such as a field, an element, or `*p`; `NAME` is a copy of it, so assigning to its fields doesn't change the subject. It lasts for the `if` and its `else`, where it is narrowed the same way. A `none` variant is tested with `is none`.
 
-`match` must be exhaustive, or end with `else:`, where the subject is none of the arms' variants. A `match` whose arms all return counts as returning; an arm ending in a call such as `panic` does not, so a `return` is still needed after it.
+`match` must be exhaustive, or end with `else:`, where the subject is none of the arms' variants. A `match` whose arms all return, or end in a `never` call such as `panic`, counts as returning.
 
 `is` is not yet a general boolean expression: nothing narrows through `and`, `or`, `not`, `x == none`, or a loop condition.
 
@@ -801,6 +808,7 @@ len
 append
 del
 bytes
+panic
 ```
 
 `str(...)` conversions are described under [Strings](#strings).
@@ -842,6 +850,10 @@ values = append(values, 3)
 
 `bytes(s)` returns a new `[]byte` copy of the string `s`.
 
+## `panic`
+
+`panic(message)` prints a `str` with the call's position (`file:line:col: panic: message`) and aborts. It is a `never` call.
+
 ## `del`
 
 `del(dict, key)` removes an existing dictionary entry:
@@ -856,7 +868,7 @@ A missing key is a runtime error.
 
 # Modules and Imports
 
-A module is currently one `.ht` source file.
+A module is currently one `.ht` source file, named by that file: the name (without `.ht`) must be an identifier, and unique among the program's modules.
 
 Import a module and access its exported declarations through a qualifier:
 
@@ -948,7 +960,6 @@ Low-level C interoperability helpers, including:
 raw string access
 C-string conversion
 raw byte/string construction
-panic()
 ```
 
 ## `stdlib/hash.ht`
@@ -1032,7 +1043,7 @@ The native runtime is located in `runtime/runtime.c` and is compiled separately 
 It currently provides language-level services including:
 
 * `print` and recursive value formatting
-* `hornet_panic`, which flushes standard output, writes the message to standard error, and aborts
+* `hornet_panic` and `hornet_panic_at` (for `panic(...)`), which flush standard output, write the message to standard error, and abort
 * `hornet_slice_grow`, which copies a slice into a larger backing store
 * `hornet_bytes` for `bytes(s)`
 * dictionary hash tables, hashed with FNV-1a (`hornet_hash_bytes`)
@@ -1171,7 +1182,6 @@ def str contents_or_exit(StrResult r):
         is Error:
             write_stderr(v.message + '\n')
             exit(1)
-    return ''
 
 def int count_lines(str s):
     int count = 0
@@ -1214,7 +1224,6 @@ Hornet is still experimental. Some notable limitations are:
 * A sum type can't be a variant of another sum type.
 * A typed literal of pointers to a named type with two or more fixed sizes (`[2][1]*P[...]`) can't be written inline; see [Arrays and Slices](#arrays-and-slices).
 * There are no enums; integer constants stand in for them.
-* There is no no-return type, so a `return` is still needed after a call to `panic` or `exit` that ends a function, and an `if` whose body ends in such a call doesn't narrow what follows it.
 * Sum-type equality is not implemented.
 * Slice equality and dictionary equality are not implemented.
 * `in` does not apply to strings.
@@ -1228,7 +1237,7 @@ Hornet is still experimental. Some notable limitations are:
 * There are no floating-point types yet.
 * Multithreading is not implemented.
 * Without generics, each result type is a separate named sum type. There is no operator for propagating errors, and ignoring a result is not diagnosed.
-* `panic(...)` from `stdlib/c.ht` reports no source position, and stack overflow is an unreported `SIGSEGV`.
+* Stack overflow is an unreported `SIGSEGV`.
 
 ---
 

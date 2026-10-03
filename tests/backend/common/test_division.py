@@ -1,4 +1,4 @@
-"""Tests for codegen/divide_by_constant.py's magic numbers, checked against truncating division."""
+"""Tests for backend/common/division.py's magic numbers, checked against truncating division."""
 
 import random
 

@@ -52,18 +52,8 @@ def test_runtime_and_caller_link_and_run_correctly(target):
 
 @each_runnable_target
 def test_hornet_runtime_entry_points_are_the_only_external_symbols(target):
-    """hornet_print/hornet_panic/hornet_slice_grow/hornet_hash_bytes/
-    hornet_dict_insert_scalar_key/hornet_dict_insert_str_key/hornet_
-    dict_set_scalar_key/hornet_dict_set_str_key/hornet_dict_lookup_
-    scalar_key/hornet_dict_lookup_str_key/hornet_dict_delete_scalar_
-    key/hornet_dict_delete_str_key/hornet_dict_contains_scalar_key/
-    hornet_dict_contains_str_key/hornet_argv_get are the fifteen
-    functions meant to be called from outside this file (the last one
-    only ever from stdlib/os.ht's own get_args -- see its own
-    comment); hornet_stringify, every buffer/read helper, and every
-    dict_* descriptor-field accessor/growth helper are internal
-    implementation details (static linkage) that shouldn't leak into
-    whatever links against this object file."""
+    """The entry points listed below are the runtime's only external symbols; hornet_stringify, the
+    buffer helpers, and the dict helpers are static, and don't leak into what links against it."""
     CC = c_compiler(target)
     with tempfile.TemporaryDirectory() as tmpdir:
         runtime_o = f"{tmpdir}/runtime.o"

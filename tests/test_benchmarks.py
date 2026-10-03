@@ -45,20 +45,9 @@ EXPECTED_EXIT_CODES = {
     'sum_type_walk': 7,  # recursive match dispatch over a sum-typed tree
 }
 
-# How many times each benchmark's COMPILED BINARY is run before this
-# file is satisfied it's correct -- not just once. A real bug (a
-# register wrongly shared between two values that are both genuinely
-# live -- see codegen/register_allocator.py's own ALLOCATABLE_
-# REGISTERS comment) was found to produce a binary whose behavior
-# depends on ASLR: the SAME binary, never recompiled, would segfault
-# on some runs and not others, purely because the exact stack/heap
-# addresses it happened to get differed. A single run -- what this
-# file used to do -- passes that kind of bug right through; genuinely
-# recompiling N times wouldn't even exercise it, since compilation
-# itself is deterministic and the fault is in what the ALREADY-
-# COMPILED code does with whatever addresses it's handed at runtime.
-# So: compile once (that part IS deterministic, and gcc is by far the
-# expensive step), then actually run the result this many times.
+# How many times each benchmark's compiled binary is run. A register wrongly shared between two
+# live values once produced a binary that faulted only under some address layouts (ASLR), so one
+# run can pass by luck. Compilation is deterministic: compile once, then run this many times.
 RERUNS = 10 if TIER == 'full' else 1
 
 

@@ -1,8 +1,9 @@
 """Semantic analysis: name resolution, type checking, and control-flow checks; its result is the
 typed tree (typed_ast.py), which every later stage consumes.
 
-Strict typing: no implicit conversions; integer operands must match exactly. Blocks
-scope lexically and may shadow. Non-void functions must return on all paths.
+Strict typing: no implicit conversions; integer operands must match exactly (an integer literal
+takes the other operand's type). Blocks scope lexically and may shadow. Non-void functions must
+return on all paths.
 
 The parser's tree is never changed: checking records what it learns in Facts, keyed by node number,
 and _TypedTreeBuilder builds each function's typed tree from those facts at the end of analyze().
@@ -368,7 +369,7 @@ class SemanticAnalyzer:
         for fn, sd in methods:
             program.scope_of[fn.nid] = program.scope_of[sd.nid]
         self.all_functions = list(program.functions) + [fn for fn, _ in methods]
-        # Order matters: 0. constant array sizes become literals before any type is resolved.
+        # Order matters: 0. constant array sizes are evaluated before any type is resolved.
         self._collect_consts(program)
         self._resolve_array_sizes(program)
 
@@ -464,7 +465,7 @@ class SemanticAnalyzer:
         if errors:
             raise SemanticErrors(errors)
 
-        # 7. The typed tree: what later stages consume.
+        # 6. The typed tree: what later stages consume.
         return _TypedTreeBuilder(self).program(self.all_functions)
 
     # -- names across modules
@@ -1640,7 +1641,8 @@ class SemanticAnalyzer:
         return Type(TypeKind.SLICE, element_type=element_type)
 
     def check_array_literal(self, expr: ArrayLiteral, expected_element_type: Optional[Type] = None) -> Type:
-        """`[e, ...]` or `[N]T[...]`; homogeneous. Untyped literals need an expected element type."""
+        """`[e, ...]` or `[N]T[...]`; homogeneous. An untyped literal's elements take
+        `expected_element_type` when there is one, else the first element's type."""
         if expr.type_expr is not None:
             declared_type = self._type(expr.type_expr, expr)
             if len(expr.elements) != declared_type.size:
@@ -2182,7 +2184,7 @@ class SemanticAnalyzer:
             return all(self._is_comparable_type(field_type) for field_type in struct_info.fields.values())
         if t.kind in (TypeKind.SLICE, TypeKind.SUM, TypeKind.DICT):
             return False
-        return True  # INT, BOOL, STR, POINTER
+        return True  # integers, bool, str, pointers
 
     def check_binary(self, expr: Binary) -> Type:
         if expr.op == BinaryOp.MULTIPLY:
@@ -2550,7 +2552,7 @@ class _TypedTreeBuilder:
             symbol = self.symbols[decl]
             local = typed.Local(symbol.type, symbol)
             if self.ty(e) != symbol.type:
-                return typed.Payload(self.ty(e), local)  # narrowed by an enclosing `is`
+                return typed.Payload(self.ty(e), local)  # narrowed by an `is` check
             return local
         if isinstance(e, syntax.ArrayLiteral):
             array_type = self.ty(e)

@@ -1,4 +1,4 @@
-// Hornet runtime: print, panic, slice growth, and dict hash tables.
+// Hornet runtime: print, panic, bytes(), slice growth, dict hash tables, and what stdlib/os.ht calls.
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -355,7 +355,8 @@ int64_t hornet_hash_bytes(const void *ptr, int64_t len) {
     return (int64_t)h;
 }
 
-// Insert into a presized scalar-keyed table (literals); returns 1 if new, 0 if overwritten.
+// Insert into a table with room (literals, and after any rehash): returns 0 if it overwrote the
+// key, 1 if the key is new, 2 if new in a tombstone's bucket.
 int64_t hornet_dict_insert_scalar_key(
     void *buckets, int64_t capacity, int64_t bucket_stride,
     const void *key_ptr, int64_t key_width,
@@ -554,7 +555,7 @@ void *hornet_dict_lookup_scalar_key(void *descriptor, int64_t key_width, int64_t
     void *buckets = dict_buckets(descriptor);
     int64_t capacity = dict_capacity(descriptor);
     if (capacity == 0) {
-        // nil dict: capacity 0 would break the mask.
+        // no table yet: capacity 0 would break the mask.
         return NULL;
     }
     int64_t bucket_stride = 1 + key_width + value_width;
@@ -576,7 +577,7 @@ void *hornet_dict_lookup_str_key(void *descriptor, int64_t value_width, const vo
     void *buckets = dict_buckets(descriptor);
     int64_t capacity = dict_capacity(descriptor);
     if (capacity == 0) {
-        // nil dict
+        // no table yet
         return NULL;
     }
     int64_t bucket_stride = 1 + key_region_width + value_width;
@@ -602,7 +603,7 @@ int64_t hornet_dict_contains_scalar_key(void *descriptor, int64_t key_width, int
     void *buckets = dict_buckets(descriptor);
     int64_t capacity = dict_capacity(descriptor);
     if (capacity == 0) {
-        // nil dict
+        // no table yet
         return 0;
     }
     int64_t bucket_stride = 1 + key_width + value_width;
@@ -624,7 +625,7 @@ int64_t hornet_dict_contains_str_key(void *descriptor, int64_t value_width, cons
     void *buckets = dict_buckets(descriptor);
     int64_t capacity = dict_capacity(descriptor);
     if (capacity == 0) {
-        // nil dict
+        // no table yet
         return 0;
     }
     int64_t bucket_stride = 1 + key_region_width + value_width;
@@ -651,7 +652,7 @@ int64_t hornet_dict_delete_scalar_key(void *descriptor, int64_t key_width, int64
     void *buckets = dict_buckets(descriptor);
     int64_t capacity = dict_capacity(descriptor);
     if (capacity == 0) {
-        // nil dict
+        // no table yet
         return 0;
     }
     int64_t bucket_stride = 1 + key_width + value_width;
@@ -677,7 +678,7 @@ int64_t hornet_dict_delete_str_key(void *descriptor, int64_t value_width, const 
     void *buckets = dict_buckets(descriptor);
     int64_t capacity = dict_capacity(descriptor);
     if (capacity == 0) {
-        // nil dict
+        // no table yet
         return 0;
     }
     int64_t bucket_stride = 1 + key_region_width + value_width;

@@ -2,7 +2,7 @@
 
 Many live variables, values live across calls (memory operands), array loads and stores,
 branches, and 64/32-bit arithmetic. int8/uint8 appear only through casts. Operand aliasing
-and illegal-operand cases are covered more directly by tests/codegen/test_direct_selection.py.
+and illegal-operand cases are covered more directly by tests/backend/x86_64/test_direct_selection.py.
 """
 
 import random

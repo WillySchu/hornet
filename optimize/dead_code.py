@@ -1,7 +1,7 @@
 """Dead code elimination: drop pure instructions whose result is never read.
 
-Division and modulo stay (dividing by zero must trap); calls, loads, stores, and checks
-always stay; writes to pinned temps always stay. Run after unreachable blocks are removed.
+Division and modulo stay, though their panics now come from the checks ir/division_checks.py
+puts before them; calls, loads, stores, and checks always stay; writes to pinned temps always stay. Run after unreachable blocks are removed.
 """
 
 from ir.cfg import PURE, build_blocks, liveness, reads, writes

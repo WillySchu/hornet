@@ -47,7 +47,7 @@ class CodeGenerator(
 
     def __init__(self):
         self._saved_registers: List[str] = []
-        self._slot_offsets: Dict[int, int] = {}  # slot id -> %rbp offset; set by _resolve_frame_layout
+        self._slot_offsets: Dict[int, int] = {}  # slot id -> %rbp offset, once the frame is laid out
         self._register_assignment: Dict[int, str] = {}
         self.allocation_log = None  # set to a list to record (ir, temp homes, params, assignment) per function
         self.frame = None  # Frame of the function being lowered
