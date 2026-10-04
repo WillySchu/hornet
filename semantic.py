@@ -747,6 +747,7 @@ class SemanticAnalyzer:
     def _resolve_sum_types(self, sum_type_defs: List[SumTypeDef], structs: Dict[str, StructInfo]) -> Dict[str, SumTypeInfo]:
         """Resolve sum type variants and check name collisions."""
         registry: Dict[str, SumTypeInfo] = {}
+        sum_names = {std.name: None for std in sum_type_defs}
         for std in sum_type_defs:
             if shown(std.name) in BUILTIN_FUNCTION_NAMES:
                 raise SemanticError(
@@ -783,8 +784,10 @@ class SemanticAnalyzer:
                         std,
                     )
                 try:
+                    # A sum can't be a variant itself (above), but a pointer to one, or a slice or
+                    # dict of them, can: the names of the sums are enough to resolve those.
                     variant_type = type_from_name(
-                        variant_name, structs, self.type_aliases, std, resolve=self._resolve_type_name,
+                        variant_name, structs, self.type_aliases, std, sum_names, resolve=self._resolve_type_name,
                         enums=self.enums)
                 except SemanticError:
                     # Name what's allowed for a simple typo.
@@ -1634,7 +1637,7 @@ class SemanticAnalyzer:
 
         seen: Dict[Type, IsCheck] = {}
         for arm_condition, _ in stmt.arms:
-            arm_type = self._type(arm_condition.type_name, arm_condition, sums=False)
+            arm_type = self._type(arm_condition.type_name, arm_condition)
             if arm_type in seen:
                 raise SemanticError(
                     f"'{arm_condition.type_name}' is tested more than once in "
@@ -2378,7 +2381,7 @@ class SemanticAnalyzer:
                 f"variable to one of its own declared variants",
                 expr,
             )
-        narrowed_type = self._type(expr.type_name, expr, sums=False)
+        narrowed_type = self._type(expr.type_name, expr)  # (a variant may be a pointer to a sum, or a slice of one)
         sum_type_info = self.sum_types[variable_type.sum_type_name]
         if narrowed_type not in sum_type_info.variants:
             raise SemanticError(

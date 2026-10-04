@@ -1,0 +1,63 @@
+# calc: an integer calculator. Each line is an expression, whose value is printed, or
+# `name = expression`, which sets a variable.
+#
+#   calc [file]    read the file, or standard input
+#
+#   + - * / %  == != < <= > >=  and or not  ( )    integers are 64-bit; true is 1, false is 0
+#
+# An error is reported as `file:line:col: error: message`, and the exit status is then 1.
+from 'os' import get_args, read_file, read_stdin, write_stderr
+from 'errors' import Error, StrResult
+from 'fmt' import int_to_str
+from 'strings' import split
+from 'lexer' import lex, LexError, Tokens
+from 'parser' import parse, ParseError, Statement
+from 'eval' import evaluate, EvalError
+
+def bool _report(str source, int line, int col, str message):
+    write_stderr(source + ':' + int_to_str(line) + ':' + int_to_str(col) + ': error: ' + message + '\n')
+    return false
+
+# Run one line; false if it has an error.
+def bool run_line(str source, int number, str line, dict[str]int variables):
+    match lex(line) as tokens:
+        is LexError:
+            return _report(source, number, tokens.col, tokens.message)
+        is Tokens:
+            if len(tokens.items) == 1:  # blank, or only a comment
+                return true
+            match parse(tokens.items) as statement:
+                is ParseError:
+                    return _report(source, number, statement.col, statement.message)
+                is Statement:
+                    match evaluate(statement.value, variables) as value:
+                        is EvalError:
+                            return _report(source, number, value.col, value.message)
+                        is int:
+                            if statement.target == '':
+                                print(value)
+                            else:
+                                variables[statement.target] = value
+                            return true
+
+def int main(int argc, *byte argv):
+    []str args = get_args(argc, argv)
+    str source = '<stdin>'
+    StrResult text = ''
+    if len(args) > 1:
+        source = args[1]
+        text = read_file(source)
+    else:
+        text = read_stdin()
+    if text is Error:
+        write_stderr('calc: ' + text.message + '\n')
+        return 1
+    dict[str]int variables
+    bool ok = true
+    []str lines = split(text, '\n')
+    for int i = 0; i < len(lines); i += 1:
+        if not run_line(source, i + 1, lines[i], variables):
+            ok = false
+    if ok:
+        return 0
+    return 1

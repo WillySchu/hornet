@@ -1,0 +1,107 @@
+# The tokens of one line of calculator input.
+from 'errors' import Error
+from 'fmt' import parse_int
+
+type TokenKind enum:
+    Number
+    Identifier
+    Plus
+    Minus
+    Star
+    Slash
+    Percent
+    LeftParen
+    RightParen
+    Assign
+    Equal
+    NotEqual
+    Less
+    LessEqual
+    Greater
+    GreaterEqual
+    And
+    Or
+    Not
+    End
+
+type Token struct:
+    TokenKind kind
+    str text  # as written
+    int value  # a Number's
+    int col
+
+type LexError struct:
+    str message
+    int col
+
+type Tokens struct:
+    []Token items
+
+type LexResult is Tokens | LexError
+
+def bool _is_digit(byte c):
+    return c >= "0" and c <= "9"
+
+def bool _is_name_start(byte c):
+    return (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_"
+
+# `and`, `or`, and `not` are operators; any other word is a name.
+def TokenKind _word_kind(str word):
+    if word == 'and':
+        return TokenKind.And
+    if word == 'or':
+        return TokenKind.Or
+    if word == 'not':
+        return TokenKind.Not
+    return TokenKind.Identifier
+
+# The kind of the operator `text` spells, or End if it spells none.
+def TokenKind _operator_kind(str text):
+    dict[str]TokenKind kinds = dict[str]TokenKind{'+': TokenKind.Plus, '-': TokenKind.Minus, '*': TokenKind.Star,
+        '/': TokenKind.Slash, '%': TokenKind.Percent, '(': TokenKind.LeftParen, ')': TokenKind.RightParen,
+        '=': TokenKind.Assign, '==': TokenKind.Equal, '!=': TokenKind.NotEqual, '<': TokenKind.Less,
+        '<=': TokenKind.LessEqual, '>': TokenKind.Greater, '>=': TokenKind.GreaterEqual}
+    if text in kinds:
+        return kinds[text]
+    return TokenKind.End
+
+# The line's tokens, ending with an End. A `#` starts a comment.
+def LexResult lex(str line):
+    []Token toks
+    int n = len(line)
+    int i = 0
+    while i < n:
+        byte c = line[i]
+        int col = i + 1
+        if c == " " or c == "\t" or c == "\r":
+            i += 1
+        elif c == "#":
+            i = n
+        elif _is_digit(c):
+            int j = i
+            while j < n and _is_digit(line[j]):
+                j += 1
+            match parse_int(line[i:j]) as value:
+                is int:
+                    toks = append(toks, Token(TokenKind.Number, line[i:j], value, col))
+                is Error:
+                    return LexError('number too large', col)
+            i = j
+        elif _is_name_start(c):
+            int j = i
+            while j < n and (_is_name_start(line[j]) or _is_digit(line[j])):
+                j += 1
+            toks = append(toks, Token(_word_kind(line[i:j]), line[i:j], 0, col))
+            i = j
+        else:
+            # The longest operator here: two characters, then one.
+            int width = 2
+            if i + 2 > n or _operator_kind(line[i:i + 2]) is End:
+                width = 1
+            TokenKind kind = _operator_kind(line[i:i + width])
+            if kind is End:
+                return LexError('unexpected character \'' + line[i:i + 1] + '\'', col)
+            toks = append(toks, Token(kind, line[i:i + width], 0, col))
+            i += width
+    toks = append(toks, Token(TokenKind.End, '', 0, n + 1))
+    return Tokens(toks)

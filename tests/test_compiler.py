@@ -6138,8 +6138,9 @@ class TestArraySliceAndPointerVariants:
             expected=0,
         )
 
-    def test_array_of_a_sum_type_as_a_variant_is_rejected(self):
-        assert_program_semantic_error(
+    def test_array_of_a_sum_type_as_a_variant(self):
+        # A sum can't be a variant itself, but an array of another sum (held by value) can.
+        assert_program_stdout(
             "type Circle struct:\n"
             "    int radius\n"
             "\n"
@@ -6150,9 +6151,20 @@ class TestArraySliceAndPointerVariants:
             "\n"
             "type Nested is [2]Shape | int\n"
             "\n"
+            "def int total(Nested n):\n"
+            "    match n as v:\n"
+            "        is [2]Shape:\n"
+            "            return len(v)\n"
+            "        is int:\n"
+            "            return v\n"
+            "\n"
             "def int main():\n"
+            "    [2]Shape pair = [Circle(3), Square(4)]\n"
+            "    Nested n = pair\n"
+            "    print(total(n) + total(5))\n"
+            "    print(n)\n"
             "    return 0\n",
-            match="Unknown type 'Shape'",
+            "7\n[2]Shape[Circle(radius: 3), Square(side: 4)]\n",
         )
 
     def test_a_sum_type_named_bare_as_a_variant_is_rejected(self):

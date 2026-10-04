@@ -1,0 +1,200 @@
+# One line of tokens into a tree, by precedence climbing.
+from 'lexer' import Token, TokenKind
+
+type Op enum:
+    Add
+    Sub
+    Mul
+    Div
+    Mod
+    Equal
+    NotEqual
+    Less
+    LessEqual
+    Greater
+    GreaterEqual
+    And
+    Or
+    Negate
+    Not
+
+type Num struct:
+    int value
+
+type Name struct:
+    str name
+    int col
+
+type Unary struct:
+    Op op
+    *Expr operand
+
+type Binary struct:
+    Op op
+    *Expr left
+    *Expr right
+    int col  # the operator's
+
+type Expr is Num | Name | Unary | Binary
+
+type ParseError struct:
+    str message
+    int col
+
+# A sum can't be another sum's variant, but a pointer to one can, and the tree is made of those.
+type ExprResult is *Expr | ParseError
+
+# A line: `name = expression` (target is the name), or an expression alone (target is '').
+type Statement struct:
+    str target
+    *Expr value
+
+type ParseResult is Statement | ParseError
+
+# How tightly a binary operator binds; 0 for a token that isn't one. `not` sits between `and` and the
+# comparisons, and unary minus binds tightest of all.
+const int _NOT_LEVEL = 3
+
+def int _precedence(TokenKind kind):
+    match kind:
+        is Or:
+            return 1
+        is And:
+            return 2
+        is Equal:
+            return 4
+        is NotEqual:
+            return 4
+        is Less:
+            return 4
+        is LessEqual:
+            return 4
+        is Greater:
+            return 4
+        is GreaterEqual:
+            return 4
+        is Plus:
+            return 5
+        is Minus:
+            return 5
+        is Star:
+            return 6
+        is Slash:
+            return 6
+        is Percent:
+            return 6
+        else:
+            return 0
+
+def Op _binary_op(TokenKind kind):
+    match kind:
+        is Or:
+            return Op.Or
+        is And:
+            return Op.And
+        is Equal:
+            return Op.Equal
+        is NotEqual:
+            return Op.NotEqual
+        is Less:
+            return Op.Less
+        is LessEqual:
+            return Op.LessEqual
+        is Greater:
+            return Op.Greater
+        is GreaterEqual:
+            return Op.GreaterEqual
+        is Plus:
+            return Op.Add
+        is Minus:
+            return Op.Sub
+        is Star:
+            return Op.Mul
+        is Slash:
+            return Op.Div
+        is Percent:
+            return Op.Mod
+        else:
+            panic('not a binary operator: ' + str(kind))
+
+# A node of the tree, on the heap. (`&Num(1)` alone is a pointer to a Num, which a result holding
+# a pointer to an Expr doesn't take.)
+def *Expr _new(Expr node):
+    return &node
+
+type Parser struct:
+    []Token _tokens
+    int _pos
+
+    def Token _peek(self):
+        return self._tokens[self._pos]
+
+    def Token _next(*self):
+        Token token = self._tokens[self._pos]
+        self._pos += 1
+        return token
+
+    # An expression of binary operators that bind at least as tightly as `level`.
+    def ExprResult _binary(*self, int level):
+        ExprResult left = self._prefix(level)
+        if left is ParseError:
+            return left
+        *Expr tree = left
+        while _precedence(self._peek().kind) >= level and _precedence(self._peek().kind) > 0:
+            Token operator = self._next()
+            # One level tighter on the right: operators of a level group from the left.
+            ExprResult right = self._binary(_precedence(operator.kind) + 1)
+            if right is ParseError:
+                return right
+            tree = _new(Binary(_binary_op(operator.kind), tree, right, operator.col))
+        return tree
+
+    # A `not` (where an operand of its level may start), or an operand.
+    def ExprResult _prefix(*self, int level):
+        if self._peek().kind is Not and level <= _NOT_LEVEL:
+            self._next()
+            ExprResult operand = self._binary(_NOT_LEVEL)
+            if operand is ParseError:
+                return operand
+            return _new(Unary(Op.Not, operand))
+        return self._operand()
+
+    # A number, a name, a parenthesized expression, or one of those negated.
+    def ExprResult _operand(*self):
+        Token token = self._next()
+        match token.kind as kind:
+            is Number:
+                return _new(Num(token.value))
+            is Identifier:
+                return _new(Name(token.text, token.col))
+            is Minus:
+                ExprResult operand = self._operand()
+                if operand is ParseError:
+                    return operand
+                return _new(Unary(Op.Negate, operand))
+            is LeftParen:
+                ExprResult inner = self._binary(1)
+                if inner is ParseError:
+                    return inner
+                Token close = self._next()
+                if close.kind is not RightParen:
+                    return ParseError('expected \')\'', close.col)
+                return inner
+            is End:
+                return ParseError('unexpected end of line', token.col)
+            else:
+                return ParseError('unexpected \'' + token.text + '\'', token.col)
+
+def ParseResult parse([]Token tokens):
+    Parser parser = Parser(tokens, 0)
+    str target = ''
+    if len(tokens) > 2 and tokens[0].kind is Identifier and tokens[1].kind is Assign:
+        target = tokens[0].text
+        parser = Parser(tokens, 2)
+    ExprResult value = parser._binary(1)
+    if value is ParseError:
+        return value
+    Token rest = parser._peek()
+    if rest.kind is not End:
+        return ParseError('unexpected \'' + rest.text + '\'', rest.col)
+    return Statement(target, value)

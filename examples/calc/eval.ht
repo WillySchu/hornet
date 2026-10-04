@@ -1,0 +1,81 @@
+# Evaluating a tree: integers that wrap like Hornet's own, with 1 and 0 for true and false.
+from 'parser' import Expr, Num, Name, Unary, Binary, Op
+
+type EvalError struct:
+    str message
+    int col
+
+type EvalResult is int | EvalError
+
+def int _flag(bool condition):
+    if condition:
+        return 1
+    return 0
+
+def EvalResult _binary(Binary node, dict[str]int variables):
+    EvalResult left = evaluate(node.left, variables)
+    if left is EvalError:
+        return left
+    # `and` and `or` leave the right side alone when the left decides.
+    if node.op is And and left == 0:
+        return 0
+    if node.op is Or and left != 0:
+        return 1
+    EvalResult right = evaluate(node.right, variables)
+    if right is EvalError:
+        return right
+    match node.op as op:
+        is Add:
+            return left + right
+        is Sub:
+            return left - right
+        is Mul:
+            return left * right
+        is Div:
+            if right == 0:
+                return EvalError('division by zero', node.col)
+            if right == -1:  # the one quotient that doesn't fit wraps, as negation does
+                return -left
+            return left / right
+        is Mod:
+            if right == 0:
+                return EvalError('division by zero', node.col)
+            if right == -1:
+                return 0
+            return left % right
+        is Equal:
+            return _flag(left == right)
+        is NotEqual:
+            return _flag(left != right)
+        is Less:
+            return _flag(left < right)
+        is LessEqual:
+            return _flag(left <= right)
+        is Greater:
+            return _flag(left > right)
+        is GreaterEqual:
+            return _flag(left >= right)
+        is And:
+            return _flag(right != 0)
+        is Or:
+            return _flag(right != 0)
+        else:
+            panic('not a binary operator: ' + str(op))
+
+def EvalResult evaluate(*Expr tree, dict[str]int variables):
+    match *tree as node:
+        is Num:
+            return node.value
+        is Name:
+            if node.name in variables:
+                return variables[node.name]
+            return EvalError('undefined variable \'' + node.name + '\'', node.col)
+        is Unary:
+            EvalResult operand = evaluate(node.operand, variables)
+            if operand is EvalError:
+                return operand
+            if node.op is Negate:
+                return -operand
+            return _flag(operand == 0)
+        is Binary:
+            return _binary(node, variables)
