@@ -1,0 +1,50 @@
+# The stack machine that runs code.ht's instructions.
+from 'parser' import Op
+from 'code' import Instruction, Opcode
+from 'eval' import apply_unary, apply_binary, EvalError
+
+# How a run ended: with an error, or (none) without one.
+type Outcome is EvalError | none
+
+def Outcome run([]Instruction code, dict[str]int variables):
+    []int stack
+    int next = 0
+    while next < len(code):
+        Instruction instruction = code[next]
+        next += 1
+        int top = len(stack) - 1
+        match instruction.opcode as opcode:
+            is Push:
+                stack = append(stack, instruction.operand)
+            is Load:
+                if instruction.name not in variables:
+                    return EvalError('undefined variable \'' + instruction.name + '\'', instruction.col)
+                stack = append(stack, variables[instruction.name])
+            is Store:
+                variables[instruction.name] = stack[top]
+                stack = stack[:top]
+            is Print:
+                print(stack[top])
+                stack = stack[:top]
+            is Apply:
+                match apply_binary(instruction.operator, stack[top - 1], stack[top], instruction.col) as value:
+                    is int:
+                        stack[top - 1] = value
+                        stack = stack[:top]
+                    is EvalError:
+                        return value
+            is ApplyUnary:
+                stack[top] = apply_unary(instruction.operator, stack[top])
+            is Truth:
+                stack[top] = apply_unary(Op.Not, apply_unary(Op.Not, stack[top]))
+            is Jump:
+                next = instruction.operand
+            is JumpIfFalse:
+                if stack[top] == 0:
+                    next = instruction.operand
+                stack = stack[:top]
+            is JumpIfTrue:
+                if stack[top] != 0:
+                    next = instruction.operand
+                stack = stack[:top]
+    return none

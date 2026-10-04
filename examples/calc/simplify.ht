@@ -1,0 +1,54 @@
+# A tree with the same value (and the same errors) that does less: constants computed, operations
+# that change nothing removed.
+from 'parser' import Expr, Num, Name, Unary, Binary, Op, new_node
+from 'eval' import apply_unary, apply_binary, EvalError
+
+def *Expr _unary(Op op, *Expr operand):
+    if *operand is Num as number:
+        return new_node(Num(apply_unary(op, number.value)))
+    # --x is x.
+    if op is Negate and *operand is Unary as inner and inner.op is Negate:
+        return inner.operand
+    # `not not not x` is `not x` (`not not x` is not x: it is 0 or 1).
+    if op is Not and *operand is Unary as first and first.op is Not:
+        if *first.operand is Unary as second and second.op is Not:
+            return first.operand
+    return new_node(Unary(op, operand))
+
+def *Expr _binary(Binary node):
+    if *node.left is Num as left:
+        if *node.right is Num as right:
+            match apply_binary(node.op, left.value, right.value, node.col) as value:
+                is int:
+                    return new_node(Num(value))
+                is EvalError:
+                    return new_node(node)  # dividing by zero stays, to be reported when it runs
+        # The left side decides, and the right is never evaluated.
+        if node.op is And and left.value == 0:
+            return new_node(Num(0))
+        if node.op is Or and left.value != 0:
+            return new_node(Num(1))
+        if left.value == 0 and node.op is Add:
+            return node.right
+        if left.value == 0 and node.op is Sub:
+            return _unary(Op.Negate, node.right)
+        if left.value == 1 and node.op is Mul:
+            return node.right
+    if *node.right is Num as right:
+        if right.value == 0 and (node.op is Add or node.op is Sub):
+            return node.left
+        if right.value == 1 and (node.op is Mul or node.op is Div):
+            return node.left
+    return new_node(node)
+
+# Operands first, so that what they become can be simplified further.
+def *Expr simplify(*Expr tree):
+    match *tree as node:
+        is Num:
+            return tree
+        is Name:
+            return tree
+        is Unary:
+            return _unary(node.op, simplify(node.operand))
+        is Binary:
+            return _binary(Binary(node.op, simplify(node.left), simplify(node.right), node.col))

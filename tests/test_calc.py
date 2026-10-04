@@ -1,6 +1,7 @@
 """examples/calc, the integer calculator: its sample input on every target, and random
 expressions checked against a Python model of the same arithmetic (64-bit wraparound, division
-that truncates, `and`/`or` that stop early, errors with their columns)."""
+that truncates, `and`/`or` that stop early, errors with their columns), both when it walks the
+tree and when it simplifies it, compiles it, and runs the code. And its prompt."""
 
 import random
 import subprocess
@@ -207,10 +208,11 @@ def _value(tree) -> int:
 def test_random_expressions_agree_with_the_model(calc, tmp_path):
     rng = random.Random(20261004)
     lines = [f"{name} = {value}" if value >= 0 else f"{name} = -{-value}" for name, value in VARIABLES.items()]
-    stdout, stderr = [], []
+    stdout, stderr, trees = [], [], []
     path = tmp_path / "random.calc"
     for _ in range(400):
         tree = _random_tree(rng, depth=rng.randrange(1, 6))
+        trees.append(tree)
         parts: list = []
         _render(tree, parts, 0)
         lines.append(''.join(parts))
@@ -219,8 +221,54 @@ def test_random_expressions_agree_with_the_model(calc, tmp_path):
         except Failed as failed:
             stderr.append(f"{path}:{len(lines)}:{failed.col}: error: {failed.message}")
     path.write_text('\n'.join(lines) + '\n')
-    result = _run(calc, str(path))
     assert len(stderr) > 20 and len(stdout) > 200  # the model itself exercises both
-    assert result.stdout.split('\n')[:-1] == stdout
-    assert result.stderr.split('\n')[:-1] == stderr
-    assert result.returncode == 1
+    # Walking the tree, and simplifying it, compiling it, and running the code, give the same answers.
+    for mode in ([], ['--vm']):
+        result = _run(calc, *mode, str(path))
+        assert result.stdout.split('\n')[:-1] == stdout, mode
+        assert result.stderr.split('\n')[:-1] == stderr, mode
+        assert result.returncode == 1
+    # The parser built the trees the expressions were printed from.
+    shown = _run(calc, '--tree', str(path))
+    assert shown.stdout.split('\n')[len(VARIABLES):-1] == [_shown(tree) for tree in trees]
+
+
+def _shown(tree) -> str:
+    """The tree as `calc --tree` prints it."""
+    if tree[0] in ('num', 'name'):
+        return str(tree[1])
+    if tree[0] in ('neg', 'not'):
+        return f"({'-' if tree[0] == 'neg' else 'not'} {_shown(tree[1])})"
+    return f"({tree[1]} {_shown(tree[2])} {_shown(tree[3])})"
+
+
+def test_simplifying(calc):
+    cases = [
+        ("x = 2 * 3 + 0", "x = 6"),                     # constants are computed
+        ("x * 1 + 0 * 5", "x"),                         # ... and what changes nothing goes
+        ("0 + x - 0", "x"), ("1 * x / 1", "x"), ("0 - x", "(- x)"),
+        ("--x - (0 - x)", "(- x (- x))"),               # a double negation
+        ("not not not x", "(not x)"), ("not not x", "(not (not x))"),
+        ("0 and y", "0"), ("1 or y", "1"),              # the right side would never run
+        ("1 and y", "(and 1 y)"), ("y and 0", "(and y 0)"),  # these could still fail, or aren't y
+        ("x / (3 - 3)", "(/ x 0)"),                     # a division by zero is left to be reported
+        ("y * 0", "(* y 0)"),                           # y may be undefined: the product isn't known to be 0
+        ("2 < 3 and x > 1", "(and 1 (> x 1))"),
+    ]
+    result = _run(calc, '--simplified', stdin="".join(source + "\n" for source, _ in cases))
+    assert (result.returncode, result.stdout.split('\n')[:-1]) == (0, [expected for _, expected in cases])
+
+
+def test_the_code_for_a_statement(calc):
+    result = _run(calc, '--code', stdin="x = 2 * y\nx > 0 and 10 / -x\n1 + 2\n")
+    assert result.stdout == (
+        "0 push 2\n1 load y\n2 apply *\n3 store x\n\n"
+        "0 load x\n1 push 0\n2 apply >\n3 jump_if_false 10\n"      # zero: skip to `push 0`
+        "4 push 10\n5 load x\n6 negate\n7 apply /\n8 truth\n9 jump 11\n10 push 0\n11 print\n\n"
+        "0 push 3\n1 print\n\n")                                   # simplified first
+
+
+def test_usage(calc):
+    for arguments in (['--bogus'], ['one.calc', 'two.calc']):
+        result = _run(calc, *arguments)
+        assert (result.returncode, result.stderr) == (2, "usage: calc [--vm | --tree | --simplified | --code] [file]\n")

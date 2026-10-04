@@ -1,0 +1,75 @@
+# A statement as instructions for a stack machine (vm.ht runs them).
+from 'parser' import Expr, Num, Name, Unary, Binary, Op, Statement
+
+type Opcode enum:
+    Push  # the operand
+    Load  # the variable `name`
+    Store  # the popped value, in the variable `name`
+    Print  # the popped value
+    Apply  # `operator` to the two popped values
+    ApplyUnary  # `operator` to the popped value
+    Truth  # the popped value as 1 or 0
+    Jump  # to instruction `operand`
+    JumpIfFalse  # there, if the popped value is zero
+    JumpIfTrue
+
+type Instruction struct:
+    Opcode opcode
+    int operand
+    str name
+    Op operator
+    int col  # where an error it raises is reported
+
+type Compiler struct:
+    []Instruction _code
+
+    def int _emit(*self, Instruction instruction):
+        self._code = append(self._code, instruction)
+        return len(self._code) - 1
+
+    # Make the jump at `index` go to the next instruction emitted.
+    def _land(*self, int index):
+        self._code[index].operand = len(self._code)
+
+    def _expression(*self, *Expr tree):
+        match *tree as node:
+            is Num:
+                self._emit(Instruction(Opcode.Push, node.value, '', Op.Add, 0))
+            is Name:
+                self._emit(Instruction(Opcode.Load, 0, node.name, Op.Add, node.col))
+            is Unary:
+                self._expression(node.operand)
+                self._emit(Instruction(Opcode.ApplyUnary, 0, '', node.op, 0))
+            is Binary:
+                if node.op is And or node.op is Or:
+                    self._short_circuit(node)
+                else:
+                    self._expression(node.left)
+                    self._expression(node.right)
+                    self._emit(Instruction(Opcode.Apply, 0, '', node.op, node.col))
+
+    # `a and b`: a; if it is zero the answer is 0, and b never runs; else b's truth. `or` likewise.
+    def _short_circuit(*self, Binary node):
+        self._expression(node.left)
+        Opcode skip = Opcode.JumpIfFalse
+        int decided = 0
+        if node.op is Or:
+            skip = Opcode.JumpIfTrue
+            decided = 1
+        int to_decided = self._emit(Instruction(skip, 0, '', node.op, 0))
+        self._expression(node.right)
+        self._emit(Instruction(Opcode.Truth, 0, '', node.op, 0))
+        int to_end = self._emit(Instruction(Opcode.Jump, 0, '', node.op, 0))
+        self._land(to_decided)
+        self._emit(Instruction(Opcode.Push, decided, '', node.op, 0))
+        self._land(to_end)
+
+# The statement's value, then what is done with it: stored in its target, or printed.
+def []Instruction compile(Statement statement):
+    Compiler compiler
+    compiler._expression(statement.value)
+    if statement.target == '':
+        compiler._emit(Instruction(Opcode.Print, 0, '', Op.Add, 0))
+    else:
+        compiler._emit(Instruction(Opcode.Store, 0, statement.target, Op.Add, 0))
+    return compiler._code

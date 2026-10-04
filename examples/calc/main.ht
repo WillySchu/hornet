@@ -1,22 +1,43 @@
 # calc: an integer calculator. Each line is an expression, whose value is printed, or
 # `name = expression`, which sets a variable.
 #
-#   calc file    evaluate the file's lines
-#   calc         evaluate standard input a line at a time; at a terminal, with a prompt
+#   calc [mode] file    work through the file's lines
+#   calc [mode]         work through standard input a line at a time; at a terminal, with a prompt
 #
 #   + - * / %  == != < <= > >=  and or not  ( )    integers are 64-bit; true is 1, false is 0
+#
+# The mode says what is done with each line:
+#
+#   (none)          evaluate it, by walking its tree
+#   --vm            evaluate it, by simplifying its tree, compiling that to code for a stack
+#                   machine, and running the code
+#   --tree          print its tree
+#   --simplified    print its tree after simplifying
+#   --code          print its code
 #
 # An error is reported as `file:line:col: error: message`, and the exit status is then 1. At the
 # prompt it is shown under the line instead.
 from 'os' import get_args, is_terminal, read_file, read_line, write_stderr, write_stdout
 from 'errors' import Error, StrResult
 from 'fmt' import int_to_str
-from 'strings' import repeat, split
+from 'strings' import repeat, split, starts_with
 from 'lexer' import lex, LexError, Tokens
 from 'parser' import parse, ParseError, Statement
 from 'eval' import evaluate, EvalError
+from 'simplify' import simplify
+from 'code' import compile
+from 'vm' import run
+from 'show' import tree_text, code_text
 
 const str PROMPT = '> '
+const str USAGE = 'usage: calc [--vm | --tree | --simplified | --code] [file]\n'
+
+type Mode enum:
+    Evaluate
+    Machine
+    Tree
+    Simplified
+    Code
 
 # Report an error, as `source:line:col: error: message`; at the prompt (no source), with a caret
 # under the column of the line just entered.
@@ -27,8 +48,44 @@ def bool _report(str source, int line, int col, str message):
         write_stderr(source + ':' + int_to_str(line) + ':' + int_to_str(col) + ': error: ' + message + '\n')
     return false
 
-# Run one line; false if it has an error.
-def bool run_line(str source, int number, str line, dict[str]int variables):
+# A statement's tree as text: after `target = `, if it has one.
+def str _shown(Statement statement):
+    if statement.target == '':
+        return tree_text(statement.value) + '\n'
+    return statement.target + ' = ' + tree_text(statement.value) + '\n'
+
+# Do what the mode says with one statement; false if it has an error.
+def bool _run(Mode mode, str source, int number, Statement statement, dict[str]int variables):
+    Statement simplified = Statement(statement.target, simplify(statement.value))
+    match mode:
+        is Evaluate:
+            match evaluate(statement.value, variables) as value:
+                is EvalError:
+                    return _report(source, number, value.col, value.message)
+                is int:
+                    if statement.target == '':
+                        print(value)
+                    else:
+                        variables[statement.target] = value
+                    return true
+        is Machine:
+            match run(compile(simplified), variables) as outcome:
+                is EvalError:
+                    return _report(source, number, outcome.col, outcome.message)
+                is none:
+                    return true
+        is Tree:
+            write_stdout(_shown(statement))
+            return true
+        is Simplified:
+            write_stdout(_shown(simplified))
+            return true
+        is Code:
+            write_stdout(code_text(compile(simplified)) + '\n')
+            return true
+
+# One line; false if it has an error.
+def bool run_line(Mode mode, str source, int number, str line, dict[str]int variables):
     match lex(line) as tokens:
         is LexError:
             return _report(source, number, tokens.col, tokens.message)
@@ -39,18 +96,10 @@ def bool run_line(str source, int number, str line, dict[str]int variables):
                 is ParseError:
                     return _report(source, number, statement.col, statement.message)
                 is Statement:
-                    match evaluate(statement.value, variables) as value:
-                        is EvalError:
-                            return _report(source, number, value.col, value.message)
-                        is int:
-                            if statement.target == '':
-                                print(value)
-                            else:
-                                variables[statement.target] = value
-                            return true
+                    return _run(mode, source, number, statement, variables)
 
 # Every line of a file.
-def int run_file(str path, dict[str]int variables):
+def int run_file(Mode mode, str path, dict[str]int variables):
     StrResult text = read_file(path)
     if text is Error:
         write_stderr('calc: ' + text.message + '\n')
@@ -58,7 +107,7 @@ def int run_file(str path, dict[str]int variables):
     bool ok = true
     []str lines = split(text, '\n')
     for int i = 0; i < len(lines); i += 1:
-        if not run_line(path, i + 1, lines[i], variables):
+        if not run_line(mode, path, i + 1, lines[i], variables):
             ok = false
     if ok:
         return 0
@@ -66,7 +115,7 @@ def int run_file(str path, dict[str]int variables):
 
 # Standard input, a line at a time: each is answered before the next is read. At a terminal there is
 # a prompt, errors point at the line just entered, and they don't count against the exit status.
-def int run_input(dict[str]int variables):
+def int run_input(Mode mode, dict[str]int variables):
     bool prompting = is_terminal(0)
     str source = '<stdin>'
     if prompting:
@@ -79,7 +128,7 @@ def int run_input(dict[str]int variables):
         match read_line() as line:
             is str:
                 number += 1
-                if not run_line(source, number, line, variables) and not prompting:
+                if not run_line(mode, source, number, line, variables) and not prompting:
                     ok = false
             is Error:
                 write_stderr('calc: ' + line.message + '\n')
@@ -94,7 +143,23 @@ def int run_input(dict[str]int variables):
 
 def int main(int argc, *byte argv):
     []str args = get_args(argc, argv)
+    Mode mode = Mode.Evaluate
+    str path = ''
+    for int i = 1; i < len(args); i += 1:
+        if args[i] == '--vm':
+            mode = Mode.Machine
+        elif args[i] == '--tree':
+            mode = Mode.Tree
+        elif args[i] == '--simplified':
+            mode = Mode.Simplified
+        elif args[i] == '--code':
+            mode = Mode.Code
+        elif starts_with(args[i], '--') or path != '':
+            write_stderr(USAGE)
+            return 2
+        else:
+            path = args[i]
     dict[str]int variables
-    if len(args) > 1:
-        return run_file(args[1], variables)
-    return run_input(variables)
+    if path != '':
+        return run_file(mode, path, variables)
+    return run_input(mode, variables)

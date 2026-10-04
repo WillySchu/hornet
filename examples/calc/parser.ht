@@ -119,7 +119,7 @@ def Op _binary_op(TokenKind kind):
 
 # A node of the tree, on the heap. (`&Num(1)` alone is a pointer to a Num, which a result holding
 # a pointer to an Expr doesn't take.)
-def *Expr _new(Expr node):
+def *Expr new_node(Expr node):
     return &node
 
 type Parser struct:
@@ -146,7 +146,7 @@ type Parser struct:
             ExprResult right = self._binary(_precedence(operator.kind) + 1)
             if right is ParseError:
                 return right
-            tree = _new(Binary(_binary_op(operator.kind), tree, right, operator.col))
+            tree = new_node(Binary(_binary_op(operator.kind), tree, right, operator.col))
         return tree
 
     # A `not` (where an operand of its level may start), or an operand.
@@ -156,7 +156,7 @@ type Parser struct:
             ExprResult operand = self._binary(_NOT_LEVEL)
             if operand is ParseError:
                 return operand
-            return _new(Unary(Op.Not, operand))
+            return new_node(Unary(Op.Not, operand))
         return self._operand()
 
     # A number, a name, a parenthesized expression, or one of those negated.
@@ -164,14 +164,14 @@ type Parser struct:
         Token token = self._next()
         match token.kind as kind:
             is Number:
-                return _new(Num(token.value))
+                return new_node(Num(token.value))
             is Identifier:
-                return _new(Name(token.text, token.col))
+                return new_node(Name(token.text, token.col))
             is Minus:
                 ExprResult operand = self._operand()
                 if operand is ParseError:
                     return operand
-                return _new(Unary(Op.Negate, operand))
+                return new_node(Unary(Op.Negate, operand))
             is LeftParen:
                 ExprResult inner = self._binary(1)
                 if inner is ParseError:

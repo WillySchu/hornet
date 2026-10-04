@@ -12,19 +12,16 @@ def int _flag(bool condition):
         return 1
     return 0
 
-def EvalResult _binary(Binary node, dict[str]int variables):
-    EvalResult left = evaluate(node.left, variables)
-    if left is EvalError:
-        return left
-    # `and` and `or` leave the right side alone when the left decides.
-    if node.op is And and left == 0:
-        return 0
-    if node.op is Or and left != 0:
-        return 1
-    EvalResult right = evaluate(node.right, variables)
-    if right is EvalError:
-        return right
-    match node.op as op:
+# A unary operator applied to a value.
+def int apply_unary(Op op, int operand):
+    if op is Negate:
+        return -operand
+    return _flag(operand == 0)
+
+# A binary operator applied to two values; `col` is where an error is reported. The evaluator, the
+# simplifier, and the virtual machine all compute through here.
+def EvalResult apply_binary(Op op, int left, int right, int col):
+    match op:
         is Add:
             return left + right
         is Sub:
@@ -33,13 +30,13 @@ def EvalResult _binary(Binary node, dict[str]int variables):
             return left * right
         is Div:
             if right == 0:
-                return EvalError('division by zero', node.col)
+                return EvalError('division by zero', col)
             if right == -1:  # the one quotient that doesn't fit wraps, as negation does
                 return -left
             return left / right
         is Mod:
             if right == 0:
-                return EvalError('division by zero', node.col)
+                return EvalError('division by zero', col)
             if right == -1:
                 return 0
             return left % right
@@ -56,11 +53,25 @@ def EvalResult _binary(Binary node, dict[str]int variables):
         is GreaterEqual:
             return _flag(left >= right)
         is And:
-            return _flag(right != 0)
+            return _flag(left != 0 and right != 0)
         is Or:
-            return _flag(right != 0)
+            return _flag(left != 0 or right != 0)
         else:
             panic('not a binary operator: ' + str(op))
+
+def EvalResult _binary(Binary node, dict[str]int variables):
+    EvalResult left = evaluate(node.left, variables)
+    if left is EvalError:
+        return left
+    # `and` and `or` leave the right side alone when the left decides.
+    if node.op is And and left == 0:
+        return 0
+    if node.op is Or and left != 0:
+        return 1
+    EvalResult right = evaluate(node.right, variables)
+    if right is EvalError:
+        return right
+    return apply_binary(node.op, left, right, node.col)
 
 def EvalResult evaluate(*Expr tree, dict[str]int variables):
     match *tree as node:
@@ -74,8 +85,6 @@ def EvalResult evaluate(*Expr tree, dict[str]int variables):
             EvalResult operand = evaluate(node.operand, variables)
             if operand is EvalError:
                 return operand
-            if node.op is Negate:
-                return -operand
-            return _flag(operand == 0)
+            return apply_unary(node.op, operand)
         is Binary:
             return _binary(node, variables)
