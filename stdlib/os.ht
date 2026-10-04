@@ -14,6 +14,8 @@ def []str get_args(int argc, *byte argv):
 # File I/O, through the runtime: C's own functions differ between systems.
 extern int hornet_open_read(*byte path)
 extern int hornet_read_fd(int fd, *byte buf, int count)
+extern *byte hornet_read_line(*int length)
+extern int hornet_is_terminal(int fd)
 extern int hornet_close_fd(int fd)
 extern int hornet_write_fd(int fd, *byte buf, int n)
 extern int hornet_open_write(*byte path)
@@ -49,6 +51,23 @@ def StrResult read_file(str path):
 
 def StrResult read_stdin():
     return read_all_from_fd(0)
+
+# A line of standard input, an Error, or none at the end of the input.
+type LineResult is str | Error | none
+
+# The next line of standard input, without its line ending ("\n" or "\r\n").
+def LineResult read_line():
+    int length = 0
+    *byte bytes = hornet_read_line(&length)
+    if bytes == none:
+        if length < 0:
+            return Error('read failed: ' + _os_reason())
+        return none
+    return from_raw_parts(bytes, length)
+
+# Whether a file descriptor is a terminal: 0 is standard input, 1 standard output.
+def bool is_terminal(int fd):
+    return hornet_is_terminal(fd) != 0
 
 def IntResult _write_fd(int fd, str s):
     int n = hornet_write_fd(fd, _raw_ptr(s), _raw_len(s))

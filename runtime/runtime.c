@@ -326,8 +326,43 @@ int64_t hornet_open_read(const char *path) {
 }
 
 // read(2): up to `len` bytes; 0 at the end, -1 on error. (C's own returns an int on Windows.)
+// Standard input goes through stdio, so that this and hornet_read_line share what is buffered.
 int64_t hornet_read_fd(int64_t fd, char *ptr, int64_t len) {
+    if (fd == 0) {
+        size_t n = fread(ptr, 1, (size_t)len, stdin);
+        return n == 0 && ferror(stdin) ? -1 : (int64_t)n;
+    }
     return read((int)fd, ptr, (unsigned int)len);
+}
+
+// The next line of standard input, without its "\n" or "\r\n", in memory the caller keeps; its
+// length goes to *len. NULL at the end of the input (*len 0), or on an error (*len -1).
+char *hornet_read_line(int64_t *len) {
+    size_t cap = 128, n = 0;
+    char *line = malloc(cap);
+    int c;
+    while ((c = getc(stdin)) != EOF && c != '\n') {
+        if (n == cap) {
+            cap *= 2;
+            line = realloc(line, cap);
+        }
+        line[n++] = (char)c;
+    }
+    if (c == EOF && n == 0) {
+        free(line);
+        *len = ferror(stdin) ? -1 : 0;
+        return NULL;
+    }
+    if (n > 0 && line[n - 1] == '\r') {
+        n--;
+    }
+    *len = (int64_t)n;
+    return line;
+}
+
+// Whether `fd` is a terminal (so a person, not a file or a pipe, is at the other end).
+int64_t hornet_is_terminal(int64_t fd) {
+    return isatty((int)fd) != 0;
 }
 
 int64_t hornet_close_fd(int64_t fd) {

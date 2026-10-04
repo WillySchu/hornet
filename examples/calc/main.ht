@@ -1,21 +1,30 @@
 # calc: an integer calculator. Each line is an expression, whose value is printed, or
 # `name = expression`, which sets a variable.
 #
-#   calc [file]    read the file, or standard input
+#   calc file    evaluate the file's lines
+#   calc         evaluate standard input a line at a time; at a terminal, with a prompt
 #
 #   + - * / %  == != < <= > >=  and or not  ( )    integers are 64-bit; true is 1, false is 0
 #
-# An error is reported as `file:line:col: error: message`, and the exit status is then 1.
-from 'os' import get_args, read_file, read_stdin, write_stderr
+# An error is reported as `file:line:col: error: message`, and the exit status is then 1. At the
+# prompt it is shown under the line instead.
+from 'os' import get_args, is_terminal, read_file, read_line, write_stderr, write_stdout
 from 'errors' import Error, StrResult
 from 'fmt' import int_to_str
-from 'strings' import split
+from 'strings' import repeat, split
 from 'lexer' import lex, LexError, Tokens
 from 'parser' import parse, ParseError, Statement
 from 'eval' import evaluate, EvalError
 
+const str PROMPT = '> '
+
+# Report an error, as `source:line:col: error: message`; at the prompt (no source), with a caret
+# under the column of the line just entered.
 def bool _report(str source, int line, int col, str message):
-    write_stderr(source + ':' + int_to_str(line) + ':' + int_to_str(col) + ': error: ' + message + '\n')
+    if source == '':
+        write_stderr(repeat(' ', len(PROMPT) + col - 1) + '^ ' + message + '\n')
+    else:
+        write_stderr(source + ':' + int_to_str(line) + ':' + int_to_str(col) + ': error: ' + message + '\n')
     return false
 
 # Run one line; false if it has an error.
@@ -40,24 +49,52 @@ def bool run_line(str source, int number, str line, dict[str]int variables):
                                 variables[statement.target] = value
                             return true
 
-def int main(int argc, *byte argv):
-    []str args = get_args(argc, argv)
-    str source = '<stdin>'
-    StrResult text = ''
-    if len(args) > 1:
-        source = args[1]
-        text = read_file(source)
-    else:
-        text = read_stdin()
+# Every line of a file.
+def int run_file(str path, dict[str]int variables):
+    StrResult text = read_file(path)
     if text is Error:
         write_stderr('calc: ' + text.message + '\n')
         return 1
-    dict[str]int variables
     bool ok = true
     []str lines = split(text, '\n')
     for int i = 0; i < len(lines); i += 1:
-        if not run_line(source, i + 1, lines[i], variables):
+        if not run_line(path, i + 1, lines[i], variables):
             ok = false
     if ok:
         return 0
     return 1
+
+# Standard input, a line at a time: each is answered before the next is read. At a terminal there is
+# a prompt, errors point at the line just entered, and they don't count against the exit status.
+def int run_input(dict[str]int variables):
+    bool prompting = is_terminal(0)
+    str source = '<stdin>'
+    if prompting:
+        source = ''
+    bool ok = true
+    int number = 0
+    while true:
+        if prompting:
+            write_stdout(PROMPT)
+        match read_line() as line:
+            is str:
+                number += 1
+                if not run_line(source, number, line, variables) and not prompting:
+                    ok = false
+            is Error:
+                write_stderr('calc: ' + line.message + '\n')
+                return 1
+            is none:
+                if prompting:
+                    write_stdout('\n')  # the end of input (Ctrl-D) leaves the cursor after the prompt
+                break
+    if ok:
+        return 0
+    return 1
+
+def int main(int argc, *byte argv):
+    []str args = get_args(argc, argv)
+    dict[str]int variables
+    if len(args) > 1:
+        return run_file(args[1], variables)
+    return run_input(variables)

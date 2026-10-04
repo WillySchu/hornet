@@ -51,6 +51,69 @@ def test_standard_input_and_a_missing_file(calc):
     assert missing.returncode == 1 and missing.stderr.startswith("calc: could not open 'no-such-file.calc': ")
 
 
+def test_each_line_is_answered_before_the_next_is_read(calc):
+    """Through pipes: the answer to one line arrives while the input is still open."""
+    import threading
+    process = subprocess.Popen(calc, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        answers = []
+        for line, expected in [("x = 6 * 7\n", None), ("x + 1\n", "43\n"), ("x * 2\n", "84\n")]:
+            process.stdin.write(line)
+            process.stdin.flush()
+            if expected is not None:
+                reader = threading.Thread(target=lambda: answers.append(process.stdout.readline()))
+                reader.start()
+                reader.join(timeout=30)
+                assert not reader.is_alive() and answers[-1] == expected
+        process.stdin.close()
+        assert process.wait(timeout=30) == 0
+    finally:
+        process.kill()
+
+
+def test_at_a_terminal_there_is_a_prompt_and_errors_point_at_the_line(calc):
+    pty = pytest.importorskip("pty")
+    if len(calc) != 1:
+        pytest.skip("a terminal session is only tried natively")
+    import os
+    import select
+    import time
+    master, slave = pty.openpty()
+    process = subprocess.Popen(calc, stdin=slave, stdout=slave, stderr=slave, close_fds=True)
+    os.close(slave)
+
+    def read_until(text: bytes, timeout: float = 20) -> bytes:
+        data, end = b"", time.time() + timeout
+        while text not in data and time.time() < end:
+            if select.select([master], [], [], 0.2)[0]:
+                try:
+                    data += os.read(master, 1024)
+                except OSError:
+                    break
+        return data
+
+    try:
+        session = read_until(b"> ")
+        for line in [b"x = 6 * 7\n", b"x + 1\n", b"10 / (x - 42)\n", b"y + 1\n"]:
+            os.write(master, line)
+            session += read_until(b"\n> ")
+        os.write(master, b"\x04")  # Ctrl-D: the end of the input
+        session += read_until(b"\n", 5)
+        assert process.wait(timeout=20) == 0  # mistakes at the prompt aren't a failed run
+    finally:
+        process.kill()
+        os.close(master)
+    assert session.decode().replace("\r\n", "\n") == (
+        "> x = 6 * 7\n"
+        "> x + 1\n"
+        "43\n"
+        "> 10 / (x - 42)\n"
+        "     ^ division by zero\n"
+        "> y + 1\n"
+        "  ^ undefined variable 'y'\n"
+        "> \n")
+
+
 # ---- a model of the calculator
 
 LEVEL = {'or': 1, 'and': 2, '==': 4, '!=': 4, '<': 4, '<=': 4, '>': 4, '>=': 4, '+': 5, '-': 5, '*': 6, '/': 6, '%': 6}
