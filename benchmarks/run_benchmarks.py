@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from modules import discover_modules
 from semantic import analyze
-from build import c_compiler, executable_name, run_prefix, runtime_object
+from build import c_compiler, executable_name, link_flags, run_prefix, runtime_object
 from target import TARGET_NAMES, Target, default_target
 from ir.program_builder import build_ir_program
 from optimize.optimizer import optimize
@@ -94,7 +94,7 @@ def run_one(ht_path: Path, runs: int = TIMING_RUNS, icount: bool = False, target
         bin_path = Path(tmpdir) / executable_name('program', target)
         asm_path.write_text(asm_text)
 
-        gcc_cmd = c_compiler(target) + [str(asm_path), str(runtime_object(target)), '-o', str(bin_path)]
+        gcc_cmd = c_compiler(target) + [str(asm_path), str(runtime_object(target)), '-o', str(bin_path)] + link_flags(target)
         result = subprocess.run(gcc_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(f"gcc failed to assemble/link {ht_path.name}:\n{result.stderr}")

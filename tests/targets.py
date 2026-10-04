@@ -1,8 +1,11 @@
 """Targets whose binaries this machine can build and run, for parametrizing tests over targets."""
 
+import atexit
 import os
+import shutil
 import signal
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -22,6 +25,33 @@ def is_native(target: Target) -> bool:
 
 # How `abort()` ends a process on Windows: exit code 3, where other systems report SIGABRT.
 WINDOWS_ABORT_EXIT_CODE = 3
+
+
+def _keep_a_wine_server_running() -> None:
+    """Without a Wine server already running, each Windows program starts one, and with it Wine's
+    services, which inherit the program's output pipes and hold them open for seconds after it has
+    exited: whoever reads its output waits that long. So one server is started here, and its
+    services by a first program that has no pipes to inherit; every later program then starts and
+    finishes in milliseconds. The server stays until the tests end."""
+    prefix = next((run_prefix(t) for t in RUNNABLE_TARGETS if t.os == 'windows'), None)
+    if not prefix:  # no Windows target here, or Windows itself
+        return
+    wine = Path(shutil.which(prefix[-1]))
+    server = next((str(path) for path in (wine.with_name('wineserver64'), wine.with_name('wineserver')) if path.exists()),
+                  shutil.which('wineserver'))
+    if server is None:
+        return
+    detached = dict(env={**os.environ, 'WINEDEBUG': '-all'}, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL)
+    subprocess.run([server, '-p'], **detached)
+    try:
+        subprocess.run([str(wine), 'cmd', '/c', 'exit'], timeout=300, **detached)  # starts the services
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    atexit.register(lambda: subprocess.run([server, '-k'], **detached))
+
+
+_keep_a_wine_server_running()
 
 
 def run_binary(target: Target, argv: list, **kwargs) -> subprocess.CompletedProcess:

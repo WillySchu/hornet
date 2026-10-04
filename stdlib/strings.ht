@@ -88,3 +88,14 @@ def str repeat(str s, int n):
     for int i = 0; i < n; i += 1:
         b.write(s)
     return b.to_str()
+
+# Which of two strings comes first, byte by byte: negative if `a` does, positive if `b` does, and 0
+# if they are equal. A string comes before the longer strings it begins.
+def int compare(str a, str b):
+    int shared = len(a)
+    if len(b) < shared:
+        shared = len(b)
+    for int i = 0; i < shared; i += 1:
+        if a[i] != b[i]:
+            return int(a[i]) - int(b[i])
+    return len(a) - len(b)

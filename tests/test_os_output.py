@@ -102,4 +102,5 @@ def test_write_functions_return_bytes_written(tmp_path):
 
 def test_read_file_of_a_directory_reports_a_read_error(tmp_path):
     r = _run(f"StrResult c = read_file('{tmp_path}')\nif c is Error:\n    print(c.message)\nreturn 0")
-    assert r.stdout == f"could not read '{tmp_path}': read failed: Is a directory\n"
+    assert r.stdout in (f"could not read '{tmp_path}': read failed: Is a directory\n",
+                        f"could not open '{tmp_path}': Permission denied\n")  # (Windows won't open one)

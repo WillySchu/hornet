@@ -19,7 +19,7 @@ import pytest
 from compile import generate_asm
 from backend.errors import CodegenError
 from ir.errors import IRError
-from build import c_compiler, executable_name, runtime_object
+from build import c_compiler, executable_name, link_flags, runtime_object
 from target import default_target
 from tests.targets import E2E_TARGETS, on_every_target, run_binary
 from lexer import lex
@@ -67,7 +67,7 @@ def _compile_to_binary(source: str, tmp: Path, target=ASM_TARGET) -> tuple[Path,
     asm = generate_asm(program, target=target)
     asm_path.write_text(asm, encoding="latin-1")
 
-    gcc_cmd = c_compiler(target) + [str(asm_path), str(runtime_object(target)), "-o", str(bin_path)]
+    gcc_cmd = c_compiler(target) + [str(asm_path), str(runtime_object(target)), "-o", str(bin_path)] + link_flags(target)
 
     result = subprocess.run(gcc_cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -10274,6 +10274,8 @@ class TestInt64Storage:
             5,
         )
 
+    @pytest.mark.skipif(any(t.os == 'windows' for t in E2E_TARGETS),
+                        reason="a Windows exit code is 32 bits wide, and Wine reports one above 255 as 1")
     def test_int64_large_literal_vardecl_and_return(self):
         assert_program_exit_code(
             "def int64 main():\n    int64 x = 9000000000\n    return x\n",

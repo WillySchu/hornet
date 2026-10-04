@@ -1,0 +1,408 @@
+# JSON: text to a Value and back.
+#
+#   match parse(text) as result:
+#       is Document: write_stdout(to_text(result.root, Layout(2, false)))
+#       is ParseError: ...
+#
+# Numbers keep their text (there is no floating point to hold them in), and an object keeps its
+# members in order, repeats included.
+from 'fmt' import int_to_str
+from 'strings' import Builder, compare, repeat
+
+type Number struct:
+    str text
+
+type Member struct:
+    str key
+    Value value
+
+type Object struct:
+    []Member members
+
+type Value is none | bool | Number | str | []Value | Object
+
+type ParseError struct:
+    str message
+    int line
+    int col
+
+# A sum can't be another's variant, so a parsed Value travels in a struct.
+type Document struct:
+    Value root
+
+type ParseResult is Document | ParseError
+
+type _Parsed struct:
+    Value value
+
+type _ValueResult is _Parsed | ParseError
+
+type _TextResult is str | ParseError
+
+# How deeply arrays and objects may nest: each level is a call, and the stack is finite.
+const int MAX_DEPTH = 1000
+
+def bool _is_digit(byte c):
+    return c >= "0" and c <= "9"
+
+# The value of a hexadecimal digit, or -1.
+def int _hex_value(byte c):
+    if _is_digit(c):
+        return int(c) - 48
+    if c >= "a" and c <= "f":
+        return int(c) - 87
+    if c >= "A" and c <= "F":
+        return int(c) - 55
+    return -1
+
+# A code point's UTF-8 bytes.
+def _write_utf8(*Builder out, int point):
+    if point < 128:
+        out.write_byte(byte(point))
+    elif point < 2048:
+        out.write_byte(byte(192 | (point >> 6)))
+        out.write_byte(byte(128 | (point & 63)))
+    elif point < 65536:
+        out.write_byte(byte(224 | (point >> 12)))
+        out.write_byte(byte(128 | ((point >> 6) & 63)))
+        out.write_byte(byte(128 | (point & 63)))
+    else:
+        out.write_byte(byte(240 | (point >> 18)))
+        out.write_byte(byte(128 | ((point >> 12) & 63)))
+        out.write_byte(byte(128 | ((point >> 6) & 63)))
+        out.write_byte(byte(128 | (point & 63)))
+
+type _Parser struct:
+    str _src
+    int _pos
+
+    # An error at the current position, as a line and a column.
+    def ParseError _error(self, str message):
+        int line = 1
+        int col = 1
+        for int i = 0; i < self._pos and i < len(self._src); i += 1:
+            if self._src[i] == "\n":
+                line += 1
+                col = 1
+            else:
+                col += 1
+        return ParseError(message, line, col)
+
+    def bool _at_end(self):
+        return self._pos >= len(self._src)
+
+    def _skip_space(*self):
+        while not self._at_end():
+            byte c = self._src[self._pos]
+            if c != " " and c != "\t" and c != "\n" and c != "\r":
+                return
+            self._pos += 1
+
+    # Whether `word` is next; if so it is consumed.
+    def bool _take(*self, str word):
+        int end = self._pos + len(word)
+        if end > len(self._src) or self._src[self._pos:end] != word:
+            return false
+        self._pos = end
+        return true
+
+    def _ValueResult _value(*self, int depth):
+        self._skip_space()
+        if self._at_end():
+            return self._error('unexpected end of input')
+        byte c = self._src[self._pos]
+        if c == "{":
+            return self._object(depth)
+        if c == "[":
+            return self._array(depth)
+        if c == "\"":
+            _TextResult text = self._string()
+            if text is ParseError:
+                return text
+            return _Parsed(text)
+        if c == "-" or _is_digit(c):
+            return self._number()
+        if self._take('true'):
+            return _Parsed(true)
+        if self._take('false'):
+            return _Parsed(false)
+        if self._take('null'):
+            return _Parsed(none)
+        return self._error('unexpected character')
+
+    def _ValueResult _array(*self, int depth):
+        if depth >= MAX_DEPTH:
+            return self._error('nested too deeply')
+        self._pos += 1
+        []Value items
+        self._skip_space()
+        if self._take(']'):
+            return _Parsed(items)
+        while true:
+            _ValueResult item = self._value(depth + 1)
+            if item is ParseError:
+                return item
+            items = append(items, item.value)
+            self._skip_space()
+            if self._take(']'):
+                return _Parsed(items)
+            if not self._take(','):
+                return self._error('expected \',\' or \']\'')
+
+    def _ValueResult _object(*self, int depth):
+        if depth >= MAX_DEPTH:
+            return self._error('nested too deeply')
+        self._pos += 1
+        []Member members
+        self._skip_space()
+        if self._take('}'):
+            return _Parsed(Object(members))
+        while true:
+            self._skip_space()
+            if self._at_end() or self._src[self._pos] != "\"":
+                return self._error('expected a string for a member\'s name')
+            _TextResult key = self._string()
+            if key is ParseError:
+                return key
+            self._skip_space()
+            if not self._take(':'):
+                return self._error('expected \':\'')
+            _ValueResult value = self._value(depth + 1)
+            if value is ParseError:
+                return value
+            members = append(members, Member(key, value.value))
+            self._skip_space()
+            if self._take('}'):
+                return _Parsed(Object(members))
+            if not self._take(','):
+                return self._error('expected \',\' or \'}\'')
+
+    # -?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?
+    def _ValueResult _number(*self):
+        int start = self._pos
+        self._take('-')
+        if self._take('0'):
+            if not self._at_end() and _is_digit(self._src[self._pos]):
+                return self._error('a number can\'t start with 0')
+        elif not self._digits():
+            return self._error('expected a digit')
+        if self._take('.') and not self._digits():
+            return self._error('expected a digit after \'.\'')
+        if self._take('e') or self._take('E'):
+            if not self._take('+'):
+                self._take('-')
+            if not self._digits():
+                return self._error('expected a digit in the exponent')
+        return _Parsed(Number(self._src[start:self._pos]))
+
+    # Whether at least one digit is next; they are consumed.
+    def bool _digits(*self):
+        int start = self._pos
+        while not self._at_end() and _is_digit(self._src[self._pos]):
+            self._pos += 1
+        return self._pos > start
+
+    # Four hexadecimal digits' value, or -1; they are consumed.
+    def int _four_hex(*self):
+        if self._pos + 4 > len(self._src):
+            return -1
+        int value = 0
+        for int i = 0; i < 4; i += 1:
+            int digit = _hex_value(self._src[self._pos + i])
+            if digit < 0:
+                return -1
+            value = value * 16 + digit
+        self._pos += 4
+        return value
+
+    # A string's contents, its escapes replaced. One without escapes is a slice of the source.
+    def _TextResult _string(*self):
+        self._pos += 1
+        int start = self._pos
+        Builder decoded
+        bool escaped = false
+        while true:
+            if self._at_end():
+                return self._error('unterminated string')
+            byte c = self._src[self._pos]
+            if c == "\"":
+                self._pos += 1
+                if escaped:
+                    return decoded.to_str()
+                return self._src[start:self._pos - 1]
+            if c < " ":
+                return self._error('a control character in a string must be escaped')
+            if c != "\\":
+                if escaped:
+                    decoded.write_byte(c)
+                self._pos += 1
+            else:
+                if not escaped:  # what came before the first escape
+                    decoded.write(self._src[start:self._pos])
+                    escaped = true
+                self._pos += 1
+                if self._at_end():
+                    return self._error('unterminated string')
+                byte e = self._src[self._pos]
+                self._pos += 1
+                if e == "\"" or e == "\\" or e == "/":
+                    decoded.write_byte(e)
+                elif e == "b":
+                    decoded.write_byte(byte(8))
+                elif e == "f":
+                    decoded.write_byte(byte(12))
+                elif e == "n":
+                    decoded.write_byte("\n")
+                elif e == "r":
+                    decoded.write_byte("\r")
+                elif e == "t":
+                    decoded.write_byte("\t")
+                elif e == "u":
+                    int point = self._four_hex()
+                    if point < 0:
+                        return self._error('expected four hexadecimal digits after \\u')
+                    # Two escapes can spell one character beyond U+FFFF, as a surrogate pair.
+                    if point >= 55296 and point < 56320 and self._take('\\u'):
+                        int low = self._four_hex()
+                        if low < 0:
+                            return self._error('expected four hexadecimal digits after \\u')
+                        if low >= 56320 and low < 57344:
+                            point = 65536 + ((point - 55296) << 10) + (low - 56320)
+                        else:  # not a pair after all: the first half alone has no character
+                            _write_utf8(&decoded, 65533)
+                            point = low
+                    if point >= 55296 and point < 57344:
+                        point = 65533  # half a pair: the replacement character
+                    _write_utf8(&decoded, point)
+                else:
+                    self._pos -= 1
+                    return self._error('unknown escape')
+
+def ParseResult parse(str text):
+    _Parser parser = _Parser(text, 0)
+    _ValueResult root = parser._value(0)
+    if root is ParseError:
+        return root
+    parser._skip_space()
+    if not parser._at_end():
+        return parser._error('unexpected text after the value')
+    return Document(root.value)
+
+# How to_text lays a value out: `indent` spaces a level, or everything on one line.
+type Layout struct:
+    int indent
+    bool compact
+
+def _write_string(*Builder out, str text):
+    out.write_byte("\"")
+    for int i = 0; i < len(text); i += 1:
+        byte c = text[i]
+        if c == "\"":
+            out.write('\\"')
+        elif c == "\\":
+            out.write('\\\\')
+        elif c == "\n":
+            out.write('\\n')
+        elif c == "\r":
+            out.write('\\r')
+        elif c == "\t":
+            out.write('\\t')
+        elif c == byte(8):
+            out.write('\\b')
+        elif c == byte(12):
+            out.write('\\f')
+        elif c < " ":
+            out.write('\\u00')
+            out.write_byte('0123456789abcdef'[int(c) >> 4])
+            out.write_byte('0123456789abcdef'[int(c) & 15])
+        else:
+            out.write_byte(c)
+    out.write_byte("\"")
+
+# What goes between two items, and before the first: a line break and the level's indentation.
+def _break(*Builder out, Layout layout, int level):
+    if not layout.compact:
+        out.write_byte("\n")
+        out.write(repeat(' ', layout.indent * level))
+
+def _write(*Builder out, Value value, Layout layout, int level):
+    match value as v:
+        is none:
+            out.write('null')
+        is bool:
+            if v:
+                out.write('true')
+            else:
+                out.write('false')
+        is Number:
+            out.write(v.text)
+        is str:
+            _write_string(out, v)
+        is []Value:
+            if len(v) == 0:
+                out.write('[]')
+                return
+            out.write_byte("[")
+            for int i = 0; i < len(v); i += 1:
+                if i > 0:
+                    out.write_byte(",")
+                _break(out, layout, level + 1)
+                _write(out, v[i], layout, level + 1)
+            _break(out, layout, level)
+            out.write_byte("]")
+        is Object:
+            if len(v.members) == 0:
+                out.write('{}')
+                return
+            out.write_byte("{")
+            for int i = 0; i < len(v.members); i += 1:
+                if i > 0:
+                    out.write_byte(",")
+                _break(out, layout, level + 1)
+                _write_string(out, v.members[i].key)
+                out.write_byte(":")
+                if not layout.compact:
+                    out.write_byte(" ")
+                _write(out, v.members[i].value, layout, level + 1)
+            _break(out, layout, level)
+            out.write_byte("}")
+
+def str to_text(Value value, Layout layout):
+    Builder out
+    _write(&out, value, layout, 0)
+    return out.to_str()
+
+# Members by key, by merging sorted halves: equal keys keep their order.
+def []Member _sorted_members([]Member members):
+    if len(members) < 2:
+        return members
+    int half = len(members) / 2
+    []Member left = _sorted_members(members[:half])
+    []Member right = _sorted_members(members[half:])
+    []Member merged
+    int i = 0
+    int j = 0
+    while i < len(left) or j < len(right):
+        if j == len(right) or (i < len(left) and compare(left[i].key, right[j].key) <= 0):
+            merged = append(merged, left[i])
+            i += 1
+        else:
+            merged = append(merged, right[j])
+            j += 1
+    return merged
+
+# The value with every object's members in the order of their keys (by their bytes).
+def Value sort_keys(Value value):
+    match value as v:
+        is []Value:
+            []Value items
+            for int i = 0; i < len(v); i += 1:
+                items = append(items, sort_keys(v[i]))
+            return items
+        is Object:
+            []Member members
+            for int i = 0; i < len(v.members); i += 1:
+                members = append(members, Member(v.members[i].key, sort_keys(v.members[i].value)))
+            return Object(_sorted_members(members))
+        else:
+            return value

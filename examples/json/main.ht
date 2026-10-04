@@ -1,0 +1,64 @@
+# jsonfmt: read JSON, and write it laid out.
+#
+#   jsonfmt [options] [file]    the file, or standard input
+#
+#   --compact      on one line, without spaces
+#   --indent N     N spaces a level (2 if not given)
+#   --sort-keys    each object's members in the order of their keys
+#
+# An error is reported as `file:line:col: error: message`, and the exit status is then 1.
+from 'os' import get_args, read_file, read_stdin, write_stderr, write_stdout
+from 'errors' import Error, StrResult
+from 'fmt' import int_to_str, parse_int
+from 'strings' import starts_with
+from 'json' import parse, to_text, sort_keys, Document, ParseError, Layout, Value
+
+const str USAGE = 'usage: jsonfmt [--compact] [--indent N] [--sort-keys] [file]\n'
+
+def int usage():
+    write_stderr(USAGE)
+    return 2
+
+def int main(int argc, *byte argv):
+    []str args = get_args(argc, argv)
+    Layout layout = Layout(2, false)
+    bool sorting = false
+    str path = ''
+    for int i = 1; i < len(args); i += 1:
+        if args[i] == '--compact':
+            layout.compact = true
+        elif args[i] == '--sort-keys':
+            sorting = true
+        elif args[i] == '--indent' and i + 1 < len(args):
+            i += 1
+            match parse_int(args[i]) as width:
+                is int:
+                    if width < 0:
+                        return usage()
+                    layout.indent = width
+                is Error:
+                    return usage()
+        elif starts_with(args[i], '--') or path != '':
+            return usage()
+        else:
+            path = args[i]
+    str source = '<stdin>'
+    StrResult text = ''
+    if path == '':
+        text = read_stdin()
+    else:
+        source = path
+        text = read_file(path)
+    if text is Error:
+        write_stderr('jsonfmt: ' + text.message + '\n')
+        return 1
+    match parse(text) as result:
+        is ParseError:
+            write_stderr(source + ':' + int_to_str(result.line) + ':' + int_to_str(result.col) + ': error: ' + result.message + '\n')
+            return 1
+        is Document:
+            Value root = result.root
+            if sorting:
+                root = sort_keys(root)
+            write_stdout(to_text(root, layout) + '\n')
+            return 0

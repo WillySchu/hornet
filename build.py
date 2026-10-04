@@ -30,6 +30,17 @@ def c_compiler(target: Target) -> list[str]:
     return [f"{target.arch}-linux-gnu-gcc"]  # Debian/Ubuntu cross toolchain naming
 
 
+# The main thread's stack on Windows is fixed when a program is linked, at 1 MB unless asked
+# otherwise; elsewhere it is the system's to give, and usually 8 MB. Hornet programs get that much
+# everywhere, so a recursion that fits on one system fits on the others.
+WINDOWS_STACK_BYTES = 8 * 1024 * 1024
+
+
+def link_flags(target: Target) -> list[str]:
+    """What the C compiler is told when linking a `target` program, besides its inputs and output."""
+    return [f"-Wl,--stack,{WINDOWS_STACK_BYTES}"] if target.os == 'windows' else []
+
+
 def executable_name(name: str, target: Target) -> str:
     """`name` as the file a linker writes for `target`: MinGW's adds `.exe` to a name without one."""
     return f"{name}.exe" if target.os == 'windows' and not name.endswith('.exe') else name
@@ -121,7 +132,7 @@ def build_executable(source_path: str, output_path: str, target=None) -> None:
 
         # The output is written exactly where asked, whatever name the linker would choose.
         linked = os.path.join(tmpdir, executable_name("program", target))
-        _run(cc + [asm_path, str(runtime_object(target)), "-o", linked], "linking")
+        _run(cc + [asm_path, str(runtime_object(target)), "-o", linked] + link_flags(target), "linking")
         shutil.move(linked, output_path)
 
 
