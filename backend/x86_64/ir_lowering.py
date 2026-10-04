@@ -86,7 +86,7 @@ from ir.panics import located
 from backend.common.frame import Frame
 from backend.x86_64.peephole import INVERSE_CC
 from backend.common.division import is_power_of_two, magic
-from backend.x86_64.utils import as_byte_register, as_qword_register, ARG_REGISTERS_32, ARG_REGISTERS_64, COMPARISON_CONDITION_CODES
+from backend.x86_64.utils import as_byte_register, as_qword_register, COMPARISON_CONDITION_CODES
 from typesys import Type
 from ops import BinaryOp, UnaryOp
 
@@ -449,18 +449,19 @@ class InstructionSelector:
         return Cmp(src=Register('ecx'), dst=Register('eax'))
 
     def lower_params(self, params: list, body: list) -> list[Instruction]:
-        """Move each incoming argument word (SysV: 6 registers, then the caller's stack) into its Temp.
-        Words the body never reads are skipped."""
+        """Move each incoming argument word (the ABI's argument registers, then the caller's stack)
+        into its Temp. Words the body never reads are skipped."""
         read = uses(body)
+        abi = self.host.abi
         to_memory, register_moves, from_stack = [], [], []
         for index, temp in enumerate(params):
             if temp.id not in read:
                 continue
             home = self._loc(temp, 8)
-            if index >= 6:
+            if index >= len(abi.arg_registers_64):
                 from_stack.append((temp, index))
             elif isinstance(home, Register):
-                register_moves.append((ARG_REGISTERS_64[index], home.name))
+                register_moves.append((abi.arg_registers_64[index], home.name))
             else:
                 to_memory.append((temp, index))
         # Argument registers can be homes too: read them into memory first, then move among registers
@@ -493,15 +494,19 @@ class InstructionSelector:
         return out
 
     def _read_argument(self, dst: Temp, index: int) -> list:
+        abi = self.host.abi
+        in_registers = len(abi.arg_registers_64)
+        # Above the saved %rbp and the return address: the shadow space, then the stack arguments.
+        on_stack = Memory('rbp', 16 + abi.shadow_space + 8 * (index - in_registers))
         width = self._width(dst.type)
         if width is not None:
             d = self._loc(dst, width)
-            if index < 6:
-                return self._mov(Register((ARG_REGISTERS_64 if width == 8 else ARG_REGISTERS_32)[index]), d, width)
+            if index < in_registers:
+                return self._mov(Register((abi.arg_registers_64 if width == 8 else abi.arg_registers_32)[index]), d, width)
             if isinstance(d, Register):
-                return self._mov(Memory('rbp', 16 + 8 * (index - 6)), d, width)
+                return self._mov(on_stack, d, width)
         wide = is_wide_type(dst.type)
-        src = Register((ARG_REGISTERS_64 if wide else ARG_REGISTERS_32)[index]) if index < 6 else Memory('rbp', 16 + 8 * (index - 6))
+        src = Register((abi.arg_registers_64 if wide else abi.arg_registers_32)[index]) if index < in_registers else on_stack
         return [MovQ(src=src, dst=Register('rax')) if wide else Mov(src=src, dst=Register('eax'))] + \
             self._gen_write_temp_from(Register('eax'), dst)
 
@@ -553,24 +558,26 @@ class InstructionSelector:
                 # Stack arguments first, while every source is intact; then the argument registers,
                 # which may also hold arguments' values: register sources as one parallel move, and
                 # the rest (slots, constants) afterwards.
+                abi = self.host.abi
+                in_registers = len(abi.arg_registers_64)
                 register_moves, others = [], []
-                for i, arg_value in enumerate(instr.args[:6]):
+                for i, arg_value in enumerate(instr.args[:in_registers]):
                     loc = self._loc(arg_value, 8)
                     if isinstance(loc, Register):
-                        register_moves.append((loc.name, ARG_REGISTERS_64[i]))
+                        register_moves.append((loc.name, abi.arg_registers_64[i]))
                     else:
                         others.append((i, arg_value))
                 for i, arg_value in enumerate(instr.args):
-                    if i < 6:
+                    if i < in_registers:
                         continue
                     wide = is_wide_type(arg_value.type)
                     scratch = as_qword_register(Register('eax')) if wide else Register('eax')
                     out.extend(self._gen_load_value(arg_value, Register('eax')))
-                    dst = FrameSlot(self.host.frame.outgoing, 8 * (i - 6))
+                    dst = FrameSlot(self.host.frame.outgoing, abi.shadow_space + 8 * (i - in_registers))
                     out.append(MovQ(src=scratch, dst=dst) if wide else Mov(src=scratch, dst=dst))
                 out.extend(self._parallel_moves(register_moves))
                 for i, arg_value in others:
-                    out.extend(self._gen_load_value(arg_value, Register(ARG_REGISTERS_32[i])))
+                    out.extend(self._gen_load_value(arg_value, Register(abi.arg_registers_32[i])))
                 out.append(CallInstr(instr.name))
                 if instr.dst is not None:
                     out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))

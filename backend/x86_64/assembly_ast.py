@@ -520,6 +520,15 @@ class SubQ(Instruction):
 
 
 @dataclass
+class Directive(Instruction):
+    """An assembler directive among a function's instructions (its unwind information)."""
+    text: str
+
+    def emit(self) -> str:
+        return self.text
+
+
+@dataclass
 class Leave(Instruction):
     """`leave`: movq %rbp, %rsp; popq %rbp."""
     mnemonic = "leave"

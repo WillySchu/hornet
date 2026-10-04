@@ -1,6 +1,7 @@
 """Targets whose binaries this machine can build and run, for parametrizing tests over targets."""
 
 import os
+import signal
 import subprocess
 
 import pytest
@@ -19,14 +20,22 @@ def is_native(target: Target) -> bool:
     return run_prefix(target) == []
 
 
+# How `abort()` ends a process on Windows: exit code 3, where other systems report SIGABRT.
+WINDOWS_ABORT_EXIT_CODE = 3
+
+
 def run_binary(target: Target, argv: list, **kwargs) -> subprocess.CompletedProcess:
-    """Run a binary built for `target`, under qemu-user if it's a foreign architecture (without
-    qemu's own report of a fatal signal in stderr, so output compares equal across targets)."""
+    """Run a binary built for `target`: under qemu-user if it's a foreign architecture, under Wine
+    if it's for Windows. The result compares equal across targets: qemu's own report of a fatal
+    signal is dropped from stderr, and a Windows panic is reported as the SIGABRT it is elsewhere."""
     prefix = run_prefix(target)
     result = subprocess.run(prefix + [str(a) for a in argv], **kwargs)
     if prefix and isinstance(result.stderr, str):
         result.stderr = ''.join(line for line in result.stderr.splitlines(keepends=True)
                                 if not line.startswith('qemu: uncaught target signal'))
+    if target.os == 'windows' and result.returncode == WINDOWS_ABORT_EXIT_CODE \
+            and b'panic: ' in (result.stderr.encode('latin-1') if isinstance(result.stderr, str) else result.stderr or b''):
+        result.returncode = -signal.SIGABRT
     return result
 
 
@@ -37,7 +46,8 @@ TIER = os.environ.get('HORNET_TEST_TIER', 'full')
 def _e2e_targets() -> list:
     if os.environ.get('HORNET_E2E_TARGETS'):
         return [Target.parse(n) for n in os.environ['HORNET_E2E_TARGETS'].split(',')]
-    targets = [t for t in RUNNABLE_TARGETS if t.arch in IMPLEMENTED_ARCHES]
+    # Another system's binaries (Windows under Wine) take much longer to start: only on request.
+    targets = [t for t in RUNNABLE_TARGETS if t.arch in IMPLEMENTED_ARCHES and t.os == default_target().os]
     if TIER == 'full':
         return targets
     native = default_target()
@@ -45,8 +55,9 @@ def _e2e_targets() -> list:
 
 
 # Targets every end-to-end program is built and run for: this machine's own target, or with
-# --full every runnable target with a complete backend. HORNET_E2E_TARGETS (comma-separated
-# arch-os names) overrides this, e.g. to test a backend that is still in progress.
+# --full every runnable target of this machine's system with a complete backend.
+# HORNET_E2E_TARGETS (comma-separated arch-os names) overrides this, e.g. to test a backend that is
+# still in progress, or `x86_64-windows` under Wine.
 E2E_TARGETS = _e2e_targets()
 
 # Parametrize a test over E2E_TARGETS as `target`.

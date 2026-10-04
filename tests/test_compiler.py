@@ -19,7 +19,7 @@ import pytest
 from compile import generate_asm
 from backend.errors import CodegenError
 from ir.errors import IRError
-from build import c_compiler, runtime_object
+from build import c_compiler, executable_name, runtime_object
 from target import default_target
 from tests.targets import E2E_TARGETS, on_every_target, run_binary
 from lexer import lex
@@ -62,7 +62,7 @@ def _compile_to_binary(source: str, tmp: Path, target=ASM_TARGET) -> tuple[Path,
     program = analyze(_parse(source))
 
     asm_path = tmp / "program.s"
-    bin_path = tmp / "program"
+    bin_path = tmp / executable_name("program", target)
 
     asm = generate_asm(program, target=target)
     asm_path.write_text(asm, encoding="latin-1")

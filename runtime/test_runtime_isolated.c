@@ -3,6 +3,10 @@
 // reach its static functions.
 #include "runtime.c"
 
+#ifdef _WIN32
+#define pipe(fds) _pipe(fds, 65536, _O_BINARY)  // what MinGW has for POSIX's pipe(2)
+#endif
+
 #include <assert.h>
 #include <fcntl.h>
 #include <stdio.h>

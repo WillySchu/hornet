@@ -4,7 +4,7 @@
 #   hfmt file ...          format files in place (written only if they change)
 #   hfmt --check file ...  list files that would change; exit 1 if any
 #   hfmt --tokens [file]   dump the token stream
-# Flags may appear anywhere among the arguments.
+# Flags may appear anywhere among the arguments. A file keeps its line endings ("\n" or "\r\n").
 from 'os' import get_args, read_file, read_stdin, write_file, write_stdout, write_stderr, exit
 from 'errors' import Error, StrResult, IntResult
 from 'fmt' import int_to_str
@@ -31,8 +31,26 @@ def FormatResult format_source(str path, str src):
                 is LayoutError:
                     return FormatError(_located(path, f.line, f.col, f.message))
                 is str:
+                    if _uses_crlf(src):
+                        return _with_crlf(f)
                     return f
     return ''
+
+# Whether the source's lines end in "\r\n" (going by its first): the lexer skips the "\r", and the
+# formatted text gets it back, so a file keeps the line endings it came with.
+def bool _uses_crlf(str src):
+    for int i = 1; i < len(src); i += 1:
+        if src[i] == "\n":
+            return src[i - 1] == "\r"
+    return false
+
+def str _with_crlf(str text):
+    Builder b
+    for int i = 0; i < len(text); i += 1:
+        if text[i] == "\n":
+            b.write_byte("\r")
+        b.write_byte(text[i])
+    return b.to_str()
 
 # One line per token: KIND line col text (NEWLINE shows its bracket depth instead).
 def str dump_tokens(str path, str src):

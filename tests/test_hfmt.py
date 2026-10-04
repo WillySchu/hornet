@@ -353,3 +353,17 @@ def test_star_spacing_follows_the_compilers_reading(hfmt, tmp_path):
     (tmp_path / 'a.ht').write_text(source)
     (tmp_path / 'b.ht').write_text(formatted)
     assert _meaning(tmp_path / 'a.ht') == _meaning(tmp_path / 'b.ht')
+
+
+def test_a_file_keeps_its_line_endings(hfmt, tmp_path):
+    """The lexer skips the "\\r" of a "\\r\\n"; a source that uses them gets them back."""
+    source = b"def int main():\n    int x=1   # note\n    return x\n"
+    formatted = b"def int main():\n    int x = 1  # note\n    return x\n"
+    crlf, lf = tmp_path / "crlf.ht", tmp_path / "lf.ht"
+    crlf.write_bytes(source.replace(b"\n", b"\r\n"))
+    lf.write_bytes(source)
+    assert subprocess.run([*hfmt, str(crlf), str(lf)], capture_output=True, timeout=20).returncode == 0
+    assert crlf.read_bytes() == formatted.replace(b"\n", b"\r\n") and lf.read_bytes() == formatted
+    assert subprocess.run([*hfmt, '--check', str(crlf), str(lf)], capture_output=True, timeout=20).returncode == 0
+    piped = subprocess.run(hfmt, input=source.replace(b"\n", b"\r\n"), capture_output=True, timeout=20)
+    assert piped.stdout == formatted.replace(b"\n", b"\r\n")

@@ -5,8 +5,9 @@ import sys
 from dataclasses import dataclass
 
 ARCHES = ('x86_64', 'aarch64')
-OSES = ('linux', 'macos')
-TARGET_NAMES = tuple(f"{a}-{o}" for a in ARCHES for o in OSES)
+OSES = ('linux', 'macos', 'windows')
+# Windows is x86-64 only (built with MinGW-w64).
+TARGET_NAMES = tuple(f"{a}-{o}" for a in ARCHES for o in OSES if (a, o) != ('aarch64', 'windows'))
 
 # Architectures with a complete backend: the default target and end-to-end tests use these.
 IMPLEMENTED_ARCHES = ('x86_64', 'aarch64')
@@ -25,7 +26,7 @@ class Target:
     @staticmethod
     def parse(text: str) -> 'Target':
         arch, _, os_name = text.partition('-')
-        if arch not in ARCHES or os_name not in OSES:
+        if text not in TARGET_NAMES:
             raise ValueError(f"unknown target '{text}' (expected one of: {', '.join(TARGET_NAMES)})")
         return Target(arch, os_name)
 
@@ -33,7 +34,7 @@ class Target:
 def host_target() -> Target:
     machine = platform.machine().lower()
     arch = 'aarch64' if machine in ('arm64', 'aarch64') else 'x86_64'
-    return Target(arch, 'macos' if sys.platform == 'darwin' else 'linux')
+    return Target(arch, {'darwin': 'macos', 'win32': 'windows'}.get(sys.platform, 'linux'))
 
 
 def default_target() -> Target:

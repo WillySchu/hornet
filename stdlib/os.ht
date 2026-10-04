@@ -11,10 +11,10 @@ def []str get_args(int argc, *byte argv):
         args = append(args, from_cstring(hornet_argv_get(argv, i)))
     return args
 
-# File I/O.
-extern int32 open(*byte path, int32 flags)
-extern int read(int32 fd, *byte buf, int count)
-extern int32 close(int32 fd)
+# File I/O, through the runtime: C's own functions differ between systems.
+extern int hornet_open_read(*byte path)
+extern int hornet_read_fd(int fd, *byte buf, int count)
+extern int hornet_close_fd(int fd)
 extern int hornet_write_fd(int fd, *byte buf, int n)
 extern int hornet_open_write(*byte path)
 extern never hornet_exit(int code)
@@ -26,23 +26,23 @@ def str _os_reason():
     return from_cstring(hornet_error_message())
 
 # Read fd to EOF.
-def StrResult read_all_from_fd(int32 fd):
+def StrResult read_all_from_fd(int fd):
     Builder b
     *byte chunk = calloc(65536, 1)
-    int n = read(fd, chunk, 65536)
+    int n = hornet_read_fd(fd, chunk, 65536)
     while n != 0:
         if n < 0:
             return Error('read failed: ' + _os_reason())
         b.write(from_raw_parts(chunk, n))
-        n = read(fd, chunk, 65536)
+        n = hornet_read_fd(fd, chunk, 65536)
     return b.to_str()
 
 def StrResult read_file(str path):
-    int32 fd = open(to_cstring(path), 0)
+    int fd = hornet_open_read(to_cstring(path))
     if fd < 0:
         return Error('could not open \'' + path + '\': ' + _os_reason())
     StrResult contents = read_all_from_fd(fd)
-    close(fd)
+    hornet_close_fd(fd)
     if contents is Error:
         return Error('could not read \'' + path + '\': ' + contents.message)
     return contents
@@ -69,7 +69,7 @@ def IntResult write_file(str path, str content):
     if fd < 0:
         return Error('could not open \'' + path + '\' for writing: ' + _os_reason())
     IntResult written = _write_fd(fd, content)
-    close(int32(fd))
+    hornet_close_fd(fd)
     if written is Error:
         return Error('could not write \'' + path + '\': ' + written.message)
     return written

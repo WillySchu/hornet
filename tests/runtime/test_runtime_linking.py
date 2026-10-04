@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from build import c_compiler
+from build import c_compiler, executable_name
 from tests.targets import each_runnable_target, run_binary
 
 RUNTIME_DIR = Path(__file__).resolve().parent.parent.parent / "runtime"
@@ -33,7 +33,7 @@ def test_runtime_and_caller_link_and_run_correctly(target):
     with tempfile.TemporaryDirectory() as tmpdir:
         runtime_o = f"{tmpdir}/runtime.o"
         caller_o = f"{tmpdir}/caller.o"
-        binary = f"{tmpdir}/test_bin"
+        binary = f"{tmpdir}/{executable_name('test_bin', target)}"
 
         subprocess.run(
             [*CC, "-c", "-Wall", "-Wextra", "-std=c11", str(RUNTIME_C), "-o", runtime_o],
@@ -77,7 +77,8 @@ def test_hornet_runtime_entry_points_are_the_only_external_symbols(target):
             "hornet_dict_insert_scalar_key", "hornet_dict_insert_str_key",
             "hornet_dict_lookup_scalar_key", "hornet_dict_lookup_str_key",
             "hornet_dict_set_scalar_key", "hornet_dict_set_str_key",
-            "hornet_error_message", "hornet_exit", "hornet_hash_bytes", "hornet_open_write", "hornet_panic", "hornet_panic_at", "hornet_print",
+            "hornet_close_fd", "hornet_error_message", "hornet_exit", "hornet_hash_bytes", "hornet_open_read", "hornet_open_write",
+            "hornet_panic", "hornet_panic_at", "hornet_print", "hornet_read_fd",
             "hornet_slice_grow", "hornet_write_fd",
         ]
         expected_names = [f"_{n}" for n in names] if target.os == 'macos' else names

@@ -77,7 +77,7 @@ class ArraysSlicesLoweringMixin:
             msg_label = self._get_bounds_check_message_label(message)
             instructions.extend([
                 Label(fail_label),
-                LeaQ(label=msg_label, dst=Register('rdi')),
+                LeaQ(label=msg_label, dst=Register(self.abi.arg_registers_64[0])),
                 CallInstr('hornet_panic'),
             ])
         return instructions

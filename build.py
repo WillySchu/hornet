@@ -23,16 +23,27 @@ def c_compiler(target: Target) -> list[str]:
     if target.os == 'macos':
         # Apple's gcc picks the architecture with -arch.
         return ["gcc", "-arch", "arm64" if target.arch == "aarch64" else "x86_64"]
+    if target.os == 'windows':  # MinGW-w64: itself on Windows, its cross compiler elsewhere
+        return ["gcc"] if host_target().os == 'windows' else [f"{target.arch}-w64-mingw32-gcc"]
     if target.arch == host_target().arch:
         return ["gcc"]
     return [f"{target.arch}-linux-gnu-gcc"]  # Debian/Ubuntu cross toolchain naming
 
 
+def executable_name(name: str, target: Target) -> str:
+    """`name` as the file a linker writes for `target`: MinGW's adds `.exe` to a name without one."""
+    return f"{name}.exe" if target.os == 'windows' and not name.endswith('.exe') else name
+
+
 def run_prefix(target: Target) -> Optional[list[str]]:
     """Command prefix for running a `target` binary on this machine ([] if it runs directly), or
     None if it can't run here. Foreign Linux architectures run under qemu-user; x86-64 macOS
-    binaries run under Rosetta 2 on Apple Silicon."""
+    binaries run under Rosetta 2 on Apple Silicon; Windows binaries run under Wine."""
     host = host_target()
+    if target.os == 'windows' and host.os != 'windows':
+        wine = next((w for w in ("wine64", "wine", "/usr/lib/wine/wine64") if shutil.which(w)), None)
+        # WINEDEBUG=-all: without Wine's own diagnostics, which would mix into the program's stderr.
+        return ["env", "WINEDEBUG=-all", wine] if wine and target.arch == host.arch else None
     if target.os != host.os:
         return None
     if target.arch == host.arch or (target.os == 'macos' and target.arch == 'x86_64'):
@@ -44,7 +55,8 @@ def run_prefix(target: Target) -> Optional[list[str]]:
 
 def can_build(target: Target) -> bool:
     """Whether this machine has a C toolchain that produces `target` binaries."""
-    return target.os == host_target().os and shutil.which(c_compiler(target)[0]) is not None
+    native_or_mingw = target.os in (host_target().os, 'windows')
+    return native_or_mingw and shutil.which(c_compiler(target)[0]) is not None
 
 
 def can_run(target: Target) -> bool:
@@ -107,7 +119,10 @@ def build_executable(source_path: str, output_path: str, target=None) -> None:
         with open(asm_path, "w", encoding="latin-1") as f:
             f.write(asm)
 
-        _run(cc + [asm_path, str(runtime_object(target)), "-o", output_path], "linking")
+        # The output is written exactly where asked, whatever name the linker would choose.
+        linked = os.path.join(tmpdir, executable_name("program", target))
+        _run(cc + [asm_path, str(runtime_object(target)), "-o", linked], "linking")
+        shutil.move(linked, output_path)
 
 
 def main() -> None:

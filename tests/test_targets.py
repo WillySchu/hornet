@@ -27,7 +27,9 @@ def test_e2e_targets_are_runnable_and_implemented():
 def test_e2e_targets_follow_the_tier(monkeypatch):
     from target import default_target
     monkeypatch.delenv('HORNET_E2E_TARGETS', raising=False)
-    runnable = [t for t in targets.RUNNABLE_TARGETS if t.arch in targets.IMPLEMENTED_ARCHES]
+    # Every runnable target of this machine's own system; another system's (Windows under Wine) only on request.
+    runnable = [t for t in targets.RUNNABLE_TARGETS
+                if t.arch in targets.IMPLEMENTED_ARCHES and t.os == default_target().os]
     monkeypatch.setattr(targets, 'TIER', 'full')
     assert targets._e2e_targets() == runnable
     monkeypatch.setattr(targets, 'TIER', 'standard')

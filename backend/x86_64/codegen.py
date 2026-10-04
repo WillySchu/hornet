@@ -12,6 +12,8 @@ from backend.x86_64.arrays_slices_lowering import ArraysSlicesLoweringMixin
 from backend.x86_64.assembly_ast import (
     AsmFunction,
     AsmProgram,
+    CallInstr,
+    Directive,
     FrameSlot,
     Imm,
     Instruction,
@@ -19,6 +21,7 @@ from backend.x86_64.assembly_ast import (
     LeaQFrameSlot,
     Leave,
     Memory,
+    Mov,
     MovQ,
     Pop,
     Push,
@@ -26,7 +29,7 @@ from backend.x86_64.assembly_ast import (
     Ret,
     SubQ,
 )
-from backend.x86_64.calling_convention import ALLOCATABLE_REGISTERS, CALLEE_SAVED_POOL, CALLEE_SAVED_REGISTERS
+from backend.x86_64.calling_convention import STACK_PROBE_FROM, SYSV, Abi, abi_for
 from backend.x86_64.emitter import Emitter
 from backend.x86_64.peephole import optimize_asm
 from ir.ir import IRCall, IRFunction, IRProgram
@@ -45,7 +48,8 @@ class CodeGenerator(
         ScalarsLoweringMixin):
     """Lowers an IRProgram to an AsmProgram."""
 
-    def __init__(self):
+    def __init__(self, abi: Abi = SYSV):
+        self.abi = abi
         self._saved_registers: List[str] = []
         self._slot_offsets: Dict[int, int] = {}  # slot id -> %rbp offset, once the frame is laid out
         self._register_assignment: Dict[int, str] = {}
@@ -99,19 +103,19 @@ class CodeGenerator(
         self.frame = Frame(ir_fn, ir_program.struct_registry, ir_program.sum_type_registry)
         ir = ir_fn.body
 
-        # Reserve outgoing stack-argument space before lower_ir needs it.
-        max_overflow_slots = max(
-            (len(instr.args) - 6 for instr in ir if isinstance(instr, IRCall)),
-            default=0,
-        )
-        self.frame.reserve_outgoing(8 * max_overflow_slots)
+        # Reserve the outgoing area (stack arguments, above any shadow space) before lower_ir needs
+        # it. Every function keeps the shadow space, as a panic block may call where the IR doesn't.
+        self.frame.reserve_outgoing(max(
+            (self.abi.outgoing_bytes(len(instr.args)) for instr in ir if isinstance(instr, IRCall)),
+            default=self.abi.shadow_space,
+        ))
 
         self._register_assignment = allocate_registers(
-            ir, ALLOCATABLE_REGISTERS, CALLEE_SAVED_POOL, ir_fn.temp_homes, ir_fn.params)
+            ir, self.abi.allocatable, list(self.abi.callee_saved_pool), ir_fn.temp_homes, ir_fn.params)
         if self.allocation_log is not None:
             self.allocation_log.append((ir, ir_fn.temp_homes, ir_fn.params, dict(self._register_assignment)))
         used = {as_qword_register(Register(r)).name for r in self._register_assignment.values()}
-        self._saved_registers = [r for r in CALLEE_SAVED_REGISTERS if r in used]
+        self._saved_registers = [r for r in self.abi.callee_saved_registers if r in used]
         selector = InstructionSelector(self, ir_fn)
         instructions = selector.lower_params(ir_fn.params, ir)
         instructions.extend(selector.lower_ir(ir))
@@ -122,25 +126,37 @@ class CodeGenerator(
         instructions.extend(self._gen_bounds_check_panic_block())
         instructions = optimize_asm(instructions)
 
+        # With unwind tables, a directive after each step of the prologue records what it did.
+        def unwind(text: str) -> list:
+            return [Directive(f".seh_{text}")] if self.abi.unwind_tables else []
+
         prologue: List[Instruction] = [
-            Push(Register('rbp')),
-            MovQ(src=Register('rsp'), dst=Register('rbp')),
+            Push(Register('rbp')), *unwind("pushreg %rbp"),
+            MovQ(src=Register('rsp'), dst=Register('rbp')), *unwind("setframe %rbp, 0"),
         ]
         for reg in self._saved_registers:
-            prologue.append(Push(Register(reg)))
-        if self.frame.size:
+            prologue += [Push(Register(reg)), *unwind(f"pushreg %{reg}")]
+        if self.abi.probes_stack and self.frame.size >= STACK_PROBE_FROM:
+            # ___chkstk_ms touches each page of the %rax bytes below %rsp; it changes no register.
+            prologue += [Mov(src=Imm(self.frame.size), dst=Register('eax')), CallInstr('___chkstk_ms'),
+                         SubQ(src=Register('rax'), dst=Register('rsp'))]
+        elif self.frame.size:
             prologue.append(SubQ(src=Imm(self.frame.size), dst=Register('rsp')))
+        if self.frame.size:
+            prologue += unwind(f"stackalloc {self.frame.size}")
+        prologue += unwind("endprologue")
 
         return AsmFunction(name=ir_fn.name, instructions=prologue + instructions)
 
     def _gen_epilogue(self) -> List[Instruction]:
-        """Restore saved callee-saved registers (from just below %rbp), then leave/ret."""
+        """Restore saved callee-saved registers (from just below %rbp), then leave/ret. With unwind
+        tables the same in the one form the unwinder recognizes: `lea`, `pop`s (%rbp last), `ret`."""
         instructions = []
-        if self._saved_registers:
+        if self._saved_registers or self.abi.unwind_tables:
             instructions.append(LeaQFrame(offset=-8 * len(self._saved_registers), dst=Register('rsp')))
         for reg in reversed(self._saved_registers):
             instructions.append(Pop(Register(reg)))
-        instructions.append(Leave())
+        instructions.append(Pop(Register('rbp')) if self.abi.unwind_tables else Leave())
         instructions.append(Ret())
         return instructions
 
@@ -149,4 +165,4 @@ class CodeGenerator(
 
 def lower_to_asm(ir_program: IRProgram, target: Target) -> str:
     """Lower an optimized IRProgram to assembly text."""
-    return Emitter(target).emit(CodeGenerator().generate(ir_program))
+    return Emitter(target).emit(CodeGenerator(abi_for(target)).generate(ir_program))

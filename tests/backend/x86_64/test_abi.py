@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from backend.x86_64.assembly_ast import Leave, LeaQFrame, MovQ, Pop, Push, Register, Ret
-from backend.x86_64.calling_convention import CALLEE_SAVED_REGISTERS
+from backend.x86_64.assembly_ast import Directive, Leave, LeaQFrame, MovQ, Pop, Push, Register, Ret
+from backend.x86_64.calling_convention import SYSV, WIN64
 from backend.x86_64.codegen import CodeGenerator
 from backend.x86_64.utils import as_qword_register
 from compile import compile_to_asm
@@ -23,10 +23,10 @@ ROOT = Path(__file__).resolve().parents[3]
 PROGRAMS = sorted((ROOT / 'benchmarks' / 'programs').glob('*.ht')) + sorted((ROOT / 'examples').glob('*.ht'))
 
 
-def _asm_program(path: Path):
+def _asm_program(path: Path, abi=SYSV):
     entry, modules = discover_modules(str(path))
     program = analyze(entry, modules)
-    return CodeGenerator().generate(optimize(build_ir_program(program)))
+    return CodeGenerator(abi).generate(optimize(build_ir_program(program)))
 
 
 def _qword(op) -> str:
@@ -38,10 +38,11 @@ def _qword(op) -> str:
         return op.name
 
 
+@pytest.mark.parametrize('abi', [SYSV, WIN64], ids=['sysv', 'win64'])
 @pytest.mark.parametrize('path', PROGRAMS, ids=lambda p: p.stem)
-def test_functions_save_every_callee_saved_register_they_write(path):
-    for fn in _asm_program(path).functions:
-        instrs = fn.instructions
+def test_functions_save_every_callee_saved_register_they_write(path, abi):
+    for fn in _asm_program(path, abi).functions:
+        instrs = [i for i in fn.instructions if not isinstance(i, Directive)]  # (unwind information)
         assert instrs[:2] == [Push(Register('rbp')), MovQ(src=Register('rsp'), dst=Register('rbp'))], fn.name
         pushed = []
         for instr in instrs[2:]:
@@ -55,9 +56,10 @@ def test_functions_save_every_callee_saved_register_they_write(path):
             for f in fields(instr):
                 if f.name in ('dst', 'operand'):
                     written.add(_qword(getattr(instr, f.name)))
-        assert written & set(CALLEE_SAVED_REGISTERS) <= set(pushed), fn.name
-        expected_tail = ([LeaQFrame(offset=-8 * len(pushed), dst=Register('rsp'))] if pushed else []) + \
-            [Pop(Register(r)) for r in reversed(pushed)] + [Leave(), Ret()]
+        assert written & set(abi.callee_saved_registers) <= set(pushed), fn.name
+        restore = [LeaQFrame(offset=-8 * len(pushed), dst=Register('rsp'))] if pushed or abi.unwind_tables else []
+        expected_tail = restore + [Pop(Register(r)) for r in reversed(pushed)] + \
+            [Pop(Register('rbp')) if abi.unwind_tables else Leave(), Ret()]
         for i, instr in enumerate(instrs):
             if isinstance(instr, Ret):
                 assert instrs[i + 1 - len(expected_tail):i + 1] == expected_tail, fn.name

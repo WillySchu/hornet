@@ -1,6 +1,6 @@
 # Hornet
 
-Hornet is an experimental, statically typed programming language with an indentation-based syntax and a native compiler targeting x86-64 and AArch64 on Linux and macOS.
+Hornet is an experimental, statically typed programming language with an indentation-based syntax and a native compiler targeting x86-64 and AArch64 on Linux and macOS, and x86-64 on Windows.
 
 The language is intentionally small, but the implementation includes a real compiler pipeline, a standalone intermediate representation, an optimizing native backend, a small runtime, modules, dictionaries, pointers, tagged sum types, pattern matching, and a C-compatible FFI.
 
@@ -24,9 +24,11 @@ The compiler itself is written in Python and has no third-party Python dependenc
 
 To build a runnable native executable, you also need a C compiler/linker. The project uses `gcc` in its build and test tooling.
 
-The native backends target x86-64 and AArch64 on Linux and macOS. On macOS the architecture is chosen with `gcc -arch`, so an Apple Silicon Mac can also build x86-64 programs and run them under Rosetta 2.
+The native backends target x86-64 and AArch64 on Linux and macOS, and x86-64 on Windows. On macOS the architecture is chosen with `gcc -arch`, so an Apple Silicon Mac can also build x86-64 programs and run them under Rosetta 2.
 
 Building for a foreign Linux architecture needs a cross toolchain named `<arch>-linux-gnu-gcc`, and running the result needs qemu-user (on Debian/Ubuntu: `apt install gcc-aarch64-linux-gnu qemu-user`). The test suite uses them when present and skips what they're needed for otherwise.
+
+Windows programs are built with MinGW-w64: its `gcc` on Windows itself, or the cross compiler `x86_64-w64-mingw32-gcc` elsewhere, where Wine runs the result (on Debian/Ubuntu: `apt install gcc-mingw-w64-x86-64 wine64`). MSVC's toolchain is not supported.
 
 ### Build an Executable
 
@@ -39,7 +41,7 @@ python3 build.py program.ht -o program
 
 `build.py` compiles the Hornet source, compiles the bundled native runtime, and links the two together into an executable. The compiled runtime is cached per target under `$HORNET_CACHE_DIR` (default `~/.cache/hornet`).
 
-The target is written `arch-os`: `x86_64-linux`, `x86_64-macos`, `aarch64-linux`, or `aarch64-macos`.
+The target is written `arch-os`: `x86_64-linux`, `x86_64-macos`, `x86_64-windows`, `aarch64-linux`, or `aarch64-macos`.
 
 ```bash
 python3 build.py program.ht --target x86_64-linux -o program
@@ -81,7 +83,7 @@ pytest --full    # every runnable target, plus slow tests (benchmark reruns, for
 
 The tests cover the lexer, parser, semantic analysis, modules, IR construction and verification, optimization, the native backend, escape analysis, runtime behavior, and end-to-end compiled programs, including seeded random programs checked against a Python model.
 
-Backend-specific tests live in `tests/backend/<arch>/` and shared backend tests in `tests/backend/common/`. With `--full`, end-to-end programs are built and run for every target that can run on the machine (natively, under Rosetta 2, or under qemu-user), and every such target must produce the same output. `HORNET_E2E_TARGETS` overrides the targets in any tier:
+Backend-specific tests live in `tests/backend/<arch>/` and shared backend tests in `tests/backend/common/`. With `--full`, end-to-end programs are built and run for every target of the machine's own system that can run on it (natively, under Rosetta 2, or under qemu-user), and every such target must produce the same output. `HORNET_E2E_TARGETS` overrides the targets in any tier, and is how every program is run for Windows under Wine, which is much slower (`HORNET_E2E_TARGETS=x86_64-windows`):
 
 ```bash
 HORNET_E2E_TARGETS=x86_64-linux,aarch64-linux pytest
@@ -99,7 +101,7 @@ python3 build.py tools/hfmt/main.ht -o hfmt
 ./hfmt --tokens file.ht        # dump tokens
 ```
 
-It keeps line breaks and normalizes the rest: 4-space indentation (plus 4 per open bracket on continuation lines), canonical spacing around operators, commas, and colons, two spaces before an inline comment and one after its `#`s (`##header` becomes `## header`), at most one blank line in a row, and exactly one blank line around multi-line top-level definitions (consecutive one-line declarations stay together). A list whose closing bracket is on its own line gets a trailing comma; one closed on the same line loses it. Flags may appear anywhere among the arguments. The repository's own `.ht` files are kept formatted by the test suite.
+It keeps line breaks, and a file's line endings (`\n` or `\r\n`), and normalizes the rest: 4-space indentation (plus 4 per open bracket on continuation lines), canonical spacing around operators, commas, and colons, two spaces before an inline comment and one after its `#`s (`##header` becomes `## header`), at most one blank line in a row, and exactly one blank line around multi-line top-level definitions (consecutive one-line declarations stay together). A list whose closing bracket is on its own line gets a trailing comma; one closed on the same line loses it. Flags may appear anywhere among the arguments. The repository's own `.ht` files are kept formatted by the test suite.
 
 ### Benchmarks
 
@@ -990,7 +992,7 @@ An omitted return type means the function returns no value.
 
 The current FFI restricts `extern` parameters and return values to scalar and pointer types. Hornet arrays, slices, structs, sum types, and strings do not currently have a general direct FFI representation.
 
-Hornet's `int` is 64-bit; declare C `int` parameters and results as `int32` (for example `extern int32 close(int32 fd)`). `long`, `size_t`, and `ssize_t` are `int`.
+Hornet's `int` is 64-bit; declare C `int` parameters and results as `int32` (for example `extern int32 close(int32 fd)`). `long`, `size_t`, and `ssize_t` are `int` (except on Windows, where C's `long` is 32-bit: `int32`).
 
 Foreign calls use the same IR call and backend calling-convention machinery as ordinary Hornet function calls.
 
@@ -1105,12 +1107,12 @@ The native runtime is located in `runtime/runtime.c` and is compiled separately 
 It currently provides language-level services including:
 
 * `print` and recursive value formatting
-* `hornet_panic` and `hornet_panic_at` (for `panic(...)`), which flush standard output, write the message to standard error, and abort
+* `hornet_panic` and `hornet_panic_at` (for `panic(...)`), which flush standard output, write the message to standard error, and abort (`SIGABRT`; on Windows, exit code 3)
 * `hornet_slice_grow`, which copies a slice into a larger backing store
 * `hornet_bytes` for `bytes(s)`
 * dictionary hash tables, hashed with FNV-1a (`hornet_hash_bytes`)
 * runtime type descriptors (`hornet_typedesc_tags.h` is generated from `ir/typedesc.py` by `runtime/generate_typedesc_header.py`)
-* argument access, output, file creation, exit, and OS error messages for `stdlib/os.ht` (`hornet_argv_get`, `hornet_write_fd`, `hornet_open_write`, `hornet_exit`, `hornet_error_message`)
+* argument access, file and stream I/O (as bytes on every system), exit, and OS error messages for `stdlib/os.ht` (`hornet_argv_get`, `hornet_open_read`, `hornet_open_write`, `hornet_read_fd`, `hornet_write_fd`, `hornet_close_fd`, `hornet_exit`, `hornet_error_message`)
 
 Runtime checks panic with `file:line:col: panic: message`, the position being where the checked expression or statement starts and the file named without its directory: array, slice, and string bounds; division by zero and `MIN / -1`; dereferencing `none`; a missing dictionary key; reallocating a slice or dictionary being iterated with `for ... in`; and a narrowed variable whose variant was changed through a pointer. The checks are in the compiled code, which calls `hornet_panic`.
 
@@ -1179,7 +1181,7 @@ IR construction compiles conditions made of `and`, `or`, and `not` straight to b
 
 The IR optimizer repeats constant folding, identity simplification, constant-branch and unreachable-block removal, copy and constant propagation within blocks, copy coalescing, address folding (an address computed as a base plus a constant becomes the access's offset), and dead-code elimination until nothing changes. `ir/cfg.py` provides the shared control-flow and liveness analysis.
 
-`backend/` holds one package per architecture, chosen by the target, plus `backend/common/` for what they share: linear-scan register allocation over the target's register lists (values live across calls get callee-saved registers), stack-frame slot layout, the magic numbers for division by constants, and jump cleanups. Each backend adds its calling convention (SysV for `backend/x86_64/`, where four of the argument registers are also allocatable, so incoming parameters and outgoing arguments move as parallel moves; AAPCS64 for `backend/aarch64/`), prologues that save only the registers a function uses, instruction selection that works directly on registers, stack slots, and immediates, a peephole pass, and assembly emission for Linux and macOS (AT&T syntax on x86-64). The AArch64 backend also rewrites accesses to stack slots beyond the reach of a load or store's offset after the frame is laid out.
+`backend/` holds one package per architecture, chosen by the target, plus `backend/common/` for what they share: linear-scan register allocation over the target's register lists (values live across calls get callee-saved registers), stack-frame slot layout, the magic numbers for division by constants, and jump cleanups. Each backend adds its calling convention (for `backend/x86_64/`, SysV or, on Windows, the x64 convention with its shadow space, stack probes, and unwind tables; argument registers are also allocatable, so incoming parameters and outgoing arguments move as parallel moves; AAPCS64 for `backend/aarch64/`), prologues that save only the registers a function uses, instruction selection that works directly on registers, stack slots, and immediates, a peephole pass, and assembly emission for each system (AT&T syntax on x86-64). The AArch64 backend also rewrites accesses to stack slots beyond the reach of a load or store's offset after the frame is laid out.
 
 Some IR operations deliberately lower to runtime calls. A runtime operation does not require a special calling mechanism; runtime functions participate in the same native call machinery as other external functions.
 

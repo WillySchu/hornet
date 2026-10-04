@@ -16,11 +16,6 @@ COMPARISON_CONDITION_CODES = {
 }
 
 
-# SysV integer argument registers; later arguments go on the stack.
-ARG_REGISTERS_64 = ['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
-ARG_REGISTERS_32 = ['edi', 'esi', 'edx', 'ecx', 'r8d', 'r9d']
-
-
 # 32-bit -> 8-bit register name.
 _BYTE_REGISTER_ALIASES = {
     'eax': 'al', 'ebx': 'bl', 'ecx': 'cl', 'edx': 'dl',

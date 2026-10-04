@@ -7,6 +7,20 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifdef _WIN32
+#include <io.h>
+// Windows opens streams and files in text mode, which rewrites "\n" as "\r\n" on the way out and
+// back on the way in. Hornet's I/O is bytes, so everything is binary.
+#define HORNET_O_BINARY _O_BINARY
+__attribute__((constructor)) static void hornet_binary_standard_streams(void) {
+    _setmode(0, _O_BINARY);
+    _setmode(1, _O_BINARY);
+    _setmode(2, _O_BINARY);
+}
+#else
+#define HORNET_O_BINARY 0
+#endif
+
 #include "hornet_typedesc_tags.h"
 
 // Bucket state byte. Tombstones keep probe chains intact after deletion.
@@ -303,7 +317,21 @@ int64_t hornet_write_fd(int64_t fd, const char *ptr, int64_t len) {
 
 // open(2) for writing, creating or truncating (open is variadic, so it's called from C).
 int64_t hornet_open_write(const char *path) {
-    return open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    return open(path, O_WRONLY | O_CREAT | O_TRUNC | HORNET_O_BINARY, 0644);
+}
+
+// open(2) for reading.
+int64_t hornet_open_read(const char *path) {
+    return open(path, O_RDONLY | HORNET_O_BINARY);
+}
+
+// read(2): up to `len` bytes; 0 at the end, -1 on error. (C's own returns an int on Windows.)
+int64_t hornet_read_fd(int64_t fd, char *ptr, int64_t len) {
+    return read((int)fd, ptr, (unsigned int)len);
+}
+
+int64_t hornet_close_fd(int64_t fd) {
+    return close((int)fd);
 }
 
 // strerror(errno) for the most recent failed call.

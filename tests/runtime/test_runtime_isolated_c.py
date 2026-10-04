@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from build import c_compiler
+from build import c_compiler, executable_name
 from tests.targets import each_runnable_target, is_native, run_binary
 
 RUNTIME_DIR = Path(__file__).resolve().parent.parent.parent / "runtime"
@@ -30,7 +30,7 @@ pytestmark = pytest.mark.skipif(not GCC_AVAILABLE, reason="gcc not available")
 
 def _compile_and_run(target, extra_flags: list[str]) -> subprocess.CompletedProcess:
     with tempfile.TemporaryDirectory() as tmpdir:
-        binary = f"{tmpdir}/test_runtime_isolated"
+        binary = f"{tmpdir}/{executable_name('test_runtime_isolated', target)}"
         subprocess.run(
             [*c_compiler(target), "-Wall", "-Wextra", "-std=c11", *extra_flags, str(TEST_ISOLATED_C), "-o", binary],
             check=True, capture_output=True, text=True,

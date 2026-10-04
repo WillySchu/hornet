@@ -6,7 +6,8 @@ from target import Target
 
 
 class Emitter:
-    """The target's OS controls symbol prefixes and section names."""
+    """The target's OS controls symbol prefixes and section names (Windows, through MinGW, takes the
+    same text as Linux without the ELF stack note)."""
 
     def __init__(self, target: Target):
         self.os = target.os
@@ -37,10 +38,11 @@ class Emitter:
 
     def emit_function(self, fn: AsmFunction) -> list[str]:
         sym = self.symbol(fn.name)
-        lines = [f"    .globl {sym}", f"{sym}:"]
+        unwind = self.os == 'windows'  # the function's unwind table: its directives sit between these two
+        lines = [f"    .globl {sym}"] + ([f"    .seh_proc {sym}"] if unwind else []) + [f"{sym}:"]
         for instr in fn.instructions:
             if isinstance(instr, CallInstr):
                 lines.append(f"    call    {self.symbol(instr.target)}")
             else:
                 lines.append(f"    {instr.emit()}")
-        return lines
+        return lines + (["    .seh_endproc"] if unwind else [])
