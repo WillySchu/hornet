@@ -14,6 +14,15 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
+- Type identity for the port. Composite dict keys, or structural equality through pointers. This is the decision the checker's port depends on.
+- Narrowing. Fields and elements still need an as binding, and as cannot bind in a while condition.
+- Enums. Explicit member values, ordering, for ... in over an enum, and methods.
+- Duplicate externs. Two modules cannot declare the same extern; it is a clear error now, but still a restriction.
+- match exhaustiveness. It does not take earlier exclusions into account, so a variant already ruled out by a guard must still have an arm or an else.
+- Panic detail. Bounds panics do not include the index and length, and stack overflow is an unreported SIGSEGV.
+- Literal-only expressions. int8 x = 1 + 2 is still rejected, because only a single literal adapts to a narrow type.
+- No mutable globals. Worth recording, since the port will need context structs because of it.
+Stdlib for the port. Integer parsing and path helpers, alongside the sorting and format strings you already list.
 - Pointers into a sum's payload.
 - &d[k] after a rehash.
 - Nothing warns when a result is ignored, such as a bare write\_stdout(...) statement.
@@ -22,10 +31,8 @@ Updates:
 - Sum type equality.
 - Spreading one package across multiple files.
 - A package-style in-file declaration decoupling the module's name from its filename.
-- Any import-path resolution strategy beyond "relative to the importing file" (a stdlib search path, a project manifest/root, etc.).
-- A pointer into a payload that outlives the variant is untouched.
+- Any import-path resolution strategy beyond "relative to the importing file" (a project manifest/root, etc.).
 - Pass structs to FFI calls.
-- Separate the runtime code from codegen.
 - CSE pass optimization for array addresses and thus indexes.
 - `type` type.
 - `typeof`
