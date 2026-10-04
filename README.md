@@ -327,7 +327,7 @@ type Square struct:
 type Shape is Circle | Square
 ```
 
-A variant may be a struct, scalar, enum, `str`, array, slice, dictionary, or pointer type, or `none`, a variant with no payload; it can't be another sum type. A sum's zero value is its `none` variant. A sum without one has no zero value, so a variable of it (or a struct or array containing it) needs an initializer, and named construction can't omit such a field.
+A variant may be a struct, scalar, enum, `str`, array, slice, dictionary, or pointer type, or `none`, a variant with no payload. It can't be another sum type, but it can reach one through a pointer, slice, or dictionary: a result that holds a tree is `type ExprResult is *Expr | ParseError`. A sum's zero value is its `none` variant. A sum without one has no zero value, so a variable of it (or a struct or array containing it) needs an initializer, and named construction can't omit such a field.
 
 Struct fields may have sum types, so types can be recursive, through a pointer, slice, or dictionary. Where a pointer to a sum is expected, `&Variant(...)` creates a new value of the sum, on the heap, holding that variant:
 
@@ -1040,12 +1040,13 @@ hash_str
 
 ## `stdlib/fmt.ht`
 
-Integer formatting:
+Integer formatting and parsing:
 
 ```hornet
 str a = int_to_str(-1234)       # '-1234'
 str b = int_to_hex(255)         # 'ff'
 str c = pad_left('7', 3, "0")   # '007'
+IntResult n = parse_int('-42')  # an Error if it isn't a decimal integer, or doesn't fit
 ```
 
 ## `stdlib/strings.ht`
@@ -1089,6 +1090,8 @@ Provides a small POSIX-style operating-system interface:
 []str args = get_args(argc, argv)
 StrResult contents = read_file('input.txt')
 StrResult stdin_contents = read_stdin()
+LineResult line = read_line()   # the next line of standard input, without its ending; none at the end
+bool at_terminal = is_terminal(0)
 StrResult fd_contents = read_all_from_fd(fd)
 IntResult written = write_file('output.txt', 'hello')
 write_stdout('no trailing newline')
@@ -1096,7 +1099,7 @@ write_stderr('error\n')
 exit(0)
 ```
 
-Functions that can fail return a result from `stdlib/errors.ht` (`StrResult is str | Error`, `IntResult is int | Error`); handle it with `match` or `is`, or use `must_str`/`must_int` to panic on error. Directory/path APIs remain future work.
+Functions that can fail return a result from `stdlib/errors.ht` (`StrResult is str | Error`, `IntResult is int | Error`); handle it with `match` or `is`, or use `must_str`/`must_int` to panic on error. `read_line` returns a `LineResult is str | Error | none`, and can be mixed with `read_stdin`, which then reads what is left. Directory/path APIs remain future work.
 
 ---
 
@@ -1112,7 +1115,7 @@ It currently provides language-level services including:
 * `hornet_bytes` for `bytes(s)`
 * dictionary hash tables, hashed with FNV-1a (`hornet_hash_bytes`)
 * runtime type descriptors (`hornet_typedesc_tags.h` is generated from `ir/typedesc.py` by `runtime/generate_typedesc_header.py`)
-* argument access, file and stream I/O (as bytes on every system), exit, and OS error messages for `stdlib/os.ht` (`hornet_argv_get`, `hornet_open_read`, `hornet_open_write`, `hornet_read_fd`, `hornet_write_fd`, `hornet_close_fd`, `hornet_exit`, `hornet_error_message`)
+* argument access, file and stream I/O (as bytes on every system), exit, and OS error messages for `stdlib/os.ht` (`hornet_argv_get`, `hornet_open_read`, `hornet_open_write`, `hornet_read_fd`, `hornet_read_line`, `hornet_is_terminal`, `hornet_write_fd`, `hornet_close_fd`, `hornet_exit`, `hornet_error_message`)
 
 Runtime checks panic with `file:line:col: panic: message`, the position being where the checked expression or statement starts and the file named without its directory: array, slice, and string bounds; division by zero and `MIN / -1`; dereferencing `none`; a missing dictionary key; reallocating a slice or dictionary being iterated with `for ... in`; and a narrowed variable whose variant was changed through a pointer. The checks are in the compiled code, which calls `hornet_panic`.
 
@@ -1212,7 +1215,7 @@ backend/           Native backends: common/ shared pieces, x86_64/ and aarch64/
 runtime/           Native Hornet runtime
 stdlib/            Hornet standard-library modules
 
-examples/          Example Hornet programs
+examples/          Example Hornet programs (`calc/` is a multi-file one)
 tools/hfmt/        Source formatter, written in Hornet
 tests/             Compiler, runtime, and end-to-end tests
 benchmarks/        Benchmark programs and tooling
@@ -1274,6 +1277,33 @@ python3 build.py examples/wc.ht -o wc
 
 The example is intentionally modest. Its purpose is to exercise the language and standard library in a real file-processing program rather than to reproduce all of Unix `wc`.
 
+## A Calculator
+
+`examples/calc/` is a larger example in eight modules: an integer calculator built the way a compiler is. A lexer and a precedence-climbing parser turn each line into a tree (a recursive sum type), which is either evaluated directly or simplified, compiled to code for a small stack machine, and run there.
+
+```bash
+python3 build.py examples/calc/main.ht -o calc
+./calc                           # a prompt: each line is answered as it is entered
+./calc examples/calc/demo.calc   # or a file's lines
+```
+
+```text
+> x = 6 * 7
+> x + 1
+43
+> 10 / (x - 42)
+     ^ division by zero
+```
+
+Its values are 64-bit integers with `+ - * / %`, comparisons, `and`/`or`/`not`, parentheses, and variables. `--vm` evaluates through the stack machine, and `--tree`, `--simplified`, and `--code` print each line's tree, its simplified tree, and its code:
+
+```text
+$ echo 'x * 1 + 0 * 5' | ./calc --tree
+(+ (* x 1) (* 0 5))
+$ echo 'x * 1 + 0 * 5' | ./calc --simplified
+x
+```
+
 ---
 
 # Current Limitations
@@ -1308,9 +1338,9 @@ Hornet is still experimental. Some notable limitations are:
 
 A longer-term goal is to rewrite the compiler itself in Hornet.
 
-The current language already has the structural features needed by a compiler implementation: structs, arrays, slices, dictionaries, pointers, recursive sum types (so an AST can be expressed), pattern matching, modules, FFI, and native compilation. The Python compiler's typed tree, printed by `compile.py --dump-typed`, is the intended point of comparison between the two implementations.
+The current language already has the structural features needed by a compiler implementation: structs, enums, arrays, slices, dictionaries, pointers, recursive sum types (so an AST can be expressed), pattern matching, modules, FFI, and native compilation. The Python compiler's typed tree, printed by `compile.py --dump-typed`, is the intended point of comparison between the two implementations.
 
-The standard library now covers file and stream I/O, process exit, string building and searching, integer formatting, and an error convention. The formatter in `tools/hfmt` is the first substantial tool written in Hornet; it includes a Hornet lexer that is tested token-for-token against the compiler's own. The next step is porting the compiler itself, starting from that lexer.
+The standard library now covers file and stream I/O, process exit, string building and searching, integer formatting and parsing, and an error convention. The formatter in `tools/hfmt` is the first substantial tool written in Hornet; it includes a Hornet lexer that is tested token-for-token against the compiler's own. `examples/calc` is a compiler in miniature (lexer, parser, tree, simplifier, code generation, and a machine to run the code). The next step is porting the compiler itself, starting from that lexer.
 
 The intended progression is roughly:
 
