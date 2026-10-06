@@ -121,15 +121,23 @@ F = "def int f(U u, bool ok, *U p):\n"
     ("    if *p is A:\n        return (*p).x\n    return 0\n", "Cannot access field 'x' on non-struct type U"),
     # Assigning to a narrowed variable ends the narrowing.
     ("    if u is A and ok:\n        u = A(1)\n        return u.x\n    return 0\n", "Cannot access field 'x'"),
-    ("    if u is A:\n        if ok:\n            u = B(1)\n        return u.x\n    return 0\n", "Cannot access field 'x'"),
+    ("    if u is A:\n        if ok:\n            u = B(1)\n        return u.x\n    return 0\n",
+     "Cannot access field 'x'"),
     ("    if u is A:\n        u = B(1)\n    else:\n        return 0\n    return u.x\n", "Cannot access field 'x'"),
     # A loop's body may already have run: what it assigns is not known on the way in.
-    ("    if u is A:\n        while ok:\n            int x = u.x\n            u = B(x)\n    return 0\n", "Cannot access field 'x'"),
-    ("    if u is A:\n        for int i = 0; i < 2; i += 1:\n            int x = u.x\n            u = B(x)\n    return 0\n",
+    ("    if u is A:\n        while ok:\n            int x = u.x\n            u = B(x)\n    return 0\n",
      "Cannot access field 'x'"),
-    ("    if u is A:\n        for b in 'ab':\n            int x = u.x\n            u = B(x)\n    return 0\n", "Cannot access field 'x'"),
+    ("    if u is A:\n"
+     "        for int i = 0; i < 2; i += 1:\n"
+     "            int x = u.x\n"
+     "            u = B(x)\n"
+     "    return 0\n",
+     "Cannot access field 'x'"),
+    ("    if u is A:\n        for b in 'ab':\n            int x = u.x\n            u = B(x)\n    return 0\n",
+     "Cannot access field 'x'"),
     # A loop left by `break` says nothing about its condition.
-    ("    while u is not A:\n        if ok:\n            break\n        u = A(1)\n    return u.x\n", "Cannot access field 'x'"),
+    ("    while u is not A:\n        if ok:\n            break\n        u = A(1)\n    return u.x\n",
+     "Cannot access field 'x'"),
     # What `is` takes.
     ("    return 5 is A\n", "'is' tests a sum type's variant or an enum's member, but this value is int"),
     ("    if ok is A:\n        return 1\n    return 0\n", "'ok' \\(declared bool\\) is not a sum type"),

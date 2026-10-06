@@ -131,7 +131,9 @@ def test_composite_functions_are_built():
 @GCC_SKIP
 def test_composite_programs_run_correctly():
     # `p = P(p.y, p.x)` reads its own target: the old builder printed P(x: 2, y: 2).
-    assert_program_stdout(COMPOSITES, "P(x: 2, y: 1)\nP(x: 1, y: 2)\n[3]P[P(x: 0, y: 0), P(x: 7, y: 0), P(x: 0, y: 0)]\n"
+    assert_program_stdout(COMPOSITES, "P(x: 2, y: 1)\n"
+                                      "P(x: 1, y: 2)\n"
+                                      "[3]P[P(x: 0, y: 0), P(x: 7, y: 0), P(x: 0, y: 0)]\n"
                                       "[]int[0, 2, 4]\n7\nhi bob!\ntrue\n7\n6\ntrue\n1\n")
 
 
@@ -191,13 +193,24 @@ def test_container_programs_run_correctly():
 @GCC_SKIP
 def test_iterating_over_a_slice_that_grows_panics():
     from tests.test_compiler import assert_program_panics
-    assert_program_panics("def int main():\n    []int s = [1, 2]\n    for x in s:\n        s = append(s, x)\n    return 0\n",
+    assert_program_panics("def int main():\n"
+                          "    []int s = [1, 2]\n"
+                          "    for x in s:\n"
+                          "        s = append(s, x)\n"
+                          "    return 0\n",
                           "for ... in: slice was reallocated (e.g. by append) during iteration")
 
 
 @GCC_SKIP
 def test_scalar_zero_values():
-    source = "def int main():\n    int x\n    bool b\n    *int p\n    print(x)\n    print(b)\n    print(p == none)\n    return 0\n"
+    source = ("def int main():\n"
+              "    int x\n"
+              "    bool b\n"
+              "    *int p\n"
+              "    print(x)\n"
+              "    print(b)\n"
+              "    print(p == none)\n"
+              "    return 0\n")
     assert _built_functions(source) == ['main']
     assert_program_stdout(source, "0\nfalse\ntrue\n")
 

@@ -40,7 +40,8 @@ def _operands(instructions) -> list:
 
 
 def test_the_two_conventions():
-    assert abi_for(WINDOWS) is WIN64 and abi_for(Target('x86_64', 'linux')) is SYSV is abi_for(Target('x86_64', 'macos'))
+    assert (abi_for(WINDOWS) is WIN64
+            and abi_for(Target('x86_64', 'linux')) is SYSV is abi_for(Target('x86_64', 'macos')))
     assert WIN64.arg_registers_64 == ('rcx', 'rdx', 'r8', 'r9') and WIN64.shadow_space == 32
     assert {'rdi', 'rsi'} <= set(WIN64.callee_saved_registers) and not {'rdi', 'rsi'} & set(SYSV.callee_saved_registers)
     for abi in (SYSV, WIN64):  # the scratch registers are never allocated, and every pool register has one role
@@ -72,7 +73,9 @@ def test_every_frame_keeps_the_shadow_space_and_a_large_one_is_probed():
         assert len(grows) == 1, name
     big = functions[link_name('big')]
     probe = next(i for i, instr in enumerate(big) if isinstance(instr, CallInstr) and instr.target == '___chkstk_ms')
-    assert isinstance(big[probe - 1], Mov) and big[probe - 1].dst == Register('eax') and big[probe - 1].src.value >= 8000
+    assert (isinstance(big[probe - 1], Mov)
+            and big[probe - 1].dst == Register('eax')
+            and big[probe - 1].src.value >= 8000)
     assert big[probe + 1] == SubQ(src=Register('rax'), dst=Register('rsp'))
     assert not any(isinstance(i, CallInstr) and i.target == '___chkstk_ms' for i in functions[link_name('six')])
     assert not any(isinstance(i, CallInstr) and i.target == '___chkstk_ms'
@@ -149,7 +152,8 @@ def test_a_windows_panic_exits_with_code_3(tmp_path):
 def test_unwind_tables_describe_each_prologue_and_the_epilogue_is_the_form_the_unwinder_knows():
     functions = _functions(WIN64)
     for name, instructions in functions.items():
-        prologue = instructions[:next(i for i, instr in enumerate(instructions) if instr == Directive(".seh_endprologue")) + 1]
+        prologue = instructions[:next(i for i, instr in enumerate(instructions)
+                                      if instr == Directive(".seh_endprologue")) + 1]
         described = [instr.text for instr in prologue if isinstance(instr, Directive)]
         pushed = [f".seh_pushreg %{instr.operand.name}" for instr in prologue if isinstance(instr, Push)]
         assert described[0] == ".seh_pushreg %rbp" and described[1] == ".seh_setframe %rbp, 0", name

@@ -32,7 +32,10 @@ def _discriminant_writes(body):
     itself and (coincidentally, for these small test structs) a
     scalar field's own value have this exact shape, so callers filter
     by expected VALUE, not just presence, to tell them apart."""
-    return [instr for instr in body if isinstance(instr, IRStore) and isinstance(instr.value, IRConst) and instr.value.type == Type.INT32]
+    return [
+        instr for instr in body
+        if isinstance(instr, IRStore) and isinstance(instr.value, IRConst) and instr.value.type == Type.INT32
+    ]
 
 
 # Circle first, Square second, throughout -- so Circle's own

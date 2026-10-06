@@ -205,9 +205,11 @@ class TypedFunctionBuilder:
     def allocate_heap(self, symbol) -> list:
         """A composite variable on the heap: new storage, its pointer kept in the variable's slot."""
         pointer, slot_address = self.temp(), self.temp()
-        return [IRCall(dst=pointer, name='malloc', args=[IRConst(self.width(symbol.type), Type.INT64)]),
-                IRLocalAddress(dst=slot_address, slot=self.ir_fn.var_slots[symbol.id]),
-                IRStore(address=slot_address, value=pointer, value_type=Type.INT64)]
+        return [
+            IRCall(dst=pointer, name='malloc', args=[IRConst(self.width(symbol.type), Type.INT64)]),
+            IRLocalAddress(dst=slot_address, slot=self.ir_fn.var_slots[symbol.id]),
+            IRStore(address=slot_address, value=pointer, value_type=Type.INT64)
+        ]
 
     def initialize(self, symbol, init) -> list:
         """A variable's first value (a declaration): fresh storage, so it is written in place."""
@@ -224,9 +226,11 @@ class TypedFunctionBuilder:
         if not heap:
             return [IRMove(dst=temp, src=value)]
         box = self.temp()
-        return [IRCall(dst=box, name='malloc', args=[IRConst(self.width(symbol.type), Type.INT64)]),
-                IRStore(address=box, value=value, value_type=symbol.type),
-                IRMove(dst=temp, src=box)]
+        return [
+            IRCall(dst=box, name='malloc', args=[IRConst(self.width(symbol.type), Type.INT64)]),
+            IRStore(address=box, value=value, value_type=symbol.type),
+            IRMove(dst=temp, src=box)
+        ]
 
     def params(self, fn: t.Function) -> list:
         ir, incoming = [], []
@@ -306,7 +310,8 @@ class TypedFunctionBuilder:
                 len_ir, len_address = self.offset(address, 8)
                 return ir + read_ir + value_ir + concat_ir + len_ir + [
                     IRStore(address=address, value=ptr, value_type=Type.INT64),
-                    IRStore(address=len_address, value=length, value_type=Type.INT)]
+                    IRStore(address=len_address, value=length, value_type=Type.INT),
+                ]
             if not _scalar(s.target.type):
                 raise NotYetPorted(f"compound assignment of {s.target.type}")
             ir, address = self.place_address(s.target)
@@ -314,7 +319,8 @@ class TypedFunctionBuilder:
             value_ir, value = self.value(s.value)
             return ir + [IRLoad(dst=current, address=address)] + value_ir + [
                 IRBinOp(dst=result, op=s.op, left=current, right=value, where=s.where),
-                IRStore(address=address, value=result, value_type=s.target.type)]
+                IRStore(address=address, value=result, value_type=s.target.type),
+            ]
         if isinstance(s, t.ExprStmt):
             if s.expr.type == Type.NONE:  # a bare `none` does nothing
                 return []
@@ -352,9 +358,16 @@ class TypedFunctionBuilder:
             self.loops.append((step, end))
             body_ir = self.block(s.body)
             self.loops.pop()
-            return ir + [IRJump(start), IRLabel(start)] + self.branch(s.cond, body, end) + [IRLabel(body)] + body_ir + [
-                IRJump(step), IRLabel(step)] + self.fresh_loop_variable(s) + self.statement(s.step) + [
-                IRJump(start), IRLabel(end)]
+            return ir + [
+                IRJump(start),
+                IRLabel(start)
+            ] + self.branch(s.cond, body, end) + [IRLabel(body)] + body_ir + [
+                IRJump(step),
+                IRLabel(step)
+            ] + self.fresh_loop_variable(s) + self.statement(s.step) + [
+                IRJump(start),
+                IRLabel(end)
+            ]
         if isinstance(s, t.ForIn):
             return self.for_in(s)
         if isinstance(s, t.Break):
@@ -371,9 +384,13 @@ class TypedFunctionBuilder:
         variants = self.ir_program.sum_type_registry[s.subject.type.sum_type_name].variants
         end = self.ids.new_label("match_end")
         for variant, body in s.arms:
-            arm, next_arm, is_it = self.ids.new_label("match_arm"), self.ids.new_label("match_next"), self.temp(Type.BOOL)
-            ir += [IRBinOp(dst=is_it, op=BinaryOp.EQUAL, left=tag, right=IRConst(variants.index(variant), Type.INT32)),
-                   IRBranch(cond=is_it, true_label=arm, false_label=next_arm), IRLabel(arm)]
+            arm = self.ids.new_label('match_arm')
+            next_arm = self.ids.new_label('match_next')
+            is_it = self.temp(Type.BOOL)
+            ir += [
+                IRBinOp(dst=is_it, op=BinaryOp.EQUAL, left=tag, right=IRConst(variants.index(variant), Type.INT32)),
+                IRBranch(cond=is_it, true_label=arm, false_label=next_arm), IRLabel(arm)
+            ]
             ir += self.block(body) + [IRJump(end), IRLabel(next_arm)]
         return ir + self.block(s.else_body) + [IRJump(end), IRLabel(end)]
 
@@ -387,8 +404,9 @@ class TypedFunctionBuilder:
                 return value_ir + [IRMove(dst=temp, src=value)]
             if isinstance(target, t.DictLookup):
                 value_ir2, address = self.scratch_address(target.type)
-                return value_ir + value_ir2 + [IRStore(address=address, value=value, value_type=target.type)] + \
-                    self.dict_set(target, address)
+                return value_ir + value_ir2 + [
+                    IRStore(address=address, value=value, value_type=target.type)
+                ] + self.dict_set(target, address)
             ir, address = self.place_address(target)
             return value_ir + ir + [IRStore(address=address, value=value, value_type=target.type)]
         # A composite. Copied directly from another place: two places of one type are the same
@@ -438,8 +456,9 @@ class TypedFunctionBuilder:
             ir, base = self.address(e.base)
             index_ir, index = self.value(e.index)
             element_ir, address = self.element(base, index, e.type)
-            return ir + index_ir + [IRBoundsCheck(index=index, length=IRConst(e.base.type.size, Type.INT),
-                                                  where=e.where)] + element_ir, address
+            return ir + index_ir + [
+                IRBoundsCheck(index=index, length=IRConst(e.base.type.size, Type.INT), where=e.where)
+            ] + element_ir, address
         if isinstance(e, t.SliceIndex):
             ir, ptr, length, _ = self.slice_value(e.base)
             index_ir, index = self.value(e.index)
@@ -461,9 +480,10 @@ class TypedFunctionBuilder:
         the variable may have changed it since the `is` check."""
         variants = self.ir_program.sum_type_registry[e.sum.type.sum_type_name].variants
         tag, changed = self.temp(Type.INT32), self.temp(Type.BOOL)
-        return [IRLoad(dst=tag, address=base),
-                IRBinOp(dst=changed, op=BinaryOp.NOT_EQUAL, left=tag, right=IRConst(variants.index(e.type), Type.INT32))
-                ] + self.panic_when(changed, f"'{e.sum.symbol.name}' changed variant while narrowed", e)
+        return [
+            IRLoad(dst=tag, address=base),
+            IRBinOp(dst=changed, op=BinaryOp.NOT_EQUAL, left=tag, right=IRConst(variants.index(e.type), Type.INT32))
+        ] + self.panic_when(changed, f"'{e.sum.symbol.name}' changed variant while narrowed", e)
 
     def field_offset(self, e: t.FieldAccess) -> int:
         struct_type = e.base.type.element_type if e.through_pointer else e.base.type
@@ -477,8 +497,10 @@ class TypedFunctionBuilder:
     def element(self, base, index, element_type) -> tuple:
         """The address of element `index` (already bounds-checked) from `base`."""
         scaled, address = self.temp(Type.INT), self.temp()
-        return [IRBinOp(dst=scaled, op=BinaryOp.MULTIPLY, left=index, right=IRConst(self.width(element_type), Type.INT)),
-                IRBinOp(dst=address, op=BinaryOp.ADD, left=base, right=scaled)], address
+        return [
+            IRBinOp(dst=scaled, op=BinaryOp.MULTIPLY, left=index, right=IRConst(self.width(element_type), Type.INT)),
+            IRBinOp(dst=address, op=BinaryOp.ADD, left=base, right=scaled),
+        ], address
 
     # -- composite values
 
@@ -527,7 +549,8 @@ class TypedFunctionBuilder:
             return ir + [IRCopy(dst_address=dst, src_address=source, value_type=e.type)]
         if isinstance(e, t.StructLiteral):
             ir, offset = [], 0
-            for (name, field_type), value in zip(self.ir_program.struct_registry[e.type.struct_name].fields.items(), e.fields):
+            for (name, field_type), value in zip(
+                    self.ir_program.struct_registry[e.type.struct_name].fields.items(), e.fields):
                 offset_ir, address = self.offset(dst, offset)
                 ir += offset_ir + self.store(address, value)
                 offset += self.width(field_type)
@@ -583,21 +606,28 @@ class TypedFunctionBuilder:
             return self.zero_array(dst, type_)
         if kind == TypeKind.DICT:  # a new empty dict
             header = self.temp()
-            return [IRCall(dst=header, name='calloc', args=[IRConst(1, Type.INT64), IRConst(_DICT_HEADER_SIZE, Type.INT64)]),
-                    IRStore(address=dst, value=header, value_type=Type.INT64)]
+            return [
+                IRCall(
+                    dst=header, name='calloc', args=[IRConst(1, Type.INT64), IRConst(_DICT_HEADER_SIZE, Type.INT64)]
+                ),
+                IRStore(address=dst, value=header, value_type=Type.INT64),
+            ]
         return [IRStore(address=dst, value=IRConst(0, type_), value_type=type_)]
 
     def zero_array(self, dst, type_: Type) -> list:
         i, cond, scaled, element = self.temp(Type.INT), self.temp(Type.BOOL), self.temp(Type.INT), self.temp()
         start, body, end = (self.ids.new_label(x) for x in ("zero_start", "zero_body", "zero_end"))
         width = self.width(type_.element_type)
-        return [IRMove(dst=i, src=IRConst(0, Type.INT)), IRJump(start), IRLabel(start),
-                IRBinOp(dst=cond, op=BinaryOp.LESS_THAN, left=i, right=IRConst(type_.size, Type.INT)),
-                IRBranch(cond=cond, true_label=body, false_label=end), IRLabel(body),
-                IRBinOp(dst=scaled, op=BinaryOp.MULTIPLY, left=i, right=IRConst(width, Type.INT)),
-                IRBinOp(dst=element, op=BinaryOp.ADD, left=dst, right=scaled)] + \
-            self.zero_into(element, type_.element_type) + [
-                IRBinOp(dst=i, op=BinaryOp.ADD, left=i, right=IRConst(1, Type.INT)), IRJump(start), IRLabel(end)]
+        return [
+            IRMove(dst=i, src=IRConst(0, Type.INT)),
+            IRJump(start), IRLabel(start),
+            IRBinOp(dst=cond, op=BinaryOp.LESS_THAN, left=i, right=IRConst(type_.size, Type.INT)),
+            IRBranch(cond=cond, true_label=body, false_label=end), IRLabel(body),
+            IRBinOp(dst=scaled, op=BinaryOp.MULTIPLY, left=i, right=IRConst(width, Type.INT)),
+            IRBinOp(dst=element, op=BinaryOp.ADD, left=dst, right=scaled)
+        ] + self.zero_into(element, type_.element_type) + [
+                IRBinOp(dst=i, op=BinaryOp.ADD, left=i, right=IRConst(1, Type.INT)), IRJump(start), IRLabel(end)
+        ]
 
     # -- strings: (ptr, len)
 
@@ -627,8 +657,10 @@ class TypedFunctionBuilder:
             base_ir, ptr, length = self.str_value(e.base)
             bounds_ir, low, high = self.bounds(e, length)
             new_len, new_ptr = self.temp(Type.INT), self.temp()
-            return base_ir + bounds_ir + [IRBinOp(dst=new_len, op=BinaryOp.SUBTRACT, left=high, right=low),
-                                         IRBinOp(dst=new_ptr, op=BinaryOp.ADD, left=ptr, right=low)], new_ptr, new_len
+            return base_ir + bounds_ir + [
+                IRBinOp(dst=new_len, op=BinaryOp.SUBTRACT, left=high, right=low),
+                IRBinOp(dst=new_ptr, op=BinaryOp.ADD, left=ptr, right=low),
+            ], new_ptr, new_len
         if isinstance(e, t.StrFromByte):
             label = getattr(self.ir_program, 'byte_table_label', None)
             if label is None:
@@ -637,8 +669,10 @@ class TypedFunctionBuilder:
                 self.ir_program.byte_table_label = label
             value_ir, value = self.value(e.value)
             base, offset, ptr = self.temp(), self.temp(), self.temp()
-            return value_ir + [IRStaticDataAddress(dst=base, label=label), IRCast(dst=offset, src=value),
-                               IRBinOp(dst=ptr, op=BinaryOp.ADD, left=base, right=offset)], ptr, IRConst(1, Type.INT)
+            return value_ir + [
+                IRStaticDataAddress(dst=base, label=label), IRCast(dst=offset, src=value),
+                IRBinOp(dst=ptr, op=BinaryOp.ADD, left=base, right=offset),
+            ], ptr, IRConst(1, Type.INT)
         if isinstance(e, t.EnumName):
             # A static table of the members' names, each a str's (ptr, len), indexed by the value.
             members = self.ir_program.enum_registry[e.value.type.enum_name].members
@@ -655,16 +689,19 @@ class TypedFunctionBuilder:
             base, index, offset, entry = self.temp(), self.temp(Type.INT), self.temp(Type.INT), self.temp()
             read_ir, ptr, length = self.read_str(entry)
             return value_ir + [
-                IRStaticDataAddress(dst=base, label=tables[e.value.type]), IRCast(dst=index, src=value),
+                IRStaticDataAddress(dst=base, label=tables[e.value.type]),
+                IRCast(dst=index, src=value),
                 IRBinOp(dst=offset, op=BinaryOp.MULTIPLY, left=index, right=IRConst(16, Type.INT)),
-                IRBinOp(dst=entry, op=BinaryOp.ADD, left=base, right=offset)] + read_ir, ptr, length
+                IRBinOp(dst=entry, op=BinaryOp.ADD, left=base, right=offset),
+            ] + read_ir, ptr, length
         if isinstance(e, t.StrFromBytes):
             slice_ir, src, length, _ = self.slice_value(e.value)
             size, ptr = self.temp(Type.INT), self.temp()
             return slice_ir + [
                 IRBinOp(dst=size, op=BinaryOp.BITWISE_OR, left=length, right=IRConst(1, Type.INT)),  # never malloc(0)
                 IRCall(dst=ptr, name='malloc', args=[size]),
-                IRCall(dst=None, name='memcpy', args=[ptr, src, length])], ptr, length
+                IRCall(dst=None, name='memcpy', args=[ptr, src, length]),
+            ], ptr, length
         if isinstance(e, t.StrFromRawParts):
             ptr_ir, ptr = self.value(e.ptr)
             len_ir, length = self.value(e.length)
@@ -688,18 +725,24 @@ class TypedFunctionBuilder:
             ir += high_ir
         else:
             high = length
-        return ir + [IRSliceBoundsCheck(value=low, bound=limit, where=e.where),
-                     IRSliceBoundsCheck(value=high, bound=limit, where=e.where),
-                     IRSliceBoundsCheck(value=low, bound=high, where=e.where)], low, high
+        return ir + [
+            IRSliceBoundsCheck(value=low, bound=limit, where=e.where),
+            IRSliceBoundsCheck(value=high, bound=limit, where=e.where),
+            IRSliceBoundsCheck(value=low, bound=high, where=e.where)
+        ], low, high
 
     # -- slices: (ptr, len, cap)
 
     def write_slice(self, dst, ptr, length, cap) -> list:
         len_ir, len_address = self.offset(dst, 8)
         cap_ir, cap_address = self.offset(dst, 16)
-        return [IRStore(address=dst, value=ptr, value_type=Type.INT64)] + len_ir + [
-            IRStore(address=len_address, value=length, value_type=Type.INT)] + cap_ir + [
-            IRStore(address=cap_address, value=cap, value_type=Type.INT)]
+        return [
+            IRStore(address=dst, value=ptr, value_type=Type.INT64)
+        ] + len_ir + [
+            IRStore(address=len_address, value=length, value_type=Type.INT)
+        ] + cap_ir + [
+            IRStore(address=cap_address, value=cap, value_type=Type.INT)
+        ]
 
     def slice_value(self, e) -> tuple:
         if isinstance(e, t.EmptySlice):
@@ -719,20 +762,25 @@ class TypedFunctionBuilder:
                     ir, ptr = self.address(e.base)
                 else:  # a temporary array: the slice may outlive this statement, so its storage is on the heap
                     ptr = self.temp()
-                    ir = [IRCall(dst=ptr, name='malloc', args=[IRConst(self.width(e.base.type), Type.INT64)])] + \
-                        self.write_into(ptr, e.base)
+                    ir = [
+                             IRCall(dst=ptr, name='malloc', args=[IRConst(self.width(e.base.type), Type.INT64)])
+                         ] + self.write_into(ptr, e.base)
                 length = cap = IRConst(e.base.type.size, Type.INT)
             else:
                 ir, ptr, length, cap = self.slice_value(e.base)
             # A slice may extend up to the capacity, as in Go.
             bounds_ir, low, high = self.bounds(e, length, cap)
             width = self.width(e.type.element_type)
-            scaled, new_ptr, new_len, new_cap = self.temp(Type.INT), self.temp(), self.temp(Type.INT), self.temp(Type.INT)
+            scaled = self.temp(Type.INT)
+            new_ptr = self.temp()
+            new_len = self.temp(Type.INT)
+            new_cap = self.temp(Type.INT)
             return ir + bounds_ir + [
                 IRBinOp(dst=scaled, op=BinaryOp.MULTIPLY, left=low, right=IRConst(width, Type.INT)),
                 IRBinOp(dst=new_ptr, op=BinaryOp.ADD, left=ptr, right=scaled),
                 IRBinOp(dst=new_len, op=BinaryOp.SUBTRACT, left=high, right=low),
-                IRBinOp(dst=new_cap, op=BinaryOp.SUBTRACT, left=cap, right=low)], new_ptr, new_len, new_cap
+                IRBinOp(dst=new_cap, op=BinaryOp.SUBTRACT, left=cap, right=low),
+            ], new_ptr, new_len, new_cap
         if isinstance(e, t.Append):
             return self.append(e)
         if isinstance(e, t.BytesFromStr):
@@ -745,8 +793,9 @@ class TypedFunctionBuilder:
         ptr, length, cap = self.temp(), self.temp(Type.INT), self.temp(Type.INT)
         len_ir, len_address = self.offset(address, 8)
         cap_ir, cap_address = self.offset(address, 16)
-        return ir + [IRLoad(dst=ptr, address=address)] + len_ir + [IRLoad(dst=length, address=len_address)] + \
-            cap_ir + [IRLoad(dst=cap, address=cap_address)], ptr, length, cap
+        return ir + [IRLoad(dst=ptr, address=address)] + len_ir + [
+            IRLoad(dst=length, address=len_address)
+        ] + cap_ir + [IRLoad(dst=cap, address=cap_address)], ptr, length, cap
 
     # -- scalar values
 
@@ -809,9 +858,11 @@ class TypedFunctionBuilder:
             ir, ptr, length = self.str_value(e.base)
             index_ir, index = self.value(e.index)
             address, loaded = self.temp(), self.temp(Type.UINT8)
-            return ir + index_ir + [IRBoundsCheck(index=index, length=length, where=e.where),
-                                    IRBinOp(dst=address, op=BinaryOp.ADD, left=ptr, right=index),
-                                    IRLoad(dst=loaded, address=address)], loaded
+            return ir + index_ir + [
+                IRBoundsCheck(index=index, length=length, where=e.where),
+                IRBinOp(dst=address, op=BinaryOp.ADD, left=ptr, right=index),
+                IRLoad(dst=loaded, address=address)
+            ], loaded
         if isinstance(e, t.Len):
             kind = e.value.type.kind
             if kind == TypeKind.ARRAY:
@@ -831,8 +882,10 @@ class TypedFunctionBuilder:
             ir, address = self.address(e.sum)
             tag, result = self.temp(Type.INT32), self.temp(Type.BOOL)
             index = self.ir_program.sum_type_registry[e.sum.type.sum_type_name].variants.index(e.variant)
-            return ir + [IRLoad(dst=tag, address=address),
-                         IRBinOp(dst=result, op=BinaryOp.EQUAL, left=tag, right=IRConst(index, Type.INT32))], result
+            return ir + [
+                IRLoad(dst=tag, address=address),
+                IRBinOp(dst=result, op=BinaryOp.EQUAL, left=tag, right=IRConst(index, Type.INT32))
+            ], result
         if isinstance(e, t.StrCompare):
             return self.str_compare(e)
         if isinstance(e, t.AddressOf):
@@ -883,17 +936,27 @@ class TypedFunctionBuilder:
             IRBranch(cond=same_length, true_label=equal_len, false_label=differ),
             IRLabel(equal_len),
             IRCall(dst=cmp, name='memcmp', args=[left_ptr, right_ptr, left_len]),
-            IRBinOp(dst=result, op=e.op, left=cmp, right=IRConst(0, Type.INT32)), IRJump(end),
-            IRLabel(differ), IRMove(dst=result, src=IRConst(0 if e.op == BinaryOp.EQUAL else 1, Type.BOOL)),
-            IRJump(end), IRLabel(end)], result
+            IRBinOp(dst=result, op=e.op, left=cmp, right=IRConst(0, Type.INT32)),
+            IRJump(end),
+            IRLabel(differ),
+            IRMove(dst=result, src=IRConst(0 if e.op == BinaryOp.EQUAL else 1, Type.BOOL)),
+            IRJump(end),
+            IRLabel(end)
+        ], result
 
     def short_circuit(self, e: t.Binary) -> tuple:
         """`and`/`or` as a value: branch on it (see `branch`), then set the result to 1 or 0."""
         yes, no, end = (self.ids.new_label(x) for x in ("logic_true", "logic_false", "logic_end"))
         result = self.temp(Type.BOOL)
         return self.branch(e, yes, no) + [
-            IRLabel(yes), IRMove(dst=result, src=IRConst(1, Type.BOOL)), IRJump(end),
-            IRLabel(no), IRMove(dst=result, src=IRConst(0, Type.BOOL)), IRJump(end), IRLabel(end)], result
+            IRLabel(yes),
+            IRMove(dst=result, src=IRConst(1, Type.BOOL)),
+            IRJump(end),
+            IRLabel(no),
+            IRMove(dst=result, src=IRConst(0, Type.BOOL)),
+            IRJump(end),
+            IRLabel(end)
+        ], result
 
     def branch(self, e, if_true: str, if_false: str) -> list:
         """Jump to `if_true` or `if_false` on bool `e`, without computing its value where it's made of
@@ -960,9 +1023,12 @@ class TypedFunctionBuilder:
         ir, value = self.value(value_expr)
         wide, negative, too_big = self.temp(Type.INT), self.temp(Type.BOOL), self.temp(Type.BOOL)
         count = len(self.ir_program.enum_registry[enum.enum_name].members)
-        return ir + [IRCast(dst=wide, src=value)], wide, \
-            IRBinOp(dst=negative, op=BinaryOp.LESS_THAN, left=wide, right=IRConst(0, Type.INT)), \
-            IRBinOp(dst=too_big, op=BinaryOp.GREATER_THAN_OR_EQUAL, left=wide, right=IRConst(count, Type.INT))
+        return (
+            ir + [IRCast(dst=wide, src=value)],
+            wide,
+            IRBinOp(dst=negative, op=BinaryOp.LESS_THAN, left=wide, right=IRConst(0, Type.INT)),
+            IRBinOp(dst=too_big, op=BinaryOp.GREATER_THAN_OR_EQUAL, left=wide, right=IRConst(count, Type.INT)),
+        )
 
     def enum_from_int(self, e: t.EnumFromInt) -> tuple:
         ir, wide, negative, too_big = self.enum_range(e.value, e.type)
@@ -972,11 +1038,17 @@ class TypedFunctionBuilder:
 
     def enum_contains(self, e: t.EnumContains) -> tuple:
         ir, _, negative, too_big = self.enum_range(e.value, e.enum)
-        result, check_top, end = self.temp(Type.BOOL), self.ids.new_label("in_enum_top"), self.ids.new_label("in_enum_end")
-        return ir + [negative, IRMove(dst=result, src=IRConst(0, Type.BOOL)),
-                     IRBranch(cond=negative.dst, true_label=end, false_label=check_top), IRLabel(check_top), too_big,
-                     IRBinOp(dst=result, op=BinaryOp.EQUAL, left=too_big.dst, right=IRConst(0, Type.BOOL)),
-                     IRJump(end), IRLabel(end)], result
+        result = self.temp(Type.BOOL)
+        check_top = self.ids.new_label('in_enum_top')
+        end = self.ids.new_label('in_enum_end')
+        return ir + [
+            negative,
+            IRMove(dst=result, src=IRConst(0, Type.BOOL)),
+            IRBranch(cond=negative.dst, true_label=end, false_label=check_top), IRLabel(check_top), too_big,
+            IRBinOp(dst=result, op=BinaryOp.EQUAL, left=too_big.dst, right=IRConst(0, Type.BOOL)),
+            IRJump(end),
+            IRLabel(end)
+        ], result
 
     def never_returned(self, at) -> IRJump:
         """What follows a call that doesn't return: a panic, should it return after all."""
@@ -986,8 +1058,10 @@ class TypedFunctionBuilder:
         """`panic(message)`: the runtime prints this call's position and the message, and aborts."""
         ir, ptr, length = self.str_value(e.message)
         where = self.temp()
-        return ir + [IRStaticDataAddress(dst=where, label=message_label(self.ir_program, e.where or "")),
-                     IRCall(dst=None, name='hornet_panic_at', args=[where, ptr, length]), self.never_returned(e)]
+        return ir + [
+            IRStaticDataAddress(dst=where, label=message_label(self.ir_program, e.where or "")),
+            IRCall(dst=None, name='hornet_panic_at', args=[where, ptr, length]), self.never_returned(e)
+        ]
 
     def print_(self, e: t.Print) -> list:
         value_type = e.value.type
@@ -1001,7 +1075,10 @@ class TypedFunctionBuilder:
             raise NotYetPorted(f"print of {value_type}")
         desc = self.temp()
         label = type_descriptor(self.ir_program, value_type)
-        return ir + [IRStaticDataAddress(dst=desc, label=label), IRCall(dst=None, name='hornet_print', args=[address, desc])]
+        return ir + [
+            IRStaticDataAddress(dst=desc, label=label),
+            IRCall(dst=None, name='hornet_print', args=[address, desc])
+        ]
 
     # -- loops
 
@@ -1016,13 +1093,18 @@ class TypedFunctionBuilder:
         ir = [IRCall(dst=box, name='malloc', args=[IRConst(self.width(symbol.type), Type.INT64)])]
         if _scalar(symbol.type):
             current = self.temp(symbol.type)
-            return ir + [IRLoad(dst=current, address=temp), IRStore(address=box, value=current, value_type=symbol.type),
-                         IRMove(dst=temp, src=box)]
+            return ir + [
+                IRLoad(dst=current, address=temp),
+                IRStore(address=box, value=current, value_type=symbol.type),
+                IRMove(dst=temp, src=box)
+            ]
         old_ir, old = self.local_address(symbol)
         slot_address = self.temp()
-        return ir + old_ir + [IRCopy(dst_address=box, src_address=old, value_type=symbol.type),
-                              IRLocalAddress(dst=slot_address, slot=self.ir_fn.var_slots[symbol.id]),
-                              IRStore(address=slot_address, value=box, value_type=Type.INT64)]
+        return ir + old_ir + [
+            IRCopy(dst_address=box, src_address=old, value_type=symbol.type),
+            IRLocalAddress(dst=slot_address, slot=self.ir_fn.var_slots[symbol.id]),
+            IRStore(address=slot_address, value=box, value_type=Type.INT64)
+        ]
 
     def bind_from(self, symbol, address) -> list:
         """A for-in binding's value for this iteration: a copy of what is at `address`, in new storage
@@ -1038,8 +1120,10 @@ class TypedFunctionBuilder:
     def panic_when(self, cond, message: str, at) -> list:
         """Panic with `message`, reported at typed node `at`, when `cond` holds."""
         ok = self.ids.new_label("check_ok")
-        return [IRBranch(cond=cond, true_label=self.panics.label(located(message, at.where)), false_label=ok),
-                IRLabel(ok)]
+        return [
+            IRBranch(cond=cond, true_label=self.panics.label(located(message, at.where)), false_label=ok),
+            IRLabel(ok)
+        ]
 
     def panic_when_zero(self, value, message: str, at) -> list:
         """panic_when for a runtime call's result: a null address or a zero count."""
@@ -1050,7 +1134,10 @@ class TypedFunctionBuilder:
     def for_in(self, s: t.ForIn) -> list:
         if s.kind == 'dict':
             return self.for_in_dict(s)
-        start, body, step, end = (self.ids.new_label(x) for x in ("for_in_start", "for_in_body", "for_in_next", "for_in_end"))
+        start = self.ids.new_label('for_in_start')
+        body = self.ids.new_label('for_in_body')
+        step = self.ids.new_label('for_in_step')
+        end = self.ids.new_label('for_in_end')
         recheck = None  # (descriptor address, pointer at the start): a slice reallocated during the loop panics
         if s.kind == 'str':
             ir, base, length = self.str_value(s.iterable)
@@ -1073,7 +1160,10 @@ class TypedFunctionBuilder:
                IRBranch(cond=more, true_label=body, false_label=end), IRLabel(body)]
         if recheck is not None:
             now, moved = self.temp(), self.temp(Type.BOOL)
-            ir += [IRLoad(dst=now, address=recheck[0]), IRBinOp(dst=moved, op=BinaryOp.NOT_EQUAL, left=now, right=recheck[1])]
+            ir += [
+                IRLoad(dst=now, address=recheck[0]),
+                IRBinOp(dst=moved, op=BinaryOp.NOT_EQUAL, left=now, right=recheck[1]),
+            ]
             ir += self.panic_when(moved, "for ... in: slice was reallocated (e.g. by append) during iteration", s)
         element_ir, element = self.element(base, i, element_type)
         ir += element_ir
@@ -1084,8 +1174,13 @@ class TypedFunctionBuilder:
         self.loops.append((step, end))
         ir += self.block(s.body)
         self.loops.pop()
-        return ir + [IRJump(step), IRLabel(step), IRBinOp(dst=i, op=BinaryOp.ADD, left=i, right=IRConst(1, Type.INT)),
-                     IRJump(start), IRLabel(end)]
+        return ir + [
+            IRJump(step),
+            IRLabel(step),
+            IRBinOp(dst=i, op=BinaryOp.ADD, left=i, right=IRConst(1, Type.INT)),
+            IRJump(start),
+            IRLabel(end)
+        ]
 
     def for_in_dict(self, s: t.ForIn) -> list:
         """Scan every bucket; a dict whose buckets are reallocated during the loop panics."""
@@ -1099,17 +1194,23 @@ class TypedFunctionBuilder:
                                          ("for_in_start", "for_in_body", "for_in_entry", "for_in_next", "for_in_end"))
         i, more, now, moved = self.temp(), self.temp(Type.BOOL), self.temp(), self.temp(Type.BOOL)
         scaled, bucket, state, occupied = self.temp(), self.temp(), self.temp(Type.UINT8), self.temp(Type.BOOL)
-        ir += [IRMove(dst=i, src=IRConst(0, Type.INT64)), IRJump(start), IRLabel(start),
-               IRBinOp(dst=more, op=BinaryOp.LESS_THAN, left=i, right=capacity),
-               IRBranch(cond=more, true_label=body, false_label=end), IRLabel(body),
-               IRLoad(dst=now, address=header), IRBinOp(dst=moved, op=BinaryOp.NOT_EQUAL, left=now, right=buckets)]
+        ir += [
+            IRMove(dst=i, src=IRConst(0, Type.INT64)), IRJump(start), IRLabel(start),
+            IRBinOp(dst=more, op=BinaryOp.LESS_THAN, left=i, right=capacity),
+            IRBranch(cond=more, true_label=body, false_label=end), IRLabel(body),
+            IRLoad(dst=now, address=header),
+            IRBinOp(dst=moved, op=BinaryOp.NOT_EQUAL, left=now, right=buckets),
+        ]
         ir += self.panic_when(moved, "for ... in: dict's own buckets were reallocated (e.g. by an insert that "
                                      "triggered growth) during iteration", s)
-        ir += [IRBinOp(dst=scaled, op=BinaryOp.MULTIPLY, left=i, right=IRConst(1 + key_width + value_width, Type.INT64)),
-               IRBinOp(dst=bucket, op=BinaryOp.ADD, left=buckets, right=scaled),
-               IRLoad(dst=state, address=bucket),
-               IRBinOp(dst=occupied, op=BinaryOp.EQUAL, left=state, right=IRConst(_DICT_BUCKET_OCCUPIED, Type.UINT8)),
-               IRBranch(cond=occupied, true_label=entry, false_label=step), IRLabel(entry)]
+        ir += [
+            IRBinOp(dst=scaled, op=BinaryOp.MULTIPLY, left=i, right=IRConst(1 + key_width + value_width, Type.INT64)),
+            IRBinOp(dst=bucket, op=BinaryOp.ADD, left=buckets, right=scaled),
+            IRLoad(dst=state, address=bucket),
+            IRBinOp(dst=occupied, op=BinaryOp.EQUAL, left=state, right=IRConst(_DICT_BUCKET_OCCUPIED, Type.UINT8)),
+            IRBranch(cond=occupied, true_label=entry, false_label=step),
+            IRLabel(entry),
+        ]
         key_ir, key_address = self.offset(bucket, 1)
         ir += key_ir + self.bind_from(s.bindings[0], key_address)
         if len(s.bindings) == 2:
@@ -1118,8 +1219,13 @@ class TypedFunctionBuilder:
         self.loops.append((step, end))
         ir += self.block(s.body)
         self.loops.pop()
-        return ir + [IRJump(step), IRLabel(step), IRBinOp(dst=i, op=BinaryOp.ADD, left=i, right=IRConst(1, Type.INT64)),
-                     IRJump(start), IRLabel(end)]
+        return ir + [
+            IRJump(step),
+            IRLabel(step),
+            IRBinOp(dst=i, op=BinaryOp.ADD, left=i, right=IRConst(1, Type.INT64)),
+            IRJump(start),
+            IRLabel(end),
+        ]
 
     # -- dicts: a dict value is a pointer to its header
 
@@ -1145,8 +1251,9 @@ class TypedFunctionBuilder:
         key_ir, value = self.value(key)
         scratch_ir, key_address = self.scratch_address(dict_type.key_type)
         key_ir += scratch_ir + [IRStore(address=key_address, value=value, value_type=dict_type.key_type)]
-        return ir + key_ir, (header, [IRConst(self.width(dict_type.key_type), Type.INT64), value_width, key_address],
-                             'scalar')
+        return ir + key_ir, (
+            header, [IRConst(self.width(dict_type.key_type), Type.INT64), value_width, key_address], 'scalar',
+        )
 
     def dict_op(self, entry, operation: str, result_type=None, extra=()) -> tuple:
         header, key_args, kind = entry
@@ -1199,8 +1306,9 @@ class TypedFunctionBuilder:
         ptr, length, cap = self.temp(), self.temp(Type.INT), self.temp(Type.INT)
         len_ir, len_address = self.offset(address, 8)
         cap_ir, cap_address = self.offset(address, 16)
-        return [IRLoad(dst=ptr, address=address)] + len_ir + [IRLoad(dst=length, address=len_address)] + \
-            cap_ir + [IRLoad(dst=cap, address=cap_address)], ptr, length, cap
+        return [IRLoad(dst=ptr, address=address)] + len_ir + [
+            IRLoad(dst=length, address=len_address)
+        ] + cap_ir + [IRLoad(dst=cap, address=cap_address)], ptr, length, cap
 
     def append(self, e: t.Append) -> tuple:
         """Write in place when there is spare capacity; otherwise grow (cap 0 -> 1, doubling below 256,
@@ -1209,34 +1317,52 @@ class TypedFunctionBuilder:
         width = IRConst(self.width(element_type), Type.INT)
         ir, ptr, length, cap = self.slice_value(e.slice)
         out_ptr, out_len, out_cap = self.temp(), self.temp(Type.INT), self.temp(Type.INT)
-        reuse, grow, end = (self.ids.new_label(x) for x in ("append_reuse", "append_grow", "append_end"))
+        reuse = self.ids.new_label('append_reuse')
+        grow = self.ids.new_label('append_grow')
+        end = self.ids.new_label('append_end')
         full, new_len = self.temp(Type.BOOL), self.temp(Type.INT)
-        ir += [IRBinOp(dst=full, op=BinaryOp.GREATER_THAN_OR_EQUAL, left=length, right=cap),
-               IRBinOp(dst=new_len, op=BinaryOp.ADD, left=length, right=IRConst(1, Type.INT)),
-               IRBranch(cond=full, true_label=grow, false_label=reuse)]
+        ir += [
+            IRBinOp(dst=full, op=BinaryOp.GREATER_THAN_OR_EQUAL, left=length, right=cap),
+            IRBinOp(dst=new_len, op=BinaryOp.ADD, left=length, right=IRConst(1, Type.INT)),
+            IRBranch(cond=full, true_label=grow, false_label=reuse),
+        ]
 
         def write_at(base) -> list:
             element_ir, address = self.element(base, length, element_type)
             return element_ir + self.store(address, e.value)
 
-        ir += [IRLabel(reuse)] + write_at(ptr) + [IRMove(dst=out_ptr, src=ptr), IRMove(dst=out_cap, src=cap),
-                                                  IRMove(dst=out_len, src=new_len), IRJump(end)]
-        new_cap, grown, is_zero, is_small, quarter = (self.temp(Type.INT), self.temp(), self.temp(Type.BOOL),
-                                                      self.temp(Type.BOOL), self.temp(Type.INT))
-        zero, nonzero, small, large, ready = (self.ids.new_label(x) for x in
-                                              ("cap_zero", "cap_nonzero", "cap_small", "cap_large", "cap_ready"))
-        ir += [IRLabel(grow),
-               IRBinOp(dst=is_zero, op=BinaryOp.EQUAL, left=cap, right=IRConst(0, Type.INT)),
-               IRBranch(cond=is_zero, true_label=zero, false_label=nonzero),
-               IRLabel(zero), IRMove(dst=new_cap, src=IRConst(1, Type.INT)), IRJump(ready),
-               IRLabel(nonzero), IRBinOp(dst=is_small, op=BinaryOp.LESS_THAN, left=cap, right=IRConst(256, Type.INT)),
-               IRBranch(cond=is_small, true_label=small, false_label=large),
-               IRLabel(small), IRBinOp(dst=new_cap, op=BinaryOp.ADD, left=cap, right=cap), IRJump(ready),
-               IRLabel(large), IRBinOp(dst=quarter, op=BinaryOp.SHIFT_RIGHT, left=cap, right=IRConst(2, Type.INT)),
-               IRBinOp(dst=new_cap, op=BinaryOp.ADD, left=cap, right=quarter), IRJump(ready),
-               IRLabel(ready), IRCall(dst=grown, name='hornet_slice_grow', args=[ptr, length, new_cap, width])]
-        ir += write_at(grown) + [IRMove(dst=out_ptr, src=grown), IRMove(dst=out_cap, src=new_cap),
-                                 IRMove(dst=out_len, src=new_len), IRJump(end), IRLabel(end)]
+        ir += [IRLabel(reuse)] + write_at(ptr) + [
+            IRMove(dst=out_ptr, src=ptr),
+            IRMove(dst=out_cap, src=cap),
+            IRMove(dst=out_len, src=new_len),
+            IRJump(end)
+        ]
+        new_cap, grown, is_zero, is_small, quarter = (
+            self.temp(Type.INT), self.temp(), self.temp(Type.BOOL), self.temp(Type.BOOL), self.temp(Type.INT))
+        zero = self.ids.new_label('cap_zero')
+        nonzero = self.ids.new_label('cap_nonzero')
+        small = self.ids.new_label('cap_small')
+        large = self.ids.new_label('cap_large')
+        ready = self.ids.new_label('cap_ready')
+        ir += [
+            IRLabel(grow),
+            IRBinOp(dst=is_zero, op=BinaryOp.EQUAL, left=cap, right=IRConst(0, Type.INT)),
+            IRBranch(cond=is_zero, true_label=zero, false_label=nonzero),
+            IRLabel(zero), IRMove(dst=new_cap, src=IRConst(1, Type.INT)), IRJump(ready),
+            IRLabel(nonzero), IRBinOp(dst=is_small, op=BinaryOp.LESS_THAN, left=cap, right=IRConst(256, Type.INT)),
+            IRBranch(cond=is_small, true_label=small, false_label=large),
+            IRLabel(small), IRBinOp(dst=new_cap, op=BinaryOp.ADD, left=cap, right=cap), IRJump(ready),
+            IRLabel(large), IRBinOp(dst=quarter, op=BinaryOp.SHIFT_RIGHT, left=cap, right=IRConst(2, Type.INT)),
+            IRBinOp(dst=new_cap, op=BinaryOp.ADD, left=cap, right=quarter), IRJump(ready),
+            IRLabel(ready), IRCall(dst=grown, name='hornet_slice_grow', args=[ptr, length, new_cap, width]),
+        ]
+        ir += write_at(grown) + [
+            IRMove(dst=out_ptr, src=grown),
+            IRMove(dst=out_cap, src=new_cap),
+            IRMove(dst=out_len, src=new_len),
+            IRJump(end),
+            IRLabel(end)
+        ]
         return ir, out_ptr, out_len, out_cap
 
     # -- comparisons of composites
@@ -1250,8 +1376,13 @@ class TypedFunctionBuilder:
         result = self.temp(Type.BOOL)
         equal = 1 if e.op == BinaryOp.EQUAL else 0
         return left_ir + right_ir + self.equal_or_jump(left, right, e.left.type, mismatch) + [
-            IRMove(dst=result, src=IRConst(equal, Type.BOOL)), IRJump(end),
-            IRLabel(mismatch), IRMove(dst=result, src=IRConst(1 - equal, Type.BOOL)), IRJump(end), IRLabel(end)], result
+            IRMove(dst=result, src=IRConst(equal, Type.BOOL)),
+            IRJump(end),
+            IRLabel(mismatch),
+            IRMove(dst=result, src=IRConst(1 - equal, Type.BOOL)),
+            IRJump(end),
+            IRLabel(end),
+        ], result
 
     def equal_or_jump(self, left, right, type_: Type, mismatch: str) -> list:
         """Fall through if the values at `left` and `right` are equal; jump to `mismatch` if not."""
@@ -1276,17 +1407,23 @@ class TypedFunctionBuilder:
             r_ir, r_ptr, r_len = self.read_str(right)
             same_len, cmp, differs = self.temp(Type.BOOL), self.temp(Type.INT32), self.temp(Type.BOOL)
             lengths_ok = self.ids.new_label("eq_len_same")
-            return l_ir + r_ir + [IRBinOp(dst=same_len, op=BinaryOp.EQUAL, left=l_len, right=r_len),
-                                  IRBranch(cond=same_len, true_label=lengths_ok, false_label=mismatch), IRLabel(lengths_ok),
-                                  IRCall(dst=cmp, name='memcmp', args=[l_ptr, r_ptr, l_len]),
-                                  IRBinOp(dst=differs, op=BinaryOp.NOT_EQUAL, left=cmp, right=IRConst(0, Type.INT32)),
-                                  IRBranch(cond=differs, true_label=mismatch, false_label=same), IRLabel(same)]
+            return l_ir + r_ir + [
+                IRBinOp(dst=same_len, op=BinaryOp.EQUAL, left=l_len, right=r_len),
+                IRBranch(cond=same_len, true_label=lengths_ok, false_label=mismatch), IRLabel(lengths_ok),
+                IRCall(dst=cmp, name='memcmp', args=[l_ptr, r_ptr, l_len]),
+                IRBinOp(dst=differs, op=BinaryOp.NOT_EQUAL, left=cmp, right=IRConst(0, Type.INT32)),
+                IRBranch(cond=differs, true_label=mismatch, false_label=same), IRLabel(same)
+            ]
         if not _scalar(type_):
             raise NotYetPorted(f"equality of {type_}")
         l_value, r_value, differs = self.temp(type_), self.temp(type_), self.temp(Type.BOOL)
-        return [IRLoad(dst=l_value, address=left), IRLoad(dst=r_value, address=right),
-                IRBinOp(dst=differs, op=BinaryOp.NOT_EQUAL, left=l_value, right=r_value),
-                IRBranch(cond=differs, true_label=mismatch, false_label=same), IRLabel(same)]
+        return [
+            IRLoad(dst=l_value, address=left),
+            IRLoad(dst=r_value, address=right),
+            IRBinOp(dst=differs, op=BinaryOp.NOT_EQUAL, left=l_value, right=r_value),
+            IRBranch(cond=differs, true_label=mismatch, false_label=same),
+            IRLabel(same),
+        ]
 
     def element_contains(self, e: t.ElementContains) -> tuple:
         """`x in a`: compare with each element in turn."""
@@ -1300,24 +1437,43 @@ class TypedFunctionBuilder:
             base_ir, base, length, _ = self.slice_value(e.container)
         ir += base_ir
         i, more, result = self.temp(Type.INT), self.temp(Type.BOOL), self.temp(Type.BOOL)
-        start, body, nope, found, end = (self.ids.new_label(x) for x in ("in_start", "in_body", "in_next", "in_found", "in_end"))
+        start = self.ids.new_label('in_start')
+        body = self.ids.new_label('in_body')
+        nope = self.ids.new_label('in_next')
+        found = self.ids.new_label('in_found')
+        end = self.ids.new_label('in_end')
         element_ir, element = self.element(base, i, element_type)
-        return ir + [IRMove(dst=i, src=IRConst(0, Type.INT)), IRJump(start), IRLabel(start),
-                     IRBinOp(dst=more, op=BinaryOp.LESS_THAN, left=i, right=length),
-                     IRBranch(cond=more, true_label=body, false_label=end), IRLabel(body)] + element_ir + \
-            self.equal_or_jump(element, needle, element_type, nope) + [IRJump(found), IRLabel(nope),
-            IRBinOp(dst=i, op=BinaryOp.ADD, left=i, right=IRConst(1, Type.INT)), IRJump(start), IRLabel(found),
-            IRMove(dst=result, src=IRConst(1, Type.BOOL)), IRJump(start + "_done"), IRLabel(end),
-            IRMove(dst=result, src=IRConst(0, Type.BOOL)), IRJump(start + "_done"), IRLabel(start + "_done")], result
+        return ir + [
+            IRMove(dst=i, src=IRConst(0, Type.INT)),
+            IRJump(start),
+            IRLabel(start),
+            IRBinOp(dst=more, op=BinaryOp.LESS_THAN, left=i, right=length),
+            IRBranch(cond=more, true_label=body, false_label=end),
+            IRLabel(body),
+        ] + element_ir + self.equal_or_jump(element, needle, element_type, nope) + [
+            IRJump(found),
+            IRLabel(nope),
+            IRBinOp(dst=i, op=BinaryOp.ADD, left=i, right=IRConst(1, Type.INT)),
+            IRJump(start),
+            IRLabel(found),
+            IRMove(dst=result, src=IRConst(1, Type.BOOL)),
+            IRJump(start + "_done"),
+            IRLabel(end),
+            IRMove(dst=result, src=IRConst(0, Type.BOOL)),
+            IRJump(start + "_done"),
+            IRLabel(start + "_done"),
+        ], result
 
     def concat(self, left_ptr, left_len, right_ptr, right_len) -> tuple:
         """A new string holding both: (ir, ptr, len)."""
         total, buffer, right_dst = self.temp(Type.INT), self.temp(), self.temp()
-        return [IRBinOp(dst=total, op=BinaryOp.ADD, left=left_len, right=right_len),
-                IRCall(dst=buffer, name='malloc', args=[total]),
-                IRCall(dst=None, name='memcpy', args=[buffer, left_ptr, left_len]),
-                IRBinOp(dst=right_dst, op=BinaryOp.ADD, left=buffer, right=left_len),
-                IRCall(dst=None, name='memcpy', args=[right_dst, right_ptr, right_len])], buffer, total
+        return [
+            IRBinOp(dst=total, op=BinaryOp.ADD, left=left_len, right=right_len),
+            IRCall(dst=buffer, name='malloc', args=[total]),
+            IRCall(dst=None, name='memcpy', args=[buffer, left_ptr, left_len]),
+            IRBinOp(dst=right_dst, op=BinaryOp.ADD, left=buffer, right=left_len),
+            IRCall(dst=None, name='memcpy', args=[right_dst, right_ptr, right_len])
+        ], buffer, total
 
     def compound_assign_dict_entry(self, s: t.CompoundAssign) -> list:
         """`d[k] op= v` where evaluating `v` may change `d`: `d` and `k` once, read the entry, evaluate
@@ -1340,5 +1496,6 @@ class TypedFunctionBuilder:
             value_ir, value = self.value(s.value)
             ir += [IRLoad(dst=current, address=address)] + value_ir + [
                 IRBinOp(dst=result, op=s.op, left=current, right=value, where=s.where),
-                IRStore(address=result_address, value=result, value_type=target.type)]
+                IRStore(address=result_address, value=result, value_type=target.type),
+            ]
         return ir + self.dict_op(entry, 'set', extra=(result_address,))[0]

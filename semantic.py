@@ -389,7 +389,8 @@ class SemanticAnalyzer:
         self.loop_depth = 0  # enclosing loop count
         self.functions: Dict[str, tuple] = {}  # name -> (param types, return type)
         self.structs: Dict[str, StructInfo] = {}
-        self.methods: Dict[Tuple[str, str], Tuple[List[Type], Type, str]] = {}  # (struct, method) -> (param types, return type, mangled name)
+        # (struct, method) -> (param types, return type, mangled name)
+        self.methods: Dict[Tuple[str, str], Tuple[List[Type], Type, str]] = {}
         self.pointer_receivers: set = set()  # (struct, method) with a `*receiver`
         self.type_aliases: Dict[str, Type] = {}
         self.sum_types: Dict[str, SumTypeInfo] = {}
@@ -634,7 +635,8 @@ class SemanticAnalyzer:
             names: List[str] = []
             for member in ed.members:
                 if member.name in names:
-                    raise SemanticError(f"Member '{member.name}' is already declared in enum '{shown(ed.name)}'", member)
+                    raise SemanticError(
+                        f"Member '{member.name}' is already declared in enum '{shown(ed.name)}'", member)
                 names.append(member.name)
             registry[ed.name] = EnumInfo(name=ed.name, members=names)
         return registry
@@ -744,7 +746,8 @@ class SemanticAnalyzer:
         raise SemanticError(
             "A constant's value must be built from literals, other constants, operators, and integer casts", expr)
 
-    def _resolve_sum_types(self, sum_type_defs: List[SumTypeDef], structs: Dict[str, StructInfo]) -> Dict[str, SumTypeInfo]:
+    def _resolve_sum_types(
+            self, sum_type_defs: List[SumTypeDef], structs: Dict[str, StructInfo]) -> Dict[str, SumTypeInfo]:
         """Resolve sum type variants and check name collisions."""
         registry: Dict[str, SumTypeInfo] = {}
         sum_names = {std.name: None for std in sum_type_defs}
@@ -2235,7 +2238,9 @@ class SemanticAnalyzer:
         literal = self._as_folded_int_literal(expr.args[0])
         if literal is not None and not 0 <= literal < len(members):
             raise SemanticError(
-                f"{literal} is not a member of {shown(enum)} (its members' values are 0 to {len(members) - 1})", expr.args[0])
+                f"{literal} is not a member of {shown(enum)} (its members' values are 0 to {len(members) - 1})",
+                expr.args[0]
+            )
         self._record_call(expr, enum)
         return Type(TypeKind.ENUM, enum_name=enum)
 
@@ -2587,7 +2592,10 @@ class SemanticAnalyzer:
                 return Type.BOOL
 
             # Slice, sum, and dict equality is undefined.
-            if left_type.kind in (TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE, TypeKind.SUM, TypeKind.DICT) or right_type.kind in (TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE, TypeKind.SUM, TypeKind.DICT):
+            if (
+                    left_type.kind in (TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE, TypeKind.SUM, TypeKind.DICT)
+                    or right_type.kind in (TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE, TypeKind.SUM, TypeKind.DICT)
+            ):
                 raise SemanticError(
                     f"'{op.symbol()}' does not support slice, void, sum "
                     f"type, dict, or none operands, except comparing a "

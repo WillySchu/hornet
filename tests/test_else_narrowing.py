@@ -196,10 +196,20 @@ def test_bindings_none_and_checks_of_a_narrowed_variable():
     # Assigning to a narrowed variable ends the narrowing.
     ("def int f(Shape s):\n    if s is Circle:\n        return 1\n    s = Square(2)\n    return s.side\n",
      "Cannot access field 'side' on non-struct type Shape"),
-    ("def int f(Shape s):\n    if s is Circle:\n        return 1\n    else:\n        s = Square(2)\n    return s.side\n",
+    ("def int f(Shape s):\n"
+     "    if s is Circle:\n"
+     "        return 1\n"
+     "    else:\n"
+     "        s = Square(2)\n"
+     "    return s.side\n",
      "Cannot access field 'side' on non-struct type Shape"),
     # A guard doesn't make room for a second declaration in the same scope.
-    ("def int f():\n    Shape s = Circle(1)\n    if s is Circle:\n        return 1\n    Shape s = Square(2)\n    return 0\n",
+    ("def int f():\n"
+     "    Shape s = Circle(1)\n"
+     "    if s is Circle:\n"
+     "        return 1\n"
+     "    Shape s = Square(2)\n"
+     "    return 0\n",
      "Variable 's' is already declared in this scope"),
 ])
 def test_what_stays_an_error(body, match):

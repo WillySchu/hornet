@@ -168,7 +168,13 @@ static void test_str(void) {
     } embedded_null_value = {"hello\0world", 11};
     s = stringify_to_cstr(&embedded_null_value, desc, 0);
     if (memcmp(s, "hello\0world", 11) != 0 || strlen(s) != 5) {
-        fprintf(stderr, "FAIL %s:%d: expected 11 bytes 'hello\\0world', got %zu bytes\n", __FILE__, __LINE__, strlen(s));
+        fprintf(
+            stderr,
+            "FAIL %s:%d: expected 11 bytes 'hello\\0world', got %zu bytes\n",
+            __FILE__,
+            __LINE__,
+            strlen(s)
+        );
         g_failures++;
     }
     free(s);

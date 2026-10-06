@@ -1,4 +1,5 @@
-"""Compile-time evaluation of integer operations, matching runtime semantics (wraparound, truncating division). Used by semantic analysis for constants and by IR constant folding."""
+"""Compile-time evaluation of integer operations, matching runtime semantics (wraparound, truncating division).
+Used by semantic analysis for constants and by IR constant folding."""
 
 from ops import BinaryOp, UnaryOp
 from typesys import Type

@@ -32,7 +32,8 @@ CASES = [
     # Each check reports its own expression.
     ("    [3]int a = [1, 2, 3]\n    [3]int b = [1, 2, 3]\n    int i = 5\n    return a[0] + b[i]\n",
      "12:19: array index out of bounds"),
-    ("    [3]int a = [1, 2, 3]\n    int i = 5\n    return (a[0] +\n            a[i])\n", "12:13: array index out of bounds"),
+    ("    [3]int a = [1, 2, 3]\n    int i = 5\n    return (a[0] +\n            a[i])\n",
+     "12:13: array index out of bounds"),
     ("    []int xs = [1, 2, 3]\n    int n = 9\n    []int t = xs[1:n]\n    return len(t)\n",
      "11:15: slice bounds out of range"),
     ("    *int p = none\n    return *p\n", "10:12: dereference of none"),

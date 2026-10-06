@@ -148,8 +148,11 @@ def test_converting_an_integer_that_is_no_member_panics(value):
 
 
 def test_a_literal_converts_at_compile_time():
-    tree = dump(analyze(_parse(DECLS + "def int main():\n    int n = 1\n    Color a = Color(2)\n    Color b = Color(n)\n"
-                               "    return len(Color)\n")))
+    tree = dump(analyze(_parse(DECLS + "def int main():\n"
+                                       "    int n = 1\n"
+                                       "    Color a = Color(2)\n"
+                                       "    Color b = Color(n)\n"
+                                       "    return len(Color)\n")))
     assert "EnumMember name=Blue index=2 : Color" in tree  # Color(2)
     assert tree.count("EnumFromInt") == 1  # Color(n)
     assert "IntLit value=3 : int" in tree  # len(Color)
@@ -284,6 +287,7 @@ def test_enums_across_modules(tmp_path):
     build_executable(str(tmp_path / "main.ht"), str(tmp_path / "out"))
     result = run_binary(default_target(), [tmp_path / "out"], capture_output=True, text=True)
     assert (result.returncode, result.stdout) == (2, "Color.Red\ntrue\ndict[Color]int{Color.Red: 4}\n")
-    (tmp_path / "hidden.ht").write_text("import 'palette'\n\ndef int main():\n    print(palette._Hidden.A)\n    return 0\n")
+    (tmp_path / "hidden.ht").write_text(
+        "import 'palette'\n\ndef int main():\n    print(palette._Hidden.A)\n    return 0\n")
     with pytest.raises(Exception, match="not visible outside the module"):
         build_executable(str(tmp_path / "hidden.ht"), str(tmp_path / "out2"))

@@ -73,7 +73,17 @@ def int _assign_levels([]Line lines):
     return -1
 
 def bool _is_type_keyword(str w):
-    return w == 'int' or w == 'int8' or w == 'uint8' or w == 'int32' or w == 'int64' or w == 'byte' or w == 'str' or w == 'bool' or w == 'dict'
+    return (
+        w == 'int'
+        or w == 'int8'
+        or w == 'uint8'
+        or w == 'int32'
+        or w == 'int64'
+        or w == 'byte'
+        or w == 'str'
+        or w == 'bool'
+        or w == 'dict'
+    )
 
 def bool _is_opener(Token t):
     return t.kind == TokenKind.Op and (t.text == '(' or t.text == '[' or t.text == '{')
@@ -120,7 +130,12 @@ type State struct:
         return s.brackets[len(s.brackets) - 1]
 
 def bool _ends_value(Token t, bool closed_type_bracket):
-    if t.kind == TokenKind.Ident or t.kind == TokenKind.Number or t.kind == TokenKind.String or t.kind == TokenKind.Byte:
+    if (
+        t.kind == TokenKind.Ident
+        or t.kind == TokenKind.Number
+        or t.kind == TokenKind.String
+        or t.kind == TokenKind.Byte
+    ):
         return true
     if t.kind == TokenKind.Keyword:
         return t.text == 'true' or t.text == 'false' or t.text == 'none'
@@ -156,7 +171,12 @@ def bool _star_multiplies([]Token toks, int i, State s):
     if s.chain_groups >= 2 and not s.chain_empty:
         return true
     int k = i + 2
-    if k + 1 < len(toks) and toks[k].kind == TokenKind.Op and toks[k].text == '.' and toks[k + 1].kind == TokenKind.Ident:
+    if (
+        k + 1 < len(toks)
+        and toks[k].kind == TokenKind.Op
+        and toks[k].text == '.'
+        and toks[k + 1].kind == TokenKind.Ident
+    ):
         k += 2
     return not (k < len(toks) and toks[k].kind == TokenKind.Op and toks[k].text == '[')  # a literal's elements
 
@@ -184,7 +204,11 @@ def bool _space_before(Token cur, bool cur_unary, State s):
     if cur.kind == TokenKind.Op and (ct == '(' or ct == '[' or ct == '{'):
         if s.type_decl and s.count == 2:
             return true  # `type Name [3]int`
-        if p.kind == TokenKind.Ident or p.kind == TokenKind.String or (p.kind == TokenKind.Op and (pt == ')' or pt == ']')):
+        if (
+            p.kind == TokenKind.Ident
+            or p.kind == TokenKind.String
+            or (p.kind == TokenKind.Op and (pt == ')' or pt == ']'))
+        ):
             return false
         return not (p.kind == TokenKind.Keyword and _is_type_keyword(pt))
     if p.kind == TokenKind.Op and pt == ']' and s.closed_type_bracket and (_is_word(cur) or cur_unary):
@@ -197,7 +221,10 @@ def bool _declaration_position(State s):
     if s.count == 0 or s.type_decl:
         return true
     Token p = s.prev
-    if p.kind == TokenKind.Keyword and (p.text == 'def' or p.text == 'extern' or p.text == 'intrinsic' or p.text == 'for'):
+    if (
+        p.kind == TokenKind.Keyword
+        and (p.text == 'def' or p.text == 'extern' or p.text == 'intrinsic' or p.text == 'for')
+    ):
         return true
     return s.decl_header and len(s.brackets) == 1 and p.kind == TokenKind.Op and (p.text == '(' or p.text == ',')
 
@@ -226,7 +253,9 @@ def _advance(*State s, Token cur, bool cur_unary):
     s.has_prev = true
     s.count += 1
     if s.count == 1:
-        s.decl_header = cur.kind == TokenKind.Keyword and (cur.text == 'def' or cur.text == 'extern' or cur.text == 'intrinsic')
+        s.decl_header = (
+            cur.kind == TokenKind.Keyword and (cur.text == 'def' or cur.text == 'extern' or cur.text == 'intrinsic')
+        )
         s.type_decl = cur.kind == TokenKind.Keyword and cur.text == 'type'
     elif s.count == 2 and s.type_decl:
         s.prev_value = false  # `type Name []int`: a type follows the name
@@ -257,7 +286,8 @@ type Out struct:
 
 def []Out _format_lines([]Line lines):
     []Out outs
-    State s = State(false, Token(TokenKind.Eof, '', 0, 0, 0), false, false, [], [], false, 0, false, false, 0, false, false)
+    State s = State(
+        false, Token(TokenKind.Eof, '', 0, 0, 0), false, false, [], [], false, 0, false, false, 0, false, false)
     int statement_level = 0
     for l in lines:
         if l.blank:

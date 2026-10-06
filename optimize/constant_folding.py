@@ -1,4 +1,5 @@
-"""Constant folding: IRBinOp/IRUnOp/IRCast with all-constant operands -> IRMove. Results match runtime semantics (wraparound, truncating division)."""
+"""Constant folding: IRBinOp/IRUnOp/IRCast with all-constant operands -> IRMove.
+Results match runtime semantics (wraparound, truncating division)."""
 
 from folding import fold_binary_op, fold_cast, fold_unary_op  # noqa: F401 (re-exported)
 from ir.ir import IRBinOp, IRCast, IRConst, IRFunction, IRMove, IRUnOp

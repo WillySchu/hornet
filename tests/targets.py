@@ -37,8 +37,10 @@ def _keep_a_wine_server_running() -> None:
     if not prefix:  # no Windows target here, or Windows itself
         return
     wine = Path(shutil.which(prefix[-1]))
-    server = next((str(path) for path in (wine.with_name('wineserver64'), wine.with_name('wineserver')) if path.exists()),
-                  shutil.which('wineserver'))
+    server = next(
+        (str(path) for path in (wine.with_name('wineserver64'), wine.with_name('wineserver')) if path.exists()),
+        shutil.which('wineserver')
+    )
     if server is None:
         return
     detached = dict(env={**os.environ, 'WINEDEBUG': '-all'}, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -63,8 +65,13 @@ def run_binary(target: Target, argv: list, **kwargs) -> subprocess.CompletedProc
     if prefix and isinstance(result.stderr, str):
         result.stderr = ''.join(line for line in result.stderr.splitlines(keepends=True)
                                 if not line.startswith('qemu: uncaught target signal'))
-    if target.os == 'windows' and result.returncode == WINDOWS_ABORT_EXIT_CODE \
-            and b'panic: ' in (result.stderr.encode('latin-1') if isinstance(result.stderr, str) else result.stderr or b''):
+    if (
+            target.os == 'windows'
+            and result.returncode == WINDOWS_ABORT_EXIT_CODE
+            and b'panic: ' in (
+                result.stderr.encode('latin-1') if isinstance(result.stderr, str) else result.stderr or b''
+            )
+    ):
         result.returncode = -signal.SIGABRT
     return result
 

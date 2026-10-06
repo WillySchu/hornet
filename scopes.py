@@ -242,7 +242,8 @@ def _signatures_match(decl, expected: Tuple[object, List[object]]) -> bool:
         return False
     if len(decl.params) != len(expected_params):
         return False
-    return all(_canonical_type_spelling(p.type) == _canonical_type_spelling(e) for p, e in zip(decl.params, expected_params))
+    return all(
+        _canonical_type_spelling(p.type) == _canonical_type_spelling(e) for p, e in zip(decl.params, expected_params))
 
 
 def _validate_intrinsics(program: Program) -> None:

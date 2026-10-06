@@ -49,7 +49,14 @@ TYPES = {
 
 
 def _holder(k: str) -> str:
-    vals = {'a': '[1, 2]', 's': '[]int[1, 2]', 'p': 'P(1, []int[2])', 'd': 'dict[int]int{1: 2}', 't': "'ab'", 'u': 'C(1)'}
+    vals = {
+        'a': '[1, 2]',
+        's': '[]int[1, 2]',
+        'p': 'P(1, []int[2])',
+        'd': 'dict[int]int{1: 2}',
+        't': "'ab'",
+        'u': 'C(1)',
+    }
     return "H(" + ", ".join(vals[x] for x in 'aspdtu') + ")"
 
 
@@ -85,7 +92,12 @@ def contexts(k: str, expr: str):
     out = [
         ('vardecl', [], [f"{ty} dst = {expr}", "print(dst)"], ['{v}']),
         ('assign', [f"{ty} dst = {lit}"], [f"dst = {expr}", "print(dst)"], ['{v}']),
-        ('field_assign', [f"H h2 = {_holder(k)}"], [f"h2.{field} = {expr}", f"print(h2.{field})"], ['{v}']) if field else None,
+        (
+            'field_assign',
+            [f"H h2 = {_holder(k)}"],
+            [f"h2.{field} = {expr}", f"print(h2.{field})"],
+            ['{v}']
+        ) if field else None,
         ('array_index_assign', [f"[1]{ty} a2 = [{lit}]"], [f"a2[0] = {expr}", "print(a2[0])"], ['{v}']),
         ('slice_index_assign', [f"[]{ty} s2 = []{ty}[{lit}]"], [f"s2[0] = {expr}", "print(s2[0])"], ['{v}']),
         ('deref_assign', [f"{ty} dst = {lit}", f"*{ty} pd = &dst"], [f"*pd = {expr}", "print(dst)"], ['{v}']),

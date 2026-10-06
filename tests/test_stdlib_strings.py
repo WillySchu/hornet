@@ -33,7 +33,8 @@ def test_int_to_str_and_hex_match_python():
 
 @GCC_SKIP
 def test_pad_left():
-    assert _run("print(pad_left('7', 3, \"0\"))\nprint(pad_left('1234', 3, \" \"))\nprint(pad_left('', 2, \"x\"))\nreturn 0") \
+    assert _run(
+        "print(pad_left('7', 3, \"0\"))\nprint(pad_left('1234', 3, \" \"))\nprint(pad_left('', 2, \"x\"))\nreturn 0") \
         == "007\n1234\nxx\n"
 
 

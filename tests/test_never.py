@@ -109,7 +109,8 @@ def test_panic_inside_a_never_function_or_method_reports_that_call():
 @GCC_SKIP
 def test_an_extern_declared_never_that_returns_panics():
     result = compile_and_run("extern never getpid()\ndef int main():\n    getpid()\n    return 0\n")
-    assert (result.returncode, result.stderr) == (-signal.SIGABRT, "program.lang:3:5: panic: a never function returned\n")
+    assert (result.returncode, result.stderr) == (
+        -signal.SIGABRT, "program.lang:3:5: panic: a never function returned\n")
 
 
 @GCC_SKIP

@@ -413,7 +413,6 @@ def test_pointer_aliasing_through_a_struct_field_assign_propagates():
     assert c_decl_id in result
 
 
-
 def _heap_names(source: str, fn_index: int = 0) -> set:
     """Names of the VarDecls (and for-in bindings) in one function that need the heap."""
     ast = parse_and_analyze(source)
@@ -428,7 +427,13 @@ def _heap_names(source: str, fn_index: int = 0) -> set:
     ("for v in [1, 2]:", "        int x = v"),
 ])
 def test_body_declaration_held_outside_its_loop_needs_the_heap(loop, decl):
-    source = f"def int main():\n    []*int ps\n    {loop}\n{decl}\n        ps = append(ps, &x)\n    print(len(ps))\n    return 0\n"
+    source = (f"def int main():\n"
+              f"    []*int ps\n"
+              f"    {loop}\n"
+              f"{decl}\n"
+              f"        ps = append(ps, &x)\n"
+              f"    print(len(ps))\n"
+              f"    return 0\n")
     assert 'x' in _heap_names(source)
 
 
@@ -446,6 +451,12 @@ def test_address_used_only_within_the_iteration_stays_on_the_stack():
 
 
 def test_inner_loop_declaration_held_by_the_outer_loop_body_needs_the_heap():
-    source = ("def int main():\n    for int i = 0; i < 2; i += 1:\n        *int last = none\n"
-              "        for int j = 0; j < 2; j += 1:\n            int x = j\n            last = &x\n        print(*last)\n    return 0\n")
+    source = ("def int main():\n"
+              "    for int i = 0; i < 2; i += 1:\n"
+              "        *int last = none\n"
+              "        for int j = 0; j < 2; j += 1:\n"
+              "            int x = j\n"
+              "            last = &x\n"
+              "        print(*last)\n"
+              "    return 0\n")
     assert _heap_names(source) == {'x'}

@@ -11,8 +11,8 @@ import pytest
 
 from backend.x86_64.assembly_ast import (
     Add, AddQ, And, AndQ, Cdq, Cmp, CmpQ, Cqto, FrameSlot, IDiv, IDivQ, IMul, IMulQ, IMulWide, Imm, Mov, MovQ,
-    MovSXD, MovZX, ShiftImmQ, Neg, NegQ, Not, NotQ, Or, OrQ, Register, SetCC, ShiftLeft, ShiftLeftQ, ShiftRightArithmetic,
-    ShiftRightArithmeticQ, Sub, SubQ, Xor, XorQ,
+    MovSXD, MovZX, ShiftImmQ, Neg, NegQ, Not, NotQ, Or, OrQ, Register, SetCC, ShiftLeft, ShiftLeftQ,
+    ShiftRightArithmetic, ShiftRightArithmeticQ, Sub, SubQ, Xor, XorQ,
 )
 from backend.x86_64.codegen import CodeGenerator
 from backend.x86_64.ir_lowering import InstructionSelector
@@ -209,11 +209,17 @@ def test_direct_selection_matches_model(seed):
     values = {}
     for tid in (1, 2, 3, 4, 9):
         v = _signed(r.getrandbits(bits), bits)
-        if op in (BinaryOp.DIVIDE, BinaryOp.MODULO) and isinstance(instr, IRBinOp) and getattr(instr.right, 'id', None) == tid:
+        if (
+                op in (BinaryOp.DIVIDE, BinaryOp.MODULO)
+                and isinstance(instr, IRBinOp)
+                and getattr(instr.right, 'id', None) == tid
+        ):
             v = r.choice([1, 3, -5, 1000, -2 ** 20]) if tid != getattr(instr.left, 'id', None) else 3
         values[tid] = v
     def home(tid, w):
-        t = Temp(tid, Type.INT if w == 8 else (Type.BOOL if tid == 9 and op is not None and op in OPS[10:] else Type.INT32))
+        t = Temp(
+            tid, Type.INT if w == 8 else (Type.BOOL if tid == 9 and op is not None and op in OPS[10:] else Type.INT32)
+        )
         return sel._loc(t, w)
 
     width = bits // 8

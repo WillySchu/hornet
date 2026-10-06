@@ -48,7 +48,8 @@ def _simulate_mov(instrs: list, bits: int) -> int:
     return value & ((1 << bits) - 1)
 
 
-@pytest.mark.parametrize('value', [0, 1, 65535, 65536, -1, -65536, -65537, 0x123456789ABCDEF0, -(2 ** 63), 2 ** 63 - 1, 0xFFFF0000])
+@pytest.mark.parametrize(
+    'value', [0, 1, 65535, 65536, -1, -65536, -65537, 0x123456789ABCDEF0, -(2 ** 63), 2 ** 63 - 1, 0xFFFF0000])
 @pytest.mark.parametrize('reg', ['x9', 'w9'])
 def test_mov_imm_builds_the_value(value, reg):
     sel = Selector(None, None)
@@ -164,7 +165,8 @@ def test_c_convention_caller_keeps_callee_saved_registers(tmp_path):
     (tmp_path / 'work.s').write_text(compile_to_asm(str(tmp_path / 'work.ht'), 'aarch64-linux'), encoding='latin-1')
     (tmp_path / 'harness.s').write_text(_HARNESS)
     exe = tmp_path / 'abi'
-    subprocess.run(c_compiler(A64) + [str(tmp_path / 'harness.s'), str(tmp_path / 'work.s'), '-o', str(exe)], check=True)
+    subprocess.run(
+        c_compiler(A64) + [str(tmp_path / 'harness.s'), str(tmp_path / 'work.s'), '-o', str(exe)], check=True)
     assert subprocess.run(run_prefix(A64) + [str(exe)]).returncode == _work_model()
 
 
@@ -174,7 +176,8 @@ def test_logical_immediates_match_the_assembler(tmp_path):
     from backend.aarch64.lowering import is_logical_immediate
     r = random.Random(5)
     values = [1, 3, 255, 0xFF00, 0xAAAAAAAAAAAAAAAA, 0x0F0F0F0F0F0F0F0F, 0xFFFFFFFF, 0x8000000000000001, 0x1234, -2]
-    values += [r.getrandbits(64) for _ in range(20)] + [((1 << r.randint(1, 63)) - 1) << r.randint(0, 10) for _ in range(20)]
+    values += [r.getrandbits(64) for _ in range(20)] + [
+        ((1 << r.randint(1, 63)) - 1) << r.randint(0, 10) for _ in range(20)]
     lines, expected = [], []
     for bits, reg in [(64, 'x'), (32, 'w')]:
         for v in values:

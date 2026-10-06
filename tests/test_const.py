@@ -150,8 +150,10 @@ def test_constant_array_sizes():
 
 
 @pytest.mark.parametrize('source,match', [
-    ("def int main():\n    int n = 3\n    [n]int a\n    return 0\n", "Array size must be a constant expression, but 'n' isn't a constant"),
-    ("def int f():\n    return 2\ndef int main():\n    [f()]int a\n    return 0\n", "Array size must be a constant expression, not a call"),
+    ("def int main():\n    int n = 3\n    [n]int a\n    return 0\n",
+     "Array size must be a constant expression, but 'n' isn't a constant"),
+    ("def int f():\n    return 2\ndef int main():\n    [f()]int a\n    return 0\n",
+     "Array size must be a constant expression, not a call"),
     ("const int N = 2 - 5\ndef int main():\n    [N]int a\n    return 0\n", "Array size must be positive, got -3"),
     ("const str N = 'x'\ndef int main():\n    [N]int a\n    return 0\n", "Array size must be an integer, got str"),
     ("const int N = 3\ndef int main():\n    [N]int a = [1, 2]\n    return 0\n", r"declared \[3\]int"),

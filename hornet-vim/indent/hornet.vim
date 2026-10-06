@@ -52,7 +52,8 @@ function! GetHornetIndent() abort
   " line that opened the enclosing construct.
   if curline =~# '^\s*\%(elif\|else\)\>'
         \ || (curline =~# '^\s*is\>' && prevcode !~# '^\s*match\>')
-    let target = s:OpenerIndent(prev, ind, curline =~# '^\s*is\>' ? '^\s*\%(is\|match\)\>' : '^\s*\%(if\|elif\|else\)\>')
+    let target = s:OpenerIndent(
+        prev, ind, curline =~# '^\s*is\>' ? '^\s*\%(is\|match\)\>' : '^\s*\%(if\|elif\|else\)\>')
     if target >= 0
       return target
     endif

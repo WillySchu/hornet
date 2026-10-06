@@ -16,4 +16,5 @@ def lower_to_asm(ir_program, target: Target) -> str:
     if target.arch == 'aarch64':
         from backend.aarch64.codegen import lower_to_asm as lower
         return lower(ir_program, target)
-    raise TargetError(f"no backend for {target.arch} yet (available: {', '.join(IMPLEMENTED_ARCHES + IN_PROGRESS_ARCHES)})")
+    raise TargetError(
+        f"no backend for {target.arch} yet (available: {', '.join(IMPLEMENTED_ARCHES + IN_PROGRESS_ARCHES)})")

@@ -47,6 +47,21 @@ def int main():
             isNil = 1
         []int literalSlice = [i % 8, (i + 1) % 8]
         int sumLiteralSlice = literalSlice[0] + literalSlice[1]
-        total = (total + copy[0] + p.x + s[0] + extracted.y + sliced[0] + fromField + fromIndex + chained + appended + isNil + sumLiteralSlice + sumAppendedPt + directAppendIndexed) % 1000003
+        total = (
+            total
+            + copy[0]
+            + p.x
+            + s[0]
+            + extracted.y
+            + sliced[0]
+            + fromField
+            + fromIndex
+            + chained
+            + appended
+            + isNil
+            + sumLiteralSlice
+            + sumAppendedPt
+            + directAppendIndexed
+        ) % 1000003
         i = i + 1
     return total % 256

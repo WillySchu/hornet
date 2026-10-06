@@ -5,7 +5,22 @@ uses, then slots, then outgoing stack arguments at sp. sp stays 16-byte aligned.
 """
 
 from backend.aarch64.assembly import (
-    AddrOf, AsmFunction, AsmProgram, Call, FrameSlot, Imm, Instr, LabelDef, LabelRef, Mem, Reg, SymPage, SymPageOffset, FP, LR, SP,
+    AddrOf,
+    AsmFunction,
+    AsmProgram,
+    Call,
+    FP,
+    FrameSlot,
+    Imm,
+    Instr,
+    LabelDef,
+    LabelRef,
+    LR,
+    Mem,
+    Reg,
+    SP,
+    SymPage,
+    SymPageOffset,
 )
 from backend.aarch64.calling_convention import ALLOCATABLE_REGISTERS, CALLEE_SAVED_POOL, MAX_REGISTER_ARGS
 from backend.aarch64.emitter import Emitter
@@ -90,7 +105,8 @@ class CodeGenerator:
         body = ir_fn.body
         overflow = max((len(i.args) - MAX_REGISTER_ARGS for i in body if isinstance(i, IRCall)), default=0)
         self.frame.reserve_outgoing(8 * overflow)
-        self.assignment = allocate_registers(body, ALLOCATABLE_REGISTERS, CALLEE_SAVED_POOL, ir_fn.temp_homes, ir_fn.params)
+        self.assignment = allocate_registers(
+            body, ALLOCATABLE_REGISTERS, CALLEE_SAVED_POOL, ir_fn.temp_homes, ir_fn.params)
         if self.allocation_log is not None:
             self.allocation_log.append((body, ir_fn.temp_homes, ir_fn.params, dict(self.assignment)))
         used = set(self.assignment.values())

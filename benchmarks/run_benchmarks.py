@@ -94,7 +94,12 @@ def run_one(ht_path: Path, runs: int = TIMING_RUNS, icount: bool = False, target
         bin_path = Path(tmpdir) / executable_name('program', target)
         asm_path.write_text(asm_text)
 
-        gcc_cmd = c_compiler(target) + [str(asm_path), str(runtime_object(target)), '-o', str(bin_path)] + link_flags(target)
+        gcc_cmd = c_compiler(target) + [
+            str(asm_path),
+            str(runtime_object(target)),
+            '-o',
+            str(bin_path),
+        ] + link_flags(target)
         result = subprocess.run(gcc_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(f"gcc failed to assemble/link {ht_path.name}:\n{result.stderr}")
@@ -182,13 +187,26 @@ def main():
         '--save-baseline', action='store_true',
         help="Overwrite baseline.json with this run's own results, instead of diffing against it.",
     )
-    arg_parser.add_argument('--runs', type=int, default=TIMING_RUNS, help=f'Timing runs per program (default {TIMING_RUNS}; 0 skips timing)')
+    arg_parser.add_argument(
+        '--runs',
+        type=int,
+        default=TIMING_RUNS,
+        help=f'Timing runs per program (default {TIMING_RUNS}; 0 skips timing)',
+    )
     arg_parser.add_argument('--json', type=Path, help='Also write results to this file')
-    arg_parser.add_argument('--icount', action='store_true', help='Count executed instructions with valgrind (slow, deterministic)')
+    arg_parser.add_argument(
+        '--icount',
+        action='store_true',
+        help='Count executed instructions with valgrind (slow, deterministic)',
+    )
     arg_parser.add_argument('--compare', type=Path, help='Diff against this results file instead of baseline.json')
-    arg_parser.add_argument('--target', choices=TARGET_NAMES, default=str(default_target()),
-                            help=f'Target to build and run for (default: {default_target()}); foreign '
-                                 'architectures run under qemu-user, so their times are not comparable')
+    arg_parser.add_argument(
+        '--target',
+        choices=TARGET_NAMES,
+        default=str(default_target()),
+        help=f'Target to build and run for (default: {default_target()}); foreign '
+             'architectures run under qemu-user, so their times are not comparable'
+    )
     arg_parser.add_argument('programs', nargs='*', help='Benchmark names to run (default: all)')
     args = arg_parser.parse_args()
     target = Target.parse(args.target)

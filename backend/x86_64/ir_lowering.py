@@ -502,13 +502,16 @@ class InstructionSelector:
         if width is not None:
             d = self._loc(dst, width)
             if index < in_registers:
-                return self._mov(Register((abi.arg_registers_64 if width == 8 else abi.arg_registers_32)[index]), d, width)
+                return self._mov(
+                    Register((abi.arg_registers_64 if width == 8 else abi.arg_registers_32)[index]), d, width)
             if isinstance(d, Register):
                 return self._mov(on_stack, d, width)
         wide = is_wide_type(dst.type)
-        src = Register((abi.arg_registers_64 if wide else abi.arg_registers_32)[index]) if index < in_registers else on_stack
-        return [MovQ(src=src, dst=Register('rax')) if wide else Mov(src=src, dst=Register('eax'))] + \
-            self._gen_write_temp_from(Register('eax'), dst)
+        src = Register(
+            (abi.arg_registers_64 if wide else abi.arg_registers_32)[index]) if index < in_registers else on_stack
+        return [
+            MovQ(src=src, dst=Register('rax')) if wide else Mov(src=src, dst=Register('eax'))
+        ] + self._gen_write_temp_from(Register('eax'), dst)
 
     def lower_ir(self, instructions: list) -> list[Instruction]:
         """Lower an IR fragment."""

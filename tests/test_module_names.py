@@ -34,7 +34,8 @@ def _analyze(entry: str):
 ])
 def test_a_module_file_must_be_named_as_an_identifier(tmp_path, import_line):
     entry = _files(tmp_path, my__mod="def int f():\n    return 3\n", main=f"\n{import_line}\n\n" + MAIN)
-    with pytest.raises(ModuleError, match=r"is the file 'my-mod.ht'.*'my-mod' must be an identifier.*rename the file") as e:
+    with pytest.raises(
+            ModuleError, match=r"is the file 'my-mod.ht'.*'my-mod' must be an identifier.*rename the file") as e:
         discover_modules(entry)
     assert (e.value.file, e.value.line, e.value.col) == (entry, 2, 1)
 

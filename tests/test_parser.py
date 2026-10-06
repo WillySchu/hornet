@@ -430,7 +430,8 @@ def test_parse_function_only_eof():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape("Expected 'def' to start a function definition at line 1, column 1")):
+    with pytest.raises(
+            parser.ParseError, match=re.escape("Expected 'def' to start a function definition at line 1, column 1")):
         p.parse_function()
 
 
@@ -470,11 +471,11 @@ def test_parse_function_no_close_paren():
 
     # The parser checks to see if there's a closing paren, if not it assumes there are parameters.
     #  Thus it calls parse_param() which in turn calls parse_type() leading to the following error message.
-    #  TODO(will): Low priority, but this should probably be a more helpful message.
     with pytest.raises(
         parser.ParseError,
         match=re.escape(
-            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name, '[size]type', or '[]type'), got end of input at line 1, column 1"
+            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name,"
+            " '[size]type', or '[]type'), got end of input at line 1, column 1"
         )):
         p.parse_function()
 
@@ -490,9 +491,8 @@ def test_parse_function_no_colon():
     ]
     p = parser.Parser(tokens)
 
-    expected = parser.Function(name='main', return_type='int', body=[])
-
-    with pytest.raises(parser.ParseError, match=re.escape("Expected ':' to start the function body at line 1, column 15")):
+    with pytest.raises(
+            parser.ParseError, match=re.escape("Expected ':' to start the function body at line 1, column 15")):
         p.parse_function()
 
 
@@ -703,7 +703,8 @@ def test_parse_param_empty():
     with pytest.raises(
         parser.ParseError,
         match=re.escape(
-            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name, '[size]type', or '[]type'), got end of input at line 1, column 1"
+            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name,"
+            " '[size]type', or '[]type'), got end of input at line 1, column 1"
         )):
         p.parse_param()
 
@@ -739,8 +740,8 @@ def test_parse_type_empty():
     with pytest.raises(
         parser.ParseError,
         match=re.escape(
-            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name, '[size]type', or '[]type'), got end of input at line 1, column 1"
-        )):
+            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name,"
+            " '[size]type', or '[]type'), got end of input at line 1, column 1")):
         p.parse_type()
 
 
@@ -794,7 +795,10 @@ def test_parse_type_array_missing_size():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape('Expected an array size (a positive integer or constant expression), or \']\' for a slice type at line 1, column 2')):
+    with pytest.raises(
+            parser.ParseError,
+            match=re.escape('Expected an array size (a positive integer or constant expression),'
+                            ' or \']\' for a slice type at line 1, column 2')):
         p.parse_type()
 
 
@@ -822,8 +826,8 @@ def test_parse_type_array_missing_type():
     with pytest.raises(
         parser.ParseError,
         match=re.escape(
-            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name, '[size]type', or '[]type'), got end of input at line 1, column 4"
-        )):
+            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name,"
+            " '[size]type', or '[]type'), got end of input at line 1, column 4")):
         p.parse_type()
 
 
@@ -837,7 +841,8 @@ def test_parse_type_array_float_size():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape("Array size must be a whole number, got '3.3' at line 1, column 2")):
+    with pytest.raises(
+            parser.ParseError, match=re.escape("Array size must be a whole number, got '3.3' at line 1, column 2")):
         p.parse_type()
 
 
@@ -967,7 +972,8 @@ def test_parse_statement_empty():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 11')):
+    with pytest.raises(
+            parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 11')):
         p.parse_statement()
 
 
@@ -1044,7 +1050,10 @@ def test_parse_statement_array_no_size():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape('Expected an array size (a positive integer or constant expression), or \']\' for a slice type at line 1, column 2')):
+    with pytest.raises(
+            parser.ParseError,
+            match=re.escape('Expected an array size (a positive integer or constant expression),'
+                            ' or \']\' for a slice type at line 1, column 2')):
         p.parse_statement()
 
 
@@ -1072,7 +1081,8 @@ def test_parse_statement_array_no_type():
     with pytest.raises(
         parser.ParseError,
         match=re.escape(
-            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name, '[size]type', or '[]type'), got end of input at line 1, column 4"
+            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name,"
+            " '[size]type', or '[]type'), got end of input at line 1, column 4"
         )):
         p.parse_statement()
 
@@ -1112,7 +1122,8 @@ def test_parse_statement_return_no_value():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 7')):
+    with pytest.raises(
+            parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 7')):
         p.parse_statement()
 
 
@@ -1134,7 +1145,8 @@ def test_parse_statement_if_no_expression():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 3')):
+    with pytest.raises(
+            parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 3')):
         p.parse_statement()
 
 
@@ -1221,7 +1233,8 @@ def test_parse_statement_if():
     ]
     p = parser.Parser(tokens)
 
-    expected = parser.If(condition=parser.BoolLiteral(value=True), then_body=[parser.ExprStmt(expr=parser.Constant(value=1))])
+    expected = parser.If(
+        condition=parser.BoolLiteral(value=True), then_body=[parser.ExprStmt(expr=parser.Constant(value=1))])
 
     assert expected == p.parse_statement()
 
@@ -1233,7 +1246,8 @@ def test_parse_statement_while_no_condition():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 6')):
+    with pytest.raises(
+            parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 6')):
         p.parse_statement()
 
 
@@ -1245,7 +1259,8 @@ def test_parse_statement_while_no_colon():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape('Expected \':\' to start the while body at line 1, column 10')):
+    with pytest.raises(
+            parser.ParseError, match=re.escape('Expected \':\' to start the while body at line 1, column 10')):
         p.parse_statement()
 
 
@@ -1320,7 +1335,8 @@ def test_parse_statement_while():
     ]
     p = parser.Parser(tokens)
 
-    expected = parser.While(condition=parser.BoolLiteral(value=True), body=[parser.ExprStmt(expr=parser.Constant(value=5))])
+    expected = parser.While(
+        condition=parser.BoolLiteral(value=True), body=[parser.ExprStmt(expr=parser.Constant(value=5))])
 
     assert expected == p.parse_statement()
 
@@ -1357,7 +1373,8 @@ def test_parse_statement_assign_no_value():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 3')):
+    with pytest.raises(
+            parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 3')):
         p.parse_statement()
 
 
@@ -1395,7 +1412,8 @@ def test_parse_while_no_condition():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 6')):
+    with pytest.raises(
+            parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 6')):
         p.parse_while()
 
 
@@ -1407,7 +1425,8 @@ def test_parse_while_no_colon():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape('Expected \':\' to start the while body at line 1, column 10')):
+    with pytest.raises(
+            parser.ParseError, match=re.escape('Expected \':\' to start the while body at line 1, column 10')):
         p.parse_while()
 
 
@@ -1538,7 +1557,8 @@ def test_parse_if_empty():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 3')):
+    with pytest.raises(
+            parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 3')):
         p.parse_if()
 
 
@@ -1625,7 +1645,8 @@ def test_parse_if():
     ]
     p = parser.Parser(tokens)
 
-    expected = parser.If(condition=parser.BoolLiteral(value=True), then_body=[parser.ExprStmt(expr=parser.StringLiteral(value='hi'))])
+    expected = parser.If(
+        condition=parser.BoolLiteral(value=True), then_body=[parser.ExprStmt(expr=parser.StringLiteral(value='hi'))])
 
     assert expected == p.parse_if()
 
@@ -1643,7 +1664,8 @@ def test_parse_if():
     ]
     p = parser.Parser(tokens)
 
-    expected = parser.If(condition=parser.BoolLiteral(value=True), then_body=[parser.ExprStmt(expr=parser.StringLiteral(value='hi'))])
+    expected = parser.If(
+        condition=parser.BoolLiteral(value=True), then_body=[parser.ExprStmt(expr=parser.StringLiteral(value='hi'))])
 
     assert expected == p.parse_if()
 
@@ -1662,7 +1684,8 @@ def test_parse_if_else_no_colon():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape('Expected \':\' to start the else body at line 2, column 12')):
+    with pytest.raises(
+            parser.ParseError, match=re.escape('Expected \':\' to start the else body at line 2, column 12')):
         p.parse_if()
 
 
@@ -1790,7 +1813,8 @@ def test_parse_if_elif_no_condition():
     ]
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape('Expected an expression, got end of input at line 2, column 9')):
+    with pytest.raises(
+            parser.ParseError, match=re.escape('Expected an expression, got end of input at line 2, column 9')):
         p.parse_if()
 
 
@@ -2025,8 +2049,8 @@ def test_parse_var_decl_none_empty():
     with pytest.raises(
         parser.ParseError,
         match=re.escape(
-            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name, '[size]type', or '[]type'), got end of input at line 1, column 1"
-        )):
+            "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name,"
+            " '[size]type', or '[]type'), got end of input at line 1, column 1")):
         p.parse_var_decl()
 
 
@@ -2066,7 +2090,8 @@ def test_parse_var_decl_none_no_value():
 
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape("Expected an expression, got end of input at line 1, column 7")):
+    with pytest.raises(
+            parser.ParseError, match=re.escape("Expected an expression, got end of input at line 1, column 7")):
         p.parse_var_decl()
 
 
@@ -2138,7 +2163,8 @@ def test_parse_assign_empty():
 
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape("Expected an expression, got end of input at line 1, column 1")):
+    with pytest.raises(
+            parser.ParseError, match=re.escape("Expected an expression, got end of input at line 1, column 1")):
         p.parse_expr_stmt_or_assign()
 
 
@@ -2162,7 +2188,8 @@ def test_parse_assign_no_value():
 
     p = parser.Parser(tokens)
 
-    with pytest.raises(parser.ParseError, match=re.escape("Expected an expression, got end of input at line 1, column 3")):
+    with pytest.raises(
+            parser.ParseError, match=re.escape("Expected an expression, got end of input at line 1, column 3")):
         p.parse_expr_stmt_or_assign()
 
 
@@ -2206,7 +2233,8 @@ def test_parse_assign_compound_subtraction():
 
     p = parser.Parser(tokens)
 
-    expected = parser.Assign(target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.SUBTRACT)
+    expected = parser.Assign(
+        target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.SUBTRACT)
 
     assert expected == p.parse_expr_stmt_or_assign()
 
@@ -2221,7 +2249,8 @@ def test_parse_assign_compound_multiplication():
 
     p = parser.Parser(tokens)
 
-    expected = parser.Assign(target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.MULTIPLY)
+    expected = parser.Assign(
+        target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.MULTIPLY)
 
     assert expected == p.parse_expr_stmt_or_assign()
 
@@ -2236,7 +2265,8 @@ def test_parse_assign_compound_division():
 
     p = parser.Parser(tokens)
 
-    expected = parser.Assign(target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.DIVIDE)
+    expected = parser.Assign(
+        target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.DIVIDE)
 
     assert expected == p.parse_expr_stmt_or_assign()
 
@@ -2251,7 +2281,8 @@ def test_parse_assign_compound_modulo():
 
     p = parser.Parser(tokens)
 
-    expected = parser.Assign(target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.MODULO)
+    expected = parser.Assign(
+        target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.MODULO)
 
     assert expected == p.parse_expr_stmt_or_assign()
 
@@ -2266,7 +2297,8 @@ def test_parse_assign_compound_bitwise_and():
 
     p = parser.Parser(tokens)
 
-    expected = parser.Assign(target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.BITWISE_AND)
+    expected = parser.Assign(
+        target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.BITWISE_AND)
 
     assert expected == p.parse_expr_stmt_or_assign()
 
@@ -2281,7 +2313,8 @@ def test_parse_assign_compound_bitwise_or():
 
     p = parser.Parser(tokens)
 
-    expected = parser.Assign(target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.BITWISE_OR)
+    expected = parser.Assign(
+        target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.BITWISE_OR)
 
     assert expected == p.parse_expr_stmt_or_assign()
 
@@ -2296,7 +2329,8 @@ def test_parse_assign_compound_bitwise_xor():
 
     p = parser.Parser(tokens)
 
-    expected = parser.Assign(target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.BITWISE_XOR)
+    expected = parser.Assign(
+        target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.BITWISE_XOR)
 
     assert expected == p.parse_expr_stmt_or_assign()
 
@@ -2311,7 +2345,8 @@ def test_parse_assign_compound_shift_left():
 
     p = parser.Parser(tokens)
 
-    expected = parser.Assign(target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.SHIFT_LEFT)
+    expected = parser.Assign(
+        target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.SHIFT_LEFT)
 
     assert expected == p.parse_expr_stmt_or_assign()
 
@@ -2326,7 +2361,8 @@ def test_parse_assign_compound_shift_right():
 
     p = parser.Parser(tokens)
 
-    expected = parser.Assign(target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.SHIFT_RIGHT)
+    expected = parser.Assign(
+        target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.SHIFT_RIGHT)
 
     assert expected == p.parse_expr_stmt_or_assign()
 
@@ -3504,7 +3540,8 @@ def test_a_parameter_list_comma_needs_a_parameter_before_it(source):
 
 
 def test_dict_types_as_variants_and_in_is_checks():
-    prog = _parse_program("type R is dict[str]int | E\ndef int main():\n    if r is dict[str]int:\n        return 1\n    return 0\n")
+    prog = _parse_program(
+        "type R is dict[str]int | E\ndef int main():\n    if r is dict[str]int:\n        return 1\n    return 0\n")
     assert prog.sum_types[0].variants[0] == parser.DictTypeExpr(key_type='str', value_type='int')
     assert prog.functions[0].body[0].condition.type_name == parser.DictTypeExpr(key_type='str', value_type='int')
 

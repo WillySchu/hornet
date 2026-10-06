@@ -35,7 +35,8 @@ DIVISORS += [1000003, 7919, 3 ** 39, 10 ** 18, 2 ** 31 - 1, 2 ** 31 + 1, 2 ** 62
 @pytest.mark.parametrize('d', DIVISORS)
 def test_magic_quotient_matches_truncating_division(d):
     r = random.Random(d)
-    values = [-(2 ** 63), 2 ** 63 - 1, 0, 1, -1] + [_s64(d * k + e) for k in (1, 2, 3, -1, -9, 1000) for e in (-1, 0, 1)]
+    values = [-(2 ** 63), 2 ** 63 - 1, 0, 1, -1] + [
+        _s64(d * k + e) for k in (1, 2, 3, -1, -9, 1000) for e in (-1, 0, 1)]
     values += [r.randint(-(2 ** 63), 2 ** 63 - 1) for _ in range(200)]
     for n in values:
         assert _via_magic(n, d) == _trunc(n, d), (n, d)

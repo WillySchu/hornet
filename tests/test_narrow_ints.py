@@ -30,11 +30,29 @@ def test_binary_ops_wrap_in_registers_and_across_calls(ty):
     signed = ty == 'int8'
     pairs = PAIRS if signed else UPAIRS
     lines, expected = [], []
-    for name, op in [('add', '+'), ('sub', '-'), ('mul', '*'), ('band', '&'), ('bor', '|'), ('bxor', '^'), ('div', '/'), ('mod', '%')]:
+    for name, op in [
+        ('add', '+'),
+        ('sub', '-'),
+        ('mul', '*'),
+        ('band', '&'),
+        ('bor', '|'),
+        ('bxor', '^'),
+        ('div', '/'),
+        ('mod', '%'),
+    ]:
         lines.append(f"def {ty} {name}({ty} a, {ty} b):\n    return a {op} b\n")
     body = ["def int main():"]
     for k, (a, b) in enumerate(pairs):
-        for name, op in [('add', '+'), ('sub', '-'), ('mul', '*'), ('band', '&'), ('bor', '|'), ('bxor', '^'), ('div', '/'), ('mod', '%')]:
+        for name, op in [
+            ('add', '+'),
+            ('sub', '-'),
+            ('mul', '*'),
+            ('band', '&'),
+            ('bor', '|'),
+            ('bxor', '^'),
+            ('div', '/'),
+            ('mod', '%'),
+        ]:
             if op in '/%' and b == 0:
                 continue
             body.append(f"    {ty} r_{name}{k} = {name}({ty}({a}), {ty}({b}))")

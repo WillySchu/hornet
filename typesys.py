@@ -109,7 +109,8 @@ def type_byte_width(t: Type, structs: dict[str, StructInfo], sum_types: dict) ->
     if t.kind == TypeKind.STR:
         return 16  # {ptr, len}
     if t.kind == TypeKind.STRUCT:
-        return sum(type_byte_width(field_type, structs, sum_types) for field_type in structs[t.struct_name].fields.values())
+        return sum(
+            type_byte_width(field_type, structs, sum_types) for field_type in structs[t.struct_name].fields.values())
     if t.kind == TypeKind.SUM:
         variant_widths = (
             type_byte_width(variant_type, structs, sum_types)

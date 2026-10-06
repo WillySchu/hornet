@@ -78,7 +78,8 @@ def test_private_members_work_inside_their_module_and_values_travel_freely(tmp_p
     ("Counter d = Counter(_count=1)", "Field '_count' of 'Counter' is not visible"),
 ])
 def test_another_module_cannot_reach_them(tmp_path, statement, match):
-    entry = _write(tmp_path, IMPORTS + f"def int main():\n    Counter c = starting_at(1)\n    {statement}\n    return 0\n")
+    entry = _write(
+        tmp_path, IMPORTS + f"def int main():\n    Counter c = starting_at(1)\n    {statement}\n    return 0\n")
     program, modules = discover_modules(entry)
     with pytest.raises(SemanticError, match=match):
         analyze(program, modules)

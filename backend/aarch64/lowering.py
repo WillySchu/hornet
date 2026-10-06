@@ -6,7 +6,9 @@ result headed to a stack slot, x8 for intermediate values). int8/uint8 values in
 kept sign/zero-extended to 32 bits, as on x86-64.
 """
 
-from backend.aarch64.assembly import AddrOf, Call, Cond, FrameSlot, Imm, Instr, LabelDef, LabelRef, Mem, Reg, Shift, SymPage, SymPageOffset, FP
+from backend.aarch64.assembly import (
+    AddrOf, Call, Cond, FrameSlot, Imm, Instr, LabelDef, LabelRef, Mem, Reg, Shift, SymPage, SymPageOffset, FP,
+)
 from backend.aarch64.calling_convention import (
     ARG_REGISTERS, MAX_REGISTER_ARGS, SCRATCH_A, SCRATCH_ADDRESS, SCRATCH_B, SCRATCH_RESULT)
 from backend.common.division import is_power_of_two, magic
@@ -14,8 +16,8 @@ from backend.errors import CodegenError
 from ir.cfg import uses
 from ir.panics import located
 from ir.ir import (
-    IRBinOp, IRBoundsCheck, IRBranch, IRCall, IRCast, IRCopy, IRConst, IRJump, IRLabel, IRLoad, IRLocalAddress, IRMove, IRReturn,
-    IRSliceBoundsCheck, IRStaticDataAddress, IRStore, IRUnOp, Temp,
+    IRBinOp, IRBoundsCheck, IRBranch, IRCall, IRCast, IRCopy, IRConst, IRJump, IRLabel, IRLoad, IRLocalAddress, IRMove,
+    IRReturn, IRSliceBoundsCheck, IRStaticDataAddress, IRStore, IRUnOp, Temp,
 )
 from ops import BinaryOp, UnaryOp
 from typesys import Type, is_wide_type, type_byte_width

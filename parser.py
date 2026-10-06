@@ -414,7 +414,8 @@ class TypeAlias(Node):
 class SumTypeDef(Node):
     """`type Name is A | B`: tagged sum type. Variant order fixes discriminants."""
     name: str
-    variants: List[Union[str, QualifiedTypeExpr, ArrayTypeExpr, SliceTypeExpr, PointerTypeExpr]] = field(default_factory=list)
+    variants: List[
+        Union[str, QualifiedTypeExpr, ArrayTypeExpr, SliceTypeExpr, PointerTypeExpr]] = field(default_factory=list)
 
 
 @dataclass
@@ -543,10 +544,14 @@ _BINARY_OPS = {
     TokenType.SHIFT_LEFT:  OperatorInfo(BinaryOp.SHIFT_LEFT,  precedence=8, associativity=Associativity.LEFT),
     TokenType.SHIFT_RIGHT: OperatorInfo(BinaryOp.SHIFT_RIGHT, precedence=8, associativity=Associativity.LEFT),
 
-    TokenType.LESS_THAN:             OperatorInfo(BinaryOp.LESS_THAN,             precedence=7, associativity=Associativity.LEFT),
-    TokenType.GREATER_THAN:          OperatorInfo(BinaryOp.GREATER_THAN,          precedence=7, associativity=Associativity.LEFT),
-    TokenType.LESS_THAN_OR_EQUAL:    OperatorInfo(BinaryOp.LESS_THAN_OR_EQUAL,    precedence=7, associativity=Associativity.LEFT),
-    TokenType.GREATER_THAN_OR_EQUAL: OperatorInfo(BinaryOp.GREATER_THAN_OR_EQUAL, precedence=7, associativity=Associativity.LEFT),
+    TokenType.LESS_THAN:             OperatorInfo(
+        BinaryOp.LESS_THAN,             precedence=7, associativity=Associativity.LEFT),
+    TokenType.GREATER_THAN:          OperatorInfo(
+        BinaryOp.GREATER_THAN,          precedence=7, associativity=Associativity.LEFT),
+    TokenType.LESS_THAN_OR_EQUAL:    OperatorInfo(
+        BinaryOp.LESS_THAN_OR_EQUAL,    precedence=7, associativity=Associativity.LEFT),
+    TokenType.GREATER_THAN_OR_EQUAL: OperatorInfo(
+        BinaryOp.GREATER_THAN_OR_EQUAL, precedence=7, associativity=Associativity.LEFT),
 
     TokenType.EQUAL:     OperatorInfo(BinaryOp.EQUAL,     precedence=6, associativity=Associativity.LEFT),
     TokenType.NOT_EQUAL: OperatorInfo(BinaryOp.NOT_EQUAL, precedence=6, associativity=Associativity.LEFT),
@@ -783,7 +788,8 @@ class Parser:
         members: List[EnumMember] = []
         while not self.check(TokenType.DEDENT) and not self.at_end():
             member_tok = self.expect(TokenType.IDENTIFIER, "Expected a member name")
-            self.expect(TokenType.NEWLINE, "Expected a newline after a member name -- an enum lists one member per line")
+            self.expect(
+                TokenType.NEWLINE, "Expected a newline after a member name -- an enum lists one member per line")
             members.append(EnumMember(name=member_tok.val, line=member_tok.line, col=member_tok.col))
             self.skip_newlines()
         self.expect(TokenType.DEDENT, "Expected a dedent to end the enum body")
@@ -818,7 +824,18 @@ class Parser:
 
     def _check_starts_with_return_type(self) -> bool:
         """Whether a return type precedes the def's name."""
-        return self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.INT32, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET, TokenType.STAR, TokenType.DICT) or (
+        return self.check(
+            TokenType.INT,
+            TokenType.INT8,
+            TokenType.UINT8,
+            TokenType.INT64,
+            TokenType.INT32,
+            TokenType.BOOL,
+            TokenType.STR,
+            TokenType.OPEN_BRACKET,
+            TokenType.STAR,
+            TokenType.DICT
+        ) or (
             self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.IDENTIFIER
         ) or (
             self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.DOT
@@ -945,7 +962,15 @@ class Parser:
             self.expect(TokenType.CLOSE_BRACKET, "Expected ']' after array size")
             element_type = self.parse_type()
             return ArrayTypeExpr(size=size, element_type=element_type, line=open_tok.line, col=open_tok.col)
-        if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.INT32, TokenType.BOOL, TokenType.STR):
+        if self.check(
+                TokenType.INT,
+                TokenType.INT8,
+                TokenType.UINT8,
+                TokenType.INT64,
+                TokenType.INT32,
+                TokenType.BOOL,
+                TokenType.STR
+        ):
             return self.advance().val
         if self.check(TokenType.IDENTIFIER):
             # Unvalidated here; semantic analysis resolves type names.
@@ -989,7 +1014,18 @@ class Parser:
             raise self._error(f"Expected the end of the line after this statement, got {describe_token(tok)}", tok)
 
     def parse_statement(self) -> Node:
-        if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.INT32, TokenType.BOOL, TokenType.STR) and self.peek(1).type == TokenType.OPEN_PAREN:
+        if (
+                self.check(
+                    TokenType.INT,
+                    TokenType.INT8,
+                    TokenType.UINT8,
+                    TokenType.INT64,
+                    TokenType.INT32,
+                    TokenType.BOOL,
+                    TokenType.STR
+                )
+                and self.peek(1).type == TokenType.OPEN_PAREN
+        ):
             # Scalar keyword + '(' is a cast statement, not a VarDecl.
             return self.parse_expr_stmt_or_assign()
         if self.check(TokenType.STAR):
@@ -1003,7 +1039,17 @@ class Parser:
             if parsed_type is not None and self.check(TokenType.IDENTIFIER):
                 return self.parse_var_decl(var_type=parsed_type, start_tok=start_tok)
             self.pos = saved_pos
-        if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.INT32, TokenType.BOOL, TokenType.STR, TokenType.OPEN_BRACKET, TokenType.DICT):
+        if self.check(
+                TokenType.INT,
+                TokenType.INT8,
+                TokenType.UINT8,
+                TokenType.INT64,
+                TokenType.INT32,
+                TokenType.BOOL,
+                TokenType.STR,
+                TokenType.OPEN_BRACKET,
+                TokenType.DICT
+        ):
             # Type may start a VarDecl or a typed literal statement; parse it once, then decide.
             start_tok = self.current()
             parsed_type = self.parse_type()
@@ -1067,7 +1113,8 @@ class Parser:
         self.expect(TokenType.COLON, "Expected ':' to start the for body")
         self.expect(TokenType.NEWLINE, "Expected a newline after ':'")
         body = self.parse_block()
-        return For(init=init, condition=condition, increment=increment, body=body, line=start_tok.line, col=start_tok.col)
+        return For(
+            init=init, condition=condition, increment=increment, body=body, line=start_tok.line, col=start_tok.col)
 
     def parse_for_in(self) -> ForIn:
         """`for a[, b] in iterable:`."""
@@ -1087,8 +1134,17 @@ class Parser:
     def _parse_for_init_clause(self) -> Node:
         """Init clause: always a VarDecl."""
         start_tok = self.current()
-        if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.INT32, TokenType.BOOL, TokenType.STR,
-                       TokenType.OPEN_BRACKET, TokenType.DICT):
+        if self.check(
+                TokenType.INT,
+                TokenType.INT8,
+                TokenType.UINT8,
+                TokenType.INT64,
+                TokenType.INT32,
+                TokenType.BOOL,
+                TokenType.STR,
+                TokenType.OPEN_BRACKET,
+                TokenType.DICT
+        ):
             parsed_type = self.parse_type()
             return self.parse_var_decl(var_type=parsed_type, start_tok=start_tok)
         if self.check(TokenType.IDENTIFIER) and self.peek(1).type == TokenType.IDENTIFIER:
@@ -1153,12 +1209,22 @@ class Parser:
             raise self._error("'as NAME' follows an 'is' check (`EXPR is T as NAME`)", self.current())
         return expr
 
-    def _parse_qualifiable_type_name(self, expected_message: str) -> Union[str, QualifiedTypeExpr, ArrayTypeExpr, SliceTypeExpr, PointerTypeExpr]:
+    def _parse_qualifiable_type_name(
+            self,
+            expected_message: str) -> Union[str, QualifiedTypeExpr, ArrayTypeExpr, SliceTypeExpr, PointerTypeExpr]:
         """A possibly qualified type name, builtin type keyword, `none`, or array/slice/pointer/dict type."""
         if self.check(TokenType.STAR, TokenType.OPEN_BRACKET, TokenType.DICT):
             return self.parse_type()
-        if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.INT32, TokenType.BOOL, TokenType.STR,
-                      TokenType.NONE):  # `none`: a sum type's payload-free variant
+        if self.check(
+                TokenType.INT,
+                TokenType.INT8,
+                TokenType.UINT8,
+                TokenType.INT64,
+                TokenType.INT32,
+                TokenType.BOOL,
+                TokenType.STR,
+                TokenType.NONE
+        ):  # `none`: a sum type's payload-free variant
             return self.advance().val
         name_tok = self.expect(TokenType.IDENTIFIER, f"Expected {expected_message}")
         if self.check(TokenType.DOT):
@@ -1333,7 +1399,8 @@ class Parser:
                 if self.match(TokenType.OPEN_PAREN):
                     args, kwargs = self.parse_receiver_call_args()
                     self.expect(TokenType.CLOSE_PAREN, "Expected ')' after call arguments")
-                    expr = Call(name=name_tok.val, args=args, kwargs=kwargs, receiver=expr, line=expr.line, col=expr.col)
+                    expr = Call(
+                        name=name_tok.val, args=args, kwargs=kwargs, receiver=expr, line=expr.line, col=expr.col)
                 else:
                     expr = Field(base=expr, name=name_tok.val, line=expr.line, col=expr.col)
             else:
@@ -1423,7 +1490,18 @@ class Parser:
                     tok,
                 )
             return ByteLiteral(value=ord(resolved), line=tok.line, col=tok.col)
-        if self.check(TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.INT32, TokenType.BOOL, TokenType.STR) and self.peek(1).type == TokenType.OPEN_PAREN:
+        if (
+                self.check(
+                    TokenType.INT,
+                    TokenType.INT8,
+                    TokenType.UINT8,
+                    TokenType.INT64,
+                    TokenType.INT32,
+                    TokenType.BOOL,
+                    TokenType.STR
+                )
+                and self.peek(1).type == TokenType.OPEN_PAREN
+        ):
             return self.parse_cast()
         if self.check(TokenType.DICT):
             parsed_type = self.parse_type()

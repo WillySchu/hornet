@@ -42,7 +42,8 @@ def test_write_stderr_goes_to_stderr():
 @GCC_SKIP
 def test_write_file_round_trips_bytes_including_nul(tmp_path):
     path = tmp_path / 'out.bin'
-    r = _run(f"write_file('{path}', 'hi\\x00there\\xff')\nstr back = must_str(read_file('{path}'))\nprint(len(back))\nreturn 0")
+    r = _run(f"write_file('{path}', 'hi\\x00there\\xff')\nstr back = must_str("
+             f"read_file('{path}'))\nprint(len(back))\nreturn 0")
     assert r.stdout == "9\n"
     assert path.read_bytes() == b'hi\x00there\xff'
 

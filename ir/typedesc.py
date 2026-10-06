@@ -53,7 +53,12 @@ def type_descriptor(ir_program, t: Type, in_progress: dict = None) -> str:
         words = [_TYPEDESC_ARRAY, name(), type_descriptor(ir_program, t.element_type, in_progress), t.size,
                  width(t.element_type)]
     elif t.kind == TypeKind.SLICE:
-        words = [_TYPEDESC_SLICE, name(), type_descriptor(ir_program, t.element_type, in_progress), width(t.element_type)]
+        words = [
+            _TYPEDESC_SLICE,
+            name(),
+            type_descriptor(ir_program, t.element_type, in_progress),
+            width(t.element_type),
+        ]
     elif t.kind == TypeKind.STRUCT:
         words, offset = [_TYPEDESC_STRUCT, name(), len(structs[t.struct_name].fields)], 0
         for field_name, field_type in structs[t.struct_name].fields.items():

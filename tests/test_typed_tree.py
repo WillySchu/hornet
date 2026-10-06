@@ -112,7 +112,8 @@ def test_dump_is_deterministic():
 
 
 def _repository_programs():
-    paths = sorted(glob.glob(str(ROOT / 'benchmarks' / 'programs' / '*.ht'))) + sorted(glob.glob(str(ROOT / 'examples' / '*.ht')))
+    paths = sorted(glob.glob(str(ROOT / 'benchmarks' / 'programs' / '*.ht'))) + sorted(
+        glob.glob(str(ROOT / 'examples' / '*.ht')))
     return paths + [str(ROOT / 'tools' / 'hfmt' / 'main.ht')]
 
 
@@ -143,7 +144,8 @@ def test_every_node_kind_occurs_in_the_repository_and_this_file():
 def test_dump_typed_command(tmp_path):
     src = tmp_path / 'p.ht'
     src.write_text("def int main():\n    return 0\n")
-    r = subprocess.run([sys.executable, str(ROOT / 'compile.py'), str(src), '--dump-typed'], capture_output=True, text=True)
+    r = subprocess.run(
+        [sys.executable, str(ROOT / 'compile.py'), str(src), '--dump-typed'], capture_output=True, text=True)
     assert r.returncode == 0 and r.stdout.startswith("function main() -> int\n  Return\n")
     assert r.stdout == typed_tree(str(src))
 
@@ -172,7 +174,11 @@ def test_later_stages_never_import_the_front_end():
 
 
 def test_intrinsics_are_their_own_nodes():
-    program = _typed("intrinsic *byte _raw_ptr(str s)\nintrinsic int _raw_len(str s)\n"
+    program = _typed("intrinsic *byte _raw_ptr(str s)\n"
+                     "intrinsic int _raw_len(str s)\n"
                      "intrinsic str _from_raw_parts(*byte p, int n)\n"
-                     "def int main():\n    str s = 'hi'\n    print(_from_raw_parts(_raw_ptr(s), _raw_len(s)))\n    return 0\n")
+                     "def int main():\n"
+                     "    str s = 'hi'\n"
+                     "    print(_from_raw_parts(_raw_ptr(s), _raw_len(s)))\n"
+                     "    return 0\n")
     assert {'StrRawPtr', 'StrRawLen', 'StrFromRawParts'} <= _nodes(program)

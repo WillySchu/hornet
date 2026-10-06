@@ -67,9 +67,21 @@ def test_what_a_parser_may_do_either_with_is_never_a_crash(jsonfmt):
 def _random_document(rng, depth):
     choice = rng.random()
     if depth == 0 or choice < 0.3:
-        return rng.choice([None, True, False, rng.randrange(-10 ** 12, 10 ** 12), 0, "", "plain",
-                           "quote \" slash \\ and /", "line\nbreak\ttab\r", "\x00\x01\x1f\x7f", "caf\u00e9 \u4e2d \U0001f600",
-                           ''.join(chr(rng.randrange(1, 0x250)) for _ in range(rng.randrange(8)))])
+        return rng.choice(
+            [
+                None,
+                True,
+                False,
+                rng.randrange(-10 ** 12, 10 ** 12),
+                0,
+                "",
+                "plain",
+                "quote \" slash \\ and /", "line\nbreak\ttab\r",
+                "\x00\x01\x1f\x7f",
+                "caf\u00e9 \u4e2d \U0001f600",
+                ''.join(chr(rng.randrange(1, 0x250)) for _ in range(rng.randrange(8)))
+            ]
+        )
     if choice < 0.65:
         return [_random_document(rng, depth - 1) for _ in range(rng.randrange(5))]
     return {rng.choice(["a", "b", "key", "", "\u00e9", "with \"quotes\"", "z" * 5]) + str(rng.randrange(40)):

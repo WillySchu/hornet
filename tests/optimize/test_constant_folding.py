@@ -115,7 +115,8 @@ def test_fold_binary_op_shift_count_masked_to_32_bits():
     """x86's own sal/sar mask the shift count to 5 bits for anything
     but int64 -- a shift by 35 on a 32-bit value is a shift by 35 & 31
     == 3, not 35 itself."""
-    assert fold_binary_op(BinaryOp.SHIFT_LEFT, 1, 3, Type.INT32) == fold_binary_op(BinaryOp.SHIFT_LEFT, 1, 35, Type.INT32)
+    assert fold_binary_op(
+        BinaryOp.SHIFT_LEFT, 1, 3, Type.INT32) == fold_binary_op(BinaryOp.SHIFT_LEFT, 1, 35, Type.INT32)
 
 
 def test_fold_binary_op_int_shift_count_masked_to_64_bits():

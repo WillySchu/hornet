@@ -25,8 +25,6 @@ GCC_AVAILABLE = shutil.which("gcc") is not None
 pytestmark = pytest.mark.skipif(not GCC_AVAILABLE, reason="gcc not available")
 
 
-
-
 def _write(tmpdir: str, name: str, content: str) -> str:
     path = Path(tmpdir) / name
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -574,8 +572,18 @@ def test_named_import_from_a_module_also_involved_in_a_circular_import():
     fromB, would be genuine infinite runtime recursion, not a
     compile-time concern this test is meant to exercise at all."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        entry = _write(tmpdir, "main.ht", "import 'a'\n\ndef int main():\n    return a.fromA()\n")
-        _write(tmpdir, "a.ht", "import 'b'\n\ndef int fromA():\n    return b.fromB() + 1\n\ndef int aValue():\n    return 100\n")
+        entry = _write(
+            tmpdir,
+            "main.ht",
+            "import 'a'\n\n"
+            "def int main():\n"
+            "    return a.fromA()\n"
+        )
+        _write(
+            tmpdir,
+            "a.ht",
+            "import 'b'\n\ndef int fromA():\n    return b.fromB() + 1\n\ndef int aValue():\n    return 100\n"
+        )
         _write(tmpdir, "b.ht", "from 'a' import aValue\n\ndef int fromB():\n    return aValue() + 10\n")
         result = _compile_and_run(entry, tmpdir)
         assert result.returncode == 111  # (100 + 10) + 1
@@ -1175,7 +1183,10 @@ def test_a_local_cant_reuse_an_import_alias(local):
             'main.ht': "import 'lib'\ndef int main():\n" + local + "    return 0\n",
             'lib.ht': "def int f():\n    return 1\n",
         })
-        with pytest.raises(MergeError, match="'lib' at line 3 is an imported module's name here and can't also be a variable name"):
+        with pytest.raises(
+                MergeError,
+                match="'lib' at line 3 is an imported module's name here and can't also be a variable name",
+        ):
             analyze(entry_program, modules)
 
 

@@ -67,7 +67,8 @@ def _compile_to_binary(source: str, tmp: Path, target=ASM_TARGET) -> tuple[Path,
     asm = generate_asm(program, target=target)
     asm_path.write_text(asm, encoding="latin-1")
 
-    gcc_cmd = c_compiler(target) + [str(asm_path), str(runtime_object(target)), "-o", str(bin_path)] + link_flags(target)
+    gcc_cmd = c_compiler(target) + [
+        str(asm_path), str(runtime_object(target)), "-o", str(bin_path)] + link_flags(target)
 
     result = subprocess.run(gcc_cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -313,7 +314,9 @@ class TestBitwiseAndModuloOperators:
     def test_modulo_by_zero_panics(self):
         assert_panics("    int a = 5\n    int b = 0\n    return a % b", "integer division by zero")
 
-    @pytest.mark.parametrize("type_,minimum", [("int", "-9223372036854775807 - 1"), ("int32", "int32(-2147483647) - int32(1)")])
+    @pytest.mark.parametrize(
+        "type_,minimum", [("int", "-9223372036854775807 - 1"), ("int32", "int32(-2147483647) - int32(1)")]
+    )
     @pytest.mark.parametrize("op", ["/", "%"])
     def test_minimum_divided_by_minus_one_panics(self, type_, minimum, op):
         assert_panics(f"    {type_} a = {minimum}\n    {type_} b = {type_}(-1)\n    print(a {op} b)\n    return 0",
@@ -325,7 +328,11 @@ class TestBitwiseAndModuloOperators:
                       "integer division by zero")
 
     def test_int8_minimum_divided_by_minus_one_wraps(self):
-        assert_stdout("    int8 a = int8(-128)\n    int8 b = int8(-1)\n    print(a / b)\n    print(a % b)\n    return 0",
+        assert_stdout("    int8 a = int8(-128)\n"
+                      "    int8 b = int8(-1)\n"
+                      "    print(a / b)\n"
+                      "    print(a % b)\n"
+                      "    return 0",
                       "-128\n0\n")
 
     def test_modulo_result_used_as_operand_of_plus(self):
@@ -12192,7 +12199,11 @@ class TestStackUse:
 
 class TestMainSignature:
     @pytest.mark.parametrize("signature", [
-        "def int main()", "def int main(int argc, *byte argv)", "def int32 main()", "def uint8 main()", "def bool main()",
+        "def int main()",
+        "def int main(int argc, *byte argv)",
+        "def int32 main()",
+        "def uint8 main()",
+        "def bool main()",
     ])
     def test_accepted(self, signature):
         value = {'int32': 'int32(0)', 'uint8': 'uint8(0)', 'bool': 'false'}.get(signature.split()[1], '0')
@@ -12247,7 +12258,12 @@ class TestTypedLiterals:
     ])
     def test_a_typed_literal_read_as_a_multiplication_is_explained(self, literal, match):
         with pytest.raises((SemanticError, ParseError), match=match):
-            analyze(_parse(f"type P struct:\n    int x\ndef int main():\n    P p = P(1)\n    print({literal})\n    return 0\n"))
+            analyze(_parse(f"type P struct:\n"
+                           f"    int x\n"
+                           f"def int main():\n"
+                           f"    P p = P(1)\n"
+                           f"    print({literal})\n"
+                           f"    return 0\n"))
 
     def test_an_indexed_literal_times_a_value_is_not_a_typed_literal(self):
         assert_program_stdout(
@@ -12322,9 +12338,16 @@ class TestNoneDereference:
 
     def test_valid_pointers_still_work(self):
         assert_program_stdout(
-            self.P + "def int main():\n    P c = P(3, none, []int[1], dict[str]int{})\n    P b = P(2, &c, [], dict[str]int{})\n"
-            "    *P h = &b\n    int s = 0\n    while h != none:\n        s += h.x + h.x\n        h = h.next\n"
-            "    print(s + len(c.s))\n    return 0\n",
+            self.P + "def int main():\n"
+            "    P c = P(3, none, []int[1], dict[str]int{})\n"
+            "    P b = P(2, &c, [], dict[str]int{})\n"
+            "    *P h = &b\n"
+            "    int s = 0\n"
+            "    while h != none:\n"
+            "        s += h.x + h.x\n"
+            "        h = h.next\n"
+            "    print(s + len(c.s))\n"
+            "    return 0\n",
             "11\n")
 
 
@@ -12421,39 +12444,75 @@ class TestDictReferenceSemantics:
 
     def test_growth_through_one_copy_is_seen_by_all(self):
         assert_program_stdout(
-            "def int main():\n    dict[int]int d\n    dict[int]int e = d\n"
-            "    for int i = 0; i < 1000; i += 1:\n        e[i] = i\n"
-            "    int s = 0\n    for k, v in d:\n        s += v\n"
-            "    print(len(d))\n    print(s)\n    return 0\n",
+            "def int main():\n"
+            "    dict[int]int d\n"
+            "    dict[int]int e = d\n"
+            "    for int i = 0; i < 1000; i += 1:\n"
+            "        e[i] = i\n"
+            "    int s = 0\n"
+            "    for k, v in d:\n"
+            "        s += v\n"
+            "    print(len(d))\n"
+            "    print(s)\n"
+            "    return 0\n",
             "1000\n499500\n")
 
     def test_an_empty_dict_passed_to_a_function_is_filled_in_place(self):
         assert_program_stdout(
-            "def fill(dict[int]int d, int n):\n    for int i = 0; i < n; i += 1:\n        d[i] = i * i\n"
-            "def int main():\n    dict[int]int d\n    fill(d, 4)\n    print(d[3] + len(d))\n    return 0\n",
+            "def fill(dict[int]int d, int n):\n"
+            "    for int i = 0; i < n; i += 1:\n"
+            "        d[i] = i * i\n"
+            "def int main():\n"
+            "    dict[int]int d\n"
+            "    fill(d, 4)\n"
+            "    print(d[3] + len(d))\n"
+            "    return 0\n",
             "13\n")
 
     def test_zero_valued_dicts_in_composites_are_distinct_and_usable(self):
         assert_program_stdout(
-            "type H struct:\n    int n\n    dict[str]int m\n"
+            "type H struct:\n"
+            "    int n\n"
+            "    dict[str]int m\n"
             "def int main():\n"
-            "    [3]dict[int]int arr\n    arr[2][1] = 9\n    print(len(arr[0]) + len(arr[2]))\n"
-            "    H h = H(n=1)\n    h.m['a'] = 1\n    H g\n    print(len(g.m))\n"
+            "    [3]dict[int]int arr\n"
+            "    arr[2][1] = 9\n"
+            "    print(len(arr[0]) + len(arr[2]))\n"
+            "    H h = H(n=1)\n"
+            "    h.m['a'] = 1\n"
+            "    H g\n"
+            "    print(len(g.m))\n"
             "    return 0\n",
             "1\n0\n")
 
     def test_reassigning_a_copy_breaks_the_alias(self):
         assert_program_stdout(
-            "def int main():\n    dict[str]int d = dict[str]int{'a': 1}\n    dict[str]int e = d\n"
-            "    e = dict[str]int{}\n    e['b'] = 2\n    print(len(d))\n    return 0\n",
+            "def int main():\n"
+            "    dict[str]int d = dict[str]int{'a': 1}\n"
+            "    dict[str]int e = d\n"
+            "    e = dict[str]int{}\n"
+            "    e['b'] = 2\n"
+            "    print(len(d))\n"
+            "    return 0\n",
             "1\n")
 
     def test_pointers_stored_in_a_dict_outlive_their_function(self):
         assert_program_stdout(
-            "def int clobber(int a):\n    [64]int big\n    for int i = 0; i < 64; i += 1:\n        big[i] = a + i\n"
+            "def int clobber(int a):\n"
+            "    [64]int big\n"
+            "    for int i = 0; i < 64; i += 1:\n"
+            "        big[i] = a + i\n"
             "    return big[63]\n"
-            "def dict[int]*int f():\n    dict[int]*int d\n    int x = 41\n    d[0] = &x\n    return d\n"
-            "def int main():\n    dict[int]*int d = f()\n    clobber(1)\n    print(*d[0])\n    return 0\n",
+            "def dict[int]*int f():\n"
+            "    dict[int]*int d\n"
+            "    int x = 41\n"
+            "    d[0] = &x\n"
+            "    return d\n"
+            "def int main():\n"
+            "    dict[int]*int d = f()\n"
+            "    clobber(1)\n"
+            "    print(*d[0])\n"
+            "    return 0\n",
             "41\n")
 
 
@@ -12465,14 +12524,27 @@ class TestNoneVariant:
     def test_returning_testing_and_printing_none(self):
         assert_program_stdout(
             "type MaybeInt is int | none\n"
-            "def MaybeInt find(int k):\n    if k > 0:\n        return k\n    return none\n"
+            "def MaybeInt find(int k):\n"
+            "    if k > 0:\n"
+            "        return k\n"
+            "    return none\n"
             "def int main():\n"
             "    MaybeInt r = find(0)\n"
-            "    print(r == none)\n    print(find(2) != none)\n"
-            "    if r is none:\n        print('missing')\n"
-            "    match find(3) as v:\n        is int:\n            print(v + 1)\n        is none:\n            print(0)\n"
-            "    print(find(5))\n    print(r)\n"
-            "    r = 7\n    print(r)\n    r = none\n    print(r)\n"
+            "    print(r == none)\n"
+            "    print(find(2) != none)\n"
+            "    if r is none:\n"
+            "        print('missing')\n"
+            "    match find(3) as v:\n"
+            "        is int:\n"
+            "            print(v + 1)\n"
+            "        is none:\n"
+            "            print(0)\n"
+            "    print(find(5))\n"
+            "    print(r)\n"
+            "    r = 7\n"
+            "    print(r)\n"
+            "    r = none\n"
+            "    print(r)\n"
             "    return 0\n",
             "true\ntrue\nmissing\n4\n5\nnone\n7\nnone\n")
 
@@ -12649,7 +12721,11 @@ class TestRecursiveTypes:
             "type Block struct:\n    []Stmt body\n"
             "type Stmt is Print | Block\n"
             "def int value(Expr e):\n"
-            "    match e as x:\n        is Num:\n            return x.v\n        is Neg:\n            return -value(*x.e)\n"
+            "    match e as x:\n"
+            "        is Num:\n"
+            "            return x.v\n"
+            "        is Neg:\n"
+            "            return -value(*x.e)\n"
             "    return 0\n"
             "def run(Stmt s):\n"
             "    match s as x:\n"
@@ -12684,7 +12760,8 @@ class TestRecursiveTypes:
 
     @pytest.mark.parametrize("source,match", [
         ("type N struct:\n    N n\n", "'N' contains itself by value \\(N.n\\)"),
-        ("type A struct:\n    B b\ntype B struct:\n    [2]A items\n", "'A' contains itself by value \\(A.b -> B.items\\)"),
+        ("type A struct:\n    B b\ntype B struct:\n    [2]A items\n",
+         "'A' contains itself by value \\(A.b -> B.items\\)"),
         ("type L struct:\n    int v\ntype Add struct:\n    Expr left\ntype Expr is L | Add\n",
          "'Add' contains itself by value \\(Add.left -> Expr's Add variant\\).*pointer \\(\\*Add\\)"),
         ("type C struct:\n    int r\ntype U is C | int\ntype Box struct:\n    U u\n"
@@ -12714,24 +12791,170 @@ class TestFreshStoragePerIteration:
     pytestmark = GCC_SKIP
 
     @pytest.mark.parametrize("source,expected", [
-        pytest.param("def int main():\n    []*int ps\n    for int i = 0; i < 3; i += 1:\n        ps = append(ps, &i)\n    print(*ps[0])\n    print(*ps[1])\n    print(*ps[2])\n    return 0\n", "0\n1\n2\n", id='for loop var per iteration'),
-        pytest.param("def int main():\n    []*int ps\n    for int i = 0; i < 6; i += 1:\n        ps = append(ps, &i)\n        i += 1\n    print(*ps[0])\n    print(*ps[1])\n    print(len(ps))\n    return 0\n", "1\n3\n3\n", id='for loop var modified in body'),
-        pytest.param("def int main():\n    *int keep = none\n    int n = 0\n    for int i = 0; i < 10; i += 1:\n        if i == 2:\n            keep = &i\n        n += 1\n    *keep = 100\n    print(n)\n    print(*keep)\n    return 0\n", "10\n100\n", id='for loop var modified via pointer'),
-        pytest.param("def int main():\n    []*int ps\n    []int s = [5, 6, 7]\n    for v in s:\n        ps = append(ps, &v)\n    print(*ps[0] + *ps[1] * 10 + *ps[2] * 100)\n    return 0\n", "765\n", id='for-in binding per iteration'),
-        pytest.param("def int main():\n    []*int ps\n    []int s = [5, 6, 7]\n    for i, v in s:\n        ps = append(ps, &i)\n    print(*ps[0] + *ps[1] * 10 + *ps[2] * 100)\n    return 0\n", "210\n", id='for-in index binding per iteration'),
-        pytest.param("def int main():\n    []*int ps\n    dict[int]int d\n    d[1] = 10\n    d[2] = 20\n    for k, v in d:\n        ps = append(ps, &v)\n    print(*ps[0] + *ps[1])\n    return 0\n", "30\n", id='for-in dict bindings per iteration'),
-        pytest.param("type P struct:\n    int x\ndef int main():\n    []*P ps\n    for int i = 0; i < 3; i += 1:\n        ps = append(ps, &P(i))\n    print(ps[0].x + ps[1].x * 10 + ps[2].x * 100)\n    return 0\n", "210\n", id='struct literal address per iteration'),
-        pytest.param("def int main():\n    []*int all\n    for int i = 0; i < 2; i += 1:\n        *int last = none\n        for int j = 0; j < 2; j += 1:\n            int x = i * 10 + j\n            last = &x\n        all = append(all, last)\n    print(*all[0])\n    print(*all[1])\n    return 0\n", "1\n11\n", id='nested loop inner var held by outer-body var'),
-        pytest.param("def int main():\n    int total = 0\n    for int i = 0; i < 5; i += 1:\n        int x = i\n        *int p = &x\n        *p += 1\n        total += x\n    print(total)\n    return 0\n", "15\n", id='pointer only used within iteration stays correct'),
-        pytest.param("def int main():\n    [][]int all\n    for int i = 0; i < 3; i += 1:\n        all = append(all, []int[i])\n    print(all[0][0] + all[1][0] * 10 + all[2][0] * 100)\n    return 0\n", "210\n", id='slice literal in loop'),
-        pytest.param("def int main():\n    [][]int all\n    for int i = 0; i < 3; i += 1:\n        [1]int a = [i]\n        all = append(all, a[0:1])\n    print(all[0][0] + all[1][0] * 10 + all[2][0] * 100)\n    return 0\n", "210\n", id='array var slice in loop'),
-        pytest.param("def int main():\n    []*int ps\n    int i = 0\n    while i < 3:\n        ps = append(ps, &i)\n        i += 1\n    print(*ps[0])\n    return 0\n", "3\n", id='while loop var from outside unaffected'),
-        pytest.param("def int main():\n    []*int8 ps\n    for int8 i = int8(0); i < int8(3); i += int8(1):\n        ps = append(ps, &i)\n    print(*ps[0] + *ps[2])\n    return 0\n", "2\n", id='int8 loop var'),
-        pytest.param("def int main():\n    []*str ps\n    for str s = 'a'; len(s) < 4; s = s + 'b':\n        ps = append(ps, &s)\n    print(*ps[0])\n    print(*ps[2])\n    return 0\n", "a\nabb\n", id='for loop str var per iteration'),
-        pytest.param("def int main():\n    []*[]int ps\n    for []int s = []int[]; len(s) < 3; s = append(s, 7):\n        ps = append(ps, &s)\n    print(len(*ps[0]))\n    print(len(*ps[2]))\n    return 0\n", "0\n2\n", id='for loop slice var per iteration'),
-        pytest.param("type P struct:\n    int x\ndef int main():\n    []*P ps\n    for int i = 0; i < 3; i += 1:\n        P p = P(i)\n        ps = append(ps, &p)\n    print(ps[0].x)\n    return 0\n", "0\n", id='escaping struct in loop distinct'),
-        pytest.param("def int main():\n    []*int ps\n    int i = 0\n    while i < 3:\n        int x = i\n        ps = append(ps, &x)\n        i += 1\n    print(*ps[0])\n    return 0\n", "0\n", id='escaping var in while distinct'),
-        pytest.param("def int main():\n    []*int ps\n    for int i = 0; i < 3; i += 1:\n        int x = i\n        ps = append(ps, &x)\n    print(*ps[0])\n    print(*ps[2])\n    return 0\n", "0\n2\n", id='pointer to var declared in loop is distinct'),
+        pytest.param("def int main():\n"
+                     "    []*int ps\n"
+                     "    for int i = 0; i < 3; i += 1:\n"
+                     "        ps = append(ps, &i)\n"
+                     "    print(*ps[0])\n"
+                     "    print(*ps[1])\n"
+                     "    print(*ps[2])\n"
+                     "    return 0\n",
+                     "0\n1\n2\n", id='for loop var per iteration'),
+        pytest.param("def int main():\n"
+                     "    []*int ps\n"
+                     "    for int i = 0; i < 6; i += 1:\n"
+                     "        ps = append(ps, &i)\n"
+                     "        i += 1\n"
+                     "    print(*ps[0])\n"
+                     "    print(*ps[1])\n"
+                     "    print(len(ps))\n"
+                     "    return 0\n",
+                     "1\n3\n3\n", id='for loop var modified in body'),
+        pytest.param("def int main():\n"
+                     "    *int keep = none\n"
+                     "    int n = 0\n"
+                     "    for int i = 0; i < 10; i += 1:\n"
+                     "        if i == 2:\n"
+                     "            keep = &i\n"
+                     "        n += 1\n"
+                     "    *keep = 100\n"
+                     "    print(n)\n"
+                     "    print(*keep)\n"
+                     "    return 0\n",
+                     "10\n100\n", id='for loop var modified via pointer'),
+        pytest.param("def int main():\n"
+                     "    []*int ps\n"
+                     "    []int s = [5, 6, 7]\n"
+                     "    for v in s:\n"
+                     "        ps = append(ps, &v)\n"
+                     "    print(*ps[0] + *ps[1] * 10 + *ps[2] * 100)\n"
+                     "    return 0\n",
+                     "765\n", id='for-in binding per iteration'),
+        pytest.param("def int main():\n"
+                     "    []*int ps\n"
+                     "    []int s = [5, 6, 7]\n"
+                     "    for i, v in s:\n"
+                     "        ps = append(ps, &i)\n"
+                     "    print(*ps[0] + *ps[1] * 10 + *ps[2] * 100)\n"
+                     "    return 0\n",
+                     "210\n", id='for-in index binding per iteration'),
+        pytest.param("def int main():\n"
+                     "    []*int ps\n"
+                     "    dict[int]int d\n"
+                     "    d[1] = 10\n"
+                     "    d[2] = 20\n"
+                     "    for k, v in d:\n"
+                     "        ps = append(ps, &v)\n"
+                     "    print(*ps[0] + *ps[1])\n"
+                     "    return 0\n",
+                     "30\n", id='for-in dict bindings per iteration'),
+        pytest.param("type P struct:\n"
+                     "    int x\n"
+                     "def int main():\n"
+                     "    []*P ps\n"
+                     "    for int i = 0; i < 3; i += 1:\n"
+                     "        ps = append(ps, &P(i))\n"
+                     "    print(ps[0].x + ps[1].x * 10 + ps[2].x * 100)\n"
+                     "    return 0\n",
+                     "210\n", id='struct literal address per iteration'),
+        pytest.param("def int main():\n"
+                     "    []*int all\n"
+                     "    for int i = 0; i < 2; i += 1:\n"
+                     "        *int last = none\n"
+                     "        for int j = 0; j < 2; j += 1:\n"
+                     "            int x = i * 10 + j\n"
+                     "            last = &x\n"
+                     "        all = append(all, last)\n"
+                     "    print(*all[0])\n"
+                     "    print(*all[1])\n"
+                     "    return 0\n",
+                     "1\n11\n", id='nested loop inner var held by outer-body var'),
+        pytest.param("def int main():\n"
+                     "    int total = 0\n"
+                     "    for int i = 0; i < 5; i += 1:\n"
+                     "        int x = i\n"
+                     "        *int p = &x\n"
+                     "        *p += 1\n"
+                     "        total += x\n"
+                     "    print(total)\n"
+                     "    return 0\n",
+                     "15\n", id='pointer only used within iteration stays correct'),
+        pytest.param("def int main():\n"
+                     "    [][]int all\n"
+                     "    for int i = 0; i < 3; i += 1:\n"
+                     "        all = append(all, []int[i])\n"
+                     "    print(all[0][0] + all[1][0] * 10 + all[2][0] * 100)\n"
+                     "    return 0\n",
+                     "210\n", id='slice literal in loop'),
+        pytest.param("def int main():\n"
+                     "    [][]int all\n"
+                     "    for int i = 0; i < 3; i += 1:\n"
+                     "        [1]int a = [i]\n"
+                     "        all = append(all, a[0:1])\n"
+                     "    print(all[0][0] + all[1][0] * 10 + all[2][0] * 100)\n"
+                     "    return 0\n",
+                     "210\n", id='array var slice in loop'),
+        pytest.param("def int main():\n"
+                     "    []*int ps\n"
+                     "    int i = 0\n"
+                     "    while i < 3:\n"
+                     "        ps = append(ps, &i)\n"
+                     "        i += 1\n"
+                     "    print(*ps[0])\n"
+                     "    return 0\n",
+                     "3\n", id='while loop var from outside unaffected'),
+        pytest.param("def int main():\n"
+                     "    []*int8 ps\n"
+                     "    for int8 i = int8(0); i < int8(3); i += int8(1):\n"
+                     "        ps = append(ps, &i)\n"
+                     "    print(*ps[0] + *ps[2])\n"
+                     "    return 0\n",
+                     "2\n", id='int8 loop var'),
+        pytest.param("def int main():\n"
+                     "    []*str ps\n"
+                     "    for str s = 'a'; len(s) < 4; s = s + 'b':\n"
+                     "        ps = append(ps, &s)\n"
+                     "    print(*ps[0])\n"
+                     "    print(*ps[2])\n"
+                     "    return 0\n",
+                     "a\nabb\n", id='for loop str var per iteration'),
+        pytest.param("def int main():\n"
+                     "    []*[]int ps\n"
+                     "    for []int s = []int[]; len(s) < 3; s = append(s, 7):\n"
+                     "        ps = append(ps, &s)\n"
+                     "    print(len(*ps[0]))\n"
+                     "    print(len(*ps[2]))\n"
+                     "    return 0\n",
+                     "0\n2\n", id='for loop slice var per iteration'),
+        pytest.param("type P struct:\n"
+                     "    int x\n"
+                     "def int main():\n"
+                     "    []*P ps\n"
+                     "    for int i = 0; i < 3; i += 1:\n"
+                     "        P p = P(i)\n"
+                     "        ps = append(ps, &p)\n"
+                     "    print(ps[0].x)\n"
+                     "    return 0\n",
+                     "0\n", id='escaping struct in loop distinct'),
+        pytest.param("def int main():\n"
+                     "    []*int ps\n"
+                     "    int i = 0\n"
+                     "    while i < 3:\n"
+                     "        int x = i\n"
+                     "        ps = append(ps, &x)\n"
+                     "        i += 1\n"
+                     "    print(*ps[0])\n"
+                     "    return 0\n",
+                     "0\n", id='escaping var in while distinct'),
+        pytest.param("def int main():\n"
+                     "    []*int ps\n"
+                     "    for int i = 0; i < 3; i += 1:\n"
+                     "        int x = i\n"
+                     "        ps = append(ps, &x)\n"
+                     "    print(*ps[0])\n"
+                     "    print(*ps[2])\n"
+                     "    return 0\n",
+                     "0\n2\n", id='pointer to var declared in loop is distinct'),
     ])
     def test_program(self, source, expected):
         assert_program_stdout(source, expected)
@@ -17583,7 +17806,8 @@ class TestPrintStructs:
             "    root.children = kids[0:2]\n"
             "    print(root)\n"
             "    return 0\n",
-            "Node(value: 1, children: []Node[Node(value: 2, children: []Node[]), Node(value: 3, children: []Node[])])\n",
+            "Node(value: 1, children: []Node[Node(value: 2, children: []Node[]),"
+            " Node(value: 3, children: []Node[])])\n",
         )
 
     def test_multiple_struct_prints_each_get_exactly_one_newline(self):

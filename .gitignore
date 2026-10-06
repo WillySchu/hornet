@@ -19,3 +19,4 @@ htmlcov
 test.ht
 
 sketches
+find_long_lines.py

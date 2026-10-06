@@ -370,7 +370,8 @@ def compute_escape_summaries(functions, structs: dict[str, StructInfo]) -> dict:
     return summaries
 
 
-def analyze_array_escapes(fn: t.Function, structs: dict[str, StructInfo], summaries: Optional[dict] = None) -> set[DeclId]:
+def analyze_array_escapes(
+        fn: t.Function, structs: dict[str, StructInfo], summaries: Optional[dict] = None) -> set[DeclId]:
     """DeclIds in typed function `fn` whose storage must be heap-allocated. Without `summaries`,
     every call escapes its arguments."""
     return EscapeAnalyzer(fn, structs, summaries).analyze()
