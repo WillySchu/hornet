@@ -65,7 +65,7 @@ python3 compile.py program.ht
 
 A generated program that uses runtime functions such as `print` must also be linked with `runtime/runtime.c`. `build.py` handles this automatically.
 
-`--dump-typed` prints the program's typed tree (see [Compiler Architecture](#compiler-architecture)) instead of assembly.
+`--dump STAGE` prints what a stage of the compiler produces instead of assembly: `tokens`, `tree` (the parser's), `typed` (the typed tree; see [Compiler Architecture](#compiler-architecture)), `ir`, or `optimized-ir`. A dump runs the compiler only as far as its stage, so `--dump tokens` works on a file that doesn't parse. `tokens` and `tree` are of the file named; the others are of the whole program.
 
 ### Errors
 
@@ -220,6 +220,8 @@ String concatenation uses `+`:
 ```hornet
 str message = 'hello ' + 'world'
 ```
+
+Strings compare with `==` and `!=`, and order with `<`, `>`, `<=`, and `>=`: byte by byte, a string coming before the longer strings it begins (`'apple' < 'apples'`, and `'Z' < 'a'`).
 
 Indexing a string produces a `byte`, and slicing a string produces another `str` view:
 
@@ -425,7 +427,7 @@ bool finished = false
 str message = 'hello'
 ```
 
-Without one, a variable holds its type's zero value: `0`, `false`, `''`, `none` for pointers, an empty slice, a new empty dictionary, the `none` variant for a sum that has one, and arrays and structs of zero values. A sum without a `none` variant has no zero value.
+Without one, a variable holds its type's zero value: `0`, `false`, `''`, `none` for pointers, an empty slice, a new empty dictionary, the `none` variant for a sum that has one, an enum's first member, and arrays and structs of zero values. A sum without a `none` variant has no zero value.
 
 Blocks introduce lexical scopes, and shadowing is allowed in nested scopes:
 
@@ -607,7 +609,7 @@ A slice is never `none`. An uninitialized slice is empty, as are `[]` and `[]int
 
 A typed literal whose element type is a pointer to a named type after two or more fixed sizes, such as `[2][1]*P[...]`, has the same tokens as an indexed literal multiplied by an indexed value, and is read as the multiplication. Give the variable that type and use an untyped literal instead.
 
-Indexing is bounds checked at runtime.
+Indexing and slicing are bounds checked at runtime; a failed check's panic says what it compared (`index out of bounds: index 7, length 3`). A slice of a slice may extend up to its capacity.
 
 Appending may allocate a new backing store:
 
@@ -650,6 +652,8 @@ Remove an entry with `del`:
 ```hornet
 del(counts, 'green')
 ```
+
+Reading, updating (`counts['green'] += 1`), or deleting a key that isn't there panics, naming the key (`dict lookup: key not found: 'green'`); test with `in` first.
 
 `len` returns the number of live entries.
 
@@ -748,7 +752,7 @@ Each iteration has its own bindings, so taking a binding's address is allowed. R
 <  >  <=  >=  ==  !=
 ```
 
-`is` and `is not` bind like `==`; see [Pattern Matching](#pattern-matching). Ordering applies to integers of the same type. Equality applies to integers, `bool`, `str`, enums, pointers, and arrays and structs of comparable types. Pointers can be compared with `none`, and so can a sum with a `none` variant (`x == none` means `x is none`); slices and dictionaries are never `none`.
+`is` and `is not` bind like `==`; see [Pattern Matching](#pattern-matching). Ordering applies to integers of the same type, and to strings (byte by byte). Equality applies to integers, `bool`, `str`, enums, pointers, and arrays and structs of comparable types. Pointers can be compared with `none`, and so can a sum with a `none` variant (`x == none` means `x is none`); slices and dictionaries are never `none`.
 
 ### Membership
 
@@ -926,7 +930,7 @@ values = append(values, 3)
 del(counts, 'obsolete')
 ```
 
-A missing key is a runtime error.
+A missing key panics, naming the key.
 
 ---
 
@@ -1069,7 +1073,7 @@ str r = repeat('ab', 3)
 int order = compare('apple', 'pear')   # negative, zero, or positive: which comes first, by bytes
 ```
 
-Strings have no `<`; `compare` is how they are ordered.
+`compare` gives the order `<` does, as one three-way answer.
 
 ## `stdlib/errors.ht`
 
@@ -1113,14 +1117,17 @@ The native runtime is located in `runtime/runtime.c` and is compiled separately 
 It currently provides language-level services including:
 
 * `print` and recursive value formatting
-* `hornet_panic` and `hornet_panic_at` (for `panic(...)`), which flush standard output, write the message to standard error, and abort (`SIGABRT`; on Windows, exit code 3)
+* the panic routines (`hornet_panic`, `hornet_panic_at` for `panic(...)`, and those that add the values a failed check compared), which flush standard output, write the message to standard error, and abort (`SIGABRT`; on Windows, exit code 3)
+* catching a stack overflow, to report it as a panic
 * `hornet_slice_grow`, which copies a slice into a larger backing store
 * `hornet_bytes` for `bytes(s)`
 * dictionary hash tables, hashed with FNV-1a (`hornet_hash_bytes`)
 * runtime type descriptors (`hornet_typedesc_tags.h` is generated from `ir/typedesc.py` by `runtime/generate_typedesc_header.py`)
 * argument access, file and stream I/O (as bytes on every system), exit, and OS error messages for `stdlib/os.ht` (`hornet_argv_get`, `hornet_open_read`, `hornet_open_write`, `hornet_read_fd`, `hornet_read_line`, `hornet_is_terminal`, `hornet_write_fd`, `hornet_close_fd`, `hornet_exit`, `hornet_error_message`)
 
-Runtime checks panic with `file:line:col: panic: message`, the position being where the checked expression or statement starts and the file named without its directory: array, slice, and string bounds; division by zero and `MIN / -1`; dereferencing `none`; a missing dictionary key; reallocating a slice or dictionary being iterated with `for ... in`; and a narrowed variable whose variant was changed through a pointer. The checks are in the compiled code, which calls `hornet_panic`.
+Runtime checks panic with `file:line:col: panic: message`, the position being where the checked expression or statement starts and the file named without its directory: array, slice, and string bounds; division by zero and `MIN / -1`; dereferencing `none`; a missing dictionary key; an integer converted to an enum with no such member; reallocating a slice or dictionary being iterated with `for ... in`; and a narrowed variable whose variant was changed through a pointer. Where a value explains the failure, the message ends with it: `index out of bounds: index 7, length 3`, `slice bounds out of range: start 5, end 2`, `dict lookup: key not found: 'apple'`, `not a member of Color: 7`. The checks are in the compiled code, which calls the runtime's panic routines.
+
+Running out of stack is a panic too: `panic: stack overflow`, with no position, since the runtime only catches the fault (with a signal handler on a stack of its own; on Windows, an exception handler). On Linux a stack with no limit (`ulimit -s unlimited`) has no end to detect.
 
 The runtime is deliberately separate from the native backends. The compiler is responsible for semantic operations such as type checking, aggregate layout, address calculation, and bounds-check generation; the runtime implements selected algorithms and services that are better expressed as ordinary native code.
 
@@ -1177,7 +1184,7 @@ Hornet runtime   external libraries
        native executable
 ```
 
-Semantic analysis never changes the parser's ASTs: it resolves each file's names in that file's scope (`scopes.py`), records what it learns (types, the declaration each name refers to, narrowing) by node number, and from that builds the typed tree (`typed_ast.py`). The typed program `semantic.analyze()` returns is the only input to later stages: a test checks that nothing in `ir/`, `optimize/`, `backend/`, or escape analysis imports the front end. In the typed tree every node has one meaning and a concrete type: names refer to symbols, the parser's overloaded forms are split (calls, struct literals, and builtins; array, slice, string, and dictionary indexing), each implicit operation is a node (widening into a sum, `&Variant(...)`, a literal becoming a slice, zero values), methods are ordinary functions, and `match` and compound assignment are nodes of their own. `compile.py --dump-typed` prints it.
+Semantic analysis never changes the parser's ASTs: it resolves each file's names in that file's scope (`scopes.py`), records what it learns (types, the declaration each name refers to, narrowing) by node number, and from that builds the typed tree (`typed_ast.py`). The typed program `semantic.analyze()` returns is the only input to later stages: a test checks that nothing in `ir/`, `optimize/`, `backend/`, or escape analysis imports the front end. In the typed tree every node has one meaning and a concrete type: names refer to symbols, the parser's overloaded forms are split (calls, struct literals, and builtins; array, slice, string, and dictionary indexing), each implicit operation is a node (widening into a sum, `&Variant(...)`, a literal becoming a slice, zero values), methods are ordinary functions, and `match` and compound assignment are nodes of their own. `compile.py --dump typed` prints it.
 
 The frontend constructs a complete `IRProgram` before a backend begins lowering it. The IR is independent of any target: a function's incoming arguments are an ordered list of word-sized temporaries in Hornet's own calling convention (a composite return value's destination address first, then one word per parameter, except two for `str` and three for slices, with arrays, structs, sum types, and dicts passed by address), and where each word physically arrives is decided by the backend. Lowering never modifies the IR. An enum value reaches the IR as an `int32`.
 
@@ -1200,6 +1207,7 @@ lexer.py           Lexical analysis
 parser.py          AST construction
 semantic.py        Semantic analysis: checking, and building the typed tree
 typed_ast.py       The typed tree and its text dump
+dump.py            What each stage produces, as text (`compile.py --dump`)
 modules.py         Module discovery
 scopes.py          Names across modules: each file's scope and the import checks
 escape_analysis.py Escape analysis, on the typed tree
@@ -1228,6 +1236,8 @@ compile.py         Generate native assembly
 test.sh            Build, run, and delete one program: ./test.sh path/without_ext
 Dockerfile, entrypoint.sh
                    Assemble and run an x86-64 `.s` file in a Linux container
+find_long_lines.py, find_newline_runs.py
+                   Report long lines, and runs of blank lines, in the sources
 TODO.md            Open language, compiler, runtime, and tooling work
 ```
 
@@ -1346,7 +1356,7 @@ Hornet is still experimental. Some notable limitations are:
 * There are no floating-point types yet.
 * Multithreading is not implemented.
 * Without generics, each result type is a separate named sum type. There is no operator for propagating errors, and ignoring a result is not diagnosed.
-* Stack overflow is an unreported `SIGSEGV`.
+* A stack overflow's panic has no source position.
 
 ---
 
@@ -1354,7 +1364,7 @@ Hornet is still experimental. Some notable limitations are:
 
 A longer-term goal is to rewrite the compiler itself in Hornet.
 
-The current language already has the structural features needed by a compiler implementation: structs, enums, arrays, slices, dictionaries, pointers, recursive sum types (so an AST can be expressed), pattern matching, modules, FFI, and native compilation. The Python compiler's typed tree, printed by `compile.py --dump-typed`, is the intended point of comparison between the two implementations.
+The current language already has the structural features needed by a compiler implementation: structs, enums, arrays, slices, dictionaries, pointers, recursive sum types (so an AST can be expressed), pattern matching, modules, FFI, and native compilation. What each stage of the Python compiler produces, printed by `compile.py --dump` (tokens, tree, typed tree, and IR), is the intended point of comparison between the two implementations.
 
 The standard library now covers file and stream I/O, process exit, string building and searching, integer formatting and parsing, and an error convention. The formatter in `tools/hfmt` is the first substantial tool written in Hornet; it includes a Hornet lexer that is tested token-for-token against the compiler's own. `examples/calc` is a compiler in miniature (lexer, parser, tree, simplifier, code generation, and a machine to run the code). The next step is porting the compiler itself, starting from that lexer.
 
