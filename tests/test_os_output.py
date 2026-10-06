@@ -6,25 +6,26 @@ from pathlib import Path
 
 from build import build_executable
 from tests.test_compiler import GCC_SKIP, panic_message
-from tests.targets import on_every_target, run_binary
+from tests.targets import on_every_target, posix, run_binary, windows
 
 
-def compile_and_run(source: str) -> subprocess.CompletedProcess:
-    """Full driver (so stdlib imports resolve), then build and run for every E2E target."""
+def compile_and_run(source: str, only=None) -> subprocess.CompletedProcess:
+    """Full driver (so stdlib imports resolve), then build and run for every E2E target (that `only`
+    accepts; None if it accepts none)."""
     def build_and_run(target):
         with tempfile.TemporaryDirectory() as tmp:
             src, exe = Path(tmp) / 'p.ht', Path(tmp) / 'p'
             src.write_text(source)
             build_executable(str(src), str(exe), target=target)
             return run_binary(target, [exe], capture_output=True, text=True, timeout=10)
-    return on_every_target(build_and_run, source)
+    return on_every_target(build_and_run, source, only=only)
 
 
-def _run(body: str):
+def _run(body: str, only=None):
     return compile_and_run(
         "from 'os' import write_stdout, write_stderr, write_file, read_file, exit\n"
         "from 'errors' import Error, StrResult, IntResult, must_str, must_int\n"
-        "def int main():\n" + ''.join(f"    {line}\n" for line in body.strip('\n').split('\n')))
+        "def int main():\n" + ''.join(f"    {line}\n" for line in body.strip('\n').split('\n')), only)
 
 
 @GCC_SKIP
@@ -101,7 +102,10 @@ def test_write_functions_return_bytes_written(tmp_path):
     assert r.stdout == "5\nabc3\n"
 
 
-def test_read_file_of_a_directory_reports_a_read_error(tmp_path):
-    r = _run(f"StrResult c = read_file('{tmp_path}')\nif c is Error:\n    print(c.message)\nreturn 0")
-    assert r.stdout in (f"could not read '{tmp_path}': read failed: Is a directory\n",
-                        f"could not open '{tmp_path}': Permission denied\n")  # (Windows won't open one)
+def test_read_file_of_a_directory_reports_an_error(tmp_path):
+    body = f"StrResult c = read_file('{tmp_path}')\nif c is Error:\n    print(c.message)\nreturn 0"
+    # A directory opens and then can't be read; Windows won't open one.
+    on_posix, on_windows = _run(body, only=posix), _run(body, only=windows)
+    assert on_posix is None or on_posix.stdout == f"could not read '{tmp_path}': read failed: Is a directory\n"
+    assert on_windows is None or on_windows.stdout == f"could not open '{tmp_path}': Permission denied\n"
+    assert on_posix is not None or on_windows is not None

@@ -83,8 +83,7 @@ TIER = os.environ.get('HORNET_TEST_TIER', 'full')
 def _e2e_targets() -> list:
     if os.environ.get('HORNET_E2E_TARGETS'):
         return [Target.parse(n) for n in os.environ['HORNET_E2E_TARGETS'].split(',')]
-    # Another system's binaries (Windows under Wine) take much longer to start: only on request.
-    targets = [t for t in RUNNABLE_TARGETS if t.arch in IMPLEMENTED_ARCHES and t.os == default_target().os]
+    targets = [t for t in RUNNABLE_TARGETS if t.arch in IMPLEMENTED_ARCHES]
     if TIER == 'full':
         return targets
     native = default_target()
@@ -92,20 +91,31 @@ def _e2e_targets() -> list:
 
 
 # Targets every end-to-end program is built and run for: this machine's own target, or with
-# --full every runnable target of this machine's system with a complete backend.
-# HORNET_E2E_TARGETS (comma-separated arch-os names) overrides this, e.g. to test a backend that is
-# still in progress, or `x86_64-windows` under Wine.
+# --full every runnable target with a complete backend (other architectures under qemu-user or
+# Rosetta 2, Windows under Wine). HORNET_E2E_TARGETS (comma-separated arch-os names) overrides
+# this, e.g. to test a backend that is still in progress, or one target alone.
 E2E_TARGETS = _e2e_targets()
 
 # Parametrize a test over E2E_TARGETS as `target`.
 each_e2e_target = pytest.mark.parametrize('target', E2E_TARGETS, ids=str)
 
 
-def on_every_target(build_and_run, label: str = '', agree: bool = True) -> subprocess.CompletedProcess:
+def posix(target: Target) -> bool:
+    return target.os != 'windows'
+
+
+def windows(target: Target) -> bool:
+    return target.os == 'windows'
+
+
+def on_every_target(build_and_run, label: str = '', agree: bool = True, only=None) -> subprocess.CompletedProcess:
     """Call build_and_run(target) for each E2E target; unless `agree` is False (output that
     legitimately varies, such as addresses), they must agree on exit status and output.
-    Returns the first target's result."""
-    results = [(t, build_and_run(t)) for t in E2E_TARGETS]
+    Returns the first target's result. `only` (posix, windows) keeps the targets it accepts, for
+    the few things systems define differently; the result is None when it keeps none."""
+    results = [(t, build_and_run(t)) for t in E2E_TARGETS if only is None or only(t)]
+    if not results:
+        return None
     first_target, first = results[0]
     for target, r in results[1:] if agree else []:
         assert (r.returncode, r.stdout, r.stderr) == (first.returncode, first.stdout, first.stderr), (

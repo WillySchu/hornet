@@ -21,7 +21,7 @@ from backend.errors import CodegenError
 from ir.errors import IRError
 from build import c_compiler, executable_name, link_flags, runtime_object
 from target import default_target
-from tests.targets import E2E_TARGETS, on_every_target, run_binary
+from tests.targets import E2E_TARGETS, on_every_target, posix, run_binary
 from lexer import lex
 from parser import Break, Call, Constant, Continue, For, ForIn, Node, Parser, ParseError
 from semantic import SemanticError, analyze as _semantic_analyze
@@ -120,14 +120,14 @@ def _heap_allocations(ast) -> list:
             if isinstance(c, IRCall) and c.name == 'malloc']
 
 
-def compile_and_run(source: str, agree: bool = True) -> subprocess.CompletedProcess:
-    """Build and run `source` for every E2E target; all must agree unless `agree` is False.
-    Returns the first result."""
+def compile_and_run(source: str, agree: bool = True, only=None) -> subprocess.CompletedProcess:
+    """Build and run `source` for every E2E target (that `only` accepts); all must agree unless
+    `agree` is False. Returns the first result."""
     def build_and_run(target):
         with tempfile.TemporaryDirectory() as tmpdir:
             bin_path, asm = _compile_to_binary(source, Path(tmpdir), target)
             return _run_binary(bin_path, asm, target)
-    return on_every_target(build_and_run, source, agree)
+    return on_every_target(build_and_run, source, agree, only)
 
 
 def assert_exit_code(body: str, expected: int, return_type: str = "int") -> None:
@@ -174,9 +174,11 @@ def assert_semantic_error(body: str, return_type: str = "int", match: str = None
         analyze(ast)
 
 
-def assert_program_exit_code(source: str, expected: int) -> None:
-    """Like assert_exit_code, for a complete program."""
-    result = compile_and_run(source)
+def assert_program_exit_code(source: str, expected: int, only=None) -> None:
+    """Like assert_exit_code, for a complete program (on the E2E targets `only` accepts)."""
+    result = compile_and_run(source, only=only)
+    if result is None:
+        pytest.skip("no end-to-end target this applies to")
     assert result.returncode == expected, (
         f"program:\n{source}\nexpected exit {expected}, got {result.returncode}"
     )
@@ -10281,12 +10283,13 @@ class TestInt64Storage:
             5,
         )
 
-    @pytest.mark.skipif(any(t.os == 'windows' for t in E2E_TARGETS),
-                        reason="a Windows exit code is 32 bits wide, and Wine reports one above 255 as 1")
     def test_int64_large_literal_vardecl_and_return(self):
+        # Where an exit status is the low byte of what main returns: a Windows exit code is 32 bits
+        # wide, and Wine reports one above 255 as 1.
         assert_program_exit_code(
             "def int64 main():\n    int64 x = 9000000000\n    return x\n",
             9000000000 % 256,
+            only=posix,
         )
 
     def test_two_int64_locals_are_independently_stored(self):

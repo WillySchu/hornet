@@ -1136,7 +1136,7 @@ class TypedFunctionBuilder:
             return self.for_in_dict(s)
         start = self.ids.new_label('for_in_start')
         body = self.ids.new_label('for_in_body')
-        step = self.ids.new_label('for_in_step')
+        step = self.ids.new_label('for_in_next')
         end = self.ids.new_label('for_in_end')
         recheck = None  # (descriptor address, pointer at the start): a slice reallocated during the loop panics
         if s.kind == 'str':
