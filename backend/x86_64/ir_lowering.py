@@ -402,14 +402,12 @@ class InstructionSelector:
             width = self._same_width(instr.index, instr.length)
             if width is None:
                 return None
-            return self._direct_cmp(instr.index, instr.length, width) + [
-                Jae(self.host._get_bounds_check_fail_label(located("array index out of bounds", instr.where)))]
+            return self._direct_cmp(instr.index, instr.length, width) + [Jae(self._bounds_fail(instr))]
         if isinstance(instr, IRSliceBoundsCheck):
             width = self._same_width(instr.value, instr.bound)
             if width is None:
                 return None
-            return self._direct_cmp(instr.value, instr.bound, width) + [
-                Ja(self.host._get_bounds_check_fail_label(located("slice bounds out of range", instr.where)))]
+            return self._direct_cmp(instr.value, instr.bound, width) + [Ja(self._bounds_fail(instr))]
         if isinstance(instr, IRLocalAddress):
             d = self._loc(instr.dst, 8)
             if isinstance(d, Register):
@@ -447,6 +445,34 @@ class InstructionSelector:
         if wide:
             return CmpQ(src=Register('rcx'), dst=Register('rax'))
         return Cmp(src=Register('ecx'), dst=Register('eax'))
+
+    def _bounds_fail(self, instr) -> str:
+        """The label of the block a failed bounds check jumps to: placed after the function's code,
+        it calls the check's panic routine with its message and the two values that were compared,
+        read from where they live (nothing has moved since the comparison)."""
+        if isinstance(instr, IRBoundsCheck):
+            routine, first, second = instr.PANIC_ROUTINE, instr.index, instr.length
+        else:
+            routine, first, second = instr.PANIC_ROUTINES[instr.part], instr.value, instr.bound
+        abi = self.host.abi
+        message, first_arg, second_arg = (Register(name) for name in abi.arg_registers_32[:3])
+        second_home = self.host._register_assignment.get(second.id) if isinstance(second, Temp) else None
+        if second_home is not None and as_qword_register(Register(second_home)) == as_qword_register(first_arg):
+            # The second value lives where the first is to go: the first waits in %rax meanwhile.
+            moves = self._load_as_int64(first, Register('eax')) + self._load_as_int64(second, second_arg) + [
+                MovQ(src=Register('rax'), dst=as_qword_register(first_arg))]
+        else:
+            moves = self._load_as_int64(first, first_arg) + self._load_as_int64(second, second_arg)
+        label = self.host.ir_program.ids.new_label("bounds_check_fail")
+        text = self.host._get_bounds_check_message_label(located(instr.PANIC_MESSAGE, instr.where))
+        self.host._bounds_check_fail_blocks.append(
+            [Label(label)] + moves + [LeaQ(label=text, dst=as_qword_register(message)), CallInstr(routine)])
+        return label
+
+    def _load_as_int64(self, value: IRValue, dst: Register) -> list[Instruction]:
+        """`value` in the 64-bit register `dst` names (by its 32-bit name), sign-extended if narrower."""
+        load = self._gen_load_value(value, dst)
+        return load if is_wide_type(value.type) else load + [MovSXD(src=dst, dst=as_qword_register(dst))]
 
     def lower_params(self, params: list, body: list) -> list[Instruction]:
         """Move each incoming argument word (the ABI's argument registers, then the caller's stack)
@@ -622,14 +648,12 @@ class InstructionSelector:
                 out.extend(self._gen_load_value(instr.length, Register('ecx')))
                 out.extend(self._gen_load_value(instr.index, Register('eax')))
                 out.append(self._cmp(instr.length, instr.index))
-                out.append(Jae(self.host._get_bounds_check_fail_label(
-                    located("array index out of bounds", instr.where))))
+                out.append(Jae(self._bounds_fail(instr)))
             elif isinstance(instr, IRSliceBoundsCheck):
                 out.extend(self._gen_load_value(instr.bound, Register('ecx')))
                 out.extend(self._gen_load_value(instr.value, Register('eax')))
                 out.append(self._cmp(instr.bound, instr.value))
-                out.append(Ja(self.host._get_bounds_check_fail_label(
-                    located("slice bounds out of range", instr.where))))
+                out.append(Ja(self._bounds_fail(instr)))
             else:
                 raise NotImplementedError(f"lower_ir has no rule for: {instr!r}")
         return out

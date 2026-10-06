@@ -22,8 +22,8 @@ SETUP = (
     ("10 / zero", "integer division by zero"),
     ("10 % zero", "integer division by zero"),
     ("int unused = 10 / zero", "integer division by zero"),
-    ("int unused = xs[five]", "array index out of bounds"),
-    ("xs[five]", "array index out of bounds"),
+    ("int unused = xs[five]", "index out of bounds: index 5, length 3"),
+    ("xs[five]", "index out of bounds: index 5, length 3"),
     ("*p", "dereference of none"),
     ("int unused = *p", "dereference of none"),
 ])

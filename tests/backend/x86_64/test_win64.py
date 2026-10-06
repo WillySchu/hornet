@@ -146,7 +146,7 @@ def test_a_windows_panic_exits_with_code_3(tmp_path):
     build.build_executable(str(tmp_path / "p.ht"), str(tmp_path / "p.exe"), target=WINDOWS)
     import subprocess
     raw = subprocess.run(build.run_prefix(WINDOWS) + [str(tmp_path / "p.exe")], capture_output=True)
-    assert (raw.returncode, raw.stderr) == (3, b"p.ht:4:12: panic: array index out of bounds\n")
+    assert (raw.returncode, raw.stderr) == (3, b"p.ht:4:12: panic: index out of bounds: index 1, length 1\n")
 
 
 def test_unwind_tables_describe_each_prologue_and_the_epilogue_is_the_form_the_unwinder_knows():

@@ -229,6 +229,37 @@ class Selector:
         else:
             self.emit('cmp', a, sized(self.value_in(right, SCRATCH_B), left.type))
 
+    def _bounds_fail(self, instr) -> str:
+        """The label of the block a failed bounds check branches to: placed after the function's
+        code, it calls the check's panic routine with its message and the two values that were
+        compared, read from where they live (nothing has moved since the comparison)."""
+        if isinstance(instr, IRBoundsCheck):
+            routine, first, second = instr.PANIC_ROUTINE, instr.index, instr.length
+        else:
+            routine, first, second = instr.PANIC_ROUTINES[instr.part], instr.value, instr.bound
+        label = self.host.ir_program.ids.new_label("bounds_check_fail")
+        code, self.out = self.out, [LabelDef(label)]
+        x0, x1, x2 = Reg('x0'), Reg('x1'), Reg('x2')
+        a, b = self.value_in(first, SCRATCH_A), self.value_in(second, SCRATCH_B)
+        if b.x == x1:  # the second value lives where the first is to go: it steps aside
+            self._as_int64(SCRATCH_B.x, b, second.type)
+            b = SCRATCH_B.x
+        self._as_int64(x1, a, first.type)
+        self._as_int64(x2, b, second.type)
+        text = self.host.message_label(located(instr.PANIC_MESSAGE, instr.where))
+        self.out += [Instr('adrp', (x0, SymPage(text))), Instr('add', (x0, x0, SymPageOffset(text))), Call(routine)]
+        block, self.out = self.out, code
+        self.host.fail_blocks.append(block)
+        return label
+
+    def _as_int64(self, dst: Reg, src: Reg, t: Type) -> None:
+        """`dst` (64-bit) = the value of type `t` in `src`, sign-extended if it is narrower."""
+        if src.name.startswith('x') or reg_width(t) == 8:
+            if src.x != dst:
+                self.emit('mov', dst, src.x)
+        else:
+            self.emit('sxtw', dst, src.w)
+
     def _lower_one(self, instr) -> None:
         if isinstance(instr, IRLabel):
             self.out.append(LabelDef(instr.name))
@@ -278,10 +309,10 @@ class Selector:
             self._copy(instr)
         elif isinstance(instr, IRBoundsCheck):
             self._compare(instr.index, instr.length)  # unsigned: a negative index is huge
-            self.emit('b.hs', LabelRef(self.host.fail_label(located("array index out of bounds", instr.where))))
+            self.emit('b.hs', LabelRef(self._bounds_fail(instr)))
         elif isinstance(instr, IRSliceBoundsCheck):
             self._compare(instr.value, instr.bound)
-            self.emit('b.hi', LabelRef(self.host.fail_label(located("slice bounds out of range", instr.where))))
+            self.emit('b.hi', LabelRef(self._bounds_fail(instr)))
         elif isinstance(instr, IRReturn):
             if instr.value is not None:
                 reg = sized(ARG_REGISTERS[0], instr.value.type)

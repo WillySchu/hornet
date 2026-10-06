@@ -176,7 +176,7 @@ def test_program(name):
 
 def test_bounds_check_panics():
     r = build_and_run(PROGRAMS['bounds_check'][0], A64)
-    assert r.returncode != 0 and r.stderr.endswith(': panic: array index out of bounds\n')
+    assert r.returncode != 0 and r.stderr.endswith(': panic: index out of bounds: index 5, length 3\n')
 
 
 @pytest.mark.parametrize('seed', range(0, 40, 4))

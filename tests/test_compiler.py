@@ -1583,7 +1583,7 @@ class TestStringSlicing:
             "    str bad = s[2:10]\n"
             "    print(bad)\n"
             "    return 0\n",
-            "slice bounds out of range",
+            "slice bounds out of range: end 10, length 5",
         )
 
     def test_low_greater_than_high_is_rejected_at_runtime(self):
@@ -1593,7 +1593,7 @@ class TestStringSlicing:
             "    str bad = s[4:2]\n"
             "    print(bad)\n"
             "    return 0\n",
-            "slice bounds out of range",
+            "slice bounds out of range: start 4, end 2",
         )
 
     def test_struct_field_constructed_from_a_slice(self):
@@ -1793,7 +1793,7 @@ class TestStringIndexing:
             "    byte b = s[10]\n"
             "    print(b)\n"
             "    return 0\n",
-            "array index out of bounds",
+            "index out of bounds: index 10, length 5",
         )
 
     def test_index_assignment_into_a_str_is_rejected(self):
@@ -11057,15 +11057,16 @@ class TestBoundsChecking:
             "    int i = 5\n"
             "    return arr[i]\n"
         )
-        assert (result.returncode, panic_message(result.stderr)) == (-signal.SIGABRT, "array index out of bounds\n")
+        assert (result.returncode, panic_message(result.stderr)) == (
+            -signal.SIGABRT, "index out of bounds: index 5, length 3\n")
 
     def test_panic_goes_to_stderr_after_the_programs_own_output(self):
         source = "def int main():\n    print('before')\n    [3]int arr = [1, 2, 3]\n    int i = 5\n    return arr[i]\n"
-        assert_program_panics(source, "array index out of bounds", "before\n")
+        assert_program_panics(source, "index out of bounds: index 5, length 3", "before\n")
         with tempfile.TemporaryDirectory() as tmpdir:  # one stream: buffered output comes out first
             bin_path, _ = _compile_to_binary(source, Path(tmpdir))
             merged = subprocess.run([str(bin_path)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        assert merged.stdout == "before\nprogram.lang:5:12: panic: array index out of bounds\n"
+        assert merged.stdout == "before\nprogram.lang:5:12: panic: index out of bounds: index 5, length 3\n"
 
 
 # ---------------------------------------------------------------------------
@@ -11790,7 +11791,8 @@ class TestSliceBoundsChecking:
             "    []int s = arr[0:hi]\n"
             "    return s[0]\n"
         )
-        assert (result.returncode, panic_message(result.stderr)) == (-signal.SIGABRT, "slice bounds out of range\n")
+        assert (result.returncode, panic_message(result.stderr)) == (
+            -signal.SIGABRT, "slice bounds out of range: end 10, length 5\n")
 
 
 # ---------------------------------------------------------------------------
@@ -12178,8 +12180,8 @@ class TestBareExpressionStatements:
         )
 
     @pytest.mark.parametrize("setup,expr,message", [
-        ("    []str ss = ['x']\n    int i = 3\n", "ss[i]", "array index out of bounds"),
-        ("    str t = 'abc'\n    int e = 9\n", "t[0:e]", "slice bounds out of range"),
+        ("    []str ss = ['x']\n    int i = 3\n", "ss[i]", "index out of bounds: index 3, length 1"),
+        ("    str t = 'abc'\n    int e = 9\n", "t[0:e]", "slice bounds out of range: end 9, length 3"),
         ("    dict[int]str d\n", "d[5]", "dict lookup: key not found"),
     ])
     def test_bare_composite_value_statement_keeps_its_checks(self, setup, expr, message):

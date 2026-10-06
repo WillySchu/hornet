@@ -713,6 +713,7 @@ class TypedFunctionBuilder:
     def bounds(self, e: t.SliceOf, length, limit=None) -> tuple:
         """(IR checking low <= high <= limit, low, high) for `x[low:high]`; high defaults to the
         length, and the limit (a slice's capacity) to the length."""
+        against = '' if limit is None else ' capacity'  # what a failed check names the limit
         limit = length if limit is None else limit
         ir = []
         if e.low is not None:
@@ -726,9 +727,9 @@ class TypedFunctionBuilder:
         else:
             high = length
         return ir + [
-            IRSliceBoundsCheck(value=low, bound=limit, where=e.where),
-            IRSliceBoundsCheck(value=high, bound=limit, where=e.where),
-            IRSliceBoundsCheck(value=low, bound=high, where=e.where)
+            IRSliceBoundsCheck(value=low, bound=limit, where=e.where, part='start' + against),
+            IRSliceBoundsCheck(value=high, bound=limit, where=e.where, part='end' + against),
+            IRSliceBoundsCheck(value=low, bound=high, where=e.where, part='order')
         ], low, high
 
     # -- slices: (ptr, len, cap)
@@ -768,8 +769,8 @@ class TypedFunctionBuilder:
                 length = cap = IRConst(e.base.type.size, Type.INT)
             else:
                 ir, ptr, length, cap = self.slice_value(e.base)
-            # A slice may extend up to the capacity, as in Go.
-            bounds_ir, low, high = self.bounds(e, length, cap)
+            # A slice may extend up to the capacity, as in Go (an array's is its length).
+            bounds_ir, low, high = self.bounds(e, length, cap if e.kind == 'slice' else None)
             width = self.width(e.type.element_type)
             scaled = self.temp(Type.INT)
             new_ptr = self.temp()

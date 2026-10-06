@@ -61,5 +61,5 @@ def test_a_function_named_hornet_panic_leaves_panics_alone():
         "    [3]int a\n"
         "    int i = hornet_panic(5)\n"
         "    return a[i]\n",
-        "array index out of bounds",
+        "index out of bounds: index 5, length 3",
     )

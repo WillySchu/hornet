@@ -56,12 +56,6 @@ class ArraysSlicesLoweringMixin:
             off += leaf_width
         return instructions
 
-    def _get_bounds_check_fail_label(self, message: str) -> str:
-        """Per-function fail label for `message`."""
-        if message not in self._bounds_check_fail_labels:
-            self._bounds_check_fail_labels[message] = self.ir_program.ids.new_label("bounds_check_fail")
-        return self._bounds_check_fail_labels[message]
-
     def _get_bounds_check_message_label(self, message: str) -> str:
         """Program-wide static label for `message`."""
         if message not in self._bounds_check_message_labels:
@@ -71,13 +65,5 @@ class ArraysSlicesLoweringMixin:
         return self._bounds_check_message_labels[message]
 
     def _gen_bounds_check_panic_block(self) -> list[Instruction]:
-        """Panic block for one bounds-check message."""
-        instructions = []
-        for message, fail_label in self._bounds_check_fail_labels.items():
-            msg_label = self._get_bounds_check_message_label(message)
-            instructions.extend([
-                Label(fail_label),
-                LeaQ(label=msg_label, dst=Register(self.abi.arg_registers_64[0])),
-                CallInstr('hornet_panic'),
-            ])
-        return instructions
+        """The function's failed-bounds-check blocks, one per check (ir_lowering's _bounds_fail)."""
+        return [instr for block in self._bounds_check_fail_blocks for instr in block]

@@ -131,18 +131,32 @@ class IRNullCheck:
 
 @dataclass
 class IRBoundsCheck:
-    """Panic if unsigned index >= length."""
+    """Panic if unsigned index >= length. The panic reports both, so a backend passes them to
+    PANIC_ROUTINE (as it does a slice check's value and bound, to its `part`'s routine)."""
     index: IRValue
     length: IRValue
     where: Optional[str] = field(default=None, compare=False, repr=False)
 
+    PANIC_MESSAGE = "index out of bounds"
+    PANIC_ROUTINE = "hornet_panic_index"
+
 
 @dataclass
 class IRSliceBoundsCheck:
-    """Panic if unsigned value > bound."""
+    """Panic if unsigned value > bound. `part` says which check of `a[start:end]` this is: its start
+    or its end against the length (or, slicing a slice, its capacity), or ('order') its start
+    against its end."""
     value: IRValue
     bound: IRValue
     where: Optional[str] = field(default=None, compare=False, repr=False)
+    part: str = 'start'
+
+    PANIC_MESSAGE = "slice bounds out of range"
+    PANIC_ROUTINES = {
+        'start': "hornet_panic_slice_start", 'end': "hornet_panic_slice_end",
+        'start capacity': "hornet_panic_slice_start_capacity", 'end capacity': "hornet_panic_slice_end_capacity",
+        'order': "hornet_panic_slice_order",
+    }
 
 
 @dataclass

@@ -15,11 +15,13 @@ Binary Ops:
 
 Updates:
 - Refactor semantic.py into package.
+- Refactor parser.py into package.
 - Type identity for the port. Composite dict keys, or structural equality through pointers. This is the decision the checker's port depends on.
 - Narrowing. Fields and elements still need an as binding, and as cannot bind in a while condition.
 - Enums. Explicit member values, ordering, for ... in over an enum, and methods.
 - match exhaustiveness. It does not take earlier exclusions into account, so a variant already ruled out by a guard must still have an arm or an else.
-- Panic detail. Bounds panics do not include the index and length.
+- Add missing key information for missing dict key panic.
+- Add missing integer information for enum conversion.
 - Report function name on stack overflow.
 - Literal-only expressions. int8 x = 1 + 2 is still rejected, because only a single literal adapts to a narrow type.
 - No mutable globals. Worth recording, since the port will need context structs because of it.

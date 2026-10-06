@@ -26,16 +26,17 @@ DECLS = (
 
 # (statements of main, from line 9; `line:col: message` of the panic)
 CASES = [
-    ("    [3]int a = [1, 2, 3]\n    int i = 5\n    return a[i]\n", "11:12: array index out of bounds"),
-    ("    []int xs = [1, 2, 3]\n    int i = 5\n    return 100 + xs[i]\n", "11:18: array index out of bounds"),
-    ("    str s = 'abc'\n    int i = 5\n    return int(s[i])\n", "11:16: array index out of bounds"),
+    ("    [3]int a = [1, 2, 3]\n    int i = 5\n    return a[i]\n", "11:12: index out of bounds: index 5, length 3"),
+    ("    []int xs = [1, 2, 3]\n    int i = 5\n    return 100 + xs[i]\n",
+     "11:18: index out of bounds: index 5, length 3"),
+    ("    str s = 'abc'\n    int i = 5\n    return int(s[i])\n", "11:16: index out of bounds: index 5, length 3"),
     # Each check reports its own expression.
     ("    [3]int a = [1, 2, 3]\n    [3]int b = [1, 2, 3]\n    int i = 5\n    return a[0] + b[i]\n",
-     "12:19: array index out of bounds"),
+     "12:19: index out of bounds: index 5, length 3"),
     ("    [3]int a = [1, 2, 3]\n    int i = 5\n    return (a[0] +\n            a[i])\n",
-     "12:13: array index out of bounds"),
+     "12:13: index out of bounds: index 5, length 3"),
     ("    []int xs = [1, 2, 3]\n    int n = 9\n    []int t = xs[1:n]\n    return len(t)\n",
-     "11:15: slice bounds out of range"),
+     "11:15: slice bounds out of range: end 9, capacity 3"),
     ("    *int p = none\n    return *p\n", "10:12: dereference of none"),
     ("    *P p = none\n    return p.x\n", "10:12: dereference of none"),
     ("    *P p = none\n    p.bump()\n    return 0\n", "4:9: dereference of none"),  # inside the method
@@ -73,7 +74,8 @@ def test_a_module_is_named_by_its_file(tmp_path):
         "from 'lib/picker' import pick\n\ndef int main():\n    []int xs = [1, 2]\n    return pick(xs, 2)\n")
     build_executable(str(tmp_path / "main.ht"), str(tmp_path / "main"))
     result = run_binary(default_target(), [tmp_path / "main"], capture_output=True, text=True)
-    assert (result.returncode, result.stderr) == (-signal.SIGABRT, "picker.ht:2:12: panic: array index out of bounds\n")
+    assert (result.returncode, result.stderr) == (
+        -signal.SIGABRT, "picker.ht:2:12: panic: index out of bounds: index 2, length 2\n")
 
 
 def test_positions_reach_the_ir_and_are_optional():
@@ -82,6 +84,6 @@ def test_positions_reach_the_ir_and_are_optional():
     assert [check.where for check in checks] == ["program.lang:4:12"]
     # A position isn't part of what an instruction is, and a check built without one still panics.
     assert checks[0] == IRBoundsCheck(index=checks[0].index, length=IRConst(3, Type.INT))
-    assert located("array index out of bounds", "program.lang:4:12") == \
-        "program.lang:4:12: panic: array index out of bounds"
-    assert located("array index out of bounds", None) == "array index out of bounds"
+    assert located("index out of bounds", "program.lang:4:12") == \
+        "program.lang:4:12: panic: index out of bounds"
+    assert located("index out of bounds", None) == "index out of bounds"

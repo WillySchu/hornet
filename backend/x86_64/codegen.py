@@ -56,7 +56,7 @@ class CodeGenerator(
         self.allocation_log = None  # set to a list to record (ir, temp homes, params, assignment) per function
         self.frame = None  # Frame of the function being lowered
         # fail labels reset per function; message labels cached per program
-        self._bounds_check_fail_labels = {}
+        self._bounds_check_fail_blocks = []
         self._bounds_check_message_labels = {}
         self.ir_program: Optional[IRProgram] = None
 
@@ -97,7 +97,7 @@ class CodeGenerator(
     def lower_function(self, ir_fn: IRFunction, ir_program: IRProgram) -> AsmFunction:
         """Allocate registers, lower, lay out the frame, and add prologue/epilogue."""
         self.ir_program = ir_program
-        self._bounds_check_fail_labels = {}
+        self._bounds_check_fail_blocks = []
         self._slot_offsets = {}
         # The IR's slots plus this backend's own; kept here so lowering never modifies the IR.
         self.frame = Frame(ir_fn, ir_program.struct_registry, ir_program.sum_type_registry)
@@ -119,11 +119,11 @@ class CodeGenerator(
         selector = InstructionSelector(self, ir_fn)
         instructions = selector.lower_params(ir_fn.params, ir)
         instructions.extend(selector.lower_ir(ir))
+        instructions.extend(self._gen_bounds_check_panic_block())  # (they read frame slots too)
         self.frame.layout(save_area=8 * len(self._saved_registers), used=self._referenced_slots(instructions))
         self._slot_offsets = self.frame.offsets
         self._patch_frame_slots(instructions)
         self._register_assignment = {}
-        instructions.extend(self._gen_bounds_check_panic_block())
         instructions = optimize_asm(instructions)
 
         # With unwind tables, a directive after each step of the prologue records what it did.

@@ -90,7 +90,7 @@ class CodeGenerator:
         self.frame = None
         self.assignment = {}
         self.saved = []  # callee-saved registers the current function uses, as x names
-        self._fail_labels = {}  # message -> label, per function
+        self.fail_blocks = []  # per function
         self._message_labels = {}  # message -> static string label, per program
         self.allocation_log = None  # set to a list to record (ir, temp homes, params, assignment) per function
 
@@ -113,30 +113,23 @@ class CodeGenerator:
         self.saved = [r for r in CALLEE_SAVED_POOL if r in used]
         selector = Selector(self, ir_fn)
         selector.lower_params(ir_fn.params, body)
-        self._fail_labels = {}
+        self.fail_blocks = []
         instrs = selector.lower(body) + self._panic_blocks()
         save_area = 16 * ((len(self.saved) + 1) // 2)
         self.frame.layout(save_area=save_area, used=_referenced_slots(instrs))
         instrs = _peephole(legalize(instrs, self.frame))
         return AsmFunction(ir_fn.name, self._prologue(save_area + self.frame.size) + instrs)
 
-    def fail_label(self, message: str) -> str:
-        """Label of this function's panic block for `message`."""
-        if message not in self._fail_labels:
-            self._fail_labels[message] = self.ir_program.ids.new_label("bounds_check_fail")
-        return self._fail_labels[message]
+    def message_label(self, message: str) -> str:
+        """The static string holding a panic's `message`, one per program."""
+        if message not in self._message_labels:
+            self._message_labels[message] = self.ir_program.ids.new_label("bounds_msg")
+            self.ir_program.string_literals.append((self._message_labels[message], message))
+        return self._message_labels[message]
 
     def _panic_blocks(self) -> list:
-        out = []
-        for message, label in self._fail_labels.items():
-            if message not in self._message_labels:
-                self._message_labels[message] = self.ir_program.ids.new_label("bounds_msg")
-                self.ir_program.string_literals.append((self._message_labels[message], message))
-            msg = self._message_labels[message]
-            x0 = Reg('x0')
-            out += [LabelDef(label), Instr('adrp', (x0, SymPage(msg))), Instr('add', (x0, x0, SymPageOffset(msg))),
-                    Call('hornet_panic')]
-        return out
+        """The function's failed-bounds-check blocks, one per check (the Selector's _bounds_fail)."""
+        return [instr for block in self.fail_blocks for instr in block]
 
     def _save_pairs(self) -> list:
         """(registers, offset below x29) for saving/restoring callee-saved registers in pairs."""
