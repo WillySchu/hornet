@@ -53,7 +53,7 @@ function! GetHornetIndent() abort
   if curline =~# '^\s*\%(elif\|else\)\>'
         \ || (curline =~# '^\s*is\>' && prevcode !~# '^\s*match\>')
     let target = s:OpenerIndent(
-        prev, ind, curline =~# '^\s*is\>' ? '^\s*\%(is\|match\)\>' : '^\s*\%(if\|elif\|else\)\>')
+          \ prev, ind, curline =~# '^\s*is\>' ? '^\s*\%(is\|match\)\>' : '^\s*\%(if\|elif\|else\)\>')
     if target >= 0
       return target
     endif
