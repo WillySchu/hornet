@@ -1129,8 +1129,6 @@ def test_stdlib_fmt_module_int_to_str_formats_a_negative_number():
         assert result.stdout == "-5\n"
 
 
-
-
 def test_types_and_names_inside_literals_are_resolved_across_modules():
     """Typed array literals, dict types and literals, dict entries, and named arguments all name
     module types and constants, resolved in the module they are written in."""

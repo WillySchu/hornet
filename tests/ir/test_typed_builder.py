@@ -71,8 +71,6 @@ def test_scalar_programs_run_correctly():
     assert_program_stdout(SCALARS, "true\n0\nfalse\n3\ntrue\n0\n2\ntrue\n44\n-128\n618\n")
 
 
-
-
 COMPOSITES = """\
 type P struct:
     int x

@@ -589,9 +589,18 @@ _COMPOUND_ASSIGN_OPS = {
 }
 
 
-
-_TYPE_START_TOKENS = (TokenType.INT, TokenType.INT8, TokenType.UINT8, TokenType.INT64, TokenType.INT32, TokenType.BOOL,
-                      TokenType.STR, TokenType.IDENTIFIER, TokenType.STAR, TokenType.DICT)
+_TYPE_START_TOKENS = (
+    TokenType.INT,
+    TokenType.INT8,
+    TokenType.UINT8,
+    TokenType.INT64,
+    TokenType.INT32,
+    TokenType.BOOL,
+    TokenType.STR,
+    TokenType.IDENTIFIER,
+    TokenType.STAR,
+    TokenType.DICT,
+)
 
 
 class Parser:
