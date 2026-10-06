@@ -727,6 +727,9 @@ class SemanticAnalyzer:
                     return left + right
                 if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
                     return (left == right) == (expr.op == BinaryOp.EQUAL)
+                if expr.op in _ORDERING_OPS:  # each character is a byte, so this is their order
+                    return {BinaryOp.LESS_THAN: left < right, BinaryOp.GREATER_THAN: left > right,
+                            BinaryOp.LESS_THAN_OR_EQUAL: left <= right}.get(expr.op, left >= right)
             elif (left_type == Type.BOOL or left_type.kind == TypeKind.ENUM) \
                     and expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
                 return (left == right) == (expr.op == BinaryOp.EQUAL)
@@ -2531,8 +2534,15 @@ class SemanticAnalyzer:
             return self._require_same_integer_type(left_type, right_type, op, expr)
 
         if op in _ORDERING_OPS:
-            self._require_same_integer_type(left_type, right_type, op, expr)
-            return Type.BOOL
+            # Same-type integers; or two strs, ordered byte by byte (as strings.ht's compare orders them).
+            if (left_type in _INTEGER_TYPES or left_type == Type.STR) and left_type == right_type:
+                return Type.BOOL
+            raise SemanticError(
+                f"'{op.symbol()}' requires two operands of the same integer type "
+                f"(int, int8, uint8, or int32) or two str operands, "
+                f"got {left_type} and {right_type}",
+                expr,
+            )
 
         if op in _EQUALITY_OPS:
             # Pointers compare to `none`.
@@ -3037,7 +3047,7 @@ class _TypedTreeBuilder:
             return typed.Binary(Type.BOOL, op, value, typed.NoneLit(value.type))
         if left_type == Type.STR and op == BinaryOp.ADD:
             return typed.StrConcat(Type.STR, self.expr(e.left), self.expr(e.right))
-        if left_type == Type.STR and op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
+        if left_type == Type.STR and op in _EQUALITY_OPS | _ORDERING_OPS:
             return typed.StrCompare(Type.BOOL, op, self.expr(e.left), self.expr(e.right))
         return typed.Binary(self.ty(e), op, self.expr(e.left), self.expr(e.right))
 

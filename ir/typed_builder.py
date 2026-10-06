@@ -929,6 +929,9 @@ class TypedFunctionBuilder:
     def str_compare(self, e: t.StrCompare) -> tuple:
         left_ir, left_ptr, left_len = self.str_value(e.left)
         right_ir, right_ptr, right_len = self.str_value(e.right)
+        if e.op not in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
+            order_ir, result = self.str_order(e.op, left_ptr, left_len, right_ptr, right_len)
+            return left_ir + right_ir + order_ir, result
         same_length, cmp, result = self.temp(Type.BOOL), self.temp(Type.INT32), self.temp(Type.BOOL)
         equal_len, differ, end = (self.ids.new_label(x) for x in ("str_len_equal", "str_len_differ", "str_cmp_end"))
         return left_ir + right_ir + [
@@ -942,6 +945,33 @@ class TypedFunctionBuilder:
             IRMove(dst=result, src=IRConst(0 if e.op == BinaryOp.EQUAL else 1, Type.BOOL)),
             IRJump(end),
             IRLabel(end)
+        ], result
+
+    def str_order(self, op, left_ptr, left_len, right_ptr, right_len) -> tuple:
+        """`<`, `>`, `<=`, or `>=` of two strs, byte by byte: the first byte that differs decides
+        (memcmp, over the length they share), and if none does, the shorter str comes first."""
+        shared, cmp = self.temp(Type.INT), self.temp(Type.INT32)
+        left_is_shorter, differ, result = self.temp(Type.BOOL), self.temp(Type.BOOL), self.temp(Type.BOOL)
+        use_right, compare, by_bytes, by_length, end = (self.ids.new_label(x) for x in (
+            "str_order_right", "str_order_compare", "str_order_bytes", "str_order_length", "str_order_end"))
+        return [
+            IRMove(dst=shared, src=left_len),
+            IRBinOp(dst=left_is_shorter, op=BinaryOp.LESS_THAN_OR_EQUAL, left=left_len, right=right_len),
+            IRBranch(cond=left_is_shorter, true_label=compare, false_label=use_right),
+            IRLabel(use_right),
+            IRMove(dst=shared, src=right_len),
+            IRJump(compare),
+            IRLabel(compare),
+            IRCall(dst=cmp, name='memcmp', args=[left_ptr, right_ptr, shared]),
+            IRBinOp(dst=differ, op=BinaryOp.NOT_EQUAL, left=cmp, right=IRConst(0, Type.INT32)),
+            IRBranch(cond=differ, true_label=by_bytes, false_label=by_length),
+            IRLabel(by_bytes),
+            IRBinOp(dst=result, op=op, left=cmp, right=IRConst(0, Type.INT32)),
+            IRJump(end),
+            IRLabel(by_length),
+            IRBinOp(dst=result, op=op, left=left_len, right=right_len),
+            IRJump(end),
+            IRLabel(end),
         ], result
 
     def short_circuit(self, e: t.Binary) -> tuple:

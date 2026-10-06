@@ -14,7 +14,6 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- > and < for strings.
 - Refactor semantic.py into package.
 - Type identity for the port. Composite dict keys, or structural equality through pointers. This is the decision the checker's port depends on.
 - Narrowing. Fields and elements still need an as binding, and as cannot bind in a while condition.

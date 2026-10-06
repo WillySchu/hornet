@@ -14433,13 +14433,13 @@ class TestSemanticErrors:
             match="requires two operands of the same integer type",
         )
 
-    def test_ordering_comparison_rejects_str_operands(self):
+    def test_ordering_comparison_rejects_a_str_and_an_integer(self):
         assert_semantic_error(
             "    str a = 'hello'\n"
-            "    str b = 'world'\n"
-            "    return a < b",
+            "    return a < 1",
             return_type="bool",
-            match="requires two operands of the same integer type",
+            match=r"'<' requires two operands of the same integer type \(int, int8, uint8, or int32\) or two str "
+                  r"operands, got str and int",
         )
 
     def test_equality_rejects_str_compared_to_int(self):
