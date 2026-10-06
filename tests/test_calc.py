@@ -4,6 +4,7 @@ that truncates, `and`/`or` that stop early, errors with their columns), both whe
 tree and when it simplifies it, compiles it, and runs the code. And its prompt."""
 
 import random
+import re
 import subprocess
 from pathlib import Path
 
@@ -104,7 +105,10 @@ def test_at_a_terminal_there_is_a_prompt_and_errors_point_at_the_line(calc):
     finally:
         process.kill()
         os.close(master)
-    assert session.decode().replace("\r\n", "\n") == (
+    # What a terminal shows for Ctrl-D is the terminal's own doing: macOS and the BSDs echo `^D` and
+    # step back over it, and Linux echoes nothing.
+    shown = re.sub(r"\^D\x08*", "", session.decode().replace("\r\n", "\n"))
+    assert shown == (
         "> x = 6 * 7\n"
         "> x + 1\n"
         "43\n"
