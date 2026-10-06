@@ -1,4 +1,12 @@
 // Hornet runtime: print, panic, bytes(), slice growth, dict hash tables, and what stdlib/os.ht calls.
+
+// What the system's headers are asked for beyond standard C: POSIX with its extensions (signal
+// stacks), and on macOS the system's own (a thread's stack).
+#ifndef _WIN32
+#define _XOPEN_SOURCE 700
+#define _DARWIN_C_SOURCE
+#endif
+
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -22,6 +30,93 @@ __attribute__((constructor)) static void hornet_binary_standard_streams(void) {
 #endif
 
 #include "hornet_typedesc_tags.h"
+
+// ---- A stack overflow is a panic.
+//
+// Running off the end of the stack is a fault like any bad memory access. What catches it tells
+// the two apart, says `panic: stack overflow`, and ends the program as a panic does; any other
+// fault is left to crash as it would have. (There is no source position: a fault doesn't say where
+// in the program it happened.)
+
+static const char hornet_stack_overflow[] = "panic: stack overflow\n";
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+// Windows raises an exception of its own for it. The handler runs on the stack that overflowed, in
+// the space SetThreadStackGuarantee keeps back.
+static LONG WINAPI hornet_on_exception(EXCEPTION_POINTERS *info) {
+    if (info->ExceptionRecord->ExceptionCode == EXCEPTION_STACK_OVERFLOW) {
+        DWORD written;
+        WriteFile(GetStdHandle(STD_ERROR_HANDLE), hornet_stack_overflow, sizeof hornet_stack_overflow - 1, &written,
+                  NULL);
+        TerminateProcess(GetCurrentProcess(), 3);  // abort()'s exit code
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+__attribute__((constructor)) static void hornet_catch_stack_overflow(void) {
+    ULONG kept_back = 64 * 1024;
+    SetThreadStackGuarantee(&kept_back);
+    AddVectoredExceptionHandler(1, hornet_on_exception);
+}
+#else
+#include <signal.h>
+#include <sys/resource.h>
+#ifdef __APPLE__
+#include <pthread.h>
+#endif
+
+// Elsewhere it is a signal, handled on a stack of its own (the program's has no room left).
+static char hornet_signal_stack[64 * 1024];
+// The stack's range, as far as it is known: its lowest address is an estimate on Linux.
+static char *hornet_stack_low, *hornet_stack_high;
+// A frame larger than the protected memory below the stack can step past it, so a fault this far
+// below the stack still counts.
+#define HORNET_BELOW_STACK ((intptr_t)64 * 1024 * 1024)
+
+static void hornet_on_fault(int sig, siginfo_t *info, void *context) {
+    (void)context;
+    char *address = (char *)info->si_addr;
+    // Memory in the stack's own range doesn't fault unless the stack has run out.
+    if (address >= hornet_stack_low - HORNET_BELOW_STACK && address < hornet_stack_high) {
+        ssize_t written = write(2, hornet_stack_overflow, sizeof hornet_stack_overflow - 1);
+        (void)written;
+        abort();
+    }
+    signal(sig, SIG_DFL);  // not the stack: back to the instruction, to fault again and crash
+}
+
+__attribute__((constructor)) static void hornet_catch_stack_overflow(void) {
+#ifdef __APPLE__
+    hornet_stack_high = (char *)pthread_get_stackaddr_np(pthread_self());
+    hornet_stack_low = hornet_stack_high - pthread_get_stacksize_np(pthread_self());
+#else
+    // The main thread's stack grows down from about here, to the size the system allows it.
+    struct rlimit limit;
+    char here;
+    if (getrlimit(RLIMIT_STACK, &limit) != 0 || limit.rlim_cur == RLIM_INFINITY) {
+        return;  // no end to look for
+    }
+    hornet_stack_high = &here + 4096;
+    hornet_stack_low = &here - limit.rlim_cur;
+#endif
+    stack_t stack;
+    memset(&stack, 0, sizeof stack);
+    stack.ss_sp = hornet_signal_stack;
+    stack.ss_size = sizeof hornet_signal_stack;
+    struct sigaction action;
+    memset(&action, 0, sizeof action);
+    action.sa_sigaction = hornet_on_fault;
+    action.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&action.sa_mask);
+    if (sigaltstack(&stack, NULL) == 0) {
+        sigaction(SIGSEGV, &action, NULL);
+        sigaction(SIGBUS, &action, NULL);  // (macOS reports protected memory this way)
+    }
+}
+#endif
 
 // Bucket state byte. Tombstones keep probe chains intact after deletion.
 #define HORNET_DICT_BUCKET_EMPTY 0
