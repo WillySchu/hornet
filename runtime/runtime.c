@@ -759,11 +759,58 @@ void hornet_dict_set_str_key(
 
 // `d[k]`: address of the value, or NULL if the key is missing (the compiled code panics, with the
 // source position). Probes past tombstones.
+// The key a lookup or a delete has just failed to find. The compiled code panics as soon as one
+// returns "not found" (`k in d` is a different call), and the panic prints the key from here: so
+// finding a key costs nothing for it.
+static const void *hornet_missing_key;
+static struct {
+    const void *ptr;
+    int64_t len;
+} hornet_missing_str_key;
+
+static void hornet_note_missing_key(const void *key_ptr) {
+    hornet_missing_key = key_ptr;  // (in the caller's frame, which is still there for the panic)
+}
+
+static void hornet_note_missing_str_key(const void *key_ptr, int64_t key_len) {
+    hornet_missing_str_key.ptr = key_ptr;
+    hornet_missing_str_key.len = key_len;
+    hornet_missing_key = &hornet_missing_str_key;
+}
+
+// How much of a str key a panic shows.
+#define HORNET_PANIC_KEY_BYTES 100
+
+// `msg: key`, the key as print shows one inside a value: `d[k]` or `del(d, k)` without the key.
+void hornet_panic_missing_key(const char *msg, const unsigned char *key_desc) {
+    struct hornet_buf buf;
+    buf.cap = 64;
+    buf.ptr = malloc((size_t)buf.cap);
+    buf.len = 0;
+    hornet_buf_append_cstr(&buf, msg);
+    hornet_buf_append_cstr(&buf, ": ");
+    if (read_desc_word(key_desc, 0) == HORNET_TYPEDESC_STR && hornet_missing_str_key.len > HORNET_PANIC_KEY_BYTES) {
+        char rest[48];
+        hornet_buf_append_byte(&buf, '\'');
+        hornet_buf_append_bytes(&buf, hornet_missing_str_key.ptr, HORNET_PANIC_KEY_BYTES);
+        int n = snprintf(rest, sizeof(rest), "...' (%lld bytes)", (long long)hornet_missing_str_key.len);
+        hornet_buf_append_bytes(&buf, rest, n);
+    } else {
+        hornet_stringify((void *)hornet_missing_key, key_desc, 1, &buf);
+    }
+    hornet_buf_append_byte(&buf, '\n');
+    fflush(stdout);  // the program's own output first
+    fwrite(buf.ptr, 1, (size_t)buf.len, stderr);
+    fflush(stderr);
+    abort();
+}
+
 void *hornet_dict_lookup_scalar_key(void *descriptor, int64_t key_width, int64_t value_width, const void *key_ptr) {
     void *buckets = dict_buckets(descriptor);
     int64_t capacity = dict_capacity(descriptor);
     if (capacity == 0) {
         // no table yet: capacity 0 would break the mask.
+        hornet_note_missing_key(key_ptr);
         return NULL;
     }
     int64_t bucket_stride = 1 + key_width + value_width;
@@ -771,6 +818,7 @@ void *hornet_dict_lookup_scalar_key(void *descriptor, int64_t key_width, int64_t
     while (1) {
         unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
         if (bucket[0] == HORNET_DICT_BUCKET_EMPTY) {
+            hornet_note_missing_key(key_ptr);
             return NULL;
         }
         if (bucket[0] == HORNET_DICT_BUCKET_OCCUPIED && memcmp(bucket + 1, key_ptr, (size_t)key_width) == 0) {
@@ -786,6 +834,7 @@ void *hornet_dict_lookup_str_key(void *descriptor, int64_t value_width, const vo
     int64_t capacity = dict_capacity(descriptor);
     if (capacity == 0) {
         // no table yet
+        hornet_note_missing_str_key(key_ptr, key_len);
         return NULL;
     }
     int64_t bucket_stride = 1 + key_region_width + value_width;
@@ -793,6 +842,7 @@ void *hornet_dict_lookup_str_key(void *descriptor, int64_t value_width, const vo
     while (1) {
         unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
         if (bucket[0] == HORNET_DICT_BUCKET_EMPTY) {
+            hornet_note_missing_str_key(key_ptr, key_len);
             return NULL;
         }
         if (bucket[0] == HORNET_DICT_BUCKET_OCCUPIED) {
@@ -861,6 +911,7 @@ int64_t hornet_dict_delete_scalar_key(void *descriptor, int64_t key_width, int64
     int64_t capacity = dict_capacity(descriptor);
     if (capacity == 0) {
         // no table yet
+        hornet_note_missing_key(key_ptr);
         return 0;
     }
     int64_t bucket_stride = 1 + key_width + value_width;
@@ -868,6 +919,7 @@ int64_t hornet_dict_delete_scalar_key(void *descriptor, int64_t key_width, int64
     while (1) {
         unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
         if (bucket[0] == HORNET_DICT_BUCKET_EMPTY) {
+            hornet_note_missing_key(key_ptr);
             return 0;
         }
         if (bucket[0] == HORNET_DICT_BUCKET_OCCUPIED && memcmp(bucket + 1, key_ptr, (size_t)key_width) == 0) {
@@ -887,6 +939,7 @@ int64_t hornet_dict_delete_str_key(void *descriptor, int64_t value_width, const 
     int64_t capacity = dict_capacity(descriptor);
     if (capacity == 0) {
         // no table yet
+        hornet_note_missing_str_key(key_ptr, key_len);
         return 0;
     }
     int64_t bucket_stride = 1 + key_region_width + value_width;
@@ -894,6 +947,7 @@ int64_t hornet_dict_delete_str_key(void *descriptor, int64_t value_width, const 
     while (1) {
         unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
         if (bucket[0] == HORNET_DICT_BUCKET_EMPTY) {
+            hornet_note_missing_str_key(key_ptr, key_len);
             return 0;
         }
         if (bucket[0] == HORNET_DICT_BUCKET_OCCUPIED) {

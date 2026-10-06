@@ -1,5 +1,6 @@
 """Panic blocks: a labelled call to hornet_panic with a fixed message, one per message per function.
-A message carries the source position of what failed (`located`), so each failing site has its own."""
+A message carries the source position of what failed (`located`), so each failing site has its own.
+A missing dict key's block calls hornet_panic_missing_key instead, which adds the key."""
 
 from typing import Optional
 
@@ -27,19 +28,25 @@ class PanicBlocks:
     def __init__(self, ir_program, label_prefix: str):
         self.ir_program = ir_program
         self.prefix = label_prefix
-        self.labels: dict = {}  # message -> label
+        self.labels: dict = {}  # (message, key descriptor) -> label
 
-    def label(self, message: str) -> str:
-        if message not in self.labels:
-            self.labels[message] = self.ir_program.ids.new_label(self.prefix)
-        return self.labels[message]
+    def label(self, message: str, key_descriptor: Optional[str] = None) -> str:
+        """The block to branch to. With `key_descriptor` (the label of a dict's key type's
+        descriptor), the panic is for a key that wasn't found, and the runtime prints the key too."""
+        if (message, key_descriptor) not in self.labels:
+            self.labels[message, key_descriptor] = self.ir_program.ids.new_label(self.prefix)
+        return self.labels[message, key_descriptor]
 
     def blocks(self) -> list:
         out = []
-        for message, label in self.labels.items():
+        for (message, key_descriptor), label in self.labels.items():
             msg = self.ir_program.ids.new_temp(Type.INT64)
-            out += [IRLabel(label),
-                    IRStaticDataAddress(dst=msg, label=message_label(self.ir_program, message)),
-                    IRCall(dst=None, name='hornet_panic', args=[msg]),
-                    IRJump(label)]  # not reached: hornet_panic aborts
+            out += [IRLabel(label), IRStaticDataAddress(dst=msg, label=message_label(self.ir_program, message))]
+            if key_descriptor is None:
+                out.append(IRCall(dst=None, name='hornet_panic', args=[msg]))
+            else:
+                descriptor = self.ir_program.ids.new_temp(Type.INT64)
+                out += [IRStaticDataAddress(dst=descriptor, label=key_descriptor),
+                        IRCall(dst=None, name='hornet_panic_missing_key', args=[msg, descriptor])]
+            out.append(IRJump(label))  # not reached: the panic aborts
         return out

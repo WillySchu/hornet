@@ -44,9 +44,9 @@ CASES = [
     ("    int z = 0\n    return 10 % z\n", "10:12: integer division by zero"),
     ("    int m = -9223372036854775808\n    int n = -1\n    return m / n\n", "11:12: integer overflow in division"),
     ("    int x = 10\n    int z = 0\n    x /= z\n    return x\n", "11:5: integer division by zero"),
-    ("    dict[str]int d\n    return d['k']\n", "10:12: dict lookup: key not found"),
-    ("    dict[str]int d\n    d['k'] += 1\n    return 0\n", "10:5: dict lookup: key not found"),
-    ("    dict[str]int d\n    del(d, 'k')\n    return 0\n", "10:5: dict delete: key not found"),
+    ("    dict[str]int d\n    return d['k']\n", "10:12: dict lookup: key not found: 'k'"),
+    ("    dict[str]int d\n    d['k'] += 1\n    return 0\n", "10:5: dict lookup: key not found: 'k'"),
+    ("    dict[str]int d\n    del(d, 'k')\n    return 0\n", "10:5: dict delete: key not found: 'k'"),
     ("    []int xs = [1, 2]\n    for x in xs:\n        xs = append(xs, x)\n    return 0\n",
      "10:5: for ... in: slice was reallocated (e.g. by append) during iteration"),
     ("    dict[int]int d\n    d[-1] = 1\n    d[-2] = 2\n    for k in d:\n        for int i = 0; i < 9; i += 1:\n"

@@ -12182,7 +12182,7 @@ class TestBareExpressionStatements:
     @pytest.mark.parametrize("setup,expr,message", [
         ("    []str ss = ['x']\n    int i = 3\n", "ss[i]", "index out of bounds: index 3, length 1"),
         ("    str t = 'abc'\n    int e = 9\n", "t[0:e]", "slice bounds out of range: end 9, length 3"),
-        ("    dict[int]str d\n", "d[5]", "dict lookup: key not found"),
+        ("    dict[int]str d\n", "d[5]", "dict lookup: key not found: 5"),
     ])
     def test_bare_composite_value_statement_keeps_its_checks(self, setup, expr, message):
         result = compile_and_run(f"def int main():\n{setup}    {expr}\n    print(1)\n    return 0\n")

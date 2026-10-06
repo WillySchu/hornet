@@ -472,7 +472,7 @@ class TypedFunctionBuilder:
             return ir + offset_ir, address
         if isinstance(e, t.DictLookup):
             ir, address = self.dict_call(e.dict, e.key, 'lookup', result_type=Type.INT64)
-            return ir + self.panic_when_zero(address, "dict lookup: key not found", e), address
+            return ir + self.panic_when_missing(address, "dict lookup: key not found", e.dict, e), address
         raise NotYetPorted(f"place {type(e).__name__}")
 
     def variant_check(self, base, e: t.Payload) -> list:
@@ -818,7 +818,7 @@ class TypedFunctionBuilder:
             return self.panic(e), None
         if isinstance(e, t.DictDelete):
             ir, removed = self.dict_call(e.dict, e.key, 'delete', result_type=Type.INT)
-            return ir + self.panic_when_zero(removed, "dict delete: key not found", e), None
+            return ir + self.panic_when_missing(removed, "dict delete: key not found", e.dict, e), None
         if isinstance(e, t.DictContains):
             ir, found = self.dict_call(e.dict, e.key, 'contains', result_type=Type.INT)
             result = self.temp(Type.BOOL)
@@ -1156,11 +1156,17 @@ class TypedFunctionBuilder:
             IRLabel(ok)
         ]
 
-    def panic_when_zero(self, value, message: str, at) -> list:
-        """panic_when for a runtime call's result: a null address or a zero count."""
-        is_zero = self.temp(Type.BOOL)
-        return [IRBinOp(dst=is_zero, op=BinaryOp.EQUAL, left=value, right=IRConst(0, value.type))
-                ] + self.panic_when(is_zero, message, at)
+    def panic_when_missing(self, found, message: str, dict_expr, at) -> list:
+        """Panic with `message` and the key, when a lookup or a delete in `dict_expr` reports nothing
+        `found` (a null address, a zero count). The runtime noted the key; its type says how to print it."""
+        missing, ok = self.temp(Type.BOOL), self.ids.new_label("check_ok")
+        key_descriptor = type_descriptor(self.ir_program, dict_expr.type.key_type)
+        return [
+            IRBinOp(dst=missing, op=BinaryOp.EQUAL, left=found, right=IRConst(0, found.type)),
+            IRBranch(cond=missing, true_label=self.panics.label(located(message, at.where), key_descriptor),
+                     false_label=ok),
+            IRLabel(ok)
+        ]
 
     def for_in(self, s: t.ForIn) -> list:
         if s.kind == 'dict':
@@ -1513,7 +1519,8 @@ class TypedFunctionBuilder:
         ir, entry = self.dict_entry(target.dict, target.key)
         lookup_ir, address = self.dict_op(entry, 'lookup', Type.INT64)
         scratch_ir, result_address = self.scratch_address(target.type)
-        ir += lookup_ir + self.panic_when_zero(address, "dict lookup: key not found", target) + scratch_ir
+        ir += lookup_ir + self.panic_when_missing(address, "dict lookup: key not found", target.dict, target) \
+            + scratch_ir
         if target.type == Type.STR:
             read_ir, left_ptr, left_len = self.read_str(address)
             value_ir, right_ptr, right_len = self.str_value(s.value)
