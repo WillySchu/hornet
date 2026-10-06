@@ -28,7 +28,7 @@ The native backends target x86-64 and AArch64 on Linux and macOS, and x86-64 on 
 
 Building for a foreign Linux architecture needs a cross toolchain named `<arch>-linux-gnu-gcc`, and running the result needs qemu-user (on Debian/Ubuntu: `apt install gcc-aarch64-linux-gnu qemu-user`). The test suite uses them when present and skips what they're needed for otherwise.
 
-Windows programs are built with MinGW-w64: its `gcc` on Windows itself, or the cross compiler `x86_64-w64-mingw32-gcc` elsewhere, where Wine runs the result (on Debian/Ubuntu: `apt install gcc-mingw-w64-x86-64 wine64`). MSVC's toolchain is not supported.
+Windows programs are built with MinGW-w64: its `gcc` on Windows itself, or the cross compiler `x86_64-w64-mingw32-gcc` elsewhere, where Wine runs the result (on Debian/Ubuntu: `apt install gcc-mingw-w64-x86-64 wine64`). They are linked with an 8 MB stack, the usual size elsewhere, in place of Windows's 1 MB. MSVC's toolchain is not supported.
 
 ### Build an Executable
 
@@ -83,7 +83,7 @@ pytest --full    # every runnable target, plus slow tests (benchmark reruns, for
 
 The tests cover the lexer, parser, semantic analysis, modules, IR construction and verification, optimization, the native backend, escape analysis, runtime behavior, and end-to-end compiled programs, including seeded random programs checked against a Python model.
 
-Backend-specific tests live in `tests/backend/<arch>/` and shared backend tests in `tests/backend/common/`. With `--full`, end-to-end programs are built and run for every target of the machine's own system that can run on it (natively, under Rosetta 2, or under qemu-user), and every such target must produce the same output. `HORNET_E2E_TARGETS` overrides the targets in any tier, and is how every program is run for Windows under Wine, which is much slower (`HORNET_E2E_TARGETS=x86_64-windows`):
+Backend-specific tests live in `tests/backend/<arch>/` and shared backend tests in `tests/backend/common/`. With `--full`, end-to-end programs are built and run for every target that can run on the machine (natively, under Rosetta 2, under qemu-user, or, for Windows, under Wine), and every such target must produce the same output. The few tests of what systems define differently, such as an exit status above 255, say which targets they apply to. `HORNET_E2E_TARGETS` overrides the targets in any tier:
 
 ```bash
 HORNET_E2E_TARGETS=x86_64-linux,aarch64-linux pytest
@@ -1066,7 +1066,10 @@ bool yes = starts_with(s, 'n=')   # also ends_with
 int at = index_of(s, '42')        # -1 if absent; also index_from, index_of_byte
 str t = trim('  padded \n')
 str r = repeat('ab', 3)
+int order = compare('apple', 'pear')   # negative, zero, or positive: which comes first, by bytes
 ```
+
+Strings have no `<`; `compare` is how they are ordered.
 
 ## `stdlib/errors.ht`
 
@@ -1215,7 +1218,7 @@ backend/           Native backends: common/ shared pieces, x86_64/ and aarch64/
 runtime/           Native Hornet runtime
 stdlib/            Hornet standard-library modules
 
-examples/          Example Hornet programs (`calc/` is a multi-file one)
+examples/          Example Hornet programs (`calc/` and `json/` are multi-file ones)
 tools/hfmt/        Source formatter, written in Hornet
 tests/             Compiler, runtime, and end-to-end tests
 benchmarks/        Benchmark programs and tooling
@@ -1303,6 +1306,19 @@ $ echo 'x * 1 + 0 * 5' | ./calc --tree
 $ echo 'x * 1 + 0 * 5' | ./calc --simplified
 x
 ```
+
+## A JSON Formatter
+
+`examples/json/` is a JSON reader and writer (`json.ht`) with a command-line tool around it:
+
+```bash
+python3 build.py examples/json/main.ht -o jsonfmt
+./jsonfmt data.json                         # laid out, two spaces a level
+./jsonfmt --compact --sort-keys < data.json
+./jsonfmt --indent 4 data.json
+```
+
+A document is a recursive sum type, `Value is none | bool | Number | str | []Value | Object`. A number keeps its text, since there is no floating point to hold it, and an object keeps its members in order. A mistake is reported as `file:line:col: error: message`. The tests run it over the 318 files of JSONTestSuite (`tests/json/test_parsing/`), and compare its output with Python's for random documents.
 
 ---
 
