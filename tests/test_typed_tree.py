@@ -145,7 +145,7 @@ def test_dump_typed_command(tmp_path):
     src = tmp_path / 'p.ht'
     src.write_text("def int main():\n    return 0\n")
     r = subprocess.run(
-        [sys.executable, str(ROOT / 'compile.py'), str(src), '--dump-typed'], capture_output=True, text=True)
+        [sys.executable, str(ROOT / 'compile.py'), str(src), '--dump', 'typed'], capture_output=True, text=True)
     assert r.returncode == 0 and r.stdout.startswith("function main() -> int\n  Return\n")
     assert r.stdout == typed_tree(str(src))
 

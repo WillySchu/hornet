@@ -5,6 +5,7 @@ import sys
 
 from backend import lower_to_asm
 from diagnostics import CompileError, run_cli
+from dump import STAGES, dump as dump_stage
 from ir.program_builder import build_ir_program
 from modules import discover_modules
 from optimize.optimizer import optimize
@@ -24,11 +25,17 @@ def main():
     add_target_argument(parser)
     parser.add_argument('-o', '--output', type=str, default=None, help='Write assembly to this file instead of stdout')
     parser.add_argument('--traceback', action='store_true', help='Show Python tracebacks for all errors')
-    parser.add_argument('--dump-typed', action='store_true', help='Print the typed tree instead of assembly')
+    parser.add_argument('--dump', choices=STAGES, default=None,
+                        help="Print what a stage of the compiler produces, instead of assembly (see dump.py)")
 
     args = parser.parse_args()
-    if args.dump_typed:
-        sys.stdout.write(run_cli(lambda: typed_tree(args.file), args.traceback))
+    if args.dump:
+        text = run_cli(lambda: dump_stage(args.file, args.dump), args.traceback)
+        if args.output:
+            with open(args.output, 'w', encoding='latin-1') as f:
+                f.write(text)
+        else:
+            sys.stdout.buffer.write(text.encode('latin-1'))
         return
 
     asm = run_cli(lambda: compile_to_asm(args.file, args.target), args.traceback)

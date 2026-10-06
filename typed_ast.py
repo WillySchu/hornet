@@ -462,18 +462,35 @@ def dump(program: Program) -> str:
     return "\n".join(lines)
 
 
+def quoted(text: str, quote: str = "'") -> str:
+    """`text` as a Hornet literal: in quotes, with what can't stand for itself escaped."""
+    escapes = {'\\': '\\\\', '\n': '\\n', '\t': '\\t', '\r': '\\r', '\0': '\\0', quote: '\\' + quote}
+    return quote + ''.join(
+        escapes.get(c) or (c if ' ' <= c <= '~' else f"\\x{ord(c):02x}") for c in text) + quote
+
+
+def scalar_text(name: str, value) -> str:
+    """A field's value in a dump, spelled as Hornet spells it: `true`, `none`, and (for a literal's
+    `value`) a quoted string."""
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    if value is None:
+        return 'none'
+    if isinstance(value, str) and name == 'value':
+        return quoted(value)
+    return str(value)
+
+
 def _label(node) -> str:
     attrs = []
     for f in fields(node):
         value = getattr(node, f.name)
         if f.name in ('type', 'nid', 'line', 'col', 'file') or value is None or isinstance(value, (Expr, Stmt, tuple)):
             continue
-        if isinstance(value, (bool, int, str)) and f.name == 'value':
-            text = repr(value)
-        elif hasattr(value, 'name') and not isinstance(value, (Symbol, Type)):
+        if hasattr(value, 'name') and not isinstance(value, (Symbol, Type)):
             text = value.name  # an operator enum
         else:
-            text = str(value)
+            text = scalar_text(f.name, value)
         attrs.append(f"{f.name}={text}")
     label = type(node).__name__ + ''.join(' ' + a for a in attrs)
     return label + (f" : {node.type}" if isinstance(node, Expr) else '')
