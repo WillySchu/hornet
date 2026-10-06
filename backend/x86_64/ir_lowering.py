@@ -450,10 +450,7 @@ class InstructionSelector:
         """The label of the block a failed bounds check jumps to: placed after the function's code,
         it calls the check's panic routine with its message and the two values that were compared,
         read from where they live (nothing has moved since the comparison)."""
-        if isinstance(instr, IRBoundsCheck):
-            routine, first, second = instr.PANIC_ROUTINE, instr.index, instr.length
-        else:
-            routine, first, second = instr.PANIC_ROUTINES[instr.part], instr.value, instr.bound
+        first, second = (instr.index, instr.length) if isinstance(instr, IRBoundsCheck) else (instr.value, instr.bound)
         abi = self.host.abi
         message, first_arg, second_arg = (Register(name) for name in abi.arg_registers_32[:3])
         second_home = self.host._register_assignment.get(second.id) if isinstance(second, Temp) else None
@@ -464,9 +461,9 @@ class InstructionSelector:
         else:
             moves = self._load_as_int64(first, first_arg) + self._load_as_int64(second, second_arg)
         label = self.host.ir_program.ids.new_label("bounds_check_fail")
-        text = self.host._get_bounds_check_message_label(located(instr.PANIC_MESSAGE, instr.where))
+        text = self.host._get_bounds_check_message_label(located(instr.message, instr.where))
         self.host._bounds_check_fail_blocks.append(
-            [Label(label)] + moves + [LeaQ(label=text, dst=as_qword_register(message)), CallInstr(routine)])
+            [Label(label)] + moves + [LeaQ(label=text, dst=as_qword_register(message)), CallInstr(instr.routine)])
         return label
 
     def _load_as_int64(self, value: IRValue, dst: Register) -> list[Instruction]:

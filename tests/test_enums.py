@@ -5,7 +5,7 @@ and are tested with `is Member` in `if` and exhaustive `match`."""
 import pytest
 
 from build import build_executable
-from ir.ir import IRConst, Temp
+from ir.ir import IRBoundsCheck, IRBranch, IRConst, Temp
 from ir.program_builder import build_ir_program
 from lexer import Lexer
 from parser import ParseError, Parser
@@ -139,12 +139,29 @@ def test_converting_an_integer_to_an_enum():
 
 
 @GCC_SKIP
-@pytest.mark.parametrize("value", ["n + 2", "n - 2"])
-def test_converting_an_integer_that_is_no_member_panics(value):
+@pytest.mark.parametrize("value,shown", [
+    ("n + 2", "3"),                      # one past the last member
+    ("n - 2", "-1"),
+    ("n * 9000000000", "9000000000"),
+    ("byte(n) + \"c\"", "100"),            # from each integer type
+    ("int8(n) - 100", "-99"),
+    ("int32(n) - 100000", "-99999"),
+])
+def test_converting_an_integer_that_is_no_member_panics_with_it(value, shown):
     assert_program_panics(
         DECLS + f"def int main():\n    int n = 1\n    print('before')\n    print(Color({value}))\n    return 0\n",
-        "not a member of Color", expected_stdout="before\n",
+        f"not a member of Color: {shown}", expected_stdout="before\n",
     )
+
+
+def test_a_conversion_is_one_bounds_check():
+    program = build_ir_program(analyze(_parse(
+        DECLS + "def Color f(int n):\n    return Color(n)\ndef int main():\n    return 0\n")))
+    f = next(fn for fn in program.functions if fn.name.startswith('f'))
+    checks = [instr for instr in f.body if isinstance(instr, IRBoundsCheck)]
+    assert [(c.message, c.routine, c.length.value) for c in checks] == [
+        ("not a member of Color", "hornet_panic_enum_value", 3)]
+    assert not any(isinstance(instr, IRBranch) for instr in f.body)  # no comparisons of its own
 
 
 def test_a_literal_converts_at_compile_time():

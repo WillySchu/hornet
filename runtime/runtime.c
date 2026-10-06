@@ -511,6 +511,15 @@ void hornet_panic_index(const char *msg, int64_t index, int64_t length) {
     hornet_panic_with(msg, "index", index, "length", length);
 }
 
+// `Enum(value)`, when no member has that value (`count` of them, from 0: it isn't shown).
+void hornet_panic_enum_value(const char *msg, int64_t value, int64_t count) {
+    (void)count;
+    fflush(stdout);  // the program's own output first
+    fprintf(stderr, "%s: %lld\n", msg, (long long)value);
+    fflush(stderr);
+    abort();
+}
+
 // `a[start:end]`: a bound past the length (of a slice: its capacity), or the two out of order.
 void hornet_panic_slice_start(const char *msg, int64_t start, int64_t length) {
     hornet_panic_with(msg, "start", start, "length", length);

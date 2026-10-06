@@ -131,14 +131,14 @@ class IRNullCheck:
 
 @dataclass
 class IRBoundsCheck:
-    """Panic if unsigned index >= length. The panic reports both, so a backend passes them to
-    PANIC_ROUTINE (as it does a slice check's value and bound, to its `part`'s routine)."""
+    """Panic if unsigned index >= length. The panic reports both, so a backend passes them, after
+    the `message`, to the runtime's `routine` (as it does a slice check's value and bound). The
+    defaults are an index's; an enum conversion checks its integer against the member count."""
     index: IRValue
     length: IRValue
     where: Optional[str] = field(default=None, compare=False, repr=False)
-
-    PANIC_MESSAGE = "index out of bounds"
-    PANIC_ROUTINE = "hornet_panic_index"
+    message: str = "index out of bounds"
+    routine: str = "hornet_panic_index"
 
 
 @dataclass
@@ -151,12 +151,16 @@ class IRSliceBoundsCheck:
     where: Optional[str] = field(default=None, compare=False, repr=False)
     part: str = 'start'
 
-    PANIC_MESSAGE = "slice bounds out of range"
-    PANIC_ROUTINES = {
+    message = "slice bounds out of range"
+    ROUTINES = {
         'start': "hornet_panic_slice_start", 'end': "hornet_panic_slice_end",
         'start capacity': "hornet_panic_slice_start_capacity", 'end capacity': "hornet_panic_slice_end_capacity",
         'order': "hornet_panic_slice_order",
     }
+
+    @property
+    def routine(self) -> str:
+        return self.ROUTINES[self.part]
 
 
 @dataclass

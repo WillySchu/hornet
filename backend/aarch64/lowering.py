@@ -233,10 +233,7 @@ class Selector:
         """The label of the block a failed bounds check branches to: placed after the function's
         code, it calls the check's panic routine with its message and the two values that were
         compared, read from where they live (nothing has moved since the comparison)."""
-        if isinstance(instr, IRBoundsCheck):
-            routine, first, second = instr.PANIC_ROUTINE, instr.index, instr.length
-        else:
-            routine, first, second = instr.PANIC_ROUTINES[instr.part], instr.value, instr.bound
+        first, second = (instr.index, instr.length) if isinstance(instr, IRBoundsCheck) else (instr.value, instr.bound)
         label = self.host.ir_program.ids.new_label("bounds_check_fail")
         code, self.out = self.out, [LabelDef(label)]
         x0, x1, x2 = Reg('x0'), Reg('x1'), Reg('x2')
@@ -246,8 +243,9 @@ class Selector:
             b = SCRATCH_B.x
         self._as_int64(x1, a, first.type)
         self._as_int64(x2, b, second.type)
-        text = self.host.message_label(located(instr.PANIC_MESSAGE, instr.where))
-        self.out += [Instr('adrp', (x0, SymPage(text))), Instr('add', (x0, x0, SymPageOffset(text))), Call(routine)]
+        text = self.host.message_label(located(instr.message, instr.where))
+        self.out += [Instr('adrp', (x0, SymPage(text))), Instr('add', (x0, x0, SymPageOffset(text))),
+                     Call(instr.routine)]
         block, self.out = self.out, code
         self.host.fail_blocks.append(block)
         return label

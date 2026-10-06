@@ -1062,10 +1062,17 @@ class TypedFunctionBuilder:
         )
 
     def enum_from_int(self, e: t.EnumFromInt) -> tuple:
-        ir, wide, negative, too_big = self.enum_range(e.value, e.type)
-        message, result = f"not a member of {e.type}", self.temp(e.type)
-        return ir + [negative] + self.panic_when(negative.dst, message, e) + [too_big] + \
-            self.panic_when(too_big.dst, message, e) + [IRCast(dst=result, src=wide)], result
+        """A member's value is its position, so the integer must be one: at least 0 and below the
+        count, which is what a bounds check tests. Its panic names the integer."""
+        ir, value = self.value(e.value)
+        wide, result = self.temp(Type.INT), self.temp(e.type)
+        count = len(self.ir_program.enum_registry[e.type.enum_name].members)
+        return ir + [
+            IRCast(dst=wide, src=value),
+            IRBoundsCheck(index=wide, length=IRConst(count, Type.INT), where=e.where,
+                          message=f"not a member of {e.type}", routine="hornet_panic_enum_value"),
+            IRCast(dst=result, src=wide),
+        ], result
 
     def enum_contains(self, e: t.EnumContains) -> tuple:
         ir, _, negative, too_big = self.enum_range(e.value, e.enum)

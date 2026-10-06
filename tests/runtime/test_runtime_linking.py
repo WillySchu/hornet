@@ -92,6 +92,7 @@ def test_hornet_runtime_entry_points_are_the_only_external_symbols(target):
             "hornet_open_write",
             "hornet_panic",
             "hornet_panic_at",
+            "hornet_panic_enum_value",
             "hornet_panic_index",
             "hornet_panic_missing_key",
             "hornet_panic_slice_end",
