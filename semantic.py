@@ -378,6 +378,7 @@ class Facts:
     enum_members: dict = dataclasses.field(default_factory=dict)  # `Enum.Member` Field -> (enum's key, index)
     enum_checks: dict = dataclasses.field(default_factory=dict)  # IsCheck on an enum -> (member's index, the enum)
     enum_lens: dict = dataclasses.field(default_factory=dict)  # `len(Enum)` Call -> the number of members
+    formats: dict = dataclasses.field(default_factory=dict)  # `format(...)` Call -> its template's text
     enum_ins: dict = dataclasses.field(default_factory=dict)  # `n in Enum` Binary -> the enum's key
 
 
@@ -2170,6 +2171,8 @@ class SemanticAnalyzer:
             return self.check_bytes_call(expr)
         if name == 'panic':
             return self.check_panic_call(expr)
+        if name == 'format':
+            return self.check_format_call(expr)
         if name in self.enums:
             return self.check_enum_conversion(expr, name)
         visible = expr.nid in self.module_set.qualified or self.scope.resolve(expr.name) is not None
@@ -2225,6 +2228,38 @@ class SemanticAnalyzer:
         if arg_type != Type.STR:
             raise SemanticError(f"'panic' expects a str, got {arg_type}", expr.args[0])
         return Type.NEVER
+
+    def check_format_call(self, expr: Call) -> Type:
+        """`format(template, args...)`: a str, the template with each `{}` replaced by the next
+        argument as print shows it. The template is known here, so it is checked against them."""
+        if not expr.args:
+            raise SemanticError("'format' expects a template, then a value for each '{}' in it", expr)
+        template = expr.args[0]
+        if self.check_expr(template) != Type.STR:
+            raise SemanticError(
+                f"'format' expects a str template first, got {self.facts.types[template.nid]}", template)
+        try:
+            text = self._const_eval(template)
+        except SemanticError:
+            raise SemanticError(
+                "'format' needs its template as a string literal or a constant, so that it can be checked "
+                "against the values", template) from None
+        try:
+            holes = len(typed.format_pieces(text)) - 1
+        except ValueError as problem:
+            raise SemanticError(f"In this 'format' template: {problem}", template) from None
+        values = expr.args[1:]
+        if holes != len(values):
+            raise SemanticError(
+                f"This 'format' template has {holes} '{{}}' placeholder{'' if holes == 1 else 's'}, "
+                f"but {len(values)} value{' was' if len(values) == 1 else 's were'} given", expr)
+        for value in values:
+            if self._check_expr_allowing_struct_literal(value) in (Type.VOID, Type.NEVER):
+                raise SemanticError(
+                    "'format' cannot show the result of a function that has no declared return type -- there's "
+                    "no value there", value)
+        self.facts.formats[expr.nid] = text
+        return Type.STR
 
     def check_enum_conversion(self, expr: Call, enum: str) -> Type:
         """`Enum(n)`: the member whose value is the integer `n`. Checked when it runs (a panic if there
@@ -3006,6 +3041,11 @@ class _TypedTreeBuilder:
             return typed.BytesFromStr(_BYTE_SLICE, self.expr(args[0]))
         if name == 'panic':
             return typed.Panic(Type.NEVER, self.expr(args[0]))
+        if name == 'format':
+            template = self.facts.formats[e.nid]
+            if len(args) == 1:  # nothing to fill in: the text itself
+                return typed.StrLit(Type.STR, typed.format_pieces(template)[0])
+            return typed.Format(Type.STR, template, tuple(self.expr(a) for a in args[1:]))
         if name in self.enums:  # `Enum(n)`
             value = self.expr(args[0])
             if isinstance(value, typed.IntLit):  # checked to be a member

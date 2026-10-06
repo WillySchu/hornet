@@ -80,7 +80,7 @@ def EvalResult evaluate(*Expr tree, dict[str]int variables):
         is Name:
             if node.name in variables:
                 return variables[node.name]
-            return EvalError('undefined variable \'' + node.name + '\'', node.col)
+            return EvalError(format('undefined variable \'{}\'', node.name), node.col)
         is Unary:
             EvalResult operand = evaluate(node.operand, variables)
             if operand is EvalError:

@@ -65,6 +65,37 @@ class EnumMember(Expr):
 
 
 @dataclass(frozen=True)
+class Format(Expr):
+    """`format(template, args...)`: the template's text, with each `{}` replaced by the next
+    argument as print shows it. format_pieces(template) is the text around the placeholders."""
+    template: str
+    args: tuple
+
+
+def format_pieces(template: str) -> list:
+    """The text between a format template's `{}` placeholders, one piece more than it has of them
+    (`{{` and `}}` are a brace each). ValueError, with what is wrong, for any other use of a brace."""
+    pieces, text, i = [], [], 0
+    while i < len(template):
+        c, pair = template[i], template[i:i + 2]
+        if pair in ('{{', '}}'):
+            text.append(c)
+            i += 2
+        elif pair == '{}':
+            pieces.append(''.join(text))
+            text = []
+            i += 2
+        elif c == '{':
+            raise ValueError("a placeholder is written '{}', with nothing inside (and a brace itself is '{{')")
+        elif c == '}':
+            raise ValueError("a '}' with no '{' before it (a brace itself is written '}}')")
+        else:
+            text.append(c)
+            i += 1
+    return pieces + [''.join(text)]
+
+
+@dataclass(frozen=True)
 class EnumFromInt(Expr):
     """`Enum(n)`: the member (type is the enum) whose value is the integer `value`; panics if there
     is none."""
@@ -476,7 +507,7 @@ def scalar_text(name: str, value) -> str:
         return 'true' if value else 'false'
     if value is None:
         return 'none'
-    if isinstance(value, str) and name == 'value':
+    if isinstance(value, str) and name in ('value', 'template'):
         return quoted(value)
     return str(value)
 

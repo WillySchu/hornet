@@ -18,7 +18,7 @@ def Outcome run([]Instruction code, dict[str]int variables):
                 stack = append(stack, instruction.operand)
             is Load:
                 if instruction.name not in variables:
-                    return EvalError('undefined variable \'' + instruction.name + '\'', instruction.col)
+                    return EvalError(format('undefined variable \'{}\'', instruction.name), instruction.col)
                 stack = append(stack, variables[instruction.name])
             is Store:
                 variables[instruction.name] = stack[top]

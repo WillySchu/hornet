@@ -99,3 +99,28 @@ def int compare(str a, str b):
         if a[i] != b[i]:
             return int(a[i]) - int(b[i])
     return len(a) - len(b)
+
+# `s` as Hornet writes a string literal: in single quotes, with a quote, a backslash, and the
+# bytes that can't stand for themselves escaped. For showing a str in a message without ambiguity.
+def str quoted(str s):
+    Builder b
+    b.write_byte("'")
+    for int i = 0; i < len(s); i += 1:
+        byte c = s[i]
+        if c == "'" or c == "\\":
+            b.write_byte("\\")
+            b.write_byte(c)
+        elif c == "\n":
+            b.write('\\n')
+        elif c == "\t":
+            b.write('\\t')
+        elif c == "\r":
+            b.write('\\r')
+        elif c < " " or c == byte(127):
+            b.write('\\x')
+            b.write_byte('0123456789abcdef'[int(c) >> 4])
+            b.write_byte('0123456789abcdef'[int(c) & 15])
+        else:
+            b.write_byte(c)
+    b.write_byte("'")
+    return b.to_str()

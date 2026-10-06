@@ -9,6 +9,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -473,6 +474,26 @@ const char *hornet_error_message(void) {
 void hornet_exit(int64_t code) {
     fflush(NULL);
     exit((int)code);
+}
+
+// format(...): the compiled code keeps a hornet_buf in its frame, begins it, and has each piece
+// appended. Its first two words are then the str: the bytes are never freed, being the result.
+_Static_assert(offsetof(struct hornet_buf, ptr) == 0 && offsetof(struct hornet_buf, len) == 8,
+               "a hornet_buf starts with a str's pointer and length");
+
+void hornet_format_begin(struct hornet_buf *buf) {
+    buf->cap = 32;
+    buf->ptr = malloc((size_t)buf->cap);
+    buf->len = 0;
+}
+
+void hornet_format_text(struct hornet_buf *buf, const char *ptr, int64_t len) {
+    hornet_buf_append_bytes(buf, ptr, len);
+}
+
+// A value as print shows it.
+void hornet_format_value(struct hornet_buf *buf, void *value_addr, const unsigned char *type_desc) {
+    hornet_stringify(value_addr, type_desc, 0, buf);
 }
 
 void hornet_print(void *value_addr, const unsigned char *type_desc) {

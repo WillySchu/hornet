@@ -183,7 +183,7 @@ type Parser struct:
             is End:
                 return ParseError('unexpected end of line', token.col)
             else:
-                return ParseError('unexpected \'' + token.text + '\'', token.col)
+                return ParseError(format('unexpected \'{}\'', token.text), token.col)
 
 def ParseResult parse([]Token tokens):
     Parser parser = Parser(tokens, 0)
@@ -196,5 +196,5 @@ def ParseResult parse([]Token tokens):
         return value
     Token rest = parser._peek()
     if rest.kind is not End:
-        return ParseError('unexpected \'' + rest.text + '\'', rest.col)
+        return ParseError(format('unexpected \'{}\'', rest.text), rest.col)
     return Statement(target, value)

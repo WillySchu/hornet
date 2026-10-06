@@ -137,7 +137,7 @@ def test_every_node_kind_occurs_in_the_repository_and_this_file():
                           "    *p = 2\n    while y < 3:\n        y += 1\n        if y == 2:\n            continue\n"
                           "        break\n    for int i = 0; i < 2; i += 1:\n        y = -y\n    print(true)\n"
                           "    dict[int]int d\n    d[1] = 1\n    del(d, 1)\n    *int q = none\n    print(q == none)\n"
-                          "    print(dict[int]int{1: 2})\n    print(str(bytes('a')))\n    return 0\n"))
+                          "    print(dict[int]int{1: 2})\n    print(str(bytes('a')))\n    print(format('{}', y))\n    return 0\n"))
     assert defined - used == set(), "node kinds no test produces"
 
 

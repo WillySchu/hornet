@@ -19,7 +19,6 @@
 # prompt it is shown under the line instead.
 from 'os' import get_args, is_terminal, read_file, read_line, write_stderr, write_stdout
 from 'errors' import Error, StrResult
-from 'fmt' import int_to_str
 from 'strings' import repeat, split, starts_with
 from 'lexer' import lex, LexError, Tokens
 from 'parser' import parse, ParseError, Statement
@@ -43,16 +42,16 @@ type Mode enum:
 # under the column of the line just entered.
 def bool _report(str source, int line, int col, str message):
     if source == '':
-        write_stderr(repeat(' ', len(PROMPT) + col - 1) + '^ ' + message + '\n')
+        write_stderr(format('{}^ {}\n', repeat(' ', len(PROMPT) + col - 1), message))
     else:
-        write_stderr(source + ':' + int_to_str(line) + ':' + int_to_str(col) + ': error: ' + message + '\n')
+        write_stderr(format('{}:{}:{}: error: {}\n', source, line, col, message))
     return false
 
 # A statement's tree as text: after `target = `, if it has one.
 def str _shown(Statement statement):
     if statement.target == '':
         return tree_text(statement.value) + '\n'
-    return statement.target + ' = ' + tree_text(statement.value) + '\n'
+    return format('{} = {}\n', statement.target, tree_text(statement.value))
 
 # Do what the mode says with one statement; false if it has an error.
 def bool _run(Mode mode, str source, int number, Statement statement, dict[str]int variables):
@@ -102,7 +101,7 @@ def bool run_line(Mode mode, str source, int number, str line, dict[str]int vari
 def int run_file(Mode mode, str path, dict[str]int variables):
     StrResult text = read_file(path)
     if text is Error:
-        write_stderr('calc: ' + text.message + '\n')
+        write_stderr(format('calc: {}\n', text.message))
         return 1
     bool ok = true
     []str lines = split(text, '\n')
@@ -131,7 +130,7 @@ def int run_input(Mode mode, dict[str]int variables):
                 if not run_line(mode, source, number, line, variables) and not prompting:
                     ok = false
             is Error:
-                write_stderr('calc: ' + line.message + '\n')
+                write_stderr(format('calc: {}\n', line.message))
                 return 1
             is none:
                 if prompting:

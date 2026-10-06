@@ -47,7 +47,7 @@ Updates:
 - Sets.
 - Generics.
 - Sorting.
-- Format strings.
+- Add format string literal.
 - Slice equality?
 - Dict equality?
 - Import \*?

@@ -100,7 +100,7 @@ def LexResult lex(str line):
                 width = 1
             TokenKind kind = _operator_kind(line[i:i + width])
             if kind is End:
-                return LexError('unexpected character \'' + line[i:i + 1] + '\'', col)
+                return LexError(format('unexpected character \'{}\'', line[i:i + 1]), col)
             toks = append(toks, Token(kind, line[i:i + width], 0, col))
             i += width
     toks = append(toks, Token(TokenKind.End, '', 0, n + 1))

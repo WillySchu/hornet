@@ -43,7 +43,7 @@ syn keyword hornetLogicalOperator and or not
 
 " Calls. Builtins have their own group.
 syn match   hornetFunction /\h\w*\ze\s*(/
-syn keyword hornetBuiltin print len append del bytes panic
+syn keyword hornetBuiltin print len append del bytes panic format
 
 " Declared names (after the operator and call matches, so they win).
 syn match   hornetTypeName /\%(\<type\s\+\)\@<=\h\w*/

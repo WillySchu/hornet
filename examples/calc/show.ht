@@ -1,5 +1,4 @@
 # Trees and instructions as text.
-from 'fmt' import int_to_str
 from 'strings' import Builder
 from 'parser' import Expr, Num, Name, Unary, Binary, Op
 from 'code' import Instruction, Opcode
@@ -41,18 +40,18 @@ def str symbol(Op op):
 def str tree_text(*Expr tree):
     match *tree as node:
         is Num:
-            return int_to_str(node.value)
+            return format('{}', node.value)
         is Name:
             return node.name
         is Unary:
-            return '(' + symbol(node.op) + ' ' + tree_text(node.operand) + ')'
+            return format('({} {})', symbol(node.op), tree_text(node.operand))
         is Binary:
-            return '(' + symbol(node.op) + ' ' + tree_text(node.left) + ' ' + tree_text(node.right) + ')'
+            return format('({} {} {})', symbol(node.op), tree_text(node.left), tree_text(node.right))
 
 def str _instruction_text(Instruction instruction):
     match instruction.opcode as opcode:
         is Push:
-            return 'push ' + int_to_str(instruction.operand)
+            return format('push {}', instruction.operand)
         is Load:
             return 'load ' + instruction.name
         is Store:
@@ -68,15 +67,15 @@ def str _instruction_text(Instruction instruction):
         is Truth:
             return 'truth'
         is Jump:
-            return 'jump ' + int_to_str(instruction.operand)
+            return format('jump {}', instruction.operand)
         is JumpIfFalse:
-            return 'jump_if_false ' + int_to_str(instruction.operand)
+            return format('jump_if_false {}', instruction.operand)
         is JumpIfTrue:
-            return 'jump_if_true ' + int_to_str(instruction.operand)
+            return format('jump_if_true {}', instruction.operand)
 
 # One instruction per line, each after its index (what a jump names).
 def str code_text([]Instruction code):
     Builder text
     for int i = 0; i < len(code); i += 1:
-        text.write(int_to_str(i) + ' ' + _instruction_text(code[i]) + '\n')
+        text.write(format('{} {}\n', i, _instruction_text(code[i])))
     return text.to_str()

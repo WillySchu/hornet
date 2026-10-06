@@ -6,7 +6,6 @@
 #
 # Numbers keep their text (there is no floating point to hold them in), and an object keeps its
 # members in order, repeats included.
-from 'fmt' import int_to_str
 from 'strings' import Builder, repeat
 
 type Number struct:

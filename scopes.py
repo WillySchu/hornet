@@ -32,7 +32,7 @@ from parser import (
 
 # The builtin functions (semantic.py's check_call). No declaration or named import may take one of
 # these names, in any file: it would stand in for the builtin there.
-BUILTIN_FUNCTION_NAMES = {'print', 'len', 'append', 'del', 'bytes', 'panic'}
+BUILTIN_FUNCTION_NAMES = {'print', 'len', 'append', 'del', 'bytes', 'panic', 'format'}
 
 
 class MergeError(CompileError):

@@ -694,6 +694,8 @@ class TypedFunctionBuilder:
                 IRBinOp(dst=offset, op=BinaryOp.MULTIPLY, left=index, right=IRConst(16, Type.INT)),
                 IRBinOp(dst=entry, op=BinaryOp.ADD, left=base, right=offset),
             ] + read_ir, ptr, length
+        if isinstance(e, t.Format):
+            return self.format(e)
         if isinstance(e, t.StrFromBytes):
             slice_ir, src, length, _ = self.slice_value(e.value)
             size, ptr = self.temp(Type.INT), self.temp()
@@ -1100,6 +1102,41 @@ class TypedFunctionBuilder:
             IRStaticDataAddress(dst=where, label=message_label(self.ir_program, e.where or "")),
             IRCall(dst=None, name='hornet_panic_at', args=[where, ptr, length]), self.never_returned(e)
         ]
+
+    def format(self, e: t.Format) -> tuple:
+        """One buffer, in a frame slot, that the runtime appends each piece to: the template's text,
+        a str argument's bytes, any other argument as print shows it. Its first two words are then
+        the result's pointer and length (the bytes are the result's to keep)."""
+        buffer = self.temp()
+        slot = self.ids.new_slot(24, "format", self.ir_fn)
+        ir = [IRLocalAddress(dst=buffer, slot=slot), IRCall(dst=None, name='hornet_format_begin', args=[buffer])]
+
+        def text(piece) -> list:
+            piece_ir, ptr, length = self.str_value(piece)
+            return piece_ir + [IRCall(dst=None, name='hornet_format_text', args=[buffer, ptr, length])]
+
+        pieces = t.format_pieces(e.template)
+        for piece, arg in zip(pieces, e.args + (None,)):
+            if piece:
+                ir += text(t.StrLit(Type.STR, piece))
+            if arg is None:
+                break
+            if arg.type == Type.STR:
+                ir += text(arg)
+                continue
+            if _scalar(arg.type):
+                arg_ir, value = self.value(arg)
+                slot_ir, address = self.scratch_address(arg.type)
+                arg_ir += slot_ir + [IRStore(address=address, value=value, value_type=arg.type)]
+            else:
+                arg_ir, address = self.address(arg)
+            descriptor = self.temp()
+            ir += arg_ir + [
+                IRStaticDataAddress(dst=descriptor, label=type_descriptor(self.ir_program, arg.type)),
+                IRCall(dst=None, name='hornet_format_value', args=[buffer, address, descriptor]),
+            ]
+        read_ir, ptr, length = self.read_str(buffer)
+        return ir + read_ir, ptr, length
 
     def print_(self, e: t.Print) -> list:
         value_type = e.value.type

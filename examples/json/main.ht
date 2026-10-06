@@ -9,7 +9,7 @@
 # An error is reported as `file:line:col: error: message`, and the exit status is then 1.
 from 'os' import get_args, read_file, read_stdin, write_stderr, write_stdout
 from 'errors' import Error, StrResult
-from 'fmt' import int_to_str, parse_int
+from 'fmt' import parse_int
 from 'strings' import starts_with
 from 'json' import parse, to_text, sort_keys, Document, ParseError, Layout, Value
 
@@ -50,11 +50,11 @@ def int main(int argc, *byte argv):
         source = path
         text = read_file(path)
     if text is Error:
-        write_stderr('jsonfmt: ' + text.message + '\n')
+        write_stderr(format('jsonfmt: {}\n', text.message))
         return 1
     match parse(text) as result:
         is ParseError:
-            write_stderr(source + ':' + int_to_str(result.line) + ':' + int_to_str(result.col) + ': error: ' + result.message + '\n')
+            write_stderr(format('{}:{}:{}: error: {}\n', source, result.line, result.col, result.message))
             return 1
         is Document:
             Value root = result.root

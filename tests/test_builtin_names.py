@@ -18,7 +18,7 @@ def _analyze(tmp_path, **files):
 
 
 def test_the_builtins():
-    assert BUILTIN_FUNCTION_NAMES == {'print', 'len', 'append', 'del', 'bytes', 'panic'}
+    assert BUILTIN_FUNCTION_NAMES == {'print', 'len', 'append', 'del', 'bytes', 'panic', 'format'}
 
 
 @pytest.mark.parametrize("declaration", [
