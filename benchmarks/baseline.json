@@ -11,7 +11,7 @@
     "executed_instructions": null,
     "instruction_count": 76,
     "name": "arithmetic_heavy",
-    "runtime_seconds": 0.09372979192994535
+    "runtime_seconds": 0.09673354204278439
   },
   "array_heavy": {
     "allocation": {
@@ -23,9 +23,9 @@
       "total_temps": 86
     },
     "executed_instructions": null,
-    "instruction_count": 279,
+    "instruction_count": 311,
     "name": "array_heavy",
-    "runtime_seconds": 0.03559954196680337
+    "runtime_seconds": 0.037247665924951434
   },
   "branchy": {
     "allocation": {
@@ -39,7 +39,7 @@
     "executed_instructions": null,
     "instruction_count": 142,
     "name": "branchy",
-    "runtime_seconds": 0.07561229192651808
+    "runtime_seconds": 0.07198120804969221
   },
   "calling_convention_heavy": {
     "allocation": {
@@ -51,9 +51,9 @@
       "total_temps": 193
     },
     "executed_instructions": null,
-    "instruction_count": 740,
+    "instruction_count": 840,
     "name": "calling_convention_heavy",
-    "runtime_seconds": 0.10555241594556719
+    "runtime_seconds": 0.10641783406026661
   },
   "calls_in_loop": {
     "allocation": {
@@ -67,7 +67,7 @@
     "executed_instructions": null,
     "instruction_count": 87,
     "name": "calls_in_loop",
-    "runtime_seconds": 0.07420645898673683
+    "runtime_seconds": 0.07596183300483972
   },
   "copy_heavy": {
     "allocation": {
@@ -79,23 +79,23 @@
       "total_temps": 211
     },
     "executed_instructions": null,
-    "instruction_count": 819,
+    "instruction_count": 961,
     "name": "copy_heavy",
-    "runtime_seconds": 0.12824091594666243
+    "runtime_seconds": 0.13338916597422212
   },
   "dict_heavy": {
     "allocation": {
       "address_taken_excluded": 0,
-      "allocated": 344,
-      "eligible": 348,
-      "live_across_call": 78,
+      "allocated": 487,
+      "eligible": 491,
+      "live_across_call": 117,
       "spilled": 4,
-      "total_temps": 348
+      "total_temps": 491
     },
     "executed_instructions": null,
-    "instruction_count": 945,
+    "instruction_count": 1414,
     "name": "dict_heavy",
-    "runtime_seconds": 0.17140137497335672
+    "runtime_seconds": 0.1713517919415608
   },
   "loop_accumulator": {
     "allocation": {
@@ -109,7 +109,7 @@
     "executed_instructions": null,
     "instruction_count": 46,
     "name": "loop_accumulator",
-    "runtime_seconds": 0.17624266701750457
+    "runtime_seconds": 0.17915041698142886
   },
   "recursive_fibonacci": {
     "allocation": {
@@ -123,7 +123,7 @@
     "executed_instructions": null,
     "instruction_count": 42,
     "name": "recursive_fibonacci",
-    "runtime_seconds": 0.024078457965515554
+    "runtime_seconds": 0.024800458922982216
   },
   "register_pressure": {
     "allocation": {
@@ -137,7 +137,7 @@
     "executed_instructions": null,
     "instruction_count": 122,
     "name": "register_pressure",
-    "runtime_seconds": 0.06323420791886747
+    "runtime_seconds": 0.06479850003961474
   },
   "string_heavy": {
     "allocation": {
@@ -151,7 +151,7 @@
     "executed_instructions": null,
     "instruction_count": 119,
     "name": "string_heavy",
-    "runtime_seconds": 0.011280541075393558
+    "runtime_seconds": 0.011477291001938283
   },
   "struct_heavy": {
     "allocation": {
@@ -165,7 +165,7 @@
     "executed_instructions": null,
     "instruction_count": 171,
     "name": "struct_heavy",
-    "runtime_seconds": 0.014776207972317934
+    "runtime_seconds": 0.014759666984900832
   },
   "sum_type_walk": {
     "allocation": {
@@ -177,9 +177,9 @@
       "total_temps": 254
     },
     "executed_instructions": null,
-    "instruction_count": 608,
+    "instruction_count": 643,
     "name": "sum_type_walk",
-    "runtime_seconds": 0.0607598340138793
+    "runtime_seconds": 0.0628416669787839
   },
   "tokenize": {
     "allocation": {
@@ -191,8 +191,8 @@
       "total_temps": 110
     },
     "executed_instructions": null,
-    "instruction_count": 286,
+    "instruction_count": 298,
     "name": "tokenize",
-    "runtime_seconds": 0.06796108395792544
+    "runtime_seconds": 0.06862187490332872
   }
 }
