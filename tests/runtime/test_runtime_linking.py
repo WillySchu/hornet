@@ -83,6 +83,8 @@ def test_hornet_runtime_entry_points_are_the_only_external_symbols(target):
             "hornet_dict_lookup_str_key",
             "hornet_dict_set_scalar_key",
             "hornet_dict_set_str_key",
+            "hornet_alloc",
+            "hornet_alloc_zeroed",
             "hornet_close_fd",
             "hornet_error_message",
             "hornet_exit",

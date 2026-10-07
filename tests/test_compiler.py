@@ -113,11 +113,11 @@ def _ir_program(program):
 
 
 def _heap_allocations(ast) -> list:
-    """Sizes passed to malloc anywhere in the program's IR (None where not constant), in order."""
+    """Sizes passed to hornet_alloc anywhere in the program's IR (None where not constant), in order."""
     from ir.ir import IRCall, IRConst
     return [c.args[0].value if isinstance(c.args[0], IRConst) else None
             for fn in _ir_program(ast).functions for c in fn.body
-            if isinstance(c, IRCall) and c.name == 'malloc']
+            if isinstance(c, IRCall) and c.name == 'hornet_alloc']
 
 
 def compile_and_run(source: str, agree: bool = True, only=None) -> subprocess.CompletedProcess:

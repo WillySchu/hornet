@@ -164,7 +164,7 @@ class TypedFunctionBuilder:
         stack."""
         address = self.temp()
         if is_heap_allocated(type_, self.ir_program.struct_registry, self.ir_program.sum_type_registry):
-            return [IRCall(dst=address, name='malloc', args=[IRConst(self.width(type_), Type.INT64)])], address
+            return [IRCall(dst=address, name='hornet_alloc', args=[IRConst(self.width(type_), Type.INT64)])], address
         slot = self.ids.new_slot(self.width(type_), "temporary", self.ir_fn)
         return [IRLocalAddress(dst=address, slot=slot)], address
 
@@ -206,7 +206,7 @@ class TypedFunctionBuilder:
         """A composite variable on the heap: new storage, its pointer kept in the variable's slot."""
         pointer, slot_address = self.temp(), self.temp()
         return [
-            IRCall(dst=pointer, name='malloc', args=[IRConst(self.width(symbol.type), Type.INT64)]),
+            IRCall(dst=pointer, name='hornet_alloc', args=[IRConst(self.width(symbol.type), Type.INT64)]),
             IRLocalAddress(dst=slot_address, slot=self.ir_fn.var_slots[symbol.id]),
             IRStore(address=slot_address, value=pointer, value_type=Type.INT64)
         ]
@@ -227,7 +227,7 @@ class TypedFunctionBuilder:
             return [IRMove(dst=temp, src=value)]
         box = self.temp()
         return [
-            IRCall(dst=box, name='malloc', args=[IRConst(self.width(symbol.type), Type.INT64)]),
+            IRCall(dst=box, name='hornet_alloc', args=[IRConst(self.width(symbol.type), Type.INT64)]),
             IRStore(address=box, value=value, value_type=symbol.type),
             IRMove(dst=temp, src=box)
         ]
@@ -608,7 +608,8 @@ class TypedFunctionBuilder:
             header = self.temp()
             return [
                 IRCall(
-                    dst=header, name='calloc', args=[IRConst(1, Type.INT64), IRConst(_DICT_HEADER_SIZE, Type.INT64)]
+                    dst=header, name='hornet_alloc_zeroed',
+                    args=[IRConst(1, Type.INT64), IRConst(_DICT_HEADER_SIZE, Type.INT64)]
                 ),
                 IRStore(address=dst, value=header, value_type=Type.INT64),
             ]
@@ -701,7 +702,7 @@ class TypedFunctionBuilder:
             size, ptr = self.temp(Type.INT), self.temp()
             return slice_ir + [
                 IRBinOp(dst=size, op=BinaryOp.BITWISE_OR, left=length, right=IRConst(1, Type.INT)),  # never malloc(0)
-                IRCall(dst=ptr, name='malloc', args=[size]),
+                IRCall(dst=ptr, name='hornet_alloc', args=[size]),
                 IRCall(dst=None, name='memcpy', args=[ptr, src, length]),
             ], ptr, length
         if isinstance(e, t.StrFromRawParts):
@@ -754,7 +755,7 @@ class TypedFunctionBuilder:
             element_type = e.type.element_type
             count = len(e.elements)
             ptr = self.temp()
-            ir = [IRCall(dst=ptr, name='malloc', args=[IRConst(count * self.width(element_type), Type.INT64)])]
+            ir = [IRCall(dst=ptr, name='hornet_alloc', args=[IRConst(count * self.width(element_type), Type.INT64)])]
             for i, value in enumerate(e.elements):
                 offset_ir, address = self.offset(ptr, i * self.width(element_type))
                 ir += offset_ir + self.store(address, value)
@@ -766,7 +767,7 @@ class TypedFunctionBuilder:
                 else:  # a temporary array: the slice may outlive this statement, so its storage is on the heap
                     ptr = self.temp()
                     ir = [
-                             IRCall(dst=ptr, name='malloc', args=[IRConst(self.width(e.base.type), Type.INT64)])
+                             IRCall(dst=ptr, name='hornet_alloc', args=[IRConst(self.width(e.base.type), Type.INT64)])
                          ] + self.write_into(ptr, e.base)
                 length = cap = IRConst(e.base.type.size, Type.INT)
             else:
@@ -895,7 +896,7 @@ class TypedFunctionBuilder:
             return self.address_of(e)
         if isinstance(e, t.BoxVariant):
             box = self.temp()
-            return [IRCall(dst=box, name='malloc', args=[IRConst(self.width(e.value.type), Type.INT64)])] + \
+            return [IRCall(dst=box, name='hornet_alloc', args=[IRConst(self.width(e.value.type), Type.INT64)])] + \
                 self.write_into(box, e.value), box
         if isinstance(e, t.Unary):
             ir, operand = self.value(e.operand)
@@ -921,7 +922,7 @@ class TypedFunctionBuilder:
         if isinstance(place, t.StructLiteral):
             # `&S(...)`: its own storage, on the heap when the pointer may outlive this frame.
             box = self.temp()
-            return [IRCall(dst=box, name='malloc', args=[IRConst(self.width(place.type), Type.INT64)])] + \
+            return [IRCall(dst=box, name='hornet_alloc', args=[IRConst(self.width(place.type), Type.INT64)])] + \
                 self.write_into(box, place), box
         if isinstance(place, t.Local) and _scalar(place.type):
             temp, heap = self.bind(place.symbol)
@@ -1165,7 +1166,7 @@ class TypedFunctionBuilder:
         symbol = s.init.symbol
         temp, _ = self.bind(symbol)
         box = self.temp()
-        ir = [IRCall(dst=box, name='malloc', args=[IRConst(self.width(symbol.type), Type.INT64)])]
+        ir = [IRCall(dst=box, name='hornet_alloc', args=[IRConst(self.width(symbol.type), Type.INT64)])]
         if _scalar(symbol.type):
             current = self.temp(symbol.type)
             return ir + [
@@ -1354,7 +1355,8 @@ class TypedFunctionBuilder:
         while capacity < len(e.entries) * 2:
             capacity *= 2
         buckets, header, count = self.temp(), self.temp(), IRConst(0, Type.INT)
-        ir = [IRCall(dst=buckets, name='calloc', args=[IRConst(capacity, Type.INT64), IRConst(stride, Type.INT64)])]
+        ir = [IRCall(dst=buckets, name='hornet_alloc_zeroed',
+                     args=[IRConst(capacity, Type.INT64), IRConst(stride, Type.INT64)])]
         table = [buckets, IRConst(capacity, Type.INT64), IRConst(stride, Type.INT64)]
         for key, value in e.entries:
             value_ir, value_address = self.scratch_address(value_type)
@@ -1375,7 +1377,7 @@ class TypedFunctionBuilder:
             count = total
         fields = [(0, buckets, Type.INT64), (8, count, Type.INT), (16, IRConst(0, Type.INT), Type.INT),
                   (24, IRConst(capacity, Type.INT64), Type.INT64)]
-        ir.append(IRCall(dst=header, name='malloc', args=[IRConst(_DICT_HEADER_SIZE, Type.INT64)]))
+        ir.append(IRCall(dst=header, name='hornet_alloc', args=[IRConst(_DICT_HEADER_SIZE, Type.INT64)]))
         for offset, value, value_type_ in fields:
             offset_ir, address = self.offset(header, offset)
             ir += offset_ir + [IRStore(address=address, value=value, value_type=value_type_)]
@@ -1550,7 +1552,7 @@ class TypedFunctionBuilder:
         total, buffer, right_dst = self.temp(Type.INT), self.temp(), self.temp()
         return [
             IRBinOp(dst=total, op=BinaryOp.ADD, left=left_len, right=right_len),
-            IRCall(dst=buffer, name='malloc', args=[total]),
+            IRCall(dst=buffer, name='hornet_alloc', args=[total]),
             IRCall(dst=None, name='memcpy', args=[buffer, left_ptr, left_len]),
             IRBinOp(dst=right_dst, op=BinaryOp.ADD, left=buffer, right=left_len),
             IRCall(dst=None, name='memcpy', args=[right_dst, right_ptr, right_len])

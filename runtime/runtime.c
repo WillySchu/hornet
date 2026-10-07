@@ -134,6 +134,70 @@ struct hornet_buf {
 static void hornet_stringify(
     void *value_addr, const unsigned char *type_desc, int quote_strings, struct hornet_buf *buf);
 
+// ---- Memory.
+//
+// Every allocation, the compiled code's and the runtime's own, comes through here, so that being
+// refused memory is a panic and not a write through a null pointer. (A system that grants memory it
+// doesn't have, as Linux does by default, kills the program when the memory is used: there is no
+// refusal to catch then.) Nothing is freed yet but the runtime's own scratch buffers.
+
+// `panic: out of memory (allocating N bytes)`, or `N x M bytes` when their product doesn't fit.
+// From a buffer on the stack: this is no time to allocate.
+static void hornet_out_of_memory(int64_t count, int64_t size) {
+    char message[96];
+    int n = size < 0
+        ? snprintf(message, sizeof message, "panic: out of memory (allocating %lld bytes)\n", (long long)count)
+        : snprintf(message, sizeof message, "panic: out of memory (allocating %lld x %lld bytes)\n",
+                   (long long)count, (long long)size);
+    fflush(stdout);  // the program's own output first
+    ssize_t written = write(2, message, (size_t)n);
+    (void)written;
+    abort();
+}
+
+// `size` bytes, uninitialized. (No bytes is still somewhere to point: malloc(0) may give NULL.)
+void *hornet_alloc(int64_t size) {
+    void *ptr = size < 0 ? NULL : malloc(size > 0 ? (size_t)size : 1);
+    if (ptr == NULL) {
+        hornet_out_of_memory(size, -1);
+    }
+    return ptr;
+}
+
+// Whether `count` items of `size` bytes is a number of bytes an int64 holds.
+static int hornet_fits(int64_t count, int64_t size) {
+    return count >= 0 && size >= 0 && (size == 0 || count <= INT64_MAX / size);
+}
+
+// `count` items of `size` bytes, all zero.
+void *hornet_alloc_zeroed(int64_t count, int64_t size) {
+    if (!hornet_fits(count, size)) {
+        hornet_out_of_memory(count, size);
+    }
+    void *ptr = calloc(count > 0 ? (size_t)count : 1, size > 0 ? (size_t)size : 1);
+    if (ptr == NULL) {
+        hornet_out_of_memory(count * size, -1);
+    }
+    return ptr;
+}
+
+// `count` items of `size` bytes, uninitialized.
+static void *hornet_alloc_items(int64_t count, int64_t size) {
+    if (!hornet_fits(count, size)) {
+        hornet_out_of_memory(count, size);
+    }
+    return hornet_alloc(count * size);
+}
+
+// realloc, for the runtime's own growing buffers.
+static void *hornet_realloc(void *ptr, int64_t size) {
+    void *grown = size < 0 ? NULL : realloc(ptr, size > 0 ? (size_t)size : 1);
+    if (grown == NULL) {
+        hornet_out_of_memory(size, -1);
+    }
+    return grown;
+}
+
 // Ensure `additional` spare bytes, growing by doubling.
 static void hornet_buf_ensure(struct hornet_buf *buf, int64_t additional) {
     int64_t needed = buf->len + additional;
@@ -142,7 +206,7 @@ static void hornet_buf_ensure(struct hornet_buf *buf, int64_t additional) {
     }
     int64_t doubled_or_quartered = buf->cap < 256 ? buf->cap * 2 : buf->cap + buf->cap / 4;
     int64_t new_cap = needed > doubled_or_quartered ? needed : doubled_or_quartered;
-    buf->ptr = realloc(buf->ptr, (size_t)new_cap);
+    buf->ptr = hornet_realloc(buf->ptr, new_cap);
     buf->cap = new_cap;
 }
 
@@ -391,7 +455,7 @@ struct hornet_slice {
 };
 
 void hornet_bytes(struct hornet_slice *out, const char *ptr, int64_t len) {
-    out->ptr = malloc(len > 0 ? (size_t)len : 1);
+    out->ptr = hornet_alloc(len);
     if (len > 0) {
         memcpy(out->ptr, ptr, (size_t)len);
     }
@@ -439,12 +503,12 @@ int64_t hornet_read_fd(int64_t fd, char *ptr, int64_t len) {
 // length goes to *len. NULL at the end of the input (*len 0), or on an error (*len -1).
 char *hornet_read_line(int64_t *len) {
     size_t cap = 128, n = 0;
-    char *line = malloc(cap);
+    char *line = hornet_alloc((int64_t)cap);
     int c;
     while ((c = getc(stdin)) != EOF && c != '\n') {
         if (n == cap) {
             cap *= 2;
-            line = realloc(line, cap);
+            line = hornet_realloc(line, (int64_t)cap);
         }
         line[n++] = (char)c;
     }
@@ -487,7 +551,7 @@ _Static_assert(offsetof(struct hornet_buf, ptr) == 0 && offsetof(struct hornet_b
 
 void hornet_format_begin(struct hornet_buf *buf) {
     buf->cap = 32;
-    buf->ptr = malloc((size_t)buf->cap);
+    buf->ptr = hornet_alloc(buf->cap);
     buf->len = 0;
 }
 
@@ -503,7 +567,7 @@ void hornet_format_value(struct hornet_buf *buf, void *value_addr, const unsigne
 void hornet_print(void *value_addr, const unsigned char *type_desc) {
     struct hornet_buf buf;
     buf.cap = 16;
-    buf.ptr = malloc((size_t)buf.cap);
+    buf.ptr = hornet_alloc(buf.cap);
     buf.len = 0;
     hornet_stringify(value_addr, type_desc, 0, &buf);
     hornet_buf_append_byte(&buf, '\n');
@@ -579,9 +643,9 @@ void hornet_panic_at(const char *where, const char *msg, int64_t len) {
     abort();
 }
 
-// malloc new_cap * element_width bytes and copy `len` elements.
+// Room for new_cap elements of element_width bytes, with the first `len` copied in.
 void *hornet_slice_grow(const void *old_ptr, int64_t len, int64_t new_cap, int64_t element_width) {
-    void *new_ptr = malloc((size_t)new_cap * (size_t)element_width);
+    void *new_ptr = hornet_alloc_items(new_cap, element_width);
     memcpy(new_ptr, old_ptr, (size_t)len * (size_t)element_width);
     return new_ptr;
 }
@@ -711,7 +775,7 @@ static void dict_grow_scalar_key_if_needed(void *descriptor, int64_t key_width, 
     }
     int64_t bucket_stride = 1 + key_width + value_width;
     int64_t new_capacity = dict_rehash_capacity(capacity, count);
-    void *new_buckets = calloc((size_t)new_capacity, (size_t)bucket_stride);
+    void *new_buckets = hornet_alloc_zeroed(new_capacity, bucket_stride);
     void *old_buckets = dict_buckets(descriptor);
     for (int64_t i = 0; i < capacity; i++) {
         unsigned char *bucket = (unsigned char *)old_buckets + i * bucket_stride;
@@ -737,7 +801,7 @@ static void dict_grow_str_key_if_needed(void *descriptor, int64_t value_width) {
     }
     int64_t bucket_stride = 1 + key_region_width + value_width;
     int64_t new_capacity = dict_rehash_capacity(capacity, count);
-    void *new_buckets = calloc((size_t)new_capacity, (size_t)bucket_stride);
+    void *new_buckets = hornet_alloc_zeroed(new_capacity, bucket_stride);
     void *old_buckets = dict_buckets(descriptor);
     for (int64_t i = 0; i < capacity; i++) {
         unsigned char *bucket = (unsigned char *)old_buckets + i * bucket_stride;
@@ -819,7 +883,7 @@ static void hornet_note_missing_str_key(const void *key_ptr, int64_t key_len) {
 void hornet_panic_missing_key(const char *msg, const unsigned char *key_desc) {
     struct hornet_buf buf;
     buf.cap = 64;
-    buf.ptr = malloc((size_t)buf.cap);
+    buf.ptr = hornet_alloc(buf.cap);
     buf.len = 0;
     hornet_buf_append_cstr(&buf, msg);
     hornet_buf_append_cstr(&buf, ": ");

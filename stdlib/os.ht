@@ -1,4 +1,4 @@
-from 'c' import from_cstring, to_cstring, from_raw_parts, calloc
+from 'c' import from_cstring, to_cstring, from_raw_parts, hornet_alloc
 from 'strings' import Builder
 from 'errors' import Error, StrResult, IntResult
 
@@ -30,7 +30,7 @@ def str _os_reason():
 # Read fd to EOF.
 def StrResult read_all_from_fd(int fd):
     Builder b
-    *byte chunk = calloc(65536, 1)
+    *byte chunk = hornet_alloc(65536)
     int n = hornet_read_fd(fd, chunk, 65536)
     while n != 0:
         if n < 0:
