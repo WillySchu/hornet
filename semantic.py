@@ -2822,10 +2822,13 @@ class _TypedTreeBuilder:
         if isinstance(s, syntax.VarDecl):
             return [self.declare(s)]
         if isinstance(s, syntax.Assign):
-            if isinstance(s.target, syntax.Variable):
+            if isinstance(s.target, syntax.Variable) and s.op is None:
+                # `v = value` replaces the whole of v, whatever an `is` check has narrowed it to.
                 symbol = self.symbols[self.facts.decls[s.target.nid]]
                 target = typed.Local(symbol.type, symbol)
             else:
+                # `v += value` reads v first, so a narrowed v is the variant it holds, which is what
+                # it is given back: the narrowing still stands afterwards.
                 target = self.expr(s.target)
             value = self.convert(s.value, target.type)
             return [typed.Assign(target, value) if s.op is None else typed.CompoundAssign(target, s.op, value)]
