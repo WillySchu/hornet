@@ -42,6 +42,7 @@ from parser import (
     ExternFunctionDecl,
     Field,
     QualifiedTypeExpr,
+    READ_AS_A_TYPED_LITERAL,
     For,
     ForIn,
     Function,
@@ -589,6 +590,11 @@ class SemanticAnalyzer:
             seen.add(node.nid)
             if isinstance(node, ArrayTypeExpr) and not isinstance(node.size, int):
                 _array_sizes[node.nid] = self._array_size_value(node.size)
+            if isinstance(node, ArrayLiteral) and node.could_be_multiplication:
+                try:  # its sizes now, to say how it was read if one is no constant
+                    self._resolve_array_sizes_in(node.type_expr)
+                except SemanticError as problem:
+                    raise SemanticError(problem.message + READ_AS_A_TYPED_LITERAL, node) from None
             if dataclasses.is_dataclass(node) and not isinstance(node, type):
                 for f in dataclasses.fields(node):
                     value = getattr(node, f.name)
@@ -1262,22 +1268,6 @@ class SemanticAnalyzer:
         if always_leaves(statements, self.facts.types):
             del self._assignments[first:]  # what follows the enclosing statement isn't reached from here
 
-    def _reject_typed_literal_read_as_multiplication(self, expr: Binary) -> None:
-        """`[2][1]*P[...]` parses as `[2][1] * P[...]` (an indexed literal times an index): explain when
-        the right side's name is a type, which is surely what was meant."""
-        def root(node):
-            while isinstance(node, Index):
-                node = node.array
-            return node
-        name = root(expr.right)
-        if (isinstance(name, Variable) and isinstance(root(expr.left), ArrayLiteral) and isinstance(expr.left, Index)
-                and self._resolve_type_name(name.name) in {**self.structs, **self.sum_types, **self.type_aliases}
-                and not any(name.name in scope for scope in self.scopes)):
-            raise SemanticError(
-                f"'{name.name}' is a type, but this reads as a multiplication: a typed literal of pointers with "
-                f"only fixed sizes, like `[2][1]*{name.name}[...]`, can't be written inline -- give the variable "
-                f"(or parameter) the type and use an untyped literal, e.g. `[2][1]*{name.name} g = [...]`", expr)
-
     def _resolve(self, name: str, node: Optional[Node] = None) -> Tuple[Type, object]:
         """(type, decl id) of `name`, innermost-first; constants (decl id None) after locals."""
         for scope in reversed(self.scopes):
@@ -1860,7 +1850,12 @@ class SemanticAnalyzer:
         `expected_element_type`, which where it is used must give: the declared type it flows into, or
         the other operand of `in`, `==`, or `!=`. Elsewhere its type has to be written."""
         if expr.type_expr is not None:
-            declared_type = self._type(expr.type_expr, expr)
+            try:
+                declared_type = self._type(expr.type_expr, expr)
+            except SemanticError as problem:
+                if not expr.could_be_multiplication:
+                    raise
+                raise SemanticError(problem.message + READ_AS_A_TYPED_LITERAL, expr) from None
             if len(expr.elements) != declared_type.size:
                 raise SemanticError(
                     f"Array literal declares type {declared_type} (size "
@@ -2569,8 +2564,6 @@ class SemanticAnalyzer:
         return True  # integers, bool, str, pointers
 
     def check_binary(self, expr: Binary) -> Type:
-        if expr.op == BinaryOp.MULTIPLY:
-            self._reject_typed_literal_read_as_multiplication(expr)
         if expr.op == BinaryOp.IN and self._enum_named_by(expr.right) is not None:
             # `n in Enum`: whether the integer `n` is a member's value (so `Enum(n)` wouldn't panic).
             enum = self._enum_named_by(expr.right)

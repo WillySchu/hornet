@@ -20,6 +20,9 @@ def int main():
     int w = [x][0] * ys[
         1
     ]
+    int v = [1]int[x][0] * ys[
+        1
+    ]
     x = [2][3]*P[
         a
     ]

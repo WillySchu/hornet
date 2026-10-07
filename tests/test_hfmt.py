@@ -344,12 +344,14 @@ def test_star_spacing_follows_the_compilers_reading(hfmt, tmp_path):
         "    int x = 3\n    [2]int ys = [4, 5]\n    P p = P(6)\n"
         "    int a = [1]int[x][0]*2\n"
         "    int b = [1]int[x][0]*ys[1]\n"
+        "    int c = len([2][1] * P[[&p],[&p]]) + [3]int[1,2,3][1]*ys[0]\n"
         "    [2][1]*P g = [[1]*P[&p], [1]*P[&p]]\n"
         "    [1]*P one = keep([1]*P[&p])\n"
-        "    print(a + b + g[1][0].x + one[0].x)\n"
+        "    print(a + b + c + g[1][0].x + one[0].x)\n"
         "    return 0\n")
     formatted = _run(hfmt, stdin=source).stdout
     assert "[1]int[x][0] * 2" in formatted and "[1]int[x][0] * ys[1]" in formatted and "keep([1]*P[&p])" in formatted
+    assert "len([2][1]*P[[&p], [&p]]) + [3]int[1, 2, 3][1] * ys[0]" in formatted
     (tmp_path / 'a.ht').write_text(source)
     (tmp_path / 'b.ht').write_text(formatted)
     assert _meaning(tmp_path / 'a.ht') == _meaning(tmp_path / 'b.ht')

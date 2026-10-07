@@ -85,7 +85,7 @@ WRITE = "This array literal has nothing to take its type from -- write the type 
     ("print(len([1, 2, 3][0:n]))", "[3]int"),
     ("print([1, 2] == [1, 2])", "[2]int"),                      # neither side says
     ("print([1] in [[1], [2]])", "[1]int"),
-    ("print([n][0] * pair[1])", "[1]int"),                      # (read as a multiplication, not as a type)
+    ("print([n][0] * n)", "[1]int"),                            # an indexed literal, multiplied
     ("Either e = [1, 2]", "[2]int"),                            # an array, or a slice? a sum doesn't say
     ("take([1, 2])", "[2]int"),
     ("print([Point(1, pair)])", "[1]Point"),

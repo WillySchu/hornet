@@ -12251,24 +12251,41 @@ class TestTypedLiterals:
                               expected + "\n")
 
     def test_an_indexed_literal_times_an_index_is_a_multiplication(self):
-        # (Without their types, `[x][0] * ys[1]` is the same tokens as a typed literal like
-        # `[N][M]*P[...]`: the multiplication wins, and the untyped literal is then what is rejected.)
+        # (With its type. Without, `[x][0] * ys[1]` has the tokens of the typed literal `[N][M]*P[...]`,
+        # which is how it is read: test_what_reads_as_a_typed_literal_but_is_not_one_says_so.)
         assert_program_stdout(
             "def int main():\n    int x = 3\n    [2]int ys = [4, 5]\n"
             "    print([1]int[x][0] * ys[1])\n    print([2]int[x, 2][1] * ys[0] + [1]int[7][0] * ys[1])\n    return 0\n",
             "15\n43\n")
 
-    @pytest.mark.parametrize("literal,match", [
-        ("[1][1]*P[[1]*P[&p]]", "'P' is a type, but this reads as a multiplication"),
-        ("[2][1]*P[[1]*P[&p], [1]*P[&p]]", "Expected ']' after array index, got ',' -- a typed literal of pointers"),
+    def test_a_literal_of_pointers_behind_two_fixed_sizes_can_be_written_inline(self):
+        # `[2][1]*P[...]` has the tokens of an indexed literal times an index, `[x][0] * ys[1]`. It is
+        # the typed literal: an array literal without a type can't be indexed.
+        assert_program_stdout(
+            "type P struct:\n    int x\nconst int N = 2\n"
+            "def int first([N][1]*P grid):\n    return grid[0][0].x\n"
+            "def int main():\n    P p = P(5)\n    P q = P(6)\n"
+            "    print(len([1][1]*P[[1]*P[&p]]))\n"
+            "    print(first([2][1]*P[[1]*P[&p], [1]*P[&q]]) + first([N][1]*P[[&q], [&p]]))\n"
+            "    int total = 0\n"
+            "    for row in [2][1]*P[[&p], [&q]]:\n        total += row[0].x\n"
+            "    print(total + [2][1]*P[[&p], [&q]][1][0].x * 100)\n"     # indexed, then multiplied
+            "    return 0\n",
+            "1\n11\n611\n")
+
+    @pytest.mark.parametrize("expression,match", [
+        ("[n][0] * ys[1]", "Array size must be positive, got 0"),
+        ("[n][1] * ys[1]", "Array size must be a constant expression, but 'n' isn't a constant"),
+        ("[2][1] * ys[1]", "Unknown type 'ys'"),
     ])
-    def test_a_typed_literal_read_as_a_multiplication_is_explained(self, literal, match):
-        with pytest.raises((SemanticError, ParseError), match=match):
-            analyze(_parse(f"type P struct:\n"
-                           f"    int x\n"
-                           f"def int main():\n"
-                           f"    P p = P(1)\n"
-                           f"    print({literal})\n"
+    def test_what_reads_as_a_typed_literal_but_is_not_one_says_so(self, expression, match):
+        with pytest.raises((SemanticError, ParseError), match=re.escape(match) + re.escape(
+                " -- this is read as a typed array literal, like `[2][1]*P[...]`; to multiply an indexed literal "
+                "by a value, write that literal's type, as in `[1]int[x][0] * ys[1]`")):
+            analyze(_parse(f"def int main():\n"
+                           f"    int n = 1\n"
+                           f"    [2]int ys = [1, 2]\n"
+                           f"    print({expression})\n"
                            f"    return 0\n"))
 
     def test_an_indexed_literal_times_a_value_is_not_a_typed_literal(self):
@@ -12283,6 +12300,7 @@ class TestTypedLiterals:
             "def int main():\n    P p = P(5)\n"
             "    [N]*P a = [N]*P[&p, &p]\n"
             "    [2][1]*P g = [[1]*P[&p], [1]*P[&p]]\n"
+            "    g = [2][1]*P[[1]*P[&p], [&p]]\n"
             "    []*int s = []*int[&p.x]\n"
             "    print(a[1].x + g[1][0].x + *s[0])\n    return 0\n",
             "15\n")

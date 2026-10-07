@@ -14,7 +14,7 @@ from diagnostics import CompileError
 # AST nodes
 
 _PRETTY_MAX_WIDTH = 88
-_HIDDEN_FIELDS = {'line', 'col', 'file', 'nid'}
+_HIDDEN_FIELDS = {'line', 'col', 'file', 'nid', 'could_be_multiplication'}
 _PRETTY_INDENT = "    "
 
 
@@ -121,9 +121,12 @@ class Variable(Node):
 
 @dataclass
 class ArrayLiteral(Node):
-    """`[e1, ...]` or typed `[N]T[...]` / `[]T[...]`."""
+    """`[e1, ...]` or typed `[N]T[...]` / `[]T[...]`. `could_be_multiplication` marks a typed one
+    whose tokens could also be an indexed literal times an index (`[x][0] * ys[1]` beside
+    `[2][1]*P[...]`): it is read as the literal, and an error in its type says so."""
     elements: List[Node] = field(default_factory=list)
     type_expr: Optional['ArrayTypeExpr'] = None
+    could_be_multiplication: bool = field(default=False, compare=False, repr=False)
 
 
 @dataclass
@@ -470,6 +473,12 @@ class ParseError(CompileError):
     """Malformed input."""
 
 
+# Added to an error in the type of a literal that ArrayLiteral.could_be_multiplication marks.
+READ_AS_A_TYPED_LITERAL = (
+    " -- this is read as a typed array literal, like `[2][1]*P[...]`; to multiply an indexed literal by a "
+    "value, write that literal's type, as in `[1]int[x][0] * ys[1]`")
+
+
 # Keyed by the character after the backslash; \xNN is handled separately.
 _ESCAPE_SEQUENCES = {
     'n': '\n',
@@ -613,7 +622,7 @@ class Parser:
             raise ValueError('tokens must be terminated by an EOF')
         self.tokens = tokens
         self.pos = 0
-        self._ambiguous_element_brackets: set = set()  # token positions; see _looks_like_typed_literal
+        self._could_be_multiplication: set = set()  # token positions; see _looks_like_typed_literal
 
     def _error(self, message: str, tok: Token) -> 'ParseError':
         return ParseError(message, tok.file, tok.line, tok.col)
@@ -1462,7 +1471,6 @@ class Parser:
 
     def parse_index_or_slice(self, array_expr: Node) -> Node:
         """Index or Slice after '['."""
-        open_pos = self.pos - 1
         if self.check(TokenType.COLON):
             self.advance()
             high = None if self.check(TokenType.CLOSE_BRACKET) else self.parse_expression()
@@ -1476,11 +1484,6 @@ class Parser:
             self.expect(TokenType.CLOSE_BRACKET, "Expected ']' to close a slice expression")
             return Slice(array=array_expr, low=first, high=high, line=array_expr.line, col=array_expr.col)
 
-        if self.check(TokenType.COMMA) and open_pos in self._ambiguous_element_brackets:
-            raise self._error(
-                "Expected ']' after array index, got ',' -- a typed literal of pointers with only fixed sizes, "
-                "like `[2][1]*P[a, b]`, reads as a multiplication: give the variable (or parameter) the type and "
-                "use an untyped literal, e.g. `[2][1]*P g = [a, b]`", self.current())
         self.expect(TokenType.CLOSE_BRACKET, "Expected ']' after array index")
         return Index(array=array_expr, index=first, line=array_expr.line, col=array_expr.col)
 
@@ -1525,8 +1528,18 @@ class Parser:
             parsed_type = self.parse_type()
             return self.parse_dict_literal(parsed_type)
         if self._looks_like_typed_literal():
-            parsed_type = self.parse_type()
-            return self._parse_bracketed_literal(parsed_type)
+            could_be_multiplication = self.pos in self._could_be_multiplication
+            try:
+                parsed_type = self.parse_type()
+            except ParseError as problem:
+                if not could_be_multiplication:
+                    raise
+                raise ParseError(problem.message + READ_AS_A_TYPED_LITERAL, problem.file, problem.line,
+                                 problem.col) from None
+            literal = self._parse_bracketed_literal(parsed_type)
+            if could_be_multiplication and isinstance(literal, ArrayLiteral):
+                literal.could_be_multiplication = True
+            return literal
         if self.check(TokenType.OPEN_BRACKET):
             return self.parse_array_literal()
         if self.check(TokenType.IDENTIFIER):
@@ -1571,13 +1584,9 @@ class Parser:
             return True
         if self.peek(k).type == TokenType.IDENTIFIER:
             if groups >= 2 and not empty_group:
-                # `[x][0] * ys[1]` and `[N][M]*P[...]` are the same tokens; whether `ys`/`P` is a type
-                # is only known later, so this shape is always the multiplication (see check_binary).
-                j = k + 1
-                if self.peek(j).type == TokenType.DOT and self.peek(j + 1).type == TokenType.IDENTIFIER:
-                    j += 2
-                self._ambiguous_element_brackets.add(self.pos + j)
-                return False
+                # `[N][M]*P[...]` has the tokens of `[x][0] * ys[1]`, an indexed literal times an
+                # index. It is the typed literal: a literal without a type can't be indexed.
+                self._could_be_multiplication.add(self.pos)
             k += 1
             if self.peek(k).type == TokenType.DOT and self.peek(k + 1).type == TokenType.IDENTIFIER:
                 k += 2

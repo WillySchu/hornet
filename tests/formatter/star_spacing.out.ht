@@ -10,10 +10,10 @@ def [2][3]*P make([2][3]*P g, []*P ps):
 extern int32 f([2]*P a)
 
 def int main():
-    int a = [x][0] * 2
-    int b = [x][0] * (a + 1)
-    int c = [x][0] * ys[1]
-    int d = [x][0] * y
+    int a = [1]int[x][0] * 2
+    int b = [1]int[x][0] * (a + 1)
+    int c = [1]int[x][0] * ys[1]
+    int d = [1]int[x][0] * y
     int e = [x, 2][1] * -a
     [2][3]*P g
     []*P ps = []*P[&p]
@@ -22,4 +22,5 @@ def int main():
     [][2]*P pq = [][2]*P[[2]*P[&p, &p]]
     for [2]*P q = pa; true; q = pa:
         break
-    return [x][0] * ys[1] + [5]*P[&p][0].x
+    int g = len([2][1]*P[[&p], [&p]])
+    return [1]int[x][0] * ys[1] + [5]*P[&p][0].x + g

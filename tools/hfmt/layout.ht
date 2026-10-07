@@ -106,9 +106,7 @@ type State struct:
     int count  # tokens so far in the statement
     bool type_decl  # the statement starts with 'type'
     bool decl_header  # the statement starts with 'def', 'extern', or 'intrinsic'
-    int chain_groups  # consecutive type brackets in the current chain (`[2][3]` is 2)
-    bool chain_empty  # the chain has a `[]`
-    bool chain_decl  # the chain started where only a type can be (a declaration)
+    bool chain_decl  # the current chain of type brackets started where only a type can be (a declaration)
 
     def reset(*s):
         s.has_prev = false
@@ -120,8 +118,6 @@ type State struct:
         s.count = 0
         s.type_decl = false
         s.decl_header = false
-        s.chain_groups = 0
-        s.chain_empty = false
         s.chain_decl = false
 
     def byte top(s):
@@ -154,8 +150,8 @@ def bool _is_unary(Token cur, State s):
     return false
 
 # Whether the `*` at toks[i], after a type bracket, multiplies rather than starting a pointer type,
-# following the compiler: `[x][0] * 2` and, outside declarations, `[x][0] * ys[1]` multiply (a
-# pointer element type behind two or more sized dimensions can't be written in an expression).
+# following the compiler: `[x][0] * 2` multiplies, and `[2][1]*P[...]` is a typed literal (a name
+# and then the elements' `[` follow the `*`).
 def bool _star_multiplies([]Token toks, int i, State s):
     if i + 1 >= len(toks):
         return false
@@ -168,8 +164,6 @@ def bool _star_multiplies([]Token toks, int i, State s):
         return true  # `(`, `-`, `&`, `*`: no type starts that way
     if s.chain_decl or n.kind != TokenKind.Ident:
         return false
-    if s.chain_groups >= 2 and not s.chain_empty:
-        return true
     int k = i + 2
     if (
         k + 1 < len(toks)
@@ -232,19 +226,18 @@ def _advance(*State s, Token cur, bool cur_unary):
     bool continues_chain = s.closed_type_bracket
     s.closed_type_bracket = false
     if cur.kind == TokenKind.Op and (cur.text == '(' or cur.text == '[' or cur.text == '{'):
-        bool type_bracket = cur.text == '[' and not s.prev_value
-        if type_bracket and continues_chain:
-            s.chain_groups += 1
-        elif type_bracket:
-            s.chain_groups = 1
-            s.chain_empty = false
+        # A '[' in prefix position is a type's or an array literal's. Straight after a scalar type's
+        # name it holds a typed literal's elements (`[2]int[1, 2]`): what it closes is then a value.
+        bool elements = (
+            s.has_prev and s.prev.kind == TokenKind.Keyword and _is_type_keyword(s.prev.text) and s.prev.text != 'dict'
+        )
+        bool type_bracket = cur.text == '[' and not s.prev_value and not elements
+        if type_bracket and not continues_chain:
             s.chain_decl = _declaration_position(*s)
         s.brackets = append(s.brackets, cur.text[0])
         s.type_brackets = append(s.type_brackets, type_bracket)
     elif _is_closer(cur) and len(s.brackets) > 0:
         s.closed_type_bracket = cur.text == ']' and s.type_brackets[len(s.type_brackets) - 1]
-        if s.closed_type_bracket and s.prev.kind == TokenKind.Op and s.prev.text == '[':
-            s.chain_empty = true
         s.brackets = s.brackets[0:len(s.brackets) - 1]
         s.type_brackets = s.type_brackets[0:len(s.type_brackets) - 1]
     s.prev_value = _ends_value(cur, s.closed_type_bracket)
@@ -287,7 +280,7 @@ type Out struct:
 def []Out _format_lines([]Line lines):
     []Out outs
     State s = State(
-        false, Token(TokenKind.Eof, '', 0, 0, 0), false, false, [], [], false, 0, false, false, 0, false, false)
+        false, Token(TokenKind.Eof, '', 0, 0, 0), false, false, [], [], false, 0, false, false, false)
     int statement_level = 0
     for l in lines:
         if l.blank:
@@ -404,28 +397,24 @@ def int _matching_open([]Token out, int k):
 # Whether the identifier at out[k] ends a typed literal's element type: `[]P`, `[2]*P`, `[]lib.P`,
 # `[][]*lib.P`. Going back from the name (possibly qualified, possibly behind `*`s) there must be a
 # run of bracket groups that starts where a value would start. `xs[0] * ys` has the same tokens as
-# `[]*P` but `[0]` follows a value. `[x][0] * ys` (an indexed literal times an index) can't be told
-# from `[N][M]*P` at all, so a pointer element type behind two or more sized groups is not treated
-# as a list: hfmt then leaves the commas alone, which is always safe.
+# `[]*P` but `[0]` follows a value.
 def bool _follows_element_type([]Token out, int k):
     int i = _last_significant(out[0:k])
     if i >= 1 and out[i].kind == TokenKind.Op and out[i].text == '.' and out[i - 1].kind == TokenKind.Ident:
         i = _last_significant(out[0:i - 1])  # qualified name: step over `lib.`
-    int stars = 0
     while i >= 0 and out[i].kind == TokenKind.Op and out[i].text == '*':
-        stars += 1
         i = _last_significant(out[0:i])
     int groups = 0
-    bool empty_group = false
     while i >= 0 and out[i].kind == TokenKind.Op and out[i].text == ']':
         int open = _matching_open(out, i)
         if open < 0 or out[open].text != '[':
             return false
         groups += 1
-        empty_group = empty_group or open == i - 1
         i = _last_significant(out[0:open])
-    if groups == 0 or (stars > 0 and groups >= 2 and not empty_group):
+    if groups == 0:
         return false
+    if i >= 0 and out[i].kind == TokenKind.Keyword and _is_type_keyword(out[i].text) and out[i].text != 'dict':
+        return false  # `[1]int[x][0] * ys[`: those brackets are a typed literal's elements and an index
     return i < 0 or not _ends_value(out[i], false)
 
 # Whether an opening bracket starts a comma-separated list that may end with a trailing comma: call
