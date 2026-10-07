@@ -156,7 +156,7 @@ def test_converting_an_integer_that_is_no_member_panics_with_it(value, shown):
 
 def test_a_conversion_is_one_bounds_check():
     program = build_ir_program(analyze(_parse(
-        DECLS + "def Color f(int n):\n    return Color(n)\ndef int main():\n    return 0\n")))
+        DECLS + "def Color f(int n):\n    return Color(n)\ndef int main():\n    return 0\n")), keep_unreachable=True)
     f = next(fn for fn in program.functions if fn.name.startswith('f'))
     checks = [instr for instr in f.body if isinstance(instr, IRBoundsCheck)]
     assert [(c.message, c.routine, c.length.value) for c in checks] == [

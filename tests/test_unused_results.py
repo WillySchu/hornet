@@ -45,7 +45,8 @@ def test_unused_results_change_nothing_else():
 
 def _optimized(function: str):
     """(the optimized body of `function`, the program's static strings)."""
-    program = optimize(build_ir_program(analyze(_parse(function + "def int main():\n    return 0\n"))))
+    typed_program = analyze(_parse(function + "def int main():\n    return 0\n"))
+    program = optimize(build_ir_program(typed_program, keep_unreachable=True))  # (main doesn't call it)
     return program.functions[0].body, "".join(text for _, text in program.string_literals)
 
 

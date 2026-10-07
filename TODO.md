@@ -14,7 +14,6 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- DCE for functions / tree shaking.
 - Refactor semantic.py into package.
 - Refactor parser.py into package.
 - Type identity for the port. Composite dict keys, or structural equality through pointers. This is the decision the checker's port depends on.

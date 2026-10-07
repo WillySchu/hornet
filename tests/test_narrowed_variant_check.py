@@ -119,5 +119,6 @@ def test_an_aliased_variable_that_keeps_its_variant_runs_normally():
     ("def int f(U u):\n    *U p = &u\n    if u is A:\n        return len(u.s)\n    return u.n\n", True),
 ])
 def test_only_variables_with_their_address_taken_are_checked(body, checked):
-    program = build_ir_program(analyze(_parse(DECLS + body + "def int main():\n    return 0\n")))
+    typed_program = analyze(_parse(DECLS + body + "def int main():\n    return 0\n"))
+    program = build_ir_program(typed_program, keep_unreachable=True)  # (main doesn't call f)
     assert any(text.endswith(MESSAGE) for _, text in program.string_literals) == checked

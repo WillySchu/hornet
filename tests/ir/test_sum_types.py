@@ -20,7 +20,7 @@ def _build(source: str):
         src_path.write_text(source)
         tokens = lex(str(src_path))
         ast = parser.Parser(tokens).parse_program()
-        return build_ir_program(semantic.analyze(ast))
+        return build_ir_program(semantic.analyze(ast), keep_unreachable=True)  # (whether main calls it or not)
 
 
 def _fn(ir_program, name):

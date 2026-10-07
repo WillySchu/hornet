@@ -86,5 +86,6 @@ def test_node_numbers_are_unique_and_follow_creation_order():
 def test_slot_labels_name_their_symbol():
     program = _parse(SOURCE)
     program = analyze(program)
-    labels = list(next(f for f in build_ir_program(program).functions if f.name == link_name('f')).slot_labels.values())
+    built = build_ir_program(program, keep_unreachable=True)  # (main doesn't call f)
+    labels = list(next(f for f in built.functions if f.name == link_name('f')).slot_labels.values())
     assert 'param:n#0' in labels and 'local:x#2' in labels and 'for_in:y#4' in labels

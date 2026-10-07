@@ -70,6 +70,7 @@ def test_a_str_orders_only_against_a_str(expression, got):
 
 
 def test_the_typed_tree_and_the_code():
-    program = analyze(_parse("def bool f(str a, str b):\n    return a < b\ndef int main():\n    return 0\n"))
+    program = analyze(_parse("def bool f(str a, str b):\n    return a < b\n"
+                             "def int main():\n    print(f('a', 'b'))\n    return 0\n"))
     assert "StrCompare op=LESS_THAN : bool" in dump(program)
     assert "memcmp" in generate_asm(program)  # the bytes they share, then their lengths
