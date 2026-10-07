@@ -271,6 +271,20 @@ Array sizes are part of the type:
 [LIMIT + 1]int table      # sizes may be constant expressions
 ```
 
+An array literal takes its type from where it is used: the declared type it flows into (a variable, an assignment, an argument, a return value, a field, or an element), or the other operand of `in`, `==`, or `!=`. Anywhere else its type is written before it:
+
+```hornet
+if kind in [Kind.Name, Kind.Number]:      # the elements take kind's type
+    count += 1
+if values == [1, 2, 3]:                   # ... or the other array's
+    count += 1
+print([3]int[1, 2, 3])                    # nothing here says, so the literal does
+for n in [2]int[10, 20]:
+    count += n
+```
+
+A bare literal given to a sum type needs its type too, since the sum could hold an array or a slice.
+
 ## Slices
 
 Slices are variable-length views over storage:
@@ -383,6 +397,28 @@ int count = len(Color)    # 3
 ```
 
 `Color(2)` with a literal is checked at compile time. `len(Color)` is a constant, so `[len(Color)]int` has one element per member.
+
+An enum may have methods, written after its members as a struct's are after its fields (see [Structs and Methods](#structs-and-methods)):
+
+```hornet
+type Light enum:
+    Red
+    Green
+
+    def Light other(self):
+        if self is Red:
+            return Light.Green
+        return Light.Red
+
+    def flip(*self):          # a pointer receiver changes the variable it is called on
+        *self = self.other()
+
+Light light = Light.Red
+light.flip()
+print(Light.Red.other())      # Light.Green
+```
+
+A method can't have a member's name, and one whose name starts with `_` is private to the enum's module.
 
 ## Dictionaries
 
@@ -613,7 +649,7 @@ A slice literal uses an explicit element type, which may be omitted where a slic
 
 A slice is never `none`. An uninitialized slice is empty, as are `[]` and `[]int[]`; test with `len(values) == 0`.
 
-A typed literal whose element type is a pointer to a named type after two or more fixed sizes, such as `[2][1]*P[...]`, has the same tokens as an indexed literal multiplied by an indexed value, and is read as the multiplication. Give the variable that type and use an untyped literal instead.
+A literal's type may be any array or slice type, pointers included: `[2][1]*P[[&p], [&q]]`. (Those tokens could also be an indexed literal times an index, `[x][0] * ys[1]`; they are read as the typed literal, and an indexed literal needs its type anyway: `[1]int[x][0] * ys[1]`.)
 
 Indexing and slicing are bounds checked at runtime; a failed check's panic says what it compared (`index out of bounds: index 7, length 3`). A slice of a slice may extend up to its capacity.
 
@@ -893,7 +929,7 @@ format
 ```hornet
 print(42)
 print('hello')
-print([1, 2, 3])
+print([3]int[1, 2, 3])
 print(counts)
 ```
 
@@ -936,7 +972,7 @@ values = append(values, 3)
 ```hornet
 str a = format('{} + {} = {}', n, 1, n + 1)          # '3 + 1 = 4'
 str b = format('{}:{}: error: {}\n', line, col, message)
-str c = format('{} is {}', Color.Green, [1, 2])      # 'Color.Green is [2]int[1, 2]'
+str c = format('{} is {}', Color.Green, values)      # 'Color.Green is [3]int[1, 2, 3]'
 str d = format('a brace pair: {{}}')                 # 'a brace pair: {}'
 ```
 
@@ -992,7 +1028,7 @@ from 'utils' import add, other as renamed
 
 Module discovery follows imports transitively. Local modules are resolved relative to the importing file, and the compiler can fall back to the bundled `stdlib/` directory.
 
-Top-level names beginning with `_` are private to their module, as are a struct's fields and methods (see [Structs and Methods](#structs-and-methods)).
+Top-level names beginning with `_` are private to their module, as are a struct's fields and methods (see [Structs and Methods](#structs-and-methods)) and an enum's methods.
 
 Every declaration is reached this way, including `extern` functions: a module that uses another module's `extern` imports it (`from 'os' import write_fd`) or qualifies it (`os.write_fd(...)`). A local variable, parameter, or loop binding can't have the name of an import alias or a constant in scope.
 
@@ -1363,8 +1399,7 @@ Hornet is still experimental. Some notable limitations are:
 * `for ... in ...` can't iterate a function-call result or a dereference; assign it to a variable first.
 * Only variables narrow; a field, element, or call result needs an `as` binding, which is for an `if` or `elif` condition and can't sit under `or` or `not`.
 * A sum type can't be a variant of another sum type.
-* A typed literal of pointers to a named type with two or more fixed sizes (`[2][1]*P[...]`) can't be written inline; see [Arrays and Slices](#arrays-and-slices).
-* Enums have no explicit member values, ordering, or methods, and `for ... in` doesn't iterate one.
+* Enums have no explicit member values or ordering, and `for ... in` doesn't iterate one.
 * Sum-type equality is not implemented.
 * Slice equality and dictionary equality are not implemented.
 * `in` does not apply to strings.
