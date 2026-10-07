@@ -140,7 +140,7 @@ Hornet currently provides:
 * Arithmetic, comparison, logical, bitwise, and membership operators
 * Compound assignment
 * Runtime bounds checking
-* Built-ins such as `print`, `len`, `append`, `del`, `bytes`, and `panic`, and `str(...)` conversions
+* Built-ins such as `print`, `len`, `append`, `del`, `bytes`, `panic`, and `format`, and `str(...)` conversions
 * Modules and imports
 * External C functions through `extern`
 * A small fixed set of compiler-defined `intrinsic` functions
@@ -219,6 +219,12 @@ String concatenation uses `+`:
 
 ```hornet
 str message = 'hello ' + 'world'
+```
+
+`format` builds a string from text and values of any type (see [Built-ins](#built-ins)):
+
+```hornet
+str line = format('{} has {} items', name, len(items))
 ```
 
 Strings compare with `==` and `!=`, and order with `<`, `>`, `<=`, and `>=`: byte by byte, a string coming before the longer strings it begins (`'apple' < 'apples'`, and `'Z' < 'a'`).
@@ -875,6 +881,7 @@ append
 del
 bytes
 panic
+format
 ```
 
 `str(...)` conversions are described under [Strings](#strings) and [Enums](#enums). A builtin's name can't be declared, or given to an import, in any file; a method or a variable may share one.
@@ -921,6 +928,19 @@ values = append(values, 3)
 ## `panic`
 
 `panic(message)` prints a `str` with the call's position (`file:line:col: panic: message`) and aborts. It is a `never` call.
+
+## `format`
+
+`format(template, values...)` builds a `str`: the template with each `{}` replaced by the next value, shown as `print` shows it.
+
+```hornet
+str a = format('{} + {} = {}', n, 1, n + 1)          # '3 + 1 = 4'
+str b = format('{}:{}: error: {}\n', line, col, message)
+str c = format('{} is {}', Color.Green, [1, 2])      # 'Color.Green is [2]int[1, 2]'
+str d = format('a brace pair: {{}}')                 # 'a brace pair: {}'
+```
+
+A value may have any type `print` accepts. A `str` appears as its text, and a string inside another value is quoted; `quoted` in `stdlib/strings.ht` quotes one on its own. The template must be a string literal or a `str` constant, because it is checked when compiling: its `{}` must match the values in number, `{{` and `}}` are a brace each, and nothing may be written inside a placeholder yet (there are no widths or other format options). The values are evaluated once, from left to right, and the whole result is built in one buffer.
 
 ## `del`
 
@@ -1071,9 +1091,10 @@ int at = index_of(s, '42')        # -1 if absent; also index_from, index_of_byte
 str t = trim('  padded \n')
 str r = repeat('ab', 3)
 int order = compare('apple', 'pear')   # negative, zero, or positive: which comes first, by bytes
+str q = quoted('it\'s')                 # the str as a literal: 'it\'s', quotes and escapes included
 ```
 
-`compare` gives the order `<` does, as one three-way answer.
+`compare` gives the order `<` does, as one three-way answer. `quoted` is for showing a string in a message without ambiguity: control bytes are escaped, and UTF-8 text is left as it is.
 
 ## `stdlib/errors.ht`
 
@@ -1119,6 +1140,7 @@ It currently provides language-level services including:
 * `print` and recursive value formatting
 * the panic routines (`hornet_panic`, `hornet_panic_at` for `panic(...)`, and those that add the values a failed check compared), which flush standard output, write the message to standard error, and abort (`SIGABRT`; on Windows, exit code 3)
 * catching a stack overflow, to report it as a panic
+* `format`'s buffer (`hornet_format_begin`, `hornet_format_text`, `hornet_format_value`)
 * `hornet_slice_grow`, which copies a slice into a larger backing store
 * `hornet_bytes` for `bytes(s)`
 * dictionary hash tables, hashed with FNV-1a (`hornet_hash_bytes`)
@@ -1346,6 +1368,7 @@ Hornet is still experimental. Some notable limitations are:
 * Sum-type equality is not implemented.
 * Slice equality and dictionary equality are not implemented.
 * `in` does not apply to strings.
+* `format` has no widths, padding, or other format options, and there are no interpolated string literals.
 * The FFI currently supports only scalar and pointer arguments/results.
 * Passing structs by value through FFI is not yet supported.
 * The standard library currently provides only a small subset of filesystem, process, path, formatting, and collection facilities.
@@ -1408,7 +1431,7 @@ Current and future work includes:
 * Additional sum-type composition and equality support
 * Generic types and functions
 * First-class function types and closures
-* Richer string formatting
+* Interpolated string literals, and format options
 * Regex support
 * Richer FFI, including aggregate types where a stable ABI can be defined
 * Potential garbage collection and a more explicit ownership model
