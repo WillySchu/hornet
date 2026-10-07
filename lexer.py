@@ -432,7 +432,7 @@ def describe_token(tok: Token) -> str:
 
 
 def lex(filename: str) -> list:
-    with open(filename, 'r') as f:
+    with open(filename, 'r', encoding='latin-1') as f:
         lines = f.readlines()
     lexer = Lexer(''.join(lines), filename)
     tokens = lexer.tokenize()
