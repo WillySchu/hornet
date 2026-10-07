@@ -2241,13 +2241,6 @@ class SemanticAnalyzer:
                 "that has no declared return type -- there's no value there to print",
                 expr.args[0],
             )
-        if arg_type == Type.NONE:
-            raise SemanticError(
-                "'print' cannot be called with a bare 'none' -- store it "
-                "in a pointer-typed variable first (e.g. `*int p = none`), "
-                "then print that",
-                expr.args[0],
-            )
         return Type.VOID
 
     def check_panic_call(self, expr: Call) -> Type:
@@ -3054,10 +3047,17 @@ class _TypedTreeBuilder:
         field_type = self.structs[struct_type.struct_name].fields[e.name]
         return typed.FieldAccess(field_type, base, e.name, names.index(e.name), through_pointer)
 
+    def shown(self, e) -> typed.Expr:
+        """A value given to print or format. A `none` that is no pointer's and no sum's has no type to be
+        shown by: it is the text every none is shown as."""
+        if self.facts.types[e.nid] == Type.NONE:
+            return typed.StrLit(Type.STR, 'none')
+        return self.expr(e)
+
     def call(self, e: syntax.Call) -> typed.Expr:
         name, args = self.facts.calls.get(e.nid, (e.name, e.args))
         if name == 'print':
-            return typed.Print(Type.VOID, self.expr(args[0]))
+            return typed.Print(Type.VOID, self.shown(args[0]))
         if name == 'len':
             if e.nid in self.facts.enum_lens:
                 return typed.IntLit(Type.INT, self.facts.enum_lens[e.nid])
@@ -3076,7 +3076,7 @@ class _TypedTreeBuilder:
             template = self.facts.formats[e.nid]
             if len(args) == 1:  # nothing to fill in: the text itself
                 return typed.StrLit(Type.STR, typed.format_pieces(template)[0])
-            return typed.Format(Type.STR, template, tuple(self.expr(a) for a in args[1:]))
+            return typed.Format(Type.STR, template, tuple(self.shown(a) for a in args[1:]))
         if name in self.enums:  # `Enum(n)`
             value = self.expr(args[0])
             if isinstance(value, typed.IntLit):  # checked to be a member

@@ -24,7 +24,7 @@ VALUES = [
     "n", "-n * 1000000000000", "int32(n) - 50", "int8(n) - 50", "byte(n) + \"a\"", "n > 3", "not n > 3",
     "'text'", "''", "'with \\'quotes\\' and {braces}'", "Color.Green", "Point(n, 'p')",
     "[3]int[1, 2, 3]", "[]str['a', 'b']", "dict[str]int{'k': n}", "shape", "nothing", "[]Point[Point(1, 'a')]",
-    "[2][2]bool[[true, false], [false, true]]",
+    "[2][2]bool[[true, false], [false, true]]", "none", "no_point", "[2]*Point[no_point, no_point]",
 ]
 
 
@@ -33,11 +33,13 @@ def test_a_value_appears_as_print_shows_it():
     body = "".join(f"    print({value})\n    print(format('{{}}', {value}))\n" for value in VALUES)
     result = compile_and_run(
         DECLS + "def int main():\n    int n = 7\n    Shape shape = Point(n, 'in a sum')\n    Shape nothing = none\n"
+        "    *Point no_point = none\n"
         + body + "    return 0\n")
     lines = result.stdout.split("\n")[:-1]
     assert result.returncode == 0 and len(lines) == 2 * len(VALUES)
     assert lines[0::2] == lines[1::2]
     assert lines[14] == "text" and lines[20] == "Color.Green" and lines[22] == "Point(x: 7, name: 'p')"
+    assert lines[-6:] == ["none", "none", "none", "none", "[2]*Point[none, none]", "[2]*Point[none, none]"]
 
 
 @GCC_SKIP

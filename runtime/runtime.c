@@ -364,8 +364,12 @@ static void hornet_stringify(
             break;
         }
         case HORNET_TYPEDESC_POINTER: {
-            // Prints the address, not the pointee.
+            // Prints the address, not the pointee; a pointer to nothing is `none`, as it is written.
             void *value = read_ptr(value_addr);
+            if (value == NULL) {
+                hornet_buf_append_cstr(buf, "none");
+                break;
+            }
             char digits[20];
             int n = snprintf(digits, sizeof(digits), "0x%llx", (unsigned long long)(uintptr_t)value);
             hornet_buf_append_bytes(buf, digits, n);

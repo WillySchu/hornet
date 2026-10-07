@@ -8334,14 +8334,20 @@ class TestPointersCodegen:
         )
         assert re.match(r"^0x[0-9a-f]+\n$", result.stdout), result.stdout
 
-    def test_print_a_null_pointer_prints_0x0(self):
+    def test_print_a_null_pointer_prints_none(self):
+        # As it is written, wherever it is: on its own, in a field, in an element.
         assert_program_stdout(
             self._CIRCLE +
+            "type Node struct:\n"
+            "    int value\n"
+            "    *Node next\n"
             "def int main():\n"
             "    *Circle p = none\n"
             "    print(p)\n"
+            "    print(Node(1, none))\n"
+            "    print([2]*Circle[none, none])\n"
             "    return 0\n",
-            "0x0\n",
+            "none\nNode(value: 1, next: none)\n[2]*Circle[none, none]\n",
         )
 
     def test_print_a_struct_with_a_pointer_field(self):
@@ -14063,11 +14069,12 @@ class TestNone:
             match="Cannot initialize",
         )
 
-    def test_print_bare_none_is_rejected(self):
-        assert_semantic_error(
+    def test_print_bare_none(self):
+        # A `none` that is no pointer's and no sum's is shown as every none is.
+        assert_stdout(
             "    print(none)\n"
             "    return 0",
-            match="cannot be called with a bare 'none'",
+            "none\n",
         )
 
     def test_comparing_none_to_none_is_rejected(self):
