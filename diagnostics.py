@@ -61,8 +61,27 @@ def format_error(err: CompileError) -> str:
     if text is not None:
         out.append(f"    {text.expandtabs(1)}")
         if err.col:
-            out.append("    " + " " * (err.col - 1) + "^")
+            out.append("    " + " " * _columns_shown(text[:err.col - 1]) + "^")
     return '\n'.join(out)
+
+
+def _columns_shown(text: str) -> int:
+    """How many columns `text` takes up when shown. A source line is read a byte to a character and
+    written back as those bytes (write_diagnostic), and in UTF-8 a character's bytes after its first
+    (0x80 to 0xBF) take no column of their own."""
+    return sum(1 for c in text if not '\x80' <= c <= '\xbf')
+
+
+def write_diagnostic(text: str, stream) -> None:
+    """Write a diagnostic and a newline to `stream` as the bytes it stands for: source text in it
+    was read a byte to a character, so latin-1 gives the terminal back what the file held."""
+    data = (text + '\n').encode('latin-1', errors='replace')
+    if hasattr(stream, 'buffer'):
+        stream.flush()
+        stream.buffer.write(data)
+        stream.buffer.flush()
+    else:
+        stream.write(data.decode('latin-1'))
 
 
 def format_errors(err: CompileError) -> str:
@@ -79,7 +98,7 @@ def run_cli(action, show_traceback: bool = False):
     except CompileError as e:
         if show_traceback:
             raise
-        print(format_errors(e), file=sys.stderr)
+        write_diagnostic(format_errors(e), sys.stderr)
         sys.exit(1)
     except Exception as e:
         if show_traceback:

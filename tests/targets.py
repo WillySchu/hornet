@@ -65,6 +65,9 @@ def run_binary(target: Target, argv: list, **kwargs) -> subprocess.CompletedProc
     if prefix and isinstance(result.stderr, str):
         result.stderr = ''.join(line for line in result.stderr.splitlines(keepends=True)
                                 if not line.startswith('qemu: uncaught target signal'))
+    elif prefix and isinstance(result.stderr, bytes):
+        result.stderr = b''.join(line for line in result.stderr.splitlines(keepends=True)
+                                 if not line.startswith(b'qemu: uncaught target signal'))
     if (
             target.os == 'windows'
             and result.returncode == WINDOWS_ABORT_EXIT_CODE

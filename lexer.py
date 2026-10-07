@@ -233,7 +233,9 @@ class Lexer:
             ('MISMATCH',      r'.'),
         ]
 
-        self.regex = re.compile('|'.join(f'(?P<{name}>{pattern})' for name, pattern in self.rules))
+        # ASCII: a name is letters, digits, and underscores, and a source file's other bytes (it is
+        # read one byte to a character) belong only in strings and comments.
+        self.regex = re.compile('|'.join(f'(?P<{name}>{pattern})' for name, pattern in self.rules), re.ASCII)
 
     def tokenize(self):
         """Tokenize, emitting INDENT/DEDENT from the indent stack. Blank lines are skipped; tabs count as one column."""
@@ -355,6 +357,9 @@ class Lexer:
                                    f"write \\n for a newline", self.file, self.line, column)
                 raise LexError(f"Unterminated {what.lower()} literal", self.file, self.line, column)
             elif kind == 'MISMATCH':
+                if ord(value) > 127:  # part of a character that isn't ASCII: there is no one byte to show
+                    raise LexError(f"Unexpected byte 0x{ord(value):02X} -- outside strings and comments, source "
+                                   f"is ASCII", self.file, self.line, column)
                 raise LexError(f"Unexpected character '{value}'", self.file, self.line, column)
             else:
                 raise InternalCompilerError(f'Unhandled token kind {kind!r} at line {self.line}, column {column}')
@@ -431,9 +436,18 @@ def describe_token(tok: Token) -> str:
     return describe_token_type(tok.type)
 
 
+# A UTF-8 byte-order mark, as its three bytes read.
+_BYTE_ORDER_MARK = '\xef\xbb\xbf'
+
+
 def lex(filename: str) -> list:
+    """The tokens of a source file. It is read as bytes, one to a character (which is what latin-1
+    does), so that a string literal holds what the file holds whatever its encoding."""
     with open(filename, 'r', encoding='latin-1') as f:
         lines = f.readlines()
+    if lines and lines[0].startswith(_BYTE_ORDER_MARK):
+        raise LexError("This file starts with a UTF-8 byte-order mark, which Hornet source doesn't use -- save it "
+                       "without one", filename, 1, 1)
     lexer = Lexer(''.join(lines), filename)
     tokens = lexer.tokenize()
     return tokens
