@@ -1857,7 +1857,8 @@ class SemanticAnalyzer:
 
     def check_array_literal(self, expr: ArrayLiteral, expected_element_type: Optional[Type] = None) -> Type:
         """`[e, ...]` or `[N]T[...]`; homogeneous. An untyped literal's elements take
-        `expected_element_type` when there is one, else the first element's type."""
+        `expected_element_type`, which where it is used must give: the declared type it flows into, or
+        the other operand of `in`, `==`, or `!=`. Elsewhere its type has to be written."""
         if expr.type_expr is not None:
             declared_type = self._type(expr.type_expr, expr)
             if len(expr.elements) != declared_type.size:
@@ -1894,16 +1895,38 @@ class SemanticAnalyzer:
 
         if len(expr.elements) == 0:
             raise SemanticError("Array literals must have at least one element", expr)
-        element_types = [self._check_expr_allowing_struct_literal(e) for e in expr.elements]
-        first = element_types[0]
-        for i, t in enumerate(element_types[1:], start=2):
-            if t != first:
-                raise SemanticError(
-                    f"Array literal elements must all be the same type -- "
-                    f"element 1 is {first}, element {i} is {t}",
-                    expr.elements[i - 1],
-                )
-        return Type(TypeKind.ARRAY, element_type=first, size=len(expr.elements))
+        try:  # what its type would be written as, if the first element says
+            written = f"[{len(expr.elements)}]{self._check_expr_allowing_struct_literal(expr.elements[0])}"
+        except SemanticError:
+            written = f"[{len(expr.elements)}]T"
+        raise SemanticError(
+            f"This array literal has nothing to take its type from -- write the type before it, as in "
+            f"`{written}[...]`", expr)
+
+    def _untyped_array_literal(self, expr: Node) -> bool:
+        return isinstance(expr, ArrayLiteral) and expr.type_expr is None
+
+    def _array_literal_of(self, literal: ArrayLiteral, element_type: Type) -> Type:
+        """Check an untyped array literal whose elements are to be `element_type`; its type."""
+        array_type = self.check_array_literal(literal, expected_element_type=element_type)
+        self.facts.types[literal.nid] = array_type
+        return array_type
+
+    def _operand_types_with_an_untyped_array(self, expr: Binary) -> Optional[tuple]:
+        """The operand types of `x in [a, b]`, whose literal's elements take x's type, and of `xs == [a, b]`
+        (or `!=`, either way round), whose literal takes the elements of xs. None for any other expression."""
+        left_untyped, right_untyped = (self._untyped_array_literal(e) for e in (expr.left, expr.right))
+        if expr.op == BinaryOp.IN and right_untyped and not left_untyped:
+            left_type = self._check_expr_allowing_struct_literal(expr.left)
+            return left_type, self._array_literal_of(expr.right, left_type)
+        if expr.op in _EQUALITY_OPS and left_untyped != right_untyped:
+            literal, other = (expr.left, expr.right) if left_untyped else (expr.right, expr.left)
+            other_type = self._check_expr_allowing_struct_literal(other)
+            if other_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE):
+                return None  # nothing to take a type from: the literal says so when it is checked
+            literal_type = self._array_literal_of(literal, other_type.element_type)
+            return (literal_type, other_type) if left_untyped else (other_type, literal_type)
+        return None
 
     def check_index(self, expr: Index) -> Type:
         """`base[index]`; str indexing yields uint8."""
@@ -2557,12 +2580,16 @@ class SemanticAnalyzer:
                     f"'in' with the enum {shown(enum)} on its right tests an integer, got {left_type}", expr.left)
             self.facts.enum_ins[expr.nid] = enum
             return Type.BOOL
-        left_type = self._check_expr_allowing_struct_literal(expr.left)
-        mark = len(self._undo)
-        if expr.op in _LOGICAL_OPS:  # the right side runs only when the left was true (`and`) or false (`or`)
-            self._apply(self._when(expr.left)[0 if expr.op == BinaryOp.AND else 1])
-        right_type = self._check_expr_allowing_struct_literal(expr.right)
-        self._end_region(mark)
+        with_literal = self._operand_types_with_an_untyped_array(expr)
+        if with_literal is not None:
+            left_type, right_type = with_literal
+        else:
+            left_type = self._check_expr_allowing_struct_literal(expr.left)
+            mark = len(self._undo)
+            if expr.op in _LOGICAL_OPS:  # the right side runs only when the left was true (`and`) or false (`or`)
+                self._apply(self._when(expr.left)[0 if expr.op == BinaryOp.AND else 1])
+            right_type = self._check_expr_allowing_struct_literal(expr.right)
+            self._end_region(mark)
         op = expr.op
         if op not in _LOGICAL_OPS and op != BinaryOp.IN:
             left_type, right_type = self._literal_operand_types(expr.left, left_type, expr.right, right_type)
@@ -2675,11 +2702,7 @@ class SemanticAnalyzer:
             # `1 in xs` from the keys or elements, the elements of `a in [1, 2]` from `a`.
             if right_type.kind in (TypeKind.DICT, TypeKind.ARRAY, TypeKind.SLICE):
                 wanted = right_type.key_type if right_type.kind == TypeKind.DICT else right_type.element_type
-                if isinstance(expr.right, ArrayLiteral) and expr.right.type_expr is None \
-                        and left_type in _NARROW_INT_RANGES:
-                    right_type = self.check_array_literal(expr.right, expected_element_type=left_type)
-                    self.facts.types[expr.right.nid] = right_type
-                elif self._as_folded_int_literal(expr.left) is not None:
+                if self._as_folded_int_literal(expr.left) is not None and not self._untyped_array_literal(expr.right):
                     left_type = self._check_value_flowing_into(expr.left, wanted)
             if right_type.kind == TypeKind.DICT:
                 if not self._types_compatible(left_type, right_type.key_type):

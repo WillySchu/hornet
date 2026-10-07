@@ -3118,19 +3118,19 @@ class TestArrayEquality:
             1,
         )
 
-    def test_two_bare_array_literals_compared_directly(self):
+    def test_an_array_literal_compared_with_a_typed_one(self):
         assert_program_exit_code(
             "def int main():\n"
-            "    if [1, 2, 3] == [1, 2, 3]:\n"
+            "    if [3]int[1, 2, 3] == [1, 2, 3]:\n"
             "        return 1\n"
             "    return 0\n",
             1,
         )
 
-    def test_two_bare_array_literals_compared_directly_not_equal(self):
+    def test_an_array_literal_compared_with_a_typed_one_not_equal(self):
         assert_program_exit_code(
             "def int main():\n"
-            "    if [1, 2, 3] != [1, 2, 4]:\n"
+            "    if [1, 2, 3] != [3]int[1, 2, 4]:\n"
             "        return 1\n"
             "    return 0\n",
             1,
@@ -6199,7 +6199,7 @@ class TestArraySliceAndPointerVariants:
             "type Thing is [3]int | str\n"
             "\n"
             "def int main():\n"
-            "    Thing t = [1, 2, 3]\n"
+            "    Thing t = [3]int[1, 2, 3]\n"
             "    if t is [3]int as arr:\n"
             "        return arr[0] + arr[1] + arr[2]\n"
             "    return -1\n",
@@ -6242,7 +6242,7 @@ class TestArraySliceAndPointerVariants:
             "    return 0\n"
             "\n"
             "def int main():\n"
-            "    describe([4, 5])\n"
+            "    describe([2]int[4, 5])\n"
             "    return 0\n",
             "9\n",
         )
@@ -6252,7 +6252,7 @@ class TestArraySliceAndPointerVariants:
             "type Thing is [3]int | str\n"
             "\n"
             "def Thing makeArr():\n"
-            "    return [7, 8, 9]\n"
+            "    return [3]int[7, 8, 9]\n"
             "\n"
             "def int main():\n"
             "    Thing t = makeArr()\n"
@@ -6327,7 +6327,7 @@ class TestArraySliceAndPointerVariants:
             "type Thing is [2]int | str\n"
             "\n"
             "def Thing makeThing():\n"
-            "    return [7, 8]\n"
+            "    return [2]int[7, 8]\n"
             "\n"
             "def int main():\n"
             "    if makeThing() is [2]int as arr:\n"
@@ -6397,7 +6397,7 @@ class TestArraySliceAndPointerVariants:
             "type Thing is [3]int | str\n"
             "\n"
             "def int main():\n"
-            "    Thing t = [10, 20, 30]\n"
+            "    Thing t = [3]int[10, 20, 30]\n"
             "    if t is [3]int as arr:\n"
             "        *[3]int p = &arr\n"
             "        return (*p)[1]\n"
@@ -6428,7 +6428,7 @@ class TestArraySliceAndPointerVariants:
             "    print(describe(Circle(3)))\n"
             "    print(describe(42))\n"
             "    print(describe('hello'))\n"
-            "    print(describe([5, 6]))\n"
+            "    print(describe([2]int[5, 6]))\n"
             "    [4]int a = [1, 2, 3, 4]\n"
             "    print(describe(a[0:3]))\n"
             "    int x = 99\n"
@@ -12251,10 +12251,11 @@ class TestTypedLiterals:
                               expected + "\n")
 
     def test_an_indexed_literal_times_an_index_is_a_multiplication(self):
-        # The same tokens as a typed literal like `[N][M]*P[...]`; the multiplication wins.
+        # (Without their types, `[x][0] * ys[1]` is the same tokens as a typed literal like
+        # `[N][M]*P[...]`: the multiplication wins, and the untyped literal is then what is rejected.)
         assert_program_stdout(
             "def int main():\n    int x = 3\n    [2]int ys = [4, 5]\n"
-            "    print([x][0] * ys[1])\n    print([x, 2][1] * ys[0] + [7][0] * ys[1])\n    return 0\n",
+            "    print([1]int[x][0] * ys[1])\n    print([2]int[x, 2][1] * ys[0] + [1]int[7][0] * ys[1])\n    return 0\n",
             "15\n43\n")
 
     @pytest.mark.parametrize("literal,match", [
@@ -12273,7 +12274,7 @@ class TestTypedLiterals:
     def test_an_indexed_literal_times_a_value_is_not_a_typed_literal(self):
         assert_program_stdout(
             "def int main():\n    int x = 3\n    int y = 4\n"
-            "    print([x][0] * y)\n    print([5][0] * y)\n    print([x, 2][1] * (y))\n    return 0\n",
+            "    print([1]int[x][0] * y)\n    print([1]int[5][0] * y)\n    print([2]int[x, 2][1] * (y))\n    return 0\n",
             "12\n20\n8\n")
 
     def test_typed_literals_of_pointers(self):
@@ -12286,9 +12287,10 @@ class TestTypedLiterals:
             "    print(a[1].x + g[1][0].x + *s[0])\n    return 0\n",
             "15\n")
 
-    def test_indexing_an_untyped_literal_is_not_a_typed_literal(self):
-        assert_program_stdout("def int main():\n    int x = 4\n    print([x, 2][0])\n    print([5][0])\n    return 0\n",
-                              "4\n5\n")
+    def test_indexing_a_typed_literal(self):
+        assert_program_stdout(
+            "def int main():\n    int x = 4\n    print([2]int[x, 2][0])\n    print([1]int[5][0])\n    return 0\n",
+            "4\n5\n")
 
 
 class TestTrailingCommas:
@@ -13439,13 +13441,6 @@ class TestPrintArraysAndSlices:
         )
 
 
-    def test_array_literal_as_direct_print_argument(self):
-        assert_stdout(
-            "    print([1, 2, 3])\n"
-            "    return 0",
-            "[3]int[1, 2, 3]\n",
-        )
-
     def test_typed_array_literal_as_direct_print_argument(self):
         assert_stdout(
             "    print([3]int[1, 2, 3])\n"
@@ -13466,7 +13461,7 @@ class TestPrintArraysAndSlices:
 
     def test_nested_array_literal_as_direct_print_argument(self):
         assert_stdout(
-            "    print([[1, 2], [3, 4]])\n"
+            "    print([2][2]int[[1, 2], [3, 4]])\n"
             "    return 0",
             "[2][2]int[[2]int[1, 2], [2]int[3, 4]]\n",
         )
@@ -13478,15 +13473,15 @@ class TestPrintArraysAndSlices:
             "    int y\n"
             "\n"
             "def int main():\n"
-            "    print([Point(1, 2), Point(3, 4)])\n"
+            "    print([2]Point[Point(1, 2), Point(3, 4)])\n"
             "    return 0\n",
             "[2]Point[Point(x: 1, y: 2), Point(x: 3, y: 4)]\n",
         )
 
     def test_two_unnamed_array_literals_printed_in_sequence(self):
         assert_stdout(
-            "    print([1, 2])\n"
-            "    print([3, 4, 5])\n"
+            "    print([2]int[1, 2])\n"
+            "    print([3]int[3, 4, 5])\n"
             "    return 0",
             "[2]int[1, 2]\n[3]int[3, 4, 5]\n",
         )
@@ -13546,7 +13541,7 @@ class TestPrintArraysAndSlices:
 
     def test_mixed_unnamed_array_and_slice_prints(self):
         assert_stdout(
-            "    print([1, 2])\n"
+            "    print([2]int[1, 2])\n"
             "    print([]int[3, 4])\n"
             "    return 0",
             "[2]int[1, 2]\n[]int[3, 4]\n",
@@ -18566,7 +18561,7 @@ class TestForInSemantics:
     def test_array_literal_iterable_analyzes_correctly(self):
         ast = _parse(
             "def int main():\n"
-            "    for x in [1, 2, 3]:\n"
+            "    for x in [3]int[1, 2, 3]:\n"
             "        print(x)\n"
             "    return 0\n"
         )
@@ -18914,7 +18909,7 @@ class TestForInArraySlice:
     def test_array_literal_iterable_iterates_correctly(self):
         assert_program_stdout(
             "def int main():\n"
-            "    for x in [10, 20, 30]:\n"
+            "    for x in [3]int[10, 20, 30]:\n"
             "        print(x)\n"
             "    return 0\n",
             "10\n20\n30\n",

@@ -33,7 +33,7 @@ SOURCE = (
     "type A struct:\n    int v\ntype B struct:\n    int w\ntype AB is A | B\n"
     "def int f(int n, AB ab):\n"
     "    int x = n\n"
-    "    for i, y in [1, 2]:\n"
+    "    for i, y in [2]int[1, 2]:\n"
     "        int x = y\n"
     "        print(x + i)\n"
     "    if ab is A:\n"

@@ -16,9 +16,9 @@ def int main():
                 arr[j] = arr[j + 1]
                 arr[j + 1] = temp
                 swapped = 1
-            literalSum = (literalSum + [10, 20, 30][j % 3]) % 1000003
+            literalSum = (literalSum + [3]int[10, 20, 30][j % 3]) % 1000003
             int eqCheck = 0
-            if [j % 3, (j % 3) + 1] == [j % 3, (j % 3) + 1]:
+            if [2]int[j % 3, (j % 3) + 1] == [j % 3, (j % 3) + 1]:
                 eqCheck = 1
             literalSum = (literalSum + eqCheck) % 1000003
             j = j + 1

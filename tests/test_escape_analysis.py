@@ -424,7 +424,7 @@ def _heap_names(source: str, fn_index: int = 0) -> set:
 @pytest.mark.parametrize("loop,decl", [
     ("for int i = 0; i < 3; i += 1:", "        int x = i"),
     ("while len(ps) < 3:", "        int x = 1"),
-    ("for v in [1, 2]:", "        int x = v"),
+    ("for v in [2]int[1, 2]:", "        int x = v"),
 ])
 def test_body_declaration_held_outside_its_loop_needs_the_heap(loop, decl):
     source = (f"def int main():\n"
@@ -439,7 +439,7 @@ def test_body_declaration_held_outside_its_loop_needs_the_heap(loop, decl):
 
 def test_loop_variable_and_binding_held_outside_the_loop_need_the_heap():
     source = ("def int main():\n    []*int ps\n    for int i = 0; i < 3; i += 1:\n        ps = append(ps, &i)\n"
-              "    for v in [1, 2]:\n        ps = append(ps, &v)\n    print(len(ps))\n    return 0\n")
+              "    for v in [2]int[1, 2]:\n        ps = append(ps, &v)\n    print(len(ps))\n    return 0\n")
     assert _heap_names(source) == {'i', 'v'}
 
 

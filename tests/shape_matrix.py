@@ -68,7 +68,8 @@ def shapes(k: str):
         ('field', [f"H h = {_holder(k)}"], f"h.{field}", canon) if field else None,
         ('index', [f"[1]{ty} arr = [{lit}]"], 'arr[0]', canon),
         ('deref', [f"{ty} src = {lit}", f"*{ty} ptr = &src"], '*ptr', canon),
-        ('literal', [], lit, canon),
+        # (An array literal used where nothing gives it a type has to say its type.)
+        ('literal', [], canon if k == 'a' else lit, canon),
         ('call', [], f"mk_{k}()", canon),
     ]
     out = [x for x in out if x is not None]
