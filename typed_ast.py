@@ -12,6 +12,7 @@ import os
 from dataclasses import dataclass, field, fields
 from typing import Any, Optional
 
+from diagnostics import path_text
 from symbols import Symbol
 from typesys import Type
 
@@ -37,7 +38,7 @@ class _Node:
         module names are unique program-wide, and the text doesn't depend on where it was compiled."""
         if not self.line:
             return None
-        return f"{os.path.basename(self.file) if self.file else '<input>'}:{self.line}:{self.col}"
+        return f"{path_text(os.path.basename(self.file)) if self.file else '<input>'}:{self.line}:{self.col}"
 
 
 @dataclass(frozen=True)

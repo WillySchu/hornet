@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
-from diagnostics import CompileError
+from diagnostics import CompileError, path_text
 from modules import DiscoveredModule
 from parser import (
     Call,
@@ -117,7 +117,7 @@ def build_module_set(entry: Program, modules: Dict[str, DiscoveredModule]) -> Mo
             return name
         if name not in own[module]:
             raise MergeError(f"'{name}' at line {at.line} is not declared in module "
-                             f"{target.canonical_name!r} ({target.file_path})", line=at.line, col=at.col)
+                             f"{target.canonical_name!r} ({path_text(target.file_path)})", line=at.line, col=at.col)
         if name.startswith('_') and referencing != module:
             raise MergeError(f"'{module}.{name}' at line {at.line} is not visible outside the module that "
                              f"defines it -- names starting with '_' are private to their own module",

@@ -14,7 +14,7 @@ import dataclasses
 import os
 from typing import Dict, List, Optional, Set, Tuple
 
-from diagnostics import CompileError
+from diagnostics import CompileError, path_text
 from lexer import lex
 from typesys import EnumInfo, StructInfo, SumTypeInfo, Type, TypeKind
 from folding import fold_binary_op, fold_cast, fold_unary_op
@@ -197,7 +197,7 @@ def contains_reachable_break(statements: List[Node]) -> bool:
 
 def _file_and_line(node: Node) -> str:
     """`file (line N)` of a declaration, for an error reported somewhere else."""
-    return f"{os.path.basename(node.file) if node.file else '<input>'} (line {node.line})"
+    return f"{path_text(os.path.basename(node.file)) if node.file else '<input>'} (line {node.line})"
 
 
 def always_leaves(statements: List[Node], types: dict) -> bool:
@@ -225,7 +225,8 @@ def _conditions_after(stmt: If, types: dict) -> Tuple[List[Node], Optional[Node]
 
 
 def _assigned_names(node) -> Set[str]:
-    """The names of the variables assigned anywhere under `node` (a statement, or a list of them)."""
+    """The names of the variables given a new value (`v = ...`) anywhere under `node` (a statement, or a
+    list of them). `v += ...` isn't one: it gives v back the variant it held."""
     names: Set[str] = set()
     stack = [node]
     while stack:
@@ -233,7 +234,7 @@ def _assigned_names(node) -> Set[str]:
         if isinstance(n, (list, tuple)):
             stack.extend(n)
         elif isinstance(n, Node):
-            if isinstance(n, Assign) and isinstance(n.target, Variable):
+            if isinstance(n, Assign) and isinstance(n.target, Variable) and n.op is None:
                 names.add(n.target.name)
             stack.extend(getattr(n, f.name) for f in dataclasses.fields(n))
     return names

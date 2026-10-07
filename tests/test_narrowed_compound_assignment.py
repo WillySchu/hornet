@@ -79,6 +79,28 @@ def test_in_loops_matches_and_narrowing_by_elimination():
     )
 
 
+@GCC_SKIP
+def test_in_a_loop_inside_the_narrowing():
+    assert_program_stdout(
+        DECLS +
+        "def int main():\n"
+        "    V v = 0\n"
+        "    []int xs = [1, 2, 3]\n"
+        "    if v is int:\n"
+        "        for int i = 0; i < 4; i += 1:\n"      # no loop here gives v a new value, so each keeps it an int
+        "            v += i\n"
+        "        for x in xs:\n"
+        "            v += x\n"
+        "        int turns = 0\n"
+        "        while turns < 3:\n"
+        "            v *= 2\n"
+        "            turns += 1\n"
+        "        print(v)\n"
+        "    return 0\n",
+        "96\n",
+    )
+
+
 def test_the_target_is_the_variant_the_variable_holds():
     tree = dump(analyze(_parse(
         DECLS + "def int main():\n    V v = 1\n    if v is int:\n        v += 1\n    return 0\n")))
@@ -114,6 +136,9 @@ def test_a_variant_changed_through_a_pointer_is_caught_here_too():
     ("if v is str:\n        v += 1", "requires two operands of the same integer type"),
     ("if v is Point:\n        v += 1", "requires two operands of the same integer type"),
     ("if v is int:\n        v += 'x'", "requires two operands of the same integer type"),
+    # A loop that also gives v a new value may meet any variant on its next turn.
+    ("if v is int:\n        for int i = 0; i < 2; i += 1:\n            v += 1\n            v = 'x'",
+     "requires two operands of the same integer type"),
 ])
 def test_what_is_still_rejected(statement, match):
     assert_program_semantic_error(DECLS + f"def int main():\n    V v = 1\n    {statement}\n    return 0\n", match=match)

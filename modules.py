@@ -1,11 +1,12 @@
 """Module discovery: resolve and parse every file the entry file transitively imports. One module per file."""
 
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
-from diagnostics import CompileError
+from diagnostics import CompileError, path_text
 from lexer import lex
 from parser import Parser, Program
 
@@ -36,9 +37,11 @@ _STDLIB_ROOT = Path(__file__).parent / 'stdlib'
 
 
 def _candidate_path(base_dir: Path, path: str) -> Path:
-    """`path` as an absolute Path under base_dir, with '.ht' appended if missing."""
+    """`path` as an absolute Path under base_dir, with '.ht' appended if missing. An import's path was
+    read a byte to a character, like the rest of its file: the file system is given those bytes."""
     candidate = path if path.endswith('.ht') else f'{path}.ht'
-    return (base_dir / candidate).resolve()
+    name = candidate.encode('latin-1').decode(sys.getfilesystemencoding(), 'surrogateescape')
+    return (base_dir / name).resolve()
 
 
 def _resolve_import_path(importer_dir: Path, path: str) -> Optional[Path]:
@@ -71,7 +74,7 @@ def discover_modules(entry_path: str) -> Tuple[Program, Dict[str, DiscoveredModu
             if resolved is None:
                 raise ModuleError(
                     f"Import {path!r} at line {at_line} doesn't resolve to a real "
-                    f"file (looked for {_candidate_path(importer_dir, path)}, or in "
+                    f"file (looked for {path_text(_candidate_path(importer_dir, path))}, or in "
                     f"the standard library)",
                     file=program.file, line=at_line, col=decl.col,
                 )
@@ -86,9 +89,9 @@ def discover_modules(entry_path: str) -> Tuple[Program, Dict[str, DiscoveredModu
             canonical_name = resolved.stem
             if not _MODULE_NAME.fullmatch(canonical_name):  # it becomes part of every symbol of the module
                 raise ModuleError(
-                    f"Import {path!r} is the file {resolved.name!r}, and a module is named by its file: "
-                    f"{canonical_name!r} must be an identifier (letters, digits, and underscores, not starting "
-                    f"with a digit) -- rename the file",
+                    f"Import {path!r} is the file {path_text(resolved.name)!r}, and a module is named by its file: "
+                    f"{path_text(canonical_name)!r} must be an identifier (letters, digits, and underscores, not "
+                    f"starting with a digit) -- rename the file",
                     file=program.file, line=decl.line, col=decl.col,
                 )
             if canonical_name in modules or canonical_name in by_path.values():
@@ -96,7 +99,7 @@ def discover_modules(entry_path: str) -> Tuple[Program, Dict[str, DiscoveredModu
                     f"Two different files both resolve to module name "
                     f"{canonical_name!r} -- module names must be globally "
                     f"unique across every imported file; rename one of them "
-                    f"(the second is {resolved})",
+                    f"(the second is {path_text(resolved)})",
                     file=program.file, line=decl.line, col=decl.col,
                 )
             by_path[resolved] = canonical_name  # Reserved before recursing so cycles terminate.

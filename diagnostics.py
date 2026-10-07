@@ -26,6 +26,11 @@ class InternalCompilerError(Exception):
     """A compiler bug, never the user's fault."""
 
 
+def path_text(path) -> str:
+    """A file's name as diagnostics and generated code hold text: a byte to a character, as source is read."""
+    return os.fsencode(str(path)).decode('latin-1')
+
+
 def _display_path(path: str) -> str:
     try:
         rel = os.path.relpath(path)
@@ -51,7 +56,7 @@ def format_error(err: CompileError) -> str:
     """`file:line:col: error: message`, then the source line and a caret."""
     if not err.file and not err.line:
         return f"error: {err.message}"
-    loc = _display_path(err.file) if err.file else '<input>'
+    loc = path_text(_display_path(err.file)) if err.file else '<input>'
     if err.line:
         loc += f":{err.line}"
         if err.col:

@@ -109,6 +109,37 @@ def test_a_byte_order_mark_is_named(tmp_path):
     assert _compile(path).stderr.startswith(b"p.ht:1:1: error: This file starts with a UTF-8 byte-order mark")
 
 
+NAMED = b"caf" + E_ACUTE + b"-" + CJK                  # a file or directory name that isn't ASCII
+OUT_OF_BOUNDS = b"def int main():\n    []int xs = [1, 2]\n    int i = 5\n    return xs[i]\n"
+
+
+def test_an_import_s_path_is_the_file_s_name(tmp_path):
+    (tmp_path / NAMED.decode()).mkdir()
+    _file(tmp_path / NAMED.decode(), b"def int seven():\n    return 7\n", "mod.ht")
+    path = _file(tmp_path, b"import '" + NAMED + b"/mod'\n\ndef int main():\n    return mod.seven()\n")
+    assert _compile(path).returncode == 0
+    missing = _compile(_file(tmp_path, b"import '" + NAMED + b"/absent'\n\ndef int main():\n    return 0\n", "q.ht"))
+    assert missing.returncode == 1
+    assert b"(looked for " + bytes(tmp_path.resolve() / NAMED.decode() / "absent.ht") + b", or in" in missing.stderr
+
+
+def test_a_diagnostic_names_its_file_by_the_name_s_bytes(tmp_path):
+    result = _compile(_file(tmp_path, b"def int main():\n    return missing\n", NAMED.decode() + ".ht"))
+    assert (result.returncode, result.stdout) == (1, b"")
+    assert result.stderr.startswith(NAMED + b".ht:2:12: error: Reference to undeclared variable 'missing'\n")
+
+
+@GCC_SKIP
+def test_a_panic_names_its_file_by_the_name_s_bytes(tmp_path):
+    path = _file(tmp_path, OUT_OF_BOUNDS, NAMED.decode() + ".ht")
+
+    def run(target):
+        exe = tmp_path / executable_name(f"p-{target}", target)
+        build_executable(path, str(exe), target=target)
+        return run_binary(target, [exe], capture_output=True)
+    assert on_every_target(run).stderr == NAMED + b".ht:4:12: panic: index out of bounds: index 5, length 2\n"
+
+
 def test_the_dumps_keep_the_bytes(tmp_path):
     path = _file(tmp_path, b"def int main():\n    print('" + CJK + b"')\n    return 0\n")
     assert "2:11 STRING '" + CJK.decode('latin-1') + "'\n" in dump(path, 'tokens')
