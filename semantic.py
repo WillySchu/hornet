@@ -259,13 +259,14 @@ def _either(a: dict, b: dict) -> dict:
 
 
 def mangle_method_name(struct_name: str, method_name: str) -> str:
-    """`Struct.method`; '.' can't appear in identifiers, so no collisions."""
+    """`Struct.method` (or `Enum.method`); '.' can't appear in identifiers, so no collisions."""
     return f"{struct_name}.{method_name}"
 
 
-def _method_function(sd: StructDef, md: MethodDef) -> Function:
-    """A method as the function it compiles to: its mangled name, and the receiver as the first
-    parameter (`*S` for a pointer receiver). New nodes; the program's own are left as they are."""
+def _method_function(sd, md: MethodDef) -> Function:
+    """A method of the struct or enum `sd` as the function it compiles to: its mangled name, and the
+    receiver as the first parameter (`*S` for a pointer receiver). New nodes; the program's own are
+    left as they are."""
     receiver_type = sd.name
     if md.receiver_is_pointer:
         receiver_type = PointerTypeExpr(pointee_type=sd.name, line=md.line, col=md.col, file=md.file)
@@ -410,7 +411,8 @@ class SemanticAnalyzer:
         self.module_set = program
         self.scope = program.files[0][1]
         # Each method is checked and compiled as a function of its own (see _method_function).
-        methods = [(_method_function(sd, md), sd) for sd in program.structs for md in sd.methods]
+        methods = [(_method_function(sd, md), sd) for sd in list(program.structs) + list(program.enums)
+                   for md in sd.methods]
         for fn, sd in methods:
             program.scope_of[fn.nid] = program.scope_of[sd.nid]
         self.all_functions = list(program.functions) + [fn for fn, _ in methods]
@@ -819,18 +821,23 @@ class SemanticAnalyzer:
         return registry
 
     def _collect_methods(self, program: Program) -> Dict[Tuple[str, str], Tuple[List[Type], Type, str]]:
-        """Reject duplicate method names per struct; return the method registry."""
+        """Reject duplicate method names per struct or enum; return the method registry."""
         methods: Dict[Tuple[str, str], Tuple[List[Type], Type, str]] = {}
-        for sd in program.structs:
+        for sd in list(program.structs) + list(program.enums):
             self._enter(sd)
+            kind = 'enum' if isinstance(sd, EnumDef) else 'struct'
+            members = {member.name for member in sd.members} if isinstance(sd, EnumDef) else set()
             seen_names: Set[str] = set()
             for md in sd.methods:
                 if md.name in seen_names:
                     raise SemanticError(
                         f"Method '{shown(md.name)}' is already declared on "
-                        f"struct '{shown(sd.name)}'",
+                        f"{kind} '{shown(sd.name)}'",
                         md,
                     )
+                if md.name in members:  # `Color.Red` and `c.Red()` would read as the same thing
+                    raise SemanticError(
+                        f"Method '{md.name}' has the same name as a member of enum '{shown(sd.name)}'", md)
                 seen_names.add(md.name)
                 param_types = [
                     self._type(p.type, p) for p in md.params
@@ -2068,36 +2075,41 @@ class SemanticAnalyzer:
                 expr,
             )
         receiver_type = self._check_expr_allowing_struct_literal(expr.receiver)
+        has_methods = (TypeKind.STRUCT, TypeKind.ENUM)
         receiver_is_pointer = (receiver_type.kind == TypeKind.POINTER
-                               and receiver_type.element_type.kind == TypeKind.STRUCT)
+                               and receiver_type.element_type.kind in has_methods)
         if receiver_is_pointer:
             # auto-deref
             receiver_type = receiver_type.element_type
-        if receiver_type.kind != TypeKind.STRUCT:
+        if receiver_type.kind not in has_methods:
             raise SemanticError(
                 f"Cannot call method '{expr.name}' on a value of type "
-                f"{receiver_type} -- methods are only defined on structs",
+                f"{receiver_type} -- methods are only defined on structs and enums",
                 expr.receiver,
             )
-        key = (receiver_type.struct_name, expr.name)
+        is_enum = receiver_type.kind == TypeKind.ENUM
+        owner = receiver_type.enum_name if is_enum else receiver_type.struct_name
+        key = (owner, expr.name)
         if key not in self.methods:
             raise SemanticError(
-                f"Struct '{shown(receiver_type.struct_name)}' has no method "
+                f"{'Enum' if is_enum else 'Struct'} '{shown(owner)}' has no method "
                 f"'{expr.name}'",
                 expr,
             )
-        if self._hidden(receiver_type.struct_name, expr.name):
+        if self._hidden(owner, expr.name):
             raise SemanticError(
-                f"Method '{expr.name}' of '{shown(receiver_type.struct_name)}' is not visible outside the module "
-                f"that defines the struct -- names starting with '_' are private to their own module", expr)
+                f"Method '{expr.name}' of '{shown(owner)}' is not visible outside the module "
+                f"that defines the {'enum' if is_enum else 'struct'} -- names starting with '_' are private to "
+                f"their own module", expr)
         param_types, return_type, mangled_name = self.methods[key]
         receiver = expr.receiver
         if key in self.pointer_receivers and not receiver_is_pointer:
             # Pointer receiver: pass the receiver's address.
-            if not isinstance(expr.receiver, (Variable, Field, Index)) and not (
-                    isinstance(expr.receiver, Unary) and expr.receiver.op == UnaryOp.DEREFERENCE):
+            is_place = isinstance(expr.receiver, (Variable, Field, Index)) or (
+                isinstance(expr.receiver, Unary) and expr.receiver.op == UnaryOp.DEREFERENCE)
+            if not is_place or expr.receiver.nid in self.facts.enum_members:  # (`Color.Red` is a value)
                 raise SemanticError(
-                    f"Method '{expr.name}' on '{shown(receiver_type.struct_name)}' has a pointer receiver, so it "
+                    f"Method '{expr.name}' on '{shown(owner)}' has a pointer receiver, so it "
                     f"needs an addressable receiver (a variable, field, index, or dereference), not a temporary",
                     expr.receiver,
                 )
@@ -2109,7 +2121,7 @@ class SemanticAnalyzer:
                 self.check_expr(receiver)
         if len(expr.args) != len(param_types):
             raise SemanticError(
-                f"Method '{expr.name}' on '{shown(receiver_type.struct_name)}' "
+                f"Method '{expr.name}' on '{shown(owner)}' "
                 f"expects {len(param_types)} argument(s), got "
                 f"{len(expr.args)}",
                 expr,
@@ -2119,7 +2131,7 @@ class SemanticAnalyzer:
             if not self._types_compatible(actual_type, expected_type):
                 raise SemanticError(
                     f"Argument {i} to method '{expr.name}' on "
-                    f"'{shown(receiver_type.struct_name)}' should be "
+                    f"'{shown(owner)}' should be "
                     f"{expected_type}, got {actual_type}",
                     arg,
                 )
@@ -2471,6 +2483,9 @@ class SemanticAnalyzer:
             if expr.operand.nid in self.facts.const_refs:
                 raise SemanticError(
                     f"Cannot take the address of constant '{shown(self.facts.const_refs[expr.operand.nid])}'", expr)
+            if expr.operand.nid in self.facts.enum_members:  # `&Color.Red`: a value, with nowhere it lives
+                raise SemanticError(
+                    f"Cannot take the address of the enum member '{operand_type}.{expr.operand.name}'", expr)
             # Only variables, struct literals, and chains rooted in a variable.
             is_struct_literal = self._struct_literal(expr.operand) is not None
             root_variable = self._root_variable_of(expr.operand) if isinstance(expr.operand, (Field, Index)) else None

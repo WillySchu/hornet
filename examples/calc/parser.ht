@@ -18,6 +18,40 @@ type Op enum:
     Negate
     Not
 
+    # The operator as it is written.
+    def str symbol(self):
+        match self:
+            is Add:
+                return '+'
+            is Sub:
+                return '-'
+            is Mul:
+                return '*'
+            is Div:
+                return '/'
+            is Mod:
+                return '%'
+            is Equal:
+                return '=='
+            is NotEqual:
+                return '!='
+            is Less:
+                return '<'
+            is LessEqual:
+                return '<='
+            is Greater:
+                return '>'
+            is GreaterEqual:
+                return '>='
+            is And:
+                return 'and'
+            is Or:
+                return 'or'
+            is Negate:
+                return '-'
+            is Not:
+                return 'not'
+
 type Num struct:
     int value
 

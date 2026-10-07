@@ -398,9 +398,11 @@ class EnumMember(Node):
 
 @dataclass
 class EnumDef(Node):
-    """`type Name enum:` and its members, one per line; a member's value is its position."""
+    """`type Name enum:` and its members, one per line; a member's value is its position. Methods,
+    as a struct has, follow the members."""
     name: str
     members: List[EnumMember]
+    methods: List[MethodDef] = field(default_factory=list)
 
 
 @dataclass
@@ -788,21 +790,28 @@ class Parser:
         return SumTypeDef(name=name_tok.val, variants=variants, line=start_tok.line, col=start_tok.col)
 
     def _parse_enum_body(self, start_tok: Token, name_tok: Token) -> EnumDef:
-        """Enum body after `type Name enum`: one member name per line."""
+        """Enum body after `type Name enum`: one member name per line, then any methods."""
         self.expect(TokenType.COLON, "Expected ':' to start the enum body")
         self.expect(TokenType.NEWLINE, "Expected a newline after ':'")
         self.skip_newlines()
         self.expect(TokenType.INDENT, "Expected an indented enum body")
         self.skip_newlines()
         members: List[EnumMember] = []
+        methods: List[MethodDef] = []
         while not self.check(TokenType.DEDENT) and not self.at_end():
-            member_tok = self.expect(TokenType.IDENTIFIER, "Expected a member name")
-            self.expect(
-                TokenType.NEWLINE, "Expected a newline after a member name -- an enum lists one member per line")
-            members.append(EnumMember(name=member_tok.val, line=member_tok.line, col=member_tok.col))
+            if self.check(TokenType.DEF):
+                methods.append(self.parse_method_def())
+            elif methods:
+                raise self._error("An enum's members come before its methods", self.current())
+            else:
+                member_tok = self.expect(TokenType.IDENTIFIER, "Expected a member name")
+                self.expect(
+                    TokenType.NEWLINE, "Expected a newline after a member name -- an enum lists one member per line")
+                members.append(EnumMember(name=member_tok.val, line=member_tok.line, col=member_tok.col))
             self.skip_newlines()
         self.expect(TokenType.DEDENT, "Expected a dedent to end the enum body")
-        return EnumDef(name=name_tok.val, members=members, line=start_tok.line, col=start_tok.col)
+        return EnumDef(
+            name=name_tok.val, members=members, methods=methods, line=start_tok.line, col=start_tok.col)
 
     def _parse_struct_body(self, start_tok: Token, name_tok: Token) -> StructDef:
         """Struct body after `type Name struct`."""
