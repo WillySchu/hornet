@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
-from diagnostics import CompileError, path_text
+from diagnostics import CompileError, path_text, quoted_text
 from lexer import lex
 from parser import Parser, Program
 
@@ -73,15 +73,15 @@ def discover_modules(entry_path: str) -> Tuple[Program, Dict[str, DiscoveredModu
             resolved = _resolve_import_path(importer_dir, path)
             if resolved is None:
                 raise ModuleError(
-                    f"Import {path!r} at line {at_line} doesn't resolve to a real "
+                    f"Import {quoted_text(path)} at line {at_line} doesn't resolve to a real "
                     f"file (looked for {path_text(_candidate_path(importer_dir, path))}, or in "
                     f"the standard library)",
                     file=program.file, line=at_line, col=decl.col,
                 )
             if resolved == entry_file:  # it would be compiled a second time, as a module
                 raise ModuleError(
-                    f"Import {path!r} at line {at_line} is the program's entry file, which can't be imported -- "
-                    f"move what is shared into a module of its own",
+                    f"Import {quoted_text(path)} at line {at_line} is the program's entry file, which can't be "
+                    f"imported -- move what is shared into a module of its own",
                     file=program.file, line=at_line, col=decl.col,
                 )
             if resolved in by_path:
@@ -89,9 +89,9 @@ def discover_modules(entry_path: str) -> Tuple[Program, Dict[str, DiscoveredModu
             canonical_name = resolved.stem
             if not _MODULE_NAME.fullmatch(canonical_name):  # it becomes part of every symbol of the module
                 raise ModuleError(
-                    f"Import {path!r} is the file {path_text(resolved.name)!r}, and a module is named by its file: "
-                    f"{path_text(canonical_name)!r} must be an identifier (letters, digits, and underscores, not "
-                    f"starting with a digit) -- rename the file",
+                    f"Import {quoted_text(path)} is the file {quoted_text(path_text(resolved.name))}, and a module "
+                    f"is named by its file: {quoted_text(path_text(canonical_name))} must be an identifier "
+                    f"(letters, digits, and underscores, not starting with a digit) -- rename the file",
                     file=program.file, line=decl.line, col=decl.col,
                 )
             if canonical_name in modules or canonical_name in by_path.values():

@@ -14,7 +14,7 @@ import dataclasses
 import os
 from typing import Dict, List, Optional, Set, Tuple
 
-from diagnostics import CompileError, path_text
+from diagnostics import CompileError, path_text, quoted_text
 from lexer import lex
 from typesys import EnumInfo, StructInfo, SumTypeInfo, Type, TypeKind
 from folding import fold_binary_op, fold_cast, fold_unary_op
@@ -330,6 +330,14 @@ _NARROW_INT_RANGES = {
     Type.UINT8: (0, 255),
     Type.INT32: (-2**31, 2**31 - 1),
 }
+
+
+def _shown_key(key: tuple) -> str:
+    """A constant dict key (_constant_key_value's) as it is written."""
+    kind, value = key
+    if kind in ('str', 'enum'):
+        return quoted_text(value)
+    return {True: 'true', False: 'false'}[value] if kind == 'bool' else str(value)
 
 
 def _constant_key_value(expr: Node):
@@ -1830,7 +1838,7 @@ class SemanticAnalyzer:
             if constant_key is not None:
                 if constant_key in seen_constant_keys:
                     raise SemanticError(
-                        f"Dict literal lists the key {constant_key[1]!r} more than once",
+                        f"Dict literal lists the key {_shown_key(constant_key)} more than once",
                         key_expr,
                     )
                 seen_constant_keys.add(constant_key)

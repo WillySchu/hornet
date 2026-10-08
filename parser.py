@@ -8,7 +8,7 @@ from typing import Any, List, Optional, Tuple, Union
 
 from lexer import Token, TokenType, describe_token, describe_token_type, lex
 from ops import BinaryOp, UnaryOp
-from diagnostics import CompileError
+from diagnostics import CompileError, quoted_text
 
 
 # AST nodes
@@ -1507,7 +1507,7 @@ class Parser:
             if len(resolved) != 1 or ord(resolved) > 255:
                 raise self._error(
                     f"A byte literal must resolve to exactly one byte (0-255), got "
-                    f"{resolved!r}",
+                    f"{quoted_text(resolved)}",
                     tok,
                 )
             return ByteLiteral(value=ord(resolved), line=tok.line, col=tok.col)

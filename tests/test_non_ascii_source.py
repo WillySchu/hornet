@@ -146,3 +146,34 @@ def test_the_dumps_keep_the_bytes(tmp_path):
     command = [sys.executable, str(ROOT / 'compile.py'), path, '--dump', 'tokens']
     assert b"2:11 STRING '" + CJK + b"'\n" in subprocess.run(command, capture_output=True).stdout
     assert "StrLit value='\\xe4\\xb8\\xad' : str" in dump(path, 'typed')      # (a literal is shown escaped)
+
+
+A_UMLAUT = "\u00c4".encode()        # its second byte, 0x84, and the CJK character's last, 0xAD, are ones repr() escapes
+
+
+@pytest.mark.parametrize("source,message", [
+    (b"import '" + NAMED + b"/absent'\n\ndef int main():\n    return 0\n",
+     b"p.ht:1:1: error: Import '" + NAMED + b"/absent' doesn't resolve to a real file (looked for "),
+    (b"from '" + A_UMLAUT + b"rger-mod' import f\n\ndef int main():\n    return f()\n",
+     b"p.ht:1:1: error: Import '" + A_UMLAUT + b"rger-mod' is the file '" + A_UMLAUT + b"rger-mod.ht', and a module is "
+     b"named by its file: '" + A_UMLAUT + b"rger-mod' must be an identifier"),
+    (b'def int main():\n    byte b = "' + CJK + b'"\n    return int(b)\n',
+     b"p.ht:2:14: error: A byte literal must resolve to exactly one byte (0-255), got '" + CJK + b"'\n"),
+    (b"def int main():\n    dict[str]int d = dict[str]int{'" + A_UMLAUT + b"': 1, '" + A_UMLAUT + b"': 2}\n"
+     b"    return len(d)\n",
+     b"p.ht:2:44: error: Dict literal lists the key '" + A_UMLAUT + b"' more than once\n"),
+    (b'def int main():\n    byte b = "\\n\\t"\n    return int(b)\n',       # what can't be shown is still escaped
+     b"p.ht:2:14: error: A byte literal must resolve to exactly one byte (0-255), got '\\n\\t'\n"),
+])
+def test_a_message_that_quotes_source_text_keeps_its_characters_whole(tmp_path, source, message):
+    (tmp_path / (A_UMLAUT.decode() + "rger-mod.ht")).write_text("def int f():\n    return 1\n")
+    result = _compile(_file(tmp_path, source))
+    assert result.returncode == 1 and result.stderr.startswith(message), result.stderr
+    result.stderr.decode('utf-8')  # every byte of it part of a whole character
+
+
+def test_a_dict_literal_s_repeated_key_is_named_as_written(tmp_path):
+    result = _compile(_file(tmp_path, b"def int main():\n    dict[bool]int d = dict[bool]int{true: 1, true: 2}\n"
+                                      b"    return len(d)\n"))
+    assert result.stderr.startswith(b"p.ht:2:46: error: Dict literal lists the key true more than once\n")
+
