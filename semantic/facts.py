@@ -4,7 +4,7 @@ import dataclasses
 @dataclasses.dataclass
 class Facts:
     """What checking learned, keyed by parser-node number (Node.nid); the parser's nodes are never
-    changed. _TypedTreeBuilder builds the typed tree from these."""
+    changed. TypedTreeBuilder builds the typed tree from these."""
     types: dict = dataclasses.field(default_factory=dict)  # expression, VarDecl, Param -> Type
     decls: dict = dataclasses.field(default_factory=dict)  # Variable, Assign, IsCheck -> Symbol.id (None: a constant)
     symbols: dict = dataclasses.field(default_factory=dict)  # VarDecl, Param -> Symbol

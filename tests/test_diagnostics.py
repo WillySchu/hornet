@@ -103,7 +103,7 @@ def test_single_error_is_not_wrapped(tmp_path):
 
 
 def test_error_limit(tmp_path, monkeypatch):
-    monkeypatch.setattr(semantic, 'MAX_ERRORS', 2)
+    monkeypatch.setattr(semantic.analyzer, 'MAX_ERRORS', 2)
     entry = _write(tmp_path, 'p.ht', _THREE_BAD_FUNCTIONS)
     with pytest.raises(semantic.SemanticError) as info:
         compile_to_asm(str(entry))

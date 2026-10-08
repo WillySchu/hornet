@@ -1,6 +1,6 @@
 """`is` as an ordinary boolean expression (`x is T`, `x is not T`, and `x == none` for a sum), and
 the narrowing that follows it through `and`, `or`, `not`, `else`, and guards. Each condition says
-something when true and something when false (SemanticAnalyzer._when); only variables are narrowed."""
+something when true and something when false (flow.py's Scopes.when); only variables are narrowed."""
 
 import pytest
 

@@ -5,7 +5,7 @@ Every top-level declaration gets a program-wide unique key: its own name in the 
 Externs keep their names, which are linker symbols. A file's scope maps the bare names it can use
 (its own declarations and `from ... import` names) to keys; `alias.name` references are resolved
 here too, recorded by node number, along with the checks on imports and on names that locals may
-not reuse. semantic.py checks each declaration and function in its file's scope.
+not reuse. semantic/ checks each declaration and function in its file's scope.
 """
 
 import dataclasses
@@ -30,7 +30,7 @@ from parser import (
 )
 
 
-# The builtin functions (semantic.py's check_call). No declaration or named import may take one of
+# The builtin functions (semantic/calls.py's check_call). No declaration or named import may take one of
 # these names, in any file: it would stand in for the builtin there.
 BUILTIN_FUNCTION_NAMES = {'print', 'len', 'append', 'del', 'bytes', 'panic', 'format'}
 
@@ -178,7 +178,7 @@ def _walk(node, scope: Scope, qualified: Dict[int, str], resolve_qualified, enum
         if isinstance(n, QualifiedTypeExpr):
             key = resolve_qualified(n.module, n.name, n)
             if key is None and scope.resolve(n.module) in enum_keys:
-                continue  # `Enum.Member` where a type is read (`x is Color.Red`): semantic.py's to check
+                continue  # `Enum.Member` where a type is read (`x is Color.Red`): semantic/'s to check
             if key is None:
                 raise MergeError(f"'{n.module}' at line {n.line} doesn't name an imported module",
                                  line=n.line, col=n.col)

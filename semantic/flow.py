@@ -111,7 +111,7 @@ def conjuncts(condition: Node) -> List[Node]:
 
 
 def _both(a: dict, b: dict) -> dict:
-    """What is known when both of two sets of narrowing facts hold (SemanticAnalyzer._when)."""
+    """What is known when both of two sets of narrowing facts hold (Scopes.when)."""
     out = dict(a)
     for decl_id, (name, variants) in b.items():
         out[decl_id] = (name, variants & out[decl_id][1]) if decl_id in out else (name, variants)
