@@ -10,7 +10,7 @@ from semantic.constants import ConstEvaluator
 from semantic.declarations import DeclarationResolver, Declarations
 from semantic.errors import SemanticError
 from semantic.facts import Facts
-from semantic.types import TypeResolver
+from semantic.type_resolution import TypeResolver
 from tests.test_compiler import _parse
 from typesys import Type, TypeKind
 

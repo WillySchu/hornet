@@ -19,7 +19,7 @@ from scopes import BUILTIN_FUNCTION_NAMES, display_name as shown
 from semantic.constants import ConstEvaluator
 from semantic.errors import SemanticError
 from semantic.facts import Facts
-from semantic.types import TYPE_NAMES, TypeResolver, type_from_name
+from semantic.type_resolution import TYPE_NAMES, TypeResolver, type_from_name
 from typesys import EnumInfo, StructInfo, SumTypeInfo, Type, TypeKind
 
 

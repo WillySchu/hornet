@@ -11,7 +11,7 @@ from semantic.errors import SemanticError
 from semantic.expressions import ExpressionChecker
 from semantic.facts import Facts
 from semantic.flow import Scopes
-from semantic.types import TypeResolver
+from semantic.type_resolution import TypeResolver
 from symbols import SymbolTable
 from tests.test_compiler import _parse
 from typesys import Type, TypeKind

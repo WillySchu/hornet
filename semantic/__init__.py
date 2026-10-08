@@ -10,15 +10,15 @@ and TypedTreeBuilder builds each function's typed tree from those facts at the e
 
 The entry points are here (analyze). The work is in the modules beside this one:
 
-    analyzer.py       runs the phases in order, and holds what they share
-    declarations.py   what the program declares, resolved before any body is checked
-    types.py          a written type to a Type
-    constants.py      the values of constants and constant expressions
-    statements.py     a function's body, statement by statement
-    expressions.py    the type of each expression (calls.py: calls and struct literals)
-    flow.py           the names in scope and what is known of them at each point
-    context.py        where checking is, shared by what checks
-    facts.py          what checking learned
+    analyzer.py         runs the phases in order, and holds what they share
+    declarations.py     what the program declares, resolved before any body is checked
+    type_resolution.py  a written type to a Type
+    constants.py        the values of constants and constant expressions
+    statements.py       a function's body, statement by statement
+    expressions.py      the type of each expression (calls.py: calls and struct literals)
+    flow.py             the names in scope and what is known of them at each point
+    context.py          where checking is, shared by what checks
+    facts.py            what checking learned
     typed_tree_builder.py   the typed tree, from the facts
 """
 
@@ -29,15 +29,23 @@ from lexer import lex
 from parser import Parser, Program
 from semantic.analyzer import SemanticAnalyzer
 from semantic.errors import SemanticError, SemanticErrors
-from semantic.types import type_from_name
+from semantic.type_resolution import type_from_name
 import typed_ast as typed
 from typesys import StructInfo, SumTypeInfo, Type, TypeKind
 
 # What is used from here: the entry points below, and names that were this module's own when semantic
 # analysis was one file, which other code still imports from it.
 __all__ = [
-    'analyze', 'analyze_source', 'SemanticAnalyzer', 'SemanticError', 'SemanticErrors', 'StructInfo', 'SumTypeInfo',
-    'Type', 'TypeKind', 'type_from_name',
+    'analyze',
+    'analyze_source',
+    'SemanticAnalyzer',
+    'SemanticError',
+    'SemanticErrors',
+    'StructInfo',
+    'SumTypeInfo',
+    'Type',
+    'TypeKind',
+    'type_from_name',
 ]
 
 

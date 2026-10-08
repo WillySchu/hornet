@@ -16,7 +16,7 @@ from semantic.facts import Facts
 from semantic.flow import Scopes
 from semantic.statements import StatementChecker
 from semantic.typed_tree_builder import TypedTreeBuilder
-from semantic.types import TypeResolver
+from semantic.type_resolution import TypeResolver
 from symbols import SymbolTable
 import typed_ast as typed
 
