@@ -1,10 +1,27 @@
+"""The parser: a source file's tokens to its tree.
+
+    nodes.py    the tree's node classes
+    parser.py   the recursive-descent parser that builds it
+
+The entry points are here (parse, parse_tokens), with the names other code takes from the package.
+"""
+
 import argparse
 from typing import List
 
 from lexer import Token, lex
-from parser.ast import Program
-from parser.parser import Parser
-from parser.parser import *
+from ops import BinaryOp, UnaryOp
+from parser import nodes
+from parser.nodes import *  # noqa: F401,F403 (what nodes.__all__ lists: the node classes)
+from parser.nodes import Program
+from parser.parser import READ_AS_A_TYPED_LITERAL, ParseError, Parser
+
+# What the package offers: the nodes, the parser and its error, the entry points below, and the two
+# operator enums, which live in ops.py but which some code takes from here.
+__all__ = [
+    *nodes.__all__,
+    'BinaryOp', 'UnaryOp', 'ParseError', 'Parser', 'READ_AS_A_TYPED_LITERAL', 'parse', 'parse_tokens', 'main',
+]
 
 
 def parse_tokens(tokens: List[Token]) -> Program:
@@ -17,12 +34,9 @@ def parse(filename: str) -> Program:
 
 
 def main():
+    """The command line: `python -m parser FILE` (see __main__.py)."""
     arg_parser = argparse.ArgumentParser(description='Parser')
     arg_parser.add_argument('file', type=str, help='File to parse.')
     args = arg_parser.parse_args()
     ast = parse(args.file)
     print(ast.pretty())
-
-
-if __name__ == '__main__':
-    main()

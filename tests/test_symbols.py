@@ -1,5 +1,6 @@
 """symbols.py, node numbers, and the rule that the compiler never keys on object identity."""
 
+import dataclasses
 import io
 import tokenize
 from pathlib import Path
@@ -73,7 +74,7 @@ def test_node_numbers_are_unique_and_follow_creation_order():
     while stack:
         node = stack.pop()
         seen.append(node.nid)
-        for f in parser.fields(node):
+        for f in dataclasses.fields(node):
             value = getattr(node, f.name)
             for v in value if isinstance(value, list) else [value]:
                 if isinstance(v, parser.Node):

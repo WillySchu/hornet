@@ -1,11 +1,19 @@
 """Recursive-descent parser: tokens -> AST. Precedence climbing for binary operators."""
 
-import argparse
+from dataclasses import dataclass
 from enum import auto, Enum
+from typing import List, Optional, Tuple, Union
 
 from diagnostics import CompileError, quoted_text
-from lexer import Token, TokenType, describe_token, describe_token_type, lex
-from parser.ast import *
+from lexer import Token, TokenType, describe_token, describe_token_type
+from ops import BinaryOp, UnaryOp
+from parser.nodes import (
+    ArrayLiteral, ArrayTypeExpr, Assign, Binary, BoolLiteral, Break, ByteLiteral, Call, Cast, ConstDecl, Constant,
+    Continue, DictLiteral, DictTypeExpr, EnumDef, EnumMember, ExprStmt, ExternFunctionDecl, Field, For, ForIn,
+    FromImportDecl, Function, If, ImportDecl, Index, IntrinsicDecl, IsCheck, Match, MethodDef, Node, NoneLiteral,
+    Param, PointerTypeExpr, Program, QualifiedTypeExpr, Return, Slice, SliceLiteral, SliceTypeExpr, StringLiteral,
+    StructDef, StructField, SumTypeDef, TypeAlias, Unary, VarDecl, Variable, While, stamp_file,
+)
 
 
 class ParseError(CompileError):
