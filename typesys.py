@@ -70,6 +70,7 @@ Type.NEVER = Type(TypeKind.NEVER)
 Type.NONE = Type(TypeKind.NONE)
 
 INTEGER_TYPES = {Type.INT, Type.INT8, Type.UINT8, Type.INT64, Type.INT32}
+BYTE_SLICE = Type(TypeKind.SLICE, element_type=Type.UINT8)  # `[]byte`
 
 
 @dataclass

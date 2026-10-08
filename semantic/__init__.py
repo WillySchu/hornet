@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Tuple
 
 from diagnostics import quoted_text
 from lexer import lex
+from semantic.calls import CallChecker
 from semantic.constants import ConstEvaluator
 from semantic.declarations import DeclarationResolver, Declarations
 from semantic.errors import SemanticError, SemanticErrors
@@ -25,7 +26,9 @@ from semantic.flow import (
 )
 from semantic.types import TypeResolver, type_from_name  # noqa: F401 (type_from_name: for those who import it here)
 from semantic.typed_tree_builder import TypedTreeBuilder
-from typesys import INTEGER_TYPES, StructInfo, SumTypeInfo, Type, TypeKind  # noqa: F401 (some for importers)
+from typesys import (  # noqa: F401 (some for those who import them here)
+    BYTE_SLICE, INTEGER_TYPES, StructInfo, SumTypeInfo, Type, TypeKind,
+)
 from ops import EQUALITY_OPS, LOGICAL_OPS, ORDERING_OPS
 import typed_ast as typed
 from scopes import build_module_set, display_name as shown
@@ -99,7 +102,7 @@ from parser import (
 
 
 
-_BYTE_SLICE = Type(TypeKind.SLICE, element_type=Type.UINT8)
+_BYTE_SLICE = BYTE_SLICE
 
 
 # Errors
@@ -193,6 +196,7 @@ class SemanticAnalyzer:
         self.scopes = Scopes(self.symbols, self.decls, self.facts)  # (no locals, until a function is checked)
         self.types = TypeResolver(self.decls, program, self.facts.array_sizes)
         self.constants = ConstEvaluator(self.facts, self.decls.enums, self._check_const_declaration)
+        self.calls = CallChecker(self, self.decls, self.facts, self.constants, program)
         DeclarationResolver(
             program, self.decls, self.types, self.facts, self.constants, self._array_size_value).resolve()
 
@@ -237,23 +241,7 @@ class SemanticAnalyzer:
         constants = getattr(self, 'constants', None)
         return key if constants is not None and key in constants.decls else None
 
-    def _callee(self, expr: Call) -> Optional[str]:
-        """The key a call's name refers to (a function, struct, extern, or intrinsic), resolving
-        `alias.name(...)`; the name as written if it names nothing at top level (a builtin, or
-        undeclared); None for a method call."""
-        if expr.nid in self.module_set.qualified:
-            return self.module_set.qualified[expr.nid]
-        if expr.receiver is not None:
-            return None
-        return self.scope.resolve(expr.name) or expr.name
 
-    def _struct_literal(self, expr: Node) -> Optional[str]:
-        """The struct's key if `expr` is a struct literal."""
-        if isinstance(expr, Call):
-            name = self._callee(expr)
-            if name in self.decls.structs:
-                return name
-        return None
 
     # -- constants
 
@@ -275,7 +263,7 @@ class SemanticAnalyzer:
             if node.nid in self.module_set.qualified and isinstance(node, Field):
                 continue  # `alias.NAME`: checked as a constant below
             if isinstance(node, Call) and node.name == 'len' and len(node.args) == 1 and node.receiver is None \
-                    and self._enum_named_by(node.args[0]) is not None:
+                    and self.enum_named_by(node.args[0]) is not None:
                 continue  # `len(Enum)`: a constant
             if isinstance(node, Call):
                 raise SemanticError("Array size must be a constant expression, not a call", node)
@@ -309,8 +297,8 @@ class SemanticAnalyzer:
                     raise SemanticError(
                         f"Constant '{shown(cd.name)}' has type {const_type} -- constants must be an integer type, "
                         f"bool, str, or an enum", cd)
-                value_type = self._check_value_flowing_into(cd.value, const_type)
-                if not self._types_compatible(value_type, const_type):
+                value_type = self.check_value_flowing_into(cd.value, const_type)
+                if not self.types_compatible(value_type, const_type):
                     raise SemanticError(
                         f"Constant '{shown(cd.name)}' is declared {const_type} but its value has type {value_type}",
                         cd)
@@ -446,11 +434,11 @@ class SemanticAnalyzer:
         elif isinstance(stmt, Continue):
             self.analyze_continue(stmt)
         elif isinstance(stmt, ExprStmt):
-            self._check_expr_allowing_struct_literal(stmt.expr)
+            self.check_expr_allowing_struct_literal(stmt.expr)
         else:
             raise SemanticError(f"No semantic rule for statement: {stmt!r}", stmt)
 
-    def _types_compatible(self, value_type: Type, target_type: Type) -> bool:
+    def types_compatible(self, value_type: Type, target_type: Type) -> bool:
         """Equality, or NONE into a pointer (slices and dicts are never none), or a variant into its sum type."""
         if value_type == target_type:
             return True
@@ -460,7 +448,7 @@ class SemanticAnalyzer:
             return value_type in self.decls.sum_types[target_type.sum_type_name].variants
         return False
 
-    def _as_folded_int_literal(self, expr: Node) -> Optional[int]:
+    def as_folded_int_literal(self, expr: Node) -> Optional[int]:
         """Folded value of an int literal or its negation, else None."""
         if isinstance(expr, Constant):
             return expr.value
@@ -468,7 +456,7 @@ class SemanticAnalyzer:
             return -expr.operand.value
         return None
 
-    def _check_value_flowing_into(self, expr: Node, target_type: Type) -> Type:
+    def check_value_flowing_into(self, expr: Node, target_type: Type) -> Type:
         """check_expr for a value flowing into a typed slot; handles untyped array literals and literal range checks."""
         if (
                 isinstance(expr, ArrayLiteral)
@@ -480,9 +468,9 @@ class SemanticAnalyzer:
             return target_type if target_type.kind == TypeKind.SLICE else array_type
         if (target_type.kind == TypeKind.POINTER and target_type.element_type.kind == TypeKind.SUM
                 and isinstance(expr, Unary) and expr.op == UnaryOp.ADDRESS_OF
-                and self._struct_literal(expr.operand) is not None):
+                and self.calls.struct_literal(expr.operand) is not None):
             # `&Variant(...)` where a pointer to the sum is expected: a new sum value holding that variant.
-            variant_type = self.check_struct_literal(expr.operand)
+            variant_type = self.calls.check_struct_literal(expr.operand)
             if variant_type in self.decls.sum_types[target_type.element_type.sum_type_name].variants:
                 self.facts.boxed[expr.nid] = target_type.element_type
                 self.facts.types[expr.nid] = target_type
@@ -495,7 +483,7 @@ class SemanticAnalyzer:
             raise SemanticError(f"A dict is never none -- write `{target_type}{{}}` (or leave it uninitialized) "
                                 f"for an empty one", expr)
         if value_type == Type.INT and target_type in _NARROW_INT_RANGES:
-            literal_value = self._as_folded_int_literal(expr)
+            literal_value = self.as_folded_int_literal(expr)
             if literal_value is not None:
                 lo, hi = _NARROW_INT_RANGES[target_type]
                 if not (lo <= literal_value <= hi):
@@ -507,7 +495,7 @@ class SemanticAnalyzer:
                 self._record_literal_type(expr, target_type)
                 return target_type
         if value_type == Type.INT and target_type == Type.INT64:
-            if self._as_folded_int_literal(expr) is not None:
+            if self.as_folded_int_literal(expr) is not None:
                 self._record_literal_type(expr, target_type)
                 return target_type
         return value_type
@@ -518,21 +506,21 @@ class SemanticAnalyzer:
         if isinstance(expr, Unary) and expr.op == UnaryOp.NEGATE and isinstance(expr.operand, Constant):
             self.facts.types[expr.operand.nid] = target_type
 
-    def _check_expr_allowing_struct_literal(self, expr: Node) -> Type:
+    def check_expr_allowing_struct_literal(self, expr: Node) -> Type:
         """check_expr, but accepts struct literals."""
-        if self._struct_literal(expr) is not None:
-            return self.check_struct_literal(expr)
+        if self.calls.struct_literal(expr) is not None:
+            return self.calls.check_struct_literal(expr)
         return self.check_expr(expr)
 
-    def _check_value_flowing_into_allowing_struct_literal(self, expr: Node, target_type: Type) -> Type:
-        """_check_value_flowing_into, but accepts struct literals."""
-        if self._struct_literal(expr) is not None:
-            return self.check_struct_literal(expr)
-        return self._check_value_flowing_into(expr, target_type)
+    def check_value_flowing_into_allowing_struct_literal(self, expr: Node, target_type: Type) -> Type:
+        """check_value_flowing_into, but accepts struct literals."""
+        if self.calls.struct_literal(expr) is not None:
+            return self.calls.check_struct_literal(expr)
+        return self.check_value_flowing_into(expr, target_type)
 
     def analyze_var_decl(self, stmt: VarDecl) -> None:
         declared_type = self._type(stmt.var_type, stmt)
-        missing = self._without_zero_value(declared_type) if stmt.init is None else None
+        missing = self.without_zero_value(declared_type) if stmt.init is None else None
         if missing is not None:
             # Only a sum with a `none` variant has a zero value (that variant).
             what = f"{missing} has" if missing == declared_type else f"{declared_type} contains {missing}, which has"
@@ -543,8 +531,8 @@ class SemanticAnalyzer:
             )
         if stmt.init is not None:
             # Checked before declaring, so `int a = a` fails.
-            init_type = self._check_value_flowing_into_allowing_struct_literal(stmt.init, declared_type)
-            if not self._types_compatible(init_type, declared_type):
+            init_type = self.check_value_flowing_into_allowing_struct_literal(stmt.init, declared_type)
+            if not self.types_compatible(init_type, declared_type):
                 raise SemanticError(
                     f"Cannot initialize '{stmt.name}' (declared {declared_type}) "
                     f"with a value of type {init_type}",
@@ -588,8 +576,8 @@ class SemanticAnalyzer:
             self.check_binary(Binary(op=stmt.op, left=target, right=stmt.value, line=stmt.line, col=stmt.col,
                                      file=stmt.file))
             return
-        value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, target_type)
-        if not self._types_compatible(value_type, target_type):
+        value_type = self.check_value_flowing_into_allowing_struct_literal(stmt.value, target_type)
+        if not self.types_compatible(value_type, target_type):
             raise SemanticError(f"Cannot assign a value of type {value_type} {what}", stmt)
         if isinstance(target, Variable) and self.facts.decls[target.nid] is not None:
             self._assignments.append(self.facts.decls[target.nid])  # the value was read as narrowed; no longer
@@ -609,8 +597,8 @@ class SemanticAnalyzer:
                 base_expr,
             )
         if base_type.kind == TypeKind.DICT:
-            index_type = self._check_value_flowing_into(index_expr, base_type.key_type)
-            if not self._types_compatible(index_type, base_type.key_type):
+            index_type = self.check_value_flowing_into(index_expr, base_type.key_type)
+            if not self.types_compatible(index_type, base_type.key_type):
                 raise SemanticError(
                     f"Dict declares key type {base_type.key_type}, but the "
                     f"index is {index_type}",
@@ -661,7 +649,7 @@ class SemanticAnalyzer:
                     stmt,
                 )
             return
-        value_type = self._check_value_flowing_into_allowing_struct_literal(stmt.value, return_type)
+        value_type = self.check_value_flowing_into_allowing_struct_literal(stmt.value, return_type)
         if return_type == Type.VOID:
             raise SemanticError(
                 f"Function has no declared return type and cannot "
@@ -669,7 +657,7 @@ class SemanticAnalyzer:
                 f"'return' instead",
                 stmt,
             )
-        if not self._types_compatible(value_type, return_type):
+        if not self.types_compatible(value_type, return_type):
             raise SemanticError(
                 f"Function is declared to return {return_type}, but this "
                 f"'return' statement returns {value_type}",
@@ -930,7 +918,7 @@ class SemanticAnalyzer:
         elif isinstance(expr, Slice):
             result = self.check_slice(expr)
         elif isinstance(expr, Call):
-            result = self.check_call(expr)
+            result = self.calls.check_call(expr)
         elif isinstance(expr, Unary):
             result = self.check_unary(expr)
         elif isinstance(expr, Cast):
@@ -950,15 +938,15 @@ class SemanticAnalyzer:
         value_type = self._type(expr.value_type, expr)
         seen_constant_keys = set()
         for key_expr, value_expr in expr.entries:
-            actual_key_type = self._check_value_flowing_into(key_expr, key_type)
-            if not self._types_compatible(actual_key_type, key_type):
+            actual_key_type = self.check_value_flowing_into(key_expr, key_type)
+            if not self.types_compatible(actual_key_type, key_type):
                 raise SemanticError(
                     f"Dict literal declares key type {key_type}, but a "
                     f"key is {actual_key_type}",
                     key_expr,
                 )
-            actual_value_type = self._check_value_flowing_into_allowing_struct_literal(value_expr, value_type)
-            if not self._types_compatible(actual_value_type, value_type):
+            actual_value_type = self.check_value_flowing_into_allowing_struct_literal(value_expr, value_type)
+            if not self.types_compatible(actual_value_type, value_type):
                 raise SemanticError(
                     f"Dict literal declares value type {value_type}, but a "
                     f"value is {actual_value_type}",
@@ -981,8 +969,8 @@ class SemanticAnalyzer:
         """`[]T[e, ...]`."""
         element_type = self._type(expr.element_type, expr)
         for i, element in enumerate(expr.elements, start=1):
-            actual = self._check_value_flowing_into_allowing_struct_literal(element, element_type)
-            if not self._types_compatible(actual, element_type):
+            actual = self.check_value_flowing_into_allowing_struct_literal(element, element_type)
+            if not self.types_compatible(actual, element_type):
                 raise SemanticError(
                     f"Slice literal declares element type {element_type}, but element {i} is {actual}", element)
         return Type(TypeKind.SLICE, element_type=element_type)
@@ -1006,9 +994,9 @@ class SemanticAnalyzer:
                     expr,
                 )
             for i, element in enumerate(expr.elements, start=1):
-                element_type = self._check_value_flowing_into_allowing_struct_literal(
+                element_type = self.check_value_flowing_into_allowing_struct_literal(
                     element, declared_type.element_type)
-                if not self._types_compatible(element_type, declared_type.element_type):
+                if not self.types_compatible(element_type, declared_type.element_type):
                     raise SemanticError(
                         f"Array literal declares element type "
                         f"{declared_type.element_type}, but element {i} "
@@ -1019,8 +1007,8 @@ class SemanticAnalyzer:
 
         if expected_element_type is not None:
             for i, element in enumerate(expr.elements, start=1):
-                element_type = self._check_value_flowing_into_allowing_struct_literal(element, expected_element_type)
-                if not self._types_compatible(element_type, expected_element_type):
+                element_type = self.check_value_flowing_into_allowing_struct_literal(element, expected_element_type)
+                if not self.types_compatible(element_type, expected_element_type):
                     raise SemanticError(
                         f"Array literal's elements must all be "
                         f"{expected_element_type} (to match the "
@@ -1033,7 +1021,7 @@ class SemanticAnalyzer:
         if len(expr.elements) == 0:
             raise SemanticError("Array literals must have at least one element", expr)
         try:  # what its type would be written as, if the first element says
-            written = f"[{len(expr.elements)}]{self._check_expr_allowing_struct_literal(expr.elements[0])}"
+            written = f"[{len(expr.elements)}]{self.check_expr_allowing_struct_literal(expr.elements[0])}"
         except SemanticError:
             written = f"[{len(expr.elements)}]T"
         raise SemanticError(
@@ -1054,25 +1042,25 @@ class SemanticAnalyzer:
         (or `!=`, either way round), whose literal takes the elements of xs. None for any other expression."""
         left_untyped, right_untyped = (self._untyped_array_literal(e) for e in (expr.left, expr.right))
         if expr.op == BinaryOp.IN and right_untyped and not left_untyped:
-            if self._as_folded_int_literal(expr.left) is not None:
+            if self.as_folded_int_literal(expr.left) is not None:
                 # `1 in [a, b]`: an integer literal has no type of its own either, so the first element
                 # that isn't one says what they all are (int, if none does).
-                typed_elements = [e for e in expr.right.elements if self._as_folded_int_literal(e) is None]
-                element_type = self._check_expr_allowing_struct_literal(typed_elements[0]) if typed_elements \
+                typed_elements = [e for e in expr.right.elements if self.as_folded_int_literal(e) is None]
+                element_type = self.check_expr_allowing_struct_literal(typed_elements[0]) if typed_elements \
                     else Type.INT
                 right_type = self._array_literal_of(expr.right, element_type)
-                return self._check_value_flowing_into(expr.left, element_type), right_type
-            left_type = self._check_expr_allowing_struct_literal(expr.left)
+                return self.check_value_flowing_into(expr.left, element_type), right_type
+            left_type = self.check_expr_allowing_struct_literal(expr.left)
             return left_type, self._array_literal_of(expr.right, left_type)
         if expr.op == BinaryOp.IN and left_untyped and not right_untyped:
             # `[1, 2] in rows`: the literal is one of the right side's elements.
-            right_type = self._check_expr_allowing_struct_literal(expr.right)
+            right_type = self.check_expr_allowing_struct_literal(expr.right)
             if right_type.kind in (TypeKind.ARRAY, TypeKind.SLICE) and right_type.element_type.kind == TypeKind.ARRAY:
                 return self._array_literal_of(expr.left, right_type.element_type.element_type), right_type
             return None
         if expr.op in _EQUALITY_OPS and left_untyped != right_untyped:
             literal, other = (expr.left, expr.right) if left_untyped else (expr.right, expr.left)
-            other_type = self._check_expr_allowing_struct_literal(other)
+            other_type = self.check_expr_allowing_struct_literal(other)
             if other_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE):
                 return None  # nothing to take a type from: the literal says so when it is checked
             literal_type = self._array_literal_of(literal, other_type.element_type)
@@ -1096,7 +1084,7 @@ class SemanticAnalyzer:
                 raise SemanticError(f"Reference to undeclared variable '{shown(key)}'", expr)
             self.facts.const_refs[expr.nid] = key
             return self.constants.type_of(key)
-        enum = self._enum_named_by(expr.base)
+        enum = self.enum_named_by(expr.base)
         if enum is not None:  # `Enum.Member`
             members = self.decls.enums[enum].members
             if expr.name not in members:
@@ -1106,7 +1094,7 @@ class SemanticAnalyzer:
             return Type(TypeKind.ENUM, enum_name=enum)
         return self._check_struct_and_field(expr.base, expr.name)
 
-    def _enum_named_by(self, expr: Node) -> Optional[str]:
+    def enum_named_by(self, expr: Node) -> Optional[str]:
         """The key of the enum that `expr` names (`Enum`, or `alias.Enum`), unless a variable has the name."""
         if isinstance(expr, Variable) and not self.scopes.is_local(expr.name):
             key = self.scope.resolve(expr.name)
@@ -1118,7 +1106,7 @@ class SemanticAnalyzer:
 
     def _check_struct_and_field(self, base_expr: Node, field_name: str) -> Type:
         """Check base is a struct (auto-deref pointers) with field `field_name`."""
-        base_type = self._check_expr_allowing_struct_literal(base_expr)
+        base_type = self.check_expr_allowing_struct_literal(base_expr)
         if base_type.kind == TypeKind.POINTER and base_type.element_type.kind == TypeKind.STRUCT:
             base_type = base_type.element_type
         if base_type.kind != TypeKind.STRUCT:
@@ -1132,98 +1120,21 @@ class SemanticAnalyzer:
                 f"Struct '{shown(base_type.struct_name)}' has no field '{field_name}'",
                 base_expr,
             )
-        if self._hidden(base_type.struct_name, field_name):
+        if self.hidden(base_type.struct_name, field_name):
             raise SemanticError(
                 f"Field '{field_name}' of '{shown(base_type.struct_name)}' is not visible outside the module that "
                 f"defines the struct -- names starting with '_' are private to their own module", base_expr)
         return struct_info.fields[field_name]
 
-    def _hidden(self, struct: str, name: str) -> bool:
+    def hidden(self, struct: str, name: str) -> bool:
         """Whether `name`, a field or method of `struct`, is private to another module: it starts with
         `_`, and the struct is declared in a different file from the one being checked."""
         declared_in = struct.rsplit('$', 1)[0] if '$' in struct else None
         return name.startswith('_') and declared_in != self.scope.module
 
-    def check_struct_literal(self, expr: Call) -> Type:
-        """`Name(args)`: positional struct literal; must be exhaustive."""
-        name = self._struct_literal(expr)
-        self._record_call(expr, name)
-        struct_info = self.decls.structs[name]
-        field_items = list(struct_info.fields.items())
-        if expr.kwargs is not None:
-            return self._check_named_struct_literal(expr, struct_info, field_items)
-        private = [field for field, _ in field_items if self._hidden(name, field)]
-        if private:  # it would have to give them values
-            raise SemanticError(
-                f"'{shown(name)}(...)' gives every field by position, but {', '.join(private)} "
-                f"{'is' if len(private) == 1 else 'are'} private to the module that defines '{shown(name)}' -- "
-                f"name the public fields instead (`{shown(name)}(field=value)`); private ones start as zero", expr)
-        if len(expr.args) != len(field_items):
-            field_names = ', '.join(name for name, _ in field_items)
-            raise SemanticError(
-                f"Struct literal for '{shown(name)}' expects "
-                f"{len(field_items)} argument(s) (one per field, in "
-                f"declaration order: {field_names}), got {len(expr.args)}",
-                expr,
-            )
-        for i, (arg, (field_name, field_type)) in enumerate(zip(expr.args, field_items), start=1):
-            arg_type = self._check_value_flowing_into_allowing_struct_literal(arg, field_type)
-            if not self._types_compatible(arg_type, field_type):
-                raise SemanticError(
-                    f"Argument {i} to struct literal '{shown(name)}' "
-                    f"(field '{field_name}') should be {field_type}, "
-                    f"got {arg_type}",
-                    arg,
-                )
-        result = Type(TypeKind.STRUCT, struct_name=name)
-        self.facts.types[expr.nid] = result
-        return result
 
-    def _check_named_struct_literal(self, expr: Call, struct_info: StructInfo, field_items: list) -> Type:
-        """`Name(f=v, ...)`: named struct literal; omitted fields are zero."""
-        name = struct_info.name
-        field_types = struct_info.fields
-        valid_names = ', '.join(name for name, _ in field_items)
-        seen = set()
-        for field_name, value in expr.kwargs:
-            if field_name not in field_types:
-                raise SemanticError(
-                    f"Struct literal for '{shown(name)}' has no field "
-                    f"'{field_name}' -- valid fields are: {valid_names}",
-                    expr,
-                )
-            if self._hidden(name, field_name):
-                raise SemanticError(
-                    f"Field '{field_name}' of '{shown(name)}' is not visible outside the module that defines the "
-                    f"struct -- names starting with '_' are private to their own module", expr)
-            if field_name in seen:
-                raise SemanticError(
-                    f"Field '{field_name}' specified more than once in "
-                    f"struct literal for '{shown(name)}'",
-                    expr,
-                )
-            seen.add(field_name)
-            value_type = self._check_value_flowing_into_allowing_struct_literal(value, field_types[field_name])
-            expected_type = field_types[field_name]
-            if not self._types_compatible(value_type, expected_type):
-                raise SemanticError(
-                    f"Field '{field_name}' of struct literal '{shown(name)}' "
-                    f"should be {expected_type}, got {value_type}",
-                    value,
-                )
-        for field_name, field_type in field_types.items():
-            if field_name not in seen:
-                missing = self._without_zero_value(field_type)
-                if missing is not None:
-                    raise SemanticError(
-                        f"Struct literal for '{shown(name)}' omits field '{field_name}', but {missing} has no "
-                        f"zero value (only a sum type with a `none` variant does) -- give the field a value",
-                        expr)
-        result = Type(TypeKind.STRUCT, struct_name=name)
-        self.facts.types[expr.nid] = result
-        return result
 
-    def _without_zero_value(self, t: Type, seen: Optional[set] = None) -> Optional[Type]:
+    def without_zero_value(self, t: Type, seen: Optional[set] = None) -> Optional[Type]:
         """The sum type that keeps `t` from having a zero value, or None if it has one. A sum's zero
         value is its `none` variant; a struct or array has one if all its parts do."""
         seen = set() if seen is None else seen
@@ -1234,308 +1145,21 @@ class SemanticAnalyzer:
         if t.kind == TypeKind.STRUCT and t.struct_name not in seen:
             seen.add(t.struct_name)
             for field_type in self.decls.structs[t.struct_name].fields.values():
-                missing = self._without_zero_value(field_type, seen)
+                missing = self.without_zero_value(field_type, seen)
                 if missing is not None:
                     return missing
         return None
 
-    def _check_method_call(self, expr: Call) -> Type:
-        """Resolve `receiver.name(args)` to its method: a call of the mangled function with the receiver
-        (or its address, for a pointer receiver) first."""
-        if expr.kwargs is not None:
-            raise SemanticError(
-                f"'{expr.name}(...)' uses named arguments, which are not "
-                f"supported for method calls",
-                expr,
-            )
-        receiver_type = self._check_expr_allowing_struct_literal(expr.receiver)
-        has_methods = (TypeKind.STRUCT, TypeKind.ENUM)
-        receiver_is_pointer = (receiver_type.kind == TypeKind.POINTER
-                               and receiver_type.element_type.kind in has_methods)
-        if receiver_is_pointer:
-            # auto-deref
-            receiver_type = receiver_type.element_type
-        if receiver_type.kind not in has_methods:
-            raise SemanticError(
-                f"Cannot call method '{expr.name}' on a value of type "
-                f"{receiver_type} -- methods are only defined on structs and enums",
-                expr.receiver,
-            )
-        is_enum = receiver_type.kind == TypeKind.ENUM
-        owner = receiver_type.enum_name if is_enum else receiver_type.struct_name
-        key = (owner, expr.name)
-        if key not in self.decls.methods:
-            raise SemanticError(
-                f"{'Enum' if is_enum else 'Struct'} '{shown(owner)}' has no method "
-                f"'{expr.name}'",
-                expr,
-            )
-        if self._hidden(owner, expr.name):
-            raise SemanticError(
-                f"Method '{expr.name}' of '{shown(owner)}' is not visible outside the module "
-                f"that defines the {'enum' if is_enum else 'struct'} -- names starting with '_' are private to "
-                f"their own module", expr)
-        param_types, return_type, mangled_name = self.decls.methods[key]
-        receiver = expr.receiver
-        if key in self.decls.pointer_receivers and not receiver_is_pointer:
-            # Pointer receiver: pass the receiver's address.
-            is_place = isinstance(expr.receiver, (Variable, Field, Index)) or (
-                    isinstance(expr.receiver, Unary) and expr.receiver.op == UnaryOp.DEREFERENCE)
-            if not is_place or expr.receiver.nid in self.facts.enum_members:  # (`Color.Red` is a value)
-                raise SemanticError(
-                    f"Method '{expr.name}' on '{shown(owner)}' has a pointer receiver, so it "
-                    f"needs an addressable receiver (a variable, field, index, or dereference), not a temporary",
-                    expr.receiver,
-                )
-            if isinstance(receiver, Unary):
-                receiver = receiver.operand  # &(*p) is p
-            else:
-                receiver = Unary(op=UnaryOp.ADDRESS_OF, operand=receiver,
-                                 line=receiver.line, col=receiver.col, file=receiver.file)
-                self.check_expr(receiver)
-        if len(expr.args) != len(param_types):
-            raise SemanticError(
-                f"Method '{expr.name}' on '{shown(owner)}' "
-                f"expects {len(param_types)} argument(s), got "
-                f"{len(expr.args)}",
-                expr,
-            )
-        for i, (arg, expected_type) in enumerate(zip(expr.args, param_types), start=1):
-            actual_type = self._check_value_flowing_into_allowing_struct_literal(arg, expected_type)
-            if not self._types_compatible(actual_type, expected_type):
-                raise SemanticError(
-                    f"Argument {i} to method '{expr.name}' on "
-                    f"'{shown(owner)}' should be "
-                    f"{expected_type}, got {actual_type}",
-                    arg,
-                )
-        self.facts.calls[expr.nid] = (mangled_name, [receiver] + list(expr.args))
-        self.facts.types[expr.nid] = return_type
-        return return_type
 
-    def _record_call(self, expr: Call, name: str) -> None:
-        """Note the key a call refers to, unless it's the name as written."""
-        if name != expr.name or expr.receiver is not None:
-            self.facts.calls[expr.nid] = (name, list(expr.args))
 
-    def check_call(self, expr: Call) -> Type:
-        name = self._callee(expr)
-        if name is None:
-            # Receiver present (and not a module) means method call, checked first.
-            return self._check_method_call(expr)
-        if name in self.decls.structs:
-            raise SemanticError(
-                f"'{expr.name}(...)' is a struct literal, which is only "
-                f"allowed as a variable's initializer, a plain "
-                f"assignment's value, a direct function-call or "
-                f"method-call argument, a method-call receiver, a "
-                f"direct return value, an array literal's own "
-                f"element, an assigned element or field, an assigned "
-                f"field's base, a field-access "
-                f"base, a binary operand, or a bare statement -- not "
-                f"most other kinds of expressions (an Index/Slice "
-                f"base, a Cast's own expression, ...); assign it to a "
-                f"variable first if you need it in one of those "
-                f"positions",
-                expr,
-            )
-        if expr.kwargs is not None:
-            raise SemanticError(
-                f"'{expr.name}(...)' uses named arguments, which are "
-                f"only supported for struct literals, not function calls",
-                expr,
-            )
-        if name == 'print':
-            return self.check_print_call(expr)
-        if name == 'len':
-            return self.check_len_call(expr)
-        if name == 'append':
-            return self.check_append_call(expr)
-        if name == 'del':
-            return self.check_del_call(expr)
-        if name == 'bytes':
-            return self.check_bytes_call(expr)
-        if name == 'panic':
-            return self.check_panic_call(expr)
-        if name == 'format':
-            return self.check_format_call(expr)
-        if name in self.decls.enums:
-            return self.check_enum_conversion(expr, name)
-        visible = expr.nid in self.module_set.qualified or self.scope.resolve(expr.name) is not None
-        if name not in self.decls.functions or not visible:  # another module's extern needs an import too
-            raise SemanticError(f"Call to undeclared function '{shown(name)}'", expr)
-        param_types, return_type = self.decls.functions[name]
-        self._record_call(expr, name)
 
-        if len(expr.args) != len(param_types):
-            raise SemanticError(
-                f"Function '{shown(name)}' expects {len(param_types)} "
-                f"argument(s), got {len(expr.args)}",
-                expr,
-            )
-        for i, (arg, expected_type) in enumerate(zip(expr.args, param_types), start=1):
-            actual_type = self._check_value_flowing_into_allowing_struct_literal(arg, expected_type)
-            if not self._types_compatible(actual_type, expected_type):
-                raise SemanticError(
-                    f"Argument {i} to '{shown(name)}' should be "
-                    f"{expected_type}, got {actual_type}",
-                    arg,
-                )
-        return return_type
 
-    def check_print_call(self, expr: Call) -> Type:
-        """`print(x)` for any non-void type."""
-        if len(expr.args) != 1:
-            raise SemanticError(
-                f"'print' expects exactly 1 argument, got {len(expr.args)}",
-                expr,
-            )
-        arg_type = self._check_expr_allowing_struct_literal(expr.args[0])
-        if arg_type in (Type.VOID, Type.NEVER):
-            raise SemanticError(
-                "'print' cannot be called with the result of a function "
-                "that has no declared return type -- there's no value there to print",
-                expr.args[0],
-            )
-        return Type.VOID
 
-    def check_panic_call(self, expr: Call) -> Type:
-        """`panic(message)`: report a str with the call's position and abort."""
-        if len(expr.args) != 1:
-            raise SemanticError(f"'panic' expects exactly 1 argument, got {len(expr.args)}", expr)
-        arg_type = self.check_expr(expr.args[0])
-        if arg_type != Type.STR:
-            raise SemanticError(f"'panic' expects a str, got {arg_type}", expr.args[0])
-        return Type.NEVER
 
-    def check_format_call(self, expr: Call) -> Type:
-        """`format(template, args...)`: a str, the template with each `{}` replaced by the next
-        argument as print shows it. The template is known here, so it is checked against them."""
-        if not expr.args:
-            raise SemanticError("'format' expects a template, then a value for each '{}' in it", expr)
-        template = expr.args[0]
-        if self.check_expr(template) != Type.STR:
-            raise SemanticError(
-                f"'format' expects a str template first, got {self.facts.types[template.nid]}", template)
-        try:
-            text = self.constants.evaluate(template)
-        except SemanticError:
-            raise SemanticError(
-                "'format' needs its template as a string literal or a constant, so that it can be checked "
-                "against the values", template) from None
-        try:
-            holes = len(typed.format_pieces(text)) - 1
-        except ValueError as problem:
-            raise SemanticError(f"In this 'format' template: {problem}", template) from None
-        values = expr.args[1:]
-        if holes != len(values):
-            raise SemanticError(
-                f"This 'format' template has {holes} '{{}}' placeholder{'' if holes == 1 else 's'}, "
-                f"but {len(values)} value{' was' if len(values) == 1 else 's were'} given", expr)
-        for value in values:
-            if self._check_expr_allowing_struct_literal(value) in (Type.VOID, Type.NEVER):
-                raise SemanticError(
-                    "'format' cannot show the result of a function that has no declared return type -- there's "
-                    "no value there", value)
-        self.facts.formats[expr.nid] = text
-        return Type.STR
 
-    def check_enum_conversion(self, expr: Call, enum: str) -> Type:
-        """`Enum(n)`: the member whose value is the integer `n`. Checked when it runs (a panic if there
-        is none), or here when `n` is a literal."""
-        members = self.decls.enums[enum].members
-        if len(expr.args) != 1:
-            raise SemanticError(
-                f"'{expr.name}(...)' converts one integer to the enum {shown(enum)}, got {len(expr.args)} arguments",
-                expr)
-        arg_type = self.check_expr(expr.args[0])
-        if arg_type not in _INTEGER_TYPES:
-            raise SemanticError(
-                f"'{expr.name}(...)' converts an integer to the enum {shown(enum)}, got {arg_type}", expr.args[0])
-        literal = self._as_folded_int_literal(expr.args[0])
-        if literal is not None and not 0 <= literal < len(members):
-            raise SemanticError(
-                f"{literal} is not a member of {shown(enum)} (its members' values are 0 to {len(members) - 1})",
-                expr.args[0]
-            )
-        self._record_call(expr, enum)
-        return Type(TypeKind.ENUM, enum_name=enum)
 
-    def check_len_call(self, expr: Call) -> Type:
-        """`len(x)` for arrays, slices, str, and dicts; `len(Enum)` is an enum's number of members."""
-        if len(expr.args) != 1:
-            raise SemanticError(
-                f"'len' expects exactly 1 argument, got {len(expr.args)}",
-                expr,
-            )
-        enum = self._enum_named_by(expr.args[0])
-        if enum is not None:
-            self.facts.enum_lens[expr.nid] = len(self.decls.enums[enum].members)
-            return Type.INT
-        arg_type = self.check_expr(expr.args[0])
-        if arg_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STR, TypeKind.DICT):
-            raise SemanticError(
-                f"'len' requires an array, slice, str, or dict argument, got {arg_type}",
-                expr.args[0],
-            )
-        return Type.INT
 
-    def check_append_call(self, expr: Call) -> Type:
-        """`append(s, v)` returns a new slice."""
-        if len(expr.args) != 2:
-            raise SemanticError(
-                f"'append' expects exactly 2 arguments, got {len(expr.args)}",
-                expr,
-            )
-        slice_arg, value_arg = expr.args
-        slice_type = self.check_expr(slice_arg)
-        if slice_type.kind != TypeKind.SLICE:
-            raise SemanticError(
-                f"'append' requires a slice as its first argument, "
-                f"got {slice_type}",
-                slice_arg,
-            )
-        value_type = self._check_value_flowing_into_allowing_struct_literal(value_arg, slice_type.element_type)
-        if not self._types_compatible(value_type, slice_type.element_type):
-            raise SemanticError(
-                f"'append' cannot append a value of type {value_type} "
-                f"to a {slice_type} (element type "
-                f"{slice_type.element_type})",
-                value_arg,
-            )
-        return slice_type
 
-    def check_bytes_call(self, expr: Call) -> Type:
-        """`bytes(s)`: a new []byte copy of str s."""
-        if len(expr.args) != 1 or expr.kwargs:
-            raise SemanticError(f"bytes() takes exactly one argument, got {len(expr.args)}", expr)
-        arg_type = self.check_expr(expr.args[0])
-        if arg_type != Type.STR:
-            raise SemanticError(f"bytes() takes a str, got {arg_type}", expr)
-        return _BYTE_SLICE
-
-    def check_del_call(self, expr: Call) -> Type:
-        """`del(d, key)` mutates d in place."""
-        if len(expr.args) != 2:
-            raise SemanticError(
-                f"'del' expects exactly 2 arguments, got {len(expr.args)}",
-                expr,
-            )
-        dict_arg, key_arg = expr.args
-        dict_type = self.check_expr(dict_arg)
-        if dict_type.kind != TypeKind.DICT:
-            raise SemanticError(
-                f"'del' requires a dict as its first argument, got {dict_type}",
-                dict_arg,
-            )
-        key_type = self._check_value_flowing_into(key_arg, dict_type.key_type)
-        if not self._types_compatible(key_type, dict_type.key_type):
-            raise SemanticError(
-                f"'del' cannot look up a key of type {key_type} in a "
-                f"{dict_type} (key type {dict_type.key_type})",
-                key_arg,
-            )
-        return Type.VOID
 
     def check_constant(self, expr: Constant) -> Type:
         if expr.value > 2**63 - 1:
@@ -1619,7 +1243,7 @@ class SemanticAnalyzer:
                 and expr.operand.value == 2**63):
             self.facts.types[expr.operand.nid] = Type.INT  # -2**63 is int's minimum
             return Type.INT
-        operand_type = self._check_expr_allowing_struct_literal(expr.operand)
+        operand_type = self.check_expr_allowing_struct_literal(expr.operand)
         if expr.op in (UnaryOp.NEGATE, UnaryOp.COMPLEMENT):
             if operand_type not in _INTEGER_TYPES:
                 raise SemanticError(
@@ -1648,7 +1272,7 @@ class SemanticAnalyzer:
                 raise SemanticError(
                     f"Cannot take the address of the enum member '{operand_type}.{expr.operand.name}'", expr)
             # Only variables, struct literals, and chains rooted in a variable.
-            is_struct_literal = self._struct_literal(expr.operand) is not None
+            is_struct_literal = self.calls.struct_literal(expr.operand) is not None
             root_variable = self._root_variable_of(expr.operand) if isinstance(expr.operand, (Field, Index)) else None
             is_rooted_field_or_index = isinstance(expr.operand, (Field, Index)) and root_variable is not None
             if not (isinstance(expr.operand, Variable) or is_struct_literal or is_rooted_field_or_index):
@@ -1680,7 +1304,7 @@ class SemanticAnalyzer:
                 raise SemanticError(f"str(...) takes a byte, a []byte, or an enum (its member's name), "
                                     f"got {source_type}", expr)
             return Type.STR
-        if target_type == Type.INT64 and self._as_folded_int_literal(expr.expr) is not None:
+        if target_type == Type.INT64 and self.as_folded_int_literal(expr.expr) is not None:
             self._record_literal_type(expr.expr, Type.INT64)
             source_type = Type.INT64
         else:
@@ -1707,9 +1331,9 @@ class SemanticAnalyzer:
         return True  # integers, bool, str, pointers
 
     def check_binary(self, expr: Binary) -> Type:
-        if expr.op == BinaryOp.IN and self._enum_named_by(expr.right) is not None:
+        if expr.op == BinaryOp.IN and self.enum_named_by(expr.right) is not None:
             # `n in Enum`: whether the integer `n` is a member's value (so `Enum(n)` wouldn't panic).
-            enum = self._enum_named_by(expr.right)
+            enum = self.enum_named_by(expr.right)
             left_type = self.check_expr(expr.left)
             if left_type not in _INTEGER_TYPES:
                 raise SemanticError(
@@ -1720,11 +1344,11 @@ class SemanticAnalyzer:
         if with_literal is not None:
             left_type, right_type = with_literal
         else:
-            left_type = self._check_expr_allowing_struct_literal(expr.left)
+            left_type = self.check_expr_allowing_struct_literal(expr.left)
             mark = self.scopes.mark()
             if expr.op in _LOGICAL_OPS:  # the right side runs only when the left was true (`and`) or false (`or`)
                 self.scopes.apply(self.scopes.when(expr.left)[0 if expr.op == BinaryOp.AND else 1])
-            right_type = self._check_expr_allowing_struct_literal(expr.right)
+            right_type = self.check_expr_allowing_struct_literal(expr.right)
             self.scopes.end_region(mark)
         op = expr.op
         if op not in _LOGICAL_OPS and op != BinaryOp.IN:
@@ -1838,10 +1462,10 @@ class SemanticAnalyzer:
             # `1 in xs` from the keys or elements, the elements of `a in [1, 2]` from `a`.
             if right_type.kind in (TypeKind.DICT, TypeKind.ARRAY, TypeKind.SLICE):
                 wanted = right_type.key_type if right_type.kind == TypeKind.DICT else right_type.element_type
-                if self._as_folded_int_literal(expr.left) is not None and not self._untyped_array_literal(expr.right):
-                    left_type = self._check_value_flowing_into(expr.left, wanted)
+                if self.as_folded_int_literal(expr.left) is not None and not self._untyped_array_literal(expr.right):
+                    left_type = self.check_value_flowing_into(expr.left, wanted)
             if right_type.kind == TypeKind.DICT:
-                if not self._types_compatible(left_type, right_type.key_type):
+                if not self.types_compatible(left_type, right_type.key_type):
                     raise SemanticError(
                         f"Dict declares key type {right_type.key_type}, but 'in's "
                         f"own left operand is {left_type}",
@@ -1858,7 +1482,7 @@ class SemanticAnalyzer:
                         f"sum type, or dict",
                         expr.right,
                     )
-                if not self._types_compatible(left_type, element_type):
+                if not self.types_compatible(left_type, element_type):
                     raise SemanticError(
                         f"{right_type} declares element type {element_type}, "
                         f"but 'in's own left operand is {left_type}",
@@ -1888,10 +1512,10 @@ class SemanticAnalyzer:
     def _literal_operand_types(self, left: Node, left_type: Type, right: Node, right_type: Type) -> tuple:
         """Both operand types, once an integer literal (or its negation) beside an operand of a
         narrower integer type has taken that type: `fd < 0`, `1 + a`. It must be in range."""
-        if right_type in _NARROW_INT_RANGES and self._as_folded_int_literal(left) is not None:
-            left_type = self._check_value_flowing_into(left, right_type)
-        elif left_type in _NARROW_INT_RANGES and self._as_folded_int_literal(right) is not None:
-            right_type = self._check_value_flowing_into(right, left_type)
+        if right_type in _NARROW_INT_RANGES and self.as_folded_int_literal(left) is not None:
+            left_type = self.check_value_flowing_into(left, right_type)
+        elif left_type in _NARROW_INT_RANGES and self.as_folded_int_literal(right) is not None:
+            right_type = self.check_value_flowing_into(right, left_type)
         return left_type, right_type
 
     def _require_same_integer_type(self, left_type: Type, right_type: Type, op, node: Optional[Node] = None) -> Type:
