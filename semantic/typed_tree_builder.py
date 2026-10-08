@@ -19,16 +19,18 @@ class TypedTreeBuilder:
     """Builds the typed tree (typed_ast.py) from a checked program: every implicit operation becomes
     explicit, and values flowing into a slot of a known type go through `convert`."""
 
-    def __init__(self, analyzer: 'SemanticAnalyzer'):
-        self.facts = analyzer.facts
-        self.consts = analyzer.constants.values
-        self.symbols = analyzer.symbols
-        self.structs = analyzer.structs
-        self.sum_types = analyzer.sum_types
-        self.enums = analyzer.enums
-        self.functions = analyzer.functions
-        self.intrinsics = analyzer.intrinsic_original_names  # name -> the intrinsic's own name
-        self.externs = analyzer.extern_names
+    def __init__(self, facts, decls, consts: dict, symbols):
+        """What checking learned (Facts), what the program declares (Declarations), each constant's
+        (type, value) by key, and the symbol table."""
+        self.facts = facts
+        self.consts = consts
+        self.symbols = symbols
+        self.structs = decls.structs
+        self.sum_types = decls.sum_types
+        self.enums = decls.enums
+        self.functions = decls.functions
+        self.intrinsics = decls.intrinsic_original_names  # name -> the intrinsic's own name
+        self.externs = decls.extern_names
         self.return_type = None
 
     def ty(self, e) -> Type:

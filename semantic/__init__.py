@@ -11,24 +11,24 @@ and _TypedTreeBuilder builds each function's typed tree from those facts at the 
 
 import argparse
 import dataclasses
-import os
 from typing import Dict, List, Optional, Set, Tuple
 
-from diagnostics import CompileError, path_text, quoted_text
+from diagnostics import quoted_text
 from lexer import lex
 from semantic.constants import ConstEvaluator
+from semantic.declarations import DeclarationResolver, Declarations
 from semantic.errors import SemanticError, SemanticErrors
 from semantic.facts import Facts
+from semantic.types import TypeResolver, type_from_name  # noqa: F401 (type_from_name: for those who import it here)
 from semantic.typed_tree_builder import TypedTreeBuilder
-from typesys import INTEGER_TYPES, EnumInfo, StructInfo, SumTypeInfo, Type, TypeKind
+from typesys import INTEGER_TYPES, StructInfo, SumTypeInfo, Type, TypeKind  # noqa: F401 (some for importers)
 from ops import ORDERING_OPS
 import typed_ast as typed
-from scopes import BUILTIN_FUNCTION_NAMES, build_module_set, display_name as shown
+from scopes import build_module_set, display_name as shown
 from symbols import SymbolTable
 from parser import (
     ConstDecl,
     ArrayLiteral,
-    ArrayTypeExpr,
     Assign,
     Binary,
     BinaryOp,
@@ -40,36 +40,25 @@ from parser import (
     Constant,
     Continue,
     DictLiteral,
-    DictTypeExpr,
     ExprStmt,
-    ExternFunctionDecl,
     Field,
     QualifiedTypeExpr,
     READ_AS_A_TYPED_LITERAL,
     For,
     ForIn,
     Function,
-    MethodDef,
-    Param,
     If,
     Index,
-    IntrinsicDecl,
     IsCheck,
     Match,
     Node,
     NoneLiteral,
     Parser,
-    PointerTypeExpr,
     Program,
     Return,
     Slice,
     SliceLiteral,
-    SliceTypeExpr,
     StringLiteral,
-    EnumDef,
-    StructDef,
-    SumTypeDef,
-    TypeAlias,
     Unary,
     UnaryOp,
     VarDecl,
@@ -78,78 +67,8 @@ from parser import (
 )
 
 
-_TYPE_NAMES = {
-    'int': Type.INT,
-    'int8': Type.INT8,
-    'uint8': Type.UINT8,
-    # alias, not a distinct kind
-    'byte': Type.UINT8,
-    'int64': Type.INT64,
-    'int32': Type.INT32,
-    'bool': Type.BOOL,
-    'str': Type.STR,
-}
 
 
-def type_from_name(
-        type_expr,
-        structs: Dict[str, StructInfo],
-        aliases: Dict[str, Type],
-        node: Optional[Node] = None,
-        sum_types: Dict[str, SumTypeInfo] = None,
-        resolve=None,
-        enums: Dict[str, EnumInfo] = None,
-        array_sizes: Dict[int, int] = None,
-) -> Type:
-    """Resolve a parsed type expression to a Type. `resolve` maps a name as written in its file (or an
-    `alias.Name`) to its declaration's key (see scopes.py). `array_sizes` (Facts.array_sizes) has the
-    value of each `[EXPR]T` size that isn't a plain number."""
-    if isinstance(type_expr, ArrayTypeExpr):
-        element = type_from_name(type_expr.element_type, structs, aliases, node, sum_types, resolve, enums, array_sizes)
-        size = type_expr.size if isinstance(type_expr.size, int) else array_sizes[type_expr.nid]
-        return Type(TypeKind.ARRAY, element_type=element, size=size)
-    if isinstance(type_expr, SliceTypeExpr):
-        element = type_from_name(type_expr.element_type, structs, aliases, node, sum_types, resolve, enums, array_sizes)
-        return Type(TypeKind.SLICE, element_type=element)
-    if isinstance(type_expr, PointerTypeExpr):
-        # Pointer-to-pointer is rejected for now.
-        pointee = type_from_name(type_expr.pointee_type, structs, aliases, node, sum_types, resolve, enums, array_sizes)
-        if pointee.kind == TypeKind.POINTER:
-            raise SemanticError(
-                "Pointer-to-pointer types aren't supported yet -- "
-                "planned for later, once single-level pointers are proven out",
-                node,
-            )
-        return Type(TypeKind.POINTER, element_type=pointee)
-    if isinstance(type_expr, DictTypeExpr):
-        key_type = type_from_name(type_expr.key_type, structs, aliases, node, sum_types, resolve, enums, array_sizes)
-        value_type = type_from_name(
-            type_expr.value_type, structs, aliases, node, sum_types, resolve, enums, array_sizes)
-        if key_type not in _VALID_DICT_KEY_TYPES and key_type.kind != TypeKind.ENUM:
-            raise SemanticError(
-                f"'{key_type}' can't be a dict's own key type -- only "
-                f"int, int8, uint8, int32, bool, str, and enums are supported "
-                f"as dict keys right now",
-                node,
-            )
-        return Type(TypeKind.DICT, key_type=key_type, element_type=value_type)
-    if isinstance(type_expr, QualifiedTypeExpr) and resolve is not None:
-        type_expr = resolve(type_expr)
-    if type_expr in _TYPE_NAMES:
-        return _TYPE_NAMES[type_expr]
-    if type_expr == 'none':  # only a sum type's variant, or the type an `is` check narrows to
-        return Type.NONE
-    if resolve is not None:
-        type_expr = resolve(type_expr)
-    if type_expr in aliases:
-        return aliases[type_expr]
-    if type_expr in structs:
-        return Type(TypeKind.STRUCT, struct_name=type_expr)
-    if sum_types is not None and type_expr in sum_types:
-        return Type(TypeKind.SUM, sum_type_name=type_expr)
-    if enums is not None and type_expr in enums:
-        return Type(TypeKind.ENUM, enum_name=type_expr)
-    raise SemanticError(f"Unknown type '{type_expr}'", node)
 
 
 def _always_ends(statements: List[Node], types: dict, ends: tuple) -> bool:
@@ -196,9 +115,6 @@ def contains_reachable_break(statements: List[Node]) -> bool:
     return False
 
 
-def _file_and_line(node: Node) -> str:
-    """`file (line N)` of a declaration, for an error reported somewhere else."""
-    return f"{path_text(os.path.basename(node.file)) if node.file else '<input>'} (line {node.line})"
 
 
 def always_leaves(statements: List[Node], types: dict) -> bool:
@@ -261,21 +177,8 @@ def _either(a: dict, b: dict) -> dict:
     return {decl_id: (name, variants | b[decl_id][1]) for decl_id, (name, variants) in a.items() if decl_id in b}
 
 
-def mangle_method_name(struct_name: str, method_name: str) -> str:
-    """`Struct.method` (or `Enum.method`); '.' can't appear in identifiers, so no collisions."""
-    return f"{struct_name}.{method_name}"
 
 
-def _method_function(sd, md: MethodDef) -> Function:
-    """A method of the struct or enum `sd` as the function it compiles to: its mangled name, and the
-    receiver as the first parameter (`*S` for a pointer receiver). New nodes; the program's own are
-    left as they are."""
-    receiver_type = sd.name
-    if md.receiver_is_pointer:
-        receiver_type = PointerTypeExpr(pointee_type=sd.name, line=md.line, col=md.col, file=md.file)
-    receiver = Param(name=md.receiver_name, type=receiver_type, line=md.line, col=md.col, file=md.file)
-    return Function(name=mangle_method_name(sd.name, md.name), return_type=md.return_type,
-                    params=[receiver] + md.params, body=md.body, line=md.line, col=md.col, file=md.file)
 
 
 _BYTE_SLICE = Type(TypeKind.SLICE, element_type=Type.UINT8)
@@ -301,7 +204,6 @@ _EQUALITY_OPS = {BinaryOp.EQUAL, BinaryOp.NOT_EQUAL}
 _LOGICAL_OPS = {BinaryOp.AND, BinaryOp.OR}
 
 _INTEGER_TYPES = INTEGER_TYPES
-_VALID_DICT_KEY_TYPES = _INTEGER_TYPES | {Type.BOOL, Type.STR}
 
 # Literal ranges for narrow integer types.
 _NARROW_INT_RANGES = {
@@ -357,13 +259,7 @@ class SemanticAnalyzer:
     def __init__(self):
         self.scopes: List[Dict[str, Tuple[Type, object]]] = []  # name -> (type, decl id)
         self.loop_depth = 0  # enclosing loop count
-        self.functions: Dict[str, tuple] = {}  # name -> (param types, return type)
-        self.structs: Dict[str, StructInfo] = {}
-        # (struct, method) -> (param types, return type, mangled name)
-        self.methods: Dict[Tuple[str, str], Tuple[List[Type], Type, str]] = {}
-        self.pointer_receivers: set = set()  # (struct, method) with a `*receiver`
-        self.type_aliases: Dict[str, Type] = {}
-        self.sum_types: Dict[str, SumTypeInfo] = {}
+        self.decls = Declarations()  # what the program declares (semantic/declarations.py), read as `self.decls.X`
         self._declared: List[Set[str]] = []  # per scope: the names declared in it (not merely narrowed)
         # Sum variables an `is` check has narrowed here: decl id -> the variants it may still hold.
         self._possible: Dict[int, frozenset] = {}
@@ -378,101 +274,20 @@ class SemanticAnalyzer:
         program = build_module_set(entry, modules or {})
         self.module_set = program
         self.scope = program.files[0][1]
-        # Each method is checked and compiled as a function of its own (see _method_function).
-        methods = [(_method_function(sd, md), sd) for sd in list(program.structs) + list(program.enums)
-                   for md in sd.methods]
-        for fn, sd in methods:
-            program.scope_of[fn.nid] = program.scope_of[sd.nid]
-        self.all_functions = list(program.functions) + [fn for fn, _ in methods]
-        # Order matters: 0. enums depend on nothing, and constant array sizes are evaluated before any
-        # type is resolved.
-        self.enums = self._collect_enums(program.enums)
-        self.constants = ConstEvaluator(self.facts, self.enums, self._check_const_declaration)
-        self.constants.declare(program.consts)
-        self._resolve_array_sizes(program)
-
-        # 1. Reserve struct names so aliases can target them.
-        struct_registry = self._reserve_struct_names(program.structs)
-
-        # 2. Resolve aliases before struct fields, which may use them.
-        self.type_aliases = self._collect_type_aliases(program.type_aliases, struct_registry)
-
-        # 3. Resolve struct fields; sum-type names are reserved first so fields can name them.
-        reserved_sums = {std.name: None for std in program.sum_types}
-        self.structs = self._resolve_struct_fields(program.structs, struct_registry, reserved_sums)
-
-        # 3.5. Sum types need resolved structs. Then no type may contain itself by value.
-        self.sum_types = self._resolve_sum_types(program.sum_types, self.structs)
-        self._check_value_containment(program)
-
-        # 3.6. Methods, after struct resolution.
-        self.methods = self._collect_methods(program)
-
-        # 4. All signatures before any body, so order doesn't matter.
-        self.functions = {}
-        self.intrinsic_original_names = {}  # mangled name -> original_name
-        for fn in self.all_functions:
-            self._enter(fn)
-            if shown(fn.name) in BUILTIN_FUNCTION_NAMES:
-                raise SemanticError(
-                    f"'{shown(fn.name)}' is a builtin and can't be redefined as "
-                    f"a function",
-                    fn,
-                )
-            if fn.name in self.structs:
-                raise SemanticError(
-                    f"Function '{shown(fn.name)}' collides with a struct of the "
-                    f"same name -- struct and function names share one "
-                    f"namespace and can never be the same, since "
-                    f"'{shown(fn.name)}(...)' would otherwise be ambiguous "
-                    f"between a call and a struct literal",
-                    fn,
-                )
-            if fn.name in self.type_aliases:
-                raise SemanticError(
-                    f"Function '{shown(fn.name)}' collides with a type alias "
-                    f"of the same name -- function and type-alias "
-                    f"names share one namespace and can never be the "
-                    f"same",
-                    fn,
-                )
-            if fn.name in self.sum_types:
-                raise SemanticError(
-                    f"Function '{shown(fn.name)}' collides with a sum type "
-                    f"of the same name -- function and sum-type names "
-                    f"share one namespace and can never be the same",
-                    fn,
-                )
-            if fn.name in self.functions:
-                raise SemanticError(f"Function '{shown(fn.name)}' is already declared", fn)
-            param_types = [self._type(p.type, p) for p in fn.params]
-            self.functions[fn.name] = (param_types, self._return_type(fn))
-
-        # 4.5. Externs share the function registry.
-        self.extern_names = {ext.name for ext in program.extern_functions}
-        self._extern_decls = {}  # name -> its declaration, for the duplicate's error
-        for ext in program.extern_functions:
-            self._enter(ext)
-            self.check_extern_function_decl(ext)
-
-        # 4.6. Intrinsics share the function registry.
-        for ic in program.intrinsics:
-            self._enter(ic)
-            self.check_intrinsic_decl(ic)
-
-        self._check_enum_name_collisions(program)
-
-        # 4.7. Constant values, in dependency order.
-        self.constants.evaluate_all()
-        self._check_const_name_collisions(program)
+        # Declarations first, all of them: what each body is then checked against.
+        self.decls = Declarations()
+        self.types = TypeResolver(self.decls, program, self.facts.array_sizes)
+        self.constants = ConstEvaluator(self.facts, self.decls.enums, self._check_const_declaration)
+        DeclarationResolver(
+            program, self.decls, self.types, self.facts, self.constants, self._array_size_value).resolve()
 
         # 5. Check bodies, collecting at most one error per function.
         errors: List[SemanticError] = []
-        for fn in self.all_functions:
+        for fn in self.decls.all_functions:
             try:
                 self.analyze_function(fn)
                 if fn.name == 'main':
-                    _check_main_signature(fn, *self.functions['main'])
+                    _check_main_signature(fn, *self.decls.functions['main'])
             except SemanticError as e:
                 if e.file is None:
                     e.file = fn.file
@@ -485,7 +300,8 @@ class SemanticAnalyzer:
             raise SemanticErrors(errors)
 
         # 6. The typed tree: what later stages consume.
-        return TypedTreeBuilder(self).program(self.all_functions)
+        return TypedTreeBuilder(self.facts, self.decls, self.constants.values, self.symbols).program(
+            self.decls.all_functions)
 
     # -- names across modules
 
@@ -495,15 +311,10 @@ class SemanticAnalyzer:
 
     def _resolve_type_name(self, name):
         """A type name (or `alias.Name`) as written in the current file -> its declaration's key."""
-        if isinstance(name, QualifiedTypeExpr):
-            if name.nid not in self.module_set.qualified:  # scopes.py left it: `Enum.Member`
-                raise SemanticError(f"'{name.module}.{name.name}' is an enum's member, not a type", name)
-            return self.module_set.qualified[name.nid]
-        return (self.scope.resolve(name) or name) if isinstance(name, str) else name
+        return self.types.key(name, self.scope)
 
     def _type(self, type_expr, node: Node, sums: bool = True) -> Type:
-        return type_from_name(type_expr, self.structs, self.type_aliases, node, self.sum_types if sums else None,
-                              resolve=self._resolve_type_name, enums=self.enums, array_sizes=self.facts.array_sizes)
+        return self.types.resolve(type_expr, node, self.scope, sums)
 
     def _const_key(self, name: str) -> Optional[str]:
         """The key of the constant a bare name refers to in the current file, if it names one."""
@@ -525,45 +336,24 @@ class SemanticAnalyzer:
         """The struct's key if `expr` is a struct literal."""
         if isinstance(expr, Call):
             name = self._callee(expr)
-            if name in self.structs:
+            if name in self.decls.structs:
                 return name
         return None
 
     # -- constants
 
-    def _resolve_array_sizes(self, program: Program) -> None:
-        """Record each `[EXPR]T` size's value (in Facts.array_sizes): a positive integer computed from
-        literals and constants only (whose types must therefore be builtin)."""
-        for file_program, scope in program.files:
-            self.scope = scope
-            self._resolve_array_sizes_in(file_program)
-        self.scope = program.files[0][1]
 
-    def _resolve_array_sizes_in(self, program: Program) -> None:
-        seen = set()
-        stack = [program]
-        while stack:
-            node = stack.pop()
-            if node.nid in seen:
-                continue
-            seen.add(node.nid)
-            if isinstance(node, ArrayTypeExpr) and not isinstance(node.size, int):
-                self.facts.array_sizes[node.nid] = self._array_size_value(node.size)
-            if isinstance(node, ArrayLiteral) and node.could_be_multiplication:
-                try:  # its sizes now, to say how it was read if one is no constant
-                    self._resolve_array_sizes_in(node.type_expr)
-                except SemanticError as problem:
-                    raise SemanticError(problem.message + READ_AS_A_TYPED_LITERAL, node) from None
-            if dataclasses.is_dataclass(node) and not isinstance(node, type):
-                for f in dataclasses.fields(node):
-                    value = getattr(node, f.name)
-                    for v in value if isinstance(value, (list, tuple)) else [value]:
-                        if isinstance(v, (Node, Program)):
-                            stack.append(v)
-                        elif isinstance(v, tuple):
-                            stack.extend(x for x in v if isinstance(x, Node))
 
-    def _array_size_value(self, expr: Node) -> int:
+    def _array_size_value(self, expr: Node, scope) -> int:
+        """The value of an array-size expression written in the file whose scope is `scope`: a positive
+        integer computed from literals and constants only. (For DeclarationResolver.)"""
+        saved_scope, self.scope = self.scope, scope
+        try:
+            return self._array_size_value_here(expr)
+        finally:
+            self.scope = saved_scope
+
+    def _array_size_value_here(self, expr: Node) -> int:
         stack = [expr]
         while stack:
             node = stack.pop()
@@ -591,41 +381,8 @@ class SemanticAnalyzer:
             raise SemanticError(f"Array size must be positive, got {value}", expr)
         return value
 
-    def _collect_enums(self, enum_defs: List[EnumDef]) -> Dict[str, EnumInfo]:
-        """The enum registry: each enum's members, distinct and at least one."""
-        registry: Dict[str, EnumInfo] = {}
-        for ed in enum_defs:
-            self._enter(ed)
-            if shown(ed.name) in BUILTIN_FUNCTION_NAMES:
-                raise SemanticError(f"'{shown(ed.name)}' is a builtin and can't be used as an enum name", ed)
-            if ed.name in registry:
-                raise SemanticError(f"Enum '{shown(ed.name)}' is already declared", ed)
-            names: List[str] = []
-            for member in ed.members:
-                if member.name in names:
-                    raise SemanticError(
-                        f"Member '{member.name}' is already declared in enum '{shown(ed.name)}'", member)
-                names.append(member.name)
-            registry[ed.name] = EnumInfo(name=ed.name, members=names)
-        return registry
 
-    def _check_enum_name_collisions(self, program: Program) -> None:
-        for ed in program.enums:
-            for kind, table in (('function', self.functions), ('struct', self.structs),
-                                ('constant', self.constants.decls), ('type alias', self.type_aliases),
-                                ('sum type', self.sum_types)):
-                if ed.name in table:
-                    self._enter(ed)
-                    raise SemanticError(f"Enum '{shown(ed.name)}' collides with a {kind} of the same name", ed)
 
-    def _check_const_name_collisions(self, program: Program) -> None:
-        for name, cd in self.constants.decls.items():
-            for kind, table in (('function', self.functions), ('struct', self.structs),
-                                ('type alias', self.type_aliases), ('sum type', self.sum_types)):
-                if name in table:
-                    raise SemanticError(f"Constant '{shown(name)}' collides with a {kind} of the same name", cd)
-            if shown(name) in BUILTIN_FUNCTION_NAMES:
-                raise SemanticError(f"'{shown(name)}' is a builtin and can't be used as a constant name", cd)
 
     def _check_const_declaration(self, cd: ConstDecl) -> Type:
         """Check a constant's declaration, in the scope of the file that declares it and with no
@@ -648,347 +405,13 @@ class SemanticAnalyzer:
             self.scope, self.scopes = saved_scope, saved_scopes
         return const_type
 
-    def _resolve_sum_types(
-            self, sum_type_defs: List[SumTypeDef], structs: Dict[str, StructInfo]) -> Dict[str, SumTypeInfo]:
-        """Resolve sum type variants and check name collisions."""
-        registry: Dict[str, SumTypeInfo] = {}
-        sum_names = {std.name: None for std in sum_type_defs}
-        for std in sum_type_defs:
-            if shown(std.name) in BUILTIN_FUNCTION_NAMES:
-                raise SemanticError(
-                    f"'{shown(std.name)}' is a builtin and can't be used as a "
-                    f"sum type name",
-                    std,
-                )
-            if std.name in structs:
-                raise SemanticError(
-                    f"Sum type '{shown(std.name)}' collides with a struct of "
-                    f"the same name -- struct and sum-type names share "
-                    f"one namespace and can never be the same",
-                    std,
-                )
-            if std.name in self.type_aliases:
-                raise SemanticError(
-                    f"Sum type '{shown(std.name)}' collides with a type alias "
-                    f"of the same name -- type-alias and sum-type names "
-                    f"share one namespace and can never be the same",
-                    std,
-                )
-            if std.name in registry:
-                raise SemanticError(f"Sum type '{shown(std.name)}' is already declared", std)
 
-            self._enter(std)
-            resolved_variants: List[Type] = []
-            for variant_name in std.variants:
-                if any(sd.name == self._resolve_type_name(variant_name) for sd in sum_type_defs):
-                    raise SemanticError(
-                        f"Sum type '{shown(std.name)}' names '{variant_name}' as "
-                        f"a variant, but '{variant_name}' is itself a sum "
-                        f"type -- a sum type's variants can't include "
-                        f"another sum type yet",
-                        std,
-                    )
-                try:
-                    # A sum can't be a variant itself (above), but a pointer to one, or a slice or
-                    # dict of them, can: the names of the sums are enough to resolve those.
-                    variant_type = type_from_name(
-                        variant_name, structs, self.type_aliases, std, sum_names, resolve=self._resolve_type_name,
-                        enums=self.enums, array_sizes=self.facts.array_sizes)
-                except SemanticError:
-                    # Name what's allowed for a simple typo.
-                    if not isinstance(variant_name, str):
-                        raise
-                    raise SemanticError(
-                        f"Sum type '{shown(std.name)}' names '{variant_name}' as "
-                        f"a variant, but '{variant_name}' isn't a declared "
-                        f"struct, `none`, or a valid scalar/str/array/slice/pointer/dict "
-                        f"type",
-                        std,
-                    )
-                if variant_type in resolved_variants:
-                    raise SemanticError(
-                        f"Sum type '{shown(std.name)}' lists '{variant_type}' "
-                        f"as a variant more than once",
-                        std,
-                    )
-                resolved_variants.append(variant_type)
 
-            registry[std.name] = SumTypeInfo(name=std.name, variants=resolved_variants)
-        return registry
 
-    def _collect_methods(self, program: Program) -> Dict[Tuple[str, str], Tuple[List[Type], Type, str]]:
-        """Reject duplicate method names per struct or enum; return the method registry."""
-        methods: Dict[Tuple[str, str], Tuple[List[Type], Type, str]] = {}
-        for sd in list(program.structs) + list(program.enums):
-            self._enter(sd)
-            kind = 'enum' if isinstance(sd, EnumDef) else 'struct'
-            members = {member.name for member in sd.members} if isinstance(sd, EnumDef) else set()
-            seen_names: Set[str] = set()
-            for md in sd.methods:
-                if md.name in seen_names:
-                    raise SemanticError(
-                        f"Method '{shown(md.name)}' is already declared on "
-                        f"{kind} '{shown(sd.name)}'",
-                        md,
-                    )
-                if md.name in members:  # `Color.Red` and `c.Red()` would read as the same thing
-                    raise SemanticError(
-                        f"Method '{md.name}' has the same name as a member of enum '{shown(sd.name)}'", md)
-                seen_names.add(md.name)
-                param_types = [
-                    self._type(p.type, p) for p in md.params
-                ]
-                return_type = self._return_type(md)
-                methods[(sd.name, md.name)] = (param_types, return_type, mangle_method_name(sd.name, md.name))
-                if md.receiver_is_pointer:
-                    self.pointer_receivers.add((sd.name, md.name))
-        return methods
 
-    def _collect_type_aliases(self, alias_defs: List[TypeAlias], structs: Dict[str, StructInfo]) -> Dict[str, Type]:
-        """Resolve every alias fully, detecting cycles."""
-        # Pass 1: reserve names, rejecting duplicates and collisions.
-        seen: Dict[str, TypeAlias] = {}
-        for ad in alias_defs:
-            if shown(ad.name) in BUILTIN_FUNCTION_NAMES:
-                raise SemanticError(
-                    f"'{shown(ad.name)}' is a builtin and can't be used as a "
-                    f"type alias name",
-                    ad,
-                )
-            if ad.name in structs:
-                raise SemanticError(
-                    f"Type alias '{shown(ad.name)}' collides with a struct of "
-                    f"the same name -- struct and type-alias names "
-                    f"share one namespace and can never be the same",
-                    ad,
-                )
-            if ad.name in seen:
-                raise SemanticError(f"Type alias '{shown(ad.name)}' is already declared", ad)
-            seen[ad.name] = ad
 
-        resolved: Dict[str, Type] = {}
-        resolving: Set[str] = set()
 
-        def resolve(name: str) -> Type:
-            if name in resolved:
-                return resolved[name]
-            if name in resolving:
-                raise SemanticError(
-                    f"Type alias '{shown(name)}' is defined in terms of "
-                    f"itself (a cycle)",
-                    seen[name],
-                )
-            resolving.add(name)
-            result = resolve_target(seen[name].target_type, seen[name])
-            resolving.discard(name)
-            resolved[name] = result
-            return result
 
-        def resolve_target(target, alias_node: TypeAlias) -> Type:
-            """`alias_node` is for error positions."""
-            if isinstance(target, ArrayTypeExpr):
-                size = target.size if isinstance(target.size, int) else self.facts.array_sizes[target.nid]
-                return Type(TypeKind.ARRAY, element_type=resolve_target(target.element_type, alias_node), size=size)
-            if isinstance(target, SliceTypeExpr):
-                return Type(TypeKind.SLICE, element_type=resolve_target(target.element_type, alias_node))
-            if isinstance(target, str) and target in _TYPE_NAMES:
-                return _TYPE_NAMES[target]
-            saved_scope = self.scope
-            self._enter(alias_node)
-            target = self._resolve_type_name(target)
-            self.scope = saved_scope
-            if target in seen:
-                return resolve(target)
-            if target in structs:
-                return Type(TypeKind.STRUCT, struct_name=target)
-            if target in self.enums:
-                return Type(TypeKind.ENUM, enum_name=target)
-            raise SemanticError(
-                f"Unknown type '{target}' in a type alias's own target "
-                f"-- expected int, bool, str, a struct or enum name, or "
-                f"another type alias",
-                alias_node,
-            )
-
-        for ad in alias_defs:
-            resolve(ad.name)
-        return resolved
-
-    def _reserve_struct_names(self, struct_defs: List[StructDef]) -> Dict[str, StructInfo]:
-        """Reserve struct names (None placeholders) so fields can forward-reference."""
-        registry: Dict[str, StructInfo] = {}
-        for sd in struct_defs:
-            if shown(sd.name) in BUILTIN_FUNCTION_NAMES:
-                raise SemanticError(
-                    f"'{shown(sd.name)}' is a builtin and can't be used as a "
-                    f"struct name",
-                    sd,
-                )
-            if sd.name in registry:
-                raise SemanticError(f"Struct '{shown(sd.name)}' is already declared", sd)
-            registry[sd.name] = None
-        return registry
-
-    def _resolve_struct_fields(self, struct_defs: List[StructDef], registry: Dict[str, StructInfo],
-                               sum_names: Dict[str, None]) -> Dict[str, StructInfo]:
-        """Resolve field types (which may name structs and sum types declared anywhere)."""
-        for sd in struct_defs:
-            self._enter(sd)
-            fields: Dict[str, Type] = {}
-            for f in sd.fields:
-                if f.name in fields:
-                    raise SemanticError(
-                        f"Field '{f.name}' is already declared in struct '{shown(sd.name)}'",
-                        f,
-                    )
-                fields[f.name] = type_from_name(
-                    f.field_type, registry, self.type_aliases, f, sum_names, resolve=self._resolve_type_name,
-                    enums=self.enums, array_sizes=self.facts.array_sizes)
-            registry[sd.name] = StructInfo(name=sd.name, fields=fields)
-        return registry
-
-    def _check_value_containment(self, program: Program) -> None:
-        """No struct or sum type may contain itself by value (directly, through arrays, or through
-        another struct or sum): it would have no finite size. Pointers, slices and dicts are
-        indirections, so recursion through them is fine."""
-        decl = {sd.name: sd for sd in program.structs}
-        decl.update({std.name: std for std in program.sum_types})
-
-        def embedded(t: Type) -> Optional[str]:
-            while t.kind == TypeKind.ARRAY:
-                t = t.element_type
-            if t.kind == TypeKind.STRUCT:
-                return t.struct_name
-            if t.kind == TypeKind.SUM:
-                return t.sum_type_name
-            return None
-
-        def contents(name: str) -> List[Tuple[str, str]]:
-            """(member description, embedded type name) for each by-value member."""
-            if name in self.structs:
-                pairs = [(f"{shown(name)}.{field}", embedded(t)) for field, t in self.structs[name].fields.items()]
-            else:
-                pairs = [(f"{shown(name)}'s {t} variant", embedded(t)) for t in self.sum_types[name].variants]
-            return [(desc, inner) for desc, inner in pairs if inner is not None]
-
-        def visit(name: str, path: List[Tuple[str, str]]) -> None:
-            for desc, inner in contents(name):
-                if any(n == inner for n, _ in path) or inner == path[0][0]:
-                    chain = [d for _, d in path[1:]] + [desc]
-                    raise SemanticError(
-                        f"'{inner}' contains itself by value ({' -> '.join(chain)}), so it would have no "
-                        f"finite size -- hold it through a pointer (*{inner}), slice, or dict instead",
-                        decl[inner])
-                visit(inner, path + [(inner, desc)])
-
-        for name in decl:
-            visit(name, [(name, name)])
-
-    def check_extern_function_decl(self, ext: ExternFunctionDecl) -> None:
-        """Validate an extern signature (scalars and pointers only) and register it."""
-        if shown(ext.name) in BUILTIN_FUNCTION_NAMES:
-            raise SemanticError(
-                f"'{shown(ext.name)}' is a builtin and can't be redefined as "
-                f"an extern function",
-                ext,
-            )
-        if ext.name in self.structs:
-            raise SemanticError(
-                f"Extern function '{shown(ext.name)}' collides with a struct "
-                f"of the same name -- struct and function names share "
-                f"one namespace and can never be the same, since "
-                f"'{shown(ext.name)}(...)' would otherwise be ambiguous "
-                f"between a call and a struct literal",
-                ext,
-            )
-        if ext.name in self.type_aliases:
-            raise SemanticError(
-                f"Extern function '{shown(ext.name)}' collides with a type "
-                f"alias of the same name -- function and type-alias "
-                f"names share one namespace and can never be the same",
-                ext,
-            )
-        if ext.name in self.sum_types:
-            raise SemanticError(
-                f"Extern function '{shown(ext.name)}' collides with a sum "
-                f"type of the same name -- function and sum-type "
-                f"names share one namespace and can never be the same",
-                ext,
-            )
-        if ext.name in self._extern_decls:
-            raise SemanticError(
-                f"Extern '{shown(ext.name)}' is already declared in {_file_and_line(self._extern_decls[ext.name])} "
-                f"-- declare an extern once and import it where else it is needed", ext)
-        if ext.name in self.functions:
-            # A function of the entry file: only there is a function's key its bare name, like an extern's.
-            function = next((fn for fn in self.all_functions if fn.name == ext.name), None)
-            raise SemanticError(
-                f"Function '{shown(ext.name)}' has the same name as an extern declared in {_file_and_line(ext)} "
-                f"-- rename the function", function if function is not None else ext)
-        self._extern_decls[ext.name] = ext
-
-        param_types = [self._type(p.type, p) for p in ext.params]
-        return_type = self._return_type(ext)
-
-        for p, p_type in zip(ext.params, param_types):
-            if p_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT, TypeKind.SUM, TypeKind.STR):
-                raise SemanticError(
-                    f"Extern function '{shown(ext.name)}''s parameter '{p.name}' has "
-                    f"type {p_type} -- only scalar and pointer types are "
-                    f"supported in an extern function's signature for now "
-                    f"(array/slice/struct/sum/str-typed parameters aren't yet)",
-                    p,
-                )
-        if return_type.kind in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STRUCT, TypeKind.SUM, TypeKind.STR):
-            raise SemanticError(
-                f"Extern function '{shown(ext.name)}' returns {return_type} -- "
-                f"only scalar and pointer types are supported as an "
-                f"extern function's own return type for now "
-                f"(array/slice/struct/sum/str aren't yet)",
-                ext,
-            )
-
-        self.functions[ext.name] = (param_types, return_type)
-
-    def check_intrinsic_decl(self, ic: IntrinsicDecl) -> None:
-        """Validate an intrinsic signature and register it."""
-        if shown(ic.name) in BUILTIN_FUNCTION_NAMES:
-            raise SemanticError(
-                f"'{shown(ic.name)}' is a builtin and can't be redefined as "
-                f"an intrinsic",
-                ic,
-            )
-        if ic.name in self.structs:
-            raise SemanticError(
-                f"Intrinsic '{shown(ic.name)}' collides with a struct "
-                f"of the same name -- struct and function names share "
-                f"one namespace and can never be the same, since "
-                f"'{shown(ic.name)}(...)' would otherwise be ambiguous "
-                f"between a call and a struct literal",
-                ic,
-            )
-        if ic.name in self.type_aliases:
-            raise SemanticError(
-                f"Intrinsic '{shown(ic.name)}' collides with a type "
-                f"alias of the same name -- function and type-alias "
-                f"names share one namespace and can never be the same",
-                ic,
-            )
-        if ic.name in self.sum_types:
-            raise SemanticError(
-                f"Intrinsic '{shown(ic.name)}' collides with a sum "
-                f"type of the same name -- function and sum-type "
-                f"names share one namespace and can never be the same",
-                ic,
-            )
-        if ic.name in self.functions:
-            raise SemanticError(f"Function '{shown(ic.name)}' is already declared", ic)
-
-        param_types = [self._type(p.type, p) for p in ic.params]
-        return_type = Type.VOID if ic.return_type is None else self._type(ic.return_type, ic)
-
-        self.functions[ic.name] = (param_types, return_type)
-        self.intrinsic_original_names[ic.name] = ic.original_name
 
     def analyze_function(self, fn: Function) -> None:
         self._enter(fn)
@@ -1019,10 +442,7 @@ class SemanticAnalyzer:
             )
 
     def _return_type(self, decl) -> Type:
-        """A def's or extern's return type: VOID when it declares none, NEVER for `never`."""
-        if decl.return_type is None:
-            return Type.VOID
-        return Type.NEVER if decl.return_type == 'never' else self._type(decl.return_type, decl)
+        return self.types.return_type(decl, self.scope)
 
     def _push_scope(self) -> None:
         self.scopes.append({})
@@ -1046,7 +466,7 @@ class SemanticAnalyzer:
         """The variants the sum variable declared as `decl_id` may hold here."""
         if decl_id in self._possible:
             return self._possible[decl_id]
-        return frozenset(self.sum_types[self.symbols[decl_id].type.sum_type_name].variants)
+        return frozenset(self.decls.sum_types[self.symbols[decl_id].type.sum_type_name].variants)
 
     def _restrict(self, name: str, decl_id, possible: frozenset) -> None:
         """From here to the end of the region (_end_region), sum variable `name` holds one of
@@ -1096,7 +516,7 @@ class SemanticAnalyzer:
                     name, decl_id, variant = side.name, self.facts.decls.get(side.nid), Type.NONE
         if decl_id is None or self.symbols[decl_id].type.kind != TypeKind.SUM:
             return {}, {}
-        variants = frozenset(self.sum_types[self.symbols[decl_id].type.sum_type_name].variants)
+        variants = frozenset(self.decls.sum_types[self.symbols[decl_id].type.sum_type_name].variants)
         holds, excluded = {decl_id: (name, frozenset({variant}))}, {decl_id: (name, variants - {variant})}
         if isinstance(condition, Binary) and condition.op == BinaryOp.NOT_EQUAL:
             return excluded, holds
@@ -1116,7 +536,8 @@ class SemanticAnalyzer:
         name = self.symbols[decl_id].name
         entry = next((scope[name] for scope in reversed(self.scopes) if name in scope), None)
         if decl_id in self._possible and entry is not None and entry[1] == decl_id:
-            self._restrict(name, decl_id, frozenset(self.sum_types[self.symbols[decl_id].type.sum_type_name].variants))
+            variants = self.decls.sum_types[self.symbols[decl_id].type.sum_type_name].variants
+            self._restrict(name, decl_id, frozenset(variants))
 
     def _forget_assigned_in(self, loop_syntax) -> None:
         """Before a loop: forget what is known about every variable its body assigns, since the body
@@ -1164,7 +585,7 @@ class SemanticAnalyzer:
                 return scope[name]
         if self._const_key(name) is not None:
             return self.constants.type_of(self._const_key(name)), None
-        enum = self.enums.get(self.scope.resolve(name))
+        enum = self.decls.enums.get(self.scope.resolve(name))
         if enum is not None:
             raise SemanticError(f"'{name}' is an enum, not a value -- write one of its members, such as "
                                 f"{name}.{enum.members[0]}", node)
@@ -1206,7 +627,7 @@ class SemanticAnalyzer:
         if value_type == Type.NONE and target_type.kind == TypeKind.POINTER:
             return True
         if target_type.kind == TypeKind.SUM and value_type.kind != TypeKind.SUM:
-            return value_type in self.sum_types[target_type.sum_type_name].variants
+            return value_type in self.decls.sum_types[target_type.sum_type_name].variants
         return False
 
     def _as_folded_int_literal(self, expr: Node) -> Optional[int]:
@@ -1232,7 +653,7 @@ class SemanticAnalyzer:
                 and self._struct_literal(expr.operand) is not None):
             # `&Variant(...)` where a pointer to the sum is expected: a new sum value holding that variant.
             variant_type = self.check_struct_literal(expr.operand)
-            if variant_type in self.sum_types[target_type.element_type.sum_type_name].variants:
+            if variant_type in self.decls.sum_types[target_type.element_type.sum_type_name].variants:
                 self.facts.boxed[expr.nid] = target_type.element_type
                 self.facts.types[expr.nid] = target_type
                 return target_type
@@ -1487,7 +908,7 @@ class SemanticAnalyzer:
         """`match` on an enum: each arm names a member, and the arms cover every member unless there is
         an `else`. Nothing is narrowed."""
         subject_type = self.facts.enum_checks[stmt.arms[0][0].nid][1]
-        members = self.enums[subject_type.enum_name].members
+        members = self.decls.enums[subject_type.enum_name].members
         seen = set()
         for check, _ in stmt.arms:
             self.check_expr(check)
@@ -1528,7 +949,7 @@ class SemanticAnalyzer:
         """Reject duplicate arms; require exhaustiveness without an else."""
         subject_name = stmt.variable_name
         subject_type = self.symbols[self.facts.decls[stmt.arms[0][0].nid]].type  # as declared, not as narrowed
-        sum_type_info = self.sum_types[subject_type.sum_type_name]
+        sum_type_info = self.decls.sum_types[subject_type.sum_type_name]
 
         seen: Dict[Type, IsCheck] = {}
         for arm_condition, _ in stmt.arms:
@@ -1716,7 +1137,7 @@ class SemanticAnalyzer:
             constant_key = _constant_key_value(key_expr)
             if key_expr.nid in self.facts.enum_members:
                 enum, index = self.facts.enum_members[key_expr.nid]
-                constant_key = ('enum', f"{shown(enum)}.{self.enums[enum].members[index]}")
+                constant_key = ('enum', f"{shown(enum)}.{self.decls.enums[enum].members[index]}")
             if constant_key is not None:
                 if constant_key in seen_constant_keys:
                     raise SemanticError(
@@ -1847,7 +1268,7 @@ class SemanticAnalyzer:
             return self.constants.type_of(key)
         enum = self._enum_named_by(expr.base)
         if enum is not None:  # `Enum.Member`
-            members = self.enums[enum].members
+            members = self.decls.enums[enum].members
             if expr.name not in members:
                 raise SemanticError(
                     f"Enum '{shown(enum)}' has no member '{expr.name}' (its members: {', '.join(members)})", expr)
@@ -1863,7 +1284,7 @@ class SemanticAnalyzer:
             key = self.module_set.qualified.get(expr.nid)
         else:
             return None
-        return key if key in self.enums else None
+        return key if key in self.decls.enums else None
 
     def _check_struct_and_field(self, base_expr: Node, field_name: str) -> Type:
         """Check base is a struct (auto-deref pointers) with field `field_name`."""
@@ -1875,7 +1296,7 @@ class SemanticAnalyzer:
                 f"Cannot access field '{field_name}' on non-struct type {base_type}",
                 base_expr,
             )
-        struct_info = self.structs[base_type.struct_name]
+        struct_info = self.decls.structs[base_type.struct_name]
         if field_name not in struct_info.fields:
             raise SemanticError(
                 f"Struct '{shown(base_type.struct_name)}' has no field '{field_name}'",
@@ -1897,7 +1318,7 @@ class SemanticAnalyzer:
         """`Name(args)`: positional struct literal; must be exhaustive."""
         name = self._struct_literal(expr)
         self._record_call(expr, name)
-        struct_info = self.structs[name]
+        struct_info = self.decls.structs[name]
         field_items = list(struct_info.fields.items())
         if expr.kwargs is not None:
             return self._check_named_struct_literal(expr, struct_info, field_items)
@@ -1979,10 +1400,10 @@ class SemanticAnalyzer:
         while t.kind == TypeKind.ARRAY:
             t = t.element_type
         if t.kind == TypeKind.SUM:
-            return None if Type.NONE in self.sum_types[t.sum_type_name].variants else t
+            return None if Type.NONE in self.decls.sum_types[t.sum_type_name].variants else t
         if t.kind == TypeKind.STRUCT and t.struct_name not in seen:
             seen.add(t.struct_name)
-            for field_type in self.structs[t.struct_name].fields.values():
+            for field_type in self.decls.structs[t.struct_name].fields.values():
                 missing = self._without_zero_value(field_type, seen)
                 if missing is not None:
                     return missing
@@ -2013,7 +1434,7 @@ class SemanticAnalyzer:
         is_enum = receiver_type.kind == TypeKind.ENUM
         owner = receiver_type.enum_name if is_enum else receiver_type.struct_name
         key = (owner, expr.name)
-        if key not in self.methods:
+        if key not in self.decls.methods:
             raise SemanticError(
                 f"{'Enum' if is_enum else 'Struct'} '{shown(owner)}' has no method "
                 f"'{expr.name}'",
@@ -2024,9 +1445,9 @@ class SemanticAnalyzer:
                 f"Method '{expr.name}' of '{shown(owner)}' is not visible outside the module "
                 f"that defines the {'enum' if is_enum else 'struct'} -- names starting with '_' are private to "
                 f"their own module", expr)
-        param_types, return_type, mangled_name = self.methods[key]
+        param_types, return_type, mangled_name = self.decls.methods[key]
         receiver = expr.receiver
-        if key in self.pointer_receivers and not receiver_is_pointer:
+        if key in self.decls.pointer_receivers and not receiver_is_pointer:
             # Pointer receiver: pass the receiver's address.
             is_place = isinstance(expr.receiver, (Variable, Field, Index)) or (
                     isinstance(expr.receiver, Unary) and expr.receiver.op == UnaryOp.DEREFERENCE)
@@ -2072,7 +1493,7 @@ class SemanticAnalyzer:
         if name is None:
             # Receiver present (and not a module) means method call, checked first.
             return self._check_method_call(expr)
-        if name in self.structs:
+        if name in self.decls.structs:
             raise SemanticError(
                 f"'{expr.name}(...)' is a struct literal, which is only "
                 f"allowed as a variable's initializer, a plain "
@@ -2108,12 +1529,12 @@ class SemanticAnalyzer:
             return self.check_panic_call(expr)
         if name == 'format':
             return self.check_format_call(expr)
-        if name in self.enums:
+        if name in self.decls.enums:
             return self.check_enum_conversion(expr, name)
         visible = expr.nid in self.module_set.qualified or self.scope.resolve(expr.name) is not None
-        if name not in self.functions or not visible:  # another module's extern needs an import too
+        if name not in self.decls.functions or not visible:  # another module's extern needs an import too
             raise SemanticError(f"Call to undeclared function '{shown(name)}'", expr)
-        param_types, return_type = self.functions[name]
+        param_types, return_type = self.decls.functions[name]
         self._record_call(expr, name)
 
         if len(expr.args) != len(param_types):
@@ -2192,7 +1613,7 @@ class SemanticAnalyzer:
     def check_enum_conversion(self, expr: Call, enum: str) -> Type:
         """`Enum(n)`: the member whose value is the integer `n`. Checked when it runs (a panic if there
         is none), or here when `n` is a literal."""
-        members = self.enums[enum].members
+        members = self.decls.enums[enum].members
         if len(expr.args) != 1:
             raise SemanticError(
                 f"'{expr.name}(...)' converts one integer to the enum {shown(enum)}, got {len(expr.args)} arguments",
@@ -2219,7 +1640,7 @@ class SemanticAnalyzer:
             )
         enum = self._enum_named_by(expr.args[0])
         if enum is not None:
-            self.facts.enum_lens[expr.nid] = len(self.enums[enum].members)
+            self.facts.enum_lens[expr.nid] = len(self.decls.enums[enum].members)
             return Type.INT
         arg_type = self.check_expr(expr.args[0])
         if arg_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STR, TypeKind.DICT):
@@ -2312,7 +1733,7 @@ class SemanticAnalyzer:
             variable_type, self.facts.decls[expr.nid] = self._resolve(expr.variable_name, expr)
             narrowed = self.facts.decls[expr.nid] in self._possible
         if variable_type.kind == TypeKind.ENUM:  # `NAME is Member`: an equality test; nothing is narrowed
-            members = self.enums[variable_type.enum_name].members
+            members = self.decls.enums[variable_type.enum_name].members
             member = expr.type_name
             if isinstance(member, QualifiedTypeExpr) and self.scope.resolve(member.module) == variable_type.enum_name:
                 member = member.name  # `NAME is Enum.Member`
@@ -2347,7 +1768,7 @@ class SemanticAnalyzer:
                 expr,
             )
         narrowed_type = self._type(expr.type_name, expr)  # (a variant may be a pointer to a sum, or a slice of one)
-        sum_type_info = self.sum_types[variable_type.sum_type_name]
+        sum_type_info = self.decls.sum_types[variable_type.sum_type_name]
         if narrowed_type not in sum_type_info.variants:
             raise SemanticError(
                 f"'{expr.type_name}' is not one of {variable_type}'s own "
@@ -2449,7 +1870,7 @@ class SemanticAnalyzer:
         if t.kind == TypeKind.ARRAY:
             return self._is_comparable_type(t.element_type)
         if t.kind == TypeKind.STRUCT:
-            struct_info = self.structs[t.struct_name]
+            struct_info = self.decls.structs[t.struct_name]
             return all(self._is_comparable_type(field_type) for field_type in struct_info.fields.values())
         if t.kind in (TypeKind.SLICE, TypeKind.SUM, TypeKind.DICT):
             return False
@@ -2517,7 +1938,7 @@ class SemanticAnalyzer:
             # A sum with a `none` variant: `x == none` is shorthand for `x is none`.
             for side, other in ((left_type, right_type), (right_type, left_type)):
                 if other == Type.NONE and side.kind == TypeKind.SUM:
-                    if Type.NONE not in self.sum_types[side.sum_type_name].variants:
+                    if Type.NONE not in self.decls.sum_types[side.sum_type_name].variants:
                         raise SemanticError(
                             f"{side} has no `none` variant, so it is never none", expr)
                     return Type.BOOL
