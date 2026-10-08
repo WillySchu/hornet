@@ -1921,8 +1921,22 @@ class SemanticAnalyzer:
         (or `!=`, either way round), whose literal takes the elements of xs. None for any other expression."""
         left_untyped, right_untyped = (self._untyped_array_literal(e) for e in (expr.left, expr.right))
         if expr.op == BinaryOp.IN and right_untyped and not left_untyped:
+            if self._as_folded_int_literal(expr.left) is not None:
+                # `1 in [a, b]`: an integer literal has no type of its own either, so the first element
+                # that isn't one says what they all are (int, if none does).
+                typed_elements = [e for e in expr.right.elements if self._as_folded_int_literal(e) is None]
+                element_type = self._check_expr_allowing_struct_literal(typed_elements[0]) if typed_elements \
+                    else Type.INT
+                right_type = self._array_literal_of(expr.right, element_type)
+                return self._check_value_flowing_into(expr.left, element_type), right_type
             left_type = self._check_expr_allowing_struct_literal(expr.left)
             return left_type, self._array_literal_of(expr.right, left_type)
+        if expr.op == BinaryOp.IN and left_untyped and not right_untyped:
+            # `[1, 2] in rows`: the literal is one of the right side's elements.
+            right_type = self._check_expr_allowing_struct_literal(expr.right)
+            if right_type.kind in (TypeKind.ARRAY, TypeKind.SLICE) and right_type.element_type.kind == TypeKind.ARRAY:
+                return self._array_literal_of(expr.left, right_type.element_type.element_type), right_type
+            return None
         if expr.op in _EQUALITY_OPS and left_untyped != right_untyped:
             literal, other = (expr.left, expr.right) if left_untyped else (expr.right, expr.left)
             other_type = self._check_expr_allowing_struct_literal(other)

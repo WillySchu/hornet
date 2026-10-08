@@ -73,6 +73,29 @@ def test_where_the_other_operand_gives_it():
     )
 
 
+@GCC_SKIP
+def test_in_when_one_side_is_only_literals():
+    assert_program_stdout(
+        DECLS +
+        "def int main():\n"
+        "    int8 a = 1\n"
+        "    int8 b = 2\n"
+        "    byte c = \"x\"\n"
+        "    [][2]int rows = [][2]int[[1, 2], [3, 4]]\n"
+        "    [2][2]int grid = [[1, 2], [3, 4]]\n"
+        "    print(1 in [a, b])\n"                    # an integer literal has no type either: the elements say
+        "    print(3 in [a, b])\n"
+        "    print(120 in [c])\n"
+        "    print(5 in [1, a + 4, 3])\n"             # ... the first of them that isn't a literal itself
+        "    print(2 in [1, 2, 3])\n"                 # ... or int, if none does
+        "    print([3, 4] in rows)\n"                 # a literal on the left is one of the right side's elements
+        "    print([9, 9] in rows)\n"
+        "    print([1, 2] in grid)\n"
+        "    return 0\n",
+        "true\nfalse\ntrue\ntrue\ntrue\ntrue\nfalse\ntrue\n",
+    )
+
+
 WRITE = "This array literal has nothing to take its type from -- write the type before it, as in "
 
 
