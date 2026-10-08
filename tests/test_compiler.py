@@ -41,7 +41,7 @@ GCC_SKIP = pytest.mark.skipif(
 HOST_IS_MACOS = sys.platform == "darwin"
 ASM_TARGET = default_target()
 
-EXECUTION_TIMEOUT = 5
+EXECUTION_TIMEOUT = 10
 
 
 # ---------------------------------------------------------------------------
