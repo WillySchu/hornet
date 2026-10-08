@@ -14,7 +14,6 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- Refactor semantic.py into package.
 - Refactor parser.py into package.
 - Sum types containing other sum types.
 - Type identity for the port. Composite dict keys, or structural equality through pointers. This is the decision the checker's port depends on.
