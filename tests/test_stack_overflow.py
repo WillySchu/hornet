@@ -8,7 +8,7 @@ import subprocess
 import pytest
 
 from build import c_compiler, executable_name, link_flags, runtime_object
-from tests.targets import WINDOWS_ABORT_EXIT_CODE, each_runnable_target, run_binary
+from tests.targets import WINDOWS_ABORT_EXIT_CODE, each_runnable_target, run_binary, under_rosetta
 from tests.test_compiler import GCC_SKIP, compile_and_run
 
 RUNAWAY = {
@@ -49,8 +49,16 @@ RUNAWAY = {
 @GCC_SKIP
 @pytest.mark.parametrize('source', RUNAWAY.values(), ids=RUNAWAY.keys())
 def test_a_runaway_recursion_panics(source):
-    result = compile_and_run(source)  # every target must agree
-    assert (result.returncode, result.stdout, result.stderr) == (-signal.SIGABRT, "before\n", "panic: stack overflow\n")
+    result = compile_and_run(source, only=lambda target: not under_rosetta(target))  # each of these must agree
+    if result is not None:
+        assert (result.returncode, result.stdout, result.stderr) == (
+            -signal.SIGABRT, "before\n", "panic: stack overflow\n")
+    # Rosetta 2 can't always hand the fault to the program it is translating: when the stack runs out
+    # on certain instructions it stops with an error of its own. The program still ends as aborted.
+    translated = compile_and_run(source, only=under_rosetta)
+    if translated is not None:
+        assert (translated.returncode, translated.stdout) == (-signal.SIGABRT, "before\n")
+        assert translated.stderr == "panic: stack overflow\n" or translated.stderr.startswith("rosetta error: ")
 
 
 @GCC_SKIP

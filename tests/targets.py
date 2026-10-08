@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from build import can_run, run_prefix
-from target import IMPLEMENTED_ARCHES, TARGET_NAMES, Target, default_target
+from target import IMPLEMENTED_ARCHES, TARGET_NAMES, Target, default_target, host_target
 
 RUNNABLE_TARGETS = [t for t in map(Target.parse, TARGET_NAMES) if can_run(t)]
 
@@ -109,6 +109,11 @@ def posix(target: Target) -> bool:
 
 def windows(target: Target) -> bool:
     return target.os == 'windows'
+
+
+def under_rosetta(target: Target) -> bool:
+    """An x86-64 macOS program on an Apple Silicon machine, which Rosetta 2 translates as it runs."""
+    return target.os == 'macos' and target.arch == 'x86_64' and host_target().arch == 'aarch64'
 
 
 def on_every_target(build_and_run, label: str = '', agree: bool = True, only=None) -> subprocess.CompletedProcess:

@@ -14,6 +14,7 @@ from ir.program_builder import build_ir_program, reachable_functions
 from ir.typed_builder import link_name
 from modules import discover_modules
 from semantic import SemanticError, analyze
+from target import Target
 from tests.test_compiler import GCC_SKIP, _parse, assert_program_stdout
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -71,7 +72,8 @@ def test_what_main_can_reach():
 
 
 def test_the_assembly_has_only_what_is_reached_and_what_that_uses():
-    asm = generate_asm(analyze(_parse(SOURCE)))
+    # (For one named target: how a symbol and a call are written differs between them.)
+    asm = generate_asm(analyze(_parse(SOURCE)), target=Target('x86_64', 'linux'))
     for name in REACHED:
         assert f"\n{link_name(name)}:\n" in asm, name
     for name in NOT_REACHED:
