@@ -20,3 +20,4 @@ class Facts:
     enum_lens: dict = dataclasses.field(default_factory=dict)  # `len(Enum)` Call -> the number of members
     formats: dict = dataclasses.field(default_factory=dict)  # `format(...)` Call -> its template's text
     enum_ins: dict = dataclasses.field(default_factory=dict)  # `n in Enum` Binary -> the enum's key
+    array_sizes: dict = dataclasses.field(default_factory=dict)  # `[EXPR]T` ArrayTypeExpr -> its size, EXPR's value

@@ -21,7 +21,7 @@ class TypedTreeBuilder:
 
     def __init__(self, analyzer: 'SemanticAnalyzer'):
         self.facts = analyzer.facts
-        self.consts = analyzer.consts
+        self.consts = analyzer.constants.values
         self.symbols = analyzer.symbols
         self.structs = analyzer.structs
         self.sum_types = analyzer.sum_types

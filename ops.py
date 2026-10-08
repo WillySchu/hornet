@@ -69,3 +69,6 @@ class BinaryOp(Enum):
             BinaryOp.AND: 'and',
             BinaryOp.OR: 'or',
         }[self]
+
+
+ORDERING_OPS = {BinaryOp.LESS_THAN, BinaryOp.GREATER_THAN, BinaryOp.LESS_THAN_OR_EQUAL, BinaryOp.GREATER_THAN_OR_EQUAL}

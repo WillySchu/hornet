@@ -16,10 +16,12 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from diagnostics import CompileError, path_text, quoted_text
 from lexer import lex
+from semantic.constants import ConstEvaluator
+from semantic.errors import SemanticError, SemanticErrors
 from semantic.facts import Facts
 from semantic.typed_tree_builder import TypedTreeBuilder
-from typesys import EnumInfo, StructInfo, SumTypeInfo, Type, TypeKind
-from folding import fold_binary_op, fold_cast, fold_unary_op
+from typesys import INTEGER_TYPES, EnumInfo, StructInfo, SumTypeInfo, Type, TypeKind
+from ops import ORDERING_OPS
 import typed_ast as typed
 from scopes import BUILTIN_FUNCTION_NAMES, build_module_set, display_name as shown
 from symbols import SymbolTable
@@ -89,11 +91,6 @@ _TYPE_NAMES = {
 }
 
 
-# The value of each `[EXPR]T` size that isn't a plain number, by the ArrayTypeExpr's node number;
-# recorded by SemanticAnalyzer._resolve_array_sizes before any type is resolved.
-_array_sizes: Dict[int, int] = {}
-
-
 def type_from_name(
         type_expr,
         structs: Dict[str, StructInfo],
@@ -102,19 +99,21 @@ def type_from_name(
         sum_types: Dict[str, SumTypeInfo] = None,
         resolve=None,
         enums: Dict[str, EnumInfo] = None,
+        array_sizes: Dict[int, int] = None,
 ) -> Type:
     """Resolve a parsed type expression to a Type. `resolve` maps a name as written in its file (or an
-    `alias.Name`) to its declaration's key (see scopes.py)."""
+    `alias.Name`) to its declaration's key (see scopes.py). `array_sizes` (Facts.array_sizes) has the
+    value of each `[EXPR]T` size that isn't a plain number."""
     if isinstance(type_expr, ArrayTypeExpr):
-        element = type_from_name(type_expr.element_type, structs, aliases, node, sum_types, resolve, enums)
-        size = type_expr.size if isinstance(type_expr.size, int) else _array_sizes[type_expr.nid]
+        element = type_from_name(type_expr.element_type, structs, aliases, node, sum_types, resolve, enums, array_sizes)
+        size = type_expr.size if isinstance(type_expr.size, int) else array_sizes[type_expr.nid]
         return Type(TypeKind.ARRAY, element_type=element, size=size)
     if isinstance(type_expr, SliceTypeExpr):
-        element = type_from_name(type_expr.element_type, structs, aliases, node, sum_types, resolve, enums)
+        element = type_from_name(type_expr.element_type, structs, aliases, node, sum_types, resolve, enums, array_sizes)
         return Type(TypeKind.SLICE, element_type=element)
     if isinstance(type_expr, PointerTypeExpr):
         # Pointer-to-pointer is rejected for now.
-        pointee = type_from_name(type_expr.pointee_type, structs, aliases, node, sum_types, resolve, enums)
+        pointee = type_from_name(type_expr.pointee_type, structs, aliases, node, sum_types, resolve, enums, array_sizes)
         if pointee.kind == TypeKind.POINTER:
             raise SemanticError(
                 "Pointer-to-pointer types aren't supported yet -- "
@@ -123,8 +122,9 @@ def type_from_name(
             )
         return Type(TypeKind.POINTER, element_type=pointee)
     if isinstance(type_expr, DictTypeExpr):
-        key_type = type_from_name(type_expr.key_type, structs, aliases, node, sum_types, resolve, enums)
-        value_type = type_from_name(type_expr.value_type, structs, aliases, node, sum_types, resolve, enums)
+        key_type = type_from_name(type_expr.key_type, structs, aliases, node, sum_types, resolve, enums, array_sizes)
+        value_type = type_from_name(
+            type_expr.value_type, structs, aliases, node, sum_types, resolve, enums, array_sizes)
         if key_type not in _VALID_DICT_KEY_TYPES and key_type.kind != TypeKind.ENUM:
             raise SemanticError(
                 f"'{key_type}' can't be a dict's own key type -- only "
@@ -283,27 +283,6 @@ _BYTE_SLICE = Type(TypeKind.SLICE, element_type=Type.UINT8)
 
 # Errors
 
-class SemanticError(CompileError):
-    """Semantic error; `node` gives the position."""
-    def __init__(self, message: str, node: Optional[Node] = None):
-        if node is None:
-            super().__init__(message)
-        else:
-            super().__init__(message, node.file, node.line, node.col)
-
-
-class SemanticErrors(SemanticError):
-    """Several functions failed. Behaves like the first error; `errors` holds all."""
-    def __init__(self, errors: List[SemanticError]):
-        first = errors[0]
-        Exception.__init__(self, str(first))
-        self.message, self.file, self.line, self.col = first.message, first.file, first.line, first.col
-        self._errors = errors
-
-    @property
-    def errors(self) -> List[CompileError]:
-        return self._errors
-
 
 # Function bodies checked before giving up.
 MAX_ERRORS = 20
@@ -317,12 +296,11 @@ _INT_ONLY_BINARY_OPS = {
     BinaryOp.BITWISE_AND, BinaryOp.BITWISE_OR, BinaryOp.BITWISE_XOR,
     BinaryOp.SHIFT_LEFT, BinaryOp.SHIFT_RIGHT,
 }
-_ORDERING_OPS = {BinaryOp.LESS_THAN, BinaryOp.GREATER_THAN,
-                 BinaryOp.LESS_THAN_OR_EQUAL, BinaryOp.GREATER_THAN_OR_EQUAL}
+_ORDERING_OPS = ORDERING_OPS
 _EQUALITY_OPS = {BinaryOp.EQUAL, BinaryOp.NOT_EQUAL}
 _LOGICAL_OPS = {BinaryOp.AND, BinaryOp.OR}
 
-_INTEGER_TYPES = {Type.INT, Type.INT8, Type.UINT8, Type.INT64, Type.INT32}
+_INTEGER_TYPES = INTEGER_TYPES
 _VALID_DICT_KEY_TYPES = _INTEGER_TYPES | {Type.BOOL, Type.STR}
 
 # Literal ranges for narrow integer types.
@@ -409,7 +387,8 @@ class SemanticAnalyzer:
         # Order matters: 0. enums depend on nothing, and constant array sizes are evaluated before any
         # type is resolved.
         self.enums = self._collect_enums(program.enums)
-        self._collect_consts(program)
+        self.constants = ConstEvaluator(self.facts, self.enums, self._check_const_declaration)
+        self.constants.declare(program.consts)
         self._resolve_array_sizes(program)
 
         # 1. Reserve struct names so aliases can target them.
@@ -484,8 +463,7 @@ class SemanticAnalyzer:
         self._check_enum_name_collisions(program)
 
         # 4.7. Constant values, in dependency order.
-        for name in self.const_decls:
-            self._const_value(name)
+        self.constants.evaluate_all()
         self._check_const_name_collisions(program)
 
         # 5. Check bodies, collecting at most one error per function.
@@ -525,12 +503,13 @@ class SemanticAnalyzer:
 
     def _type(self, type_expr, node: Node, sums: bool = True) -> Type:
         return type_from_name(type_expr, self.structs, self.type_aliases, node, self.sum_types if sums else None,
-                              resolve=self._resolve_type_name, enums=self.enums)
+                              resolve=self._resolve_type_name, enums=self.enums, array_sizes=self.facts.array_sizes)
 
     def _const_key(self, name: str) -> Optional[str]:
         """The key of the constant a bare name refers to in the current file, if it names one."""
         key = self.scope.consts.get(name)
-        return key if key in getattr(self, 'const_decls', {}) else None
+        constants = getattr(self, 'constants', None)
+        return key if constants is not None and key in constants.decls else None
 
     def _callee(self, expr: Call) -> Optional[str]:
         """The key a call's name refers to (a function, struct, extern, or intrinsic), resolving
@@ -552,17 +531,8 @@ class SemanticAnalyzer:
 
     # -- constants
 
-    def _collect_consts(self, program: Program) -> None:
-        self.const_decls: Dict[str, ConstDecl] = {}
-        self.consts: Dict[str, Tuple[Type, object]] = {}  # name -> (type, value)
-        self._const_in_progress: set = set()
-        for cd in program.consts:
-            if cd.name in self.const_decls:
-                raise SemanticError(f"Constant '{shown(cd.name)}' is already declared", cd)
-            self.const_decls[cd.name] = cd
-
     def _resolve_array_sizes(self, program: Program) -> None:
-        """Record each `[EXPR]T` size's value (in _array_sizes): a positive integer computed from
+        """Record each `[EXPR]T` size's value (in Facts.array_sizes): a positive integer computed from
         literals and constants only (whose types must therefore be builtin)."""
         for file_program, scope in program.files:
             self.scope = scope
@@ -578,7 +548,7 @@ class SemanticAnalyzer:
                 continue
             seen.add(node.nid)
             if isinstance(node, ArrayTypeExpr) and not isinstance(node.size, int):
-                _array_sizes[node.nid] = self._array_size_value(node.size)
+                self.facts.array_sizes[node.nid] = self._array_size_value(node.size)
             if isinstance(node, ArrayLiteral) and node.could_be_multiplication:
                 try:  # its sizes now, to say how it was read if one is no constant
                     self._resolve_array_sizes_in(node.type_expr)
@@ -614,7 +584,7 @@ class SemanticAnalyzer:
             size_type = self.check_expr(expr)
             if size_type not in _INTEGER_TYPES:
                 raise SemanticError(f"Array size must be an integer, got {size_type}", expr)
-            value = self._const_eval(expr)
+            value = self.constants.evaluate(expr)
         finally:
             self.scopes = saved_scopes
         if value <= 0:
@@ -641,14 +611,15 @@ class SemanticAnalyzer:
 
     def _check_enum_name_collisions(self, program: Program) -> None:
         for ed in program.enums:
-            for kind, table in (('function', self.functions), ('struct', self.structs), ('constant', self.const_decls),
-                                ('type alias', self.type_aliases), ('sum type', self.sum_types)):
+            for kind, table in (('function', self.functions), ('struct', self.structs),
+                                ('constant', self.constants.decls), ('type alias', self.type_aliases),
+                                ('sum type', self.sum_types)):
                 if ed.name in table:
                     self._enter(ed)
                     raise SemanticError(f"Enum '{shown(ed.name)}' collides with a {kind} of the same name", ed)
 
     def _check_const_name_collisions(self, program: Program) -> None:
-        for name, cd in self.const_decls.items():
+        for name, cd in self.constants.decls.items():
             for kind, table in (('function', self.functions), ('struct', self.structs),
                                 ('type alias', self.type_aliases), ('sum type', self.sum_types)):
                 if name in table:
@@ -656,96 +627,26 @@ class SemanticAnalyzer:
             if shown(name) in BUILTIN_FUNCTION_NAMES:
                 raise SemanticError(f"'{shown(name)}' is a builtin and can't be used as a constant name", cd)
 
-    def _const_value(self, name: str) -> Tuple[Type, object]:
-        """(type, value) of constant `name`, evaluating it (and what it depends on) the first time."""
-        if name in self.consts:
-            return self.consts[name]
-        cd = self.const_decls[name]
-        if name in self._const_in_progress:
-            raise SemanticError(f"Constant '{shown(name)}' is defined in terms of itself", cd)
-        self._const_in_progress.add(name)
-        saved_scope = self.scope
+    def _check_const_declaration(self, cd: ConstDecl) -> Type:
+        """Check a constant's declaration, in the scope of the file that declares it and with no
+        local in sight; its type. (For ConstEvaluator, which then works out the value.)"""
+        saved_scope, saved_scopes = self.scope, self.scopes
         self._enter(cd)
-        const_type = self._type(cd.const_type, cd)
-        if const_type not in _INTEGER_TYPES and const_type not in (Type.BOOL, Type.STR) \
-                and const_type.kind != TypeKind.ENUM:
-            raise SemanticError(
-                f"Constant '{shown(name)}' has type {const_type} -- constants must be an integer type, bool, str, "
-                f"or an enum", cd)
-        saved_scopes, self.scopes = self.scopes, [{}]
+        self.scopes = [{}]
         try:
+            const_type = self._type(cd.const_type, cd)
+            if const_type not in _INTEGER_TYPES and const_type not in (Type.BOOL, Type.STR) \
+                    and const_type.kind != TypeKind.ENUM:
+                raise SemanticError(
+                    f"Constant '{shown(cd.name)}' has type {const_type} -- constants must be an integer type, "
+                    f"bool, str, or an enum", cd)
             value_type = self._check_value_flowing_into(cd.value, const_type)
             if not self._types_compatible(value_type, const_type):
                 raise SemanticError(
-                    f"Constant '{shown(name)}' is declared {const_type} but its value has type {value_type}", cd)
-            value = self._const_eval(cd.value)
+                    f"Constant '{shown(cd.name)}' is declared {const_type} but its value has type {value_type}", cd)
         finally:
-            self.scopes = saved_scopes
-            self.scope = saved_scope
-        self._const_in_progress.discard(name)
-        self.consts[name] = (const_type, value)
-        return self.consts[name]
-
-    def _const_eval(self, expr: Node):
-        """Value of an already type-checked constant expression; an enum's is its member's index."""
-        t = self.facts.types.get(expr.nid)
-        if expr.nid in self.facts.enum_members:  # `Enum.Member`
-            return self.facts.enum_members[expr.nid][1]
-        if isinstance(expr, Call) and self._callee(expr) in self.enums:  # `Enum(n)`
-            value, members = self._const_eval(expr.args[0]), self.enums[t.enum_name].members
-            if not 0 <= value < len(members):
-                raise SemanticError(
-                    f"{value} is not a member of {t} (its members' values are 0 to {len(members) - 1})", expr)
-            return value
-        if isinstance(expr, (Constant, ByteLiteral)) and isinstance(expr.value, int):
-            return expr.value
-        if isinstance(expr, (BoolLiteral, StringLiteral)):
-            return expr.value
-        if isinstance(expr, Call) and expr.nid in self.facts.enum_lens:
-            return self.facts.enum_lens[expr.nid]
-        if isinstance(expr, Variable) and self._const_key(expr.name) is not None:
-            return self._const_value(self._const_key(expr.name))[1]
-        if isinstance(expr, Field) and self.module_set.qualified.get(expr.nid) in self.const_decls:
-            return self._const_value(self.module_set.qualified[expr.nid])[1]
-        if isinstance(expr, Unary) and expr.op in (UnaryOp.NEGATE, UnaryOp.COMPLEMENT):
-            if isinstance(expr.operand, Constant) and expr.operand.value == 2 ** 63:
-                return -2 ** 63
-            return fold_unary_op(expr.op, self._const_eval(expr.operand), t)
-        if isinstance(expr, Unary) and expr.op == UnaryOp.NOT:
-            return not self._const_eval(expr.operand)
-        if isinstance(expr, Binary):
-            left_type = self.facts.types.get(expr.left.nid)
-            if expr.op in (BinaryOp.AND, BinaryOp.OR):
-                left = self._const_eval(expr.left)
-                right = self._const_eval(expr.right)
-                return (left and right) if expr.op == BinaryOp.AND else (left or right)
-            left, right = self._const_eval(expr.left), self._const_eval(expr.right)
-            if left_type == Type.STR:
-                if expr.op == BinaryOp.ADD:
-                    return left + right
-                if expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
-                    return (left == right) == (expr.op == BinaryOp.EQUAL)
-                if expr.op in _ORDERING_OPS:  # each character is a byte, so this is their order
-                    return {BinaryOp.LESS_THAN: left < right, BinaryOp.GREATER_THAN: left > right,
-                            BinaryOp.LESS_THAN_OR_EQUAL: left <= right}.get(expr.op, left >= right)
-            elif (left_type == Type.BOOL or left_type.kind == TypeKind.ENUM) \
-                    and expr.op in (BinaryOp.EQUAL, BinaryOp.NOT_EQUAL):
-                return (left == right) == (expr.op == BinaryOp.EQUAL)
-            else:
-                if (expr.op in (BinaryOp.DIVIDE, BinaryOp.MODULO) and right == -1
-                        and left == {Type.INT: -(2 ** 63), Type.INT32: -(2 ** 31)}.get(left_type)):
-                    raise SemanticError("Integer overflow in division in a constant expression", expr)
-                value = fold_binary_op(expr.op, left, right, t if t != Type.BOOL else left_type)
-                if value is None:
-                    raise SemanticError("Division by zero in a constant expression", expr)
-                return bool(value) if t == Type.BOOL else value
-        if isinstance(expr, Cast) and t in _INTEGER_TYPES:
-            return fold_cast(t, self._const_eval(expr.expr), self.facts.types.get(expr.expr.nid))
-        source_type = self.facts.types.get(expr.expr.nid) if isinstance(expr, Cast) else None
-        if t == Type.STR and source_type is not None and source_type.kind == TypeKind.ENUM:  # `str(Enum.Member)`
-            return self.enums[source_type.enum_name].members[self._const_eval(expr.expr)]
-        raise SemanticError(
-            "A constant's value must be built from literals, other constants, operators, and integer casts", expr)
+            self.scope, self.scopes = saved_scope, saved_scopes
+        return const_type
 
     def _resolve_sum_types(
             self, sum_type_defs: List[SumTypeDef], structs: Dict[str, StructInfo]) -> Dict[str, SumTypeInfo]:
@@ -792,7 +693,7 @@ class SemanticAnalyzer:
                     # dict of them, can: the names of the sums are enough to resolve those.
                     variant_type = type_from_name(
                         variant_name, structs, self.type_aliases, std, sum_names, resolve=self._resolve_type_name,
-                        enums=self.enums)
+                        enums=self.enums, array_sizes=self.facts.array_sizes)
                 except SemanticError:
                     # Name what's allowed for a simple typo.
                     if not isinstance(variant_name, str):
@@ -886,7 +787,7 @@ class SemanticAnalyzer:
         def resolve_target(target, alias_node: TypeAlias) -> Type:
             """`alias_node` is for error positions."""
             if isinstance(target, ArrayTypeExpr):
-                size = target.size if isinstance(target.size, int) else _array_sizes[target.nid]
+                size = target.size if isinstance(target.size, int) else self.facts.array_sizes[target.nid]
                 return Type(TypeKind.ARRAY, element_type=resolve_target(target.element_type, alias_node), size=size)
             if isinstance(target, SliceTypeExpr):
                 return Type(TypeKind.SLICE, element_type=resolve_target(target.element_type, alias_node))
@@ -942,7 +843,7 @@ class SemanticAnalyzer:
                     )
                 fields[f.name] = type_from_name(
                     f.field_type, registry, self.type_aliases, f, sum_names, resolve=self._resolve_type_name,
-                    enums=self.enums)
+                    enums=self.enums, array_sizes=self.facts.array_sizes)
             registry[sd.name] = StructInfo(name=sd.name, fields=fields)
         return registry
 
@@ -1262,7 +1163,7 @@ class SemanticAnalyzer:
             if name in scope:
                 return scope[name]
         if self._const_key(name) is not None:
-            return self._const_value(self._const_key(name))[0], None
+            return self.constants.type_of(self._const_key(name)), None
         enum = self.enums.get(self.scope.resolve(name))
         if enum is not None:
             raise SemanticError(f"'{name}' is an enum, not a value -- write one of its members, such as "
@@ -1940,10 +1841,10 @@ class SemanticAnalyzer:
     def check_field(self, expr: Field) -> Type:
         key = self.module_set.qualified.get(expr.nid)
         if key is not None:  # `alias.NAME`: a constant of another module
-            if key not in self.const_decls:
+            if key not in self.constants.decls:
                 raise SemanticError(f"Reference to undeclared variable '{shown(key)}'", expr)
             self.facts.const_refs[expr.nid] = key
-            return self._const_value(key)[0]
+            return self.constants.type_of(key)
         enum = self._enum_named_by(expr.base)
         if enum is not None:  # `Enum.Member`
             members = self.enums[enum].members
@@ -2266,7 +2167,7 @@ class SemanticAnalyzer:
             raise SemanticError(
                 f"'format' expects a str template first, got {self.facts.types[template.nid]}", template)
         try:
-            text = self._const_eval(template)
+            text = self.constants.evaluate(template)
         except SemanticError:
             raise SemanticError(
                 "'format' needs its template as a string literal or a constant, so that it can be checked "

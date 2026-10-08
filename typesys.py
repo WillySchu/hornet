@@ -69,6 +69,8 @@ Type.VOID = Type(TypeKind.VOID)
 Type.NEVER = Type(TypeKind.NEVER)
 Type.NONE = Type(TypeKind.NONE)
 
+INTEGER_TYPES = {Type.INT, Type.INT8, Type.UINT8, Type.INT64, Type.INT32}
+
 
 @dataclass
 class StructInfo:
