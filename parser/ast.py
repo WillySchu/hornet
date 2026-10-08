@@ -57,6 +57,19 @@ def _pretty_node(node: 'Node', indent: int) -> str:
     return f"{class_name}(\n{inner},\n{_PRETTY_INDENT * indent})"
 
 
+def stamp_file(node, file: str) -> None:
+    """Set `file` on `node` and every descendant that lacks one."""
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if isinstance(n, Node):
+            if n.file is None:
+                n.file = file
+            stack.extend(getattr(n, f.name) for f in fields(n))
+        elif isinstance(n, (list, tuple)):
+            stack.extend(n)
+
+
 _node_numbers = itertools.count()
 
 

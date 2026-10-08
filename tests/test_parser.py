@@ -212,7 +212,7 @@ def test_unescape_quoted_literal():
     ]
 
     for tc in tcs:
-        assert tc['expected'] == parser._unescape_quoted_literal(tc['input'])
+        assert tc['expected'] == parser.parser._unescape_quoted_literal(tc['input'])
 
     # A backslash that starts no escape is an error, at its offset in the token: a mistyped escape
     # would otherwise quietly become some other text.
@@ -222,8 +222,8 @@ def test_unescape_quoted_literal():
         ("'a\\qb'", 2, "Unknown escape '\\q'"),
         ('"\\d"', 1, "Unknown escape '\\d'"),
     ]:
-        with pytest.raises(parser._BadEscape, match=re.escape(message)) as e:
-            parser._unescape_quoted_literal(bad)
+        with pytest.raises(parser.parser._BadEscape, match=re.escape(message)) as e:
+            parser.parser._unescape_quoted_literal(bad)
         assert e.value.offset == offset
 
 
