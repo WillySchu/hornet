@@ -14291,11 +14291,16 @@ class TestSemanticErrors:
         analyze(ast)  # should not raise
 
 
-    def test_float_literal_is_rejected(self):
-        assert_semantic_error(
-            "    return 2.5",
-            match="not a whole number",
-        )
+    @pytest.mark.parametrize("written", ["2.5", "2.0", "1.50", "0.25", "123456789012345678901234567890.5"])
+    def test_a_number_with_a_fractional_part_is_rejected_as_written(self, written):
+        # (A whole one, `2.0`, was once let through as a number that wasn't an integer, and broke later.)
+        for statement in (f"return {written}", f"print({written} + 1)\n    return 0",
+                          f"[2]int a = [1, {written}]\n    return 0"):
+            with pytest.raises(ParseError, match=re.escape(
+                    f"A number can't have a fractional part ('{written}') -- there are no floating-point types "
+                    f"yet, only integers")) as e:
+                _parse(f"def int main():\n    {statement}\n")
+            assert e.value.line == 2
 
 
     def test_if_condition_must_be_bool(self):

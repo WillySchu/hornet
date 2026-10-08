@@ -85,9 +85,8 @@ class Node:
 
 @dataclass
 class Constant(Node):
-    """A number literal. One with a fraction (`1.5`) parses and is rejected by semantic analysis:
-    there is no floating-point type."""
-    value: Union[int, float]
+    """A number literal: an integer (one written with a fraction, `1.5`, is a parse error)."""
+    value: int
 
 
 @dataclass
@@ -1514,8 +1513,11 @@ class Parser:
     def parse_primary(self) -> Node:
         if self.check(TokenType.NUMBER):
             tok = self.advance()
-            value = float(tok.val) if '.' in tok.val else int(tok.val)
-            return Constant(value=value, line=tok.line, col=tok.col)
+            if '.' in tok.val:  # (the lexer takes `1.5` as one number, so that this can say so)
+                raise self._error(
+                    f"A number can't have a fractional part ('{tok.val}') -- there are no floating-point types "
+                    f"yet, only integers", tok)
+            return Constant(value=int(tok.val), line=tok.line, col=tok.col)
         if self.check(TokenType.TRUE, TokenType.FALSE):
             tok = self.advance()
             return BoolLiteral(value=(tok.type == TokenType.TRUE), line=tok.line, col=tok.col)

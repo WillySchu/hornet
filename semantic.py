@@ -2408,12 +2408,6 @@ class SemanticAnalyzer:
         return Type.VOID
 
     def check_constant(self, expr: Constant) -> Type:
-        if isinstance(expr.value, float) and not expr.value.is_integer():
-            raise SemanticError(
-                f"'{expr.value}' is not a whole number -- this language has "
-                f"no floating-point type; only int and bool exist",
-                expr,
-            )
         if expr.value > 2**63 - 1:
             raise SemanticError(f"Integer literal {int(expr.value)} is out of range for int (64-bit)", expr)
         return Type.INT
