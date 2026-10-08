@@ -69,4 +69,5 @@ Updates:
 - Free memory `malloc`ed by string concatenation.
 - Explore graph coloring algorithm for register allocation (Chaitin-Briggs).
 - Link to non libc functions for FFI?
+- TLS.
 - Call hornet code from C?
