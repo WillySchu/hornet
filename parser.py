@@ -650,7 +650,6 @@ class Parser:
         except _BadEscape as bad:
             raise ParseError(bad.message, tok.file, tok.line, tok.col + bad.offset) from None
 
-
     def peek(self, offset: int = 0) -> Token:
         idx = min(self.pos + offset, len(self.tokens) - 1)
         return self.tokens[idx]
@@ -686,7 +685,6 @@ class Parser:
     def skip_newlines(self):
         while self.match(TokenType.NEWLINE):
             pass
-
 
     def parse_program(self) -> Program:
         start_tok = self.current()
