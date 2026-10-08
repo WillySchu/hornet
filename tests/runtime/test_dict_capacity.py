@@ -5,7 +5,7 @@ import subprocess
 
 import pytest
 
-from build import c_compiler, executable_name, runtime_object
+from build import c_compiler, executable_name, link_flags, runtime_object
 from tests.targets import each_runnable_target, run_binary
 
 pytestmark = pytest.mark.skipif(shutil.which("gcc") is None, reason="gcc not available")
@@ -62,7 +62,8 @@ int main(void) {
 def test_capacity_follows_live_entries(target, tmp_path):
     source, binary = tmp_path / "churn.c", tmp_path / executable_name("churn", target)
     source.write_text(_PROGRAM)
-    subprocess.run([*c_compiler(target), "-std=c11", str(source), str(runtime_object(target)), "-o", str(binary)],
+    subprocess.run([*c_compiler(target), "-std=c11", str(source), str(runtime_object(target)), "-o", str(binary),
+                    *link_flags(target)],
                    check=True, capture_output=True, text=True)
     result = run_binary(target, [binary], capture_output=True, text=True)
     assert (result.returncode, result.stdout) == (0, "3 8 -2\n1 8 7\n1000 2048\n")

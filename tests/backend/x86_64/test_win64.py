@@ -189,6 +189,7 @@ def test_the_system_can_walk_the_stack_through_hornet_frames(tmp_path):
         "    return (level(5) - shallow) * 10 + big(3) - shallow\n")
     (tmp_path / "p.s").write_text(generate_asm(analyze(_parse(source)), target=WINDOWS))
     subprocess.run(build.c_compiler(WINDOWS) + [str(tmp_path / "p.s"), str(tmp_path / "frames.c"),
-                                               str(build.runtime_object(WINDOWS)), "-o", str(tmp_path / "p.exe")],
+                                               str(build.runtime_object(WINDOWS)), "-o", str(tmp_path / "p.exe"),
+                                               *build.link_flags(WINDOWS)],
                    check=True, capture_output=True)
     assert run_binary(WINDOWS, [tmp_path / "p.exe"]).returncode == 5 * 10 + 4

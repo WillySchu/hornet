@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from build import c_compiler, executable_name
+from build import c_compiler, executable_name, link_flags
 from tests.targets import each_runnable_target, run_binary
 
 RUNTIME_DIR = Path(__file__).resolve().parent.parent.parent / "runtime"
@@ -43,7 +43,8 @@ def test_runtime_and_caller_link_and_run_correctly(target):
             [*CC, "-c", "-Wall", "-Wextra", "-std=c11", str(TEST_CALLER_C), "-o", caller_o],
             check=True, capture_output=True, text=True,
         )
-        subprocess.run([*CC, runtime_o, caller_o, "-o", binary], check=True, capture_output=True, text=True)
+        subprocess.run([*CC, runtime_o, caller_o, "-o", binary, *link_flags(target)],
+                       check=True, capture_output=True, text=True)
 
         result = run_binary(target, [binary], capture_output=True, text=True)
         assert result.returncode == 0
@@ -93,6 +94,7 @@ def test_hornet_runtime_entry_points_are_the_only_external_symbols(target):
             "hornet_format_value",
             "hornet_hash_bytes",
             "hornet_is_terminal",
+            "hornet_net_error",
             "hornet_open_read",
             "hornet_open_write",
             "hornet_panic",
@@ -109,6 +111,10 @@ def test_hornet_runtime_entry_points_are_the_only_external_symbols(target):
             "hornet_read_fd",
             "hornet_read_line",
             "hornet_slice_grow",
+            "hornet_tcp_close",
+            "hornet_tcp_connect",
+            "hornet_tcp_read",
+            "hornet_tcp_write",
             "hornet_write_fd",
         ]
         expected_names = [f"_{n}" for n in names] if target.os == 'macos' else names

@@ -1,0 +1,326 @@
+# HTTP/1.1 requests over plain TCP. There is no TLS yet: an `https://` URL is an Error.
+#
+#   ResponseResult r = get('http://example.com/')
+#   if r is Response:
+#       print(r.body)
+#
+# One request to a connection, redirects are the caller's to follow, and a body is held whole.
+from 'errors' import Error, IntResult, StrResult
+from 'fmt' import int_to_str, parse_int
+from 'net' import Conn, ConnResult, connect
+from 'strings' import Builder, ends_with, index_of, index_of_byte, starts_with, trim
+
+# What get and post allow each read and write, in milliseconds.
+const int TIMEOUT_MS = 30000
+# A status line and headers longer than this aren't a response.
+const int _MAX_HEAD = 1048576
+
+type Header struct:
+    str name
+    str value
+
+type Response struct:
+    int status  # 200
+    str reason  # 'OK'
+    []Header headers  # as sent, in order
+    str body
+
+    # The value of the first header called `name`, however either is cased; '' if there is none.
+    def str header(r, str name):
+        str wanted = _lower(name)
+        for h in r.headers:
+            if _lower(h.name) == wanted:
+                return h.value
+        return ''
+
+type ResponseResult is Response | Error
+
+# Where a URL's request goes, and what it asks for there.
+type Url struct:
+    str host
+    int port
+    str target  # the path and query, as the request line gives them
+
+type UrlResult is Url | Error
+
+type _More is bool | Error
+
+def str _lower(str s):
+    []byte out = bytes(s)
+    for i, c in s:
+        if c >= "A" and c <= "Z":
+            out[i] = c + 32
+    return str(out)
+
+# Whether `s` can be a method or a header's name: no spaces, control characters, or colons.
+def bool _is_token(str s):
+    for c in s:
+        if c <= " " or c >= "\x7f" or c == ":":
+            return false
+    return len(s) > 0
+
+def IntResult _parse_hex(str s):
+    if len(s) == 0 or len(s) > 15:
+        return Error('malformed chunk size \'' + s + '\'')
+    int value = 0
+    for c in s:
+        int digit = -1
+        if c >= "0" and c <= "9":
+            digit = int(c) - 48
+        elif c >= "a" and c <= "f":
+            digit = int(c) - 87
+        elif c >= "A" and c <= "F":
+            digit = int(c) - 55
+        if digit < 0:
+            return Error('malformed chunk size \'' + s + '\'')
+        value = value * 16 + digit
+    return value
+
+# `http://host[:port][/path][?query]`; an address in brackets (`[::1]`) is an IPv6 one.
+def UrlResult parse_url(str url):
+    for c in url:
+        if c <= " " or c == "\x7f":
+            return Error('a URL can\'t contain spaces or control characters')
+    int scheme_end = index_of(url, '://')
+    if scheme_end < 0:
+        return Error('not a URL (it has no scheme): \'' + url + '\'')
+    str scheme = _lower(url[0:scheme_end])
+    if scheme == 'https':
+        return Error('https is not supported: there is no TLS yet')
+    if scheme != 'http':
+        return Error('unsupported URL scheme \'' + scheme + '\'')
+    str rest = url[scheme_end + 3:]
+    int fragment = index_of_byte(rest, "#")
+    if fragment >= 0:
+        rest = rest[0:fragment]
+    int authority_end = len(rest)
+    for i, c in rest:
+        if c == "/" or c == "?":
+            authority_end = i
+            break
+    str authority = rest[0:authority_end]
+    str target = rest[authority_end:]
+    if len(target) == 0 or target[0] != "/":
+        target = '/' + target
+    if index_of_byte(authority, "@") >= 0:
+        return Error('a URL with a user name is not supported')
+    str host = authority
+    int colon = -1
+    if starts_with(authority, '['):
+        int bracket = index_of_byte(authority, "]")
+        if bracket < 0 or (bracket + 1 < len(authority) and authority[bracket + 1] != ":"):
+            return Error('malformed address in URL: \'' + authority + '\'')
+        host = authority[1:bracket]
+        if bracket + 1 < len(authority):
+            colon = bracket + 1
+    else:
+        colon = index_of_byte(authority, ":")
+        if colon >= 0:
+            host = authority[0:colon]
+    int port = 80
+    if colon >= 0:
+        IntResult given = parse_int(authority[colon + 1:])
+        if given is Error or given < 1 or given > 65535:
+            return Error('malformed port in URL: \'' + authority + '\'')
+        port = given
+    if len(host) == 0:
+        return Error('a URL needs a host: \'' + url + '\'')
+    return Url(host, port, target)
+
+# The request as it is sent. Host, Connection, and Content-Length are written here; `headers` adds to them.
+def StrResult _request_text(str method, Url url, []Header headers, str body):
+    if not _is_token(method):
+        return Error('not an HTTP method: \'' + method + '\'')
+    str host = url.host
+    if index_of_byte(host, ":") >= 0:
+        host = '[' + host + ']'
+    if url.port != 80:
+        host = host + ':' + int_to_str(url.port)
+    Builder b
+    b.write(method + ' ' + url.target + ' HTTP/1.1\r\nHost: ' + host + '\r\nConnection: close\r\n')
+    for h in headers:
+        if not _is_token(h.name) or index_of_byte(h.value, "\r") >= 0 or index_of_byte(h.value, "\n") >= 0:
+            return Error('malformed header \'' + h.name + '\'')
+        b.write(h.name + ': ' + h.value + '\r\n')
+    if len(body) > 0 or method in ['POST', 'PUT', 'PATCH']:
+        b.write('Content-Length: ' + int_to_str(len(body)) + '\r\n')
+    b.write('\r\n')
+    b.write(body)
+    return b.to_str()
+
+# What has arrived on a connection and not been used yet.
+type _Reader struct:
+    Conn conn
+    []byte buf
+    int pos  # where in buf the unused part starts
+    bool ended  # the other side has closed
+
+    # Wait for more to arrive; false once there is no more to come.
+    def _More fill(*r):
+        if r.ended:
+            return false
+        StrResult got = r.conn.read()
+        if got is Error:
+            return got
+        if len(got) == 0:
+            r.ended = true
+            return false
+        for c in got:
+            r.buf = append(r.buf, c)
+        return true
+
+    # The next line, without its "\r\n" (a bare "\n" ends one too).
+    def StrResult line(*r):
+        int i = r.pos
+        while true:
+            while i < len(r.buf):
+                if r.buf[i] == "\n":
+                    int end = i
+                    if end > r.pos and r.buf[end - 1] == "\r":
+                        end -= 1
+                    str text = str(r.buf[r.pos:end])
+                    r.pos = i + 1
+                    return text
+                i += 1
+            if i - r.pos > _MAX_HEAD:
+                return Error('not an HTTP response: a line of it is over 1 MB')
+            _More more = r.fill()
+            if more is Error:
+                return more
+            if not more:
+                return Error('the connection closed in the middle of the response')
+
+    # The next `n` bytes.
+    def StrResult take(*r, int n):
+        while len(r.buf) - r.pos < n:
+            _More more = r.fill()
+            if more is Error:
+                return more
+            if not more:
+                return Error('the connection closed before the whole body arrived')
+        str text = str(r.buf[r.pos:r.pos + n])
+        r.pos += n
+        return text
+
+    # Everything up to the connection's close.
+    def StrResult rest(*r):
+        while true:
+            _More more = r.fill()
+            if more is Error:
+                return more
+            if not more:
+                break
+        str text = str(r.buf[r.pos:])
+        r.pos = len(r.buf)
+        return text
+
+# A body sent in chunks: each a line giving its size in hex, then that many bytes; a size of 0 ends it.
+def StrResult _read_chunked(*_Reader r):
+    Builder body
+    while true:
+        StrResult size_line = r.line()
+        if size_line is Error:
+            return size_line
+        str digits = size_line
+        int extension = index_of_byte(size_line, ";")
+        if extension >= 0:
+            digits = size_line[0:extension]
+        IntResult size = _parse_hex(trim(digits))
+        if size is Error:
+            return size
+        if size == 0:
+            break
+        StrResult data = r.take(size)
+        if data is Error:
+            return data
+        body.write(data)
+        StrResult after = r.line()
+        if after is Error:
+            return after
+        if len(after) != 0:
+            return Error('malformed chunk: no line end after its data')
+    while true:  # trailers, to the empty line that ends them
+        StrResult trailer = r.line()
+        if trailer is Error:
+            return trailer
+        if len(trailer) == 0:
+            break
+    return body.to_str()
+
+# The body that follows `head`: how much there is depends on the request and on head's status and headers.
+def StrResult _read_body(*_Reader r, Response head, bool head_request):
+    if head_request or head.status == 204 or head.status == 304:
+        return ''
+    if ends_with(_lower(trim(head.header('Transfer-Encoding'))), 'chunked'):
+        return _read_chunked(r)
+    str length = trim(head.header('Content-Length'))
+    if len(length) == 0:
+        return r.rest()
+    IntResult n = parse_int(length)
+    if n is Error or n < 0:
+        return Error('malformed Content-Length \'' + length + '\'')
+    return r.take(n)
+
+def ResponseResult _read_response(*_Reader r, bool head_request):
+    while true:
+        StrResult status_line = r.line()
+        if status_line is Error:
+            return status_line
+        int space = index_of_byte(status_line, " ")
+        if not starts_with(status_line, 'HTTP/') or space < 0 or len(status_line) < space + 4:
+            return Error('not an HTTP response: it starts \'' + status_line + '\'')
+        IntResult status = parse_int(status_line[space + 1:space + 4])
+        if status is Error or status < 100:
+            return Error('not an HTTP response: it starts \'' + status_line + '\'')
+        int head_start = r.pos
+        []Header headers
+        while true:
+            StrResult h = r.line()
+            if h is Error:
+                return h
+            if len(h) == 0:
+                break
+            if r.pos - head_start > _MAX_HEAD:
+                return Error('not an HTTP response: its headers are over 1 MB')
+            int colon = index_of_byte(h, ":")
+            if (h[0] == " " or h[0] == "\t") and len(headers) > 0:  # a header's value, carried on
+                headers[len(headers) - 1].value += ' ' + trim(h)
+            elif colon > 0:
+                headers = append(headers, Header(trim(h[0:colon]), trim(h[colon + 1:])))
+            else:
+                return Error('malformed header in response: \'' + h + '\'')
+        if status >= 100 and status < 200 and status != 101:
+            continue  # an interim response: the real one follows
+        Response response = Response(status, trim(status_line[space + 4:]), headers, '')
+        StrResult body = _read_body(r, response, head_request)
+        if body is Error:
+            return body
+        response.body = body
+        return response
+
+# Send one request and read its response. `headers` are sent besides Host, Connection, and
+# Content-Length, which are set here. `timeout_ms` bounds each read and write (0: no bound).
+def ResponseResult request(str method, str url, []Header headers, str body, int timeout_ms):
+    UrlResult parsed = parse_url(url)
+    if parsed is Error:
+        return parsed
+    StrResult text = _request_text(method, parsed, headers, body)
+    if text is Error:
+        return text
+    ConnResult conn = connect(parsed.host, parsed.port, timeout_ms)
+    if conn is Error:
+        return conn
+    IntResult sent = conn.write(text)
+    if sent is Error:
+        conn.close()
+        return sent
+    _Reader reader = _Reader(conn, [], 0, false)
+    ResponseResult response = _read_response(&reader, method == 'HEAD')
+    conn.close()
+    return response
+
+def ResponseResult get(str url):
+    return request('GET', url, [], '', TIMEOUT_MS)
+
+def ResponseResult post(str url, str content_type, str body):
+    return request('POST', url, [Header('Content-Type', content_type)], body, TIMEOUT_MS)

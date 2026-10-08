@@ -37,8 +37,9 @@ WINDOWS_STACK_BYTES = 8 * 1024 * 1024
 
 
 def link_flags(target: Target) -> list[str]:
-    """What the C compiler is told when linking a `target` program, besides its inputs and output."""
-    return [f"-Wl,--stack,{WINDOWS_STACK_BYTES}"] if target.os == 'windows' else []
+    """What the C compiler is told when linking a `target` program, besides its inputs and output.
+    (Windows keeps its sockets, which the runtime's hornet_tcp_* use, in a library of their own.)"""
+    return [f"-Wl,--stack,{WINDOWS_STACK_BYTES}", "-lws2_32"] if target.os == 'windows' else []
 
 
 def executable_name(name: str, target: Target) -> str:

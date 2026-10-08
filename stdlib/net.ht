@@ -1,0 +1,56 @@
+# TCP connections, through the runtime: C's sockets differ between systems.
+from 'c' import from_cstring, to_cstring, from_raw_parts, hornet_alloc, memcpy
+from 'errors' import Error, IntResult, StrResult
+from 'strings' import index_of_byte
+
+extern int hornet_tcp_connect(*byte host, int port, int timeout_ms)
+extern int hornet_tcp_read(int socket, *byte buf, int count)
+extern int hornet_tcp_write(int socket, *byte buf, int n)
+extern int hornet_tcp_close(int socket)
+extern *byte hornet_net_error()
+intrinsic *byte _raw_ptr(str s)
+intrinsic int _raw_len(str s)
+
+const int _CHUNK = 65536
+
+def str _reason():
+    return from_cstring(hornet_net_error())
+
+# An open connection: Conn c = ...; c.write('ping'); c.read(); c.close().
+type Conn struct:
+    int _socket
+    *byte _chunk  # where a read arrives, before it is copied out
+
+    # Send all of `data`; how many bytes that was.
+    def IntResult write(c, str data):
+        if hornet_tcp_write(c._socket, _raw_ptr(data), _raw_len(data)) < 0:
+            return Error('write failed: ' + _reason())
+        return len(data)
+
+    # What has arrived, up to 64 KB, waiting if nothing has yet; '' once the other side has closed.
+    def StrResult read(c):
+        int n = hornet_tcp_read(c._socket, c._chunk, _CHUNK)
+        if n < 0:
+            return Error('read failed: ' + _reason())
+        if n == 0:
+            return ''
+        *byte copy = hornet_alloc(n)
+        memcpy(copy, c._chunk, n)
+        return from_raw_parts(copy, n)
+
+    def close(c):
+        hornet_tcp_close(c._socket)
+
+type ConnResult is Conn | Error
+
+# Connect to `host` (a name or an address) on `port`. A positive `timeout_ms` bounds each read and
+# write (and, on Linux, the connecting itself); 0 waits as long as the system does.
+def ConnResult connect(str host, int port, int timeout_ms):
+    if len(host) == 0 or index_of_byte(host, "\0") >= 0:
+        return Error('could not connect: \'' + host + '\' is not a host name')
+    if port < 1 or port > 65535:
+        return Error('could not connect: a port is 1 to 65535')
+    int socket = hornet_tcp_connect(to_cstring(host), port, timeout_ms)
+    if socket < 0:
+        return Error('could not connect to ' + host + ': ' + _reason())
+    return Conn(socket, hornet_alloc(_CHUNK))

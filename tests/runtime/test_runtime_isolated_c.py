@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from build import c_compiler, executable_name
+from build import c_compiler, executable_name, link_flags
 from tests.targets import each_runnable_target, is_native, run_binary
 
 RUNTIME_DIR = Path(__file__).resolve().parent.parent.parent / "runtime"
@@ -32,7 +32,8 @@ def _compile_and_run(target, extra_flags: list[str]) -> subprocess.CompletedProc
     with tempfile.TemporaryDirectory() as tmpdir:
         binary = f"{tmpdir}/{executable_name('test_runtime_isolated', target)}"
         subprocess.run(
-            [*c_compiler(target), "-Wall", "-Wextra", "-std=c11", *extra_flags, str(TEST_ISOLATED_C), "-o", binary],
+            [*c_compiler(target), "-Wall", "-Wextra", "-std=c11", *extra_flags, str(TEST_ISOLATED_C), "-o", binary,
+             *link_flags(target)],
             check=True, capture_output=True, text=True,
         )
         return run_binary(target, [binary], capture_output=True, text=True)
