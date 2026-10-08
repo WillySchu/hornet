@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from build import build_executable, executable_name
-from diagnostics import CompileError, _columns_shown, format_error
+from diagnostics import CompileError, _columns_shown, format_error, quoted_text
 from dump import dump
 from lexer import LexError, lex
 from tests.targets import on_every_target, run_binary
@@ -164,12 +164,21 @@ A_UMLAUT = "\u00c4".encode()        # its second byte, 0x84, and the CJK charact
      b"p.ht:2:44: error: Dict literal lists the key '" + A_UMLAUT + b"' more than once\n"),
     (b'def int main():\n    byte b = "\\n\\t"\n    return int(b)\n',       # what can't be shown is still escaped
      b"p.ht:2:14: error: A byte literal must resolve to exactly one byte (0-255), got '\\n\\t'\n"),
+    (b'def int main():\n    byte b = "\\\\n"\n    return int(b)\n',      # a backslash and an n: not a newline
+     b"p.ht:2:14: error: A byte literal must resolve to exactly one byte (0-255), got '\\\\n'\n"),
+    (b'def int main():\n    int x = 1 "' + CJK + b'"\n    return x\n',      # a token is named as written
+     b"p.ht:2:15: error: Expected the end of the line after this statement, got byte literal \"" + CJK + b"\"\n"),
 ])
 def test_a_message_that_quotes_source_text_keeps_its_characters_whole(tmp_path, source, message):
     (tmp_path / (A_UMLAUT.decode() + "rger-mod.ht")).write_text("def int f():\n    return 1\n")
     result = _compile(_file(tmp_path, source))
     assert result.returncode == 1 and result.stderr.startswith(message), result.stderr
     result.stderr.decode('utf-8')  # every byte of it part of a whole character
+
+
+def test_quoted_text_tells_a_backslash_from_an_escape():
+    assert quoted_text("a\\nb") == "'a\\\\nb'" and quoted_text("a\nb") == "'a\\nb'"
+    assert quoted_text("\x00\x7f it's") == "'\\x00\\x7f it's'"
 
 
 def test_a_dict_literal_s_repeated_key_is_named_as_written(tmp_path):

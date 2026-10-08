@@ -35,8 +35,8 @@ def quoted_text(text: str) -> str:
     """`text` in quotes, for a message. Source text and file names are held a byte to a character
     and written back as those bytes, so the bytes of a character that isn't ASCII are left as they
     are (repr() would escape some of them, and so break the character up); only control characters,
-    which can't be shown, are escaped."""
-    return "'" + ''.join(c if c >= ' ' and c != '\x7f' else repr(c)[1:-1] for c in text) + "'"
+    which can't be shown, are escaped, and the backslash, so that it isn't read as an escape."""
+    return "'" + ''.join(c if c >= ' ' and c not in '\\\x7f' else repr(c)[1:-1] for c in text) + "'"
 
 
 def _display_path(path: str) -> str:

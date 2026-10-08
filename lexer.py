@@ -430,9 +430,11 @@ def describe_token_type(t: TokenType) -> str:
 
 
 def describe_token(tok: Token) -> str:
-    """Human-readable token, e.g. "identifier 'x'" or "':'"."""
-    if tok.type in (TokenType.IDENTIFIER, TokenType.NUMBER, TokenType.STRING, TokenType.BYTE):
-        return f"{_TOKEN_NAMES[tok.type]} {tok.val!r}" if tok.type != TokenType.STRING else f"string literal {tok.val}"
+    """Human-readable token, e.g. "identifier 'x'" or "':'". A literal is shown as written, in its own quotes."""
+    if tok.type in (TokenType.STRING, TokenType.BYTE):
+        return f"{_TOKEN_NAMES[tok.type]} {tok.val}"
+    if tok.type in (TokenType.IDENTIFIER, TokenType.NUMBER):
+        return f"{_TOKEN_NAMES[tok.type]} {tok.val!r}"
     return describe_token_type(tok.type)
 
 
