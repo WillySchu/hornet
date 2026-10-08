@@ -4,7 +4,6 @@ expression checker, and the Context they share, it checks a function's body."""
 import pytest
 
 from scopes import build_module_set
-from semantic.constants import ConstEvaluator
 from semantic.context import Context
 from semantic.declarations import DeclarationResolver, Declarations
 from semantic.errors import SemanticError
@@ -36,11 +35,11 @@ def _check(body: str, signature: str = "def int f(Shape shape, Color c, int n)")
     program, facts, decls, symbols = build_module_set(_parse(source), {}), Facts(), Declarations(), SymbolTable()
     context = Context(scope=program.files[0][1], scopes=Scopes(symbols, decls, facts))
     types = TypeResolver(decls, program, facts.array_sizes)
-    constants = ConstEvaluator(facts, decls.enums, lambda decl: pytest.fail("no constant here"))
-    DeclarationResolver(program, decls, types, facts, constants, lambda expr, scope: pytest.fail("no size")).resolve()
-    expressions = ExpressionChecker(context, decls, facts, constants, types, program, symbols)
+    expressions = ExpressionChecker(context, decls, facts, types, program, symbols)
+    DeclarationResolver(program, decls, types, facts, expressions.constants, expressions.check_array_size).resolve()
     checker = StatementChecker(context, decls, facts, symbols, types, expressions, program)
-    fn = next(fn for fn in decls.all_functions if fn.name == 'f')
+    name = signature.split('(')[0].split()[-1]
+    fn = next(fn for fn in decls.all_functions if fn.name == name)
     checker.analyze_function(fn)
     return facts, fn, checker
 
@@ -97,3 +96,16 @@ def test_a_never_function_must_not_finish():
     with pytest.raises(SemanticError, match="is declared never, but can finish"):
         _check("if n > 0:\n    stop()", signature="def never f(Shape shape, Color c, int n)")
     _check("stop()", signature="def never f(Shape shape, Color c, int n)")
+
+
+def test_main_s_signature_is_checked_after_its_body():
+    _check("return 0", signature="def int main()")
+    _check("return argc", signature="def int main(int argc, *byte argv)")
+    with pytest.raises(SemanticError, match="'main' must return int"):
+        _check("return 'done'", signature="def str main()")
+    with pytest.raises(SemanticError, match=r"'main' takes no parameters, or exactly '\(int argc, \*byte argv\)'"):
+        _check("return n", signature="def int main(int n)")
+    # What is wrong in the body is said first: the signature is checked once the body has been.
+    with pytest.raises(SemanticError, match="Reference to undeclared variable 'missing'"):
+        _check("return missing", signature="def str main()")
+

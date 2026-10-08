@@ -2,21 +2,28 @@
 
 ExpressionChecker checks an expression where checking is (Context), against what the program
 declares, and records what it learns in Facts, from which the typed tree is built. Calls and struct
-literals are CallChecker's (semantic/calls.py), which is a part of it. Statements are checked
+literals are CallChecker's (semantic/calls.py), which is a part of it, and the values of constants
+are ConstEvaluator's (semantic/constants.py), which it also builds: the two take turns, since a
+constant's value is an expression and an expression may name a constant. Statements are checked
 elsewhere and only call in: nothing here calls back out."""
 
+import contextlib
+import dataclasses
 from typing import Optional, Tuple
 
 from diagnostics import quoted_text
 from ops import EQUALITY_OPS, LOGICAL_OPS, ORDERING_OPS, BinaryOp, UnaryOp
 from parser import (
-    READ_AS_A_TYPED_LITERAL, ArrayLiteral, Binary, BoolLiteral, ByteLiteral, Call, Cast, Constant, DictLiteral, Field,
-    Index, IsCheck, Node, NoneLiteral, QualifiedTypeExpr, Slice, SliceLiteral, StringLiteral, Unary, VarDecl, Variable,
+    READ_AS_A_TYPED_LITERAL, ArrayLiteral, Binary, BoolLiteral, ByteLiteral, Call, Cast, ConstDecl, Constant,
+    DictLiteral, Field, Index, IsCheck, Node, NoneLiteral, QualifiedTypeExpr, Slice, SliceLiteral, StringLiteral,
+    Unary, VarDecl, Variable,
 )
 from scopes import display_name as shown
 from semantic.calls import CallChecker
+from semantic.constants import ConstEvaluator
 from semantic.context import Context
 from semantic.errors import SemanticError
+from semantic.flow import Scopes
 from typesys import BYTE_SLICE, INTEGER_TYPES, Type, TypeKind
 
 # ADD is excluded: it also concatenates strings.
@@ -59,15 +66,15 @@ def _constant_key_value(expr: Node):
 class ExpressionChecker:
     """Checks expressions. (It is the Checker that CallChecker asks about a call's arguments.)"""
 
-    def __init__(self, context: Context, decls, facts, constants, types, module_set, symbols):
+    def __init__(self, context: Context, decls, facts, types, module_set, symbols):
         self.context = context
         self.decls = decls
         self.facts = facts
-        self.constants = constants
         self.types = types
         self.module_set = module_set
         self.symbols = symbols
-        self.calls = CallChecker(self, decls, facts, constants, module_set)
+        self.constants = ConstEvaluator(facts, decls.enums, self.check_const_declaration)
+        self.calls = CallChecker(self, decls, facts, self.constants, module_set)
 
     @property
     def scope(self):
@@ -76,6 +83,72 @@ class ExpressionChecker:
 
     def _type(self, type_expr, node: Node, sums: bool = True) -> Type:
         return self.types.resolve(type_expr, node, self.context.scope, sums)
+
+    # -- constant expressions, for the declaration phase: checked in the scope of the file they are
+    # written in, wherever checking was, and with no local in sight
+
+    @contextlib.contextmanager
+    def _no_locals(self):
+        saved, self.context.scopes = self.context.scopes, Scopes(self.symbols, self.decls, self.facts)
+        try:
+            yield
+        finally:
+            self.context.scopes = saved
+
+    def check_array_size(self, expr: Node, scope) -> int:
+        """The value of an array-size expression written in the file whose scope is `scope`: a positive
+        integer computed from literals and constants only. (For DeclarationResolver.)"""
+        saved_scope, self.context.scope = self.context.scope, scope
+        try:
+            return self._array_size_here(expr)
+        finally:
+            self.context.scope = saved_scope
+
+    def _array_size_here(self, expr: Node) -> int:
+        stack = [expr]
+        while stack:
+            node = stack.pop()
+            if node.nid in self.module_set.qualified and isinstance(node, Field):
+                continue  # `alias.NAME`: checked as a constant below
+            if isinstance(node, Call) and node.name == 'len' and len(node.args) == 1 and node.receiver is None \
+                    and self.enum_named_by(node.args[0]) is not None:
+                continue  # `len(Enum)`: a constant
+            if isinstance(node, Call):
+                raise SemanticError("Array size must be a constant expression, not a call", node)
+            if isinstance(node, Variable) and self.const_key(node.name) is None:
+                raise SemanticError(
+                    f"Array size must be a constant expression, but '{node.name}' isn't a constant", node)
+            if dataclasses.is_dataclass(node):
+                stack.extend(v for f in dataclasses.fields(node) if isinstance(v := getattr(node, f.name), Node))
+        with self._no_locals():
+            size_type = self.check_expr(expr)
+            if size_type not in INTEGER_TYPES:
+                raise SemanticError(f"Array size must be an integer, got {size_type}", expr)
+            value = self.constants.evaluate(expr)
+        if value <= 0:
+            raise SemanticError(f"Array size must be positive, got {value}", expr)
+        return value
+
+    def check_const_declaration(self, cd: ConstDecl) -> Type:
+        """Check a constant's declaration, in the scope of the file that declares it; its type. (For
+        ConstEvaluator, which then works out the value.)"""
+        saved_scope, self.context.scope = self.context.scope, self.module_set.scope_of[cd.nid]
+        try:
+            with self._no_locals():
+                const_type = self._type(cd.const_type, cd)
+                if const_type not in INTEGER_TYPES and const_type not in (Type.BOOL, Type.STR) \
+                        and const_type.kind != TypeKind.ENUM:
+                    raise SemanticError(
+                        f"Constant '{shown(cd.name)}' has type {const_type} -- constants must be an integer type, "
+                        f"bool, str, or an enum", cd)
+                value_type = self.check_value_flowing_into(cd.value, const_type)
+                if not self.types_compatible(value_type, const_type):
+                    raise SemanticError(
+                        f"Constant '{shown(cd.name)}' is declared {const_type} but its value has type {value_type}",
+                        cd)
+        finally:
+            self.context.scope = saved_scope
+        return const_type
 
     def check_expr(self, expr: Node) -> Type:
         """Type-check `expr`, recording its type."""
