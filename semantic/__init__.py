@@ -10,8 +10,9 @@ and _TypedTreeBuilder builds each function's typed tree from those facts at the 
 """
 
 import argparse
+import contextlib
 import dataclasses
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from diagnostics import quoted_text
 from lexer import lex
@@ -19,10 +20,13 @@ from semantic.constants import ConstEvaluator
 from semantic.declarations import DeclarationResolver, Declarations
 from semantic.errors import SemanticError, SemanticErrors
 from semantic.facts import Facts
+from semantic.flow import (
+    Scopes, always_ends, always_leaves, always_returns, conditions_after, conjuncts, contains_reachable_break,
+)
 from semantic.types import TypeResolver, type_from_name  # noqa: F401 (type_from_name: for those who import it here)
 from semantic.typed_tree_builder import TypedTreeBuilder
 from typesys import INTEGER_TYPES, StructInfo, SumTypeInfo, Type, TypeKind  # noqa: F401 (some for importers)
-from ops import ORDERING_OPS
+from ops import EQUALITY_OPS, LOGICAL_OPS, ORDERING_OPS
 import typed_ast as typed
 from scopes import build_module_set, display_name as shown
 from symbols import SymbolTable
@@ -71,110 +75,24 @@ from parser import (
 
 
 
-def _always_ends(statements: List[Node], types: dict, ends: tuple) -> bool:
-    """Whether control never runs off the end of `statements`: every path reaches a statement of
-    one of the classes `ends`, a call to a `never` function (by `types`, the checked types by node
-    number), or a `while true` without a reachable break."""
-    for stmt in statements:
-        if isinstance(stmt, ends):
-            return True
-        if isinstance(stmt, ExprStmt) and types.get(stmt.expr.nid) == Type.NEVER:
-            return True
-        if isinstance(stmt, Match) and all(_always_ends(body, types, ends) for _, body in stmt.arms) and (
-                stmt.else_body is None or _always_ends(stmt.else_body, types, ends)):  # exhaustive without an else
-            return True
-        if isinstance(stmt, If) and stmt.else_body is not None and _always_ends(stmt.then_body, types, ends) and \
-                _always_ends(stmt.else_body, types, ends):
-            return True
-        if isinstance(stmt, While) and isinstance(stmt.condition, BoolLiteral) and stmt.condition.value is True \
-                and not contains_reachable_break(stmt.body):
-            return True
-    return False
-
-
-def always_returns(statements: List[Node], types: dict) -> bool:
-    """Whether every path through `statements` returns (or never finishes)."""
-    return _always_ends(statements, types, (Return,))
-
-
-def contains_reachable_break(statements: List[Node]) -> bool:
-    """Whether `statements` contain a break for this loop (not nested loops)."""
-    for stmt in statements:
-        if isinstance(stmt, Break):
-            return True
-        if isinstance(stmt, If):
-            if contains_reachable_break(stmt.then_body):
-                return True
-            if stmt.else_body is not None and contains_reachable_break(stmt.else_body):
-                return True
-        if isinstance(stmt, Match):
-            if any(contains_reachable_break(body) for _, body in stmt.arms):
-                return True
-            if stmt.else_body is not None and contains_reachable_break(stmt.else_body):
-                return True
-    return False
 
 
 
 
-def always_leaves(statements: List[Node], types: dict) -> bool:
-    """Whether every path through `statements` returns, breaks out of or continues the enclosing
-    loop, or never finishes."""
-    return _always_ends(statements, types, (Return, Break, Continue))
 
 
-def _conditions_after(stmt: If, types: dict) -> Tuple[List[Node], Optional[Node]]:
-    """(the conditions known false, the condition known true) once control passes the `if`/`elif`/
-    `else` chain `stmt`. When every branch but one always leaves, that one ran: the conditions before
-    it were false, and its own was true (it has none if it is the `else`, written or not)."""
-    branches = []  # (condition, body); the `else` last, with no condition
-    while True:
-        branches.append((stmt.condition, stmt.then_body))
-        if stmt.else_body is not None and len(stmt.else_body) == 1 and isinstance(stmt.else_body[0], If):
-            stmt = stmt.else_body[0]
-            continue
-        branches.append((None, stmt.else_body or []))
-        break
-    staying = [i for i, (_, body) in enumerate(branches) if not always_leaves(body, types)]
-    if len(staying) != 1:
-        return [], None
-    return [condition for condition, _ in branches[:staying[0]]], branches[staying[0]][0]
 
 
-def _assigned_names(node) -> Set[str]:
-    """The names of the variables given a new value (`v = ...`) anywhere under `node` (a statement, or a
-    list of them). `v += ...` isn't one: it gives v back the variant it held."""
-    names: Set[str] = set()
-    stack = [node]
-    while stack:
-        n = stack.pop()
-        if isinstance(n, (list, tuple)):
-            stack.extend(n)
-        elif isinstance(n, Node):
-            if isinstance(n, Assign) and isinstance(n.target, Variable) and n.op is None:
-                names.add(n.target.name)
-            stack.extend(getattr(n, f.name) for f in dataclasses.fields(n))
-    return names
 
 
-def _conjuncts(condition: Node) -> List[Node]:
-    """The checks a condition's top-level `and`s join, in order (the condition itself if it has none)."""
-    if isinstance(condition, Binary) and condition.op == BinaryOp.AND:
-        return _conjuncts(condition.left) + _conjuncts(condition.right)
-    return [condition]
 
 
-def _both(a: dict, b: dict) -> dict:
-    """What is known when both of two sets of narrowing facts hold (SemanticAnalyzer._when)."""
-    out = dict(a)
-    for decl_id, (name, variants) in b.items():
-        out[decl_id] = (name, variants & out[decl_id][1]) if decl_id in out else (name, variants)
-    return out
 
 
-def _either(a: dict, b: dict) -> dict:
-    """What is known when one of two sets of narrowing facts holds, but not which."""
-    return {decl_id: (name, variants | b[decl_id][1]) for decl_id, (name, variants) in a.items() if decl_id in b}
+
+
+
+
 
 
 
@@ -200,8 +118,8 @@ _INT_ONLY_BINARY_OPS = {
     BinaryOp.SHIFT_LEFT, BinaryOp.SHIFT_RIGHT,
 }
 _ORDERING_OPS = ORDERING_OPS
-_EQUALITY_OPS = {BinaryOp.EQUAL, BinaryOp.NOT_EQUAL}
-_LOGICAL_OPS = {BinaryOp.AND, BinaryOp.OR}
+_EQUALITY_OPS = EQUALITY_OPS
+_LOGICAL_OPS = LOGICAL_OPS
 
 _INTEGER_TYPES = INTEGER_TYPES
 
@@ -257,13 +175,9 @@ class SemanticAnalyzer:
     """Type- and scope-checks a Program."""
 
     def __init__(self):
-        self.scopes: List[Dict[str, Tuple[Type, object]]] = []  # name -> (type, decl id)
+        self.scopes = None  # the names in scope where checking is (semantic/flow.py): a Scopes per function
         self.loop_depth = 0  # enclosing loop count
         self.decls = Declarations()  # what the program declares (semantic/declarations.py), read as `self.decls.X`
-        self._declared: List[Set[str]] = []  # per scope: the names declared in it (not merely narrowed)
-        # Sum variables an `is` check has narrowed here: decl id -> the variants it may still hold.
-        self._possible: Dict[int, frozenset] = {}
-        self._undo: list = []  # what _restrict changed, undone by _end_region
 
     def analyze(self, entry: Program, modules: Optional[dict] = None) -> "typed.Program":
         """Check the entry file and the modules it imports (discover_modules's result) and return the
@@ -276,6 +190,7 @@ class SemanticAnalyzer:
         self.scope = program.files[0][1]
         # Declarations first, all of them: what each body is then checked against.
         self.decls = Declarations()
+        self.scopes = Scopes(self.symbols, self.decls, self.facts)  # (no locals, until a function is checked)
         self.types = TypeResolver(self.decls, program, self.facts.array_sizes)
         self.constants = ConstEvaluator(self.facts, self.decls.enums, self._check_const_declaration)
         DeclarationResolver(
@@ -369,14 +284,11 @@ class SemanticAnalyzer:
                     f"Array size must be a constant expression, but '{node.name}' isn't a constant", node)
             if dataclasses.is_dataclass(node):
                 stack.extend(v for f in dataclasses.fields(node) if isinstance(v := getattr(node, f.name), Node))
-        saved_scopes, self.scopes = self.scopes, [{}]
-        try:
+        with self._no_locals():
             size_type = self.check_expr(expr)
             if size_type not in _INTEGER_TYPES:
                 raise SemanticError(f"Array size must be an integer, got {size_type}", expr)
             value = self.constants.evaluate(expr)
-        finally:
-            self.scopes = saved_scopes
         if value <= 0:
             raise SemanticError(f"Array size must be positive, got {value}", expr)
         return value
@@ -387,23 +299,33 @@ class SemanticAnalyzer:
     def _check_const_declaration(self, cd: ConstDecl) -> Type:
         """Check a constant's declaration, in the scope of the file that declares it and with no
         local in sight; its type. (For ConstEvaluator, which then works out the value.)"""
-        saved_scope, saved_scopes = self.scope, self.scopes
+        saved_scope = self.scope
         self._enter(cd)
-        self.scopes = [{}]
         try:
-            const_type = self._type(cd.const_type, cd)
-            if const_type not in _INTEGER_TYPES and const_type not in (Type.BOOL, Type.STR) \
-                    and const_type.kind != TypeKind.ENUM:
-                raise SemanticError(
-                    f"Constant '{shown(cd.name)}' has type {const_type} -- constants must be an integer type, "
-                    f"bool, str, or an enum", cd)
-            value_type = self._check_value_flowing_into(cd.value, const_type)
-            if not self._types_compatible(value_type, const_type):
-                raise SemanticError(
-                    f"Constant '{shown(cd.name)}' is declared {const_type} but its value has type {value_type}", cd)
+            with self._no_locals():
+                const_type = self._type(cd.const_type, cd)
+                if const_type not in _INTEGER_TYPES and const_type not in (Type.BOOL, Type.STR) \
+                        and const_type.kind != TypeKind.ENUM:
+                    raise SemanticError(
+                        f"Constant '{shown(cd.name)}' has type {const_type} -- constants must be an integer type, "
+                        f"bool, str, or an enum", cd)
+                value_type = self._check_value_flowing_into(cd.value, const_type)
+                if not self._types_compatible(value_type, const_type):
+                    raise SemanticError(
+                        f"Constant '{shown(cd.name)}' is declared {const_type} but its value has type {value_type}",
+                        cd)
         finally:
-            self.scope, self.scopes = saved_scope, saved_scopes
+            self.scope = saved_scope
         return const_type
+
+    @contextlib.contextmanager
+    def _no_locals(self):
+        """While a constant expression is checked: no local is in scope, wherever checking was."""
+        saved, self.scopes = self.scopes, Scopes(self.symbols, self.decls, self.facts)
+        try:
+            yield
+        finally:
+            self.scopes = saved
 
 
 
@@ -415,8 +337,7 @@ class SemanticAnalyzer:
 
     def analyze_function(self, fn: Function) -> None:
         self._enter(fn)
-        self.scopes, self._declared = [{}], [set()]
-        self._possible, self._undo = {}, []
+        self.scopes = Scopes(self.symbols, self.decls, self.facts)
         self._bindable, self._bound = set(), set()  # `as NAME` checks that may bind here; those that have
         self._assignments = []  # decl ids, as variables are assigned on paths that reach what follows
         self.loop_depth = 0
@@ -425,11 +346,11 @@ class SemanticAnalyzer:
             param_type = self._type(p.type, p)
             self.facts.types[p.nid] = param_type
             self.facts.symbols[p.nid] = self.symbols.new(p.name, 'param', param_type, p)
-            self._declare(p.name, param_type, p, self.facts.symbols[p.nid].id)
+            self.scopes.declare(p.name, param_type, p, self.facts.symbols[p.nid].id)
         return_type = self._return_type(fn)
         self.facts.returns[fn.nid] = return_type
         self._analyze_block(fn.body, return_type)
-        if return_type == Type.NEVER and not _always_ends(fn.body, self.facts.types, ()):
+        if return_type == Type.NEVER and not always_ends(fn.body, self.facts.types, ()):
             raise SemanticError(
                 f"Function '{shown(fn.name)}' is declared never, but can finish -- every path must end in a call "
                 f"to a never function (such as panic) or in a `while true` it doesn't break out of", fn)
@@ -444,145 +365,54 @@ class SemanticAnalyzer:
     def _return_type(self, decl) -> Type:
         return self.types.return_type(decl, self.scope)
 
-    def _push_scope(self) -> None:
-        self.scopes.append({})
-        self._declared.append(set())
 
-    def _pop_scope(self) -> None:
-        self.scopes.pop()
-        self._declared.pop()
 
-    def _declare(self, name: str, type_: Type, node: Optional[Node], decl_id) -> None:
-        """Declare in the innermost scope; shadowing outer scopes is allowed.
-        decl_id is the declaration's Symbol.id."""
-        if name in self._declared[-1]:
-            raise SemanticError(f"Variable '{shown(name)}' is already declared in this scope", node)
-        self._declared[-1].add(name)
-        self.scopes[-1][name] = (type_, decl_id)
 
     # -- narrowing: what `is` checks have established about a sum variable, within a region
 
-    def _possible_variants(self, decl_id) -> frozenset:
-        """The variants the sum variable declared as `decl_id` may hold here."""
-        if decl_id in self._possible:
-            return self._possible[decl_id]
-        return frozenset(self.decls.sum_types[self.symbols[decl_id].type.sum_type_name].variants)
 
-    def _restrict(self, name: str, decl_id, possible: frozenset) -> None:
-        """From here to the end of the region (_end_region), sum variable `name` holds one of
-        `possible`: with one variant left it has that variant's type (`none` has nothing to read,
-        so the variable stays its sum). Assigning to it ends that (_forget)."""
-        narrowed = len(possible) == 1 and Type.NONE not in possible
-        entry = (next(iter(possible)) if narrowed else self.symbols[decl_id].type, decl_id)
-        scope = self.scopes[-1]
-        self._undo.append((scope, name, scope.get(name), entry, decl_id, self._possible.get(decl_id)))
-        scope[name] = entry
-        self._possible[decl_id] = possible
 
-    def _end_region(self, mark: int) -> None:
-        """Undo every _restrict since `mark` (a length of self._undo)."""
-        while len(self._undo) > mark:
-            scope, name, previous, entry, decl_id, possible = self._undo.pop()
-            if scope.get(name) is entry:  # not since replaced by a declaration of the same name
-                if previous is None:
-                    del scope[name]
-                else:
-                    scope[name] = previous
-            if possible is None:
-                del self._possible[decl_id]
-            else:
-                self._possible[decl_id] = possible
 
-    def _when(self, condition: Node) -> Tuple[dict, dict]:
-        """What `condition` (already checked) says about sum variables when it is true, and when it is
-        false: each a dict, decl id -> (name, the variants the variable may then hold). `x is T` (and
-        `x == none`) says so directly; `and`, `or`, and `not` combine what their operands say."""
-        if isinstance(condition, Unary) and condition.op == UnaryOp.NOT:
-            when_true, when_false = self._when(condition.operand)
-            return when_false, when_true
-        if isinstance(condition, Binary) and condition.op in _LOGICAL_OPS:
-            left_true, left_false = self._when(condition.left)
-            right_true, right_false = self._when(condition.right)
-            if condition.op == BinaryOp.AND:
-                return _both(left_true, right_true), _either(left_false, right_false)
-            return _either(left_true, right_true), _both(left_false, right_false)
-        name = decl_id = variant = None
-        if isinstance(condition, IsCheck) and condition.nid in self.facts.narrowed:
-            name, decl_id, variant = condition.variable_name, self.facts.decls.get(condition.nid), \
-                self.facts.narrowed[condition.nid]
-        elif isinstance(condition, Binary) and condition.op in _EQUALITY_OPS:
-            for side, other in ((condition.left, condition.right), (condition.right, condition.left)):
-                if isinstance(side, Variable) and isinstance(other, NoneLiteral):  # `x == none` is `x is none`
-                    name, decl_id, variant = side.name, self.facts.decls.get(side.nid), Type.NONE
-        if decl_id is None or self.symbols[decl_id].type.kind != TypeKind.SUM:
-            return {}, {}
-        variants = frozenset(self.decls.sum_types[self.symbols[decl_id].type.sum_type_name].variants)
-        holds, excluded = {decl_id: (name, frozenset({variant}))}, {decl_id: (name, variants - {variant})}
-        if isinstance(condition, Binary) and condition.op == BinaryOp.NOT_EQUAL:
-            return excluded, holds
-        return holds, excluded
 
-    def _apply(self, known: Optional[dict]) -> None:
-        """Narrow by `known` (one of _when's results) until the end of the region."""
-        for decl_id, (name, variants) in (known or {}).items():
-            # An `as NAME` binding ends with its `if`, so the name may be gone, or another variable's.
-            entry = next((scope[name] for scope in reversed(self.scopes) if name in scope), None)
-            if entry is not None and entry[1] == decl_id:
-                self._restrict(name, decl_id, self._possible_variants(decl_id) & variants)
 
-    def _forget(self, decl_id) -> None:
-        """The variable declared as `decl_id` has been assigned: nothing is known about it from here
-        to the end of the region, whatever was known before."""
-        name = self.symbols[decl_id].name
-        entry = next((scope[name] for scope in reversed(self.scopes) if name in scope), None)
-        if decl_id in self._possible and entry is not None and entry[1] == decl_id:
-            variants = self.decls.sum_types[self.symbols[decl_id].type.sum_type_name].variants
-            self._restrict(name, decl_id, frozenset(variants))
 
-    def _forget_assigned_in(self, loop_syntax) -> None:
-        """Before a loop: forget what is known about every variable its body assigns, since the body
-        may already have run when its condition and its statements are reached."""
-        for name in _assigned_names(loop_syntax):
-            entry = next((scope[name] for scope in reversed(self.scopes) if name in scope), None)
-            if entry is not None and entry[1] is not None:
-                self._forget(entry[1])
 
     def _analyze_block(self, statements: List[Node], return_type: Type) -> None:
         """Check a block's statements in the current scope. What an `if` or a `while` establishes for
         the code after it narrows the rest of the block; what a statement assigns is forgotten."""
-        mark = len(self._undo)
+        mark = self.scopes.mark()
         for stmt in statements:
             first = len(self._assignments)
             self.analyze_statement(stmt, return_type)
             assigned = set(self._assignments[first:])  # here, or in nested blocks that reach what follows
             if isinstance(stmt, If):
-                known_false, known_true = _conditions_after(stmt, self.facts.types)
+                known_false, known_true = conditions_after(stmt, self.facts.types)
                 for condition in known_false:
-                    self._apply(self._when(condition)[1])
+                    self.scopes.apply(self.scopes.when(condition)[1])
                 if known_true is not None:
-                    self._apply(self._when(known_true)[0])
+                    self.scopes.apply(self.scopes.when(known_true)[0])
             for decl_id in assigned:
-                self._forget(decl_id)
+                self.scopes.forget(decl_id)
             if isinstance(stmt, While) and not contains_reachable_break(stmt.body):
-                self._apply(self._when(stmt.condition)[1])  # the loop ended because its condition was false
-        self._end_region(mark)
+                self.scopes.apply(self.scopes.when(stmt.condition)[1])  # the loop ended because its condition was false
+        self.scopes.end_region(mark)
 
     def _analyze_body(self, statements: List[Node], return_type: Type, known: Optional[dict] = None) -> None:
         """A block in a scope of its own, narrowed by `known` (one of _when's results)."""
-        mark, first = len(self._undo), len(self._assignments)
-        self._push_scope()
-        self._apply(known)
+        mark, first = self.scopes.mark(), len(self._assignments)
+        self.scopes.push()
+        self.scopes.apply(known)
         self._analyze_block(statements, return_type)
-        self._pop_scope()
-        self._end_region(mark)
+        self.scopes.pop()
+        self.scopes.end_region(mark)
         if always_leaves(statements, self.facts.types):
             del self._assignments[first:]  # what follows the enclosing statement isn't reached from here
 
     def _resolve(self, name: str, node: Optional[Node] = None) -> Tuple[Type, object]:
         """(type, decl id) of `name`, innermost-first; constants (decl id None) after locals."""
-        for scope in reversed(self.scopes):
-            if name in scope:
-                return scope[name]
+        local = self.scopes.lookup(name)
+        if local is not None:
+            return local
         if self._const_key(name) is not None:
             return self.constants.type_of(self._const_key(name)), None
         enum = self.decls.enums.get(self.scope.resolve(name))
@@ -722,13 +552,13 @@ class SemanticAnalyzer:
                 )
         self.facts.types[stmt.nid] = declared_type
         self.facts.symbols[stmt.nid] = self.symbols.new(stmt.name, 'local', declared_type, stmt)
-        self._declare(stmt.name, declared_type, stmt, self.facts.symbols[stmt.nid].id)
+        self.scopes.declare(stmt.name, declared_type, stmt, self.facts.symbols[stmt.nid].id)
 
     def analyze_assign(self, stmt: Assign) -> None:
         """`target = value` or `target op= value`, to a name, field, element, or pointee."""
         target = stmt.target
         if isinstance(target, Variable):
-            if self._const_key(target.name) is not None and not any(target.name in scope for scope in self.scopes):
+            if self._const_key(target.name) is not None and not self.scopes.is_local(target.name):
                 raise SemanticError(f"Cannot assign to constant '{target.name}'", stmt)
             _, decl_id = self._resolve(target.name, stmt)
             self.facts.decls[target.nid] = decl_id
@@ -763,7 +593,7 @@ class SemanticAnalyzer:
             raise SemanticError(f"Cannot assign a value of type {value_type} {what}", stmt)
         if isinstance(target, Variable) and self.facts.decls[target.nid] is not None:
             self._assignments.append(self.facts.decls[target.nid])  # the value was read as narrowed; no longer
-            self._forget(self.facts.decls[target.nid])
+            self.scopes.forget(self.facts.decls[target.nid])
 
     def _check_indexable_and_index(self, base_expr: Node, index_expr: Node, base_type: Optional[Type] = None) -> Type:
         """Check an array/slice/dict base and its index; return the element type. `base_type` is the
@@ -849,10 +679,10 @@ class SemanticAnalyzer:
     def analyze_if(self, stmt: If, return_type: Type) -> None:
         # `EXPR is T as NAME` binds NAME when it is the condition, or one of the checks its `and`s join
         # (check_is_check declares it, in evaluation order). A scope of their own holds the names.
-        binders = [c for c in _conjuncts(stmt.condition) if isinstance(c, IsCheck) and c.binds]
+        binders = [c for c in conjuncts(stmt.condition) if isinstance(c, IsCheck) and c.binds]
         whole = isinstance(stmt.condition, IsCheck) and stmt.condition.binds
         if binders:
-            self._push_scope()
+            self.scopes.push()
             self._bindable.update(c.nid for c in binders)
 
         condition_type = self.check_expr(stmt.condition)
@@ -866,14 +696,14 @@ class SemanticAnalyzer:
 
         # What the condition says when true narrows then_body, and what it says when false narrows
         # else_body (and what follows the `if`, when its other branches always leave: _analyze_block).
-        when_true, when_false = self._when(stmt.condition)
+        when_true, when_false = self.scopes.when(stmt.condition)
         self._analyze_body(stmt.then_body, return_type, when_true)
         if binders and not whole:
-            self._pop_scope()  # in the `else`, a check after an `and` may never have run: its name is unset
+            self.scopes.pop()  # in the `else`, a check after an `and` may never have run: its name is unset
         if stmt.else_body is not None:
             self._analyze_body(stmt.else_body, return_type, when_false)
         if whole:
-            self._pop_scope()
+            self.scopes.pop()
 
     def analyze_match(self, stmt: 'Match', return_type: Type) -> None:
         """Each arm narrows the subject within its own body, like `if NAME is T:` (the order of checks,
@@ -881,13 +711,13 @@ class SemanticAnalyzer:
         first_check = stmt.arms[0][0]
         has_binding = stmt.subject is not None
         if has_binding:
-            self._push_scope()
+            self.scopes.push()
             self._declare_is_binding(first_check)
         self.check_expr(first_check)
         if first_check.nid in self.facts.enum_checks:
             self._analyze_enum_match(stmt, return_type)
             if has_binding:
-                self._pop_scope()
+                self.scopes.pop()
             return
         tested = set()
         for i, (check, body) in enumerate(stmt.arms):
@@ -896,13 +726,13 @@ class SemanticAnalyzer:
                 self._check_match_exhaustiveness(stmt)
             variant = self.facts.narrowed[check.nid]
             tested.add(variant)
-            self._analyze_body(body, return_type, self._when(check)[0])
+            self._analyze_body(body, return_type, self.scopes.when(check)[0])
         if stmt.else_body is not None:  # the subject is none of the arms' variants
             decl_id = self.facts.decls[first_check.nid]
             self._analyze_body(stmt.else_body, return_type,
-                               {decl_id: (stmt.variable_name, self._possible_variants(decl_id) - tested)})
+                               {decl_id: (stmt.variable_name, self.scopes.possible_variants(decl_id) - tested)})
         if has_binding:
-            self._pop_scope()
+            self.scopes.pop()
 
     def _analyze_enum_match(self, stmt: 'Match', return_type: Type) -> None:
         """`match` on an enum: each arm names a member, and the arms cover every member unless there is
@@ -932,7 +762,7 @@ class SemanticAnalyzer:
     def _declare_is_binding(self, check: IsCheck) -> None:
         """`EXPR is T as NAME`: check EXPR and declare NAME, a copy of it."""
         subject_type = self.check_expr(check.subject)
-        if isinstance(check.subject, Variable) and self.facts.decls[check.subject.nid] in self._possible:
+        if isinstance(check.subject, Variable) and self.scopes.is_narrowed(self.facts.decls[check.subject.nid]):
             subject_type = self.symbols[self.facts.decls[check.subject.nid]].type  # a narrowed variable: its sum
         self._bound.add(check.nid)
         sym = self.symbols.new(check.variable_name, 'narrowing', subject_type, check)
@@ -943,7 +773,7 @@ class SemanticAnalyzer:
             self.facts.bindings[check.nid] = binding
             self.facts.types[binding.nid] = subject_type
             self.facts.symbols[binding.nid] = sym
-        self._declare(check.variable_name, subject_type, check, sym.id)
+        self.scopes.declare(check.variable_name, subject_type, check, sym.id)
 
     def _check_match_exhaustiveness(self, stmt: 'Match') -> None:
         """Reject duplicate arms; require exhaustiveness without an else."""
@@ -978,7 +808,7 @@ class SemanticAnalyzer:
     def analyze_while(self, stmt: While, return_type: Type) -> None:
         """The condition narrows the body, like an `if`'s (and, when it is false, what follows a loop
         with no `break`: _analyze_block)."""
-        self._forget_assigned_in(stmt.body)
+        self.scopes.forget_assigned_in(stmt.body)
         condition_type = self.check_expr(stmt.condition)
         if condition_type != Type.BOOL:
             raise SemanticError(
@@ -989,14 +819,14 @@ class SemanticAnalyzer:
             )
 
         self.loop_depth += 1
-        self._analyze_body(stmt.body, return_type, self._when(stmt.condition)[0])
+        self._analyze_body(stmt.body, return_type, self.scopes.when(stmt.condition)[0])
         self.loop_depth -= 1
 
     def analyze_for(self, stmt: For, return_type: Type) -> None:
         """`for init; cond; increment:`; one scope spans all clauses."""
-        self._push_scope()
+        self.scopes.push()
         self.analyze_statement(stmt.init, return_type)
-        self._forget_assigned_in([stmt.body, stmt.increment])
+        self.scopes.forget_assigned_in([stmt.body, stmt.increment])
         condition_type = self.check_expr(stmt.condition)
         if condition_type != Type.BOOL:
             raise SemanticError(
@@ -1006,13 +836,13 @@ class SemanticAnalyzer:
                 stmt.condition,
             )
         self.loop_depth += 1
-        mark = len(self._undo)
-        self._apply(self._when(stmt.condition)[0])  # the condition narrows the body, as a `while`'s does
+        mark = self.scopes.mark()
+        self.scopes.apply(self.scopes.when(stmt.condition)[0])  # the condition narrows the body, as a `while`'s does
         self._analyze_block(stmt.body, return_type)
-        self._end_region(mark)
+        self.scopes.end_region(mark)
         self.loop_depth -= 1
         self.analyze_statement(stmt.increment, return_type)
-        self._pop_scope()
+        self.scopes.pop()
 
     def analyze_for_in(self, stmt: ForIn, return_type: Type) -> None:
         """`for a[, b] in iterable:` over arrays, slices, dicts, and strings (bytes)."""
@@ -1049,18 +879,18 @@ class SemanticAnalyzer:
         else:
             binding_types = [
                 Type.INT, iterable_type.element_type] if num_bindings == 2 else [iterable_type.element_type]
-        self._push_scope()
+        self.scopes.push()
         symbols = [
             self.symbols.new(name, 'binding', t, stmt) for name, t in zip(stmt.binding_names, binding_types)
         ]
         self.facts.for_symbols[stmt.nid] = symbols
         for name, binding_type, sym in zip(stmt.binding_names, binding_types, symbols):
-            self._declare(name, binding_type, stmt, sym.id)
-        self._forget_assigned_in(stmt.body)
+            self.scopes.declare(name, binding_type, stmt, sym.id)
+        self.scopes.forget_assigned_in(stmt.body)
         self.loop_depth += 1
         self._analyze_block(stmt.body, return_type)
         self.loop_depth -= 1
-        self._pop_scope()
+        self.scopes.pop()
 
     def analyze_break(self, stmt: Break) -> None:
         if self.loop_depth == 0:
@@ -1278,7 +1108,7 @@ class SemanticAnalyzer:
 
     def _enum_named_by(self, expr: Node) -> Optional[str]:
         """The key of the enum that `expr` names (`Enum`, or `alias.Enum`), unless a variable has the name."""
-        if isinstance(expr, Variable) and not any(expr.name in scope for scope in self.scopes):
+        if isinstance(expr, Variable) and not self.scopes.is_local(expr.name):
             key = self.scope.resolve(expr.name)
         elif isinstance(expr, Field):
             key = self.module_set.qualified.get(expr.nid)
@@ -1731,7 +1561,7 @@ class SemanticAnalyzer:
             variable_type, narrowed = self.check_expr(expr.subject), False
         else:
             variable_type, self.facts.decls[expr.nid] = self._resolve(expr.variable_name, expr)
-            narrowed = self.facts.decls[expr.nid] in self._possible
+            narrowed = self.scopes.is_narrowed(self.facts.decls[expr.nid])
         if variable_type.kind == TypeKind.ENUM:  # `NAME is Member`: an equality test; nothing is narrowed
             members = self.decls.enums[variable_type.enum_name].members
             member = expr.type_name
@@ -1891,11 +1721,11 @@ class SemanticAnalyzer:
             left_type, right_type = with_literal
         else:
             left_type = self._check_expr_allowing_struct_literal(expr.left)
-            mark = len(self._undo)
+            mark = self.scopes.mark()
             if expr.op in _LOGICAL_OPS:  # the right side runs only when the left was true (`and`) or false (`or`)
-                self._apply(self._when(expr.left)[0 if expr.op == BinaryOp.AND else 1])
+                self.scopes.apply(self.scopes.when(expr.left)[0 if expr.op == BinaryOp.AND else 1])
             right_type = self._check_expr_allowing_struct_literal(expr.right)
-            self._end_region(mark)
+            self.scopes.end_region(mark)
         op = expr.op
         if op not in _LOGICAL_OPS and op != BinaryOp.IN:
             left_type, right_type = self._literal_operand_types(expr.left, left_type, expr.right, right_type)

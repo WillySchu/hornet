@@ -72,3 +72,5 @@ class BinaryOp(Enum):
 
 
 ORDERING_OPS = {BinaryOp.LESS_THAN, BinaryOp.GREATER_THAN, BinaryOp.LESS_THAN_OR_EQUAL, BinaryOp.GREATER_THAN_OR_EQUAL}
+EQUALITY_OPS = {BinaryOp.EQUAL, BinaryOp.NOT_EQUAL}
+LOGICAL_OPS = {BinaryOp.AND, BinaryOp.OR}
