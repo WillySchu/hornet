@@ -1,7 +1,10 @@
 """The parser: a source file's tokens to its tree.
 
     nodes.py    the tree's node classes
-    parser.py   the recursive-descent parser that builds it
+    stream.py   the token stream: where the parser is in a file's tokens
+    escapes.py  what a string or byte literal's text stands for
+    errors.py   what it reports
+    parser.py   the recursive-descent parser that builds the tree
 
 The entry points are here (parse, parse_tokens), with the names other code takes from the package.
 """
@@ -14,13 +17,16 @@ from ops import BinaryOp, UnaryOp
 from parser import nodes
 from parser.nodes import *  # noqa: F401,F403 (what nodes.__all__ lists: the node classes)
 from parser.nodes import Program
-from parser.parser import READ_AS_A_TYPED_LITERAL, ParseError, Parser
+from parser.errors import ParseError
+from parser.parser import READ_AS_A_TYPED_LITERAL, Parser
+from parser.stream import TokenStream
 
 # What the package offers: the nodes, the parser and its error, the entry points below, and the two
 # operator enums, which live in ops.py but which some code takes from here.
 __all__ = [
     *nodes.__all__,
-    'BinaryOp', 'UnaryOp', 'ParseError', 'Parser', 'READ_AS_A_TYPED_LITERAL', 'parse', 'parse_tokens', 'main',
+    'BinaryOp', 'UnaryOp', 'ParseError', 'Parser', 'TokenStream', 'READ_AS_A_TYPED_LITERAL', 'parse', 'parse_tokens',
+    'main',
 ]
 
 

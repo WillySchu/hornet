@@ -4,9 +4,10 @@ from dataclasses import dataclass
 from enum import auto, Enum
 from typing import List, Optional, Tuple, Union
 
-from diagnostics import CompileError, quoted_text
-from lexer import Token, TokenType, describe_token, describe_token_type
+from diagnostics import quoted_text
+from lexer import Token, TokenType, describe_token
 from ops import BinaryOp, UnaryOp
+from parser.errors import ParseError
 from parser.nodes import (
     ArrayLiteral, ArrayTypeExpr, Assign, Binary, BoolLiteral, Break, ByteLiteral, Call, Cast, ConstDecl, Constant,
     Continue, DictLiteral, DictTypeExpr, EnumDef, EnumMember, ExprStmt, ExternFunctionDecl, Field, For, ForIn,
@@ -14,68 +15,13 @@ from parser.nodes import (
     Param, PointerTypeExpr, Program, QualifiedTypeExpr, Return, Slice, SliceLiteral, SliceTypeExpr, StringLiteral,
     StructDef, StructField, SumTypeDef, TypeAlias, Unary, VarDecl, Variable, While, stamp_file,
 )
-
-
-class ParseError(CompileError):
-    """Malformed input."""
+from parser.stream import TokenStream
 
 
 # Added to an error in the type of a literal that ArrayLiteral.could_be_multiplication marks.
 READ_AS_A_TYPED_LITERAL = (
     " -- this is read as a typed array literal, like `[2][1]*P[...]`; to multiply an indexed literal by a "
     "value, write that literal's type, as in `[1]int[x][0] * ys[1]`")
-
-
-# Keyed by the character after the backslash; \xNN is handled separately.
-_ESCAPE_SEQUENCES = {
-    'n': '\n',
-    't': '\t',
-    'r': '\r',
-    '0': '\0',
-    "'": "'",
-    '"': '"',
-    '\\': '\\',
-}
-
-_HEX_DIGITS = '0123456789abcdefABCDEF'
-
-
-class _BadEscape(Exception):
-    """An escape that isn't one, `offset` characters into the literal's token."""
-
-    def __init__(self, message: str, offset: int):
-        super().__init__(message)
-        self.message, self.offset = message, offset
-
-
-def _unescape_quoted_literal(raw: str) -> str:
-    """Strip quotes and resolve escape sequences. _BadEscape for a backslash that starts none: a
-    mistyped one would otherwise quietly become some other text."""
-    inner = raw[1:-1]
-    chars = []
-    i = 0
-    while i < len(inner):
-        ch = inner[i]
-        if ch == '\\' and i + 1 < len(inner):
-            nxt = inner[i + 1]
-            if nxt == 'x':
-                digits = inner[i + 2:i + 4]
-                if len(digits) != 2 or digits[0] not in _HEX_DIGITS or digits[1] not in _HEX_DIGITS:
-                    raise _BadEscape("'\\x' must be followed by two hexadecimal digits, as in '\\x41'", i + 1)
-                chars.append(chr(int(digits, 16)))
-                i += 4
-            elif nxt in _ESCAPE_SEQUENCES:
-                chars.append(_ESCAPE_SEQUENCES[nxt])
-                i += 2
-            else:
-                shown = nxt if ' ' <= nxt <= '~' else f"\\x{ord(nxt):02x}"
-                raise _BadEscape(
-                    f"Unknown escape '\\{shown}' -- the escapes are \\n, \\t, \\r, \\0, \\\\, \\', \\\", and \\xNN "
-                    f"(a byte, as two hexadecimal digits)", i + 1)
-        else:
-            chars.append(ch)
-            i += 1
-    return ''.join(chars)
 
 
 def _default_import_qualifier(path: str) -> str:
@@ -180,59 +126,56 @@ _TYPE_START_TOKENS = (
 
 class Parser:
     def __init__(self, tokens: List[Token]):
-        if len(tokens) == 0:
-            raise ValueError('tokens must have non zero length')
-        if tokens[-1].type != TokenType.EOF:
-            raise ValueError('tokens must be terminated by an EOF')
-        self.tokens = tokens
-        self.pos = 0
-        self._could_be_multiplication: set = set()  # token positions; see _looks_like_typed_literal
+        self.stream = TokenStream(tokens)
 
-    def _error(self, message: str, tok: Token) -> 'ParseError':
-        return ParseError(message, tok.file, tok.line, tok.col)
+    # The cursor is the stream's. These stand in for it while the grammar below is still this
+    # class's methods; each part of it that becomes functions takes the stream itself.
+
+    @property
+    def tokens(self) -> List[Token]:
+        return self.stream.tokens
+
+    @property
+    def pos(self) -> int:
+        return self.stream.pos
+
+    @pos.setter
+    def pos(self, pos: int) -> None:
+        self.stream.pos = pos
+
+    @property
+    def _could_be_multiplication(self) -> set:
+        return self.stream.could_be_multiplication
+
+    def _error(self, message: str, tok: Token) -> ParseError:
+        return self.stream.error(message, tok)
 
     def _literal_text(self, tok: Token) -> str:
-        """What a string or byte literal's token stands for, its escapes resolved."""
-        try:
-            return _unescape_quoted_literal(tok.val)
-        except _BadEscape as bad:
-            raise ParseError(bad.message, tok.file, tok.line, tok.col + bad.offset) from None
+        return self.stream.literal_text(tok)
 
     def peek(self, offset: int = 0) -> Token:
-        idx = min(self.pos + offset, len(self.tokens) - 1)
-        return self.tokens[idx]
+        return self.stream.peek(offset)
 
     def current(self) -> Token:
-        return self.peek()
+        return self.stream.current()
 
     def at_end(self) -> bool:
-        return self.current().type == TokenType.EOF
+        return self.stream.at_end()
 
     def check(self, *types: TokenType) -> bool:
-        return not self.at_end() and self.current().type in types
+        return self.stream.check(*types)
 
     def advance(self) -> Token:
-        tok = self.current()
-        if not self.at_end():
-            self.pos += 1
-        return tok
+        return self.stream.advance()
 
     def match(self, *types: TokenType) -> bool:
-        if self.check(*types):
-            self.advance()
-            return True
-        return False
+        return self.stream.match(*types)
 
     def expect(self, type_: TokenType, message: str = None) -> Token:
-        if self.check(type_):
-            return self.advance()
-        tok = self.current()
-        msg = message or f"Expected {describe_token_type(type_)}, got {describe_token(tok)}"
-        raise self._error(msg, tok)
+        return self.stream.expect(type_, message)
 
     def skip_newlines(self):
-        while self.match(TokenType.NEWLINE):
-            pass
+        self.stream.skip_newlines()
 
     def parse_program(self) -> Program:
         start_tok = self.current()
@@ -600,14 +543,7 @@ class Parser:
         return statements
 
     def _expect_statement_end(self) -> None:
-        """A statement ends its line: a block statement has consumed its block (DEDENT), a simple
-        one must be followed by a newline, the block's end, or the end of input."""
-        previous = self.tokens[self.pos - 1].type if self.pos else None
-        if previous in (TokenType.DEDENT, TokenType.NEWLINE) or self.at_end():
-            return
-        if not self.check(TokenType.NEWLINE, TokenType.DEDENT):
-            tok = self.current()
-            raise self._error(f"Expected the end of the line after this statement, got {describe_token(tok)}", tok)
+        self.stream.expect_statement_end()
 
     def parse_statement(self) -> Node:
         if (
@@ -626,7 +562,7 @@ class Parser:
             return self.parse_expr_stmt_or_assign()
         if self.check(TokenType.STAR):
             # '*' may start a pointer-typed VarDecl or a deref expression; try the type first and backtrack.
-            saved_pos = self.pos
+            mark = self.stream.mark()
             start_tok = self.current()
             try:
                 parsed_type = self.parse_type()
@@ -634,7 +570,7 @@ class Parser:
                 parsed_type = None
             if parsed_type is not None and self.check(TokenType.IDENTIFIER):
                 return self.parse_var_decl(var_type=parsed_type, start_tok=start_tok)
-            self.pos = saved_pos
+            self.stream.reset(mark)
         if self.check(
                 TokenType.INT,
                 TokenType.INT8,
