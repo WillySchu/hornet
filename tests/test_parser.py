@@ -209,18 +209,22 @@ def test_unescape_quoted_literal():
             'input': "'\\x4a\\x4A'",
             'expected': 'JJ',
         },
-        {
-            # A malformed \x (only one hex digit here, then a
-            # non-hex 'g') falls through to the same lenient
-            # "unknown escape" handling as any other -- 'x' kept
-            # literally, backslash dropped, nothing raised.
-            'input': "'\\xg1'",
-            'expected': 'xg1',
-        },
     ]
 
     for tc in tcs:
         assert tc['expected'] == parser._unescape_quoted_literal(tc['input'])
+
+    # A backslash that starts no escape is an error, at its offset in the token: a mistyped escape
+    # would otherwise quietly become some other text.
+    for bad, offset, message in [
+        ("'\\xg1'", 1, "'\\x' must be followed by two hexadecimal digits"),
+        ("'ab\\x4'", 3, "'\\x' must be followed by two hexadecimal digits"),
+        ("'a\\qb'", 2, "Unknown escape '\\q'"),
+        ('"\\d"', 1, "Unknown escape '\\d'"),
+    ]:
+        with pytest.raises(parser._BadEscape, match=re.escape(message)) as e:
+            parser._unescape_quoted_literal(bad)
+        assert e.value.offset == offset
 
 
 def test_parser_init_empty():

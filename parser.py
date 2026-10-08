@@ -493,8 +493,17 @@ _ESCAPE_SEQUENCES = {
 _HEX_DIGITS = '0123456789abcdefABCDEF'
 
 
+class _BadEscape(Exception):
+    """An escape that isn't one, `offset` characters into the literal's token."""
+
+    def __init__(self, message: str, offset: int):
+        super().__init__(message)
+        self.message, self.offset = message, offset
+
+
 def _unescape_quoted_literal(raw: str) -> str:
-    """Strip quotes and resolve escape sequences."""
+    """Strip quotes and resolve escape sequences. _BadEscape for a backslash that starts none: a
+    mistyped one would otherwise quietly become some other text."""
     inner = raw[1:-1]
     chars = []
     i = 0
@@ -502,12 +511,20 @@ def _unescape_quoted_literal(raw: str) -> str:
         ch = inner[i]
         if ch == '\\' and i + 1 < len(inner):
             nxt = inner[i + 1]
-            if nxt == 'x' and i + 3 < len(inner) and inner[i + 2] in _HEX_DIGITS and inner[i + 3] in _HEX_DIGITS:
-                chars.append(chr(int(inner[i + 2:i + 4], 16)))
+            if nxt == 'x':
+                digits = inner[i + 2:i + 4]
+                if len(digits) != 2 or digits[0] not in _HEX_DIGITS or digits[1] not in _HEX_DIGITS:
+                    raise _BadEscape("'\\x' must be followed by two hexadecimal digits, as in '\\x41'", i + 1)
+                chars.append(chr(int(digits, 16)))
                 i += 4
-            else:
-                chars.append(_ESCAPE_SEQUENCES.get(nxt, nxt))
+            elif nxt in _ESCAPE_SEQUENCES:
+                chars.append(_ESCAPE_SEQUENCES[nxt])
                 i += 2
+            else:
+                shown = nxt if ' ' <= nxt <= '~' else f"\\x{ord(nxt):02x}"
+                raise _BadEscape(
+                    f"Unknown escape '\\{shown}' -- the escapes are \\n, \\t, \\r, \\0, \\\\, \\', \\\", and \\xNN "
+                    f"(a byte, as two hexadecimal digits)", i + 1)
         else:
             chars.append(ch)
             i += 1
@@ -627,6 +644,13 @@ class Parser:
     def _error(self, message: str, tok: Token) -> 'ParseError':
         return ParseError(message, tok.file, tok.line, tok.col)
 
+    def _literal_text(self, tok: Token) -> str:
+        """What a string or byte literal's token stands for, its escapes resolved."""
+        try:
+            return _unescape_quoted_literal(tok.val)
+        except _BadEscape as bad:
+            raise ParseError(bad.message, tok.file, tok.line, tok.col + bad.offset) from None
+
 
     def peek(self, offset: int = 0) -> Token:
         idx = min(self.pos + offset, len(self.tokens) - 1)
@@ -736,7 +760,7 @@ class Parser:
         """`import 'path' [as name]`."""
         start_tok = self.expect(TokenType.IMPORT, "Expected 'import'")
         path_tok = self.expect(TokenType.STRING, "Expected a quoted path after 'import'")
-        path = _unescape_quoted_literal(path_tok.val)
+        path = self._literal_text(path_tok)
         if self.match(TokenType.AS):
             alias_tok = self.expect(TokenType.IDENTIFIER, "Expected a module name after 'as'")
             qualifier = alias_tok.val
@@ -748,7 +772,7 @@ class Parser:
         """`from 'path' import a [as b], ...`."""
         start_tok = self.expect(TokenType.FROM, "Expected 'from'")
         path_tok = self.expect(TokenType.STRING, "Expected a quoted path after 'from'")
-        path = _unescape_quoted_literal(path_tok.val)
+        path = self._literal_text(path_tok)
         self.expect(TokenType.IMPORT, "Expected 'import' after the path")
         names: List[Tuple[str, str]] = []
         while True:
@@ -1500,10 +1524,10 @@ class Parser:
             return NoneLiteral(line=tok.line, col=tok.col)
         if self.check(TokenType.STRING):
             tok = self.advance()
-            return StringLiteral(value=_unescape_quoted_literal(tok.val), line=tok.line, col=tok.col)
+            return StringLiteral(value=self._literal_text(tok), line=tok.line, col=tok.col)
         if self.check(TokenType.BYTE):
             tok = self.advance()
-            resolved = _unescape_quoted_literal(tok.val)
+            resolved = self._literal_text(tok)
             if len(resolved) != 1 or ord(resolved) > 255:
                 raise self._error(
                     f"A byte literal must resolve to exactly one byte (0-255), got "

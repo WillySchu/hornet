@@ -65,7 +65,7 @@ python3 compile.py program.ht
 
 A generated program that uses runtime functions such as `print` must also be linked with `runtime/runtime.c`. `build.py` handles this automatically.
 
-`--dump STAGE` prints what a stage of the compiler produces instead of assembly: `tokens`, `tree` (the parser's), `typed` (the typed tree; see [Compiler Architecture](#compiler-architecture)), `ir`, or `optimized-ir`. A dump runs the compiler only as far as its stage, so `--dump tokens` works on a file that doesn't parse. `tokens` and `tree` are of the file named; the others are of the whole program.
+`--dump STAGE` prints what a stage of the compiler produces instead of assembly: `tokens`, `tree` (the parser's), `typed` (the typed tree; see [Compiler Architecture](#compiler-architecture)), `ir`, or `optimized-ir`. A dump runs the compiler only as far as its stage, so `--dump tokens` works on a file that doesn't parse. `tokens` and `tree` are of the file named; the others are of the whole program (`typed` shows every function, and the IR dumps those that are compiled).
 
 ### Errors
 
@@ -129,7 +129,7 @@ Hornet currently provides:
 * Type aliases and compile-time constants
 * Single-level pointers
 * Tagged sum types, including a payload-free `none` variant and recursive types
-* Enums, compared, matched exhaustively, and printed by name
+* Enums, with methods, compared, matched exhaustively, and printed by name
 * `if`, `elif`, `else`, and `match`
 * `while` loops
 * C-style `for` loops
@@ -139,7 +139,7 @@ Hornet currently provides:
 * Explicit integer casts
 * Arithmetic, comparison, logical, bitwise, and membership operators
 * Compound assignment
-* Runtime bounds checking
+* Runtime checks (bounds, division, `none`, missing keys, and more) that panic with a source position
 * Built-ins such as `print`, `len`, `append`, `del`, `bytes`, `panic`, and `format`, and `str(...)` conversions
 * Modules and imports
 * External C functions through `extern`
@@ -213,7 +213,9 @@ Strings use single quotes:
 str message = 'hello'
 ```
 
-Strings are byte-oriented rather than a Unicode text abstraction. String literals support the language's escape syntax, including `\n`, `\t`, `\r`, `\0`, escaped quotes, escaped backslashes, and `\xNN` byte escapes. A literal ends on the line it starts; write `\n` for a newline.
+Strings are byte-oriented rather than a Unicode text abstraction. In a literal, the escapes are `\n`, `\t`, `\r`, `\0`, `\\`, `\'`, `\"`, and `\xNN` (a byte, as two hexadecimal digits); a backslash before anything else is a compile error. A literal ends on the line it starts; write `\n` for a newline.
+
+A source file is read as bytes, so a literal holds exactly the bytes the file holds: UTF-8 text stays UTF-8, and `len('é')` is 2. Any bytes may appear in a string literal or a comment; everywhere else source is ASCII. Line and column numbers, in compile errors and in panics, count bytes. A file may not start with a byte-order mark.
 
 String concatenation uses `+`:
 
@@ -865,7 +867,7 @@ while node is Cons:
     node = *node.next                   # assigning ends the narrowing
 ```
 
-Assigning to a narrowed variable ends its narrowing, and a loop assumes nothing about a variable its body assigns. Only variables narrow: `h.shape is Circle` is a plain test. Nothing narrows to `none`: with only `none` left, the variable keeps its sum type. If a pointer to the variable (`&shape`) changes its variant meanwhile, its next use panics.
+Assigning to a narrowed variable ends its narrowing, and a loop assumes nothing about a variable its body assigns. A compound assignment (`count += 1`) is no such assignment: it gives the variable back the variant it held, so the narrowing stands. Only variables narrow: `h.shape is Circle` is a plain test. Nothing narrows to `none`: with only `none` left, the variable keeps its sum type. If a pointer to the variable (`&shape`) changes its variant meanwhile, its next use panics.
 
 `as NAME` binds a narrowed copy of the subject, which is how a field, an element, or a call's result is narrowed:
 
@@ -933,7 +935,7 @@ print([3]int[1, 2, 3])
 print(counts)
 ```
 
-Arrays, slices, structs, dictionaries, and supported sum-type values are recursively formatted by the native runtime.
+Arrays, slices, structs, dictionaries, and supported sum-type values are recursively formatted by the native runtime. A pointer prints as its address, and as `none` when it points to nothing; `print(none)` prints `none` too.
 
 ## `len`
 
@@ -1084,6 +1086,7 @@ Low-level C interoperability helpers, including:
 raw string access
 C-string conversion
 raw byte/string construction
+memory from the runtime (hornet_alloc, hornet_alloc_zeroed)
 ```
 
 ## `stdlib/hash.ht`
@@ -1176,6 +1179,7 @@ It currently provides language-level services including:
 * `print` and recursive value formatting
 * the panic routines (`hornet_panic`, `hornet_panic_at` for `panic(...)`, and those that add the values a failed check compared), which flush standard output, write the message to standard error, and abort (`SIGABRT`; on Windows, exit code 3)
 * catching a stack overflow, to report it as a panic
+* memory: `hornet_alloc` and `hornet_alloc_zeroed`, which every allocation goes through, the compiled code's and the runtime's own, and which panic when memory is refused
 * `format`'s buffer (`hornet_format_begin`, `hornet_format_text`, `hornet_format_value`)
 * `hornet_slice_grow`, which copies a slice into a larger backing store
 * `hornet_bytes` for `bytes(s)`
@@ -1187,9 +1191,11 @@ Runtime checks panic with `file:line:col: panic: message`, the position being wh
 
 Running out of stack is a panic too: `panic: stack overflow`, with no position, since the runtime only catches the fault (with a signal handler on a stack of its own; on Windows, an exception handler). On Linux a stack with no limit (`ulimit -s unlimited`) has no end to detect.
 
+Being refused memory is one as well: `panic: out of memory (allocating 1048576 bytes)`. A system that grants memory it doesn't have, as Linux does by default, kills the program when the memory is used instead, and that can't be caught.
+
 The runtime is deliberately separate from the native backends. The compiler is responsible for semantic operations such as type checking, aggregate layout, address calculation, and bounds-check generation; the runtime implements selected algorithms and services that are better expressed as ordinary native code.
 
-The runtime currently uses the platform C library for lower-level services such as memory allocation and byte copying rather than wrapping every libc primitive in a Hornet-specific API.
+The runtime currently uses the platform C library for lower-level services such as byte copying, and for memory behind its own checked allocators, rather than wrapping every libc primitive in a Hornet-specific API.
 
 ---
 
@@ -1213,7 +1219,7 @@ Module discovery ── one AST per file
 Semantic analysis ── resolves names per file, checks, builds the typed tree
      │
      ▼
-IR construction ── from the typed tree; escape analysis, null and division checks
+IR construction ── of the functions main can reach; escape analysis, null and division checks
      │
      ▼
  IRProgram (verified)
@@ -1244,9 +1250,9 @@ Hornet runtime   external libraries
 
 Semantic analysis never changes the parser's ASTs: it resolves each file's names in that file's scope (`scopes.py`), records what it learns (types, the declaration each name refers to, narrowing) by node number, and from that builds the typed tree (`typed_ast.py`). The typed program `semantic.analyze()` returns is the only input to later stages: a test checks that nothing in `ir/`, `optimize/`, `backend/`, or escape analysis imports the front end. In the typed tree every node has one meaning and a concrete type: names refer to symbols, the parser's overloaded forms are split (calls, struct literals, and builtins; array, slice, string, and dictionary indexing), each implicit operation is a node (widening into a sum, `&Variant(...)`, a literal becoming a slice, zero values), methods are ordinary functions, and `match` and compound assignment are nodes of their own. `compile.py --dump typed` prints it.
 
-The frontend constructs a complete `IRProgram` before a backend begins lowering it. The IR is independent of any target: a function's incoming arguments are an ordered list of word-sized temporaries in Hornet's own calling convention (a composite return value's destination address first, then one word per parameter, except two for `str` and three for slices, with arrays, structs, sum types, and dicts passed by address), and where each word physically arrives is decided by the backend. Lowering never modifies the IR. An enum value reaches the IR as an `int32`.
+The frontend constructs a complete `IRProgram` before a backend begins lowering it. Only the functions `main` can reach through calls are built: every function is type-checked, but one that can never run is not compiled, and neither are the strings and descriptors only it uses, so importing a module costs what is used of it. (Calls are all resolved by then, and nothing else can call a function. A program without `main` keeps every function.) The IR is independent of any target: a function's incoming arguments are an ordered list of word-sized temporaries in Hornet's own calling convention (a composite return value's destination address first, then one word per parameter, except two for `str` and three for slices, with arrays, structs, sum types, and dicts passed by address), and where each word physically arrives is decided by the backend. Lowering never modifies the IR. An enum value reaches the IR as an `int32`.
 
-Escape analysis decides which locals must live on the heap; heap storage comes from `malloc` and is never freed. It is a flow-insensitive points-to analysis per function, run on the typed tree, with per-parameter escape summaries so that passing `&x` to a function that doesn't keep the pointer leaves `x` on the stack.
+Escape analysis decides which locals must live on the heap; heap storage comes from the runtime's `hornet_alloc` and is never freed. It is a flow-insensitive points-to analysis per function, run on the typed tree, with per-parameter escape summaries so that passing `&x` to a function that doesn't keep the pointer leaves `x` on the stack.
 
 IR construction compiles conditions made of `and`, `or`, and `not` straight to branches, and copies a composite value directly between places (two places of one type are the same storage or disjoint). Loads, stores, and copies address memory as a base plus a constant offset.
 
@@ -1414,7 +1420,7 @@ Hornet is still experimental. Some notable limitations are:
 * There are no floating-point types yet.
 * Multithreading is not implemented.
 * Without generics, each result type is a separate named sum type. There is no operator for propagating errors, and ignoring a result is not diagnosed.
-* A stack overflow's panic has no source position.
+* The panics for a stack overflow and for running out of memory have no source position.
 
 ---
 

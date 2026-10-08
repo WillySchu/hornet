@@ -102,12 +102,73 @@ def format_errors(err: CompileError) -> str:
     return '\n\n'.join(format_error(e) for e in err.errors)
 
 
+def file_error(doing: str, path, problem: OSError) -> CompileError:
+    """A file that can't be read or written, as an ordinary error: `can't read 'p.ht': No such file
+    or directory`."""
+    shown = quoted_text(path_text(_display_path(str(path))))
+    return CompileError(f"can't {doing} {shown}: {problem.strerror or problem}", None, 0, 0)
+
+
+def write_output(path, text: str) -> None:
+    """Write generated text to `path` as the bytes it stands for (see write_diagnostic)."""
+    try:
+        with open(path, 'w', encoding='latin-1') as f:
+            f.write(text)
+    except OSError as problem:
+        raise file_error("write", path, problem) from None
+
+
+# The compiler walks a program's tree by recursion, so how deeply a program may nest (a chain of
+# 300 `+` is 300 levels) is how deeply Python may recurse. Its usual limit is too low for programs
+# that are generated, or just long, so the command line runs with these: far beyond anything written
+# by hand, and within the stack asked for.
+_RECURSION_LIMIT = 200_000
+_STACK_BYTES = 512 * 1024 * 1024
+
+
+def _with_room_to_recurse(action):
+    """Call `action` on a thread with a large stack and a high recursion limit; its result, or its
+    exception."""
+    import sys
+    import threading
+    outcome = {}
+
+    def run():
+        try:
+            outcome['result'] = action()
+        except BaseException as problem:  # (handed on to the caller's thread, SystemExit included)
+            outcome['problem'] = problem
+
+    limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(limit, _RECURSION_LIMIT))
+    try:
+        threading.stack_size(_STACK_BYTES)
+    except (ValueError, RuntimeError):
+        pass  # not a size this system gives a thread: its usual stack, then, and a lower ceiling
+    try:
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join()
+    finally:
+        sys.setrecursionlimit(limit)
+        threading.stack_size(0)
+    if 'problem' in outcome:
+        raise outcome['problem']
+    return outcome.get('result')
+
+
 def run_cli(action, show_traceback: bool = False):
     """Run `action`, reporting errors to stderr. Exit 1 for user errors, 2 for compiler bugs."""
     import sys
     import traceback
     try:
-        return action()
+        return _with_room_to_recurse(action)
+    except RecursionError:
+        if show_traceback:
+            raise
+        write_diagnostic("error: this program nests more deeply than the compiler can follow (an expression or a "
+                         "block many thousands of levels deep)", sys.stderr)
+        sys.exit(1)
     except CompileError as e:
         if show_traceback:
             raise

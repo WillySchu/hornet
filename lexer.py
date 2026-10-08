@@ -5,7 +5,7 @@ import re
 from enum import auto, Enum
 from typing import Optional
 
-from diagnostics import CompileError, InternalCompilerError
+from diagnostics import CompileError, InternalCompilerError, file_error
 
 
 class TokenType(Enum):
@@ -445,8 +445,11 @@ _BYTE_ORDER_MARK = '\xef\xbb\xbf'
 def lex(filename: str) -> list:
     """The tokens of a source file. It is read as bytes, one to a character (which is what latin-1
     does), so that a string literal holds what the file holds whatever its encoding."""
-    with open(filename, 'r', encoding='latin-1') as f:
-        lines = f.readlines()
+    try:
+        with open(filename, 'r', encoding='latin-1') as f:
+            lines = f.readlines()
+    except OSError as problem:
+        raise file_error("read", filename, problem) from None
     if lines and lines[0].startswith(_BYTE_ORDER_MARK):
         raise LexError("This file starts with a UTF-8 byte-order mark, which Hornet source doesn't use -- save it "
                        "without one", filename, 1, 1)

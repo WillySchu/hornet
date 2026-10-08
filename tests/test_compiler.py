@@ -1728,13 +1728,13 @@ class TestByteLiterals:
             "16\nhigh byte: \xc8 end\n",
         )
 
-    def test_malformed_hex_escape_falls_back_leniently(self):
+    def test_malformed_hex_escape_is_an_error(self):
         source = (
             "def int main():\n"
             "    byte b = \"\\xg1\"\n"
             "    return 0\n"
         )
-        with pytest.raises(ParseError, match="must resolve to exactly one byte"):
+        with pytest.raises(ParseError, match=r"'\\x' must be followed by two hexadecimal digits"):
             _parse(source)
 
 

@@ -1465,9 +1465,12 @@ class SemanticAnalyzer:
             self._assignments.append(self.facts.decls[target.nid])  # the value was read as narrowed; no longer
             self._forget(self.facts.decls[target.nid])
 
-    def _check_indexable_and_index(self, base_expr: Node, index_expr: Node) -> Type:
-        """Check an array/slice/dict base and its index; return the element type."""
-        base_type = self.check_expr(base_expr)
+    def _check_indexable_and_index(self, base_expr: Node, index_expr: Node, base_type: Optional[Type] = None) -> Type:
+        """Check an array/slice/dict base and its index; return the element type. `base_type` is the
+        base's type where the caller has checked it: checking it again here would double the work at
+        each level of `a[i][j][k]...`."""
+        if base_type is None:
+            base_type = self.check_expr(base_expr)
         if base_type.kind == TypeKind.STR:
             raise SemanticError(
                 "Cannot assign into a str via indexing -- str supports "
@@ -1954,7 +1957,7 @@ class SemanticAnalyzer:
             if index_type != Type.INT:
                 raise SemanticError(f"Index must be int, got {index_type}", expr.index)
             return Type.UINT8
-        return self._check_indexable_and_index(expr.array, expr.index)
+        return self._check_indexable_and_index(expr.array, expr.index, base_type)
 
     def check_field(self, expr: Field) -> Type:
         key = self.module_set.qualified.get(expr.nid)

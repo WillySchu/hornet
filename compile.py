@@ -4,7 +4,7 @@ import argparse
 import sys
 
 from backend import lower_to_asm
-from diagnostics import CompileError, run_cli
+from diagnostics import CompileError, run_cli, write_output
 from dump import STAGES, dump as dump_stage
 from ir.program_builder import build_ir_program
 from modules import discover_modules
@@ -29,22 +29,18 @@ def main():
                         help="Print what a stage of the compiler produces, instead of assembly (see dump.py)")
 
     args = parser.parse_args()
-    if args.dump:
-        text = run_cli(lambda: dump_stage(args.file, args.dump), args.traceback)
+    def produce():
+        if args.dump:
+            text = dump_stage(args.file, args.dump)
+        else:
+            text = compile_to_asm(args.file, args.target)
+        # Latin-1: str literals are raw bytes 0-255; UTF-8 would re-encode >= 128.
         if args.output:
-            with open(args.output, 'w', encoding='latin-1') as f:
-                f.write(text)
+            write_output(args.output, text)
         else:
             sys.stdout.buffer.write(text.encode('latin-1'))
-        return
 
-    asm = run_cli(lambda: compile_to_asm(args.file, args.target), args.traceback)
-    # Latin-1: str literals are raw bytes 0-255; UTF-8 would re-encode >= 128.
-    if args.output:
-        with open(args.output, 'w', encoding='latin-1') as f:
-            f.write(asm)
-    else:
-        sys.stdout.buffer.write(asm.encode('latin-1'))
+    run_cli(produce, args.traceback)
 
 
 def generate_asm(program, target=None) -> str:

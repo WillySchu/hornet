@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from compile import add_target_argument, compile_to_asm
-from diagnostics import run_cli
+from diagnostics import file_error, run_cli, write_output
 from target import Target, as_target, host_target
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -126,14 +126,15 @@ def build_executable(source_path: str, output_path: str, target=None) -> None:
 
     with tempfile.TemporaryDirectory() as tmpdir:
         asm_path = os.path.join(tmpdir, "program.s")
-        # Latin-1: see compile.py.
-        with open(asm_path, "w", encoding="latin-1") as f:
-            f.write(asm)
+        write_output(asm_path, asm)  # (as bytes: see compile.py)
 
         # The output is written exactly where asked, whatever name the linker would choose.
         linked = os.path.join(tmpdir, executable_name("program", target))
         _run(cc + [asm_path, str(runtime_object(target)), "-o", linked] + link_flags(target), "linking")
-        shutil.move(linked, output_path)
+        try:
+            shutil.move(linked, output_path)
+        except OSError as problem:
+            raise file_error("write", output_path, problem) from None
 
 
 def main() -> None:
