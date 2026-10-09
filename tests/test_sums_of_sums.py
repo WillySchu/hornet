@@ -144,13 +144,129 @@ def test_what_is_wrong_with_one(declarations, message):
     assert_program_semantic_error(declarations + MAIN, match=message)
 
 
+# -- a sum's value, into a wider sum
+
+FLOW = DECLS + (
+    "type LineResult is StrResult | none\n"              # [str, Error, none]: numbers StrResult's as it does
+    "type Either is IntResult | StrResult\n"             # [int, Error, str]: numbers them differently
+    "type Wide is Either | LineResult | bool\n"          # [int, Error, str, none, bool]
+)
+
+
+@GCC_SKIP
+def test_a_sum_flows_into_a_wider_one():
+    assert_program_stdout(
+        FLOW +
+        "type Holder struct:\n"
+        "    Wide held\n"
+        "def StrResult read(int n):\n"
+        "    if n == 0:\n        return Error('nothing to read')\n"
+        "    return 'a line'\n"
+        "def LineResult next(int n):\n"
+        "    if n < 0:\n        return none\n"
+        "    return read(n)\n"                                   # a call's result, returned as the wider sum
+        "def Wide widen(LineResult l):\n"
+        "    return l\n"
+        "def str describe(Wide w):\n"
+        "    match w:\n"
+        "        is int:\n            return 'int'\n"
+        "        is Error:\n            return 'error'\n"
+        "        is str:\n            return 'str'\n"
+        "        is none:\n            return 'none'\n"
+        "        is bool:\n            return 'bool'\n"
+        "def int main():\n"
+        "    print(next(-1))\n    print(next(0))\n    print(next(1))\n"
+        "    StrResult s = read(1)\n"
+        "    Either e = s\n"                                     # an initializer
+        "    print(e)\n"
+        "    e = read(0)\n"                                      # an assignment
+        "    print(e)\n"
+        "    Wide w = e\n"
+        "    print(w)\n"
+        "    print(describe(widen(next(-1))) + ' ' + describe(widen(next(0))) + ' ' + describe(widen(next(1))))\n"
+        "    print(describe(s) + ' ' + describe(e))\n"           # an argument
+        "    []Wide many = []Wide[s, e, next(-1)]\n"             # elements
+        "    many = append(many, next(1))\n"
+        "    print(many)\n"
+        "    dict[str]LineResult named\n"
+        "    named['k'] = s\n"                                   # a dict's value
+        "    print(named['k'])\n"
+        "    Holder h = Holder(s)\n"                             # a field
+        "    h.held = next(-1)\n"
+        "    print(h)\n"
+        "    return 0\n",
+        "none\nError(message: 'nothing to read')\n'a line'\n'a line'\nError(message: 'nothing to read')\n"
+        "Error(message: 'nothing to read')\nnone error str\nstr error\n"
+        "[]Wide['a line', Error(message: 'nothing to read'), none, 'a line']\n'a line'\nHolder(held: none)\n",
+    )
+
+
+def test_the_tag_is_translated_only_where_the_numbers_differ():
+    from ir.ir import IRStaticDataAddress
+    from ir.program_builder import build_ir_program
+
+    def tables(conversion: str):
+        program = build_ir_program(analyze(_parse(
+            FLOW + "def int main():\n    StrResult s = 'x'\n" + conversion + "    return 0\n")))
+        main = next(fn for fn in program.functions if fn.name == 'main')
+        used = [i.label for i in main.body if isinstance(i, IRStaticDataAddress) and 'sum_tags' in i.label]
+        return [words for label, words in program.type_descriptors if label in used]
+    assert tables("    LineResult l = s\n    print(l)\n") == []              # str 0, Error 1 in both
+    assert tables("    Either e = s\n    print(e)\n") == [[2, 1]]            # str is Either's 2, Error its 1
+    assert tables("    Either e = s\n    Either f = s\n    print(e)\n    print(f)\n") == [[2, 1]]   # one table
+
+
+@GCC_SKIP
+def test_what_a_sum_points_at_is_followed_through_the_wider_one():
+    # The int is reached only through a sum that became a wider sum: it must still outlive its function.
+    assert_program_stdout(
+        "type Maybe is *int | none\n"
+        "type More is Maybe | bool\n"
+        "def More make():\n"
+        "    int n = 41\n"
+        "    Maybe m = &n\n"
+        "    More w = m\n"
+        "    return w\n"
+        "def int clobber(int a, int b, int c):\n"
+        "    [8]int scratch = [a, b, c, a, b, c, a, b]\n"
+        "    return scratch[0] + scratch[7]\n"
+        "def int main():\n"
+        "    More w = make()\n"
+        "    print(clobber(1, 2, 3))\n"
+        "    if w is *int:\n"
+        "        print(*w + 1)\n"
+        "    return 0\n",
+        "3\n42\n",
+    )
+
+
 @pytest.mark.parametrize("body,message", [
-    # Not yet: a whole sum flowing into a wider one, and a test for a sum.
-    ("    StrResult s = 'x'\n    LineResult l = s\n",
-     "Cannot initialize 'l' .declared LineResult. with a value of type StrResult"),
-    ("    LineResult l = 'x'\n    if l is StrResult:\n        print(1)\n",
-     "'StrResult' is not one of LineResult's own declared variants"),
+    ("    LineResult l = none\n    StrResult s = l\n",
+     "Cannot initialize 's' .declared StrResult. with a value of type LineResult -- a LineResult can hold none, "
+     "which StrResult has no variant for"),
+    ("    LineResult l = none\n    StrResult s = 'a'\n    s = l\n",
+     "Cannot assign a value of type LineResult to 's' .declared StrResult. -- a LineResult can hold none"),
+    ("    LineResult l = none\n    print(take(l))\n",
+     "Argument 1 to 'take' should be StrResult, got LineResult -- a LineResult can hold none"),
+    ("    IntResult i = 1\n    StrResult s = i\n", "-- an IntResult can hold int, which StrResult has no variant for"),
+    ("    Either e = 1\n    LineResult l = e\n", "-- an Either can hold int, which LineResult has no variant for"),
+    # A pointer to a sum, or a slice of them, isn't one to the wider sum: they are laid out differently.
+    ("    StrResult s = 'a'\n    *LineResult p = &s\n", "Cannot initialize 'p'"),
+    ("    []StrResult many = []StrResult['a']\n    []LineResult lines = many\n", "Cannot initialize 'lines'"),
 ])
-def test_what_is_still_to_come(body, message):
+def test_what_does_not_flow(body, message):
     assert_program_semantic_error(
-        DECLS + "type LineResult is StrResult | none\ndef int main():\n" + body + "    return 0\n", match=message)
+        FLOW + "def int take(StrResult s):\n    return 1\ndef int main():\n" + body + "    return 0\n", match=message)
+
+
+def test_a_return_that_does_not_fit_says_which_variant():
+    assert_program_semantic_error(
+        FLOW + "def StrResult give(LineResult l):\n    return l\n" + MAIN,
+        match="'return' statement returns LineResult -- a LineResult can hold none, which StrResult has no variant")
+
+
+def test_what_is_still_to_come():
+    # Not yet: a test for a sum.
+    assert_program_semantic_error(
+        FLOW + "def int main():\n    LineResult l = 'x'\n    if l is StrResult:\n        print(1)\n    return 0\n",
+        match="'StrResult' is not one of LineResult's own declared variants")

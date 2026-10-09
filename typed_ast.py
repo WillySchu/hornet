@@ -182,6 +182,13 @@ class WidenToSum(Expr):
 
 
 @dataclass(frozen=True)
+class WidenSum(Expr):
+    """A sum as a value of a wider sum type: one that has every variant it has (and numbers them
+    its own way, so the tag is translated)."""
+    value: Expr
+
+
+@dataclass(frozen=True)
 class BoxVariant(Expr):
     """`&Variant(...)` where a pointer to the sum is expected: new heap storage holding the variant."""
     value: Expr

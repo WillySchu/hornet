@@ -212,7 +212,7 @@ class EscapeAnalyzer:
             return {loc}
         if isinstance(e, t.Deref):
             return self._contents(self.vals(e.pointer))
-        if isinstance(e, (t.Payload, t.WidenToSum)):
+        if isinstance(e, (t.Payload, t.WidenToSum, t.WidenSum)):
             return self.vals(e.sum if isinstance(e, t.Payload) else e.value)
         if isinstance(e, (t.IntCast, t.StrFromByte, t.StrFromBytes)):
             return self.vals(e.value)

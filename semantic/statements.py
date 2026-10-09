@@ -165,7 +165,7 @@ class StatementChecker:
             if not self.expressions.types_compatible(init_type, declared_type):
                 raise SemanticError(
                     f"Cannot initialize '{stmt.name}' (declared {declared_type}) "
-                    f"with a value of type {init_type}",
+                    f"with a value of type {init_type}" + self.expressions.sum_gap(init_type, declared_type),
                     stmt,
                 )
         self.facts.types[stmt.nid] = declared_type
@@ -209,7 +209,8 @@ class StatementChecker:
             return
         value_type = self.expressions.check_value_flowing_into_allowing_struct_literal(stmt.value, target_type)
         if not self.expressions.types_compatible(value_type, target_type):
-            raise SemanticError(f"Cannot assign a value of type {value_type} {what}", stmt)
+            gap = self.expressions.sum_gap(value_type, target_type)
+            raise SemanticError(f"Cannot assign a value of type {value_type} {what}{gap}", stmt)
         if isinstance(target, Variable) and self.facts.decls[target.nid] is not None:
             self._assignments.append(self.facts.decls[target.nid])  # the value was read as narrowed; no longer
             self.context.scopes.forget(self.facts.decls[target.nid])
@@ -237,7 +238,7 @@ class StatementChecker:
         if not self.expressions.types_compatible(value_type, return_type):
             raise SemanticError(
                 f"Function is declared to return {return_type}, but this "
-                f"'return' statement returns {value_type}",
+                f"'return' statement returns {value_type}" + self.expressions.sum_gap(value_type, return_type),
                 stmt,
             )
 

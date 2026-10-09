@@ -61,6 +61,9 @@ class _StandIn:
     def types_compatible(self, value_type, target_type):
         return value_type == target_type
 
+    def sum_gap(self, value_type, target_type):
+        return ""
+
     def hidden(self, struct, name):
         return False
 

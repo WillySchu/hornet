@@ -191,6 +191,8 @@ class TypedTreeBuilder:
             return value
         if target.kind == TypeKind.SUM and value.type in self.sum_types[target.sum_type_name].variants:
             return typed.WidenToSum(target, value)
+        if target.kind == TypeKind.SUM and value.type.kind == TypeKind.SUM:  # (checked to have its variants)
+            return typed.WidenSum(target, value)
         if value.type.kind == TypeKind.POINTER and value.type.element_type == target:
             return typed.Deref(target, value)  # a method's value receiver called through a pointer
         if (

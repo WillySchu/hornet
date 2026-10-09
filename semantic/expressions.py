@@ -662,14 +662,30 @@ class ExpressionChecker:
         return Type(TypeKind.SLICE, element_type=base_type.element_type)
 
     def types_compatible(self, value_type: Type, target_type: Type) -> bool:
-        """Equality, or NONE into a pointer (slices and dicts are never none), or a variant into its sum type."""
+        """Equality, or NONE into a pointer (slices and dicts are never none), or a variant into its sum
+        type, or a sum into a wider one: a sum with every variant it has."""
         if value_type == target_type:
             return True
         if value_type == Type.NONE and target_type.kind == TypeKind.POINTER:
             return True
-        if target_type.kind == TypeKind.SUM and value_type.kind != TypeKind.SUM:
-            return value_type in self.decls.sum_types[target_type.sum_type_name].variants
+        if target_type.kind == TypeKind.SUM:
+            wider = self.decls.sum_types[target_type.sum_type_name].variants
+            if value_type.kind == TypeKind.SUM:
+                return all(variant in wider for variant in self.decls.sum_types[value_type.sum_type_name].variants)
+            return value_type in wider
         return False
+
+    def sum_gap(self, value_type: Type, target_type: Type) -> str:
+        """What to add to "a `value_type` doesn't fit a `target_type`" when both are sums: the first
+        variant the one can hold that the other has no place for. '' when that isn't the reason."""
+        if value_type.kind != TypeKind.SUM or target_type.kind != TypeKind.SUM:
+            return ""
+        wider = self.decls.sum_types[target_type.sum_type_name].variants
+        missing = [v for v in self.decls.sum_types[value_type.sum_type_name].variants if v not in wider]
+        if not missing:
+            return ""
+        article = "an" if str(value_type)[:1].lower() in "aeiou" else "a"
+        return f" -- {article} {value_type} can hold {missing[0]}, which {target_type} has no variant for"
 
     def check_value_flowing_into(self, expr: Node, target_type: Type) -> Type:
         """check_expr for a value flowing into a typed slot; handles untyped array literals and literal range checks."""

@@ -568,6 +568,8 @@ class TypedFunctionBuilder:
                 return ir
             offset_ir, payload = self.offset(dst, SUM_TYPE_TAG_WIDTH)
             return ir + offset_ir + self.store(payload, e.value)
+        if isinstance(e, t.WidenSum):
+            return self.widen_sum(dst, e)
         if isinstance(e, t.ZeroValue):
             return self.zero_into(dst, e.type)
         if isinstance(e, t.NewEmptyDict):
@@ -577,6 +579,34 @@ class TypedFunctionBuilder:
         if isinstance(e, t.Call):
             return self.call(e, False, destination=dst)[0]
         raise NotYetPorted(f"composite {type(e).__name__}")
+
+    def widen_sum(self, dst, e: t.WidenSum) -> list:
+        """A sum's value at `dst` as the wider sum e.type. The wider sum has room for it (its payload
+        is at least as large), so it is copied whole; then its tag is rewritten where the two sums
+        number that variant differently, through a table from the one's numbers to the other's."""
+        narrow = self.ir_program.sum_type_registry[e.value.type.sum_type_name].variants
+        wide = self.ir_program.sum_type_registry[e.type.sum_type_name].variants
+        ir, source = self.address(e.value)
+        ir = ir + [IRCopy(dst_address=dst, src_address=source, value_type=e.value.type)]
+        numbers = [wide.index(variant) for variant in narrow]
+        if numbers == list(range(len(narrow))):
+            return ir
+        tables = self.ir_program.__dict__.setdefault('_sum_tag_tables', {})
+        if (e.value.type, e.type) not in tables:
+            tables[(e.value.type, e.type)] = self.ids.new_label("sum_tags")
+            self.ir_program.type_descriptors.append((tables[(e.value.type, e.type)], numbers))
+        tag, index, offset = self.temp(Type.INT32), self.temp(Type.INT), self.temp(Type.INT)
+        base, entry, number, new_tag = self.temp(), self.temp(), self.temp(Type.INT), self.temp(Type.INT32)
+        return ir + [
+            IRLoad(dst=tag, address=source),
+            IRCast(dst=index, src=tag),
+            IRBinOp(dst=offset, op=BinaryOp.MULTIPLY, left=index, right=IRConst(8, Type.INT)),
+            IRStaticDataAddress(dst=base, label=tables[(e.value.type, e.type)]),
+            IRBinOp(dst=entry, op=BinaryOp.ADD, left=base, right=offset),
+            IRLoad(dst=number, address=entry),
+            IRCast(dst=new_tag, src=number),
+            IRStore(address=dst, value=new_tag, value_type=Type.INT32),
+        ]
 
     def store(self, address, value) -> list:
         """Store any value (scalar or composite) at `address`."""
