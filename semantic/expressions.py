@@ -9,7 +9,7 @@ elsewhere and only call in: nothing here calls back out."""
 
 import contextlib
 import dataclasses
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 from diagnostics import quoted_text
 from ops import EQUALITY_OPS, LOGICAL_OPS, ORDERING_OPS, BinaryOp, UnaryOp
@@ -60,6 +60,27 @@ def _constant_key_value(expr: Node):
         return ('bool', expr.value)
     if isinstance(expr, ByteLiteral):
         return ('byte', expr.value)
+    return None
+
+
+def _written(expr: Node) -> Optional[str]:
+    """How `expr` is written, if it is a variable or a chain of fields, constant or variable indexes,
+    and dereferences from one; None for anything else."""
+    if isinstance(expr, Variable):
+        return expr.name
+    if isinstance(expr, Unary) and expr.op == UnaryOp.DEREFERENCE:
+        inner = _written(expr.operand)
+        return None if inner is None else f"*{inner}"
+    if isinstance(expr, (Field, Index)):
+        base = _written(expr.base if isinstance(expr, Field) else expr.array)
+        if base is None:
+            return None
+        if base.startswith('*'):  # `(*p).x`: the dereference is of p alone
+            base = f"({base})"
+        if isinstance(expr, Field):
+            return f"{base}.{expr.name}"
+        index = str(expr.index.value) if isinstance(expr.index, Constant) else _written(expr.index)
+        return None if index is None else f"{base}[{index}]"
     return None
 
 
@@ -972,8 +993,12 @@ class ExpressionChecker:
         if base_type.kind == TypeKind.POINTER and base_type.element_type.kind == TypeKind.STRUCT:
             base_type = base_type.element_type
         if base_type.kind != TypeKind.STRUCT:
+            def has_field(variant: Type) -> bool:
+                return (variant.kind == TypeKind.STRUCT and field_name in self.decls.structs[variant.struct_name].fields
+                        and not self.hidden(variant.struct_name, field_name))
             raise SemanticError(
-                f"Cannot access field '{field_name}' on non-struct type {base_type}",
+                f"Cannot access field '{field_name}' on non-struct type {base_type}"
+                + self.reaching_into_a_sum(base_expr, base_type, f"a field '{field_name}'", has_field),
                 base_expr,
             )
         struct_info = self.decls.structs[base_type.struct_name]
@@ -987,6 +1012,31 @@ class ExpressionChecker:
                 f"Field '{field_name}' of '{shown(base_type.struct_name)}' is not visible outside the module that "
                 f"defines the struct -- names starting with '_' are private to their own module", base_expr)
         return struct_info.fields[field_name]
+
+    def reaching_into_a_sum(self, expr: Node, type_: Type, wanted: str, has: Callable[[Type], bool]) -> str:
+        """What to add to an error about using `expr`, a sum (or a pointer to one), as one of its
+        variants: how to get at the variant. `has` says whether a variant has what was `wanted` (a
+        struct through a pointer counts). '' if `type_` is no sum."""
+        through_pointer = type_.kind == TypeKind.POINTER and type_.element_type.kind == TypeKind.SUM
+        sum_type = type_.element_type if through_pointer else type_
+        if sum_type.kind != TypeKind.SUM:
+            return ""
+
+        def fits(variant: Type) -> bool:
+            return has(variant.element_type if variant.kind == TypeKind.POINTER else variant)
+        holdable = self.decls.sum_types[sum_type.sum_type_name].variants if through_pointer \
+            else self._may_hold(expr, sum_type)
+        fitting = [variant for variant in holdable if fits(variant)]
+        if not fitting:
+            listed = ', '.join(map(str, holdable))
+            return f" -- {sum_type} is a sum type, and none of its variants ({listed}) has {wanted}"
+        written = _written(expr)
+        if isinstance(expr, Variable) and not through_pointer:
+            return (f" -- {sum_type} is a sum type: test which variant '{expr.name}' holds first, as in "
+                    f"`if {expr.name} is {fitting[0]}:`")
+        subject = "..." if written is None else (f"*{written}" if through_pointer else written)
+        return (f" -- {sum_type} is a sum type, and 'is' narrows only a variable: bind this value to reach its "
+                f"variant, as in `if {subject} is {fitting[0]} as NAME:`")
 
     def hidden(self, struct: str, name: str) -> bool:
         """Whether `name`, a field or method of `struct`, is private to another module: it starts with

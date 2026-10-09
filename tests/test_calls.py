@@ -64,6 +64,9 @@ class _StandIn:
     def sum_gap(self, value_type, target_type, expr=None):
         return ""
 
+    def reaching_into_a_sum(self, expr, type_, wanted, has):
+        return ""
+
     def hidden(self, struct, name):
         return False
 

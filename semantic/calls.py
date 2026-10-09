@@ -7,7 +7,7 @@ told from a call only by what its name refers to.
 A call's arguments are expressions, so CallChecker is one part of the expression checker and calls
 back into the rest of it (Checker, below) for them. It keeps no state of its own."""
 
-from typing import Optional, Protocol
+from typing import Callable, Optional, Protocol
 
 from ops import UnaryOp
 from parser import Call, Field, Index, Node, Unary, Variable
@@ -32,6 +32,8 @@ class Checker(Protocol):
     def types_compatible(self, value_type: Type, target_type: Type) -> bool: ...
 
     def sum_gap(self, value_type: Type, target_type: Type, expr: Optional[Node] = None) -> str: ...
+
+    def reaching_into_a_sum(self, expr: Node, type_: Type, wanted: str, has: Callable[[Type], bool]) -> str: ...
 
     def hidden(self, struct: str, name: str) -> bool: ...
 
@@ -157,9 +159,13 @@ class CallChecker:
             # auto-deref
             receiver_type = receiver_type.element_type
         if receiver_type.kind not in has_methods:
+            def has_method(variant: Type) -> bool:
+                owner = variant.struct_name if variant.kind == TypeKind.STRUCT else variant.enum_name
+                return variant.kind in has_methods and (owner, expr.name) in self.decls.methods
+            hint = self.checker.reaching_into_a_sum(expr.receiver, receiver_type, f"a method '{expr.name}'", has_method)
             raise SemanticError(
-                f"Cannot call method '{expr.name}' on a value of type "
-                f"{receiver_type} -- methods are only defined on structs and enums",
+                f"Cannot call method '{expr.name}' on a value of type {receiver_type}"
+                + (hint or " -- methods are only defined on structs and enums"),
                 expr.receiver,
             )
         is_enum = receiver_type.kind == TypeKind.ENUM

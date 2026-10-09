@@ -2,9 +2,12 @@
 the narrowing that follows it through `and`, `or`, `not`, `else`, and guards. Each condition says
 something when true and something when false (flow.py's Scopes.when); only variables are narrowed."""
 
+import re
+
 import pytest
 
-from tests.test_compiler import GCC_SKIP, assert_program_semantic_error, assert_program_stdout
+from tests.test_compiler import (
+    GCC_SKIP, SemanticError, _parse, analyze, assert_program_semantic_error, assert_program_stdout)
 from lexer import Lexer
 from parser import ParseError, Parser
 
@@ -359,3 +362,81 @@ def int main():
 @GCC_SKIP
 def test_while_narrows_and_assignment_ends_narrowing():
     assert_program_stdout(LOOPS, "10\n4\n4\n-1\n34\n12\n8\n")
+
+
+# -- reaching into a sum without narrowing it: the error says how to
+
+REACH = (
+    "type Circle struct:\n"
+    "    int radius\n"
+    "\n"
+    "    def int area(c):\n"
+    "        return c.radius * c.radius\n"
+    "type Square struct:\n"
+    "    int side\n"
+    "type Shape is Circle | Square | none\n"
+    "type Holder struct:\n"
+    "    Shape shape\n"
+    "    *Shape far\n"
+    "    []Shape many\n"
+    "def Shape make():\n"
+    "    return Circle(1)\n"
+    "def int main():\n"
+    "    Shape s = Circle(1)\n"
+    "    Holder h = Holder(s, &s, []Shape[s])\n"
+    "    *Holder p = &h\n"
+    "    int i = 0\n"
+)
+ONLY_A_VARIABLE = "Shape is a sum type, and 'is' narrows only a variable: bind this value to reach its variant, as in "
+
+
+@pytest.mark.parametrize("use,message", [
+    # A field or an element, tested or not: it has to be bound.
+    ("if h.shape is Circle:\n        print(h.shape.radius)",
+     "Cannot access field 'radius' on non-struct type Shape -- " + ONLY_A_VARIABLE
+     + "`if h.shape is Circle as NAME:`"),
+    ("print(h.many[i].side)", ONLY_A_VARIABLE + r"`if h.many\[i\] is Square as NAME:`"),
+    ("print(h.many[0].side)", ONLY_A_VARIABLE + r"`if h.many\[0\] is Square as NAME:`"),
+    ("print(p.shape.radius)", ONLY_A_VARIABLE + "`if p.shape is Circle as NAME:`"),
+    ("print(h.far.radius)", r"on non-struct type \*Shape -- " + ONLY_A_VARIABLE + r"`if \*h.far is Circle as NAME:`"),
+    ("print((*h.far).radius)", ONLY_A_VARIABLE + r"`if \*h.far is Circle as NAME:`"),
+    ("print(make().radius)", ONLY_A_VARIABLE + r"`if \.\.\. is Circle as NAME:`"),      # (not written out)
+    # A variable only has to be tested, for a variant it can still hold that has what was asked for.
+    ("print(s.radius)",
+     "Shape is a sum type: test which variant 's' holds first, as in `if s is Circle:`"),
+    ("if s is Circle:\n        return 1\n    print(s.side)", "as in `if s is Square:`"),
+    # Methods are told the same.
+    ("print(h.shape.area())",
+     "Cannot call method 'area' on a value of type Shape -- " + ONLY_A_VARIABLE + "`if h.shape is Circle as NAME:`"),
+    ("print(s.area())", "test which variant 's' holds first, as in `if s is Circle:`"),
+    # What no variant has.
+    ("print(h.shape.width)",
+     r"Shape is a sum type, and none of its variants \(Circle, Square, none\) has a field 'width'"),
+    ("print(s.volume())", r"none of its variants \(Circle, Square, none\) has a method 'volume'"),
+])
+def test_reaching_into_a_sum_says_how_to_get_at_the_variant(use, message):
+    assert_program_semantic_error(REACH + f"    {use}\n    return 0\n", match=message)
+
+
+@pytest.mark.parametrize("use,message", [
+    ("print(i.radius)", "Cannot access field 'radius' on non-struct type int at line"),
+    ("print(i.area())", "on a value of type int -- methods are only defined on structs and enums at line"),
+])
+def test_what_is_no_sum_is_told_nothing_more(use, message):
+    assert_program_semantic_error(REACH + f"    {use}\n    return 0\n", match=message)
+
+
+@pytest.mark.parametrize("use,reached", [
+    ("print(h.shape.radius)", "NAME.radius"),
+    ("print(h.many[i].side)", "NAME.side"),
+    ("print(h.far.radius)", "NAME.radius"),
+    ("print(p.shape.area())", "NAME.area()"),
+    ("print(s.radius)", "s.radius"),
+    ("print(s.area())", "s.area()"),
+])
+def test_what_the_error_suggests_is_right(use, reached):
+    # Take the line the error offers, and use it: the program then compiles.
+    with pytest.raises(SemanticError) as refused:
+        analyze(_parse(REACH + f"    {use}\n    return 0\n"))
+    suggestion = re.search(r"as in `(if .*:)`", refused.value.message).group(1)
+    analyze(_parse(REACH + f"    {suggestion}\n        print({reached})\n    return 0\n"))
