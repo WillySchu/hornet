@@ -307,6 +307,8 @@ class EscapeAnalyzer:
             for symbol in s.bindings:
                 self._add(symbol.id, elems)
             self.walk_statements(s.body)
+        elif isinstance(s, t.ForMembers):  # (a member is no pointer, and holds none)
+            self.walk_statements(s.body)
         elif isinstance(s, (t.Break, t.Continue)):
             pass
         else:
@@ -334,6 +336,8 @@ def _declared_within(nodes: list) -> set:
             out.add(node.symbol.id)
         elif isinstance(node, t.ForIn):
             out.update(symbol.id for symbol in node.bindings)
+        elif isinstance(node, t.ForMembers):
+            out.add(node.binding.id)
         elif isinstance(node, t.StructLiteral):
             out.add(_literal(node))
         stack.extend(_children(node))
@@ -350,6 +354,8 @@ def _loop_scopes(statements) -> list:
         if isinstance(node, t.ForIn):
             # The iterable is evaluated once, before the first iteration.
             scopes.append(_declared_within(list(node.body)) | {symbol.id for symbol in node.bindings})
+        elif isinstance(node, t.ForMembers):
+            scopes.append(_declared_within(list(node.body)) | {node.binding.id})
         elif isinstance(node, (t.While, t.For)):
             scopes.append(_declared_within(_children(node)))
         stack.extend(_children(node))

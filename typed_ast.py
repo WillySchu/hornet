@@ -468,6 +468,15 @@ class ForIn(Stmt):
 
 
 @dataclass(frozen=True)
+class ForMembers(Stmt):
+    """`for ... in` over an enum: `body` once for each member of `enum`, in the order declared;
+    `binding` is fresh each iteration."""
+    enum: Type
+    binding: Symbol
+    body: tuple
+
+
+@dataclass(frozen=True)
 class Defer(Stmt):
     """A call to make whenever the block this is in is left: at its end, or by `return`, `break`, or
     `continue`; the last deferred first. Its operands are variables set when this was reached (or

@@ -387,6 +387,8 @@ class TypedFunctionBuilder:
                 IRJump(start),
                 IRLabel(end)
             ]
+        if isinstance(s, t.ForMembers):
+            return self.for_members(s)
         if isinstance(s, t.ForIn):
             return self.for_in(s)
         if isinstance(s, t.Break):  # out of the loop's body, and any block open inside it
@@ -1347,6 +1349,29 @@ class TypedFunctionBuilder:
         if len(bindings) == 2:
             ir += self.initialize_scalar(bindings.pop(0), i)
         ir += self.bind_from(bindings[0], element)
+        self.loops.append((step, end, len(self.deferred)))
+        ir += self.block(s.body)
+        self.loops.pop()
+        return ir + [
+            IRJump(step),
+            IRLabel(step),
+            IRBinOp(dst=i, op=BinaryOp.ADD, left=i, right=IRConst(1, Type.INT)),
+            IRJump(start),
+            IRLabel(end)
+        ]
+
+    def for_members(self, s: t.ForMembers) -> list:
+        """Each member of an enum in turn. A member's value is its position, so this counts from 0 to
+        the number of members, and each count is a member as it stands: nothing to check."""
+        start, body = self.ids.new_label('for_in_start'), self.ids.new_label('for_in_body')
+        step, end = self.ids.new_label('for_in_next'), self.ids.new_label('for_in_end')
+        count = len(self.ir_program.enum_registry[s.enum.enum_name].members)
+        i, more, member = self.temp(Type.INT), self.temp(Type.BOOL), self.temp(s.enum)
+        ir = [IRMove(dst=i, src=IRConst(0, Type.INT)), IRJump(start), IRLabel(start),
+              IRBinOp(dst=more, op=BinaryOp.LESS_THAN, left=i, right=IRConst(count, Type.INT)),
+              IRBranch(cond=more, true_label=body, false_label=end), IRLabel(body),
+              IRCast(dst=member, src=i)]
+        ir += self.initialize_scalar(s.binding, member)
         self.loops.append((step, end, len(self.deferred)))
         ir += self.block(s.body)
         self.loops.pop()

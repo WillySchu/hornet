@@ -427,7 +427,11 @@ class StatementChecker:
         self.context.scopes.pop()
 
     def analyze_for_in(self, stmt: ForIn, return_type: Type) -> None:
-        """`for a[, b] in iterable:` over arrays, slices, dicts, and strings (bytes)."""
+        """`for a[, b] in iterable:` over arrays, slices, dicts, and strings (bytes); or `for a in Enum:`,
+        over an enum's members."""
+        enum = self.expressions.enum_named_by(stmt.iterable)
+        if enum is not None:
+            return self._analyze_for_members(stmt, Type(TypeKind.ENUM, enum_name=enum), return_type)
         if not isinstance(
                 stmt.iterable,
                 (Variable, Field, Index, Slice, ArrayLiteral, SliceLiteral, DictLiteral, StringLiteral, Call)):
@@ -447,10 +451,15 @@ class StatementChecker:
                 stmt.iterable,
             )
         iterable_type = self.expressions.check_expr(stmt.iterable)
+        if iterable_type.kind == TypeKind.ENUM:
+            raise SemanticError(
+                f"'for ... in' goes through an enum's members when it is given the enum itself, as in "
+                f"`for {stmt.binding_names[-1]} in {iterable_type}:`; this is one {iterable_type} value",
+                stmt.iterable)
         if iterable_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.DICT, TypeKind.STR):
             raise SemanticError(
                 f"'for ... in' requires an array, slice, dict, or str as its own "
-                f"iterable, got {iterable_type}",
+                f"iterable (or an enum, for its members), got {iterable_type}",
                 stmt.iterable,
             )
         num_bindings = len(stmt.binding_names)
@@ -468,6 +477,23 @@ class StatementChecker:
         self.facts.for_symbols[stmt.nid] = symbols
         for name, binding_type, sym in zip(stmt.binding_names, binding_types, symbols):
             self.context.scopes.declare(name, binding_type, stmt, sym.id)
+        self.context.scopes.forget_assigned_in(stmt.body)
+        self.loop_depth += 1
+        self._analyze_block(stmt.body, return_type)
+        self.loop_depth -= 1
+        self.context.scopes.pop()
+
+    def _analyze_for_members(self, stmt: ForIn, enum: Type, return_type: Type) -> None:
+        """`for member in Enum:`: the body once for each member, in the order they are declared."""
+        if len(stmt.binding_names) != 1:
+            raise SemanticError(
+                f"'for ... in' over an enum takes one name, for each member in turn; a member's position is "
+                f"`int({stmt.binding_names[-1]})`", stmt)
+        self.context.scopes.push()
+        symbol = self.symbols.new(stmt.binding_names[0], 'binding', enum, stmt)
+        self.facts.for_symbols[stmt.nid] = [symbol]
+        self.facts.member_loops[stmt.nid] = enum
+        self.context.scopes.declare(stmt.binding_names[0], enum, stmt, symbol.id)
         self.context.scopes.forget_assigned_in(stmt.body)
         self.loop_depth += 1
         self._analyze_block(stmt.body, return_type)

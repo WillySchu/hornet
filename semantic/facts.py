@@ -10,6 +10,7 @@ class Facts:
     symbols: dict = dataclasses.field(default_factory=dict)  # VarDecl, Param -> Symbol
     for_symbols: dict = dataclasses.field(default_factory=dict)  # ForIn -> [Symbol] per binding
     bindings: dict = dataclasses.field(default_factory=dict)  # IsCheck with `as NAME` -> synthetic VarDecl for NAME
+    member_loops: dict = dataclasses.field(default_factory=dict)  # ForIn over an enum's members -> the enum's type
     narrowed: dict = dataclasses.field(default_factory=dict)  # IsCheck -> the variant (or sum) it tests for
     sum_equalities: dict = dataclasses.field(default_factory=dict)  # `==`/`!=` Binary on sums -> the sum compared as
     # A Variable read flowing into a sum narrower than its own, which what is known of it there fits -> that sum.

@@ -280,6 +280,93 @@ def test_the_typed_tree_and_the_ir():
                     assert not (isinstance(item, Type) and item.kind == TypeKind.ENUM)
 
 
+# -- `for ... in` over an enum: each member in turn
+
+@GCC_SKIP
+def test_for_in_goes_through_an_enum_s_members():
+    assert_program_stdout(
+        DECLS +
+        "def note(str what):\n"
+        "    print(what)\n"
+        "def int main():\n"
+        "    for c in Color:\n"                                  # in the order declared
+        "        print(c)\n"
+        "    [len(Color)]int tally\n"                            # one slot for each
+        "    for c in Color:\n"
+        "        tally[int(c)] = int(c) * 10\n"
+        "    print(tally)\n"
+        "    for c in Color:\n"
+        "        defer note(format('after {}', c))\n"
+        "        if c is Green:\n            continue\n"
+        "        if c is Blue:\n            break\n"
+        "        print(c == Color.Red)\n"
+        "    for a in Color:\n"                                  # one loop inside another
+        "        for b in Color:\n"
+        "            if int(a) < int(b):\n"
+        "                print(format('{} before {}', a, b))\n"
+        "    for c in Color:\n"
+        "        c = Color.Blue\n"                               # the loop's own copy: the next member still comes
+        "        print(c)\n"
+        "    str wanted = 'Green'\n"
+        "    for c in Color:\n"                                  # a member, found by its name
+        "        if str(c) == wanted:\n"
+        "            print(int(c))\n"
+        "    for only in Shade:\n"
+        "        print(only)\n"
+        "    return 0\n",
+        "Color.Red\nColor.Green\nColor.Blue\n[3]int[0, 10, 20]\ntrue\nafter Color.Red\nafter Color.Green\n"
+        "after Color.Blue\nColor.Red before Color.Green\nColor.Red before Color.Blue\nColor.Green before Color.Blue\n"
+        "Color.Blue\nColor.Blue\nColor.Blue\n1\nShade.Dark\n",
+    )
+
+
+def test_such_a_loop_in_the_typed_tree_and_the_ir():
+    program = analyze(_parse(DECLS + "def int main():\n    for c in Color:\n        print(c)\n    return 0\n"))
+    assert "  ForMembers enum=Color binding=c#0\n    body:\n" in dump(program)
+    # A count is a member as it stands: nothing checks that it is one.
+    main = next(fn for fn in build_ir_program(program).functions if fn.name == 'main')
+    assert not [instr for instr in main.body if isinstance(instr, IRBoundsCheck)]
+    assert [instr for instr in main.body if isinstance(instr, IRBranch)]
+
+
+@pytest.mark.parametrize("loop,message", [
+    ("for i, c in Color:\n        print(c)",
+     r"'for ... in' over an enum takes one name, for each member in turn; a member's position is `int\(c\)`"),
+    ("for c in Color.Red:\n        print(c)",
+     "goes through an enum's members when it is given the enum itself, as in `for c in Color:`; this is one "
+     "Color value"),
+    ("Color k = Color.Red\n    for c in k:\n        print(c)", "as in `for c in Color:`; this is one Color value"),
+    ("for c in Color:\n        print(c)\n    print(c)", "Reference to undeclared variable 'c'"),   # the loop's own
+    ("for c in Colour:\n        print(c)", "Reference to undeclared variable 'Colour'"),
+])
+def test_what_such_a_loop_refuses(loop, message):
+    assert_program_semantic_error(DECLS + f"def int main():\n    {loop}\n    return 0\n", match=message)
+
+
+@GCC_SKIP
+def test_a_variable_named_like_an_enum_is_what_the_loop_is_over():
+    assert_program_stdout(
+        DECLS + "def int main():\n    [2]int Color = [7, 8]\n    for c in Color:\n        print(c)\n    return 0\n",
+        "7\n8\n")
+
+
+@GCC_SKIP
+def test_the_members_of_an_enum_from_another_module(tmp_path):
+    (tmp_path / "palette.ht").write_text("type Color enum:\n    Red\n    Green\n")
+    (tmp_path / "main.ht").write_text(
+        "import 'palette'\nfrom 'palette' import Color\n\n"
+        "def int main():\n"
+        "    for c in palette.Color:\n"                          # by its qualified name
+        "        print(c)\n"
+        "    for c in Color:\n"                                  # ... and by the name imported
+        "        print(int(c))\n"
+        "    return 0\n")
+    exe = tmp_path / "main"
+    build_executable(str(tmp_path / "main.ht"), str(exe))
+    r = run_binary(default_target(), [str(exe)], capture_output=True, text=True)
+    assert r.stdout == "Color.Red\nColor.Green\n0\n1\n"
+
+
 @GCC_SKIP
 def test_enums_across_modules(tmp_path):
     (tmp_path / "palette.ht").write_text(

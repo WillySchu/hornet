@@ -14,7 +14,6 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- Enums. Explicit member values, ordering, for ... in over an enum.
 - match exhaustiveness. It does not take earlier exclusions into account, so a variant already ruled out by a guard must still have an arm or an else.
 - Report function name on stack overflow.
 - Literal-only expressions. int8 x = 1 + 2 is still rejected, because only a single literal adapts to a narrow type.
@@ -52,6 +51,7 @@ Updates:
 - Make `append` variadic.
 - Spread operator.
 - As binding in a while condition?
+- Enums. Explicit member values, ordering?
 - float
 - Multithreading
 - `gen_array_copy` currently copies each leaf one by one, so for small leaf types (int8, etc.) this is calling many `movb` rather than a few `movq`.

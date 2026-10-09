@@ -141,6 +141,7 @@ def test_every_node_kind_occurs_in_the_repository_and_this_file():
     used |= _nodes(_typed("type Narrow is int | none\ntype Wide is Narrow | str\n\ndef int main():\n"
                           "    Narrow n = 1\n    Wide w = n\n    print(w)\n"
                           "    if w is Narrow:\n        n = w\n    defer print(n)\n    return 0\n"))
+    used |= _nodes(_typed("type E enum:\n    A\n\ndef int main():\n    for e in E:\n        print(e)\n    return 0\n"))
     assert defined - used == set(), "node kinds no test produces"
 
 

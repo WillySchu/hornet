@@ -114,6 +114,9 @@ class TypedTreeBuilder:
                 raise ElaborationError(f"for-loop initializer elaborated to {len(init)} statements")
             step = self.statement(s.increment)
             return [typed.For(init[0] if init else None, self.expr(s.condition), step[0], self.block(s.body))]
+        if isinstance(s, syntax.ForIn) and s.nid in self.facts.member_loops:
+            enum, member = self.facts.member_loops[s.nid], self.facts.for_symbols[s.nid][0]
+            return [typed.ForMembers(enum, member, self.block(s.body))]
         if isinstance(s, syntax.ForIn):
             iterable = self.expr(s.iterable)
             kind = {TypeKind.ARRAY: 'array', TypeKind.SLICE: 'slice', TypeKind.STR: 'str',
