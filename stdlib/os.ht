@@ -53,7 +53,7 @@ def StrResult read_stdin():
     return read_all_from_fd(0)
 
 # A line of standard input, an Error, or none at the end of the input.
-type LineResult is str | Error | none
+type LineResult is StrResult | none
 
 # The next line of standard input, without its line ending ("\n" or "\r\n").
 def LineResult read_line():

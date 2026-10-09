@@ -351,7 +351,7 @@ type Square struct:
 type Shape is Circle | Square
 ```
 
-A variant may be a struct, scalar, enum, `str`, array, slice, dictionary, or pointer type, or `none`, a variant with no payload. It can't be another sum type, but it can reach one through a pointer, slice, or dictionary: a result that holds a tree is `type ExprResult is *Expr | ParseError`. A sum's zero value is its `none` variant. A sum without one has no zero value, so a variable of it (or a struct or array containing it) needs an initializer, and named construction can't omit such a field.
+A variant may be a struct, scalar, enum, `str`, array, slice, dictionary, or pointer type, or `none`, a variant with no payload. A sum's zero value is its `none` variant. A sum without one has no zero value, so a variable of it (or a struct or array containing it) needs an initializer, and named construction can't omit such a field.
 
 Struct fields may have sum types, so types can be recursive, through a pointer, slice, or dictionary. Where a pointer to a sum is expected, `&Variant(...)` creates a new value of the sum, on the heap, holding that variant:
 
@@ -370,6 +370,27 @@ Expr e = Bin('+', &Num(1), &Bin('*', &Num(2), &Num(3)))
 ```
 
 A type that contains itself by value has no finite size and is rejected.
+
+A sum type named among another's variants gives that sum its own variants in its place:
+
+```hornet
+type StrResult is str | Error
+type IntResult is int | Error
+
+type LineResult is StrResult | none      # str, Error, none
+type Either is IntResult | StrResult     # int, Error, str
+```
+
+So a sum's variants are always a flat set of types that aren't sums. One that arrives twice, as `Error` does in `Either`, is one variant; a sum can't include itself. A pointer to a sum, or a slice or dictionary of them, is a variant in its own right, not a sum to be taken apart: a result that holds a tree is `type ExprResult is *Expr | ParseError`.
+
+A sum's value flows into any wider sum, one that has every variant it has, wherever a value of the wider type is expected:
+
+```hornet
+def LineResult next_line():
+    return read_some()                   # a StrResult
+```
+
+That is true of the value only: a `*StrResult` is not a `*LineResult`, nor a `[]StrResult` a `[]LineResult`. The other direction needs a check first; see [Pattern Matching](#pattern-matching).
 
 The representation uses a discriminant and payload storage for the largest variant.
 
@@ -869,6 +890,17 @@ while node is Cons:
 
 Assigning to a narrowed variable ends its narrowing, and a loop assumes nothing about a variable its body assigns. A compound assignment (`count += 1`) is no such assignment: it gives the variable back the variant it held, so the narrowing stands. Only variables narrow: `h.shape is Circle` is a plain test. Nothing narrows to `none`: with only `none` left, the variable keeps its sum type. If a pointer to the variable (`&shape`) changes its variant meanwhile, its next use panics.
 
+`T` may be a sum type whose variants are all the subject's: the test is then for any of them. A variable with several variants left keeps its type, but it flows into any sum that has all those it can still hold:
+
+```hornet
+LineResult line = next_line()
+if line is StrResult:
+    show(line)                          # show takes a StrResult
+if line is none:
+    return
+show(line)                              # and here, none having been ruled out
+```
+
 `as NAME` binds a narrowed copy of the subject, which is how a field, an element, or a call's result is narrowed:
 
 ```hornet
@@ -892,7 +924,7 @@ match shape as s:
 
 The subject of `match ... as NAME` can be any sum-typed expression, such as a field, an element, or `*p`; `NAME` is a copy of it. A `none` variant is tested with `is none`.
 
-`match` must be exhaustive, or end with `else:`, where the subject is none of the arms' variants. A `match` whose arms all return, or end in a `never` call such as `panic`, counts as returning.
+`match` must be exhaustive, or end with `else:`, where the subject is none of the arms' variants. A `match` whose arms all return, or end in a `never` call such as `panic`, counts as returning. An arm may test for a sum type, taking each of its variants that no arm above has; an arm with nothing left to take is an error.
 
 `is` and `match` also apply to an enum, with its members in place of variants (`colour is Red`). Nothing is narrowed, and a `match` must cover every member or end with `else:`:
 
@@ -1166,7 +1198,7 @@ write_stderr('error\n')
 exit(0)
 ```
 
-Functions that can fail return a result from `stdlib/errors.ht` (`StrResult is str | Error`, `IntResult is int | Error`); handle it with `match` or `is`, or use `must_str`/`must_int` to panic on error. `read_line` returns a `LineResult is str | Error | none`, and can be mixed with `read_stdin`, which then reads what is left. Directory/path APIs remain future work.
+Functions that can fail return a result from `stdlib/errors.ht` (`StrResult is str | Error`, `IntResult is int | Error`); handle it with `match` or `is`, or use `must_str`/`must_int` to panic on error. `read_line` returns a `LineResult is StrResult | none`, and can be mixed with `read_stdin`, which then reads what is left. Directory/path APIs remain future work.
 
 ## `stdlib/net.ht`
 
@@ -1449,7 +1481,6 @@ Hornet is still experimental. Some notable limitations are:
 * Some advanced pointer/address-taking cases remain unsupported.
 * `for ... in ...` can't iterate a function-call result or a dereference; assign it to a variable first.
 * Only variables narrow; a field, element, or call result needs an `as` binding, which is for an `if` or `elif` condition and can't sit under `or` or `not`.
-* A sum type can't be a variant of another sum type.
 * Enums have no explicit member values or ordering, and `for ... in` doesn't iterate one.
 * Sum-type equality is not implemented.
 * Slice equality and dictionary equality are not implemented.
@@ -1515,7 +1546,7 @@ Current and future work includes:
 * More complete pointer and address-taking support
 * More precise escape analysis for iterators, aliases, and data more than one pointer away from a call argument
 * Narrowing of fields and elements, and `as` bindings in loop conditions
-* Additional sum-type composition and equality support
+* Sum-type equality
 * Generic types and functions
 * First-class function types and closures
 * Interpolated string literals, and format options
