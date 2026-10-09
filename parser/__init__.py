@@ -1,13 +1,17 @@
 """The parser: a source file's tokens to its tree.
 
-    nodes.py    the tree's node classes
-    stream.py   the token stream: where the parser is in a file's tokens
-    escapes.py  what a string or byte literal's text stands for
-    errors.py   what it reports
-    type_exprs.py    types as they are written
-    expressions.py   expressions: operators, literals, calls
-    statements.py    statements and blocks
-    parser.py   the rest of the grammar (declarations), on its way to a module of its own
+    nodes.py          the tree's node classes
+    stream.py         the token stream: a file's tokens and where the parser is in them
+    declarations.py   a file from its top, and what is declared there
+    statements.py     statements and blocks
+    expressions.py    expressions: operators, literals, calls
+    type_exprs.py     types as they are written
+    escapes.py        what a string or byte literal's text stands for
+    errors.py         what the parser reports
+    parser.py         Parser: the grammar as one object, for code that has tokens and wants a tree
+
+The grammar is functions that each take the stream and move it along. Declarations call statements,
+which call expressions and types; those two call each other.
 
 The entry points are here (parse, parse_tokens), with the names other code takes from the package.
 """

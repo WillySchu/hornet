@@ -64,3 +64,34 @@ def test_a_statement_is_told_from_its_first_tokens():
     assignment = statements.parse_statement(stream)
     assert isinstance(assignment, Assign) and isinstance(assignment.target, Unary)
     assert stream.current().type == TokenType.NEWLINE      # read from the start again, and to the line's end
+
+
+def test_the_parser_object_is_only_the_way_in():
+    from parser import Parser, declarations
+    tokens = Lexer("def int main():\n    return 0\n", 'f.ht').tokenize()
+    assert Parser(tokens).parse_program().pretty() == declarations.parse_program(TokenStream(tokens)).pretty()
+    assert [name for name in vars(Parser) if not name.startswith('_')] == ['parse_program']
+    with pytest.raises(ValueError, match="tokens must be terminated by an EOF"):
+        Parser(tokens[:-1])
+
+
+def test_each_part_of_the_grammar_imports_only_what_is_below_it():
+    import ast
+
+    def imported(module: str) -> set:
+        """The parser modules `module` imports."""
+        tree = ast.parse((ROOT / "parser" / f"{module}.py").read_text())
+        found = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == 'parser':
+                found |= {alias.name for alias in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.module and node.module.startswith('parser.'):
+                found.add(node.module.split('.')[1])
+        return found - {'nodes', 'errors', 'stream', 'escapes'}        # what everything may use
+
+    assert imported('parser') == {'declarations'}
+    assert imported('declarations') == {'statements', 'expressions', 'type_exprs'}
+    assert imported('statements') == {'expressions', 'type_exprs'}
+    assert imported('expressions') == {'type_exprs'}                    # these two need each other
+    assert imported('type_exprs') == {'expressions'}
+    assert imported('stream') == set() and imported('nodes') == set()
