@@ -32,7 +32,7 @@ syn keyword hornetStorageClass extern intrinsic const
 " Control flow
 syn keyword hornetConditional if elif else match is
 syn keyword hornetRepeat for while in
-syn keyword hornetStatement break continue
+syn keyword hornetStatement break continue defer
 
 " Operators. When matches start at the same column the later one wins, so
 " the guards keep '=' out of '==' and '<<' out of '<<='.

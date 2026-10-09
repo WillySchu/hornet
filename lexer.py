@@ -76,6 +76,7 @@ class TokenType(Enum):
     WHILE = auto()
     BREAK = auto()
     CONTINUE = auto()
+    DEFER = auto()
     NONE = auto()
     STRUCT = auto()
     ENUM = auto()
@@ -160,6 +161,7 @@ class Lexer:
             'while': TokenType.WHILE,
             'break': TokenType.BREAK,
             'continue': TokenType.CONTINUE,
+            'defer': TokenType.DEFER,
             'none': TokenType.NONE,
             'struct': TokenType.STRUCT,
             'enum': TokenType.ENUM,

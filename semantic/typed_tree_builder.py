@@ -1,4 +1,6 @@
 
+import dataclasses
+
 import parser as syntax
 import typed_ast as typed
 from ops import BinaryOp, UnaryOp
@@ -117,11 +119,34 @@ class TypedTreeBuilder:
             kind = {TypeKind.ARRAY: 'array', TypeKind.SLICE: 'slice', TypeKind.STR: 'str',
                     TypeKind.DICT: 'dict'}[iterable.type.kind]
             return [typed.ForIn(kind, iterable, tuple(self.facts.for_symbols[s.nid]), self.block(s.body))]
+        if isinstance(s, syntax.Defer):
+            return self.defer(s)
         if isinstance(s, syntax.Break):
             return [typed.Break()]
         if isinstance(s, syntax.Continue):
             return [typed.Continue()]
         raise ElaborationError(f"No elaboration for statement {type(s).__name__}")
+
+    def defer(self, s: syntax.Defer) -> list:
+        """`defer CALL`: each of the call's operands is put in a variable of its own here, and the
+        deferred call is of those. (A literal needs none.)"""
+        call, declarations = self.expr(s.call), []
+
+        def kept(operand: typed.Expr) -> typed.Expr:
+            if isinstance(operand, (typed.IntLit, typed.BoolLit, typed.StrLit, typed.NoneLit, typed.EnumMember)):
+                return operand
+            symbol = self.symbols.new('deferred', 'local', operand.type, s)
+            declarations.append(typed.Declare(symbol, operand))
+            return typed.Local(operand.type, symbol)
+
+        operands = {}
+        for field in dataclasses.fields(call):
+            value = getattr(call, field.name)
+            if isinstance(value, typed.Expr):
+                operands[field.name] = kept(value)
+            elif isinstance(value, tuple) and value and all(isinstance(v, typed.Expr) for v in value):
+                operands[field.name] = tuple(kept(v) for v in value)
+        return declarations + [typed.Defer(dataclasses.replace(call, **operands))]
 
     def declare(self, s: syntax.VarDecl) -> typed.Declare:
         symbol = self.facts.symbols[s.nid]

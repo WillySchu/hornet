@@ -55,7 +55,7 @@ def dict[str]bool _keywords():
     dict[str]bool kw = dict[str]bool{}
     []str words = []str['def', 'int', 'int8', 'uint8', 'int64', 'int32', 'byte', 'str', 'return', 'and', 'or', 'not',
         'bool', 'true', 'false', 'if', 'else', 'elif', 'for', 'while', 'break', 'continue', 'none', 'struct', 'type',
-        'is', 'in', 'match', 'as', 'import', 'from', 'extern', 'intrinsic', 'dict', 'const', 'never', 'enum']
+        'is', 'in', 'match', 'as', 'import', 'from', 'extern', 'intrinsic', 'dict', 'const', 'never', 'enum', 'defer']
     for w in words:
         kw[w] = true
     return kw

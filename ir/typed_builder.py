@@ -135,7 +135,8 @@ class TypedFunctionBuilder:
         self.addressed, self.exposed = _addressed(fn), _exposed(fn)
         self.panics = PanicBlocks(self.ir_program, "check_failed")  # for panic_when
         self.storage = {}  # symbol id -> (Temp or None, heap)
-        self.loops = []  # (continue label, end label)
+        self.loops = []  # (continue label, end label, how many blocks were open around the loop)
+        self.deferred = []  # for each open block, innermost last: the calls deferred in it so far
         ir = self.params(fn)
         ir += self.block(fn.body)
         if not ir or not isinstance(ir[-1], (IRBranch, IRJump, IRReturn)):
@@ -285,9 +286,23 @@ class TypedFunctionBuilder:
     # -- statements
 
     def block(self, statements) -> list:
+        """A block's statements, then the calls deferred in it, for when its end is reached."""
+        self.deferred.append([])
         ir = []
         for s in statements or ():
             ir += self.statement(s)
+        if not (statements and isinstance(statements[-1], (t.Return, t.Break, t.Continue))):
+            ir += self.leave(len(self.deferred) - 1)
+        self.deferred.pop()
+        return ir
+
+    def leave(self, outermost: int) -> list:
+        """The deferred calls of the open blocks from the innermost out to block number `outermost`,
+        each block's last deferred first: what leaving those blocks from here does."""
+        ir = []
+        for calls in reversed(self.deferred[outermost:]):
+            for call in reversed(calls):
+                ir += self.statement(t.ExprStmt(call, line=call.line, col=call.col, file=call.file))
         return ir
 
     def statement(self, s) -> list:
@@ -329,15 +344,19 @@ class TypedFunctionBuilder:
                 return ir
             ir, _ = self.address(s.expr)  # evaluated for its effects (calls, checks)
             return ir
-        if isinstance(s, t.Return):
+        if isinstance(s, t.Defer):
+            self.deferred[-1].append(s.call)
+            return []
+        if isinstance(s, t.Return):  # the value first, then what every open block deferred
             if s.value is None:
-                return [IRReturn(value=None)]
+                return self.leave(0) + [IRReturn(value=None)]
             if _scalar(s.value.type):
                 ir, value = self.value(s.value)
-                return ir + [IRReturn(value=value)]
+                return ir + self.leave(0) + [IRReturn(value=value)]
             hidden, address = self.temp(), self.temp()
             return [IRLocalAddress(dst=address, slot=self.ir_fn.hidden_return_ptr_slot),
-                    IRLoad(dst=hidden, address=address)] + self.write_into(hidden, s.value) + [IRReturn(value=None)]
+                    IRLoad(dst=hidden, address=address)] + self.write_into(hidden, s.value) + self.leave(0) + [
+                        IRReturn(value=None)]
         if isinstance(s, t.If):
             then_label, else_label, end_label = (self.ids.new_label(x) for x in ("if_then", "if_else", "if_end"))
             ir = self.branch(s.cond, then_label, else_label) + [IRLabel(then_label)]
@@ -347,7 +366,7 @@ class TypedFunctionBuilder:
             return self.match(s)
         if isinstance(s, t.While):
             start, body, end = (self.ids.new_label(x) for x in ("while_start", "while_body", "while_end"))
-            self.loops.append((start, end))
+            self.loops.append((start, end, len(self.deferred)))
             body_ir = self.block(s.body)
             self.loops.pop()
             return [IRJump(start), IRLabel(start)] + self.branch(s.cond, body, end) + [IRLabel(body)] + body_ir + [
@@ -355,7 +374,7 @@ class TypedFunctionBuilder:
         if isinstance(s, t.For):
             start, body, step, end = (self.ids.new_label(x) for x in ("for_start", "for_body", "for_step", "for_end"))
             ir = self.statement(s.init) if s.init is not None else []
-            self.loops.append((step, end))
+            self.loops.append((step, end, len(self.deferred)))
             body_ir = self.block(s.body)
             self.loops.pop()
             return ir + [
@@ -370,10 +389,10 @@ class TypedFunctionBuilder:
             ]
         if isinstance(s, t.ForIn):
             return self.for_in(s)
-        if isinstance(s, t.Break):
-            return [IRJump(self.loops[-1][1])]
+        if isinstance(s, t.Break):  # out of the loop's body, and any block open inside it
+            return self.leave(self.loops[-1][2]) + [IRJump(self.loops[-1][1])]
         if isinstance(s, t.Continue):
-            return [IRJump(self.loops[-1][0])]
+            return self.leave(self.loops[-1][2]) + [IRJump(self.loops[-1][0])]
         raise NotYetPorted(type(s).__name__)
 
     def match(self, s: t.Match) -> list:
@@ -1328,7 +1347,7 @@ class TypedFunctionBuilder:
         if len(bindings) == 2:
             ir += self.initialize_scalar(bindings.pop(0), i)
         ir += self.bind_from(bindings[0], element)
-        self.loops.append((step, end))
+        self.loops.append((step, end, len(self.deferred)))
         ir += self.block(s.body)
         self.loops.pop()
         return ir + [
@@ -1373,7 +1392,7 @@ class TypedFunctionBuilder:
         if len(s.bindings) == 2:
             value_ir, value_address = self.offset(key_address, key_width)
             ir += value_ir + self.bind_from(s.bindings[1], value_address)
-        self.loops.append((step, end))
+        self.loops.append((step, end, len(self.deferred)))
         ir += self.block(s.body)
         self.loops.pop()
         return ir + [

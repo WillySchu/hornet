@@ -1,0 +1,8 @@
+def int main():
+    defer   print( 'done' )
+    for int i = 0; i < 2; i += 1:
+        defer  out.flush( )   # each time round
+        if i == 1:
+            continue
+    defer conn.close(  )
+    return 0

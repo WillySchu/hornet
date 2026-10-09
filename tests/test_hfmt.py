@@ -71,7 +71,7 @@ _EVERY_TOKEN = (
     "( ) [ ] { } > < : ; , = + - * / % ~ & | ^ . x.y a[0]b(c){d}\n"
     "1 23 4.5 6. 7.x _a9 'it\\'s' '' \"\\n\" \"\\x41\" 'a\\\\'\n"
     "def int int8 uint8 int64 int32 byte str return and or not bool true false if else elif for while break\n"
-    "continue none struct type is in match as import from extern intrinsic dict const deff intx\n"
+    "continue none struct type is in match as import from extern intrinsic dict const defer deff intx\n"
     "\tx\r\n"
 )
 

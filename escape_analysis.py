@@ -281,6 +281,8 @@ class EscapeAnalyzer:
             self._escape(self.vals(s.value))
         elif isinstance(s, t.ExprStmt):
             self.vals(s.expr)
+        elif isinstance(s, t.Defer):  # a call like any other, of the variables its operands were put in
+            self.vals(s.call)
         elif isinstance(s, t.If):
             self.vals(s.cond)
             self.walk_statements(s.then_body)

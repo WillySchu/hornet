@@ -7,8 +7,8 @@ The expressions in them are ExpressionChecker's; nothing there calls back here."
 from typing import Dict, List, Optional
 
 from parser import (
-    ArrayLiteral, Assign, Binary, Break, Call, Continue, DictLiteral, ExprStmt, Field, For, ForIn, Function, If, Index,
-    IsCheck, Match, Node, Return, Slice, SliceLiteral, StringLiteral, VarDecl, Variable, While,
+    ArrayLiteral, Assign, Binary, Break, Call, Continue, Defer, DictLiteral, ExprStmt, Field, For, ForIn, Function, If,
+    Index, IsCheck, Match, Node, Return, Slice, SliceLiteral, StringLiteral, VarDecl, Variable, While,
 )
 from scopes import display_name as shown
 from semantic.context import Context
@@ -139,6 +139,8 @@ class StatementChecker:
             self.analyze_for(stmt, return_type)
         elif isinstance(stmt, ForIn):
             self.analyze_for_in(stmt, return_type)
+        elif isinstance(stmt, Defer):
+            self.analyze_defer(stmt)
         elif isinstance(stmt, Break):
             self.analyze_break(stmt)
         elif isinstance(stmt, Continue):
@@ -370,6 +372,19 @@ class StatementChecker:
                 f"(add an arm for each, or an 'else:' to cover the rest)",
                 stmt,
             )
+
+    def analyze_defer(self, stmt: Defer) -> None:
+        """`defer CALL`: the call is checked here, as what it is here (its receiver and arguments are
+        evaluated here, so what `is` checks have shown of them is what holds); it must be one that
+        returns, and a call of something, not a struct literal."""
+        if self.expressions.calls.struct_literal(stmt.call) is not None:
+            raise SemanticError(
+                f"'defer' takes a call to a function or a method; `{shown(stmt.call.name)}(...)` makes a value",
+                stmt.call)
+        if self.expressions.check_expr(stmt.call) == Type.NEVER:
+            raise SemanticError(
+                f"'{shown(stmt.call.name)}' never returns, so it can't be deferred: leaving the block would end "
+                f"the program", stmt.call)
 
     def analyze_while(self, stmt: While, return_type: Type) -> None:
         """The condition narrows the body, like an `if`'s (and, when it is false, what follows a loop

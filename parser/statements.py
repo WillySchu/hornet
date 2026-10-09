@@ -11,7 +11,7 @@ from ops import BinaryOp, UnaryOp
 from parser import expressions, type_exprs
 from parser.errors import ParseError
 from parser.nodes import (
-    ArrayTypeExpr, Assign, Break, Continue, ExprStmt, Field, For, ForIn, If, Index, IsCheck, Match, Node,
+    ArrayTypeExpr, Assign, Break, Call, Continue, Defer, ExprStmt, Field, For, ForIn, If, Index, IsCheck, Match, Node,
     QualifiedTypeExpr, Return, SliceTypeExpr, Unary, VarDecl, Variable, While,
 )
 from parser.stream import TokenStream
@@ -101,6 +101,8 @@ def parse_statement(p: TokenStream) -> Node:
         return parse_while(p)
     if p.check(TokenType.FOR):
         return parse_for(p)
+    if p.check(TokenType.DEFER):
+        return parse_defer(p)
     if p.check(TokenType.BREAK):
         return parse_break(p)
     if p.check(TokenType.CONTINUE):
@@ -207,6 +209,15 @@ def _parse_for_increment_clause(p: TokenStream) -> Node:
         f"clause",
         start_tok,
     )
+
+
+def parse_defer(p: TokenStream) -> Defer:
+    """`defer CALL`."""
+    tok = p.expect(TokenType.DEFER, "Expected 'defer'")
+    call = expressions.parse_expression(p)
+    if not isinstance(call, Call):
+        raise p.error("'defer' takes a call, as in `defer file.close()`: what is deferred is calling it", tok)
+    return Defer(call=call, line=tok.line, col=tok.col)
 
 
 def parse_break(p: TokenStream) -> Break:

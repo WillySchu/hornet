@@ -11,8 +11,9 @@ __all__ = [
     'Node', 'Constant', 'BoolLiteral', 'NoneLiteral', 'StringLiteral', 'ByteLiteral', 'Variable', 'ArrayLiteral',
     'DictLiteral', 'Index', 'SliceLiteral', 'Slice', 'Call', 'Unary', 'Cast', 'Binary', 'Return', 'ArrayTypeExpr',
     'SliceTypeExpr', 'PointerTypeExpr', 'DictTypeExpr', 'QualifiedTypeExpr', 'VarDecl', 'Assign', 'Field',
-    'StructField', 'MethodDef', 'StructDef', 'ExprStmt', 'IsCheck', 'If', 'Match', 'While', 'For', 'ForIn', 'Break',
-    'Continue', 'Param', 'Function', 'ExternFunctionDecl', 'IntrinsicDecl', 'ConstDecl', 'EnumMember', 'EnumDef',
+    'StructField', 'MethodDef', 'StructDef', 'ExprStmt', 'IsCheck', 'If', 'Match', 'While', 'For', 'ForIn', 'Defer',
+    'Break', 'Continue', 'Param', 'Function', 'ExternFunctionDecl', 'IntrinsicDecl', 'ConstDecl', 'EnumMember',
+    'EnumDef',
     'TypeAlias', 'SumTypeDef', 'ImportDecl', 'FromImportDecl', 'Program', 'stamp_file',
 ]
 
@@ -355,6 +356,13 @@ class ForIn(Node):
     binding_names: List[str]
     iterable: Node
     body: List[Node]
+
+
+@dataclass
+class Defer(Node):
+    """`defer CALL`: the call's receiver and arguments are evaluated here; the call is made when the
+    block this statement is in is left."""
+    call: Node
 
 
 @dataclass

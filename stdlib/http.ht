@@ -310,14 +310,12 @@ def ResponseResult request(str method, str url, []Header headers, str body, int 
     ConnResult conn = connect(parsed.host, parsed.port, timeout_ms)
     if conn is Error:
         return conn
+    defer conn.close()
     IntResult sent = conn.write(text)
     if sent is Error:
-        conn.close()
         return sent
     _Reader reader = _Reader(conn, [], 0, false)
-    ResponseResult response = _read_response(&reader, method == 'HEAD')
-    conn.close()
-    return response
+    return _read_response(&reader, method == 'HEAD')
 
 def ResponseResult get(str url):
     return request('GET', url, [], '', TIMEOUT_MS)

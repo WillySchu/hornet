@@ -468,6 +468,14 @@ class ForIn(Stmt):
 
 
 @dataclass(frozen=True)
+class Defer(Stmt):
+    """A call to make whenever the block this is in is left: at its end, or by `return`, `break`, or
+    `continue`; the last deferred first. Its operands are variables set when this was reached (or
+    literals), so the call is of what they were then."""
+    call: Expr
+
+
+@dataclass(frozen=True)
 class Break(Stmt):
     pass
 

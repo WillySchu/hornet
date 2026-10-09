@@ -423,7 +423,7 @@
 					<key>name</key>
 					<string>keyword.control.hornet</string>
 					<key>match</key>
-					<string>\b(?:return|if|elif|else|for|in|while|break|continue|match)\b</string>
+					<string>\b(?:return|if|elif|else|for|in|while|break|continue|match|defer)\b</string>
 				</dict>
 				<dict>
 					<key>name</key>
