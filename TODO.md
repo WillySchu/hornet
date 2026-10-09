@@ -14,7 +14,6 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- Type identity for the port. Composite dict keys, or structural equality through pointers. This is the decision the checker's port depends on.
 - Enums. Explicit member values, ordering, for ... in over an enum.
 - match exhaustiveness. It does not take earlier exclusions into account, so a variant already ruled out by a guard must still have an arm or an else.
 - Report function name on stack overflow.
