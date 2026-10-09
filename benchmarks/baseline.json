@@ -9,37 +9,37 @@
       "total_temps": 22
     },
     "executed_instructions": null,
-    "instruction_count": 76,
+    "instruction_count": 75,
     "name": "arithmetic_heavy",
-    "runtime_seconds": 0.09413900005165488
+    "runtime_seconds": 0.09398458292707801
   },
   "array_heavy": {
     "allocation": {
       "address_taken_excluded": 0,
-      "allocated": 86,
-      "eligible": 86,
+      "allocated": 88,
+      "eligible": 88,
       "live_across_call": 0,
       "spilled": 0,
-      "total_temps": 86
+      "total_temps": 88
     },
     "executed_instructions": null,
-    "instruction_count": 309,
+    "instruction_count": 308,
     "name": "array_heavy",
-    "runtime_seconds": 0.036391833098605275
+    "runtime_seconds": 0.03549599996767938
   },
   "branchy": {
     "allocation": {
       "address_taken_excluded": 0,
-      "allocated": 29,
-      "eligible": 29,
+      "allocated": 30,
+      "eligible": 30,
       "live_across_call": 4,
       "spilled": 0,
-      "total_temps": 29
+      "total_temps": 30
     },
     "executed_instructions": null,
     "instruction_count": 141,
     "name": "branchy",
-    "runtime_seconds": 0.06948212499264628
+    "runtime_seconds": 0.07190787489525974
   },
   "calling_convention_heavy": {
     "allocation": {
@@ -51,9 +51,9 @@
       "total_temps": 193
     },
     "executed_instructions": null,
-    "instruction_count": 840,
+    "instruction_count": 838,
     "name": "calling_convention_heavy",
-    "runtime_seconds": 0.11077595897950232
+    "runtime_seconds": 0.10784404200967401
   },
   "calls_in_loop": {
     "allocation": {
@@ -65,9 +65,9 @@
       "total_temps": 32
     },
     "executed_instructions": null,
-    "instruction_count": 87,
+    "instruction_count": 86,
     "name": "calls_in_loop",
-    "runtime_seconds": 0.0745417500147596
+    "runtime_seconds": 0.07381025003269315
   },
   "copy_heavy": {
     "allocation": {
@@ -79,23 +79,23 @@
       "total_temps": 211
     },
     "executed_instructions": null,
-    "instruction_count": 959,
+    "instruction_count": 956,
     "name": "copy_heavy",
-    "runtime_seconds": 0.14945774991065264
+    "runtime_seconds": 0.15244674996938556
   },
   "dict_heavy": {
     "allocation": {
       "address_taken_excluded": 0,
-      "allocated": 290,
-      "eligible": 294,
+      "allocated": 294,
+      "eligible": 298,
       "live_across_call": 59,
       "spilled": 4,
-      "total_temps": 294
+      "total_temps": 298
     },
     "executed_instructions": null,
     "instruction_count": 814,
     "name": "dict_heavy",
-    "runtime_seconds": 0.17155341594479978
+    "runtime_seconds": 0.17155604192521423
   },
   "loop_accumulator": {
     "allocation": {
@@ -107,9 +107,9 @@
       "total_temps": 6
     },
     "executed_instructions": null,
-    "instruction_count": 46,
+    "instruction_count": 45,
     "name": "loop_accumulator",
-    "runtime_seconds": 0.17669145797844976
+    "runtime_seconds": 0.1764477079268545
   },
   "recursive_fibonacci": {
     "allocation": {
@@ -123,7 +123,7 @@
     "executed_instructions": null,
     "instruction_count": 42,
     "name": "recursive_fibonacci",
-    "runtime_seconds": 0.02334533294197172
+    "runtime_seconds": 0.023282958078198135
   },
   "register_pressure": {
     "allocation": {
@@ -135,23 +135,23 @@
       "total_temps": 53
     },
     "executed_instructions": null,
-    "instruction_count": 122,
+    "instruction_count": 121,
     "name": "register_pressure",
-    "runtime_seconds": 0.06200229097157717
+    "runtime_seconds": 0.06125970801804215
   },
   "string_heavy": {
     "allocation": {
       "address_taken_excluded": 0,
-      "allocated": 42,
-      "eligible": 42,
+      "allocated": 43,
+      "eligible": 43,
       "live_across_call": 12,
       "spilled": 0,
-      "total_temps": 42
+      "total_temps": 43
     },
     "executed_instructions": null,
-    "instruction_count": 119,
+    "instruction_count": 121,
     "name": "string_heavy",
-    "runtime_seconds": 0.01052412495482713
+    "runtime_seconds": 0.011183624970726669
   },
   "struct_heavy": {
     "allocation": {
@@ -163,36 +163,36 @@
       "total_temps": 71
     },
     "executed_instructions": null,
-    "instruction_count": 168,
+    "instruction_count": 167,
     "name": "struct_heavy",
-    "runtime_seconds": 0.013339040917344391
+    "runtime_seconds": 0.013149083009921014
   },
   "sum_type_walk": {
     "allocation": {
       "address_taken_excluded": 0,
-      "allocated": 254,
-      "eligible": 254,
+      "allocated": 260,
+      "eligible": 260,
       "live_across_call": 39,
       "spilled": 0,
-      "total_temps": 254
+      "total_temps": 260
     },
     "executed_instructions": null,
-    "instruction_count": 643,
+    "instruction_count": 648,
     "name": "sum_type_walk",
-    "runtime_seconds": 0.06087966705672443
+    "runtime_seconds": 0.060659416019916534
   },
   "tokenize": {
     "allocation": {
       "address_taken_excluded": 0,
-      "allocated": 110,
-      "eligible": 110,
+      "allocated": 117,
+      "eligible": 117,
       "live_across_call": 18,
       "spilled": 0,
-      "total_temps": 110
+      "total_temps": 117
     },
     "executed_instructions": null,
-    "instruction_count": 297,
+    "instruction_count": 306,
     "name": "tokenize",
-    "runtime_seconds": 0.06552291696425527
+    "runtime_seconds": 0.06516483298037201
   }
 }

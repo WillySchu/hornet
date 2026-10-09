@@ -1,4 +1,5 @@
-"""IR optimization entry point: per-function passes repeated until nothing changes, then re-verify."""
+"""IR optimization entry point: per-function passes repeated until nothing changes, loops inverted and
+the passes repeated, then re-verify."""
 
 from ir.ir import IRFunction, IRLocalAddress, IRProgram
 from ir.verify import verify_program
@@ -10,6 +11,7 @@ from optimize.copy_propagation import propagate_copies
 from optimize.dead_code import remove_dead_code
 from optimize.identity_reduction import reduce_identities
 from optimize.jump_threading import merge_blocks, thread_jumps
+from optimize.loop_inversion import invert_loops
 
 MAX_ROUNDS = 10
 
@@ -40,5 +42,7 @@ def optimize_function(ir_fn: IRFunction) -> None:
 def optimize(ir_program: IRProgram) -> IRProgram:
     for ir_fn in ir_program.functions:
         optimize_function(ir_fn)
+        if invert_loops(ir_fn, ir_program.ids):  # once, on settled code: see its module
+            optimize_function(ir_fn)
     verify_program(ir_program)  # a pass may break an invariant
     return ir_program
