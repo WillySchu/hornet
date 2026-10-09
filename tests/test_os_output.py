@@ -109,3 +109,37 @@ def test_read_file_of_a_directory_reports_an_error(tmp_path):
     assert on_posix is None or on_posix.stdout == f"could not read '{tmp_path}': read failed: Is a directory\n"
     assert on_windows is None or on_windows.stdout == f"could not open '{tmp_path}': Permission denied\n"
     assert on_posix is not None or on_windows is not None
+
+
+@GCC_SKIP
+def test_files_are_closed_however_reading_or_writing_them_ends(tmp_path):
+    # Many more opens than the process is allowed to hold at once (where that can be limited): each
+    # file must have been closed again, on the paths that fail as on those that succeed.
+    path, missing = tmp_path / 'again.txt', tmp_path / 'no-such-directory' / 'x'
+    source = (
+        "from 'os' import write_file, read_file\n"
+        "from 'errors' import Error, StrResult, IntResult\n"
+        "def int main():\n"
+        "    int done = 0\n"
+        "    for int i = 0; i < 300; i += 1:\n"
+        f"        IntResult written = write_file('{path}', 'again')\n"
+        f"        StrResult back = read_file('{path}')\n"
+        f"        IntResult nowhere = write_file('{missing}', 'lost')\n"
+        "        if written is int and back is str and nowhere is Error:\n"
+        "            done += 1\n"
+        "    print(done)\n"
+        "    return 0\n")
+
+    def at_most_64_open():
+        import resource
+        resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
+
+    def build_and_run(target):
+        with tempfile.TemporaryDirectory() as tmp:
+            src, exe = Path(tmp) / 'p.ht', Path(tmp) / 'p'
+            src.write_text(source)
+            build_executable(str(src), str(exe), target=target)
+            limit = {'preexec_fn': at_most_64_open} if posix(target) else {}  # (Wine needs more of its own)
+            return run_binary(target, [exe], capture_output=True, text=True, timeout=20, **limit)
+    r = on_every_target(build_and_run, source)
+    assert (r.stdout, r.stderr) == ("300\n", "")

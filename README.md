@@ -135,6 +135,7 @@ Hornet currently provides:
 * C-style `for` loops
 * `for ... in ...` iteration over arrays, slices, dictionaries, and strings
 * `break` and `continue`
+* `defer`, for a call to make when a block is left
 * Dictionaries with hashing, deletion, membership, and iteration; copies share one table
 * Explicit integer casts
 * Arithmetic, comparison, logical, bitwise, and membership operators
@@ -819,6 +820,34 @@ Each iteration has its own bindings, so taking a binding's address is allowed. R
 
 `break` and `continue` apply to the innermost enclosing loop.
 
+## `defer`
+
+`defer` names a call to make when the block it is in is left: at the block's end, or by `return`, `break`, or `continue`. It keeps what undoes a thing beside what did it, whichever way the block ends:
+
+```hornet
+def StrResult first_line(str host):
+    ConnResult conn = connect(host, 80, 5000)
+    if conn is Error:
+        return conn
+    defer conn.close()
+    IntResult sent = conn.write('hello\n')
+    if sent is Error:
+        return sent                  # closes
+    return conn.read()               # reads, then closes
+```
+
+The block is the indented body the statement is written in: a function's, an `if` or `else` branch's, a `match` arm's, or a loop's. A `defer` in a loop's body runs at the end of every iteration; one in an `if` branch runs at the end of that branch, not of the function. A block's deferred calls run in reverse, the last deferred first, and a `return` from inside several blocks runs each one's, innermost first.
+
+The call's receiver and arguments are evaluated at the `defer`, and the call is made later with those values. So what `is` checks have shown of a variable there is what the call is of, as with `conn` above, and a later assignment doesn't change it:
+
+```hornet
+int x = 1
+defer print(x)                       # prints 1
+x = 2
+```
+
+A value being returned is computed before the deferred calls run. Only a call can be deferred, and only one that returns; its result, if it has one, is dropped. A panic ends the program without running any.
+
 ---
 
 # Operators
@@ -1225,9 +1254,9 @@ TCP connections:
 ```hornet
 ConnResult opened = connect('example.com', 80, 5000)   # a name or an address, a port, a timeout in milliseconds
 if opened is Conn as conn:
+    defer conn.close()
     conn.write('ping\n')            # an IntResult: how many bytes were sent
     StrResult reply = conn.read()   # what has arrived, up to 64 KB; '' once the other side has closed
-    conn.close()
 ```
 
 The timeout bounds each read and write; 0 waits as long as the system does. `connect` returns a `ConnResult is Conn | Error`.
@@ -1337,7 +1366,7 @@ The frontend constructs a complete `IRProgram` before a backend begins lowering 
 
 Escape analysis decides which locals must live on the heap; heap storage comes from the runtime's `hornet_alloc` and is never freed. It is a flow-insensitive points-to analysis per function, run on the typed tree, with per-parameter escape summaries so that passing `&x` to a function that doesn't keep the pointer leaves `x` on the stack.
 
-IR construction compiles conditions made of `and`, `or`, and `not` straight to branches, and copies a composite value directly between places (two places of one type are the same storage or disjoint). Loads, stores, and copies address memory as a base plus a constant offset.
+IR construction compiles conditions made of `and`, `or`, and `not` straight to branches, and copies a composite value directly between places (two places of one type are the same storage or disjoint). A deferred call's operands are stored in variables of their own where the `defer` is, and the call is emitted on each path out of its block, so nothing about it is decided at run time. Loads, stores, and copies address memory as a base plus a constant offset.
 
 The IR optimizer repeats constant folding, identity simplification, constant-branch and unreachable-block removal, copy and constant propagation within blocks, copy coalescing, address folding (an address computed as a base plus a constant becomes the access's offset), and dead-code elimination until nothing changes. `ir/cfg.py` provides the shared control-flow and liveness analysis.
 

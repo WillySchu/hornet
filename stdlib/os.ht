@@ -43,8 +43,8 @@ def StrResult read_file(str path):
     int fd = hornet_open_read(to_cstring(path))
     if fd < 0:
         return Error('could not open \'' + path + '\': ' + _os_reason())
+    defer hornet_close_fd(fd)
     StrResult contents = read_all_from_fd(fd)
-    hornet_close_fd(fd)
     if contents is Error:
         return Error('could not read \'' + path + '\': ' + contents.message)
     return contents
@@ -87,8 +87,8 @@ def IntResult write_file(str path, str content):
     int fd = hornet_open_write(to_cstring(path))
     if fd < 0:
         return Error('could not open \'' + path + '\' for writing: ' + _os_reason())
+    defer hornet_close_fd(fd)
     IntResult written = _write_fd(fd, content)
-    hornet_close_fd(fd)
     if written is Error:
         return Error('could not write \'' + path + '\': ' + written.message)
     return written
