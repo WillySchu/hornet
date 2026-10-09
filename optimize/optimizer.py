@@ -9,6 +9,7 @@ from optimize.copy_coalescing import coalesce_copies
 from optimize.copy_propagation import propagate_copies
 from optimize.dead_code import remove_dead_code
 from optimize.identity_reduction import reduce_identities
+from optimize.jump_threading import merge_blocks, thread_jumps
 
 MAX_ROUNDS = 10
 
@@ -24,6 +25,8 @@ def optimize_function(ir_fn: IRFunction) -> None:
     for _ in range(MAX_ROUNDS):
         before = list(ir_fn.body)
         simplify_branches(ir_fn)
+        thread_jumps(ir_fn)
+        merge_blocks(ir_fn)
         propagate_copies(ir_fn, pinned)
         fold_constants(ir_fn)
         reduce_identities(ir_fn)

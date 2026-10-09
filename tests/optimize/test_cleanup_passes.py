@@ -197,6 +197,6 @@ def test_optimize_function_result_still_verifies():
     f.params = [t(0)]
     optimize_function(f)
     verify_function(f)
-    assert f.body[-2:] == [add(t(3), t(0), t(1)), IRReturn(value=t(3))]
+    assert f.body == [add(t(3), t(0), c(2)), IRReturn(value=t(3))]  # (one block now, so the 2 reaches the add)
     assert not any(isinstance(i, (IRBranch, IRMove)) and getattr(i, 'dst', None) == t(4) for i in f.body)
     assert not any(isinstance(i, IRBranch) for i in f.body)
