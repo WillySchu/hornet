@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from lexer import Lexer
+from lexer import Lexer, TokenType
 from parser import ArrayLiteral, ArrayTypeExpr, Binary, BinaryOp, Constant, IsCheck, TokenStream, Variable
 from parser import expressions, type_exprs
 
@@ -49,3 +49,18 @@ def test_a_function_leaves_the_stream_after_what_it_read():
     stream = _stream("*[2]int x")
     type_exprs.parse_type(stream)
     assert stream.current().val == 'x'
+
+
+def test_a_statement_is_told_from_its_first_tokens():
+    from parser import Assign, ExprStmt, If, Unary, VarDecl, statements
+    assert isinstance(statements.parse_statement(_stream("int n = 1\n")), VarDecl)
+    assert isinstance(statements.parse_statement(_stream("n = 1\n")), Assign)
+    assert isinstance(statements.parse_statement(_stream("f(n)\n")), ExprStmt)
+    assert isinstance(statements.parse_statement(_stream("if n > 0:\n    n = 1\n")), If)
+    # A leading `*` is tried as a pointer type first, and taken back if no name follows it.
+    declaration = statements.parse_statement(_stream("*P q = none\n"))
+    assert isinstance(declaration, VarDecl) and declaration.name == 'q'
+    stream = _stream("*q = 5\n")
+    assignment = statements.parse_statement(stream)
+    assert isinstance(assignment, Assign) and isinstance(assignment.target, Unary)
+    assert stream.current().type == TokenType.NEWLINE      # read from the start again, and to the line's end

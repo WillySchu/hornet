@@ -888,7 +888,7 @@ def test_parse_block_empty():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape("Expected an indented block at line 1, column 1")):
-        p.parse_block()
+        parser.statements.parse_block(p.stream)
 
 
 def test_parse_block_no_dedent():
@@ -899,7 +899,7 @@ def test_parse_block_no_dedent():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape("Expected the end of an indented block at line 1, column 2")):
-        p.parse_block()
+        parser.statements.parse_block(p.stream)
 
 
 def test_parse_block_no_statement():
@@ -911,7 +911,7 @@ def test_parse_block_no_statement():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape("Expected at least one statement in this block")):
-        p.parse_block()
+        parser.statements.parse_block(p.stream)
 
 
 def test_parse_block_single_statement():
@@ -923,7 +923,7 @@ def test_parse_block_single_statement():
     ]
     p = parser.Parser(tokens)
 
-    assert [parser.ExprStmt(expr=parser.Constant(value=1))] == p.parse_block()
+    assert [parser.ExprStmt(expr=parser.Constant(value=1))] == parser.statements.parse_block(p.stream)
 
 
 def test_parse_block_single_statement_ignore_newlines():
@@ -940,7 +940,7 @@ def test_parse_block_single_statement_ignore_newlines():
     ]
     p = parser.Parser(tokens)
 
-    assert [parser.ExprStmt(expr=parser.Constant(value=1))] == p.parse_block()
+    assert [parser.ExprStmt(expr=parser.Constant(value=1))] == parser.statements.parse_block(p.stream)
 
 
 def test_parse_block_many_statements():
@@ -956,7 +956,7 @@ def test_parse_block_many_statements():
         parser.ExprStmt(expr=parser.Constant(value=2)),
         parser.ExprStmt(expr=parser.Constant(value=3)),
         parser.ExprStmt(expr=parser.Constant(value=4)),
-    ] == p.parse_block()
+    ] == parser.statements.parse_block(p.stream)
 
 
 def test_parse_block_rejects_two_statements_on_one_line():
@@ -968,7 +968,7 @@ def test_parse_block_rejects_two_statements_on_one_line():
         lexer.Token(lexer.TokenType.EOF, '', 1, 7),
     ]
     with pytest.raises(parser.ParseError, match="Expected the end of the line after this statement, got number '2'"):
-        parser.Parser(tokens).parse_block()
+        parser.statements.parse_block(parser.TokenStream(tokens))
 
 
 def test_parse_statement_empty():
@@ -979,7 +979,7 @@ def test_parse_statement_empty():
 
     with pytest.raises(
             parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 11')):
-        p.parse_statement()
+        parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_int_no_name():
@@ -990,7 +990,7 @@ def test_parse_statement_int_no_name():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected a variable name at line 1, column 2')):
-        p.parse_statement()
+        parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_int():
@@ -1001,7 +1001,7 @@ def test_parse_statement_int():
     ]
     p = parser.Parser(tokens)
 
-    assert parser.VarDecl(name='a', var_type='') == p.parse_statement()
+    assert parser.VarDecl(name='a', var_type='') == parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_str_no_name():
@@ -1012,7 +1012,7 @@ def test_parse_statement_str_no_name():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected a variable name at line 1, column 2')):
-        p.parse_statement()
+        parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_str():
@@ -1023,7 +1023,7 @@ def test_parse_statement_str():
     ]
     p = parser.Parser(tokens)
 
-    assert parser.VarDecl(name='a', var_type='') == p.parse_statement()
+    assert parser.VarDecl(name='a', var_type='') == parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_bool_no_name():
@@ -1034,7 +1034,7 @@ def test_parse_statement_bool_no_name():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected a variable name at line 1, column 2')):
-        p.parse_statement()
+        parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_bool():
@@ -1045,7 +1045,7 @@ def test_parse_statement_bool():
     ]
     p = parser.Parser(tokens)
 
-    assert parser.VarDecl(name='a', var_type='') == p.parse_statement()
+    assert parser.VarDecl(name='a', var_type='') == parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_array_no_size():
@@ -1059,7 +1059,7 @@ def test_parse_statement_array_no_size():
             parser.ParseError,
             match=re.escape('Expected an array size (a positive integer or constant expression),'
                             ' or \']\' for a slice type at line 1, column 2')):
-        p.parse_statement()
+        parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_array_no_close_bracket():
@@ -1071,7 +1071,7 @@ def test_parse_statement_array_no_close_bracket():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected \']\' after array size at line 1, column 3')):
-        p.parse_statement()
+        parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_array_no_type():
@@ -1089,7 +1089,7 @@ def test_parse_statement_array_no_type():
             "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name,"
             " '[size]type', or '[]type'), got end of input at line 1, column 4"
         )):
-        p.parse_statement()
+        parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_array_no_name():
@@ -1103,7 +1103,7 @@ def test_parse_statement_array_no_name():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected a variable name at line 1, column 7')):
-        p.parse_statement()
+        parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_array():
@@ -1117,7 +1117,8 @@ def test_parse_statement_array():
     ]
     p = parser.Parser(tokens)
 
-    assert parser.VarDecl(name='arr', var_type=parser.ArrayTypeExpr(size=3, element_type='int')) == p.parse_statement()
+    expected = parser.VarDecl(name='arr', var_type=parser.ArrayTypeExpr(size=3, element_type='int'))
+    assert expected == parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_return_no_value():
@@ -1129,7 +1130,7 @@ def test_parse_statement_return_no_value():
 
     with pytest.raises(
             parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 7')):
-        p.parse_statement()
+        parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_return():
@@ -1140,7 +1141,7 @@ def test_parse_statement_return():
     ]
     p = parser.Parser(tokens)
 
-    assert parser.Return(value=parser.Constant(value=5)) == p.parse_statement()
+    assert parser.Return(value=parser.Constant(value=5)) == parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_if_no_expression():
@@ -1152,7 +1153,7 @@ def test_parse_statement_if_no_expression():
 
     with pytest.raises(
             parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 3')):
-        p.parse_statement()
+        parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_if_no_colon():
@@ -1164,7 +1165,7 @@ def test_parse_statement_if_no_colon():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected \':\' to start the if body at line 1, column 7')):
-        p.parse_statement()
+        parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_if_no_newline():
@@ -1177,7 +1178,7 @@ def test_parse_statement_if_no_newline():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected a newline after \':\' at line 1, column 8')):
-        p.parse_statement()
+        parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_if_no_indent():
@@ -1191,7 +1192,7 @@ def test_parse_statement_if_no_indent():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected an indented block at line 1, column 9')):
-        p.parse_statement()
+        parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_if_no_dedent():
@@ -1206,7 +1207,7 @@ def test_parse_statement_if_no_dedent():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected the end of an indented block at line 2, column 5')):
-        p.parse_statement()
+        parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_if_no_body():
@@ -1222,7 +1223,7 @@ def test_parse_statement_if_no_body():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected at least one statement in this block')):
-        p.parse_statement()
+        parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_if():
@@ -1241,7 +1242,7 @@ def test_parse_statement_if():
     expected = parser.If(
         condition=parser.BoolLiteral(value=True), then_body=[parser.ExprStmt(expr=parser.Constant(value=1))])
 
-    assert expected == p.parse_statement()
+    assert expected == parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_while_no_condition():
@@ -1253,7 +1254,7 @@ def test_parse_statement_while_no_condition():
 
     with pytest.raises(
             parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 6')):
-        p.parse_statement()
+        parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_while_no_colon():
@@ -1266,7 +1267,7 @@ def test_parse_statement_while_no_colon():
 
     with pytest.raises(
             parser.ParseError, match=re.escape('Expected \':\' to start the while body at line 1, column 10')):
-        p.parse_statement()
+        parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_while_no_newline():
@@ -1279,7 +1280,7 @@ def test_parse_statement_while_no_newline():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected a newline after \':\' at line 1, column 11')):
-        p.parse_statement()
+        parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_while_no_indent():
@@ -1293,7 +1294,7 @@ def test_parse_statement_while_no_indent():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected an indented block at line 2, column 1')):
-        p.parse_statement()
+        parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_while_no_dedent():
@@ -1308,7 +1309,7 @@ def test_parse_statement_while_no_dedent():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected the end of an indented block at line 2, column 5')):
-        p.parse_statement()
+        parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_while_no_body():
@@ -1324,7 +1325,7 @@ def test_parse_statement_while_no_body():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected at least one statement in this block')):
-        p.parse_statement()
+        parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_while():
@@ -1343,7 +1344,7 @@ def test_parse_statement_while():
     expected = parser.While(
         condition=parser.BoolLiteral(value=True), body=[parser.ExprStmt(expr=parser.Constant(value=5))])
 
-    assert expected == p.parse_statement()
+    assert expected == parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_break():
@@ -1355,7 +1356,7 @@ def test_parse_statement_break():
 
     expected = parser.Break()
 
-    assert expected == p.parse_statement()
+    assert expected == parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_break():
@@ -1367,7 +1368,7 @@ def test_parse_statement_break():
 
     expected = parser.Continue()
 
-    assert expected == p.parse_statement()
+    assert expected == parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_assign_no_value():
@@ -1380,7 +1381,7 @@ def test_parse_statement_assign_no_value():
 
     with pytest.raises(
             parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 3')):
-        p.parse_statement()
+        parser.statements.parse_statement(p.stream)
 
 
 def test_parse_statement_assign():
@@ -1394,7 +1395,7 @@ def test_parse_statement_assign():
 
     expected = parser.Assign(target=parser.Variable(name='a'), value=parser.Constant(value=3))
 
-    assert expected == p.parse_statement()
+    assert expected == parser.statements.parse_statement(p.stream)
 
 
 # TODO(will): Test parse_expr_stmt_or_index_assign() path.
@@ -1407,7 +1408,7 @@ def test_parse_while_empty():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected \'while\' at line 1, column 1')):
-        p.parse_while()
+        parser.statements.parse_while(p.stream)
 
 
 def test_parse_while_no_condition():
@@ -1419,7 +1420,7 @@ def test_parse_while_no_condition():
 
     with pytest.raises(
             parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 6')):
-        p.parse_while()
+        parser.statements.parse_while(p.stream)
 
 
 def test_parse_while_no_colon():
@@ -1432,7 +1433,7 @@ def test_parse_while_no_colon():
 
     with pytest.raises(
             parser.ParseError, match=re.escape('Expected \':\' to start the while body at line 1, column 10')):
-        p.parse_while()
+        parser.statements.parse_while(p.stream)
 
 
 def test_parse_while_no_newline():
@@ -1445,7 +1446,7 @@ def test_parse_while_no_newline():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected a newline after \':\' at line 1, column 11')):
-        p.parse_while()
+        parser.statements.parse_while(p.stream)
 
 
 def test_parse_while_no_indent():
@@ -1459,7 +1460,7 @@ def test_parse_while_no_indent():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected an indented block at line 2, column 1')):
-        p.parse_while()
+        parser.statements.parse_while(p.stream)
 
 
 def test_parse_while_no_dedent():
@@ -1474,7 +1475,7 @@ def test_parse_while_no_dedent():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected the end of an indented block at line 2, column 5')):
-        p.parse_while()
+        parser.statements.parse_while(p.stream)
 
 
 def test_parse_while_no_body():
@@ -1490,7 +1491,7 @@ def test_parse_while_no_body():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected at least one statement in this block')):
-        p.parse_while()
+        parser.statements.parse_while(p.stream)
 
 
 def test_parse_while():
@@ -1508,7 +1509,7 @@ def test_parse_while():
 
     expected = parser.While(condition=parser.BoolLiteral(value=True), body=[parser.Break()])
 
-    assert expected == p.parse_while()
+    assert expected == parser.statements.parse_while(p.stream)
 
 
 def test_parse_break_emtpy():
@@ -1518,7 +1519,7 @@ def test_parse_break_emtpy():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected \'break\' at line 1, column 1')):
-        p.parse_break()
+        parser.statements.parse_break(p.stream)
 
 
 def test_parse_break():
@@ -1530,7 +1531,7 @@ def test_parse_break():
 
     expected = parser.Break()
 
-    assert expected == p.parse_break()
+    assert expected == parser.statements.parse_break(p.stream)
 
 
 def test_parse_continue_emtpy():
@@ -1540,7 +1541,7 @@ def test_parse_continue_emtpy():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected \'continue\' at line 1, column 1')):
-        p.parse_continue()
+        parser.statements.parse_continue(p.stream)
 
 
 def test_parse_break():
@@ -1552,7 +1553,7 @@ def test_parse_break():
 
     expected = parser.Continue()
 
-    assert expected == p.parse_continue()
+    assert expected == parser.statements.parse_continue(p.stream)
 
 
 def test_parse_if_empty():
@@ -1564,7 +1565,7 @@ def test_parse_if_empty():
 
     with pytest.raises(
             parser.ParseError, match=re.escape('Expected an expression, got end of input at line 1, column 3')):
-        p.parse_if()
+        parser.statements.parse_if(p.stream)
 
 
 def test_parse_if_no_colon():
@@ -1576,7 +1577,7 @@ def test_parse_if_no_colon():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected \':\' to start the if body at line 1, column 8')):
-        p.parse_if()
+        parser.statements.parse_if(p.stream)
 
 
 def test_parse_if_no_newline():
@@ -1589,7 +1590,7 @@ def test_parse_if_no_newline():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected a newline after \':\' at line 1, column 9')):
-        p.parse_if()
+        parser.statements.parse_if(p.stream)
 
 
 def test_parse_if_no_indent():
@@ -1603,7 +1604,7 @@ def test_parse_if_no_indent():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected an indented block at line 2, column 1')):
-        p.parse_if()
+        parser.statements.parse_if(p.stream)
 
 
 def test_parse_if_no_dedent():
@@ -1618,7 +1619,7 @@ def test_parse_if_no_dedent():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected the end of an indented block at line 2, column 5')):
-        p.parse_if()
+        parser.statements.parse_if(p.stream)
 
 
 def test_parse_if_no_body():
@@ -1634,7 +1635,7 @@ def test_parse_if_no_body():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected at least one statement in this block')):
-        p.parse_if()
+        parser.statements.parse_if(p.stream)
 
 
 def test_parse_if():
@@ -1653,7 +1654,7 @@ def test_parse_if():
     expected = parser.If(
         condition=parser.BoolLiteral(value=True), then_body=[parser.ExprStmt(expr=parser.StringLiteral(value='hi'))])
 
-    assert expected == p.parse_if()
+    assert expected == parser.statements.parse_if(p.stream)
 
 
 def test_parse_if():
@@ -1672,7 +1673,7 @@ def test_parse_if():
     expected = parser.If(
         condition=parser.BoolLiteral(value=True), then_body=[parser.ExprStmt(expr=parser.StringLiteral(value='hi'))])
 
-    assert expected == p.parse_if()
+    assert expected == parser.statements.parse_if(p.stream)
 
 
 def test_parse_if_else_no_colon():
@@ -1691,7 +1692,7 @@ def test_parse_if_else_no_colon():
 
     with pytest.raises(
             parser.ParseError, match=re.escape('Expected \':\' to start the else body at line 2, column 12')):
-        p.parse_if()
+        parser.statements.parse_if(p.stream)
 
 
 def test_parse_if_else_no_newline():
@@ -1710,7 +1711,7 @@ def test_parse_if_else_no_newline():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected a newline after \':\' at line 2, column 13')):
-        p.parse_if()
+        parser.statements.parse_if(p.stream)
 
 
 def test_parse_if_else_no_indent():
@@ -1730,7 +1731,7 @@ def test_parse_if_else_no_indent():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected an indented block at line 3, column 1')):
-        p.parse_if()
+        parser.statements.parse_if(p.stream)
 
 
 def test_parse_if_else_no_dedent():
@@ -1751,7 +1752,7 @@ def test_parse_if_else_no_dedent():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected the end of an indented block at line 3, column 5')):
-        p.parse_if()
+        parser.statements.parse_if(p.stream)
 
 
 def test_parse_if_else_no_body():
@@ -1773,7 +1774,7 @@ def test_parse_if_else_no_body():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected at least one statement in this block')):
-        p.parse_if()
+        parser.statements.parse_if(p.stream)
 
 
 def test_parse_if_else():
@@ -1801,7 +1802,7 @@ def test_parse_if_else():
         else_body=[parser.ExprStmt(expr=parser.StringLiteral(value='bye'))],
     )
 
-    assert expected == p.parse_if()
+    assert expected == parser.statements.parse_if(p.stream)
 
 
 def test_parse_if_elif_no_condition():
@@ -1820,7 +1821,7 @@ def test_parse_if_elif_no_condition():
 
     with pytest.raises(
             parser.ParseError, match=re.escape('Expected an expression, got end of input at line 2, column 9')):
-        p.parse_if()
+        parser.statements.parse_if(p.stream)
 
 
 def test_parse_if_elif_no_colon():
@@ -1839,7 +1840,7 @@ def test_parse_if_elif_no_colon():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected \':\' to start the if body at line 2, column 18')):
-        p.parse_if()
+        parser.statements.parse_if(p.stream)
 
 
 def test_parse_if_elif_no_newline():
@@ -1859,7 +1860,7 @@ def test_parse_if_elif_no_newline():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected a newline after \':\' at line 2, column 19')):
-        p.parse_if()
+        parser.statements.parse_if(p.stream)
 
 
 def test_parse_if_elif_no_indent():
@@ -1880,7 +1881,7 @@ def test_parse_if_elif_no_indent():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected an indented block at line 3, column 1')):
-        p.parse_if()
+        parser.statements.parse_if(p.stream)
 
 
 def test_parse_if_elif_no_dedent():
@@ -1902,7 +1903,7 @@ def test_parse_if_elif_no_dedent():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected the end of an indented block at line 3, column 5')):
-        p.parse_if()
+        parser.statements.parse_if(p.stream)
 
 
 def test_parse_if_elif_no_body():
@@ -1925,7 +1926,7 @@ def test_parse_if_elif_no_body():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected at least one statement in this block')):
-        p.parse_if()
+        parser.statements.parse_if(p.stream)
 
 
 def test_parse_if_elif():
@@ -1959,7 +1960,7 @@ def test_parse_if_elif():
         ],
     )
 
-    assert expected == p.parse_if()
+    assert expected == parser.statements.parse_if(p.stream)
 
 
 def test_parse_if_elif_else():
@@ -2056,7 +2057,7 @@ def test_parse_var_decl_none_empty():
         match=re.escape(
             "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name,"
             " '[size]type', or '[]type'), got end of input at line 1, column 1")):
-        p.parse_var_decl()
+        parser.statements.parse_var_decl(p.stream)
 
 
 def test_parse_var_decl_none_no_name():
@@ -2068,7 +2069,7 @@ def test_parse_var_decl_none_no_name():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape("Expected a variable name at line 1, column 4")):
-        p.parse_var_decl()
+        parser.statements.parse_var_decl(p.stream)
 
 
 def test_parse_var_decl_none_no_assign():
@@ -2082,7 +2083,7 @@ def test_parse_var_decl_none_no_assign():
 
     expected = parser.VarDecl(name='x', var_type='int')
 
-    assert expected == p.parse_var_decl()
+    assert expected == parser.statements.parse_var_decl(p.stream)
 
 
 def test_parse_var_decl_none_no_value():
@@ -2097,7 +2098,7 @@ def test_parse_var_decl_none_no_value():
 
     with pytest.raises(
             parser.ParseError, match=re.escape("Expected an expression, got end of input at line 1, column 7")):
-        p.parse_var_decl()
+        parser.statements.parse_var_decl(p.stream)
 
 
 def test_parse_var_decl_none():
@@ -2113,7 +2114,7 @@ def test_parse_var_decl_none():
 
     expected = parser.VarDecl('x', var_type='int', init=parser.Constant(value=1))
 
-    assert expected == p.parse_var_decl()
+    assert expected == parser.statements.parse_var_decl(p.stream)
 
 
 def test_parse_var_decl_pass_type_with_type():
@@ -2128,7 +2129,7 @@ def test_parse_var_decl_pass_type_with_type():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape("Expected a variable name at line 1, column 1")):
-        p.parse_var_decl('str')
+        parser.statements.parse_var_decl(p.stream, 'str')
 
 
 def test_parse_var_decl_pass_type():
@@ -2143,7 +2144,7 @@ def test_parse_var_decl_pass_type():
 
     expected = parser.VarDecl('x', var_type='int', init=parser.Constant(value=1))
 
-    assert expected == p.parse_var_decl('int')
+    assert expected == parser.statements.parse_var_decl(p.stream, 'int')
 
 
 def test_parse_var_decl_pass_wrong_type():
@@ -2158,7 +2159,7 @@ def test_parse_var_decl_pass_wrong_type():
 
     expected = parser.VarDecl('x', var_type='str', init=parser.Constant(value=1))
 
-    assert expected == p.parse_var_decl('str')
+    assert expected == parser.statements.parse_var_decl(p.stream, 'str')
 
 
 def test_parse_assign_empty():
@@ -2170,7 +2171,7 @@ def test_parse_assign_empty():
 
     with pytest.raises(
             parser.ParseError, match=re.escape("Expected an expression, got end of input at line 1, column 1")):
-        p.parse_expr_stmt_or_assign()
+        parser.statements.parse_expr_stmt_or_assign(p.stream)
 
 
 def test_parse_assign_no_assign_is_an_expression_statement():
@@ -2181,7 +2182,7 @@ def test_parse_assign_no_assign_is_an_expression_statement():
 
     p = parser.Parser(tokens)
 
-    assert p.parse_expr_stmt_or_assign() == parser.ExprStmt(expr=parser.Variable(name='a'))
+    assert parser.statements.parse_expr_stmt_or_assign(p.stream) == parser.ExprStmt(expr=parser.Variable(name='a'))
 
 
 def test_parse_assign_no_value():
@@ -2195,7 +2196,7 @@ def test_parse_assign_no_value():
 
     with pytest.raises(
             parser.ParseError, match=re.escape("Expected an expression, got end of input at line 1, column 3")):
-        p.parse_expr_stmt_or_assign()
+        parser.statements.parse_expr_stmt_or_assign(p.stream)
 
 
 def test_parse_assign():
@@ -2210,7 +2211,7 @@ def test_parse_assign():
 
     expected = parser.Assign(target=parser.Variable(name='a'), value=parser.Constant(value=1))
 
-    assert expected == p.parse_expr_stmt_or_assign()
+    assert expected == parser.statements.parse_expr_stmt_or_assign(p.stream)
 
 
 def test_parse_assign_compound_addition():
@@ -2225,7 +2226,7 @@ def test_parse_assign_compound_addition():
 
     expected = parser.Assign(target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.ADD)
 
-    assert expected == p.parse_expr_stmt_or_assign()
+    assert expected == parser.statements.parse_expr_stmt_or_assign(p.stream)
 
 
 def test_parse_assign_compound_subtraction():
@@ -2241,7 +2242,7 @@ def test_parse_assign_compound_subtraction():
     expected = parser.Assign(
         target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.SUBTRACT)
 
-    assert expected == p.parse_expr_stmt_or_assign()
+    assert expected == parser.statements.parse_expr_stmt_or_assign(p.stream)
 
 
 def test_parse_assign_compound_multiplication():
@@ -2257,7 +2258,7 @@ def test_parse_assign_compound_multiplication():
     expected = parser.Assign(
         target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.MULTIPLY)
 
-    assert expected == p.parse_expr_stmt_or_assign()
+    assert expected == parser.statements.parse_expr_stmt_or_assign(p.stream)
 
 
 def test_parse_assign_compound_division():
@@ -2273,7 +2274,7 @@ def test_parse_assign_compound_division():
     expected = parser.Assign(
         target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.DIVIDE)
 
-    assert expected == p.parse_expr_stmt_or_assign()
+    assert expected == parser.statements.parse_expr_stmt_or_assign(p.stream)
 
 
 def test_parse_assign_compound_modulo():
@@ -2289,7 +2290,7 @@ def test_parse_assign_compound_modulo():
     expected = parser.Assign(
         target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.MODULO)
 
-    assert expected == p.parse_expr_stmt_or_assign()
+    assert expected == parser.statements.parse_expr_stmt_or_assign(p.stream)
 
 
 def test_parse_assign_compound_bitwise_and():
@@ -2305,7 +2306,7 @@ def test_parse_assign_compound_bitwise_and():
     expected = parser.Assign(
         target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.BITWISE_AND)
 
-    assert expected == p.parse_expr_stmt_or_assign()
+    assert expected == parser.statements.parse_expr_stmt_or_assign(p.stream)
 
 
 def test_parse_assign_compound_bitwise_or():
@@ -2321,7 +2322,7 @@ def test_parse_assign_compound_bitwise_or():
     expected = parser.Assign(
         target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.BITWISE_OR)
 
-    assert expected == p.parse_expr_stmt_or_assign()
+    assert expected == parser.statements.parse_expr_stmt_or_assign(p.stream)
 
 
 def test_parse_assign_compound_bitwise_xor():
@@ -2337,7 +2338,7 @@ def test_parse_assign_compound_bitwise_xor():
     expected = parser.Assign(
         target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.BITWISE_XOR)
 
-    assert expected == p.parse_expr_stmt_or_assign()
+    assert expected == parser.statements.parse_expr_stmt_or_assign(p.stream)
 
 
 def test_parse_assign_compound_shift_left():
@@ -2353,7 +2354,7 @@ def test_parse_assign_compound_shift_left():
     expected = parser.Assign(
         target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.SHIFT_LEFT)
 
-    assert expected == p.parse_expr_stmt_or_assign()
+    assert expected == parser.statements.parse_expr_stmt_or_assign(p.stream)
 
 
 def test_parse_assign_compound_shift_right():
@@ -2369,7 +2370,7 @@ def test_parse_assign_compound_shift_right():
     expected = parser.Assign(
         target=parser.Variable(name='a'), value=parser.Constant(value=1), op=parser.BinaryOp.SHIFT_RIGHT)
 
-    assert expected == p.parse_expr_stmt_or_assign()
+    assert expected == parser.statements.parse_expr_stmt_or_assign(p.stream)
 
 
 # TODO(will): Test parse_expr_stmt_or_index_assign
@@ -2504,7 +2505,7 @@ def test_position_var_decl_is_its_type_token():
         lexer.Token(lexer.TokenType.IDENTIFIER, 'x', 9, 5),
         lexer.Token(lexer.TokenType.EOF, '', 9, 6),
     ]
-    result = parser.Parser(tokens).parse_var_decl()
+    result = parser.statements.parse_var_decl(parser.TokenStream(tokens))
     assert (result.line, result.col) == (9, 1)
 
 
@@ -2518,7 +2519,7 @@ def test_position_var_decl_via_parse_statement_struct_typed_branch():
         lexer.Token(lexer.TokenType.IDENTIFIER, 'p', 10, 7),
         lexer.Token(lexer.TokenType.EOF, '', 10, 8),
     ]
-    result = parser.Parser(tokens).parse_statement()
+    result = parser.statements.parse_statement(parser.TokenStream(tokens))
     assert isinstance(result, parser.VarDecl)
     assert (result.line, result.col) == (10, 1)
 
@@ -2530,7 +2531,7 @@ def test_position_assign_is_its_name_token():
         lexer.Token(lexer.TokenType.NUMBER, '1', 11, 9),
         lexer.Token(lexer.TokenType.EOF, '', 11, 10),
     ]
-    result = parser.Parser(tokens).parse_expr_stmt_or_assign()
+    result = parser.statements.parse_expr_stmt_or_assign(parser.TokenStream(tokens))
     assert (result.line, result.col) == (11, 5)
 
 
@@ -2542,7 +2543,7 @@ def test_position_compound_assign_is_its_target():
         lexer.Token(lexer.TokenType.NUMBER, '1', 12, 10),
         lexer.Token(lexer.TokenType.EOF, '', 12, 11),
     ]
-    result = parser.Parser(tokens).parse_expr_stmt_or_assign()
+    result = parser.statements.parse_expr_stmt_or_assign(parser.TokenStream(tokens))
     assert (result.line, result.col) == (12, 5) and result.op == parser.BinaryOp.ADD
     assert (result.target.line, result.target.col) == (12, 5)
 
@@ -2553,7 +2554,7 @@ def test_position_return_is_its_keyword_token():
         lexer.Token(lexer.TokenType.NUMBER, '1', 13, 12),
         lexer.Token(lexer.TokenType.EOF, '', 13, 13),
     ]
-    result = parser.Parser(tokens).parse_return()
+    result = parser.statements.parse_return(parser.TokenStream(tokens))
     assert (result.line, result.col) == (13, 5)
 
 
@@ -2570,7 +2571,7 @@ def test_position_if_is_its_keyword_token_not_the_condition():
         lexer.Token(lexer.TokenType.DEDENT, '', 16, 1),
         lexer.Token(lexer.TokenType.EOF, '', 16, 1),
     ]
-    result = parser.Parser(tokens).parse_if()
+    result = parser.statements.parse_if(parser.TokenStream(tokens))
     assert (result.line, result.col) == (14, 1)
 
 
@@ -2586,7 +2587,7 @@ def test_position_while_is_its_keyword_token():
         lexer.Token(lexer.TokenType.DEDENT, '', 19, 1),
         lexer.Token(lexer.TokenType.EOF, '', 19, 1),
     ]
-    result = parser.Parser(tokens).parse_while()
+    result = parser.statements.parse_while(parser.TokenStream(tokens))
     assert (result.line, result.col) == (17, 1)
 
 
@@ -2595,15 +2596,15 @@ def test_position_break_and_continue_are_their_own_token():
         lexer.Token(lexer.TokenType.BREAK, 'break', 20, 5),
         lexer.Token(lexer.TokenType.EOF, '', 20, 10),
     ]
-    assert (parser.Parser(break_tokens).parse_break().line,
-            parser.Parser(break_tokens).parse_break().col) == (20, 5)
+    assert (parser.statements.parse_break(parser.TokenStream(break_tokens)).line,
+            parser.statements.parse_break(parser.TokenStream(break_tokens)).col) == (20, 5)
 
     continue_tokens = [
         lexer.Token(lexer.TokenType.CONTINUE, 'continue', 21, 5),
         lexer.Token(lexer.TokenType.EOF, '', 21, 13),
     ]
-    assert (parser.Parser(continue_tokens).parse_continue().line,
-            parser.Parser(continue_tokens).parse_continue().col) == (21, 5)
+    assert (parser.statements.parse_continue(parser.TokenStream(continue_tokens)).line,
+            parser.statements.parse_continue(parser.TokenStream(continue_tokens)).col) == (21, 5)
 
 
 def test_position_function_is_its_def_token():
@@ -2858,7 +2859,7 @@ def test_if_condition_recognizes_is_check():
         lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
         lexer.Token(lexer.TokenType.EOF, '', 3, 1),
     ]
-    result = parser.Parser(tokens).parse_if()
+    result = parser.statements.parse_if(parser.TokenStream(tokens))
     assert isinstance(result.condition, parser.IsCheck)
     assert result.condition.variable_name == 's'
     assert result.condition.type_name == 'Circle'
@@ -2892,7 +2893,7 @@ def test_elif_condition_also_recognizes_is_check():
         lexer.Token(lexer.TokenType.DEDENT, '', 5, 1),
         lexer.Token(lexer.TokenType.EOF, '', 5, 1),
     ]
-    result = parser.Parser(tokens).parse_if()
+    result = parser.statements.parse_if(parser.TokenStream(tokens))
     elif_node = result.else_body[0]
     assert isinstance(elif_node, parser.If)
     assert isinstance(elif_node.condition, parser.IsCheck)
@@ -2916,7 +2917,7 @@ def test_ordinary_if_condition_is_unaffected():
         lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
         lexer.Token(lexer.TokenType.EOF, '', 3, 1),
     ]
-    result = parser.Parser(tokens).parse_if()
+    result = parser.statements.parse_if(parser.TokenStream(tokens))
     assert isinstance(result.condition, parser.Variable)
     assert result.condition.name == 'flag'
 
@@ -2931,7 +2932,7 @@ def test_is_check_requires_a_type_name_after_is():
         lexer.Token(lexer.TokenType.EOF, '', 1, 11),
     ]
     with pytest.raises(parser.ParseError, match="Expected a type name after 'is'"):
-        parser.Parser(tokens).parse_if()
+        parser.statements.parse_if(parser.TokenStream(tokens))
 
 
 def test_is_check_with_index_subject_requires_as_binding():
@@ -2956,7 +2957,7 @@ def test_is_check_with_index_subject_requires_as_binding():
         lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
         lexer.Token(lexer.TokenType.EOF, '', 3, 1),
     ]
-    result = parser.Parser(tokens).parse_if()
+    result = parser.statements.parse_if(parser.TokenStream(tokens))
     condition = result.condition
     assert isinstance(condition, parser.IsCheck)
     assert condition.variable_name == 'c'
@@ -3009,7 +3010,7 @@ def test_is_check_bare_variable_can_still_take_an_optional_as_rename():
         lexer.Token(lexer.TokenType.DEDENT, '', 3, 1),
         lexer.Token(lexer.TokenType.EOF, '', 3, 1),
     ]
-    result = parser.Parser(tokens).parse_if()
+    result = parser.statements.parse_if(parser.TokenStream(tokens))
     condition = result.condition
     assert condition.variable_name == 'y'
     assert condition.type_name == 'Circle'
@@ -3056,7 +3057,7 @@ def test_match_with_call_subject_binds_only_the_first_arm():
         lexer.Token(lexer.TokenType.DEDENT, '', 6, 1),
         lexer.Token(lexer.TokenType.EOF, '', 6, 1),
     ]
-    match = parser.Parser(tokens).parse_match()
+    match = parser.statements.parse_match(parser.TokenStream(tokens))
     assert match.variable_name == 's' and match.subject.name == 'makeShape'
     first, _ = match.arms[0]
     assert (first.variable_name, first.type_name) == ('s', 'Circle')
@@ -3114,7 +3115,7 @@ def test_match_is_a_match_node_with_one_check_per_arm():
         lexer.Token(lexer.TokenType.DEDENT, '', 6, 1),
         lexer.Token(lexer.TokenType.EOF, '', 6, 1),
     ]
-    match = parser.Parser(tokens).parse_match()
+    match = parser.statements.parse_match(parser.TokenStream(tokens))
     assert isinstance(match, parser.Match)
     assert (match.variable_name, match.subject, match.else_body) == ('s', None, None)
     assert [(check.variable_name, check.type_name) for check, _ in match.arms] == [('s', 'Circle'), ('s', 'Square')]
@@ -3151,7 +3152,7 @@ def test_match_with_explicit_else():
         lexer.Token(lexer.TokenType.DEDENT, '', 6, 1),
         lexer.Token(lexer.TokenType.EOF, '', 6, 1),
     ]
-    match = parser.Parser(tokens).parse_match()
+    match = parser.statements.parse_match(parser.TokenStream(tokens))
     assert len(match.arms) == 1 and len(match.else_body) == 1
     assert isinstance(match.else_body[0], parser.Return)
 
@@ -3175,7 +3176,7 @@ def test_match_with_no_arms_raises():
         lexer.Token(lexer.TokenType.EOF, '', 4, 1),
     ]
     with pytest.raises(parser.ParseError, match="Expected at least one 'is' arm"):
-        parser.Parser(tokens).parse_match()
+        parser.statements.parse_match(parser.TokenStream(tokens))
 
 
 def test_non_identifier_match_subject_requires_an_as_binding():
@@ -3195,7 +3196,7 @@ def test_non_identifier_match_subject_requires_an_as_binding():
         lexer.Token(lexer.TokenType.EOF, '', 1, 9),
     ]
     with pytest.raises(parser.ParseError, match="Expected 'as NAME' after the match subject"):
-        parser.Parser(tokens).parse_match()
+        parser.statements.parse_match(parser.TokenStream(tokens))
 
 
 def test_match_requires_is_or_else_between_arms():
@@ -3209,7 +3210,7 @@ def test_match_requires_is_or_else_between_arms():
         lexer.Token(lexer.TokenType.EOF, '', 2, 9),
     ]
     with pytest.raises(parser.ParseError, match="Expected 'is' \\(a match arm\\) or 'else'"):
-        parser.Parser(tokens).parse_match()
+        parser.statements.parse_match(parser.TokenStream(tokens))
 
 
 def test_parse_statement_dispatches_to_match():
@@ -3236,7 +3237,7 @@ def test_parse_statement_dispatches_to_match():
         lexer.Token(lexer.TokenType.DEDENT, '', 4, 1),
         lexer.Token(lexer.TokenType.EOF, '', 4, 1),
     ]
-    result = parser.Parser(tokens).parse_statement()
+    result = parser.statements.parse_statement(parser.TokenStream(tokens))
     assert isinstance(result, parser.Match)
 
 

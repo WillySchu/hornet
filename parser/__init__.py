@@ -6,7 +6,8 @@
     errors.py   what it reports
     type_exprs.py    types as they are written
     expressions.py   expressions: operators, literals, calls
-    parser.py   the rest of the grammar (statements, declarations), on its way to modules of their own
+    statements.py    statements and blocks
+    parser.py   the rest of the grammar (declarations), on its way to a module of its own
 
 The entry points are here (parse, parse_tokens), with the names other code takes from the package.
 """
