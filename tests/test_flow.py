@@ -17,7 +17,8 @@ POINT = Type(TypeKind.STRUCT, struct_name='Point')
 
 
 class _Decls:
-    sum_types = {'Shape': SumTypeInfo(name='Shape', variants=[POINT, Type.INT, Type.NONE])}
+    sum_types = {'Shape': SumTypeInfo(name='Shape', variants=[POINT, Type.INT, Type.NONE]),
+                 'Solid': SumTypeInfo(name='Solid', variants=[POINT, Type.INT])}
 
 
 def _scopes(*variables):
@@ -113,6 +114,9 @@ def test_what_a_condition_says_when_true_and_when_false():
     n = Variable(name='n')
     facts.decls[n.nid] = 2
     assert scopes.when(Binary(op=BinaryOp.EQUAL, left=n, right=n)) == ({}, {})  # nothing about a sum variable
+    # A test for a sum says the variable holds one of that sum's variants, or one of the others.
+    is_solid = is_check(Type(TypeKind.SUM, sum_type_name='Solid'))
+    assert scopes.when(is_solid) == ({1: ('s', frozenset([POINT, Type.INT]))}, {1: ('s', frozenset([Type.NONE]))})
 
 
 def test_the_questions_about_statements():

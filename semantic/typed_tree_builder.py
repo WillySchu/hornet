@@ -189,6 +189,8 @@ class TypedTreeBuilder:
         value = self.expr(e)
         if value.type == target:
             return value
+        if e.nid in self.facts.narrowed_sums:
+            return typed.NarrowSum(target, value)
         if target.kind == TypeKind.SUM and value.type in self.sum_types[target.sum_type_name].variants:
             return typed.WidenToSum(target, value)
         if target.kind == TypeKind.SUM and value.type.kind == TypeKind.SUM:  # (checked to have its variants)

@@ -381,18 +381,33 @@ class TypedFunctionBuilder:
         ir, address = self.address(s.subject)
         tag = self.temp(Type.INT32)
         ir.append(IRLoad(dst=tag, address=address))
-        variants = self.ir_program.sum_type_registry[s.subject.type.sum_type_name].variants
         end = self.ids.new_label("match_end")
         for variant, body in s.arms:
             arm = self.ids.new_label('match_arm')
             next_arm = self.ids.new_label('match_next')
-            is_it = self.temp(Type.BOOL)
-            ir += [
-                IRBinOp(dst=is_it, op=BinaryOp.EQUAL, left=tag, right=IRConst(variants.index(variant), Type.INT32)),
-                IRBranch(cond=is_it, true_label=arm, false_label=next_arm), IRLabel(arm)
-            ]
+            test_ir, is_it = self.tag_is(tag, s.subject.type, variant)
+            ir += test_ir + [IRBranch(cond=is_it, true_label=arm, false_label=next_arm), IRLabel(arm)]
             ir += self.block(body) + [IRJump(end), IRLabel(next_arm)]
         return ir + self.block(s.else_body) + [IRJump(end), IRLabel(end)]
+
+    def tag_is(self, tag, sum_type: Type, tested: Type) -> tuple:
+        """(IR, bool): whether `tag`, a value of `sum_type`'s, is the number of the variant `tested`;
+        or, `tested` being a sum, of any of its variants: then bit `tag` of a mask of those numbers."""
+        variants = self.ir_program.sum_type_registry[sum_type.sum_type_name].variants
+        result = self.temp(Type.BOOL)
+        if tested.kind != TypeKind.SUM:
+            return [IRBinOp(dst=result, op=BinaryOp.EQUAL, left=tag, right=IRConst(variants.index(tested), Type.INT32))
+                    ], result
+        numbers = [variants.index(v) for v in self.ir_program.sum_type_registry[tested.sum_type_name].variants]
+        if max(numbers) > 62:
+            raise NotYetPorted("a test for a sum type against a sum of more than 63 variants")
+        wide, bit, kept = self.temp(Type.INT), self.temp(Type.INT), self.temp(Type.INT)
+        return [
+            IRCast(dst=wide, src=tag),
+            IRBinOp(dst=bit, op=BinaryOp.SHIFT_LEFT, left=IRConst(1, Type.INT), right=wide),
+            IRBinOp(dst=kept, op=BinaryOp.BITWISE_AND, left=bit, right=IRConst(sum(1 << n for n in numbers), Type.INT)),
+            IRBinOp(dst=result, op=BinaryOp.NOT_EQUAL, left=kept, right=IRConst(0, Type.INT)),
+        ], result
 
     def assign(self, target, value_expr) -> list:
         if _scalar(target.type):
@@ -570,6 +585,8 @@ class TypedFunctionBuilder:
             return ir + offset_ir + self.store(payload, e.value)
         if isinstance(e, t.WidenSum):
             return self.widen_sum(dst, e)
+        if isinstance(e, t.NarrowSum):
+            return self.narrow_sum(dst, e)
         if isinstance(e, t.ZeroValue):
             return self.zero_into(dst, e.type)
         if isinstance(e, t.NewEmptyDict):
@@ -607,6 +624,37 @@ class TypedFunctionBuilder:
             IRCast(dst=new_tag, src=number),
             IRStore(address=dst, value=new_tag, value_type=Type.INT32),
         ]
+
+    def narrow_sum(self, dst, e: t.NarrowSum) -> list:
+        """A sum variable's value at `dst` as the narrower sum e.type, which the checker has shown has
+        the variant it holds. That variant fits (it is one of the narrower sum's), so the narrower
+        sum's width is copied, and the tag is translated through a table, in which a variant the
+        narrower sum lacks is -1. Reaching one of those means a pointer to the variable changed it
+        after the `is` check, which is checked for where there can be such a pointer."""
+        wide = self.ir_program.sum_type_registry[e.value.type.sum_type_name].variants
+        narrow = self.ir_program.sum_type_registry[e.type.sum_type_name].variants
+        numbers = [narrow.index(variant) if variant in narrow else -1 for variant in wide]
+        ir, source = self.address(e.value)
+        ir = ir + [IRCopy(dst_address=dst, src_address=source, value_type=e.type)]
+        tables = self.ir_program.__dict__.setdefault('_sum_tag_tables', {})
+        if (e.value.type, e.type) not in tables:
+            tables[(e.value.type, e.type)] = self.ids.new_label("sum_tags")
+            self.ir_program.type_descriptors.append((tables[(e.value.type, e.type)], numbers))
+        tag, index, offset = self.temp(Type.INT32), self.temp(Type.INT), self.temp(Type.INT)
+        base, entry, number, new_tag = self.temp(), self.temp(), self.temp(Type.INT), self.temp(Type.INT32)
+        ir += [
+            IRLoad(dst=tag, address=source),
+            IRCast(dst=index, src=tag),
+            IRBinOp(dst=offset, op=BinaryOp.MULTIPLY, left=index, right=IRConst(8, Type.INT)),
+            IRStaticDataAddress(dst=base, label=tables[(e.value.type, e.type)]),
+            IRBinOp(dst=entry, op=BinaryOp.ADD, left=base, right=offset),
+            IRLoad(dst=number, address=entry),
+        ]
+        if isinstance(e.value, t.Local) and e.value.symbol.id in self.addressed:
+            changed = self.temp(Type.BOOL)
+            ir += [IRBinOp(dst=changed, op=BinaryOp.LESS_THAN, left=number, right=IRConst(0, Type.INT))]
+            ir += self.panic_when(changed, f"'{e.value.symbol.name}' changed variant while narrowed", e)
+        return ir + [IRCast(dst=new_tag, src=number), IRStore(address=dst, value=new_tag, value_type=Type.INT32)]
 
     def store(self, address, value) -> list:
         """Store any value (scalar or composite) at `address`."""
@@ -914,12 +962,9 @@ class TypedFunctionBuilder:
             return ir + count_ir + [IRLoad(dst=length, address=count_address)], length
         if isinstance(e, t.TagTest):
             ir, address = self.address(e.sum)
-            tag, result = self.temp(Type.INT32), self.temp(Type.BOOL)
-            index = self.ir_program.sum_type_registry[e.sum.type.sum_type_name].variants.index(e.variant)
-            return ir + [
-                IRLoad(dst=tag, address=address),
-                IRBinOp(dst=result, op=BinaryOp.EQUAL, left=tag, right=IRConst(index, Type.INT32))
-            ], result
+            tag = self.temp(Type.INT32)
+            test_ir, result = self.tag_is(tag, e.sum.type, e.variant)
+            return ir + [IRLoad(dst=tag, address=address)] + test_ir, result
         if isinstance(e, t.StrCompare):
             return self.str_compare(e)
         if isinstance(e, t.AddressOf):

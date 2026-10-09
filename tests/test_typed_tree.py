@@ -139,7 +139,8 @@ def test_every_node_kind_occurs_in_the_repository_and_this_file():
                           "    dict[int]int d\n    d[1] = 1\n    del(d, 1)\n    *int q = none\n    print(q == none)\n"
                           "    print(dict[int]int{1: 2})\n    print(str(bytes('a')))\n    print(format('{}', y))\n    return 0\n"))
     used |= _nodes(_typed("type Narrow is int | none\ntype Wide is Narrow | str\n\ndef int main():\n"
-                          "    Narrow n = 1\n    Wide w = n\n    print(w)\n    return 0\n"))
+                          "    Narrow n = 1\n    Wide w = n\n    print(w)\n"
+                          "    if w is Narrow:\n        n = w\n    return 0\n"))
     assert defined - used == set(), "node kinds no test produces"
 
 

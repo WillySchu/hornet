@@ -230,7 +230,10 @@ class Scopes:
         if decl_id is None or self.symbols[decl_id].type.kind != TypeKind.SUM:
             return {}, {}
         variants = frozenset(self.decls.sum_types[self.symbols[decl_id].type.sum_type_name].variants)
-        holds, excluded = {decl_id: (name, frozenset({variant}))}, {decl_id: (name, variants - {variant})}
+        tested = frozenset({variant})
+        if variant.kind == TypeKind.SUM:  # `x is S`, S a sum: any of S's variants
+            tested = frozenset(self.decls.sum_types[variant.sum_type_name].variants)
+        holds, excluded = {decl_id: (name, tested)}, {decl_id: (name, variants - tested)}
         if isinstance(condition, Binary) and condition.op == BinaryOp.NOT_EQUAL:
             return excluded, holds
         return holds, excluded

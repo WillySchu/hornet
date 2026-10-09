@@ -14,7 +14,8 @@ from semantic.declarations import DeclarationResolver, Declarations
 from semantic.facts import Facts
 from semantic.type_resolution import TypeResolver
 from target import Target, default_target
-from tests.test_compiler import GCC_SKIP, _parse, analyze, assert_program_semantic_error, assert_program_stdout
+from tests.test_compiler import (
+    GCC_SKIP, _parse, analyze, assert_program_panics, assert_program_semantic_error, assert_program_stdout)
 from typesys import Type, TypeKind
 
 MAIN = "def int main():\n    return 0\n"
@@ -265,8 +266,125 @@ def test_a_return_that_does_not_fit_says_which_variant():
         match="'return' statement returns LineResult -- a LineResult can hold none, which StrResult has no variant")
 
 
-def test_what_is_still_to_come():
-    # Not yet: a test for a sum.
+# -- testing for a sum
+
+@GCC_SKIP
+def test_a_sum_is_tested_for_and_narrows():
+    assert_program_stdout(
+        FLOW +
+        "def int size(StrResult s):\n"
+        "    match s:\n"
+        "        is str:\n            return len(s)\n"
+        "        is Error:\n            return -1\n"
+        "def LineResult next(int n):\n"
+        "    if n < 0:\n        return none\n"
+        "    if n == 0:\n        return Error('nothing')\n"
+        "    return 'a line'\n"
+        "def str kind(Wide w):\n"
+        "    match w:\n"
+        "        is LineResult:\n"                               # an arm for a sum: any of its variants
+        "            if w is StrResult:\n"
+        "                return format('a str result of size {}', size(w))\n"
+        "            return 'no line'\n"
+        "        is IntResult:\n"                                # (its Error went to the arm above)
+        "            return 'an int'\n"
+        "        is bool:\n"
+        "            return 'a bool'\n"
+        "def int main():\n"
+        "    for int n = -1; n < 2; n += 1:\n"
+        "        LineResult l = next(n)\n"
+        "        if l is StrResult:\n"
+        "            print(size(l))\n"                           # a LineResult, where a StrResult is wanted
+        "            StrResult s = l\n"
+        "            print(s)\n"
+        "        else:\n"
+        "            print(l)\n"                                 # what is left: none
+        "    LineResult l = next(1)\n"
+        "    if l is none:\n        return 1\n"
+        "    print(size(l))\n"                                   # by elimination
+        "    if next(0) is StrResult as r:\n"                    # bound, and narrowed
+        "        print(size(r))\n"
+        "    print(next(-1) is StrResult)\n"                     # a test of any expression
+        "    print(l is LineResult)\n"
+        "    Wide w = 'four'\n"
+        "    if w is bool or w is int or w is none:\n        return 1\n"
+        "    print(size(w))\n"                                   # ... and by `or`, `not`, and a loop's condition
+        "    int turns = 0\n"
+        "    while l is StrResult and turns < 12:\n"
+        "        turns += size(l)\n"
+        "    print(turns)\n"
+        "    print(kind('s') + ', ' + kind(Error('e')) + ', ' + kind(none) + ', ' + kind(4) + ', ' + kind(true))\n"
+        "    return 0\n",
+        "none\n-1\nError(message: 'nothing')\n6\n'a line'\n6\n-1\nfalse\ntrue\n4\n12\n"
+        "a str result of size 1, a str result of size -1, no line, an int, a bool\n",
+    )
+
+
+def test_how_such_a_test_and_such_a_flow_are_built():
+    from typed_ast import dump
+    tree = dump(analyze(_parse(
+        FLOW + "def int take(StrResult s):\n    return 1\n"
+        "def int main():\n    LineResult l = 'x'\n    if l is StrResult:\n        return take(l)\n    return 0\n")))
+    assert "TagTest variant=StrResult : bool\n" in tree
+    assert ("NarrowSum : StrResult\n"
+            "                value:\n"
+            "                  Local symbol=l#") in tree
+
+
+@GCC_SKIP
+def test_a_variant_changed_through_a_pointer_is_caught():
+    assert_program_panics(
+        FLOW +
+        "def int size(StrResult s):\n"
+        "    if s is str:\n        return len(s)\n"
+        "    return -1\n"
+        "def int main():\n"
+        "    LineResult l = 'x'\n"
+        "    *LineResult p = &l\n"
+        "    if l is StrResult:\n"
+        "        print(size(l))\n"
+        "        *p = none\n"                    # no longer one of StrResult's
+        "        print(size(l))\n"
+        "    return 0\n",
+        "'l' changed variant while narrowed",
+        expected_stdout="1\n",
+    )
+
+
+@pytest.mark.parametrize("body,message", [
+    ("    LineResult l = none\n    print(l is Either)\n",
+     "'Either' can hold int, which LineResult has no variant for -- 'is' tests for one of LineResult's variants "
+     r"\(str, Error, none\), or for a sum type made only of them"),
+    # What is known of a variable decides whether it fits, and what the error says of it.
+    ("    Wide w = true\n    if w is int:\n        return 1\n    LineResult l = w\n",
+     "a Wide can hold bool here, which LineResult has no variant for"),
+    ("    LineResult l = 'x'\n    if l is StrResult:\n        l = none\n        print(take(l))\n",
+     "Argument 1 to 'take' should be StrResult, got LineResult -- a LineResult can hold none, which"),
+    ("    LineResult l = 'x'\n    print(take(l))\n", "a LineResult can hold none, which StrResult has no variant"),
+    # Only a variable is narrowed: a field of one isn't, tested or not.
+    ("    Holder h = Holder('x')\n    if h.line is StrResult:\n        print(take(h.line))\n",
+     "Argument 1 to 'take' should be StrResult, got LineResult"),
+])
+def test_what_a_test_for_a_sum_does_not_allow(body, message):
     assert_program_semantic_error(
-        FLOW + "def int main():\n    LineResult l = 'x'\n    if l is StrResult:\n        print(1)\n    return 0\n",
-        match="'StrResult' is not one of LineResult's own declared variants")
+        FLOW + "type Holder struct:\n    LineResult line\n"
+        "def int take(StrResult s):\n    return 1\ndef int main():\n" + body + "    return 0\n", match=message)
+
+
+@pytest.mark.parametrize("arms,message", [
+    ("        is StrResult:\n            return 1\n        is str:\n            return 2\n"
+     "        is none:\n            return 3\n",
+     "'str' is never reached in this match on 'l': the arms above it take every variant it tests for"),
+    ("        is StrResult:\n            return 1\n        is StrResult:\n            return 2\n"
+     "        is none:\n            return 3\n", "'StrResult' is tested more than once in this match on 'l'"),
+    ("        is str:\n            return 1\n        is Error:\n            return 2\n"
+     "        is StrResult:\n            return 3\n        is none:\n            return 4\n",
+     "'StrResult' is never reached in this match on 'l'"),
+    ("        is StrResult:\n            return 1\n",
+     r"doesn't cover every variant -- missing: none \(add an arm"),
+    ("        is IntResult:\n            return 1\n        is none:\n            return 2\n",
+     "'IntResult' can hold int, which LineResult has no variant for"),
+])
+def test_what_is_wrong_with_a_match_s_arms(arms, message):
+    assert_program_semantic_error(
+        FLOW + "def int f(LineResult l):\n    match l:\n" + arms + MAIN, match=message)

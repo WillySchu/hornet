@@ -31,7 +31,7 @@ class Checker(Protocol):
 
     def types_compatible(self, value_type: Type, target_type: Type) -> bool: ...
 
-    def sum_gap(self, value_type: Type, target_type: Type) -> str: ...
+    def sum_gap(self, value_type: Type, target_type: Type, expr: Optional[Node] = None) -> str: ...
 
     def hidden(self, struct: str, name: str) -> bool: ...
 
@@ -135,7 +135,7 @@ class CallChecker:
             if not self.checker.types_compatible(actual_type, expected_type):
                 raise SemanticError(
                     f"Argument {i} to '{shown(name)}' should be "
-                    f"{expected_type}, got {actual_type}" + self.checker.sum_gap(actual_type, expected_type),
+                    f"{expected_type}, got {actual_type}" + self.checker.sum_gap(actual_type, expected_type, arg),
                     arg,
                 )
         return return_type
@@ -207,7 +207,7 @@ class CallChecker:
                 raise SemanticError(
                     f"Argument {i} to method '{expr.name}' on "
                     f"'{shown(owner)}' should be "
-                    f"{expected_type}, got {actual_type}" + self.checker.sum_gap(actual_type, expected_type),
+                    f"{expected_type}, got {actual_type}" + self.checker.sum_gap(actual_type, expected_type, arg),
                     arg,
                 )
         self.facts.calls[expr.nid] = (mangled_name, [receiver] + list(expr.args))

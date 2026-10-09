@@ -189,6 +189,13 @@ class WidenSum(Expr):
 
 
 @dataclass(frozen=True)
+class NarrowSum(Expr):
+    """A sum-typed variable as a value of a narrower sum type, which `is` checks have shown has
+    every variant the variable can hold here."""
+    value: Expr
+
+
+@dataclass(frozen=True)
 class BoxVariant(Expr):
     """`&Variant(...)` where a pointer to the sum is expected: new heap storage holding the variant."""
     value: Expr
@@ -211,7 +218,7 @@ class Bind(Expr):
 
 @dataclass(frozen=True)
 class TagTest(Expr):
-    """Whether a sum holds `variant`."""
+    """Whether a sum holds `variant`; or, `variant` being a sum itself, any of its variants."""
     sum: Expr
     variant: Type
 
@@ -429,7 +436,8 @@ class If(Stmt):
 
 @dataclass(frozen=True)
 class Match(Stmt):
-    """Branch on which variant `subject` (a sum) holds; arms are (variant type, body)."""
+    """Branch on which variant `subject` (a sum) holds; arms are (variant type, body), tried in
+    order. An arm's type may be a sum: it takes any of that sum's variants."""
     subject: Expr
     arms: tuple
     else_body: Optional[tuple]

@@ -255,7 +255,17 @@ class ExpressionChecker:
             )
         narrowed_type = self._type(expr.type_name, expr)  # (a variant may be a pointer to a sum, or a slice of one)
         sum_type_info = self.decls.sum_types[variable_type.sum_type_name]
-        if narrowed_type not in sum_type_info.variants:
+        if narrowed_type.kind == TypeKind.SUM:
+            # `x is S`, S a sum: whether x holds any of S's variants, all of which must be x's own.
+            foreign = [v for v in self.decls.sum_types[narrowed_type.sum_type_name].variants
+                       if v not in sum_type_info.variants]
+            if foreign:
+                raise SemanticError(
+                    f"'{expr.type_name}' can hold {foreign[0]}, which {variable_type} has no variant for -- 'is' "
+                    f"tests for one of {variable_type}'s variants "
+                    f"({', '.join(str(v) for v in sum_type_info.variants)}), or for a sum type made only of them",
+                    expr)
+        elif narrowed_type not in sum_type_info.variants:
             raise SemanticError(
                 f"'{expr.type_name}' is not one of {variable_type}'s own "
                 f"declared variants ({', '.join(str(v) for v in sum_type_info.variants)})",
@@ -675,17 +685,29 @@ class ExpressionChecker:
             return value_type in wider
         return False
 
-    def sum_gap(self, value_type: Type, target_type: Type) -> str:
+    def _may_hold(self, expr: Optional[Node], value_type: Type) -> list:
+        """The variants the sum-typed value of `expr` may hold where checking is: all its type's, or
+        fewer if it is a variable that `is` checks have narrowed."""
+        variants = self.decls.sum_types[value_type.sum_type_name].variants
+        decl_id = self.facts.decls.get(expr.nid) if isinstance(expr, Variable) else None
+        if decl_id is not None and self.context.scopes.is_narrowed(decl_id):
+            possible = self.context.scopes.possible_variants(decl_id)
+            return [v for v in variants if v in possible]
+        return variants
+
+    def sum_gap(self, value_type: Type, target_type: Type, expr: Optional[Node] = None) -> str:
         """What to add to "a `value_type` doesn't fit a `target_type`" when both are sums: the first
-        variant the one can hold that the other has no place for. '' when that isn't the reason."""
+        variant the one can hold (here, if `expr` is the value) that the other has no place for. ''
+        when that isn't the reason."""
         if value_type.kind != TypeKind.SUM or target_type.kind != TypeKind.SUM:
             return ""
         wider = self.decls.sum_types[target_type.sum_type_name].variants
-        missing = [v for v in self.decls.sum_types[value_type.sum_type_name].variants if v not in wider]
+        missing = [v for v in self._may_hold(expr, value_type) if v not in wider]
         if not missing:
             return ""
         article = "an" if str(value_type)[:1].lower() in "aeiou" else "a"
-        return f" -- {article} {value_type} can hold {missing[0]}, which {target_type} has no variant for"
+        here = " here" if len(self._may_hold(expr, value_type)) < len(self._may_hold(None, value_type)) else ""
+        return f" -- {article} {value_type} can hold {missing[0]}{here}, which {target_type} has no variant for"
 
     def check_value_flowing_into(self, expr: Node, target_type: Type) -> Type:
         """check_expr for a value flowing into a typed slot; handles untyped array literals and literal range checks."""
@@ -707,6 +729,14 @@ class ExpressionChecker:
                 self.facts.types[expr.nid] = target_type
                 return target_type
         value_type = self.check_expr(expr)
+        if (target_type.kind == TypeKind.SUM and value_type.kind == TypeKind.SUM and isinstance(expr, Variable)
+                and not self.types_compatible(value_type, target_type)):
+            # A variable of a wider sum, where `is` checks have left it only variants the target has:
+            # it flows in as the narrower sum.
+            wanted = self.decls.sum_types[target_type.sum_type_name].variants
+            if all(variant in wanted for variant in self._may_hold(expr, value_type)):
+                self.facts.narrowed_sums[expr.nid] = target_type
+                return target_type
         if value_type == Type.NONE and target_type.kind == TypeKind.SLICE:
             raise SemanticError(f"A slice is never none -- write `[]` (or leave the {target_type} uninitialized) "
                                 f"for an empty one", expr)

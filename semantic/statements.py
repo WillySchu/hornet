@@ -165,7 +165,8 @@ class StatementChecker:
             if not self.expressions.types_compatible(init_type, declared_type):
                 raise SemanticError(
                     f"Cannot initialize '{stmt.name}' (declared {declared_type}) "
-                    f"with a value of type {init_type}" + self.expressions.sum_gap(init_type, declared_type),
+                    f"with a value of type {init_type}"
+                    + self.expressions.sum_gap(init_type, declared_type, stmt.init),
                     stmt,
                 )
         self.facts.types[stmt.nid] = declared_type
@@ -209,7 +210,7 @@ class StatementChecker:
             return
         value_type = self.expressions.check_value_flowing_into_allowing_struct_literal(stmt.value, target_type)
         if not self.expressions.types_compatible(value_type, target_type):
-            gap = self.expressions.sum_gap(value_type, target_type)
+            gap = self.expressions.sum_gap(value_type, target_type, stmt.value)
             raise SemanticError(f"Cannot assign a value of type {value_type} {what}{gap}", stmt)
         if isinstance(target, Variable) and self.facts.decls[target.nid] is not None:
             self._assignments.append(self.facts.decls[target.nid])  # the value was read as narrowed; no longer
@@ -238,7 +239,8 @@ class StatementChecker:
         if not self.expressions.types_compatible(value_type, return_type):
             raise SemanticError(
                 f"Function is declared to return {return_type}, but this "
-                f"'return' statement returns {value_type}" + self.expressions.sum_gap(value_type, return_type),
+                f"'return' statement returns {value_type}"
+                + self.expressions.sum_gap(value_type, return_type, stmt.value),
                 stmt,
             )
 
@@ -286,15 +288,16 @@ class StatementChecker:
                 self.context.scopes.pop()
             return
         tested = set()
+        decl_id = self.facts.decls[first_check.nid]
         for i, (check, body) in enumerate(stmt.arms):
             self.expressions.check_expr(check)
             if i == 0:
                 self._check_match_exhaustiveness(stmt)
-            variant = self.facts.narrowed[check.nid]
-            tested.add(variant)
-            self._analyze_body(body, return_type, self.context.scopes.when(check)[0])
+            # An arm is reached only if none before it was: it has what it tests for, less what they did.
+            arm = self._variants_tested(self.facts.narrowed[check.nid]) - tested
+            self._analyze_body(body, return_type, {decl_id: (stmt.variable_name, frozenset(arm))})
+            tested |= arm
         if stmt.else_body is not None:  # the subject is none of the arms' variants
-            decl_id = self.facts.decls[first_check.nid]
             self._analyze_body(stmt.else_body, return_type,
                                {decl_id: (stmt.variable_name, self.context.scopes.possible_variants(decl_id) - tested)})
         if has_binding:
@@ -325,6 +328,12 @@ class StatementChecker:
         if stmt.else_body is not None:
             self._analyze_body(stmt.else_body, return_type)
 
+    def _variants_tested(self, tested: Type) -> set:
+        """The variants an `is` check for `tested` is true of: itself, or each of a sum's."""
+        if tested.kind == TypeKind.SUM:
+            return set(self.decls.sum_types[tested.sum_type_name].variants)
+        return {tested}
+
     def _check_match_exhaustiveness(self, stmt: 'Match') -> None:
         """Reject duplicate arms; require exhaustiveness without an else."""
         subject_name = stmt.variable_name
@@ -332,6 +341,7 @@ class StatementChecker:
         sum_type_info = self.decls.sum_types[subject_type.sum_type_name]
 
         seen: Dict[Type, IsCheck] = {}
+        covered: set = set()  # the variants the arms so far take between them
         for arm_condition, _ in stmt.arms:
             arm_type = self._type(arm_condition.type_name, arm_condition)
             if arm_type in seen:
@@ -340,12 +350,18 @@ class StatementChecker:
                     f"this match on '{subject_name}'",
                     arm_condition,
                 )
+            tested = self._variants_tested(arm_type)
+            if tested and tested <= covered:  # (what isn't a variant at all is the arm's own check's to say)
+                raise SemanticError(
+                    f"'{arm_condition.type_name}' is never reached in this match on '{subject_name}': the arms "
+                    f"above it take every variant it tests for", arm_condition)
             seen[arm_type] = arm_condition
+            covered |= tested
 
         if stmt.else_body is not None:
             return
 
-        missing = [v for v in sum_type_info.variants if v not in seen]
+        missing = [v for v in sum_type_info.variants if v not in covered]
         if missing:
             raise SemanticError(
                 f"This match on '{subject_name}' (declared {subject_type}) "
