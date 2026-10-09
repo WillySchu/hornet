@@ -81,7 +81,7 @@ pytest --quick   # unit tests only; nothing is built or run
 pytest --full    # every runnable target, plus slow tests (benchmark reruns, formatter fuzzing, sanitizers)
 ```
 
-The tests cover the lexer, parser, semantic analysis, modules, IR construction and verification, optimization, the native backend, escape analysis, runtime behavior, and end-to-end compiled programs, including seeded random programs checked against a Python model.
+The tests cover the lexer, parser, semantic analysis, modules, IR construction and verification, optimization, the native backend, escape analysis, runtime behavior, and end-to-end compiled programs, including seeded random programs checked against a Python model. The networking library is tested against a server on the same machine; nothing leaves it.
 
 Backend-specific tests live in `tests/backend/<arch>/` and shared backend tests in `tests/backend/common/`. With `--full`, end-to-end programs are built and run for every target that can run on the machine (natively, under Rosetta 2, under qemu-user, or, for Windows, under Wine), and every such target must produce the same output. The few tests of what systems define differently, such as an exit status above 255, say which targets they apply to. `HORNET_E2E_TARGETS` overrides the targets in any tier:
 
@@ -1168,6 +1168,36 @@ exit(0)
 
 Functions that can fail return a result from `stdlib/errors.ht` (`StrResult is str | Error`, `IntResult is int | Error`); handle it with `match` or `is`, or use `must_str`/`must_int` to panic on error. `read_line` returns a `LineResult is str | Error | none`, and can be mixed with `read_stdin`, which then reads what is left. Directory/path APIs remain future work.
 
+## `stdlib/net.ht`
+
+TCP connections:
+
+```hornet
+ConnResult opened = connect('example.com', 80, 5000)   # a name or an address, a port, a timeout in milliseconds
+if opened is Conn as conn:
+    conn.write('ping\n')            # an IntResult: how many bytes were sent
+    StrResult reply = conn.read()   # what has arrived, up to 64 KB; '' once the other side has closed
+    conn.close()
+```
+
+The timeout bounds each read and write; 0 waits as long as the system does. `connect` returns a `ConnResult is Conn | Error`.
+
+## `stdlib/http.ht`
+
+HTTP/1.1 requests over plain TCP:
+
+```hornet
+ResponseResult r = get('http://example.com/')
+if r is Response:
+    print(r.status)                   # 200
+    print(r.header('content-type'))   # found whatever its case; '' if there is none
+    print(r.body)
+```
+
+`post(url, content_type, body)` sends a body, and `request(method, url, headers, body, timeout_ms)` is the general form, with `headers` a `[]Header`. `parse_url` splits a URL into its host, port, and target. A response's body is read whole, whether it comes with a length, in chunks, or until the connection closes.
+
+There is no TLS yet, so an `https://` URL is an `Error`. Redirects are the caller's to follow, and each request uses a connection of its own.
+
 ---
 
 # Runtime
@@ -1179,6 +1209,7 @@ It currently provides language-level services including:
 * `print` and recursive value formatting
 * the panic routines (`hornet_panic`, `hornet_panic_at` for `panic(...)`, and those that add the values a failed check compared), which flush standard output, write the message to standard error, and abort (`SIGABRT`; on Windows, exit code 3)
 * catching a stack overflow, to report it as a panic
+* TCP sockets for `stdlib/net.ht` (`hornet_tcp_connect`, `hornet_tcp_read`, `hornet_tcp_write`, `hornet_tcp_close`, and `hornet_net_error` for why one failed), since C's sockets differ between systems; on Windows the program is linked with `ws2_32`
 * memory: `hornet_alloc` and `hornet_alloc_zeroed`, which every allocation goes through, the compiled code's and the runtime's own, and which panic when memory is refused
 * `format`'s buffer (`hornet_format_begin`, `hornet_format_text`, `hornet_format_value`)
 * `hornet_slice_grow`, which copies a slice into a larger backing store
@@ -1250,6 +1281,8 @@ Hornet runtime   external libraries
 
 Semantic analysis never changes the parser's ASTs: it resolves each file's names in that file's scope (`scopes.py`), records what it learns (types, the declaration each name refers to, narrowing) by node number, and from that builds the typed tree (`typed_ast.py`). The typed program `semantic.analyze()` returns is the only input to later stages: a test checks that nothing in `ir/`, `optimize/`, `backend/`, or escape analysis imports the front end. In the typed tree every node has one meaning and a concrete type: names refer to symbols, the parser's overloaded forms are split (calls, struct literals, and builtins; array, slice, string, and dictionary indexing), each implicit operation is a node (widening into a sum, `&Variant(...)`, a literal becoming a slice, zero values), methods are ordinary functions, and `match` and compound assignment are nodes of their own. `compile.py --dump typed` prints it.
 
+Both frontend stages are packages. The parser (`parser/`) is functions over a token stream, which holds a file's tokens and the position in them and is all the state parsing has. There is one module for each part of the grammar: declarations call statements, which call expressions and types. Semantic analysis (`semantic/`) runs in phases that `analyzer.py` sequences. Declarations are resolved first, all of them, and the constants with them; then each function's body is checked, statement by statement, the statements calling into expression checking; then the typed tree is built from what checking recorded. The names in scope, and what `is` checks have narrowed them to, are kept by one object that both statement and expression checking use.
+
 The frontend constructs a complete `IRProgram` before a backend begins lowering it. Only the functions `main` can reach through calls are built: every function is type-checked, but one that can never run is not compiled, and neither are the strings and descriptors only it uses, so importing a module costs what is used of it. (Calls are all resolved by then, and nothing else can call a function. A program without `main` keeps every function.) The IR is independent of any target: a function's incoming arguments are an ordered list of word-sized temporaries in Hornet's own calling convention (a composite return value's destination address first, then one word per parameter, except two for `str` and three for slices, with arrays, structs, sum types, and dicts passed by address), and where each word physically arrives is decided by the backend. Lowering never modifies the IR. An enum value reaches the IR as an `int32`.
 
 Escape analysis decides which locals must live on the heap; heap storage comes from the runtime's `hornet_alloc` and is never freed. It is a flow-insensitive points-to analysis per function, run on the typed tree, with per-parameter escape summaries so that passing `&x` to a function that doesn't keep the pointer leaves `x` on the stack.
@@ -1268,8 +1301,11 @@ Some IR operations deliberately lower to runtime calls. A runtime operation does
 
 ```text
 lexer.py           Lexical analysis
-parser.py          AST construction
-semantic.py        Semantic analysis: checking, and building the typed tree
+parser/            Parsing: the tree's nodes (nodes.py), the token stream (stream.py), and the grammar
+                   as functions over it (declarations.py, statements.py, expressions.py, type_exprs.py)
+semantic/          Semantic analysis: declarations.py first, then statements.py and expressions.py (with
+                   calls.py) for each body, over the scopes in flow.py; constants.py for constant
+                   values; typed_tree_builder.py builds the typed tree; analyzer.py runs them in order
 typed_ast.py       The typed tree and its text dump
 dump.py            What each stage produces, as text (`compile.py --dump`)
 modules.py         Module discovery
@@ -1290,7 +1326,7 @@ backend/           Native backends: common/ shared pieces, x86_64/ and aarch64/
 runtime/           Native Hornet runtime
 stdlib/            Hornet standard-library modules
 
-examples/          Example Hornet programs (`calc/` and `json/` are multi-file ones)
+examples/          Example Hornet programs (`calc/` and `json/` are multi-file ones; `fetch.ht` is an HTTP client)
 tools/hfmt/        Source formatter, written in Hornet
 tests/             Compiler, runtime, and end-to-end tests
 benchmarks/        Benchmark programs and tooling
@@ -1394,6 +1430,15 @@ python3 build.py examples/json/main.ht -o jsonfmt
 
 A document is a recursive sum type, `Value is none | bool | Number | str | []Value | Object`. A number keeps its text, since there is no floating point to hold it, and an object keeps its members in order. A mistake is reported as `file:line:col: error: message`. The tests run it over the 318 files of JSONTestSuite (`tests/json/test_parsing/`), and compare its output with Python's for random documents.
 
+## An HTTP Client
+
+`examples/fetch.ht` is twenty lines over `stdlib/http.ht`: it writes the body of an `http://` URL to standard output and the status line to standard error.
+
+```bash
+python3 build.py examples/fetch.ht -o fetch
+./fetch http://example.com/
+```
+
 ---
 
 # Current Limitations
@@ -1418,6 +1463,7 @@ Hornet is still experimental. Some notable limitations are:
 * Variadic functions and variadic FFI calls are not implemented.
 * There is no garbage collector yet; string concatenation in particular never frees its intermediate strings.
 * There are no floating-point types yet.
+* There is no TLS: `stdlib/http.ht` makes plain `http://` requests only.
 * Multithreading is not implemented.
 * Without generics, each result type is a separate named sum type. There is no operator for propagating errors, and ignoring a result is not diagnosed.
 * The panics for a stack overflow and for running out of memory have no source position.
@@ -1430,7 +1476,7 @@ A longer-term goal is to rewrite the compiler itself in Hornet.
 
 The current language already has the structural features needed by a compiler implementation: structs, enums, arrays, slices, dictionaries, pointers, recursive sum types (so an AST can be expressed), pattern matching, modules, FFI, and native compilation. What each stage of the Python compiler produces, printed by `compile.py --dump` (tokens, tree, typed tree, and IR), is the intended point of comparison between the two implementations.
 
-The standard library now covers file and stream I/O, process exit, string building and searching, integer formatting and parsing, and an error convention. The formatter in `tools/hfmt` is the first substantial tool written in Hornet; it includes a Hornet lexer that is tested token-for-token against the compiler's own. `examples/calc` is a compiler in miniature (lexer, parser, tree, simplifier, code generation, and a machine to run the code). The next step is porting the compiler itself, starting from that lexer.
+The standard library now covers file and stream I/O, process exit, string building and searching, integer formatting and parsing, TCP connections and HTTP requests, and an error convention. The formatter in `tools/hfmt` is the first substantial tool written in Hornet; it includes a Hornet lexer that is tested token-for-token against the compiler's own. `examples/calc` is a compiler in miniature (lexer, parser, tree, simplifier, code generation, and a machine to run the code). The next step is porting the compiler itself, starting from that lexer.
 
 The intended progression is roughly:
 
@@ -1464,7 +1510,7 @@ Garbage collection is not a prerequisite for bootstrapping the compiler. A compi
 
 Current and future work includes:
 
-* Expanding the standard library, especially directory, path, and process facilities
+* Expanding the standard library, especially directory, path, and process facilities, and TLS for the HTTP client
 * Error-propagation syntax for result types
 * More complete pointer and address-taking support
 * More precise escape analysis for iterators, aliases, and data more than one pointer away from a call argument
