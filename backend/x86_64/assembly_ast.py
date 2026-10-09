@@ -263,6 +263,21 @@ class ShiftImmQ(Instruction):
 
 
 @dataclass
+class ShiftImm(Instruction):
+    """32-bit ShiftImmQ."""
+    kind: str
+    count: int
+    dst: Operand
+
+    @property
+    def mnemonic(self) -> str:
+        return f"{self.kind}l"
+
+    def operands(self) -> list[str]:
+        return [f"${self.count}", self.dst.emit()]
+
+
+@dataclass
 class Cdq(Instruction):
     """Sign-extend %eax into %edx:%eax (before IDiv)."""
     mnemonic = "cdq"

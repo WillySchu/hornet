@@ -11,7 +11,7 @@ import pytest
 
 from backend.x86_64.assembly_ast import (
     Add, AddQ, And, AndQ, Cdq, Cmp, CmpQ, Cqto, FrameSlot, IDiv, IDivQ, IMul, IMulQ, IMulWide, Imm, Mov, MovQ,
-    MovSXD, MovZX, ShiftImmQ, Neg, NegQ, Not, NotQ, Or, OrQ, Register, SetCC, ShiftLeft, ShiftLeftQ,
+    MovSXD, MovZX, ShiftImm, ShiftImmQ, Neg, NegQ, Not, NotQ, Or, OrQ, Register, SetCC, ShiftLeft, ShiftLeftQ,
     ShiftRightArithmetic, ShiftRightArithmeticQ, Sub, SubQ, Xor, XorQ,
 )
 from backend.x86_64.codegen import CodeGenerator
@@ -130,10 +130,12 @@ class Sim:
             elif t is IMulWide:
                 prod = _signed(self.regs.get('rax', 0), 64) * _signed(self.read(ins.operand, 8), 64)
                 self.regs['rax'], self.regs['rdx'] = prod & M64, (prod >> 64) & M64
-            elif t is ShiftImmQ:
-                v = self.read(ins.dst, 8)
-                v = {'sar': _signed(v, 64) >> ins.count, 'shr': v >> ins.count, 'shl': v << ins.count}[ins.kind]
-                self.write(ins.dst, v, 8)
+            elif t in (ShiftImm, ShiftImmQ):
+                w = 8 if t is ShiftImmQ else 4
+                assert 0 <= ins.count < w * 8, "a count the processor would cut down"
+                v = self.read(ins.dst, w)
+                v = {'sar': _signed(v, w * 8) >> ins.count, 'shr': v >> ins.count, 'shl': v << ins.count}[ins.kind]
+                self.write(ins.dst, v, w)
             else:
                 raise AssertionError(f"simulator has no rule for {ins!r}")
 
@@ -291,3 +293,45 @@ def test_division_by_constant_matches_idiv(divisor, bits):
                 if dst.id != src.id:
                     assert _signed(sim.read(sel._loc(src, width), width), bits) == _signed(n, bits)
                 assert sim.regs['rbx'] == 12345
+
+
+COUNTS = [0, 1, 3, 31, 32, 33, 63, 64, 67, -1, -64, 2 ** 31 - 1]
+
+
+@pytest.mark.parametrize('count', COUNTS)
+@pytest.mark.parametrize('bits', [64, 32])
+def test_a_shift_by_a_constant_needs_no_count_register(count, bits):
+    t = Type.INT if bits == 64 else Type.INT32
+    width = bits // 8
+    lo, hi = -2 ** (bits - 1), 2 ** (bits - 1) - 1
+    r = random.Random(count * 3 + bits)
+    for op in (BinaryOp.SHIFT_LEFT, BinaryOp.SHIFT_RIGHT):
+        for n in [lo, hi, 0, 1, -1, 5, -5] + [r.randint(lo, hi) for _ in range(20)]:
+            for layout in range(4):  # in registers or in the frame; onto itself or into another
+                src, dst = Temp(1, t), Temp(2 if layout % 2 else 1, t)
+                host = CodeGenerator()
+                host.ir_program = IRProgram(ids=IdAllocator())
+                host._register_assignment = {1: 'r12d', 2: 'r13d'} if layout < 2 else {}
+                sel = InstructionSelector(host, IRFunction(name='f'))
+                out = sel.lower_ir([IRBinOp(dst=dst, op=op, left=src, right=IRConst(count, t))])
+                assert [type(i) for i in out if 'Shift' in type(i).__name__] == [ShiftImmQ if bits == 64 else ShiftImm]
+                sim = Sim()
+                sim.write(sel._loc(src, width), n, width)
+                sim.write(Register('rcx'), 12345, 8)
+                sim.run(out)
+                assert _signed(sim.read(sel._loc(dst, width), width), bits) == _model(op, n, count, bits), (op, n, out)
+                if dst.id != src.id:
+                    assert _signed(sim.read(sel._loc(src, width), width), bits) == n
+                assert sim.regs['rcx'] == 12345  # (%rcx is where a count that isn't constant goes)
+
+
+def test_a_narrow_shift_by_a_constant_needs_no_count_register():
+    host = CodeGenerator()
+    host.ir_program = IRProgram(ids=IdAllocator())
+    host._register_assignment = {}
+    sel = InstructionSelector(host, IRFunction(name='f'))
+    x = Temp(1, Type.INT8)
+    for op, kind in ((BinaryOp.SHIFT_LEFT, 'shl'), (BinaryOp.SHIFT_RIGHT, 'sar')):
+        out = sel.lower_ir([IRBinOp(dst=Temp(2, Type.INT8), op=op, left=x, right=IRConst(35, Type.INT8))])
+        assert ShiftImm(kind, 3, Register('eax')) in out  # (at 32 bits, as a count in %cl is: 35 is 3)
+        assert not any(isinstance(i, (ShiftLeft, ShiftRightArithmetic)) for i in out)

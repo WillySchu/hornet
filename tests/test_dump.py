@@ -102,11 +102,11 @@ EXPECTED = {
         "  return t4\n"
         "\n"
     ),
-    'optimized-ir': (  # dividing by one is gone
+    'optimized-ir': (  # dividing by one is gone, and multiplying by two is a shift
         "function twice$(t1: int) -> int\n"
         "  slot 0: 8 bytes (param:n#0)\n"
         "  t1 lives in slot 0\n"
-        "  t2: int = multiply t1, 2\n"
+        "  t2: int = shift_left t1, 1\n"
         "  return t2\n"
         "\n"
         "function main() -> int\n"

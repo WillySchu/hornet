@@ -12,6 +12,7 @@ from optimize.dead_code import remove_dead_code
 from optimize.identity_reduction import reduce_identities
 from optimize.jump_threading import merge_blocks, thread_jumps
 from optimize.loop_inversion import invert_loops
+from optimize.strength_reduction import reduce_strength
 
 MAX_ROUNDS = 10
 
@@ -32,6 +33,7 @@ def optimize_function(ir_fn: IRFunction) -> None:
         propagate_copies(ir_fn, pinned)
         fold_constants(ir_fn)
         reduce_identities(ir_fn)
+        reduce_strength(ir_fn)
         coalesce_copies(ir_fn, pinned)
         fold_addresses(ir_fn, pinned)
         remove_dead_code(ir_fn, pinned)

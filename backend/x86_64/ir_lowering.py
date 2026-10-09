@@ -24,6 +24,7 @@ from backend.x86_64.assembly_ast import (
     IMulWide,
     MovSX,
     MovSXD,
+    ShiftImm,
     ShiftImmQ,
     MovZX,
     Neg,
@@ -89,6 +90,12 @@ from backend.common.division import is_power_of_two, magic
 from backend.x86_64.utils import as_byte_register, as_qword_register, COMPARISON_CONDITION_CODES
 from typesys import Type
 from ops import BinaryOp, UnaryOp
+
+
+def shift_by_constant(op: BinaryOp, count: int, dst: Operand, wide: bool) -> Instruction:
+    """`dst` shifted by `count`, cut to the bits of it a shift by %cl would go by."""
+    kind = 'shl' if op == BinaryOp.SHIFT_LEFT else 'sar'
+    return ShiftImmQ(kind, count & 63, dst) if wide else ShiftImm(kind, count & 31, dst)
 
 
 class InstructionSelector:
@@ -296,12 +303,13 @@ class InstructionSelector:
     def _direct_shift(self, op, d: Operand, a: Operand, b: Operand, width: int) -> list:
         cls = {BinaryOp.SHIFT_LEFT: (ShiftLeft, ShiftLeftQ),
                BinaryOp.SHIFT_RIGHT: (ShiftRightArithmetic, ShiftRightArithmeticQ)}[op][width == 8]
-        out = self._mov(b, self._scratch('ecx', width), width)  # count first: d may be b's home
+        by_constant = isinstance(b, Imm)
+        out = [] if by_constant else self._mov(b, self._scratch('ecx', width), width)  # first: d may be b's home
         if d != a:
             if not isinstance(d, Register):
                 a = self._as_source(a, d, width, 'eax', out)
             out.extend(self._mov(a, d, width))
-        return out + [cls(dst=d)]
+        return out + [shift_by_constant(op, b.value, d, width == 8) if by_constant else cls(dst=d)]
 
     def _direct_cmp(self, left: IRValue, right: IRValue, width: int) -> list:
         """Set flags from left - right."""
@@ -558,9 +566,14 @@ class InstructionSelector:
                 out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
             elif isinstance(instr, IRBinOp):
                 out.extend(self._gen_load_value(instr.left, Register('eax')))
-                out.extend(self._gen_load_value(instr.right, Register('ecx')))
-                out.extend(self.host.gen_binary_op(
-                    instr.op, src=Register('ecx'), dst=Register('eax'), operand_type=instr.left.type))
+                if instr.op in (BinaryOp.SHIFT_LEFT, BinaryOp.SHIFT_RIGHT) and isinstance(instr.right, IRConst):
+                    wide = is_wide_type(instr.left.type)
+                    acc = Register('rax' if wide else 'eax')
+                    out.append(shift_by_constant(instr.op, instr.right.value, acc, wide))
+                else:
+                    out.extend(self._gen_load_value(instr.right, Register('ecx')))
+                    out.extend(self.host.gen_binary_op(
+                        instr.op, src=Register('ecx'), dst=Register('eax'), operand_type=instr.left.type))
                 out.extend(self._gen_write_temp_from(Register('eax'), instr.dst))
             elif isinstance(instr, IRUnOp):
                 out.extend(self._gen_load_value(instr.operand, Register('eax')))
