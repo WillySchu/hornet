@@ -746,6 +746,8 @@ class ExpressionChecker:
         if value_type == Type.NONE and target_type.kind == TypeKind.DICT:
             raise SemanticError(f"A dict is never none -- write `{target_type}{{}}` (or leave it uninitialized) "
                                 f"for an empty one", expr)
+        if value_type == Type.INT and target_type.kind == TypeKind.SUM and self.as_folded_int_literal(expr) is not None:
+            return self._literal_in_sum(expr, target_type) or value_type
         if value_type == Type.INT and target_type in _NARROW_INT_RANGES:
             literal_value = self.as_folded_int_literal(expr)
             if literal_value is not None:
@@ -810,6 +812,20 @@ class ExpressionChecker:
             return None  # integers, bool, str, enums, pointers (by address), none
         return next((part for part in map(self._incomparable_part, parts) if part is not None), None)
 
+    def _literal_in_sum(self, literal: Node, sum_type: Type) -> Optional[Type]:
+        """The variant of `sum_type` that an integer literal is, where one is wanted: the sum's int;
+        or, there being no int, its one integer variant, which the literal must be in range of (and is
+        recorded as). None if the sum has no integer variant. Several, and no int among them, is an
+        error: nothing says which."""
+        integers = [v for v in self.decls.sum_types[sum_type.sum_type_name].variants if v in INTEGER_TYPES]
+        if Type.INT in integers:
+            return Type.INT
+        if len(integers) > 1:
+            raise SemanticError(
+                f"{sum_type} has more than one integer variant ({', '.join(map(str, integers))}) and none is int "
+                f"-- say which this is, as in `{integers[0]}({self.as_folded_int_literal(literal)})`", literal)
+        return self.check_value_flowing_into(literal, integers[0]) if integers else None
+
     def _check_sum_equality(self, expr: Binary, left_type: Type, right_type: Type) -> Type:
         """`==` or `!=` with a sum on one side or both. They are compared as one sum type, the wider:
         the other side is a narrower sum, or a value of one of its variants. Equal is holding the
@@ -829,15 +845,7 @@ class ExpressionChecker:
                 else (right_type, left_type, expr.left)
             variants = self.decls.sum_types[compared.sum_type_name].variants
             if self.as_folded_int_literal(value) is not None:
-                # An integer literal is the sum's int; or, there being no int, its one integer variant.
-                integers = [v for v in variants if v in INTEGER_TYPES]
-                if Type.INT not in integers and len(integers) > 1:
-                    raise SemanticError(
-                        f"{compared} has more than one integer variant ({', '.join(map(str, integers))}) and "
-                        f"none is int -- say which this is, as in `{integers[0]}({self.as_folded_int_literal(value)})`",
-                        value)
-                if Type.INT not in integers and integers:
-                    other = self.check_value_flowing_into(value, integers[0])
+                other = self._literal_in_sum(value, compared) or other
             if other not in variants:
                 raise SemanticError(
                     f"Cannot compare {left_type} to {right_type} with '{op}' -- {other} is not one of {compared}'s "
