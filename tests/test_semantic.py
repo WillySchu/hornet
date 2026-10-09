@@ -1,4 +1,4 @@
-"""Tests for semantic.py"""
+"""Tests for semantic analysis (the semantic package)."""
 
 import pytest
 

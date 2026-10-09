@@ -79,7 +79,7 @@ def test_circular_import_terminates_and_both_sides_resolve():
     """a imports b, b imports a right back -- discovery must terminate
     (not infinite-loop) and both modules must still resolve their own
     alias for one another correctly. Whether a program built from this
-    actually type-checks is semantic.py's own concern (the merge
+    actually type-checks is semantic analysis's own concern (the merge
     model's two-phase analysis is what makes it SAFE to allow this at
     all) -- this test is scoped to discovery alone: it must not hang
     or crash on a genuine cycle."""

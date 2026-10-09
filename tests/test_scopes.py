@@ -657,7 +657,7 @@ def test_intrinsic_with_mismatched_signature_is_rejected():
 def test_intrinsic_signature_accepts_either_byte_or_uint8_spelling():
     """*byte and *uint8 are the same type (see lexer.py's own keyword
     table) but textually different spellings at the AST-shape level
-    this validation runs at, before semantic.py's own type_from_name
+    this validation runs at, before semantic analysis's own type_from_name
     ever canonicalizes anything -- confirms _canonical_type_spelling
     treats them as equivalent rather than rejecting the less-common
     spelling as a signature mismatch."""

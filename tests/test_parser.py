@@ -2393,7 +2393,7 @@ def test_parse_assign_compound_shift_right():
 
 # ---------------------------------------------------------------------------
 # Source positions (Node.line/col) -- one test per position-derivation
-# strategy parser.py uses, not per node type (many node types share the
+# strategy the parser uses, not per node type (many node types share the
 # same strategy): a "start token" the method itself captured, or a
 # position propagated from an already-parsed child. Real line/col
 # values (not all 1s) are used throughout so a test can't pass by
@@ -2634,7 +2634,7 @@ def test_position_new_node_defaults_to_zero_when_built_by_hand():
 
 # ---------------------------------------------------------------------------
 # type Name struct: ... -- the only spelling for a struct declaration
-# now that the hard cutover has happened (see parser.py's own
+# now that the hard cutover has happened (see parser/declarations.py's
 # parse_program: a bare `struct Name:` at the top level is rejected
 # outright, with a specific error pointing at the new spelling).
 # ---------------------------------------------------------------------------
@@ -2791,7 +2791,7 @@ def test_parse_type_declaration_sum_type_more_than_two_variants():
 def test_parse_type_declaration_sum_type_single_variant_raises():
     """The parser's own "at least two variants" check -- mirroring
     _parse_struct_body's "at least one field" -- fires on a single
-    bare name with no '|' at all, before semantic.py ever sees it."""
+    bare name with no '|' at all, before semantic analysis ever sees it."""
     tokens = [
         lexer.Token(lexer.TokenType.TYPE, 'type', 1, 1),
         lexer.Token(lexer.TokenType.IDENTIFIER, 'Shape', 1, 6),
@@ -2841,7 +2841,7 @@ def test_parse_program_sorts_sum_type_into_sum_types():
 # right variable_name/type_name, ordinary conditions are unaffected,
 # and while doesn't recognize this shape at all) -- whether either
 # name refers to anything real, and whether NAME's own type actually
-# narrows anywhere, are semantic.py's job, not tested here.
+# narrows anywhere, are semantic analysis's job, not tested here.
 # ---------------------------------------------------------------------------
 
 def test_if_condition_recognizes_is_check():
@@ -3084,7 +3084,7 @@ def test_while_condition_may_be_an_is_check():
 # ---------------------------------------------------------------------------
 # `match NAME: (is TypeName: <block>)+ [else: <block>]?` -- a Match node with one
 # IsCheck per arm. These check its shape and the grammar's error cases; whether
-# a match is exhaustive is semantic.py's job, not tested here.
+# a match is exhaustive is semantic analysis's job, not tested here.
 # ---------------------------------------------------------------------------
 
 def test_match_is_a_match_node_with_one_check_per_arm():
@@ -3214,8 +3214,8 @@ def test_match_requires_is_or_else_between_arms():
 
 
 def test_parse_statement_dispatches_to_match():
-    """parse_statement's own dispatch (`if self.check(TokenType.MATCH):
-    return self.parse_match()`) -- every other test in this section
+    """parse_statement's own dispatch (`if p.check(TokenType.MATCH):
+    return parse_match(p)`) -- every other test in this section
     calls parse_match directly, bypassing that dispatch line entirely,
     so this is the one test that actually goes through parse_program's
     ordinary statement-parsing path."""
@@ -3293,9 +3293,9 @@ def test_pointer_to_struct_type_in_a_var_decl():
 
 
 def test_pointer_to_pointer_type_parses_without_restriction():
-    """parse_type/PointerTypeExpr don't reject `**int` themselves --
-    see PointerTypeExpr's own docstring for why that's semantic.py's
-    job instead."""
+    """parse_type/PointerTypeExpr don't reject `**int` themselves:
+    that is semantic analysis's job (type_from_name, in
+    semantic/type_resolution.py, is what refuses it)."""
     prog = _parse_program(
         "def int main():\n"
         "    **int p\n"
@@ -3405,7 +3405,7 @@ def test_compound_assignment_through_a_dereference_now_parses():
 # ---------------------------------------------------------------------------
 # `extern [type] NAME(params)` -- an external function declaration, no
 # body, no ':'. Introduces one new AST node (ExternFunctionDecl, distinct
-# from Function -- see its own docstring in parser.py for why) and one
+# from Function -- see its own docstring in parser/nodes.py for why) and one
 # new Program list (extern_functions), sorted at parse time exactly like
 # StructDef/SumTypeDef already are. Grammar mirrors parse_function's own
 # return-type/name/params handling exactly, just without the trailing
