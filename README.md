@@ -392,6 +392,24 @@ def LineResult next_line():
 
 That is true of the value only: a `*StrResult` is not a `*LineResult`, nor a `[]StrResult` a `[]LineResult`. The other direction needs a check first; see [Pattern Matching](#pattern-matching).
 
+An integer literal where a sum is wanted is the sum's `int`. A sum with no `int` and one other integer variant takes it as that, range-checked; with several, a cast has to say which:
+
+```hornet
+type Small is int8 | str
+
+Small m = 7              # its int8
+```
+
+Sums compare with `==` and `!=`: equal is holding the same variant, with equal values. A sum may be compared with another of its type, with a value of one of its variants, or with a wider sum, and is compared as the wider of the two:
+
+```hornet
+StrResult a = 'same'
+print(a == 'same')       # true
+print(a == line)         # line a LineResult
+```
+
+A sum with a slice or dictionary among its variants has no `==`, since they have none. Only a comparison with `none` narrows.
+
 The representation uses a discriminant and payload storage for the largest variant.
 
 ## Enums
@@ -817,7 +835,7 @@ Each iteration has its own bindings, so taking a binding's address is allowed. R
 <  >  <=  >=  ==  !=
 ```
 
-`is` and `is not` bind like `==`; see [Pattern Matching](#pattern-matching). Ordering applies to integers of the same type, and to strings (byte by byte). Equality applies to integers, `bool`, `str`, enums, pointers, and arrays and structs of comparable types. Pointers can be compared with `none`, and so can a sum with a `none` variant (`x == none` means `x is none`); slices and dictionaries are never `none`.
+`is` and `is not` bind like `==`; see [Pattern Matching](#pattern-matching). Ordering applies to integers of the same type, and to strings (byte by byte). Equality applies to integers, `bool`, `str`, enums, pointers (by address), and arrays, structs, and sum types whose parts are all comparable; slices and dictionaries have none. Two sums are equal when they hold the same variant and its values are equal; see [Sum Types](#sum-types) for what a sum may be compared with. Pointers can be compared with `none`, and so can a sum with a `none` variant (`x == none` means `x is none`); slices and dictionaries are never `none`.
 
 ### Membership
 
@@ -1482,8 +1500,7 @@ Hornet is still experimental. Some notable limitations are:
 * `for ... in ...` can't iterate a function-call result or a dereference; assign it to a variable first.
 * Only variables narrow; a field, element, or call result needs an `as` binding, which is for an `if` or `elif` condition and can't sit under `or` or `not`.
 * Enums have no explicit member values or ordering, and `for ... in` doesn't iterate one.
-* Sum-type equality is not implemented.
-* Slice equality and dictionary equality are not implemented.
+* Slice equality and dictionary equality are not implemented, so neither is that of a struct, array, or sum type that holds one.
 * `in` does not apply to strings.
 * `format` has no widths, padding, or other format options, and there are no interpolated string literals.
 * The FFI currently supports only scalar and pointer arguments/results.
@@ -1546,7 +1563,6 @@ Current and future work includes:
 * More complete pointer and address-taking support
 * More precise escape analysis for iterators, aliases, and data more than one pointer away from a call argument
 * Narrowing of fields and elements, and `as` bindings in loop conditions
-* Sum-type equality
 * Generic types and functions
 * First-class function types and closures
 * Interpolated string literals, and format options
