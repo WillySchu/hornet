@@ -37,6 +37,14 @@ def _check_main_signature(fn, param_types: list, return_type: Type) -> None:
             "'main' takes no parameters, or exactly '(int argc, *byte argv)'", fn.params[0] if fn.params else fn)
 
 
+def _one_of(types) -> str:
+    """`A`, `A or B`, `A, B, or C`."""
+    names = [str(t) for t in types]
+    if len(names) <= 2:
+        return " or ".join(names)
+    return ", ".join(names[:-1]) + f", or {names[-1]}"
+
+
 class StatementChecker:
     """Checks functions, one at a time (analyze_function)."""
 
@@ -337,10 +345,15 @@ class StatementChecker:
         return {tested}
 
     def _check_match_exhaustiveness(self, stmt: 'Match') -> None:
-        """Reject duplicate arms; require exhaustiveness without an else."""
+        """Reject an arm that can't be reached; without an else, require an arm for every variant the
+        subject can hold here: all its type's, less any that earlier checks have ruled out."""
         subject_name = stmt.variable_name
-        subject_type = self.symbols[self.facts.decls[stmt.arms[0][0].nid]].type  # as declared, not as narrowed
-        sum_type_info = self.decls.sum_types[subject_type.sum_type_name]
+        decl_id = self.facts.decls[stmt.arms[0][0].nid]
+        subject_type = self.symbols[decl_id].type  # as declared
+        declared = self.decls.sum_types[subject_type.sum_type_name].variants
+        # (Where it can hold nothing at all, in code no path reaches, there is nothing to go by.)
+        possible = set(self.context.scopes.possible_variants(decl_id)) or set(declared)
+        narrowed = len(possible) < len(declared)
 
         seen: Dict[Type, IsCheck] = {}
         covered: set = set()  # the variants the arms so far take between them
@@ -352,8 +365,13 @@ class StatementChecker:
                     f"this match on '{subject_name}'",
                     arm_condition,
                 )
-            tested = self._variants_tested(arm_type)
-            if tested and tested <= covered:  # (what isn't a variant at all is the arm's own check's to say)
+            tested = self._variants_tested(arm_type) & set(declared)  # (what isn't a variant is the check's to say)
+            if tested and not tested & possible:
+                raise SemanticError(
+                    f"'{arm_condition.type_name}' is never reached in this match on '{subject_name}': checks "
+                    f"before the match have ruled it out, so '{subject_name}' can only be "
+                    f"{_one_of(v for v in declared if v in possible)} here", arm_condition)
+            if tested and tested & possible <= covered:
                 raise SemanticError(
                     f"'{arm_condition.type_name}' is never reached in this match on '{subject_name}': the arms "
                     f"above it take every variant it tests for", arm_condition)
@@ -363,11 +381,11 @@ class StatementChecker:
         if stmt.else_body is not None:
             return
 
-        missing = [v for v in sum_type_info.variants if v not in covered]
+        missing = [v for v in declared if v in possible and v not in covered]
         if missing:
             raise SemanticError(
                 f"This match on '{subject_name}' (declared {subject_type}) "
-                f"doesn't cover every variant -- missing: "
+                f"doesn't cover every variant{' it can hold here' if narrowed else ''} -- missing: "
                 f"{', '.join(str(v) for v in missing)} "
                 f"(add an arm for each, or an 'else:' to cover the rest)",
                 stmt,

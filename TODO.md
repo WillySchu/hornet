@@ -14,7 +14,6 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- match exhaustiveness. It does not take earlier exclusions into account, so a variant already ruled out by a guard must still have an arm or an else.
 - Report function name on stack overflow.
 - Literal-only expressions. int8 x = 1 + 2 is still rejected, because only a single literal adapts to a narrow type.
 - No mutable globals. Worth recording, since the port will need context structs because of it.

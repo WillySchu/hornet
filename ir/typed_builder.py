@@ -409,6 +409,16 @@ class TypedFunctionBuilder:
             test_ir, is_it = self.tag_is(tag, s.subject.type, variant)
             ir += test_ir + [IRBranch(cond=is_it, true_label=arm, false_label=next_arm), IRLabel(arm)]
             ir += self.block(body) + [IRJump(end), IRLabel(next_arm)]
+        if s.else_body is None and isinstance(s.subject, t.Local) and s.subject.symbol.id in self.addressed:
+            # No arm took it. If the arms leave a variant out, that is one the checker saw ruled out
+            # before the match: a pointer to the variable has changed it since.
+            registry = self.ir_program.sum_type_registry
+            taken = set()
+            for variant, _ in s.arms:
+                taken |= set(registry[variant.sum_type_name].variants) if variant.kind == TypeKind.SUM else {variant}
+            if not set(registry[s.subject.type.sum_type_name].variants) <= taken:
+                message = f"'{s.subject.symbol.name}' changed variant while narrowed"
+                return ir + [IRJump(self.panics.label(located(message, s.where))), IRLabel(end)]
         return ir + self.block(s.else_body) + [IRJump(end), IRLabel(end)]
 
     def tag_is(self, tag, sum_type: Type, tested: Type) -> tuple:

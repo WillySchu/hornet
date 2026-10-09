@@ -1024,8 +1024,9 @@ class ExpressionChecker:
 
         def fits(variant: Type) -> bool:
             return has(variant.element_type if variant.kind == TypeKind.POINTER else variant)
-        holdable = self.decls.sum_types[sum_type.sum_type_name].variants if through_pointer \
-            else self._may_hold(expr, sum_type)
+        declared = self.decls.sum_types[sum_type.sum_type_name].variants
+        # (A variable that checks have left nothing it can hold is told of all its type's.)
+        holdable = declared if through_pointer else (self._may_hold(expr, sum_type) or declared)
         fitting = [variant for variant in holdable if fits(variant)]
         if not fitting:
             listed = ', '.join(map(str, holdable))

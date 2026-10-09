@@ -4,8 +4,10 @@ the variable isn't the tested variant. With one variant left it has that variant
 import pytest
 
 from tests.test_compiler import (
-    GCC_SKIP, _parse, analyze, assert_program_semantic_error, assert_program_stdout,
+    GCC_SKIP, _parse, analyze, assert_program_panics, assert_program_semantic_error, assert_program_stdout,
 )
+
+MAIN = "def int main():\n    return 0\n"
 
 DECLS = (
     "type Circle struct:\n"
@@ -159,9 +161,7 @@ def test_bindings_none_and_checks_of_a_narrowed_variable():
         "        return 1\n"
         "    if s is Circle:\n"  # never true here; still allowed
         "        return 2\n"
-        "    match s:\n"
-        "        is Circle:\n"
-        "            return 3\n"
+        "    match s:\n"         # (an arm for Circle is not: see the match tests below)
         "        is Square:\n"
         "            return s.side\n"
         "def int main():\n"
@@ -236,3 +236,115 @@ def test_a_new_variable_of_the_same_name_is_not_narrowed():
         "            s = Circle(2)\n"
         "    return 0\n"
     )
+
+
+# -- a `match` on a variable that checks have narrowed: its arms are for what it can still hold
+
+MATCHED = (
+    "type Circle struct:\n"
+    "    int radius\n"
+    "type Square struct:\n"
+    "    int side\n"
+    "type Figure is Circle | Square | none\n"
+    "type Solid is Circle | Square\n"
+)
+
+
+@GCC_SKIP
+def test_a_match_needs_arms_only_for_what_is_left():
+    assert_program_stdout(
+        MATCHED +
+        "def int after_a_guard(Figure f):\n"
+        "    if f is none:\n        return 0\n"
+        "    match f:\n"                                           # no arm for none: it was ruled out
+        "        is Circle:\n            return f.radius\n"
+        "        is Square:\n            return f.side\n"
+        "def int one_left(Figure f):\n"
+        "    if f is Circle:\n"
+        "        match f:\n"
+        "            is Circle:\n                return f.radius\n"
+        "    return 0\n"
+        "def int by_a_sum(Figure f):\n"
+        "    if f is Solid:\n"                                     # a test for a sum narrows to its variants
+        "        match f:\n"
+        "            is Circle:\n                return f.radius\n"
+        "            is Square:\n                return f.side\n"
+        "    return 0\n"
+        "def int part_of_an_arm(Figure f):\n"
+        "    if f is Circle:\n        return 1\n"
+        "    match f:\n"
+        "        is Solid:\n            return f.side\n"           # Solid, less the Circle ruled out: a Square
+        "        is none:\n            return 0\n"
+        "def int with_else(Figure f):\n"
+        "    if f is none:\n        return 0\n"
+        "    match f:\n"
+        "        is Circle:\n            return f.radius\n"
+        "        else:\n            return f.side\n"
+        "def int main():\n"
+        "    []Figure all = []Figure[Circle(2), Square(3), none]\n"
+        "    for f in all:\n"
+        "        print(format('{} {} {} {} {}', after_a_guard(f), one_left(f), by_a_sum(f), part_of_an_arm(f),\n"
+        "                     with_else(f)))\n"
+        "    return 0\n",
+        "2 2 2 1 2\n3 0 3 3 3\n0 0 0 0 0\n",
+    )
+
+
+@pytest.mark.parametrize("body,message", [
+    # An arm for what was ruled out can't be reached.
+    ("    if f is none:\n        return 0\n    match f:\n        is Circle:\n            return 1\n"
+     "        is Square:\n            return 2\n        is none:\n            return 3\n",
+     "'none' is never reached in this match on 'f': checks before the match have ruled it out, so 'f' can only be "
+     "Circle or Square here"),
+    ("    if f is Solid:\n        return 0\n    match f:\n        is Solid:\n            return 1\n"
+     "        is none:\n            return 2\n",
+     "'Solid' is never reached in this match on 'f': checks before the match have ruled it out, so 'f' can only be "
+     "none here"),
+    # What is left still needs its arms.
+    ("    if f is none:\n        return 0\n    match f:\n        is Circle:\n            return 1\n",
+     r"This match on 'f' \(declared Figure\) doesn't cover every variant it can hold here -- missing: Square "),
+    # Assigned since: it may hold any again.
+    ("    if f is none:\n        return 0\n    f = none\n    match f:\n        is Circle:\n            return 1\n"
+     "        is Square:\n            return 2\n",
+     r"This match on 'f' \(declared Figure\) doesn't cover every variant -- missing: none "),
+    # Never narrowed: as it always was.
+    ("    match f:\n        is Circle:\n            return 1\n        is Square:\n            return 2\n",
+     r"doesn't cover every variant -- missing: none \(add an arm for each, or an 'else:' to cover the rest\)"),
+])
+def test_what_such_a_match_refuses(body, message):
+    assert_program_semantic_error(MATCHED + "def int g(Figure f):\n" + body + "    return 9\n" + MAIN, match=message)
+
+
+def test_a_subject_that_is_no_variable_is_never_narrowed():
+    # `match EXPR as NAME` binds a fresh variable: every variant needs its arm, whatever was known of EXPR's parts.
+    assert_program_semantic_error(
+        MATCHED + "type Holder struct:\n    Figure f\n"
+        "def int g(Holder h):\n    if h.f is none:\n        return 0\n"
+        "    match h.f as f:\n        is Circle:\n            return 1\n"
+        "        is Square:\n            return 2\n" + MAIN,
+        match="doesn't cover every variant -- missing: none")
+
+
+@GCC_SKIP
+def test_a_variant_ruled_out_and_put_back_through_a_pointer_is_caught():
+    source = (
+        MATCHED +
+        "def int g(bool change):\n"
+        "    Figure f = Circle(2)\n"
+        "    *Figure p = &f\n"
+        "    if f is none:\n        return 0\n"
+        "    if change:\n        *p = none\n"                       # what the match was told it can't be
+        "    match f:\n"
+        "        is Circle:\n            return f.radius\n"
+        "        is Square:\n            return f.side\n")
+    assert_program_stdout(source + "def int main():\n    print(g(false))\n    return 0\n", "2\n")
+    assert_program_panics(source + "def int main():\n    print(g(true))\n    return 0\n",
+                          "'f' changed variant while narrowed")
+
+
+def test_a_variable_that_can_hold_nothing_is_told_of_all_its_variants():
+    # Inside two checks that can't both hold, what the variable "can hold" is nothing: the hint lists none of that.
+    assert_program_semantic_error(
+        MATCHED + "def int g(Figure f):\n    if f is Circle:\n        if f is Square:\n            return f.side\n"
+        "    return 0\n" + MAIN,
+        match="Figure is a sum type: test which variant 'f' holds first, as in `if f is Square:`")
