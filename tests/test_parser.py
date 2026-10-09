@@ -746,7 +746,7 @@ def test_parse_type_empty():
         match=re.escape(
             "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name,"
             " '[size]type', or '[]type'), got end of input at line 1, column 1")):
-        p.parse_type()
+        parser.type_exprs.parse_type(p.stream)
 
 
 def test_parse_type_int():
@@ -756,7 +756,7 @@ def test_parse_type_int():
     ]
     p = parser.Parser(tokens)
 
-    assert 'int' == p.parse_type()
+    assert 'int' == parser.type_exprs.parse_type(p.stream)
 
 
 def test_parse_type_str():
@@ -766,7 +766,7 @@ def test_parse_type_str():
     ]
     p = parser.Parser(tokens)
 
-    assert 'str' == p.parse_type()
+    assert 'str' == parser.type_exprs.parse_type(p.stream)
 
 
 def test_parse_type_bool():
@@ -776,7 +776,7 @@ def test_parse_type_bool():
     ]
     p = parser.Parser(tokens)
 
-    assert 'bool' == p.parse_type()
+    assert 'bool' == parser.type_exprs.parse_type(p.stream)
 
 
 def test_parse_type_array():
@@ -789,7 +789,7 @@ def test_parse_type_array():
     ]
     p = parser.Parser(tokens)
 
-    assert parser.ArrayTypeExpr(size=3, element_type='int') == p.parse_type()
+    assert parser.ArrayTypeExpr(size=3, element_type='int') == parser.type_exprs.parse_type(p.stream)
 
 
 def test_parse_type_array_missing_size():
@@ -803,7 +803,7 @@ def test_parse_type_array_missing_size():
             parser.ParseError,
             match=re.escape('Expected an array size (a positive integer or constant expression),'
                             ' or \']\' for a slice type at line 1, column 2')):
-        p.parse_type()
+        parser.type_exprs.parse_type(p.stream)
 
 
 def test_parse_type_array_missing_closing_brakcet():
@@ -815,7 +815,7 @@ def test_parse_type_array_missing_closing_brakcet():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape('Expected \']\' after array size at line 1, column 3')):
-        p.parse_type()
+        parser.type_exprs.parse_type(p.stream)
 
 
 def test_parse_type_array_missing_type():
@@ -832,7 +832,7 @@ def test_parse_type_array_missing_type():
         match=re.escape(
             "Expected a type ('int', 'int8', 'uint8', 'int64', 'bool', 'str', a struct name,"
             " '[size]type', or '[]type'), got end of input at line 1, column 4")):
-        p.parse_type()
+        parser.type_exprs.parse_type(p.stream)
 
 
 def test_parse_type_array_float_size():
@@ -847,7 +847,7 @@ def test_parse_type_array_float_size():
 
     with pytest.raises(
             parser.ParseError, match=re.escape("Array size must be a whole number, got '3.3' at line 1, column 2")):
-        p.parse_type()
+        parser.type_exprs.parse_type(p.stream)
 
 
 def test_parse_type_array_negative_size():
@@ -861,7 +861,7 @@ def test_parse_type_array_negative_size():
     p = parser.Parser(tokens)
 
     with pytest.raises(parser.ParseError, match=re.escape("Array size must be positive, got -3 at line 1, column 2")):
-        p.parse_type()
+        parser.type_exprs.parse_type(p.stream)
 
 
 def test_parse_type_array_nested():
@@ -877,7 +877,8 @@ def test_parse_type_array_nested():
     ]
     p = parser.Parser(tokens)
 
-    assert parser.ArrayTypeExpr(size=3, element_type=parser.ArrayTypeExpr(size=2, element_type='int')) == p.parse_type()
+    expected = parser.ArrayTypeExpr(size=3, element_type=parser.ArrayTypeExpr(size=2, element_type='int'))
+    assert expected == parser.type_exprs.parse_type(p.stream)
 
 
 def test_parse_block_empty():
@@ -2403,7 +2404,7 @@ def test_position_constant_is_its_own_token():
         lexer.Token(lexer.TokenType.NUMBER, '7', 3, 10),
         lexer.Token(lexer.TokenType.EOF, '', 3, 11),
     ]
-    result = parser.Parser(tokens).parse_primary()
+    result = parser.expressions.parse_primary(parser.TokenStream(tokens))
     assert (result.line, result.col) == (3, 10)
 
 
@@ -2412,7 +2413,7 @@ def test_position_variable_is_its_own_token():
         lexer.Token(lexer.TokenType.IDENTIFIER, 'x', 5, 2),
         lexer.Token(lexer.TokenType.EOF, '', 5, 3),
     ]
-    result = parser.Parser(tokens).parse_primary()
+    result = parser.expressions.parse_primary(parser.TokenStream(tokens))
     assert (result.line, result.col) == (5, 2)
 
 
@@ -2422,7 +2423,7 @@ def test_position_unary_is_its_operator_token():
         lexer.Token(lexer.TokenType.NUMBER, '1', 2, 9),
         lexer.Token(lexer.TokenType.EOF, '', 2, 10),
     ]
-    result = parser.Parser(tokens).parse_unary()
+    result = parser.expressions.parse_unary(parser.TokenStream(tokens))
     assert (result.line, result.col) == (2, 8)
 
 
@@ -2437,7 +2438,7 @@ def test_position_binary_is_left_operands_not_operators():
         lexer.Token(lexer.TokenType.IDENTIFIER, 'b', 2, 3),
         lexer.Token(lexer.TokenType.EOF, '', 2, 4),
     ]
-    result = parser.Parser(tokens).parse_binary()
+    result = parser.expressions.parse_binary(parser.TokenStream(tokens))
     assert (result.line, result.col) == (1, 1)
 
 
@@ -2453,7 +2454,7 @@ def test_position_binary_chain_keeps_the_original_leftmost_operand():
         lexer.Token(lexer.TokenType.IDENTIFIER, 'c', 4, 12),
         lexer.Token(lexer.TokenType.EOF, '', 4, 13),
     ]
-    result = parser.Parser(tokens).parse_binary()
+    result = parser.expressions.parse_binary(parser.TokenStream(tokens))
     assert (result.line, result.col) == (4, 4)
 
 
@@ -2469,7 +2470,7 @@ def test_position_postfix_chain_is_the_base_not_the_dot_or_bracket():
         lexer.Token(lexer.TokenType.CLOSE_BRACKET, ']', 6, 6),
         lexer.Token(lexer.TokenType.EOF, '', 6, 7),
     ]
-    result = parser.Parser(tokens).parse_postfix()
+    result = parser.expressions.parse_postfix(parser.TokenStream(tokens))
     assert isinstance(result, parser.Index)
     assert (result.line, result.col) == (6, 1)
     assert (result.array.line, result.array.col) == (6, 1)  # the Field
@@ -2482,7 +2483,7 @@ def test_position_array_literal_is_its_open_bracket():
         lexer.Token(lexer.TokenType.CLOSE_BRACKET, ']', 7, 11),
         lexer.Token(lexer.TokenType.EOF, '', 7, 12),
     ]
-    result = parser.Parser(tokens).parse_array_literal()
+    result = parser.expressions.parse_array_literal(parser.TokenStream(tokens))
     assert (result.line, result.col) == (7, 9)
 
 
@@ -2493,7 +2494,7 @@ def test_position_call_is_its_name_token():
         lexer.Token(lexer.TokenType.CLOSE_PAREN, ')', 8, 7),
         lexer.Token(lexer.TokenType.EOF, '', 8, 8),
     ]
-    result = parser.Parser(tokens).parse_call()
+    result = parser.expressions.parse_call(parser.TokenStream(tokens))
     assert (result.line, result.col) == (8, 3)
 
 
@@ -2978,7 +2979,7 @@ def test_is_check_with_non_bare_subject_is_a_plain_test():
         lexer.Token(lexer.TokenType.COLON, ':', 1, 23),
         lexer.Token(lexer.TokenType.EOF, '', 1, 24),
     ]
-    condition = parser.Parser(tokens[1:7] + [tokens[-1]]).parse_expression()
+    condition = parser.expressions.parse_expression(parser.TokenStream(tokens[1:7] + [tokens[-1]]))
     assert isinstance(condition, parser.IsCheck) and condition.variable_name is None
     assert isinstance(condition.subject, parser.Index) and condition.type_name == 'Circle' and not condition.binds
 
@@ -3074,7 +3075,7 @@ def test_while_condition_may_be_an_is_check():
         lexer.Token(lexer.TokenType.COLON, ':', 1, 18),
         lexer.Token(lexer.TokenType.EOF, '', 1, 19),
     ]
-    condition = parser.Parser(tokens[1:4] + [tokens[-1]]).parse_expression()
+    condition = parser.expressions.parse_expression(parser.TokenStream(tokens[1:4] + [tokens[-1]]))
     assert isinstance(condition, parser.IsCheck) and not condition.binds
     assert (condition.variable_name, condition.type_name, condition.subject) == ('s', 'Circle', None)
 

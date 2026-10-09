@@ -4,7 +4,9 @@
     stream.py   the token stream: where the parser is in a file's tokens
     escapes.py  what a string or byte literal's text stands for
     errors.py   what it reports
-    parser.py   the recursive-descent parser that builds the tree
+    type_exprs.py    types as they are written
+    expressions.py   expressions: operators, literals, calls
+    parser.py   the rest of the grammar (statements, declarations), on its way to modules of their own
 
 The entry points are here (parse, parse_tokens), with the names other code takes from the package.
 """
@@ -18,7 +20,8 @@ from parser import nodes
 from parser.nodes import *  # noqa: F401,F403 (what nodes.__all__ lists: the node classes)
 from parser.nodes import Program
 from parser.errors import ParseError
-from parser.parser import READ_AS_A_TYPED_LITERAL, Parser
+from parser.expressions import READ_AS_A_TYPED_LITERAL
+from parser.parser import Parser
 from parser.stream import TokenStream
 
 # What the package offers: the nodes, the parser and its error, the entry points below, and the two

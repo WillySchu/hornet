@@ -28,7 +28,7 @@ def parse_expression(source: str) -> parser.Node:
         src_path = Path(tmpdir) / 'program.ht'
         src_path.write_text(source)
         tokens = lex(str(src_path))
-        ast = parser.Parser(tokens).parse_expression()
+        ast = parser.expressions.parse_expression(parser.TokenStream(tokens))
         return ast
 
 
