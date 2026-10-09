@@ -1560,6 +1560,29 @@ class TypedFunctionBuilder:
                 r_ir, r = self.offset(right, i * self.width(type_.element_type))
                 ir += l_ir + r_ir + self.equal_or_jump(l, r, type_.element_type, mismatch)
             return ir
+        if type_.kind == TypeKind.SUM:
+            # The same variant, and then that variant's payloads: which comparison that is depends on
+            # the tag. (The bytes can't be compared whole: those past the variant held mean nothing.)
+            l_tag, r_tag, differs = self.temp(Type.INT32), self.temp(Type.INT32), self.temp(Type.BOOL)
+            tags_same, done = self.ids.new_label("eq_tags_same"), self.ids.new_label("eq_sum_same")
+            l_ir, l_payload = self.offset(left, SUM_TYPE_TAG_WIDTH)
+            r_ir, r_payload = self.offset(right, SUM_TYPE_TAG_WIDTH)
+            ir = [
+                IRLoad(dst=l_tag, address=left),
+                IRLoad(dst=r_tag, address=right),
+                IRBinOp(dst=differs, op=BinaryOp.NOT_EQUAL, left=l_tag, right=r_tag),
+                IRBranch(cond=differs, true_label=mismatch, false_label=tags_same), IRLabel(tags_same),
+            ] + l_ir + r_ir
+            for number, variant in enumerate(self.ir_program.sum_type_registry[type_.sum_type_name].variants):
+                if variant == Type.NONE:  # nothing held: the tags were all there is
+                    continue
+                holds = self.temp(Type.BOOL)
+                this, other = self.ids.new_label("eq_variant"), self.ids.new_label("eq_next")
+                ir += [
+                    IRBinOp(dst=holds, op=BinaryOp.EQUAL, left=l_tag, right=IRConst(number, Type.INT32)),
+                    IRBranch(cond=holds, true_label=this, false_label=other), IRLabel(this),
+                ] + self.equal_or_jump(l_payload, r_payload, variant, mismatch) + [IRJump(done), IRLabel(other)]
+            return ir + [IRJump(done), IRLabel(done)]
         if type_.kind == TypeKind.STR:
             l_ir, l_ptr, l_len = self.read_str(left)
             r_ir, r_ptr, r_len = self.read_str(right)

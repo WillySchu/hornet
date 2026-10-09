@@ -2202,7 +2202,7 @@ class TestFunctionsWithNoDeclaredReturnType:
             "    return log(1) == log(2)\n"
         )
         ast = _parse(source)
-        with pytest.raises(SemanticError, match="does not support slice, void, sum type, dict, or none operands"):
+        with pytest.raises(SemanticError, match="does not support slice, void, dict, or none operands"):
             analyze(ast)
 
 
@@ -4625,8 +4625,9 @@ class TestSumTypes:
             "Square(side: 2)\n",
         )
 
-    def test_equality_between_sum_types_is_rejected(self):
-        assert_program_semantic_error(
+    def test_equality_between_sum_types(self):
+        # (More in tests/test_sum_equality.py.)
+        assert_program_stdout(
             "type Circle struct:\n"
             "    int radius\n"
             "\n"
@@ -4638,10 +4639,11 @@ class TestSumTypes:
             "def int main():\n"
             "    Shape s = Circle(5)\n"
             "    Shape t = Circle(5)\n"
-            "    if s == t:\n"
-            "        return 1\n"
+            "    print(s == t)\n"
+            "    t = Square(5)\n"
+            "    print(s == t)\n"
             "    return 0\n",
-            match="does not support slice, void, sum type, dict, or none operands",
+            "true\nfalse\n",
         )
 
     def test_sum_type_name_colliding_with_a_struct_is_rejected(self):
@@ -7140,7 +7142,7 @@ class TestDicts:
             "    return 0\n",
             match="'in' does not support an element type of \\[\\]int -- "
                   "membership isn't defined yet when the elements are "
-                  "\\(or contain\\) a slice, sum type, or dict",
+                  "\\(or contain\\) a slice or a dict",
         )
 
     def test_in_element_type_mismatch_is_rejected(self):
@@ -7535,7 +7537,7 @@ class TestDicts:
             "    if a == b:\n"
             "        return 1\n"
             "    return 0\n",
-            match="does not support slice, void, sum type, dict, or none operands",
+            match="does not support slice, void, dict, or none operands",
         )
 
     def test_dict_literal_vs_dict_equality_is_also_rejected(self):
@@ -7546,7 +7548,7 @@ class TestDicts:
             "    if dict[str]int{'a': 1} == dict[str]int{'a': 1}:\n"
             "        return 1\n"
             "    return 0\n",
-            match="does not support slice, void, sum type, dict, or none operands",
+            match="does not support slice, void, dict, or none operands",
         )
 
 
@@ -14086,14 +14088,14 @@ class TestNone:
     def test_comparing_none_to_none_is_rejected(self):
         assert_semantic_error(
             "    return none == none",
-            match="does not support slice, void, sum type, dict, or none operands",
+            match="does not support slice, void, dict, or none operands",
             return_type="bool",
         )
 
     def test_comparing_int_to_none_is_rejected(self):
         assert_semantic_error(
             "    return 5 == none",
-            match="does not support slice, void, sum type, dict, or none operands",
+            match="does not support slice, void, dict, or none operands",
             return_type="bool",
         )
 
@@ -14758,8 +14760,8 @@ class TestSemanticErrors:
             return_type="bool",
         )
 
-    def test_array_of_sum_types_equality_comparison_is_rejected(self):
-        ast = _parse(
+    def test_array_of_sum_types_equality_comparison(self):
+        assert_program_stdout(
             "type Circle struct:\n"
             "    int radius\n"
             "\n"
@@ -14768,17 +14770,15 @@ class TestSemanticErrors:
             "\n"
             "type Shape is Circle | Square\n"
             "\n"
-            "def bool main():\n"
+            "def int main():\n"
             "    [2]Shape a = [Circle(1), Circle(2)]\n"
             "    [2]Shape b = [Circle(1), Circle(2)]\n"
-            "    return a == b\n"
+            "    print(a == b)\n"
+            "    b[1] = Square(2)\n"
+            "    print(a == b)\n"
+            "    return 0\n",
+            "true\nfalse\n",
         )
-        with pytest.raises(
-            SemanticError,
-            match="array equality isn't defined yet when the elements "
-                  "are \\(or contain\\) a slice, sum type, or dict",
-        ):
-            analyze(ast)
 
     def test_array_of_dicts_equality_comparison_is_rejected(self):
         assert_semantic_error(
@@ -14786,7 +14786,7 @@ class TestSemanticErrors:
             "    [2]dict[str]int b\n"
             "    return a == b",
             match="array equality isn't defined yet when the elements "
-                  "are \\(or contain\\) a slice, sum type, or dict",
+                  "are \\(or contain\\) a slice or a dict",
             return_type="bool",
         )
 

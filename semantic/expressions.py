@@ -438,8 +438,8 @@ class ExpressionChecker:
                     raise SemanticError(
                         f"'{op.symbol()}' does not support {left_type} "
                         f"operands -- array equality isn't defined yet "
-                        f"when the elements are (or contain) a slice, "
-                        f"sum type, or dict, none of which has '==' defined yet",
+                        f"when the elements are (or contain) a slice "
+                        f"or a dict, neither of which has '==' defined yet",
                         expr,
                     )
                 return Type.BOOL
@@ -457,20 +457,23 @@ class ExpressionChecker:
                         f"'{op.symbol()}' does not support {left_type} "
                         f"operands -- struct equality isn't defined yet "
                         f"when a field (directly, or nested inside "
-                        f"another struct or an array field) is a slice, "
-                        f"sum type, or dict, none of which has '==' defined yet",
+                        f"another struct, an array field, or a sum's variant) is a slice "
+                        f"or a dict, neither of which has '==' defined yet",
                         expr,
                     )
                 return Type.BOOL
 
-            # Slice, sum, and dict equality is undefined.
+            if TypeKind.SUM in (left_type.kind, right_type.kind):
+                return self._check_sum_equality(expr, left_type, right_type)
+
+            # Slice and dict equality is undefined.
             if (
-                    left_type.kind in (TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE, TypeKind.SUM, TypeKind.DICT)
-                    or right_type.kind in (TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE, TypeKind.SUM, TypeKind.DICT)
+                    left_type.kind in (TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE, TypeKind.DICT)
+                    or right_type.kind in (TypeKind.SLICE, TypeKind.VOID, TypeKind.NONE, TypeKind.DICT)
             ):
                 raise SemanticError(
-                    f"'{op.symbol()}' does not support slice, void, sum "
-                    f"type, dict, or none operands, except comparing a "
+                    f"'{op.symbol()}' does not support slice, void, "
+                    f"dict, or none operands, except comparing a "
                     f"pointer, or a sum type with a `none` variant, to none",
                     expr,
                 )
@@ -503,8 +506,8 @@ class ExpressionChecker:
                     raise SemanticError(
                         f"'in' does not support an element type of "
                         f"{element_type} -- membership isn't defined yet "
-                        f"when the elements are (or contain) a slice, "
-                        f"sum type, or dict",
+                        f"when the elements are (or contain) a slice "
+                        f"or a dict",
                         expr.right,
                     )
                 if not self.types_compatible(left_type, element_type):
@@ -790,14 +793,62 @@ class ExpressionChecker:
 
     def _is_comparable_type(self, t: Type) -> bool:
         """Whether `==` is defined for `t`."""
+        return self._incomparable_part(t) is None
+
+    def _incomparable_part(self, t: Type) -> Optional[Type]:
+        """The slice or dict type that keeps `t` from having `==`: `t` itself, or the first one found
+        among its elements, fields, or variants. None if `t` has it."""
         if t.kind == TypeKind.ARRAY:
-            return self._is_comparable_type(t.element_type)
+            return self._incomparable_part(t.element_type)
         if t.kind == TypeKind.STRUCT:
-            struct_info = self.decls.structs[t.struct_name]
-            return all(self._is_comparable_type(field_type) for field_type in struct_info.fields.values())
-        if t.kind in (TypeKind.SLICE, TypeKind.SUM, TypeKind.DICT):
-            return False
-        return True  # integers, bool, str, pointers
+            parts = self.decls.structs[t.struct_name].fields.values()
+        elif t.kind == TypeKind.SUM:  # equal when they hold the same variant, and it is equal
+            parts = self.decls.sum_types[t.sum_type_name].variants
+        elif t.kind in (TypeKind.SLICE, TypeKind.DICT):
+            return t
+        else:
+            return None  # integers, bool, str, enums, pointers (by address), none
+        return next((part for part in map(self._incomparable_part, parts) if part is not None), None)
+
+    def _check_sum_equality(self, expr: Binary, left_type: Type, right_type: Type) -> Type:
+        """`==` or `!=` with a sum on one side or both. They are compared as one sum type, the wider:
+        the other side is a narrower sum, or a value of one of its variants. Equal is holding the
+        same variant, with equal payloads."""
+        op = expr.op.symbol()
+        if left_type.kind == TypeKind.SUM and right_type.kind == TypeKind.SUM:
+            if self.types_compatible(left_type, right_type):
+                compared = right_type
+            elif self.types_compatible(right_type, left_type):
+                compared = left_type
+            else:
+                raise SemanticError(
+                    f"Cannot compare {left_type} to {right_type} with '{op}' -- neither has all the other's "
+                    f"variants{self.sum_gap(left_type, right_type)}", expr)
+        else:
+            compared, other, value = (left_type, right_type, expr.right) if left_type.kind == TypeKind.SUM \
+                else (right_type, left_type, expr.left)
+            variants = self.decls.sum_types[compared.sum_type_name].variants
+            if self.as_folded_int_literal(value) is not None:
+                # An integer literal is the sum's int; or, there being no int, its one integer variant.
+                integers = [v for v in variants if v in INTEGER_TYPES]
+                if Type.INT not in integers and len(integers) > 1:
+                    raise SemanticError(
+                        f"{compared} has more than one integer variant ({', '.join(map(str, integers))}) and "
+                        f"none is int -- say which this is, as in `{integers[0]}({self.as_folded_int_literal(value)})`",
+                        value)
+                if Type.INT not in integers and integers:
+                    other = self.check_value_flowing_into(value, integers[0])
+            if other not in variants:
+                raise SemanticError(
+                    f"Cannot compare {left_type} to {right_type} with '{op}' -- {other} is not one of {compared}'s "
+                    f"variants ({', '.join(map(str, variants))})", expr)
+        part = self._incomparable_part(compared)
+        if part is not None:
+            raise SemanticError(
+                f"'{op}' does not support {compared} operands -- equality isn't defined yet for a variant that "
+                f"is (or contains) {'a slice' if part.kind == TypeKind.SLICE else 'a dict'} ({part})", expr)
+        self.facts.sum_equalities[expr.nid] = compared
+        return Type.BOOL
 
     def as_folded_int_literal(self, expr: Node) -> Optional[int]:
         """Folded value of an int literal or its negation, else None."""

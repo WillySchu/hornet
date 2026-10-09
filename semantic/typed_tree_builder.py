@@ -380,6 +380,9 @@ class TypedTreeBuilder:
                 test = typed.TagTest(Type.BOOL, value, Type.NONE)
                 return test if op == BinaryOp.EQUAL else typed.Unary(Type.BOOL, UnaryOp.NOT, test)
             return typed.Binary(Type.BOOL, op, value, typed.NoneLit(value.type))
+        if e.nid in self.facts.sum_equalities:  # both sides as the one sum they are compared as
+            compared = self.facts.sum_equalities[e.nid]
+            return typed.Binary(Type.BOOL, op, self.convert(e.left, compared), self.convert(e.right, compared))
         if left_type == Type.STR and op == BinaryOp.ADD:
             return typed.StrConcat(Type.STR, self.expr(e.left), self.expr(e.right))
         if left_type == Type.STR and op in _EQUALITY_OPS | _ORDERING_OPS:

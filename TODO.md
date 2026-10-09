@@ -27,7 +27,6 @@ Updates:
 - Nothing warns when a result is ignored, such as a bare write\_stdout(...) statement.
 - Weight spills by use count and loop depth.
 - `in` checking for strings.
-- Sum type equality.
 - Spreading one package across multiple files.
 - A package-style in-file declaration decoupling the module's name from its filename.
 - Any import-path resolution strategy beyond "relative to the importing file" (a project manifest/root, etc.).
