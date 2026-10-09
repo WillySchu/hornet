@@ -4550,7 +4550,7 @@ class TestSumTypes:
             "\n"
             "def int main():\n"
             "    return 0\n",
-            match="isn't a declared struct, `none`, or a valid scalar/str/array/slice/pointer/dict type",
+            match="isn't a declared struct, sum type, `none`, or a valid scalar/str/array/slice/pointer/dict type",
         )
 
     def test_duplicate_variant_is_rejected(self):
@@ -6176,8 +6176,9 @@ class TestArraySliceAndPointerVariants:
             "7\n[2]Shape[Circle(radius: 3), Square(side: 4)]\n",
         )
 
-    def test_a_sum_type_named_bare_as_a_variant_is_rejected(self):
-        assert_program_semantic_error(
+    def test_a_sum_type_named_bare_as_a_variant_gives_its_variants(self):
+        # (More in tests/test_sums_of_sums.py.)
+        assert_program_stdout(
             "type Circle struct:\n"
             "    int radius\n"
             "\n"
@@ -6189,8 +6190,13 @@ class TestArraySliceAndPointerVariants:
             "type Nested is Shape | int\n"
             "\n"
             "def int main():\n"
+            "    Nested n = Square(4)\n"
+            "    if n is Square:\n"
+            "        print(n.side)\n"
+            "    n = 5\n"
+            "    print(n)\n"
             "    return 0\n",
-            match="is itself a sum type",
+            "4\n5\n",
         )
 
 

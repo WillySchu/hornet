@@ -13,7 +13,8 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 from diagnostics import path_text
 from parser import (
     READ_AS_A_TYPED_LITERAL, ArrayLiteral, ArrayTypeExpr, EnumDef, ExternFunctionDecl, Function, IntrinsicDecl,
-    MethodDef, Node, Param, PointerTypeExpr, Program, SliceTypeExpr, StructDef, SumTypeDef, TypeAlias,
+    MethodDef, Node, Param, PointerTypeExpr, Program, QualifiedTypeExpr, SliceTypeExpr, StructDef, SumTypeDef,
+    TypeAlias,
 )
 from scopes import BUILTIN_FUNCTION_NAMES, display_name as shown
 from semantic.constants import ConstEvaluator
@@ -339,9 +340,37 @@ class DeclarationResolver:
 
     def _resolve_sum_types(
             self, sum_type_defs: List[SumTypeDef], structs: Dict[str, StructInfo]) -> Dict[str, SumTypeInfo]:
-        """Resolve sum type variants and check name collisions."""
+        """Resolve sum type variants and check name collisions. A sum named as a variant gives its
+        own variants in its place (and so on down), so every sum's variants are a flat list of types
+        that aren't sums, each once: what arrives twice through different sums is one variant."""
         registry: Dict[str, SumTypeInfo] = {}
         sum_names = {std.name: None for std in sum_type_defs}
+        by_name: Dict[str, SumTypeDef] = {}
+        for std in sum_type_defs:
+            by_name.setdefault(std.name, std)
+        resolving: List[str] = []  # the sums whose variants are being worked out, outermost first
+
+        def variants_of(std: SumTypeDef) -> List[Type]:
+            if std.name in registry:
+                return registry[std.name].variants
+            if std.name in resolving:
+                through = [f"'{shown(name)}'" for name in resolving[resolving.index(std.name) + 1:]]
+                raise SemanticError(
+                    f"Sum type '{shown(std.name)}' includes itself as a variant"
+                    + (f" (through {', then '.join(through)})" if through else "")
+                    + " -- a sum type's variants are those of the sums it names, so one can't name itself",
+                    by_name[resolving[-1]])
+            resolving.append(std.name)
+            scope = self.scope
+            try:
+                variants = self._flat_variants(std, structs, sum_names, by_name, variants_of)
+            finally:
+                self.scope = scope
+                resolving.pop()
+            registry[std.name] = SumTypeInfo(name=std.name, variants=variants)
+            return variants
+
+        declared = set()
         for std in sum_type_defs:
             if shown(std.name) in BUILTIN_FUNCTION_NAMES:
                 raise SemanticError(
@@ -363,47 +392,58 @@ class DeclarationResolver:
                     f"share one namespace and can never be the same",
                     std,
                 )
-            if std.name in registry:
+            if std.name in declared:
                 raise SemanticError(f"Sum type '{shown(std.name)}' is already declared", std)
-
-            self._enter(std)
-            resolved_variants: List[Type] = []
-            for variant_name in std.variants:
-                if any(sd.name == self._resolve_type_name(variant_name) for sd in sum_type_defs):
-                    raise SemanticError(
-                        f"Sum type '{shown(std.name)}' names '{variant_name}' as "
-                        f"a variant, but '{variant_name}' is itself a sum "
-                        f"type -- a sum type's variants can't include "
-                        f"another sum type yet",
-                        std,
-                    )
-                try:
-                    # A sum can't be a variant itself (above), but a pointer to one, or a slice or
-                    # dict of them, can: the names of the sums are enough to resolve those.
-                    variant_type = type_from_name(
-                        variant_name, structs, self.decls.type_aliases, std, sum_names, resolve=self._resolve_type_name,
-                        enums=self.decls.enums, array_sizes=self.facts.array_sizes)
-                except SemanticError:
-                    # Name what's allowed for a simple typo.
-                    if not isinstance(variant_name, str):
-                        raise
-                    raise SemanticError(
-                        f"Sum type '{shown(std.name)}' names '{variant_name}' as "
-                        f"a variant, but '{variant_name}' isn't a declared "
-                        f"struct, `none`, or a valid scalar/str/array/slice/pointer/dict "
-                        f"type",
-                        std,
-                    )
-                if variant_type in resolved_variants:
-                    raise SemanticError(
-                        f"Sum type '{shown(std.name)}' lists '{variant_type}' "
-                        f"as a variant more than once",
-                        std,
-                    )
-                resolved_variants.append(variant_type)
-
-            registry[std.name] = SumTypeInfo(name=std.name, variants=resolved_variants)
+            declared.add(std.name)
+            variants_of(std)
         return registry
+
+    def _flat_variants(self, std: SumTypeDef, structs: Dict[str, StructInfo], sum_names: dict,
+                       by_name: Dict[str, SumTypeDef], variants_of: Callable) -> List[Type]:
+        """The variants of `std`, in the order written, each sum it names replaced by that sum's."""
+        self._enter(std)
+        variants: List[Type] = []
+        written: list = []  # what std itself lists: a Type, or the name of a sum
+        for variant_name in std.variants:
+            named_sum = None
+            if isinstance(variant_name, (str, QualifiedTypeExpr)):
+                named_sum = by_name.get(self._resolve_type_name(variant_name))
+            if named_sum is not None:
+                if named_sum.name in written:
+                    raise SemanticError(
+                        f"Sum type '{shown(std.name)}' lists '{variant_name}' as a variant more than once", std)
+                written.append(named_sum.name)
+                included = variants_of(named_sum)
+                self._enter(std)  # (working those out was done in that sum's file)
+                variants.extend(v for v in included if v not in variants)
+                continue
+            try:
+                # A pointer to a sum, or a slice or dict of them, is a variant in its own right:
+                # the names of the sums are enough to resolve those.
+                variant_type = type_from_name(
+                    variant_name, structs, self.decls.type_aliases, std, sum_names, resolve=self._resolve_type_name,
+                    enums=self.decls.enums, array_sizes=self.facts.array_sizes)
+            except SemanticError:
+                # Name what's allowed for a simple typo.
+                if not isinstance(variant_name, str):
+                    raise
+                raise SemanticError(
+                    f"Sum type '{shown(std.name)}' names '{variant_name}' as "
+                    f"a variant, but '{variant_name}' isn't a declared "
+                    f"struct, sum type, `none`, or a valid scalar/str/array/slice/pointer/dict "
+                    f"type",
+                    std,
+                )
+            if variant_type in written:
+                raise SemanticError(
+                    f"Sum type '{shown(std.name)}' lists '{variant_type}' "
+                    f"as a variant more than once",
+                    std,
+                )
+            written.append(variant_type)
+            if variant_type not in variants:
+                variants.append(variant_type)
+        return variants
 
     def _check_value_containment(self, program: Program) -> None:
         """No struct or sum type may contain itself by value (directly, through arrays, or through

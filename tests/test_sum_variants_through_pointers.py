@@ -65,7 +65,6 @@ def test_a_result_that_holds_a_pointer_to_a_sum():
 
 
 @pytest.mark.parametrize("declaration,match", [
-    ("type Wrapped is Expr | none\n", "'Expr' is itself a sum type"),
     ("type Loop is [2]Loop | int\n", r"'Loop' contains itself by value \(Loop's \[2\]Loop variant\)"),
     ("type Other is *Missing | int\n", "Unknown type 'Missing'"),
 ])

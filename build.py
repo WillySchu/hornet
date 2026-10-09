@@ -158,5 +158,6 @@ def main() -> None:
 
     run_cli(action, args.traceback)
 
+
 if __name__ == "__main__":
     main()
