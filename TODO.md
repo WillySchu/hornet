@@ -37,7 +37,6 @@ Updates:
 - Consider enabling struct literal syntax for aliases.
 - `function` type.
 - User defined types built off other types.
-- Disallow untyped array literals from anything except assignment to a typed variable / parameter / return.
 - `assert`
 - `cap` builtin?
 - Ternary.
