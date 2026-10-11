@@ -821,9 +821,14 @@ for c in Color:
     print(c)
 ```
 
-Otherwise the iterable must be an array, slice, dictionary, or string given as a variable, field, index, slice expression, or array/dictionary/string literal. Iterating over a function-call result or a dereference is not yet supported.
+Otherwise the iterable is any expression that gives an array, slice, dictionary, or string, a call among them. It is evaluated once, before the first iteration:
 
-Each iteration has its own bindings, so taking a binding's address is allowed. Reallocating the iterated slice (e.g. by `append`), or inserting into the iterated dictionary so that it is rehashed, panics.
+```hornet
+for word in split(line, ' '):
+    print(word)
+```
+
+Each iteration has its own bindings, so taking a binding's address is allowed. Reallocating the iterated slice (e.g. by `append`), or inserting into the iterated dictionary so that it is rehashed, panics. That watches a slice held in a variable, field, or element; a slice a call returned is iterated as it was returned, whatever is appended meanwhile to the storage it came from.
 
 `break` and `continue` apply to the innermost enclosing loop.
 
@@ -1540,7 +1545,6 @@ Hornet is still experimental. Some notable limitations are:
 
 * Pointer-to-pointer types are parsed but rejected semantically.
 * Some advanced pointer/address-taking cases remain unsupported.
-* `for ... in ...` can't iterate a function-call result or a dereference; assign it to a variable first.
 * Only variables narrow; a field, element, or call result needs an `as` binding, which is for an `if` or `elif` condition and can't sit under `or` or `not`.
 * Enums have no explicit member values or ordering.
 * Slice equality and dictionary equality are not implemented, so neither is that of a struct, array, or sum type that holds one.
