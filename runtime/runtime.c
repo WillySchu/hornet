@@ -38,26 +38,128 @@ __attribute__((constructor)) static void hornet_binary_standard_streams(void) {
 
 #include "hornet_typedesc_tags.h"
 
+// ---- Which of the program's functions an address is in.
+//
+// The compiler writes a table of the functions it compiled: where each starts and ends, and its
+// name (backend/common/function_table.py). A program's table takes the place of this empty one,
+// which is here for a runtime linked with no program.
+
+typedef struct {
+    const char *start, *end, *name;
+} hornet_function;
+
+__attribute__((weak)) const hornet_function hornet_functions[] = {{NULL, NULL, NULL}};
+
+static const char *hornet_function_at(const char *address) {
+    // (Through a pointer whose target the compiler can't see: the table is as long as the
+    // program's, not as this one.)
+    const hornet_function *volatile table = hornet_functions;
+    for (const hornet_function *f = table; f->start != NULL; f++) {
+        if (address >= f->start && address < f->end) {
+            return f->name;
+        }
+    }
+    return NULL;
+}
+
 // ---- A stack overflow is a panic.
 //
 // Running off the end of the stack is a fault like any bad memory access. What catches it tells
-// the two apart, says `panic: stack overflow`, and ends the program as a panic does; any other
-// fault is left to crash as it would have. (There is no source position: a fault doesn't say where
-// in the program it happened.)
+// the two apart, says `panic: stack overflow in 'f'`, and ends the program as a panic does; any
+// other fault is left to crash as it would have. (There is no source position: a fault doesn't say
+// where in the program it happened. The function is the program's own that was running: the one
+// the fault was in, or the nearest that called the C the fault was in. It goes unnamed if that
+// can't be found.)
 
-static const char hornet_stack_overflow[] = "panic: stack overflow\n";
+// The message is written in two parts: this, before the function is looked for, so that it is said
+// whatever becomes of the looking; then the rest.
+static const char hornet_stack_overflow[] = "panic: stack overflow";
+
+// The rest: " in 'function'\n", or only the newline if there is no function to name. Its length.
+// (Nothing here allocates.)
+static size_t hornet_stack_overflow_rest(char *text, size_t room, const char *function) {
+    size_t length = 0;
+    if (function != NULL) {
+        static const char in[] = " in '";
+        memcpy(text, in, sizeof in - 1);
+        length = sizeof in - 1;
+        while (*function != '\0' && length < room - 2) {
+            text[length++] = *function++;
+        }
+        text[length++] = '\'';
+    }
+    text[length++] = '\n';
+    return length;
+}
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+// The program's function that was running at `fault`: the registers there are unwound, a frame at a
+// time, until the address is in one. (A frame with no unwind table of its own, like a stack probe's,
+// has only its return address on the stack.)
+static const char *hornet_running_function(const CONTEXT *fault) {
+    static CONTEXT at;
+    at = *fault;
+    for (int frame = 0; frame < 64 && at.Rip != 0; frame++) {
+        // Past the first, the address is where a call returns to: the call is just before it.
+        const char *name = hornet_function_at((const char *)at.Rip - (frame == 0 ? 0 : 1));
+        if (name != NULL) {
+            return name;
+        }
+        DWORD64 image;
+        RUNTIME_FUNCTION *unwind = RtlLookupFunctionEntry(at.Rip, &image, NULL);
+        if (unwind == NULL) {
+            DWORD64 returns_to;
+            if (!ReadProcessMemory(GetCurrentProcess(), (void *)at.Rsp, &returns_to, sizeof returns_to, NULL)) {
+                return NULL;
+            }
+            at.Rip = returns_to;
+            at.Rsp += 8;
+        } else {
+            void *handler_data;
+            DWORD64 establisher;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, at.Rip, unwind, &at, &handler_data, &establisher, NULL);
+        }
+    }
+    return NULL;
+}
+
 // Windows raises an exception of its own for it. The handler runs on the stack that overflowed, in
-// the space SetThreadStackGuarantee keeps back.
+// the space SetThreadStackGuarantee keeps back: enough to say so and end the program, but the
+// looking for the function is done on a stack of its own, since how much is kept back isn't sure.
+static char hornet_handler_stack[64 * 1024];
+static const CONTEXT *hornet_fault;
+static const char *hornet_function_found;
+
+static void hornet_find_function(void) {
+    hornet_function_found = hornet_running_function(hornet_fault);
+}
+
+// Call `work` with the stack pointer in hornet_handler_stack (leaving the 32 bytes a callee may use
+// above its return address, 16-byte aligned), and come back to this stack.
+static void hornet_on_handler_stack(void (*work)(void)) {
+    char *top = hornet_handler_stack + sizeof hornet_handler_stack - 64;
+    __asm__ volatile("mov %%rsp, %%rbx\n\t"
+                     "mov %[top], %%rsp\n\t"
+                     "call *%[work]\n\t"
+                     "mov %%rbx, %%rsp"
+                     :
+                     : [top] "r"(top), [work] "r"(work)
+                     : "rbx", "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "memory", "cc");
+}
+
 static LONG WINAPI hornet_on_exception(EXCEPTION_POINTERS *info) {
     if (info->ExceptionRecord->ExceptionCode == EXCEPTION_STACK_OVERFLOW) {
+        static char rest[256];
+        HANDLE standard_error = GetStdHandle(STD_ERROR_HANDLE);
         DWORD written;
-        WriteFile(GetStdHandle(STD_ERROR_HANDLE), hornet_stack_overflow, sizeof hornet_stack_overflow - 1, &written,
-                  NULL);
+        WriteFile(standard_error, hornet_stack_overflow, sizeof hornet_stack_overflow - 1, &written, NULL);
+        hornet_fault = info->ContextRecord;
+        hornet_on_handler_stack(hornet_find_function);
+        size_t length = hornet_stack_overflow_rest(rest, sizeof rest, hornet_function_found);
+        WriteFile(standard_error, rest, (DWORD)length, &written, NULL);
         TerminateProcess(GetCurrentProcess(), 3);  // abort()'s exit code
     }
     return EXCEPTION_CONTINUE_SEARCH;
@@ -71,6 +173,7 @@ __attribute__((constructor)) static void hornet_catch_stack_overflow(void) {
 #else
 #include <signal.h>
 #include <sys/resource.h>
+#include <unwind.h>
 #ifdef __APPLE__
 #include <pthread.h>
 #endif
@@ -83,12 +186,38 @@ static char *hornet_stack_low, *hornet_stack_high;
 // below the stack still counts.
 #define HORNET_BELOW_STACK ((intptr_t)64 * 1024 * 1024)
 
+// One frame of the walk back from the signal's handler: if it is in one of the program's
+// functions, that is the one, and the walk ends.
+static _Unwind_Reason_Code hornet_note_function(struct _Unwind_Context *frame, void *found) {
+    // The frame the signal interrupted is at the instruction that faulted; any other's address is
+    // where a call returns to, and the call is just before it.
+    int at_instruction = 0;
+    const char *address = (const char *)_Unwind_GetIPInfo(frame, &at_instruction);
+    const char *name = hornet_function_at(at_instruction ? address : address - 1);
+    if (name == NULL) {
+        return _URC_NO_REASON;
+    }
+    *(const char **)found = name;
+    return _URC_END_OF_STACK;
+}
+
+// The program's function that was running when the signal came: found by unwinding from here,
+// through the signal's own frame and any C the program had called.
+static const char *hornet_running_function(void) {
+    const char *name = NULL;
+    _Unwind_Backtrace(hornet_note_function, &name);
+    return name;
+}
+
 static void hornet_on_fault(int sig, siginfo_t *info, void *context) {
     (void)context;
     char *address = (char *)info->si_addr;
     // Memory in the stack's own range doesn't fault unless the stack has run out.
     if (address >= hornet_stack_low - HORNET_BELOW_STACK && address < hornet_stack_high) {
+        static char rest[256];
         ssize_t written = write(2, hornet_stack_overflow, sizeof hornet_stack_overflow - 1);
+        size_t length = hornet_stack_overflow_rest(rest, sizeof rest, hornet_running_function());
+        written = write(2, rest, length);
         (void)written;
         abort();
     }

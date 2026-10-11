@@ -133,7 +133,7 @@ Hornet currently provides:
 * `if`, `elif`, `else`, and `match`
 * `while` loops
 * C-style `for` loops
-* `for ... in ...` iteration over arrays, slices, dictionaries, and strings
+* `for ... in ...` iteration over arrays, slices, dictionaries, strings, and an enum's members
 * `break` and `continue`
 * `defer`, for a call to make when a block is left
 * Dictionaries with hashing, deletion, membership, and iteration; copies share one table
@@ -438,7 +438,7 @@ str name = str(c)         # 'Green'
 int count = len(Color)    # 3
 ```
 
-`Color(2)` with a literal is checked at compile time. `len(Color)` is a constant, so `[len(Color)]int` has one element per member.
+`Color(2)` with a literal is checked at compile time. `len(Color)` is a constant, so `[len(Color)]int` has one element per member. `for c in Color:` goes through the members (see [Control Flow](#control-flow)).
 
 An enum may have methods, written after its members as a struct's are after its fields (see [Structs and Methods](#structs-and-methods)):
 
@@ -814,7 +814,14 @@ for key, value in counts:
     print(value)
 ```
 
-The iterable must be an array, slice, dictionary, or string given as a variable, field, index, slice expression, or array/dictionary/string literal. Iterating over a function-call result or a dereference is not yet supported.
+An enum's name gives each of its members, in the order declared:
+
+```hornet
+for c in Color:
+    print(c)
+```
+
+Otherwise the iterable must be an array, slice, dictionary, or string given as a variable, field, index, slice expression, or array/dictionary/string literal. Iterating over a function-call result or a dereference is not yet supported.
 
 Each iteration has its own bindings, so taking a binding's address is allowed. Reallocating the iterated slice (e.g. by `append`), or inserting into the iterated dictionary so that it is rehashed, panics.
 
@@ -971,7 +978,7 @@ match shape as s:
 
 The subject of `match ... as NAME` can be any sum-typed expression, such as a field, an element, or `*p`; `NAME` is a copy of it. A `none` variant is tested with `is none`.
 
-`match` must be exhaustive, or end with `else:`, where the subject is none of the arms' variants. A `match` whose arms all return, or end in a `never` call such as `panic`, counts as returning. An arm may test for a sum type, taking each of its variants that no arm above has; an arm with nothing left to take is an error.
+`match` must be exhaustive, or end with `else:`, where the subject is none of the arms' variants. On a variable that checks have narrowed, that is every variant it can still hold: one already ruled out needs no arm, and an arm for it is an error. A `match` whose arms all return, or end in a `never` call such as `panic`, counts as returning. An arm may test for a sum type, taking each of its variants that no arm above has; an arm with nothing left to take is an error.
 
 `is` and `match` also apply to an enum, with its members in place of variants (`colour is Red`). Nothing is narrowed, and a `match` must cover every member or end with `else:`:
 
@@ -1287,7 +1294,7 @@ It currently provides language-level services including:
 
 * `print` and recursive value formatting
 * the panic routines (`hornet_panic`, `hornet_panic_at` for `panic(...)`, and those that add the values a failed check compared), which flush standard output, write the message to standard error, and abort (`SIGABRT`; on Windows, exit code 3)
-* catching a stack overflow, to report it as a panic
+* catching a stack overflow, to report it as a panic that names the function
 * TCP sockets for `stdlib/net.ht` (`hornet_tcp_connect`, `hornet_tcp_read`, `hornet_tcp_write`, `hornet_tcp_close`, and `hornet_net_error` for why one failed), since C's sockets differ between systems; on Windows the program is linked with `ws2_32`
 * memory: `hornet_alloc` and `hornet_alloc_zeroed`, which every allocation goes through, the compiled code's and the runtime's own, and which panic when memory is refused
 * `format`'s buffer (`hornet_format_begin`, `hornet_format_text`, `hornet_format_value`)
@@ -1299,7 +1306,7 @@ It currently provides language-level services including:
 
 Runtime checks panic with `file:line:col: panic: message`, the position being where the checked expression or statement starts and the file named without its directory: array, slice, and string bounds; division by zero and `MIN / -1`; dereferencing `none`; a missing dictionary key; an integer converted to an enum with no such member; reallocating a slice or dictionary being iterated with `for ... in`; and a narrowed variable whose variant was changed through a pointer. Where a value explains the failure, the message ends with it: `index out of bounds: index 7, length 3`, `slice bounds out of range: start 5, end 2`, `dict lookup: key not found: 'apple'`, `not a member of Color: 7`. The checks are in the compiled code, which calls the runtime's panic routines.
 
-Running out of stack is a panic too: `panic: stack overflow`, with no position, since the runtime only catches the fault (with a signal handler on a stack of its own; on Windows, an exception handler). On Linux a stack with no limit (`ulimit -s unlimited`) has no end to detect.
+Running out of stack is a panic too: `panic: stack overflow in 'depth'`. It has no position, since the runtime only catches the fault (with a signal handler on a stack of its own; on Windows, an exception handler), but it names the program's function that was running: the one the fault was in, or the nearest that called the C it was in. The compiler writes a table of each function's start, end, and name for this. On Linux a stack with no limit (`ulimit -s unlimited`) has no end to detect.
 
 Being refused memory is one as well: `panic: out of memory (allocating 1048576 bytes)`. A system that grants memory it doesn't have, as Linux does by default, kills the program when the memory is used instead, and that can't be caught.
 
@@ -1370,7 +1377,7 @@ IR construction compiles conditions made of `and`, `or`, and `not` straight to b
 
 The IR optimizer repeats constant folding, identity simplification, strength reduction (a multiplication by a power of two becomes a shift), constant-branch and unreachable-block removal, jump threading (a jump to a block that only jumps on goes straight to where that leads), block merging (a block entered only by another block's jump is joined to it), copy and constant propagation within blocks, copy coalescing, address folding (an address computed as a base plus a constant becomes the access's offset), and dead-code elimination until nothing changes. Loops are then inverted, once: the jump back to a loop's test becomes a copy of the test, so each turn ends in one conditional branch, and the passes are repeated on the result. `ir/cfg.py` provides the shared control-flow and liveness analysis.
 
-`backend/` holds one package per architecture, chosen by the target, plus `backend/common/` for what they share: linear-scan register allocation over the target's register lists (values live across calls get callee-saved registers), stack-frame slot layout, the magic numbers for division by constants, and jump cleanups. Each backend adds its calling convention (for `backend/x86_64/`, SysV or, on Windows, the x64 convention with its shadow space, stack probes, and unwind tables; argument registers are also allocatable, so incoming parameters and outgoing arguments move as parallel moves; AAPCS64 for `backend/aarch64/`), prologues that save only the registers a function uses, instruction selection that works directly on registers, stack slots, and immediates, a peephole pass, and assembly emission for each system (AT&T syntax on x86-64). The AArch64 backend also rewrites accesses to stack slots beyond the reach of a load or store's offset after the frame is laid out.
+`backend/` holds one package per architecture, chosen by the target, plus `backend/common/` for what they share: linear-scan register allocation over the target's register lists (values live across calls get callee-saved registers), stack-frame slot layout, the magic numbers for division by constants, and jump cleanups. Each backend adds its calling convention (for `backend/x86_64/`, SysV or, on Windows, the x64 convention with its shadow space, stack probes, and unwind tables; argument registers are also allocatable, so incoming parameters and outgoing arguments move as parallel moves; AAPCS64 for `backend/aarch64/`), prologues that save only the registers a function uses, instruction selection that works directly on registers, stack slots, and immediates, a peephole pass, and assembly emission for each system (AT&T syntax on x86-64), ending with the table of functions the runtime reads. The AArch64 backend also rewrites accesses to stack slots beyond the reach of a load or store's offset after the frame is laid out.
 
 Some IR operations deliberately lower to runtime calls. A runtime operation does not require a special calling mechanism; runtime functions participate in the same native call machinery as other external functions.
 
@@ -1528,7 +1535,7 @@ Hornet is still experimental. Some notable limitations are:
 * Some advanced pointer/address-taking cases remain unsupported.
 * `for ... in ...` can't iterate a function-call result or a dereference; assign it to a variable first.
 * Only variables narrow; a field, element, or call result needs an `as` binding, which is for an `if` or `elif` condition and can't sit under `or` or `not`.
-* Enums have no explicit member values or ordering, and `for ... in` doesn't iterate one.
+* Enums have no explicit member values or ordering.
 * Slice equality and dictionary equality are not implemented, so neither is that of a struct, array, or sum type that holds one.
 * `in` does not apply to strings.
 * `format` has no widths, padding, or other format options, and there are no interpolated string literals.
@@ -1543,7 +1550,7 @@ Hornet is still experimental. Some notable limitations are:
 * There is no TLS: `stdlib/http.ht` makes plain `http://` requests only.
 * Multithreading is not implemented.
 * Without generics, each result type is a separate named sum type. There is no operator for propagating errors, and ignoring a result is not diagnosed.
-* The panics for a stack overflow and for running out of memory have no source position.
+* The panic for running out of memory has no source position; the one for a stack overflow names only the function.
 
 ---
 

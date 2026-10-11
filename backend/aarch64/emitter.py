@@ -3,6 +3,7 @@
 from backend.aarch64.assembly import (
     AsmFunction, AsmProgram, Call, Cond, Imm, Instr, LabelDef, LabelRef, Mem, Reg, Shift, SymPage, SymPageOffset,
 )
+from backend.common.function_table import end_label, table_lines
 from backend.common.text import escape_for_asciz
 from target import Target
 
@@ -49,8 +50,8 @@ class Emitter:
 
     def emit(self, program: AsmProgram) -> str:
         lines = ["    .text"]
-        for fn in program.functions:
-            lines.extend(self.emit_function(fn))
+        for index, fn in enumerate(program.functions):
+            lines.extend(self.emit_function(fn, index))
             lines.append("")
         if program.string_literals or program.type_descriptors:
             lines.append("    .data")
@@ -63,10 +64,14 @@ class Emitter:
                 for f in fields:
                     lines.append(f"    .quad {f}")
             lines.append("")
+        lines += table_lines([fn.name for fn in program.functions], self.symbol) + [""]
         if self.os == 'linux':
             lines.append('    .section .note.GNU-stack,"",%progbits')
         return "\n".join(lines).rstrip() + "\n"
 
-    def emit_function(self, fn: AsmFunction) -> list:
+    def emit_function(self, fn: AsmFunction, index: int) -> list:
+        """`fn`'s text, the function at `index` in the program: its end is labelled for the table of
+        functions the runtime reads."""
         sym = self.symbol(fn.name)
-        return [f"    .globl {sym}", "    .p2align 2", f"{sym}:"] + [self.instruction(i) for i in fn.instructions]
+        return [f"    .globl {sym}", "    .p2align 2", f"{sym}:"] + [self.instruction(i) for i in fn.instructions] + [
+            f"{end_label(index)}:"]

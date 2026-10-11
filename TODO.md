@@ -14,7 +14,6 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- Report function name on stack overflow.
 - Literal-only expressions. int8 x = 1 + 2 is still rejected, because only a single literal adapts to a narrow type.
 - No mutable globals. Worth recording, since the port will need context structs because of it.
 - Stdlib for the port. Integer parsing and path helpers.
